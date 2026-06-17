@@ -1423,10 +1423,14 @@ mod tests {
     ///
     /// The exact bug trigger is: `serde_json/arbitrary_precision`
     /// + `#[serde(flatten)]` + a flatten-reachable concrete `f64` field
-    /// + JSON carrying a float value for that `f64`. Under the
-    /// `arbitrary-precision-flatten-workaround` feature, `arbitrary_precision`
-    /// is on, so the trigger fires in production parses unless those parse
-    /// sites route through `from_str`.
+    /// + JSON carrying a float value for that `f64`. The
+    /// `arbitrary-precision-flatten-workaround` feature only gates the
+    /// workaround code path; it does not enable `arbitrary_precision` itself.
+    /// To exercise the bug trigger in tests we additionally enable the
+    /// internal-only `_internal-test-arbitrary-precision` feature, which turns
+    /// on `serde_json/arbitrary_precision` for the test build. With both
+    /// features on, the production parse sites route through `from_str` and
+    /// sidestep #1157; without the routing they would fail.
     ///
     /// Two fixtures cover the two response-side parse surfaces in
     /// `responses_api/`:
@@ -1441,7 +1445,10 @@ mod tests {
     ///   the untagged enum's Response-variant trial under direct
     ///   `serde_json::from_str`, so the streaming/websocket routes are
     ///   justified.
-    #[cfg(feature = "arbitrary-precision-flatten-workaround")]
+    #[cfg(all(
+        feature = "arbitrary-precision-flatten-workaround",
+        feature = "_internal-test-arbitrary-precision"
+    ))]
     mod arbitrary_precision_flatten_workaround {
         use super::super::CompletionResponse;
         use super::StreamingCompletionChunk;
