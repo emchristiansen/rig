@@ -176,7 +176,7 @@ pub(crate) fn parse_sse_completion_body(
             continue;
         }
 
-        if let Ok(chunk) = serde_json::from_str::<StreamingCompletionChunk>(data) {
+        if let Ok(chunk) = crate::json_utils::from_str::<StreamingCompletionChunk>(data) {
             if let StreamingCompletionChunk::Response(chunk) = chunk {
                 let ResponseChunk { kind, response, .. } = *chunk;
                 match kind {
@@ -440,7 +440,7 @@ pub(crate) fn raw_choices_from_sse_body(
             continue;
         }
 
-        if let Ok(chunk) = serde_json::from_str::<StreamingCompletionChunk>(data) {
+        if let Ok(chunk) = crate::json_utils::from_str::<StreamingCompletionChunk>(data) {
             match chunk {
                 StreamingCompletionChunk::Delta(chunk) => {
                     raw_choices.extend(accumulator.decode_item_chunk(chunk, options));
@@ -661,7 +661,7 @@ where
                         continue;
                     }
 
-                    let data = serde_json::from_str::<StreamingCompletionChunk>(&evt.data);
+                    let data = crate::json_utils::from_str::<StreamingCompletionChunk>(&evt.data);
 
                     let Ok(data) = data else {
                         let Err(err) = data else {
@@ -1416,6 +1416,133 @@ mod tests {
 
         while let Some(item) = stream.next().await {
             println!("Got item: {item:?}");
+        }
+    }
+
+    /// Proofs for serde-rs/json#1157 against the actual Rig response types.
+    ///
+    /// The exact bug trigger is: `serde_json/arbitrary_precision`
+    /// + `#[serde(flatten)]` + a flatten-reachable concrete `f64` field
+    /// + JSON carrying a float value for that `f64`. The
+    /// `arbitrary-precision-flatten-workaround` feature only gates the
+    /// workaround code path; it does not enable `arbitrary_precision` itself.
+    /// To exercise the bug trigger in tests we additionally enable the
+    /// internal-only `_internal-test-arbitrary-precision` feature, which turns
+    /// on `serde_json/arbitrary_precision` for the test build. With both
+    /// features on, the production parse sites route through `from_str` and
+    /// sidestep #1157; without the routing they would fail.
+    ///
+    /// Two fixtures cover the two response-side parse surfaces in
+    /// `responses_api/`:
+    /// - `CompletionResponse` directly (used by `mod.rs:1510`), via its
+    ///   `#[serde(flatten)] additional_parameters: AdditionalParameters`
+    ///   where `top_p: Option<f64>` lives.
+    /// - `StreamingCompletionChunk` (used by `streaming.rs:179, 443, 664`
+    ///   and `websocket.rs:695`), whose untagged `Response(Box<ResponseChunk>)`
+    ///   variant wraps a `CompletionResponse` and therefore inherits the
+    ///   same flatten-reachable `f64`. The `Delta(ItemChunk)` variant has
+    ///   no f64 reachable, but a `top_p`-bearing payload would still crash
+    ///   the untagged enum's Response-variant trial under direct
+    ///   `serde_json::from_str`, so the streaming/websocket routes are
+    ///   justified.
+    #[cfg(all(
+        feature = "arbitrary-precision-flatten-workaround",
+        feature = "_internal-test-arbitrary-precision"
+    ))]
+    mod arbitrary_precision_flatten_workaround {
+        use super::super::CompletionResponse;
+        use super::StreamingCompletionChunk;
+
+        const COMPLETION_RESPONSE_WITH_TOP_P: &str = r#"{
+            "id": "resp_test",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "gpt-5.4",
+            "top_p": 0.95
+        }"#;
+
+        const STREAMING_RESPONSE_CHUNK_WITH_TOP_P: &str = r#"{
+            "type": "response.in_progress",
+            "response": {
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 0,
+                "status": "in_progress",
+                "model": "gpt-5.4",
+                "top_p": 0.95
+            },
+            "sequence_number": 0
+        }"#;
+
+        #[test]
+        fn completion_response_top_p_float_fails_direct_from_str() {
+            let err = serde_json::from_str::<CompletionResponse>(COMPLETION_RESPONSE_WITH_TOP_P)
+                .expect_err(
+                    "direct serde_json::from_str should fail on CompletionResponse with float \
+                     top_p under serde_json/arbitrary_precision (serde-rs/json#1157)",
+                );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("invalid type: map, expected f64"),
+                "expected the serde-rs/json#1157 `invalid type: map, expected f64` error, \
+                 got: {msg}"
+            );
+        }
+
+        #[test]
+        fn completion_response_top_p_float_succeeds_via_value() {
+            let parsed = crate::json_utils::from_str::<CompletionResponse>(
+                COMPLETION_RESPONSE_WITH_TOP_P,
+            )
+            .expect("from_str should sidestep #1157");
+            assert_eq!(parsed.additional_parameters.top_p, Some(0.95));
+        }
+
+        /// Direct `serde_json::from_str` fails on `StreamingCompletionChunk` for a
+        /// response-shaped payload carrying a float `top_p` under arbitrary_precision.
+        ///
+        /// `StreamingCompletionChunk` is `#[serde(untagged)]`, so the underlying
+        /// `invalid type: map, expected f64` error from the Response-variant attempt
+        /// is swallowed and surfaces as a generic
+        /// `data did not match any variant of untagged enum StreamingCompletionChunk`.
+        /// That is exactly the production failure mode we are routing around: without
+        /// `from_str`, the streaming dispatch would silently drop these
+        /// response chunks (the parser falls through to the next SSE event on parse
+        /// failure), so the asymmetric behavior — direct fails, `via_value` succeeds —
+        /// justifies routing the streaming/websocket parse sites.
+        #[test]
+        fn streaming_response_chunk_top_p_float_fails_direct_from_str() {
+            let err = serde_json::from_str::<StreamingCompletionChunk>(
+                STREAMING_RESPONSE_CHUNK_WITH_TOP_P,
+            )
+            .expect_err(
+                "direct serde_json::from_str should fail on the Response variant of \
+                 StreamingCompletionChunk when its embedded CompletionResponse carries a \
+                 float top_p (serde-rs/json#1157)",
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("did not match any variant of untagged enum StreamingCompletionChunk"),
+                "expected the untagged-enum fall-through error masking serde-rs/json#1157, \
+                 got: {msg}"
+            );
+        }
+
+        #[test]
+        fn streaming_response_chunk_top_p_float_succeeds_via_value() {
+            let parsed = crate::json_utils::from_str::<StreamingCompletionChunk>(
+                STREAMING_RESPONSE_CHUNK_WITH_TOP_P,
+            )
+            .expect("from_str should sidestep #1157 on the Response variant");
+            match parsed {
+                StreamingCompletionChunk::Response(chunk) => {
+                    assert_eq!(chunk.response.additional_parameters.top_p, Some(0.95));
+                }
+                StreamingCompletionChunk::Delta(_) => {
+                    panic!("expected Response variant, got Delta");
+                }
+            }
         }
     }
 }

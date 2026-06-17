@@ -5,6 +5,46 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
 
+/// Deserialize a JSON string into `T`, optionally routing through `serde_json::Value`
+/// to dodge the incompatibility between `serde_json/arbitrary_precision` and
+/// `#[serde(flatten)]` on structs whose flatten tree reaches a concrete `f64` field
+/// (see <https://github.com/serde-rs/json/issues/1157>).
+///
+/// Exact trigger: `serde_json/arbitrary_precision` + `#[serde(flatten)]` + reachable `f64`
+/// + JSON carrying a float value for that `f64`. `u64`/`i64`/`String` fields under flatten
+/// are not affected; only `f64` (or types deserialized via `f64`) hit the
+/// `invalid type: map, expected f64` error introduced by the arbitrary-precision
+/// tagged-Number representation in `ContentDeserializer`.
+///
+/// Call sites in this crate that satisfy the trigger and therefore route through
+/// this helper: `CompletionResponse` (flatten → `AdditionalParameters.top_p: Option<f64>`)
+/// and `StreamingCompletionChunk` (untagged enum whose `Response` variant wraps
+/// `CompletionResponse`).
+///
+/// With the `arbitrary-precision-flatten-workaround` feature off (default),
+/// this delegates directly to `serde_json::from_str` and is upstream-equivalent.
+///
+/// With the feature on, the input is parsed into a `serde_json::Value` first,
+/// then `serde_json::from_value` is used to convert into `T`. This two-step
+/// path materializes numbers as `Value::Number` before flatten-driven field
+/// collection sees them, sidestepping the bug.
+///
+/// Note: this feature only gates Rig's workaround code path. Whether
+/// `serde_json/arbitrary_precision` is actually enabled in the build is a
+/// separate, downstream decision; consumers who do not enable it pay only
+/// the small two-step parse cost and observe identical results.
+pub fn from_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, serde_json::Error> {
+    #[cfg(not(feature = "arbitrary-precision-flatten-workaround"))]
+    {
+        serde_json::from_str(s)
+    }
+    #[cfg(feature = "arbitrary-precision-flatten-workaround")]
+    {
+        let value: serde_json::Value = serde_json::from_str(s)?;
+        serde_json::from_value(value)
+    }
+}
+
 pub fn merge(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
     match (a, b) {
         (serde_json::Value::Object(mut a_map), serde_json::Value::Object(b_map)) => {
