@@ -153,4 +153,9 @@ rustls = ["reqwest/rustls", "tokio-tungstenite?/rustls-tls-webpki-roots"]
 native-tls = ["reqwest/native-tls", "tokio-tungstenite?/native-tls"]
 reqwest-middleware = ["reqwest-middleware-rustls"]
 reqwest-middleware-rustls = ["dep:reqwest-middleware", "rustls", "reqwest-middleware/rustls"]
+# Route OpenAI Responses API deserializers through `serde_json::Value` to dodge
+# the incompatibility between `serde_json/arbitrary_precision` and `#[serde(flatten)]`
+# on structs with concrete numeric fields (serde-rs/json#1157).
+# Default off; downstream crates that enable `arbitrary_precision` should turn this on.
+arbitrary-precision-flatten-workaround = []
 reqwest-middleware-native-tls = ["dep:reqwest-middleware", "native-tls"]
