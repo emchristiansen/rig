@@ -176,7 +176,7 @@ pub(crate) fn parse_sse_completion_body(
             continue;
         }
 
-        if let Ok(chunk) = crate::json_utils::from_str_via_value::<StreamingCompletionChunk>(data) {
+        if let Ok(chunk) = crate::json_utils::from_str::<StreamingCompletionChunk>(data) {
             if let StreamingCompletionChunk::Response(chunk) = chunk {
                 let ResponseChunk { kind, response, .. } = *chunk;
                 match kind {
@@ -440,7 +440,7 @@ pub(crate) fn raw_choices_from_sse_body(
             continue;
         }
 
-        if let Ok(chunk) = crate::json_utils::from_str_via_value::<StreamingCompletionChunk>(data) {
+        if let Ok(chunk) = crate::json_utils::from_str::<StreamingCompletionChunk>(data) {
             match chunk {
                 StreamingCompletionChunk::Delta(chunk) => {
                     raw_choices.extend(accumulator.decode_item_chunk(chunk, options));
@@ -661,7 +661,7 @@ where
                         continue;
                     }
 
-                    let data = crate::json_utils::from_str_via_value::<StreamingCompletionChunk>(&evt.data);
+                    let data = crate::json_utils::from_str::<StreamingCompletionChunk>(&evt.data);
 
                     let Ok(data) = data else {
                         let Err(err) = data else {
@@ -1423,7 +1423,7 @@ mod tests {
     /// + JSON carrying a float value for that `f64`. Under the
     /// `arbitrary-precision-flatten-workaround` feature, `arbitrary_precision`
     /// is on, so the trigger fires in production parses unless those parse
-    /// sites route through `from_str_via_value`.
+    /// sites route through `from_str`.
     ///
     /// Two fixtures cover the two response-side parse surfaces in
     /// `responses_api/`:
@@ -1482,10 +1482,10 @@ mod tests {
 
         #[test]
         fn completion_response_top_p_float_succeeds_via_value() {
-            let parsed = crate::json_utils::from_str_via_value::<CompletionResponse>(
+            let parsed = crate::json_utils::from_str::<CompletionResponse>(
                 COMPLETION_RESPONSE_WITH_TOP_P,
             )
-            .expect("from_str_via_value should sidestep #1157");
+            .expect("from_str should sidestep #1157");
             assert_eq!(parsed.additional_parameters.top_p, Some(0.95));
         }
 
@@ -1497,7 +1497,7 @@ mod tests {
         /// is swallowed and surfaces as a generic
         /// `data did not match any variant of untagged enum StreamingCompletionChunk`.
         /// That is exactly the production failure mode we are routing around: without
-        /// `from_str_via_value`, the streaming dispatch would silently drop these
+        /// `from_str`, the streaming dispatch would silently drop these
         /// response chunks (the parser falls through to the next SSE event on parse
         /// failure), so the asymmetric behavior — direct fails, `via_value` succeeds —
         /// justifies routing the streaming/websocket parse sites.
@@ -1521,10 +1521,10 @@ mod tests {
 
         #[test]
         fn streaming_response_chunk_top_p_float_succeeds_via_value() {
-            let parsed = crate::json_utils::from_str_via_value::<StreamingCompletionChunk>(
+            let parsed = crate::json_utils::from_str::<StreamingCompletionChunk>(
                 STREAMING_RESPONSE_CHUNK_WITH_TOP_P,
             )
-            .expect("from_str_via_value should sidestep #1157 on the Response variant");
+            .expect("from_str should sidestep #1157 on the Response variant");
             match parsed {
                 StreamingCompletionChunk::Response(chunk) => {
                     assert_eq!(chunk.response.additional_parameters.top_p, Some(0.95));
