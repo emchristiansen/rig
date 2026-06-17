@@ -176,7 +176,7 @@ pub(crate) fn parse_sse_completion_body(
             continue;
         }
 
-        if let Ok(chunk) = serde_json::from_str::<StreamingCompletionChunk>(data) {
+        if let Ok(chunk) = crate::json_utils::from_str_via_value::<StreamingCompletionChunk>(data) {
             if let StreamingCompletionChunk::Response(chunk) = chunk {
                 let ResponseChunk { kind, response, .. } = *chunk;
                 match kind {
@@ -440,7 +440,7 @@ pub(crate) fn raw_choices_from_sse_body(
             continue;
         }
 
-        if let Ok(chunk) = serde_json::from_str::<StreamingCompletionChunk>(data) {
+        if let Ok(chunk) = crate::json_utils::from_str_via_value::<StreamingCompletionChunk>(data) {
             match chunk {
                 StreamingCompletionChunk::Delta(chunk) => {
                     raw_choices.extend(accumulator.decode_item_chunk(chunk, options));
@@ -661,7 +661,7 @@ where
                         continue;
                     }
 
-                    let data = serde_json::from_str::<StreamingCompletionChunk>(&evt.data);
+                    let data = crate::json_utils::from_str_via_value::<StreamingCompletionChunk>(&evt.data);
 
                     let Ok(data) = data else {
                         let Err(err) = data else {
