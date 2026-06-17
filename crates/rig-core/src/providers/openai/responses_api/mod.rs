@@ -1506,7 +1506,7 @@ where
 
             if response.status().is_success() {
                 let t = http_client::text(response).await?;
-                let response = crate::json_utils::from_str_via_value::<Self::Response>(&t)?;
+                let response = crate::json_utils::from_str::<Self::Response>(&t)?;
                 let span = tracing::Span::current();
                 span.record("gen_ai.response.id", &response.id);
                 span.record("gen_ai.response.model", &response.model);

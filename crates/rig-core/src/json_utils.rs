@@ -28,9 +28,12 @@ use std::str::FromStr;
 /// then `serde_json::from_value` is used to convert into `T`. This two-step
 /// path materializes numbers as `Value::Number` before flatten-driven field
 /// collection sees them, sidestepping the bug.
-pub fn from_str_via_value<T: serde::de::DeserializeOwned>(
-    s: &str,
-) -> Result<T, serde_json::Error> {
+///
+/// Note: this feature only gates Rig's workaround code path. Whether
+/// `serde_json/arbitrary_precision` is actually enabled in the build is a
+/// separate, downstream decision; consumers who do not enable it pay only
+/// the small two-step parse cost and observe identical results.
+pub fn from_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, serde_json::Error> {
     #[cfg(not(feature = "arbitrary-precision-flatten-workaround"))]
     {
         serde_json::from_str(s)

@@ -158,7 +158,7 @@ reqwest-middleware-rustls = ["dep:reqwest-middleware", "rustls", "reqwest-middle
 # on structs with concrete numeric fields (serde-rs/json#1157).
 #
 # This feature is self-contained: enabling it turns on `serde_json/arbitrary_precision`
-# for the rig-core build AND switches the wrapper in `json_utils::from_str_via_value`
+# for the rig-core build AND switches the wrapper in `json_utils::from_str`
 # to the `Value` round-trip path. Default off — feature-off behavior is upstream-equivalent
 # and does NOT activate `arbitrary_precision`.
 arbitrary-precision-flatten-workaround = ["serde_json/arbitrary_precision"]

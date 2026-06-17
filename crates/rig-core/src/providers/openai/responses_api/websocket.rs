@@ -692,7 +692,7 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
         "response.done" => serde_json::from_str(payload)
             .map(|d| Some(ResponsesWebSocketEvent::Done(d)))
             .map_err(CompletionError::from),
-        kind if is_known_streaming_event(kind) => match crate::json_utils::from_str_via_value::<
+        kind if is_known_streaming_event(kind) => match crate::json_utils::from_str::<
             StreamingCompletionChunk,
         >(payload)?
         {
