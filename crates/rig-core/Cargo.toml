@@ -146,6 +146,10 @@ reqwest-middleware-rustls = ["dep:reqwest-middleware", "rustls", "reqwest-middle
 # Route OpenAI Responses API deserializers through `serde_json::Value` to dodge
 # the incompatibility between `serde_json/arbitrary_precision` and `#[serde(flatten)]`
 # on structs with concrete numeric fields (serde-rs/json#1157).
-# Default off; downstream crates that enable `arbitrary_precision` should turn this on.
-arbitrary-precision-flatten-workaround = []
+#
+# This feature is self-contained: enabling it turns on `serde_json/arbitrary_precision`
+# for the rig-core build AND switches the wrapper in `json_utils::from_str_via_value`
+# to the `Value` round-trip path. Default off — feature-off behavior is upstream-equivalent
+# and does NOT activate `arbitrary_precision`.
+arbitrary-precision-flatten-workaround = ["serde_json/arbitrary_precision"]
 reqwest-middleware-native-tls = ["dep:reqwest-middleware", "native-tls"]
