@@ -17,6 +17,9 @@
 //! ```
 
 mod auth;
+mod cache_identity;
+
+pub use cache_identity::{ChatGptCacheIdentity, ChatGptRequestExt};
 
 use crate::OneOrMany;
 use crate::client::{
