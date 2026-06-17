@@ -20,6 +20,7 @@ mod auth;
 mod cache_identity;
 
 pub use cache_identity::{ChatGptCacheIdentity, ChatGptRequestExt};
+use cache_identity::{extract_chatgpt_cache_identity, stamp_body_with_cache_identity};
 
 use crate::OneOrMany;
 use crate::client::{
@@ -350,8 +351,9 @@ where
 
     fn create_request(
         &self,
-        request: completion::CompletionRequest,
-    ) -> Result<ResponsesRequest, CompletionError> {
+        mut request: completion::CompletionRequest,
+    ) -> Result<(ResponsesRequest, Option<ChatGptCacheIdentity>), CompletionError> {
+        let identity = extract_chatgpt_cache_identity(&mut request.additional_params);
         let mut request = self.openai_model().create_completion_request(request)?;
 
         if let Some(system_instructions) =
@@ -396,20 +398,31 @@ where
         request.additional_parameters.top_p = None;
         request.additional_parameters.user = None;
 
-        Ok(request)
+        Ok((request, identity))
     }
 
     fn add_auth_headers(
         &self,
         req: http_client::Builder,
         context: &auth::AuthContext,
+        identity: Option<&ChatGptCacheIdentity>,
     ) -> http_client::Builder {
-        let req = req
+        let session_id_header = identity
+            .map(|id| id.session_id.clone())
+            .unwrap_or_else(|| nanoid::nanoid!());
+        let mut req = req
             .header(
                 http::header::AUTHORIZATION,
                 format!("Bearer {}", context.access_token),
             )
-            .header("session_id", nanoid::nanoid!());
+            .header("session_id", session_id_header.clone());
+
+        if let Some(id) = identity {
+            req = req
+                .header("session-id", id.session_id.as_str())
+                .header("thread-id", id.thread_id.as_str())
+                .header("x-client-request-id", id.thread_id.as_str());
+        }
 
         if let Some(account_id) = &context.account_id {
             req.header("ChatGPT-Account-Id", account_id)
@@ -421,9 +434,10 @@ where
     async fn completion_from_sse(
         &self,
         request: ResponsesRequest,
+        identity: Option<ChatGptCacheIdentity>,
     ) -> Result<completion::CompletionResponse<responses_api::CompletionResponse>, CompletionError>
     {
-        let body = serde_json::to_vec(&request)?;
+        let body = serialize_request_with_identity(&request, identity.as_ref())?;
         let auth = self
             .client
             .ext()
@@ -433,7 +447,7 @@ where
             .map_err(|err| CompletionError::ProviderError(err.to_string()))?;
 
         let req = self
-            .add_auth_headers(self.client.post("/responses")?, &auth)
+            .add_auth_headers(self.client.post("/responses")?, &auth, identity.as_ref())
             .body(body)
             .map_err(|err| CompletionError::HttpError(err.into()))?;
 
@@ -484,7 +498,7 @@ where
         &self,
         completion_request: completion::CompletionRequest,
     ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError> {
-        let request = self.create_request(completion_request)?;
+        let (request, identity) = self.create_request(completion_request)?;
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
@@ -507,7 +521,7 @@ where
 
         tracing_futures::Instrument::instrument(
             async move {
-                let response = self.completion_from_sse(request).await?;
+                let response = self.completion_from_sse(request, identity).await?;
                 let span = tracing::Span::current();
                 span.record("gen_ai.response.id", &response.raw_response.id);
                 span.record("gen_ai.response.model", &response.raw_response.model);
@@ -544,7 +558,7 @@ where
         StreamingCompletionResponse<responses_api::streaming::StreamingCompletionResponse>,
         CompletionError,
     > {
-        let request = self.create_request(completion_request)?;
+        let (request, identity) = self.create_request(completion_request)?;
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
@@ -554,7 +568,7 @@ where
             );
         }
 
-        let body = serde_json::to_vec(&request)?;
+        let body = serialize_request_with_identity(&request, identity.as_ref())?;
         let auth = self
             .client
             .ext()
@@ -564,7 +578,7 @@ where
             .map_err(|err| CompletionError::ProviderError(err.to_string()))?;
 
         let req = self
-            .add_auth_headers(self.client.post("/responses")?, &auth)
+            .add_auth_headers(self.client.post("/responses")?, &auth, identity.as_ref())
             .body(body)
             .map_err(|err| CompletionError::HttpError(err.into()))?;
 
@@ -595,6 +609,18 @@ where
             "ChatGPT",
         ))
     }
+}
+
+fn serialize_request_with_identity(
+    request: &ResponsesRequest,
+    identity: Option<&ChatGptCacheIdentity>,
+) -> Result<Vec<u8>, CompletionError> {
+    let Some(identity) = identity else {
+        return Ok(serde_json::to_vec(request)?);
+    };
+    let mut body = serde_json::to_value(request)?;
+    stamp_body_with_cache_identity(&mut body, identity);
+    Ok(serde_json::to_vec(&body)?)
 }
 
 fn default_user_agent() -> String {
@@ -754,7 +780,7 @@ data: [DONE]"#;
             .expect("client");
         let model = ResponsesCompletionModel::new(client, GPT_5_3_CODEX);
 
-        let request = model
+        let (request, _identity) = model
             .create_request(completion::CompletionRequest {
                 model: None,
                 preamble: None,
