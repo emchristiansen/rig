@@ -147,9 +147,19 @@ reqwest-middleware-rustls = ["dep:reqwest-middleware", "rustls", "reqwest-middle
 # the incompatibility between `serde_json/arbitrary_precision` and `#[serde(flatten)]`
 # on structs with concrete numeric fields (serde-rs/json#1157).
 #
-# This feature is self-contained: enabling it turns on `serde_json/arbitrary_precision`
-# for the rig-core build AND switches the wrapper in `json_utils::from_str`
-# to the `Value` round-trip path. Default off — feature-off behavior is upstream-equivalent
-# and does NOT activate `arbitrary_precision`.
-arbitrary-precision-flatten-workaround = ["serde_json/arbitrary_precision"]
+# This feature gates **only** Rig's workaround code path: when enabled, the wrapper
+# in `json_utils::from_str` switches to the `Value` round-trip path. It deliberately
+# does NOT enable `serde_json/arbitrary_precision` — that remains a downstream choice.
+# A consumer who already enables `serde_json/arbitrary_precision` elsewhere in its
+# dependency graph (e.g. for lossless decoding of integers beyond u64::MAX) turns on
+# this feature to avoid the #1157 crash; a consumer who does not enable
+# `arbitrary_precision` pays only the small two-step parse cost. Default off —
+# feature-off behavior is upstream-equivalent.
+arbitrary-precision-flatten-workaround = []
+# Internal test-only feature: turns on `serde_json/arbitrary_precision` so the
+# `arbitrary_precision_flatten_workaround` proof tests can exercise the #1157
+# bug trigger. Not part of the public API; downstream consumers should not enable
+# this. CI runs the proof tests with this feature plus
+# `arbitrary-precision-flatten-workaround` to demonstrate the asymmetry.
+_internal-test-arbitrary-precision = ["serde_json/arbitrary_precision"]
 reqwest-middleware-native-tls = ["dep:reqwest-middleware", "native-tls"]
