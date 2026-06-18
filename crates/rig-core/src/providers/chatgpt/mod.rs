@@ -18,6 +18,7 @@
 
 mod auth;
 mod cache_identity;
+mod wire_capture;
 
 pub use cache_identity::{ChatGptCacheIdentity, ChatGptRequestExt};
 use cache_identity::{extract_chatgpt_cache_identity, stamp_body_with_cache_identity};
@@ -579,6 +580,8 @@ where
             .add_auth_headers(self.client.post("/responses")?, &auth, identity.as_ref())
             .body(body)
             .map_err(|err| CompletionError::HttpError(err.into()))?;
+
+        wire_capture::capture_outbound_request(&req, req.body());
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
