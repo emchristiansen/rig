@@ -408,21 +408,18 @@ where
         context: &auth::AuthContext,
         identity: Option<&ChatGptCacheIdentity>,
     ) -> http_client::Builder {
-        let session_id_header = identity
-            .map(|id| id.session_id.clone())
-            .unwrap_or_else(|| nanoid::nanoid!());
-        let mut req = req
-            .header(
-                http::header::AUTHORIZATION,
-                format!("Bearer {}", context.access_token),
-            )
-            .header("session_id", session_id_header.clone());
+        let mut req = req.header(
+            http::header::AUTHORIZATION,
+            format!("Bearer {}", context.access_token),
+        );
 
         if let Some(id) = identity {
             req = req
                 .header("session-id", id.session_id.as_str())
                 .header("thread-id", id.thread_id.as_str())
                 .header("x-client-request-id", id.thread_id.as_str());
+        } else {
+            req = req.header("session_id", nanoid::nanoid!());
         }
 
         if let Some(account_id) = &context.account_id {
@@ -735,6 +732,68 @@ data: [DONE]"#;
             .get("OpenAI-Beta")
             .expect("OpenAI-Beta header must be set");
         assert_eq!(value, "responses=experimental");
+    }
+
+    #[test]
+    fn test_add_auth_headers_without_identity_emits_underscore_session_id() {
+        let client = crate::providers::chatgpt::Client::builder()
+            .oauth()
+            .build()
+            .expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-5.4");
+        let ctx = auth::AuthContext {
+            access_token: "test_token".to_string(),
+            account_id: None,
+        };
+        let req = model
+            .add_auth_headers(http_client::Builder::new(), &ctx, None)
+            .body(())
+            .expect("body");
+        let headers = req.headers();
+        assert!(
+            headers.get("session_id").is_some(),
+            "underscore session_id header must still be emitted when identity is absent"
+        );
+        assert!(
+            headers.get("session-id").is_none(),
+            "dashed session-id header must NOT be emitted when identity is absent"
+        );
+        assert!(headers.get("thread-id").is_none());
+        assert!(headers.get("x-client-request-id").is_none());
+    }
+
+    #[test]
+    fn test_add_auth_headers_with_identity_omits_underscore_session_id() {
+        let client = crate::providers::chatgpt::Client::builder()
+            .oauth()
+            .build()
+            .expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-5.4");
+        let ctx = auth::AuthContext {
+            access_token: "test_token".to_string(),
+            account_id: None,
+        };
+        let identity = ChatGptCacheIdentity {
+            session_id: "sess-123".to_string(),
+            thread_id: "thr-456".to_string(),
+            prompt_cache_key: None,
+            extra_client_metadata: Default::default(),
+        };
+        let req = model
+            .add_auth_headers(http_client::Builder::new(), &ctx, Some(&identity))
+            .body(())
+            .expect("body");
+        let headers = req.headers();
+        assert!(
+            headers.get("session_id").is_none(),
+            "underscore session_id header must NOT be emitted when dashed identity headers are present"
+        );
+        assert_eq!(headers.get("session-id").expect("session-id"), "sess-123");
+        assert_eq!(headers.get("thread-id").expect("thread-id"), "thr-456");
+        assert_eq!(
+            headers.get("x-client-request-id").expect("x-client-request-id"),
+            "thr-456"
+        );
     }
 
     #[test]
