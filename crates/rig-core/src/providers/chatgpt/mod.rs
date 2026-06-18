@@ -148,6 +148,7 @@ impl Provider for ChatGPTExt {
 
     fn with_custom(&self, req: http_client::Builder) -> http_client::Result<http_client::Builder> {
         Ok(req
+            .header("OpenAI-Beta", "responses=experimental")
             .header("originator", &self.originator)
             .header("user-agent", &self.user_agent)
             .header(http::header::ACCEPT, "text/event-stream"))
@@ -714,6 +715,26 @@ data: [DONE]"#;
             .oauth()
             .build()
             .expect("Client::builder()");
+    }
+
+    #[test]
+    fn test_with_custom_emits_openai_beta_responses_experimental() {
+        let client = crate::providers::chatgpt::Client::builder()
+            .oauth()
+            .build()
+            .expect("client");
+        let req = http_client::Builder::new();
+        let req = client
+            .ext()
+            .with_custom(req)
+            .expect("with_custom")
+            .body(())
+            .expect("body");
+        let value = req
+            .headers()
+            .get("OpenAI-Beta")
+            .expect("OpenAI-Beta header must be set");
+        assert_eq!(value, "responses=experimental");
     }
 
     #[test]
