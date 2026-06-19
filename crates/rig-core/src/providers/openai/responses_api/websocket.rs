@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
+    Connector, MaybeTlsStream, WebSocketStream, connect_async, connect_async_tls_with_config,
     tungstenite::{self, Message, client::IntoClientRequest},
 };
 use tracing::Level;
@@ -26,6 +26,34 @@ use super::{CompletionResponse, ResponseError, ResponseStatus, ResponsesCompleti
 
 type OpenAIWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// An explicit TLS connector for the Responses WebSocket connection.
+///
+/// Wraps a [`tokio_tungstenite::Connector`] so callers can inject a custom TLS
+/// configuration (for example a pre-built [`rustls::ClientConfig`]) instead of
+/// relying on the default connector that `tokio-tungstenite` builds internally.
+/// This is the seam hosts use to supply their own crypto provider and trust
+/// roots without Rig having to construct a default `ClientConfig` on the connect
+/// path.
+#[derive(Clone)]
+pub struct WebSocketTlsConnector(Connector);
+
+impl WebSocketTlsConnector {
+    /// Builds a connector from an explicit rustls client configuration.
+    pub fn rustls(config: std::sync::Arc<rustls::ClientConfig>) -> Self {
+        Self(Connector::Rustls(config))
+    }
+
+    fn into_connector(self) -> Connector {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for WebSocketTlsConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("WebSocketTlsConnector").finish()
+    }
+}
 
 /// Options for a `response.create` message sent over OpenAI WebSocket mode.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -195,6 +223,7 @@ pub struct ResponsesWebSocketSessionBuilder<H = reqwest::Client> {
     model: ResponsesCompletionModel<H>,
     connect_timeout: Option<Duration>,
     event_timeout: Option<Duration>,
+    tls_connector: Option<WebSocketTlsConnector>,
 }
 
 impl<H> ResponsesWebSocketSessionBuilder<H> {
@@ -203,7 +232,19 @@ impl<H> ResponsesWebSocketSessionBuilder<H> {
             model,
             connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
             event_timeout: None,
+            tls_connector: None,
         }
+    }
+
+    /// Sets an explicit TLS connector for establishing the websocket connection.
+    ///
+    /// When unset, the default `tokio-tungstenite` connector is used and Rig makes
+    /// a best-effort installation of a default rustls crypto provider before
+    /// connecting.
+    #[must_use]
+    pub fn tls_connector(mut self, connector: WebSocketTlsConnector) -> Self {
+        self.tls_connector = Some(connector);
+        self
     }
 
     /// Sets the timeout for establishing the websocket connection.
@@ -251,6 +292,7 @@ where
             self.model,
             self.connect_timeout,
             self.event_timeout,
+            self.tls_connector,
         )
         .await
     }
@@ -289,10 +331,11 @@ where
         model: ResponsesCompletionModel<H>,
         connect_timeout: Option<Duration>,
         event_timeout: Option<Duration>,
+        tls_connector: Option<WebSocketTlsConnector>,
     ) -> Result<Self, CompletionError> {
         let url = websocket_url(model.client.base_url())?;
         let request = websocket_request(&url, model.client.headers())?;
-        let socket = connect_websocket(request, connect_timeout).await?;
+        let socket = connect_websocket(request, connect_timeout, tls_connector).await?;
 
         Ok(Self {
             model,
@@ -774,19 +817,57 @@ fn websocket_request(
 async fn connect_websocket(
     request: http::Request<()>,
     connect_timeout: Option<Duration>,
+    tls_connector: Option<WebSocketTlsConnector>,
 ) -> Result<OpenAIWebSocket, CompletionError> {
+    let connect = async move {
+        match tls_connector {
+            Some(connector) => {
+                connect_async_tls_with_config(
+                    request,
+                    None,
+                    false,
+                    Some(connector.into_connector()),
+                )
+                .await
+            }
+            None => {
+                ensure_default_crypto_provider();
+                connect_async(request).await
+            }
+        }
+    };
+
     if let Some(timeout_duration) = connect_timeout {
-        match tokio::time::timeout(timeout_duration, connect_async(request)).await {
+        match tokio::time::timeout(timeout_duration, connect).await {
             Ok(result) => result
                 .map(|(socket, _)| socket)
                 .map_err(websocket_provider_error),
             Err(_) => Err(connect_timeout_error(timeout_duration)),
         }
     } else {
-        connect_async(request)
+        connect
             .await
             .map(|(socket, _)| socket)
             .map_err(websocket_provider_error)
+    }
+}
+
+/// Best-effort installation of a process-wide default rustls crypto provider.
+///
+/// On the no-connector path, `tokio-tungstenite` builds an implicit default
+/// `rustls::ClientConfig`. When more than one crypto provider is linked into the
+/// final binary, constructing that config panics unless a process-wide default
+/// provider has been installed. This installs one idempotently and treats an
+/// already-installed provider as success — the common case for hosts (such as
+/// Muninn) that install their own provider at startup before Rig runs.
+fn ensure_default_crypto_provider() {
+    use rustls::crypto::{CryptoProvider, aws_lc_rs};
+
+    if CryptoProvider::get_default().is_none() {
+        // `install_default` returns `Err` only if another thread installed a
+        // provider between the check above and this call. That still satisfies
+        // our requirement (a default is now present), so both outcomes are success.
+        let _ = aws_lc_rs::default_provider().install_default();
     }
 }
 
@@ -849,6 +930,7 @@ mod tests {
             output: Vec::new(),
             tools: Vec::new(),
             additional_parameters: Default::default(),
+            provider_reasoning: None,
         }
     }
 
@@ -2000,5 +2082,59 @@ mod tests {
         assert_eq!(response.id, "resp_after_unknown");
 
         server.await.expect("server task should finish");
+    }
+
+    fn empty_client_config() -> rustls::ClientConfig {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .expect("default protocol versions should build")
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth()
+    }
+
+    #[test]
+    fn ensure_default_crypto_provider_is_idempotent() {
+        // The no-connector connect path calls this before building tokio-tungstenite's
+        // implicit default config; calling it repeatedly must remain panic-free and
+        // always leave a process-wide default provider installed.
+        super::ensure_default_crypto_provider();
+        super::ensure_default_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+
+    #[test]
+    fn rustls_connector_maps_to_rustls_variant() {
+        let connector =
+            super::WebSocketTlsConnector::rustls(std::sync::Arc::new(empty_client_config()));
+
+        // `Clone` and `Debug` are part of the connector's public contract.
+        let cloned = connector.clone();
+        assert_eq!(format!("{cloned:?}"), "WebSocketTlsConnector");
+
+        // The injected config must surface as the rustls connector variant, not the
+        // default connector that tokio-tungstenite would otherwise build.
+        assert!(matches!(
+            connector.into_connector(),
+            super::Connector::Rustls(_)
+        ));
+    }
+
+    #[test]
+    fn builder_records_injected_tls_connector() {
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .build()
+            .expect("client should build");
+
+        let default_builder = client.responses_websocket_builder("gpt-4o");
+        assert!(default_builder.tls_connector.is_none());
+
+        let connector =
+            super::WebSocketTlsConnector::rustls(std::sync::Arc::new(empty_client_config()));
+        let configured_builder = client
+            .responses_websocket_builder("gpt-4o")
+            .tls_connector(connector);
+        assert!(configured_builder.tls_connector.is_some());
     }
 }
