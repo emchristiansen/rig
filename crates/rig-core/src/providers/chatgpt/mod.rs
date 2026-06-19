@@ -17,6 +17,11 @@
 //! ```
 
 mod auth;
+mod cache_identity;
+mod wire_capture;
+
+pub use cache_identity::{ChatGptCacheIdentity, ChatGptRequestExt};
+use cache_identity::{extract_chatgpt_cache_identity, stamp_body_with_cache_identity};
 
 use crate::OneOrMany;
 use crate::client::{
@@ -144,6 +149,7 @@ impl Provider for ChatGPTExt {
 
     fn with_custom(&self, req: http_client::Builder) -> http_client::Result<http_client::Builder> {
         Ok(req
+            .header("OpenAI-Beta", "responses=experimental")
             .header("originator", &self.originator)
             .header("user-agent", &self.user_agent)
             .header(http::header::ACCEPT, "text/event-stream"))
@@ -348,8 +354,9 @@ where
 
     fn create_request(
         &self,
-        request: completion::CompletionRequest,
-    ) -> Result<ResponsesRequest, CompletionError> {
+        mut request: completion::CompletionRequest,
+    ) -> Result<(ResponsesRequest, Option<ChatGptCacheIdentity>), CompletionError> {
+        let identity = extract_chatgpt_cache_identity(&mut request.additional_params);
         let mut request = self.openai_model().create_completion_request(request)?;
 
         if let Some(system_instructions) =
@@ -394,20 +401,28 @@ where
         request.additional_parameters.top_p = None;
         request.additional_parameters.user = None;
 
-        Ok(request)
+        Ok((request, identity))
     }
 
     fn add_auth_headers(
         &self,
         req: http_client::Builder,
         context: &auth::AuthContext,
+        identity: Option<&ChatGptCacheIdentity>,
     ) -> http_client::Builder {
-        let req = req
-            .header(
-                http::header::AUTHORIZATION,
-                format!("Bearer {}", context.access_token),
-            )
-            .header("session_id", nanoid::nanoid!());
+        let mut req = req.header(
+            http::header::AUTHORIZATION,
+            format!("Bearer {}", context.access_token),
+        );
+
+        if let Some(id) = identity {
+            req = req
+                .header("session-id", id.session_id.as_str())
+                .header("thread-id", id.thread_id.as_str())
+                .header("x-client-request-id", id.thread_id.as_str());
+        } else {
+            req = req.header("session_id", nanoid::nanoid!());
+        }
 
         if let Some(account_id) = &context.account_id {
             req.header("ChatGPT-Account-Id", account_id)
@@ -419,9 +434,10 @@ where
     async fn completion_from_sse(
         &self,
         request: ResponsesRequest,
+        identity: Option<ChatGptCacheIdentity>,
     ) -> Result<completion::CompletionResponse<responses_api::CompletionResponse>, CompletionError>
     {
-        let body = serde_json::to_vec(&request)?;
+        let body = serialize_request_with_identity(&request, identity.as_ref())?;
         let auth = self
             .client
             .ext()
@@ -431,7 +447,7 @@ where
             .map_err(|err| CompletionError::ProviderError(err.to_string()))?;
 
         let req = self
-            .add_auth_headers(self.client.post("/responses")?, &auth)
+            .add_auth_headers(self.client.post("/responses")?, &auth, identity.as_ref())
             .body(body)
             .map_err(|err| CompletionError::HttpError(err.into()))?;
 
@@ -482,7 +498,7 @@ where
         &self,
         completion_request: completion::CompletionRequest,
     ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError> {
-        let request = self.create_request(completion_request)?;
+        let (request, identity) = self.create_request(completion_request)?;
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
@@ -505,7 +521,7 @@ where
 
         tracing_futures::Instrument::instrument(
             async move {
-                let response = self.completion_from_sse(request).await?;
+                let response = self.completion_from_sse(request, identity).await?;
                 let span = tracing::Span::current();
                 span.record("gen_ai.response.id", &response.raw_response.id);
                 span.record("gen_ai.response.model", &response.raw_response.model);
@@ -542,7 +558,7 @@ where
         StreamingCompletionResponse<responses_api::streaming::StreamingCompletionResponse>,
         CompletionError,
     > {
-        let request = self.create_request(completion_request)?;
+        let (request, identity) = self.create_request(completion_request)?;
 
         if enabled!(Level::TRACE) {
             tracing::trace!(
@@ -552,7 +568,7 @@ where
             );
         }
 
-        let body = serde_json::to_vec(&request)?;
+        let body = serialize_request_with_identity(&request, identity.as_ref())?;
         let auth = self
             .client
             .ext()
@@ -562,9 +578,11 @@ where
             .map_err(|err| CompletionError::ProviderError(err.to_string()))?;
 
         let req = self
-            .add_auth_headers(self.client.post("/responses")?, &auth)
+            .add_auth_headers(self.client.post("/responses")?, &auth, identity.as_ref())
             .body(body)
             .map_err(|err| CompletionError::HttpError(err.into()))?;
+
+        wire_capture::capture_outbound_request(&req, req.body());
 
         let span = if tracing::Span::current().is_disabled() {
             info_span!(
@@ -593,6 +611,18 @@ where
             "ChatGPT",
         ))
     }
+}
+
+fn serialize_request_with_identity(
+    request: &ResponsesRequest,
+    identity: Option<&ChatGptCacheIdentity>,
+) -> Result<Vec<u8>, CompletionError> {
+    let Some(identity) = identity else {
+        return Ok(serde_json::to_vec(request)?);
+    };
+    let mut body = serde_json::to_value(request)?;
+    stamp_body_with_cache_identity(&mut body, identity);
+    Ok(serde_json::to_vec(&body)?)
 }
 
 fn default_user_agent() -> String {
@@ -689,6 +719,88 @@ data: [DONE]"#;
     }
 
     #[test]
+    fn test_with_custom_emits_openai_beta_responses_experimental() {
+        let client = crate::providers::chatgpt::Client::builder()
+            .oauth()
+            .build()
+            .expect("client");
+        let req = http_client::Builder::new();
+        let req = client
+            .ext()
+            .with_custom(req)
+            .expect("with_custom")
+            .body(())
+            .expect("body");
+        let value = req
+            .headers()
+            .get("OpenAI-Beta")
+            .expect("OpenAI-Beta header must be set");
+        assert_eq!(value, "responses=experimental");
+    }
+
+    #[test]
+    fn test_add_auth_headers_without_identity_emits_underscore_session_id() {
+        let client = crate::providers::chatgpt::Client::builder()
+            .oauth()
+            .build()
+            .expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-5.4");
+        let ctx = auth::AuthContext {
+            access_token: "test_token".to_string(),
+            account_id: None,
+        };
+        let req = model
+            .add_auth_headers(http_client::Builder::new(), &ctx, None)
+            .body(())
+            .expect("body");
+        let headers = req.headers();
+        assert!(
+            headers.get("session_id").is_some(),
+            "underscore session_id header must still be emitted when identity is absent"
+        );
+        assert!(
+            headers.get("session-id").is_none(),
+            "dashed session-id header must NOT be emitted when identity is absent"
+        );
+        assert!(headers.get("thread-id").is_none());
+        assert!(headers.get("x-client-request-id").is_none());
+    }
+
+    #[test]
+    fn test_add_auth_headers_with_identity_omits_underscore_session_id() {
+        let client = crate::providers::chatgpt::Client::builder()
+            .oauth()
+            .build()
+            .expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-5.4");
+        let ctx = auth::AuthContext {
+            access_token: "test_token".to_string(),
+            account_id: None,
+        };
+        let identity = ChatGptCacheIdentity {
+            session_id: "sess-123".to_string(),
+            thread_id: "thr-456".to_string(),
+            prompt_cache_key: None,
+            extra_client_metadata: Default::default(),
+        };
+        let req = model
+            .add_auth_headers(http_client::Builder::new(), &ctx, Some(&identity))
+            .body(())
+            .expect("body");
+        let headers = req.headers();
+        assert!(
+            headers.get("session_id").is_none(),
+            "underscore session_id header must NOT be emitted when dashed identity headers are present"
+        );
+        assert_eq!(headers.get("session-id").expect("session-id"), "sess-123");
+        assert_eq!(headers.get("thread-id").expect("thread-id"), "thr-456");
+        assert_eq!(
+            headers.get("x-client-request-id").expect("x-client-request-id"),
+            "thr-456"
+        );
+    }
+
+    #[test]
     fn test_merge_instructions_uses_default_when_missing() {
         assert_eq!(
             merge_instructions(DEFAULT_INSTRUCTIONS, None),
@@ -752,7 +864,7 @@ data: [DONE]"#;
             .expect("client");
         let model = ResponsesCompletionModel::new(client, GPT_5_3_CODEX);
 
-        let request = model
+        let (request, _identity) = model
             .create_request(completion::CompletionRequest {
                 model: None,
                 preamble: None,
