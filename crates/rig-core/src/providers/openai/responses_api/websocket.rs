@@ -55,6 +55,85 @@ impl std::fmt::Debug for WebSocketTlsConnector {
     }
 }
 
+/// Provider seam for a Responses WebSocket session.
+///
+/// A backend describes how to reach a Responses-compatible provider and how to
+/// build its `response.create` payload: the connection target, the async
+/// handshake headers, and provider-specific request shaping. The
+/// [`ResponsesWebSocketSession`] itself owns the transport, event parsing, and
+/// turn state, so a backend stays small.
+///
+/// The trait is intentionally not object-safe — the session is generic over the
+/// backend (`ResponsesWebSocketSession<B>`) and dispatches statically — so the
+/// async method uses return-position `impl Future` rather than `async_trait`.
+pub trait ResponsesWebSocketBackend: WasmCompatSend + WasmCompatSync {
+    /// The HTTP(S) base URL the session converts into a `ws://`/`wss://` endpoint.
+    fn base_url(&self) -> &str;
+
+    /// Shapes a Rig completion request into the provider's Responses request.
+    fn shape_request(
+        &self,
+        request: completion::CompletionRequest,
+    ) -> Result<super::CompletionRequest, CompletionError>;
+
+    /// Builds the WebSocket handshake headers, awaiting any async auth work.
+    fn handshake_headers(
+        &self,
+    ) -> impl std::future::Future<Output = Result<http::HeaderMap, CompletionError>> + WasmCompatSend;
+
+    /// Whether the session auto-chains turns via `previous_response_id`.
+    ///
+    /// OpenAI's Responses WebSocket mode chains by default; replay-style backends
+    /// override this to keep each turn independent.
+    fn chains_previous_response_id(&self) -> bool {
+        true
+    }
+}
+
+/// The default [`ResponsesWebSocketBackend`] backing OpenAI's Responses WebSocket mode.
+///
+/// Wraps a [`ResponsesCompletionModel`] so the session reaches OpenAI through the
+/// model's configured client (base URL and static auth headers) and shapes
+/// requests with the model's Responses request conversion.
+pub struct OpenAIResponsesWebSocketBackend<H = reqwest::Client> {
+    model: ResponsesCompletionModel<H>,
+}
+
+impl<H> OpenAIResponsesWebSocketBackend<H> {
+    pub(crate) fn new(model: ResponsesCompletionModel<H>) -> Self {
+        Self { model }
+    }
+}
+
+impl<H> ResponsesWebSocketBackend for OpenAIResponsesWebSocketBackend<H>
+where
+    H: HttpClientExt
+        + Clone
+        + std::fmt::Debug
+        + Default
+        + WasmCompatSend
+        + WasmCompatSync
+        + 'static,
+{
+    fn base_url(&self) -> &str {
+        self.model.client.base_url()
+    }
+
+    fn shape_request(
+        &self,
+        request: completion::CompletionRequest,
+    ) -> Result<super::CompletionRequest, CompletionError> {
+        self.model.create_completion_request(request)
+    }
+
+    async fn handshake_headers(&self) -> Result<http::HeaderMap, CompletionError> {
+        // OpenAI's auth headers are static, so no async work is needed here; the
+        // async signature exists for backends (such as ChatGPT/Codex) that refresh
+        // credentials before each connect.
+        Ok(self.model.client.headers().clone())
+    }
+}
+
 /// Options for a `response.create` message sent over OpenAI WebSocket mode.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResponsesWebSocketCreateOptions {
@@ -219,17 +298,17 @@ impl ResponsesWebSocketEvent {
 ///
 /// The default builder applies a 30 second connection timeout and leaves the
 /// per-event timeout disabled.
-pub struct ResponsesWebSocketSessionBuilder<H = reqwest::Client> {
-    model: ResponsesCompletionModel<H>,
+pub struct ResponsesWebSocketSessionBuilder<B = OpenAIResponsesWebSocketBackend> {
+    backend: B,
     connect_timeout: Option<Duration>,
     event_timeout: Option<Duration>,
     tls_connector: Option<WebSocketTlsConnector>,
 }
 
-impl<H> ResponsesWebSocketSessionBuilder<H> {
-    pub(crate) fn new(model: ResponsesCompletionModel<H>) -> Self {
+impl<B> ResponsesWebSocketSessionBuilder<B> {
+    pub(crate) fn new(backend: B) -> Self {
         Self {
-            model,
+            backend,
             connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
             event_timeout: None,
             tls_connector: None,
@@ -276,20 +355,14 @@ impl<H> ResponsesWebSocketSessionBuilder<H> {
     }
 }
 
-impl<H> ResponsesWebSocketSessionBuilder<H>
+impl<B> ResponsesWebSocketSessionBuilder<B>
 where
-    H: HttpClientExt
-        + Clone
-        + std::fmt::Debug
-        + Default
-        + WasmCompatSend
-        + WasmCompatSync
-        + 'static,
+    B: ResponsesWebSocketBackend,
 {
     /// Opens the websocket session using the configured builder options.
-    pub async fn connect(self) -> Result<ResponsesWebSocketSession<H>, CompletionError> {
+    pub async fn connect(self) -> Result<ResponsesWebSocketSession<B>, CompletionError> {
         ResponsesWebSocketSession::connect_with_timeouts(
-            self.model,
+            self.backend,
             self.connect_timeout,
             self.event_timeout,
             self.tls_connector,
@@ -306,8 +379,8 @@ where
 ///
 /// Call [`ResponsesWebSocketSession::close`] when you are finished with the
 /// session so the websocket can complete a close handshake cleanly.
-pub struct ResponsesWebSocketSession<H = reqwest::Client> {
-    model: ResponsesCompletionModel<H>,
+pub struct ResponsesWebSocketSession<B = OpenAIResponsesWebSocketBackend> {
+    backend: B,
     previous_response_id: Option<String>,
     pending_done_response_id: Option<String>,
     socket: OpenAIWebSocket,
@@ -317,28 +390,23 @@ pub struct ResponsesWebSocketSession<H = reqwest::Client> {
     failed: bool,
 }
 
-impl<H> ResponsesWebSocketSession<H>
+impl<B> ResponsesWebSocketSession<B>
 where
-    H: HttpClientExt
-        + Clone
-        + std::fmt::Debug
-        + Default
-        + WasmCompatSend
-        + WasmCompatSync
-        + 'static,
+    B: ResponsesWebSocketBackend,
 {
     async fn connect_with_timeouts(
-        model: ResponsesCompletionModel<H>,
+        backend: B,
         connect_timeout: Option<Duration>,
         event_timeout: Option<Duration>,
         tls_connector: Option<WebSocketTlsConnector>,
     ) -> Result<Self, CompletionError> {
-        let url = websocket_url(model.client.base_url())?;
-        let request = websocket_request(&url, model.client.headers())?;
+        let url = websocket_url(backend.base_url())?;
+        let headers = backend.handshake_headers().await?;
+        let request = websocket_request(&url, &headers)?;
         let socket = connect_websocket(request, connect_timeout, tls_connector).await?;
 
         Ok(Self {
-            model,
+            backend,
             previous_response_id: None,
             pending_done_response_id: None,
             socket,
@@ -506,14 +574,16 @@ where
         &self,
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<super::CompletionRequest, CompletionError> {
-        let mut request = self.model.create_completion_request(completion_request)?;
+        let mut request = self.backend.shape_request(completion_request)?;
 
         // WebSocket mode is always event-driven, so these HTTP/SSE-specific flags
         // are ignored by the provider and only add noise to the payload.
         request.stream = None;
         request.additional_parameters.background = None;
 
-        if request.additional_parameters.previous_response_id.is_none() {
+        if self.backend.chains_previous_response_id()
+            && request.additional_parameters.previous_response_id.is_none()
+        {
             request.additional_parameters.previous_response_id = self.previous_response_id.clone();
         }
 
@@ -645,7 +715,7 @@ where
     }
 }
 
-impl<H> Drop for ResponsesWebSocketSession<H> {
+impl<B> Drop for ResponsesWebSocketSession<B> {
     fn drop(&mut self) {
         if !self.closed {
             tracing::warn!(
@@ -2118,6 +2188,23 @@ mod tests {
             connector.into_connector(),
             super::Connector::Rustls(_)
         ));
+    }
+
+    #[test]
+    fn openai_backend_defaults_to_chaining() {
+        use super::{OpenAIResponsesWebSocketBackend, ResponsesWebSocketBackend};
+
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url("https://api.openai.com/v1")
+            .build()
+            .expect("client should build");
+
+        let backend = OpenAIResponsesWebSocketBackend::new(client.completion_model("gpt-4o"));
+
+        // OpenAI must keep auto-chaining turns via `previous_response_id`.
+        assert!(backend.chains_previous_response_id());
+        assert!(backend.base_url().contains("api.openai.com"));
     }
 
     #[test]
