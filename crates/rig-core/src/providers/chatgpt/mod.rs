@@ -17,6 +17,8 @@
 //! ```
 
 mod auth;
+#[cfg(all(not(target_family = "wasm"), feature = "websocket"))]
+pub mod websocket;
 
 use crate::OneOrMany;
 use crate::client::{
@@ -592,6 +594,28 @@ where
             span,
             "ChatGPT",
         ))
+    }
+}
+
+#[cfg(all(not(target_family = "wasm"), feature = "websocket"))]
+impl<H> ResponsesCompletionModel<H>
+where
+    Client<H>: HttpClientExt + Clone + Debug + 'static,
+    H: Clone + Default + Debug + WasmCompatSend + WasmCompatSync + 'static,
+{
+    /// Opens a builder for a ChatGPT Responses WebSocket session.
+    ///
+    /// The returned builder connects through ChatGPT's subscription backend and
+    /// derives handshake credentials from the model's async auth context. See
+    /// [`websocket::ChatGptWsBackend`] for the current header and behavior scope.
+    pub fn websocket(
+        &self,
+    ) -> crate::providers::openai::responses_api::websocket::ResponsesWebSocketSessionBuilder<
+        websocket::ChatGptWsBackend<H>,
+    > {
+        crate::providers::openai::responses_api::websocket::ResponsesWebSocketSessionBuilder::new(
+            websocket::ChatGptWsBackend::new(self.clone()),
+        )
     }
 }
 
