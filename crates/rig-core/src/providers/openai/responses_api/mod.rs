@@ -32,6 +32,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 use tracing::{Instrument, Level, enabled, info_span};
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::ops::Add;
 use std::str::FromStr;
@@ -1132,6 +1133,15 @@ pub struct AdditionalParameters {
     /// Whether or not to store the response for later retrieval by API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
+    /// A stable cache-routing affinity key serialized at the top level of the
+    /// request. For ChatGPT/Codex this is the session's thread identifier; the
+    /// provider treats it as routing metadata, not a hard cache partition key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    /// Provider-specific client metadata serialized at the top level of the
+    /// request. Empty by default and omitted from the payload when empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub client_metadata: BTreeMap<String, String>,
 }
 
 impl AdditionalParameters {

@@ -5,12 +5,14 @@
 //! supplies ChatGPT's base URL, reuses the provider's Codex request shaping, and
 //! builds handshake headers from the async ChatGPT auth context.
 //!
-//! This is an intentionally minimal first phase. It emits only the
-//! auth-context-derived handshake headers (`Authorization` and the optional
-//! `ChatGPT-Account-Id`) and does not chain turns via `previous_response_id`. The
-//! dashed identity headers, the `OpenAI-Beta` header, FedRAMP/JWT behavior, the
-//! cache identity, and request-body stamping are deferred to later phases, so this
-//! backend is not yet a live-acceptable Codex WebSocket implementation.
+//! It emits the source-derived Codex WebSocket handshake headers
+//! (`Authorization`, the optional `ChatGPT-Account-Id`, the dashed `session-id`
+//! and `thread-id`, `x-client-request-id`, and the `OpenAI-Beta` beta opt-in) and
+//! stamps the Codex cache identity (`prompt_cache_key` and `client_metadata`) onto
+//! the request body as typed top-level fields. It does not chain turns via
+//! `previous_response_id` (Codex runs full-replay), and it deliberately does not
+//! fake optional host/reconnect/attestation headers (`x-oai-attestation`,
+//! `x-codex-turn-state`, and similar), which the live handshake tolerates absent.
 
 use super::{Client, ResponsesCompletionModel};
 use crate::completion::{self, CompletionError};
@@ -26,6 +28,56 @@ use std::fmt::Debug;
 /// source consistency; it is lowercased on the wire like the existing HTTP path.
 const CHATGPT_ACCOUNT_ID_HEADER: &str = "ChatGPT-Account-Id";
 
+/// The dashed session identity header used by the Codex WebSocket transport.
+const SESSION_ID_HEADER: &str = "session-id";
+
+/// The dashed thread identity header used by the Codex WebSocket transport.
+const THREAD_ID_HEADER: &str = "thread-id";
+
+/// The per-request correlation header; Codex sets it to the thread id.
+const X_CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
+
+/// The beta opt-in header enabling Codex's Responses WebSocket protocol.
+const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
+
+/// The Codex Responses WebSocket beta value (mirrors the Codex client).
+const RESPONSES_WEBSOCKETS_BETA_VALUE: &str = "responses_websockets=2026-02-06";
+
+/// The `client_metadata` key carrying the session identifier (Codex spelling).
+const SESSION_ID_METADATA_KEY: &str = "session_id";
+
+/// The `client_metadata` key carrying the thread identifier (Codex spelling).
+const THREAD_ID_METADATA_KEY: &str = "thread_id";
+
+/// The stable Codex cache/correlation identity for a WebSocket session.
+///
+/// Codex derives `prompt_cache_key` from the thread id and correlates a turn via
+/// the dashed `session-id`/`thread-id` headers plus `client_metadata`. Rig has no
+/// installation/window concept, so this carries only the session and thread
+/// identifiers — generated once per session and stable across its turns so cache
+/// routing stays sticky. The identifiers use `nanoid`, matching the existing
+/// ChatGPT HTTP path's `session_id` generation, since the server treats them as
+/// opaque correlation strings.
+#[derive(Clone, Debug)]
+struct CodexCacheIdentity {
+    session_id: String,
+    thread_id: String,
+}
+
+impl CodexCacheIdentity {
+    fn new() -> Self {
+        Self {
+            session_id: nanoid::nanoid!(),
+            thread_id: nanoid::nanoid!(),
+        }
+    }
+
+    /// The cache-routing affinity key. Codex defaults this to the thread id.
+    fn prompt_cache_key(&self) -> &str {
+        &self.thread_id
+    }
+}
+
 /// A [`ResponsesWebSocketBackend`] backed by the ChatGPT subscription provider.
 ///
 /// Wraps a ChatGPT [`ResponsesCompletionModel`] so the session reaches ChatGPT's
@@ -33,11 +85,15 @@ const CHATGPT_ACCOUNT_ID_HEADER: &str = "ChatGPT-Account-Id";
 /// the provider's existing Codex request conversion.
 pub struct ChatGptWsBackend<H = reqwest::Client> {
     model: ResponsesCompletionModel<H>,
+    identity: CodexCacheIdentity,
 }
 
 impl<H> ChatGptWsBackend<H> {
     pub(crate) fn new(model: ResponsesCompletionModel<H>) -> Self {
-        Self { model }
+        Self {
+            model,
+            identity: CodexCacheIdentity::new(),
+        }
     }
 }
 
@@ -54,7 +110,26 @@ where
         &self,
         request: completion::CompletionRequest,
     ) -> Result<ResponsesRequest, CompletionError> {
-        self.model.create_request(request)
+        let mut request = self.model.create_request(request)?;
+        let params = &mut request.additional_parameters;
+
+        // Codex carries the cache key and correlation metadata as typed top-level
+        // fields (the placement validated against the live server), so they ride
+        // along with the flattened request body rather than being stamped in by
+        // hand. A caller-supplied value wins.
+        if params.prompt_cache_key.is_none() {
+            params.prompt_cache_key = Some(self.identity.prompt_cache_key().to_string());
+        }
+        params
+            .client_metadata
+            .entry(SESSION_ID_METADATA_KEY.to_string())
+            .or_insert_with(|| self.identity.session_id.clone());
+        params
+            .client_metadata
+            .entry(THREAD_ID_METADATA_KEY.to_string())
+            .or_insert_with(|| self.identity.thread_id.clone());
+
+        Ok(request)
     }
 
     async fn handshake_headers(&self) -> Result<http::HeaderMap, CompletionError> {
@@ -97,6 +172,22 @@ where
             headers.insert(name, value);
         }
 
+        // The source-derived Codex identity headers: the dashed `session-id` and
+        // `thread-id`, the `x-client-request-id` correlation header (set to the
+        // thread id, matching Codex), and the `OpenAI-Beta` protocol opt-in.
+        insert_header(&mut headers, SESSION_ID_HEADER, &self.identity.session_id)?;
+        insert_header(&mut headers, THREAD_ID_HEADER, &self.identity.thread_id)?;
+        insert_header(
+            &mut headers,
+            X_CLIENT_REQUEST_ID_HEADER,
+            &self.identity.thread_id,
+        )?;
+        insert_header(
+            &mut headers,
+            OPENAI_BETA_HEADER,
+            RESPONSES_WEBSOCKETS_BETA_VALUE,
+        )?;
+
         Ok(headers)
     }
 
@@ -105,6 +196,23 @@ where
         // `previous_response_id`.
         false
     }
+}
+
+/// Inserts a static-named handshake header, surfacing an invalid name or value as
+/// a provider error rather than silently dropping it.
+fn insert_header(
+    headers: &mut http::HeaderMap,
+    name: &'static str,
+    value: &str,
+) -> Result<(), CompletionError> {
+    let name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|err| {
+        CompletionError::ProviderError(format!("Invalid Codex websocket header name: {err}"))
+    })?;
+    let value = value.parse().map_err(|err| {
+        CompletionError::ProviderError(format!("Invalid Codex websocket header value: {err}"))
+    })?;
+    headers.insert(name, value);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -229,7 +337,85 @@ mod tests {
             "acct-123"
         );
 
+        // The dashed identity headers and beta opt-in are present, and the
+        // correlation header mirrors the thread id, matching the Codex client.
+        let session_id = headers
+            .get(SESSION_ID_HEADER)
+            .expect("session-id header")
+            .to_str()
+            .expect("session-id header should be ascii");
+        assert!(!session_id.is_empty(), "session-id should be non-empty");
+        let thread_id = headers
+            .get(THREAD_ID_HEADER)
+            .expect("thread-id header")
+            .to_str()
+            .expect("thread-id header should be ascii");
+        assert!(!thread_id.is_empty(), "thread-id should be non-empty");
+        assert_eq!(
+            headers
+                .get(X_CLIENT_REQUEST_ID_HEADER)
+                .expect("x-client-request-id header")
+                .to_str()
+                .expect("x-client-request-id header should be ascii"),
+            thread_id,
+            "x-client-request-id should mirror the thread id"
+        );
+        assert_eq!(
+            headers
+                .get(OPENAI_BETA_HEADER)
+                .expect("OpenAI-Beta header")
+                .to_str()
+                .expect("OpenAI-Beta header should be ascii"),
+            RESPONSES_WEBSOCKETS_BETA_VALUE
+        );
+
         drop(session);
+    }
+
+    #[test]
+    fn shape_request_stamps_cache_identity_as_top_level_fields() {
+        let backend =
+            ChatGptWsBackend::new(access_token_model("https://chatgpt.com/backend-api/codex"));
+        let request = backend
+            .shape_request(user_turn("hello"))
+            .expect("request should shape");
+
+        // The cache key defaults to the thread id, and the session/thread land in
+        // client_metadata under Codex's key spellings.
+        assert_eq!(
+            request.additional_parameters.prompt_cache_key.as_deref(),
+            Some(backend.identity.thread_id.as_str())
+        );
+        assert_eq!(
+            request
+                .additional_parameters
+                .client_metadata
+                .get(SESSION_ID_METADATA_KEY)
+                .map(String::as_str),
+            Some(backend.identity.session_id.as_str())
+        );
+        assert_eq!(
+            request
+                .additional_parameters
+                .client_metadata
+                .get(THREAD_ID_METADATA_KEY)
+                .map(String::as_str),
+            Some(backend.identity.thread_id.as_str())
+        );
+
+        // The fields serialize at the top level of the request body (the placement
+        // validated against the live server), not nested under another object.
+        let body = serde_json::to_value(&request).expect("request should serialize");
+        assert_eq!(
+            body.get("prompt_cache_key").and_then(|v| v.as_str()),
+            Some(backend.identity.thread_id.as_str())
+        );
+        assert!(
+            body.get("client_metadata")
+                .and_then(|v| v.get(THREAD_ID_METADATA_KEY))
+                .is_some(),
+            "client_metadata should be a top-level object, got {body}"
+        );
     }
 
     #[tokio::test]
