@@ -376,15 +376,20 @@ where
         request.max_output_tokens = None;
         request.stream = Some(true);
 
-        let include = request
-            .additional_parameters
-            .include
-            .get_or_insert_with(Vec::new);
-        if !include
-            .iter()
-            .any(|item| matches!(item, Include::ReasoningEncryptedContent))
-        {
-            include.push(Include::ReasoningEncryptedContent);
+        // Match the generic OpenAI conversion: the encrypted-reasoning include is
+        // only meaningful when the request actually carries reasoning, so gate it
+        // on `reasoning.is_some()` rather than adding it unconditionally.
+        if request.additional_parameters.reasoning.is_some() {
+            let include = request
+                .additional_parameters
+                .include
+                .get_or_insert_with(Vec::new);
+            if !include
+                .iter()
+                .any(|item| matches!(item, Include::ReasoningEncryptedContent))
+            {
+                include.push(Include::ReasoningEncryptedContent);
+            }
         }
 
         request.additional_parameters.background = None;
@@ -792,6 +797,91 @@ data: [DONE]"#;
             .expect("request");
 
         assert!(request.temperature.is_none());
+    }
+
+    #[test]
+    fn test_create_request_sets_store_false() {
+        let client = crate::providers::chatgpt::Client::builder()
+            .oauth()
+            .build()
+            .expect("client");
+        let model = ResponsesCompletionModel::new(client, GPT_5_3_CODEX);
+
+        let request = model
+            .create_request(completion::CompletionRequest {
+                model: None,
+                preamble: None,
+                chat_history: OneOrMany::one(completion::Message::user("hello")),
+                documents: Vec::new(),
+                tools: Vec::new(),
+                temperature: None,
+                max_tokens: None,
+                tool_choice: None,
+                additional_params: None,
+                output_schema: None,
+            })
+            .expect("request");
+
+        assert_eq!(request.additional_parameters.store, Some(false));
+    }
+
+    #[test]
+    fn test_create_request_includes_reasoning_only_when_reasoning_present() {
+        fn includes_reasoning_encrypted_content(request: &ResponsesRequest) -> bool {
+            request
+                .additional_parameters
+                .include
+                .as_ref()
+                .is_some_and(|include| {
+                    include
+                        .iter()
+                        .any(|item| matches!(item, Include::ReasoningEncryptedContent))
+                })
+        }
+
+        let client = crate::providers::chatgpt::Client::builder()
+            .oauth()
+            .build()
+            .expect("client");
+        let model = ResponsesCompletionModel::new(client, GPT_5_3_CODEX);
+
+        let without_reasoning = model
+            .create_request(completion::CompletionRequest {
+                model: None,
+                preamble: None,
+                chat_history: OneOrMany::one(completion::Message::user("hello")),
+                documents: Vec::new(),
+                tools: Vec::new(),
+                temperature: None,
+                max_tokens: None,
+                tool_choice: None,
+                additional_params: None,
+                output_schema: None,
+            })
+            .expect("request without reasoning");
+        assert!(
+            !includes_reasoning_encrypted_content(&without_reasoning),
+            "did not expect reasoning include when the request carries no reasoning"
+        );
+
+        let with_reasoning = model
+            .create_request(completion::CompletionRequest {
+                model: None,
+                preamble: None,
+                chat_history: OneOrMany::one(completion::Message::user("hello")),
+                documents: Vec::new(),
+                tools: Vec::new(),
+                temperature: None,
+                max_tokens: None,
+                tool_choice: None,
+                additional_params: Some(serde_json::json!({ "reasoning": { "effort": "medium" } })),
+                output_schema: None,
+            })
+            .expect("request with reasoning");
+        assert!(
+            includes_reasoning_encrypted_content(&with_reasoning),
+            "expected reasoning include when the request carries reasoning"
+        );
     }
 
     #[tokio::test]

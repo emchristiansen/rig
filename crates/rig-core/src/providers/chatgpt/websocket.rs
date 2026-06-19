@@ -124,6 +124,43 @@ mod tests {
         ResponsesCompletionModel::new(client, GPT_5_3_CODEX)
     }
 
+    fn user_turn(text: &str) -> crate::completion::CompletionRequest {
+        crate::completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: crate::OneOrMany::one(crate::completion::Message::user(text)),
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        }
+    }
+
+    fn completed_response_event(response_id: &str) -> String {
+        serde_json::json!({
+            "type": "response.completed",
+            "sequence_number": 1,
+            "response": {
+                "id": response_id,
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-5.3-codex",
+                "usage": null,
+                "output": [],
+                "tools": []
+            }
+        })
+        .to_string()
+    }
+
     #[test]
     fn chatgpt_ws_backend_does_not_chain() {
         let backend =
@@ -193,5 +230,126 @@ mod tests {
         );
 
         drop(session);
+    }
+
+    #[tokio::test]
+    async fn chatgpt_ws_emits_response_create_and_omits_previous_response_id() {
+        use futures::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            // Two completed turns: Codex runs full-replay, so neither outbound
+            // payload may carry `previous_response_id`, even after turn 1 completes.
+            for response_id in ["resp_1", "resp_2"] {
+                let request = socket
+                    .next()
+                    .await
+                    .expect("request should exist")
+                    .expect("request should be valid");
+                let payload = request.into_text().expect("request should be text");
+                assert!(
+                    payload.contains("\"type\":\"response.create\""),
+                    "expected response.create envelope, got {payload}"
+                );
+                assert!(
+                    !payload.contains("previous_response_id"),
+                    "Codex replay mode must not chain previous_response_id, got {payload}"
+                );
+
+                socket
+                    .send(Message::text(completed_response_event(response_id)))
+                    .await
+                    .expect("completed event should send");
+            }
+        });
+
+        let base_url = format!("http://{address}/backend-api/codex");
+        let mut session = access_token_model(&base_url)
+            .websocket()
+            .connect()
+            .await
+            .expect("session should connect");
+
+        for turn in ["first", "second"] {
+            session
+                .send(user_turn(turn))
+                .await
+                .expect("turn should send");
+            loop {
+                let event = session.next_event().await.expect("event should arrive");
+                if event.is_terminal() {
+                    break;
+                }
+            }
+        }
+
+        server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn chatgpt_ws_warmup_emits_generate_false() {
+        use futures::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            let request = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+            let payload = request.into_text().expect("request should be text");
+            assert!(
+                payload.contains("\"type\":\"response.create\""),
+                "expected response.create envelope, got {payload}"
+            );
+            assert!(
+                payload.contains("\"generate\":false"),
+                "expected warmup to serialize generate:false, got {payload}"
+            );
+
+            socket
+                .send(Message::text(completed_response_event("resp_warmup")))
+                .await
+                .expect("completed event should send");
+        });
+
+        let base_url = format!("http://{address}/backend-api/codex");
+        let mut session = access_token_model(&base_url)
+            .websocket()
+            .connect()
+            .await
+            .expect("session should connect");
+
+        let response_id = session
+            .warmup(user_turn("prewarm"))
+            .await
+            .expect("warmup should complete");
+        assert_eq!(response_id, "resp_warmup");
+
+        server.await.expect("server task should finish");
     }
 }
