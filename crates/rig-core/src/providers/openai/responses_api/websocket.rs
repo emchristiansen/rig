@@ -383,6 +383,12 @@ pub struct ResponsesWebSocketSession<B = OpenAIResponsesWebSocketBackend> {
     backend: B,
     previous_response_id: Option<String>,
     pending_done_response_id: Option<String>,
+    /// The non-input request envelope/config captured from the last successful
+    /// full-replay turn, reused by forward-only incremental continuations.
+    last_envelope: Option<super::CompletionRequest>,
+    /// The envelope of the turn currently in flight, promoted to `last_envelope`
+    /// when that turn completes successfully and dropped if it does not.
+    pending_envelope: Option<super::CompletionRequest>,
     socket: OpenAIWebSocket,
     in_flight: bool,
     event_timeout: Option<Duration>,
@@ -409,6 +415,8 @@ where
             backend,
             previous_response_id: None,
             pending_done_response_id: None,
+            last_envelope: None,
+            pending_envelope: None,
             socket,
             in_flight: false,
             event_timeout,
@@ -454,9 +462,10 @@ where
             ));
         }
 
+        let request = self.prepare_request(completion_request)?;
         let payload = ResponsesWebSocketClientEvent {
             kind: ResponsesWebSocketClientEventKind::ResponseCreate,
-            request: self.prepare_request(completion_request)?,
+            request: request.clone(),
             generate: options.generate,
         };
 
@@ -473,6 +482,72 @@ where
         if let Err(error) = self.socket.send(Message::text(payload)).await {
             return Err(self.fail_session(websocket_provider_error(error)));
         }
+        // Capture this turn's non-input envelope/config so a later incremental
+        // continuation can reuse it; it is promoted to `last_envelope` only once
+        // the turn completes successfully.
+        self.pending_envelope = Some(request);
+        self.in_flight = true;
+
+        Ok(())
+    }
+
+    /// Sends a forward-only incremental continuation of the current live tip.
+    ///
+    /// Rebuilds the `response.create` frame from the envelope captured by the last
+    /// successful full-replay turn, replacing `input` with exactly `delta` and
+    /// injecting the current `previous_response_id` regardless of whether the
+    /// backend auto-chains. It establishes nothing on its own: it requires both a
+    /// captured envelope and a live tip, and never falls back to full replay.
+    pub(crate) async fn send_incremental_frame(
+        &mut self,
+        delta: crate::OneOrMany<super::InputItem>,
+    ) -> Result<(), CompletionError> {
+        self.ensure_open()?;
+
+        if self.in_flight {
+            return Err(CompletionError::ProviderError(
+                "An OpenAI websocket response is already in flight on this session".to_string(),
+            ));
+        }
+
+        let previous_response_id = self.previous_response_id.clone().ok_or_else(|| {
+            CompletionError::ProviderError(
+                "Cannot send an incremental turn before a completed send() established a live tip"
+                    .to_string(),
+            )
+        })?;
+        let mut request = self.last_envelope.clone().ok_or_else(|| {
+            CompletionError::ProviderError(
+                "Cannot send an incremental turn before a completed send() captured a request envelope"
+                    .to_string(),
+            )
+        })?;
+
+        request.input = delta;
+        request.additional_parameters.previous_response_id = Some(previous_response_id);
+
+        let payload = ResponsesWebSocketClientEvent {
+            kind: ResponsesWebSocketClientEventKind::ResponseCreate,
+            request,
+            generate: None,
+        };
+
+        if tracing::enabled!(Level::TRACE) {
+            tracing::trace!(
+                target: "rig::completions",
+                "OpenAI websocket incremental request: {}",
+                serde_json::to_string_pretty(&payload)?
+            );
+        }
+
+        let payload = serde_json::to_string(&payload)?;
+
+        if let Err(error) = self.socket.send(Message::text(payload)).await {
+            return Err(self.fail_session(websocket_provider_error(error)));
+        }
+        // The incremental turn reuses the captured envelope, so `last_envelope`
+        // must persist across the continuation; leave `pending_envelope` unset so
+        // completion does not overwrite it.
         self.in_flight = true;
 
         Ok(())
@@ -634,11 +709,15 @@ where
                     let response_id = chunk.response.id.clone();
                     self.previous_response_id = Some(response_id.clone());
                     self.pending_done_response_id = Some(response_id);
+                    if let Some(envelope) = self.pending_envelope.take() {
+                        self.last_envelope = Some(envelope);
+                    }
                     self.in_flight = false;
                 }
                 ResponseChunkKind::ResponseFailed | ResponseChunkKind::ResponseIncomplete => {
                     self.pending_done_response_id = Some(chunk.response.id.clone());
                     self.previous_response_id = None;
+                    self.pending_envelope = None;
                     self.in_flight = false;
                 }
                 ResponseChunkKind::ResponseCreated | ResponseChunkKind::ResponseInProgress => {}
@@ -649,11 +728,15 @@ where
                         if let Some(response_id) = done.response_id() {
                             self.previous_response_id = Some(response_id.to_string());
                         }
+                        if let Some(envelope) = self.pending_envelope.take() {
+                            self.last_envelope = Some(envelope);
+                        }
                     }
                     Some(ResponseStatus::Failed)
                     | Some(ResponseStatus::Incomplete)
                     | Some(ResponseStatus::Cancelled) => {
                         self.previous_response_id = None;
+                        self.pending_envelope = None;
                     }
                     Some(ResponseStatus::InProgress | ResponseStatus::Queued) | None => {}
                 }
@@ -663,6 +746,7 @@ where
             ResponsesWebSocketEvent::Error(_) => {
                 self.previous_response_id = None;
                 self.pending_done_response_id = None;
+                self.pending_envelope = None;
                 self.in_flight = false;
             }
             ResponsesWebSocketEvent::Item(_) => {}
@@ -672,6 +756,7 @@ where
     fn abort_turn(&mut self) {
         self.previous_response_id = None;
         self.pending_done_response_id = None;
+        self.pending_envelope = None;
         self.in_flight = false;
     }
 

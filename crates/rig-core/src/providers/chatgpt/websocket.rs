@@ -15,10 +15,14 @@
 //! `x-codex-turn-state`, and similar), which the live handshake tolerates absent.
 
 use super::{Client, ResponsesCompletionModel};
+use crate::OneOrMany;
 use crate::completion::{self, CompletionError};
 use crate::http_client::HttpClientExt;
 use crate::providers::openai::responses_api::CompletionRequest as ResponsesRequest;
-use crate::providers::openai::responses_api::websocket::ResponsesWebSocketBackend;
+use crate::providers::openai::responses_api::InputItem;
+use crate::providers::openai::responses_api::websocket::{
+    ResponsesWebSocketBackend, ResponsesWebSocketSession,
+};
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use std::fmt::Debug;
 
@@ -198,6 +202,30 @@ where
     }
 }
 
+impl<H> ResponsesWebSocketSession<ChatGptWsBackend<H>>
+where
+    Client<H>: HttpClientExt + Clone + Debug + 'static,
+    H: Clone + Default + Debug + WasmCompatSend + WasmCompatSync + 'static,
+{
+    /// Continues the current live tip with a forward-only incremental Codex turn.
+    ///
+    /// Codex runs full-replay, so `send` never chains. This instead sends exactly
+    /// `delta` as the new input while injecting the live `previous_response_id`
+    /// captured from the last completed `send`, reusing that turn's non-input
+    /// envelope/config (model, instructions, tools, reasoning/include, and the
+    /// Codex cache identity). It errors rather than falling back to full replay
+    /// when no completed `send` has established a tip and envelope, and a terminal
+    /// failure clears the tip so the next call fails until a fresh `send` re-roots
+    /// the session. Changing any non-input configuration likewise requires a fresh
+    /// `send`; an incremental turn cannot reconfigure the chain.
+    pub async fn send_incremental(
+        &mut self,
+        delta: OneOrMany<InputItem>,
+    ) -> Result<(), CompletionError> {
+        self.send_incremental_frame(delta).await
+    }
+}
+
 /// Inserts a static-named handshake header, surfacing an invalid name or value as
 /// a provider error rather than silently dropping it.
 fn insert_header(
@@ -267,6 +295,34 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    fn failed_response_event(response_id: &str) -> String {
+        serde_json::json!({
+            "type": "response.failed",
+            "sequence_number": 1,
+            "response": {
+                "id": response_id,
+                "object": "response",
+                "created_at": 0,
+                "status": "failed",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-5.3-codex",
+                "usage": null,
+                "output": [],
+                "tools": []
+            }
+        })
+        .to_string()
+    }
+
+    fn delta_turn(text: &str) -> crate::OneOrMany<InputItem> {
+        let items = Vec::<InputItem>::try_from(crate::completion::Message::user(text))
+            .expect("user message should convert into input items");
+        crate::OneOrMany::many(items).expect("delta should contain at least one item")
     }
 
     #[test]
@@ -536,6 +592,356 @@ mod tests {
             .expect("warmup should complete");
         assert_eq!(response_id, "resp_warmup");
 
+        server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn chatgpt_ws_send_incremental_injects_tip_and_reuses_envelope() {
+        use futures::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            let mut frames = Vec::new();
+            for response_id in ["resp_1", "resp_2"] {
+                let request = socket
+                    .next()
+                    .await
+                    .expect("request should exist")
+                    .expect("request should be valid");
+                frames.push(
+                    request
+                        .into_text()
+                        .expect("request should be text")
+                        .to_string(),
+                );
+                socket
+                    .send(Message::text(completed_response_event(response_id)))
+                    .await
+                    .expect("completed event should send");
+            }
+            frames
+        });
+
+        let base_url = format!("http://{address}/backend-api/codex");
+        let mut session = access_token_model(&base_url)
+            .websocket()
+            .connect()
+            .await
+            .expect("session should connect");
+
+        // The root full-replay turn establishes the live tip and captures envelope.
+        session
+            .send(user_turn("ROOT_CONTEXT_MARKER"))
+            .await
+            .expect("root turn should send");
+        loop {
+            let event = session.next_event().await.expect("event should arrive");
+            if event.is_terminal() {
+                break;
+            }
+        }
+        assert_eq!(session.previous_response_id(), Some("resp_1"));
+
+        // A forward-only incremental continuation of the established live tip.
+        session
+            .send_incremental(delta_turn("DELTA_QUESTION_MARKER"))
+            .await
+            .expect("incremental turn should send");
+        loop {
+            let event = session.next_event().await.expect("event should arrive");
+            if event.is_terminal() {
+                break;
+            }
+        }
+        // The live tip advances to the incremental response.
+        assert_eq!(session.previous_response_id(), Some("resp_2"));
+
+        let frames = server.await.expect("server task should finish");
+        let root: serde_json::Value =
+            serde_json::from_str(&frames[0]).expect("root frame should parse");
+        let incremental: serde_json::Value =
+            serde_json::from_str(&frames[1]).expect("incremental frame should parse");
+
+        // The root replay frame does not chain; the incremental frame injects the
+        // live tip even though the Codex backend reports chains == false.
+        assert!(
+            root.get("previous_response_id").is_none(),
+            "root replay frame must not chain, got {root}"
+        );
+        assert_eq!(
+            incremental.get("type").and_then(|v| v.as_str()),
+            Some("response.create")
+        );
+        assert_eq!(
+            incremental
+                .get("previous_response_id")
+                .and_then(|v| v.as_str()),
+            Some("resp_1"),
+            "incremental frame must inject the current live tip"
+        );
+
+        // The incremental input is exactly the delta, not a replay of the root turn.
+        assert!(
+            frames[1].contains("DELTA_QUESTION_MARKER"),
+            "incremental input should carry the delta, got {}",
+            frames[1]
+        );
+        assert!(
+            !frames[1].contains("ROOT_CONTEXT_MARKER"),
+            "incremental input must not replay the root turn, got {}",
+            frames[1]
+        );
+
+        // The incremental frame reuses the captured non-input envelope/config.
+        assert_eq!(
+            incremental.get("model"),
+            root.get("model"),
+            "incremental should reuse the captured model"
+        );
+        assert_eq!(
+            incremental.get("prompt_cache_key"),
+            root.get("prompt_cache_key"),
+            "incremental should reuse the captured cache key"
+        );
+        assert_eq!(
+            incremental.get("client_metadata"),
+            root.get("client_metadata"),
+            "incremental should reuse the captured client metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn chatgpt_ws_send_incremental_without_tip_errors_and_emits_no_frame() {
+        use futures::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            // The first and only frame the server sees must be the root send(); a
+            // failed incremental must not have emitted anything ahead of it.
+            let request = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+            let payload = request
+                .into_text()
+                .expect("request should be text")
+                .to_string();
+            socket
+                .send(Message::text(completed_response_event("resp_1")))
+                .await
+                .expect("completed event should send");
+            payload
+        });
+
+        let base_url = format!("http://{address}/backend-api/codex");
+        let mut session = access_token_model(&base_url)
+            .websocket()
+            .connect()
+            .await
+            .expect("session should connect");
+
+        // No completed send() yet: the incremental must fail without a frame.
+        let error = session
+            .send_incremental(delta_turn("PREMATURE_DELTA"))
+            .await
+            .expect_err("incremental without a tip should fail");
+        assert!(
+            matches!(error, CompletionError::ProviderError(_)),
+            "expected ProviderError, got {error:?}"
+        );
+
+        // A subsequent real send() must be the first frame the server receives.
+        session
+            .send(user_turn("ROOT_AFTER_FAILURE"))
+            .await
+            .expect("root turn should send");
+        loop {
+            let event = session.next_event().await.expect("event should arrive");
+            if event.is_terminal() {
+                break;
+            }
+        }
+
+        let first_frame = server.await.expect("server task should finish");
+        assert!(
+            first_frame.contains("ROOT_AFTER_FAILURE"),
+            "the first frame should be the root send, got {first_frame}"
+        );
+        assert!(
+            !first_frame.contains("PREMATURE_DELTA"),
+            "a failed incremental must not emit a frame, got {first_frame}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chatgpt_ws_send_incremental_after_terminal_failure_errors() {
+        use futures::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            // Turn 1: the root send() completes and establishes the tip.
+            let _ = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+            socket
+                .send(Message::text(completed_response_event("resp_1")))
+                .await
+                .expect("completed event should send");
+
+            // Turn 2: the incremental is answered with a terminal failure.
+            let _ = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+            socket
+                .send(Message::text(failed_response_event("resp_2")))
+                .await
+                .expect("failed event should send");
+        });
+
+        let base_url = format!("http://{address}/backend-api/codex");
+        let mut session = access_token_model(&base_url)
+            .websocket()
+            .connect()
+            .await
+            .expect("session should connect");
+
+        session
+            .send(user_turn("ROOT"))
+            .await
+            .expect("root turn should send");
+        loop {
+            let event = session.next_event().await.expect("event should arrive");
+            if event.is_terminal() {
+                break;
+            }
+        }
+        assert_eq!(session.previous_response_id(), Some("resp_1"));
+
+        session
+            .send_incremental(delta_turn("FIRST_DELTA"))
+            .await
+            .expect("incremental turn should send");
+        loop {
+            let event = session.next_event().await.expect("event should arrive");
+            if event.is_terminal() {
+                break;
+            }
+        }
+        // The terminal failure cleared the tip.
+        assert_eq!(session.previous_response_id(), None);
+
+        // The next incremental fails until a fresh send() re-roots the session.
+        let error = session
+            .send_incremental(delta_turn("SECOND_DELTA"))
+            .await
+            .expect_err("incremental after a terminal failure should fail");
+        assert!(
+            matches!(error, CompletionError::ProviderError(_)),
+            "expected ProviderError, got {error:?}"
+        );
+
+        server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn chatgpt_ws_send_incremental_rejected_while_in_flight() {
+        use futures::{SinkExt, StreamExt};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::accept_async;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            let _ = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+            socket
+                .send(Message::text(completed_response_event("resp_1")))
+                .await
+                .expect("completed event should send");
+        });
+
+        let base_url = format!("http://{address}/backend-api/codex");
+        let mut session = access_token_model(&base_url)
+            .websocket()
+            .connect()
+            .await
+            .expect("session should connect");
+
+        session
+            .send(user_turn("ROOT"))
+            .await
+            .expect("root turn should send");
+
+        // A response is now in flight; an incremental must be rejected.
+        let error = session
+            .send_incremental(delta_turn("DELTA"))
+            .await
+            .expect_err("incremental while a turn is in flight should fail");
+        assert!(
+            matches!(error, CompletionError::ProviderError(_)),
+            "expected ProviderError, got {error:?}"
+        );
+
+        // Drain the in-flight turn so the session and server settle cleanly.
+        loop {
+            let event = session.next_event().await.expect("event should arrive");
+            if event.is_terminal() {
+                break;
+            }
+        }
         server.await.expect("server task should finish");
     }
 }
