@@ -162,7 +162,9 @@ impl Client<reqwest::Client> {
         model: impl Into<String>,
     ) -> super::responses_api::websocket::ResponsesWebSocketSessionBuilder {
         super::responses_api::websocket::ResponsesWebSocketSessionBuilder::new(
-            self.completion_model(model),
+            super::responses_api::websocket::OpenAIResponsesWebSocketBackend::new(
+                self.completion_model(model),
+            ),
         )
     }
 

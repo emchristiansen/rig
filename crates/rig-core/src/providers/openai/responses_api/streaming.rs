@@ -1492,10 +1492,9 @@ mod tests {
 
         #[test]
         fn completion_response_top_p_float_succeeds_via_value() {
-            let parsed = crate::json_utils::from_str::<CompletionResponse>(
-                COMPLETION_RESPONSE_WITH_TOP_P,
-            )
-            .expect("from_str should sidestep #1157");
+            let parsed =
+                crate::json_utils::from_str::<CompletionResponse>(COMPLETION_RESPONSE_WITH_TOP_P)
+                    .expect("from_str should sidestep #1157");
             assert_eq!(parsed.additional_parameters.top_p, Some(0.95));
         }
 

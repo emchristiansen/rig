@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, connect_async,
+    Connector, MaybeTlsStream, WebSocketStream, connect_async, connect_async_tls_with_config,
     tungstenite::{self, Message, client::IntoClientRequest},
 };
 use tracing::Level;
@@ -26,6 +26,113 @@ use super::{CompletionResponse, ResponseError, ResponseStatus, ResponsesCompleti
 
 type OpenAIWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// An explicit TLS connector for the Responses WebSocket connection.
+///
+/// Wraps a [`tokio_tungstenite::Connector`] so callers can inject a custom TLS
+/// configuration (for example a pre-built [`rustls::ClientConfig`]) instead of
+/// relying on the default connector that `tokio-tungstenite` builds internally.
+/// This is the seam hosts use to supply their own crypto provider and trust
+/// roots without Rig having to construct a default `ClientConfig` on the connect
+/// path.
+#[derive(Clone)]
+pub struct WebSocketTlsConnector(Connector);
+
+impl WebSocketTlsConnector {
+    /// Builds a connector from an explicit rustls client configuration.
+    pub fn rustls(config: std::sync::Arc<rustls::ClientConfig>) -> Self {
+        Self(Connector::Rustls(config))
+    }
+
+    fn into_connector(self) -> Connector {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for WebSocketTlsConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("WebSocketTlsConnector").finish()
+    }
+}
+
+/// Provider seam for a Responses WebSocket session.
+///
+/// A backend describes how to reach a Responses-compatible provider and how to
+/// build its `response.create` payload: the connection target, the async
+/// handshake headers, and provider-specific request shaping. The
+/// [`ResponsesWebSocketSession`] itself owns the transport, event parsing, and
+/// turn state, so a backend stays small.
+///
+/// The trait is intentionally not object-safe — the session is generic over the
+/// backend (`ResponsesWebSocketSession<B>`) and dispatches statically — so the
+/// async method uses return-position `impl Future` rather than `async_trait`.
+pub trait ResponsesWebSocketBackend: WasmCompatSend + WasmCompatSync {
+    /// The HTTP(S) base URL the session converts into a `ws://`/`wss://` endpoint.
+    fn base_url(&self) -> &str;
+
+    /// Shapes a Rig completion request into the provider's Responses request.
+    fn shape_request(
+        &self,
+        request: completion::CompletionRequest,
+    ) -> Result<super::CompletionRequest, CompletionError>;
+
+    /// Builds the WebSocket handshake headers, awaiting any async auth work.
+    fn handshake_headers(
+        &self,
+    ) -> impl std::future::Future<Output = Result<http::HeaderMap, CompletionError>> + WasmCompatSend;
+
+    /// Whether the session auto-chains turns via `previous_response_id`.
+    ///
+    /// OpenAI's Responses WebSocket mode chains by default; replay-style backends
+    /// override this to keep each turn independent.
+    fn chains_previous_response_id(&self) -> bool {
+        true
+    }
+}
+
+/// The default [`ResponsesWebSocketBackend`] backing OpenAI's Responses WebSocket mode.
+///
+/// Wraps a [`ResponsesCompletionModel`] so the session reaches OpenAI through the
+/// model's configured client (base URL and static auth headers) and shapes
+/// requests with the model's Responses request conversion.
+pub struct OpenAIResponsesWebSocketBackend<H = reqwest::Client> {
+    model: ResponsesCompletionModel<H>,
+}
+
+impl<H> OpenAIResponsesWebSocketBackend<H> {
+    pub(crate) fn new(model: ResponsesCompletionModel<H>) -> Self {
+        Self { model }
+    }
+}
+
+impl<H> ResponsesWebSocketBackend for OpenAIResponsesWebSocketBackend<H>
+where
+    H: HttpClientExt
+        + Clone
+        + std::fmt::Debug
+        + Default
+        + WasmCompatSend
+        + WasmCompatSync
+        + 'static,
+{
+    fn base_url(&self) -> &str {
+        self.model.client.base_url()
+    }
+
+    fn shape_request(
+        &self,
+        request: completion::CompletionRequest,
+    ) -> Result<super::CompletionRequest, CompletionError> {
+        self.model.create_completion_request(request)
+    }
+
+    async fn handshake_headers(&self) -> Result<http::HeaderMap, CompletionError> {
+        // OpenAI's auth headers are static, so no async work is needed here; the
+        // async signature exists for backends (such as ChatGPT/Codex) that refresh
+        // credentials before each connect.
+        Ok(self.model.client.headers().clone())
+    }
+}
 
 /// Options for a `response.create` message sent over OpenAI WebSocket mode.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -191,19 +298,32 @@ impl ResponsesWebSocketEvent {
 ///
 /// The default builder applies a 30 second connection timeout and leaves the
 /// per-event timeout disabled.
-pub struct ResponsesWebSocketSessionBuilder<H = reqwest::Client> {
-    model: ResponsesCompletionModel<H>,
+pub struct ResponsesWebSocketSessionBuilder<B = OpenAIResponsesWebSocketBackend> {
+    backend: B,
     connect_timeout: Option<Duration>,
     event_timeout: Option<Duration>,
+    tls_connector: Option<WebSocketTlsConnector>,
 }
 
-impl<H> ResponsesWebSocketSessionBuilder<H> {
-    pub(crate) fn new(model: ResponsesCompletionModel<H>) -> Self {
+impl<B> ResponsesWebSocketSessionBuilder<B> {
+    pub(crate) fn new(backend: B) -> Self {
         Self {
-            model,
+            backend,
             connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
             event_timeout: None,
+            tls_connector: None,
         }
+    }
+
+    /// Sets an explicit TLS connector for establishing the websocket connection.
+    ///
+    /// When unset, the default `tokio-tungstenite` connector is used and Rig makes
+    /// a best-effort installation of a default rustls crypto provider before
+    /// connecting.
+    #[must_use]
+    pub fn tls_connector(mut self, connector: WebSocketTlsConnector) -> Self {
+        self.tls_connector = Some(connector);
+        self
     }
 
     /// Sets the timeout for establishing the websocket connection.
@@ -235,22 +355,17 @@ impl<H> ResponsesWebSocketSessionBuilder<H> {
     }
 }
 
-impl<H> ResponsesWebSocketSessionBuilder<H>
+impl<B> ResponsesWebSocketSessionBuilder<B>
 where
-    H: HttpClientExt
-        + Clone
-        + std::fmt::Debug
-        + Default
-        + WasmCompatSend
-        + WasmCompatSync
-        + 'static,
+    B: ResponsesWebSocketBackend,
 {
     /// Opens the websocket session using the configured builder options.
-    pub async fn connect(self) -> Result<ResponsesWebSocketSession<H>, CompletionError> {
+    pub async fn connect(self) -> Result<ResponsesWebSocketSession<B>, CompletionError> {
         ResponsesWebSocketSession::connect_with_timeouts(
-            self.model,
+            self.backend,
             self.connect_timeout,
             self.event_timeout,
+            self.tls_connector,
         )
         .await
     }
@@ -264,10 +379,16 @@ where
 ///
 /// Call [`ResponsesWebSocketSession::close`] when you are finished with the
 /// session so the websocket can complete a close handshake cleanly.
-pub struct ResponsesWebSocketSession<H = reqwest::Client> {
-    model: ResponsesCompletionModel<H>,
+pub struct ResponsesWebSocketSession<B = OpenAIResponsesWebSocketBackend> {
+    backend: B,
     previous_response_id: Option<String>,
     pending_done_response_id: Option<String>,
+    /// The non-input request envelope/config captured from the last successful
+    /// full-replay turn, reused by forward-only incremental continuations.
+    last_envelope: Option<super::CompletionRequest>,
+    /// The envelope of the turn currently in flight, promoted to `last_envelope`
+    /// when that turn completes successfully and dropped if it does not.
+    pending_envelope: Option<super::CompletionRequest>,
     socket: OpenAIWebSocket,
     in_flight: bool,
     event_timeout: Option<Duration>,
@@ -275,29 +396,27 @@ pub struct ResponsesWebSocketSession<H = reqwest::Client> {
     failed: bool,
 }
 
-impl<H> ResponsesWebSocketSession<H>
+impl<B> ResponsesWebSocketSession<B>
 where
-    H: HttpClientExt
-        + Clone
-        + std::fmt::Debug
-        + Default
-        + WasmCompatSend
-        + WasmCompatSync
-        + 'static,
+    B: ResponsesWebSocketBackend,
 {
     async fn connect_with_timeouts(
-        model: ResponsesCompletionModel<H>,
+        backend: B,
         connect_timeout: Option<Duration>,
         event_timeout: Option<Duration>,
+        tls_connector: Option<WebSocketTlsConnector>,
     ) -> Result<Self, CompletionError> {
-        let url = websocket_url(model.client.base_url())?;
-        let request = websocket_request(&url, model.client.headers())?;
-        let socket = connect_websocket(request, connect_timeout).await?;
+        let url = websocket_url(backend.base_url())?;
+        let headers = backend.handshake_headers().await?;
+        let request = websocket_request(&url, &headers)?;
+        let socket = connect_websocket(request, connect_timeout, tls_connector).await?;
 
         Ok(Self {
-            model,
+            backend,
             previous_response_id: None,
             pending_done_response_id: None,
+            last_envelope: None,
+            pending_envelope: None,
             socket,
             in_flight: false,
             event_timeout,
@@ -343,9 +462,10 @@ where
             ));
         }
 
+        let request = self.prepare_request(completion_request)?;
         let payload = ResponsesWebSocketClientEvent {
             kind: ResponsesWebSocketClientEventKind::ResponseCreate,
-            request: self.prepare_request(completion_request)?,
+            request: request.clone(),
             generate: options.generate,
         };
 
@@ -362,6 +482,72 @@ where
         if let Err(error) = self.socket.send(Message::text(payload)).await {
             return Err(self.fail_session(websocket_provider_error(error)));
         }
+        // Capture this turn's non-input envelope/config so a later incremental
+        // continuation can reuse it; it is promoted to `last_envelope` only once
+        // the turn completes successfully.
+        self.pending_envelope = Some(request);
+        self.in_flight = true;
+
+        Ok(())
+    }
+
+    /// Sends a forward-only incremental continuation of the current live tip.
+    ///
+    /// Rebuilds the `response.create` frame from the envelope captured by the last
+    /// successful full-replay turn, replacing `input` with exactly `delta` and
+    /// injecting the current `previous_response_id` regardless of whether the
+    /// backend auto-chains. It establishes nothing on its own: it requires both a
+    /// captured envelope and a live tip, and never falls back to full replay.
+    pub(crate) async fn send_incremental_frame(
+        &mut self,
+        delta: crate::OneOrMany<super::InputItem>,
+    ) -> Result<(), CompletionError> {
+        self.ensure_open()?;
+
+        if self.in_flight {
+            return Err(CompletionError::ProviderError(
+                "An OpenAI websocket response is already in flight on this session".to_string(),
+            ));
+        }
+
+        let previous_response_id = self.previous_response_id.clone().ok_or_else(|| {
+            CompletionError::ProviderError(
+                "Cannot send an incremental turn before a completed send() established a live tip"
+                    .to_string(),
+            )
+        })?;
+        let mut request = self.last_envelope.clone().ok_or_else(|| {
+            CompletionError::ProviderError(
+                "Cannot send an incremental turn before a completed send() captured a request envelope"
+                    .to_string(),
+            )
+        })?;
+
+        request.input = delta;
+        request.additional_parameters.previous_response_id = Some(previous_response_id);
+
+        let payload = ResponsesWebSocketClientEvent {
+            kind: ResponsesWebSocketClientEventKind::ResponseCreate,
+            request,
+            generate: None,
+        };
+
+        if tracing::enabled!(Level::TRACE) {
+            tracing::trace!(
+                target: "rig::completions",
+                "OpenAI websocket incremental request: {}",
+                serde_json::to_string_pretty(&payload)?
+            );
+        }
+
+        let payload = serde_json::to_string(&payload)?;
+
+        if let Err(error) = self.socket.send(Message::text(payload)).await {
+            return Err(self.fail_session(websocket_provider_error(error)));
+        }
+        // The incremental turn reuses the captured envelope, so `last_envelope`
+        // must persist across the continuation; leave `pending_envelope` unset so
+        // completion does not overwrite it.
         self.in_flight = true;
 
         Ok(())
@@ -463,14 +649,16 @@ where
         &self,
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<super::CompletionRequest, CompletionError> {
-        let mut request = self.model.create_completion_request(completion_request)?;
+        let mut request = self.backend.shape_request(completion_request)?;
 
         // WebSocket mode is always event-driven, so these HTTP/SSE-specific flags
         // are ignored by the provider and only add noise to the payload.
         request.stream = None;
         request.additional_parameters.background = None;
 
-        if request.additional_parameters.previous_response_id.is_none() {
+        if self.backend.chains_previous_response_id()
+            && request.additional_parameters.previous_response_id.is_none()
+        {
             request.additional_parameters.previous_response_id = self.previous_response_id.clone();
         }
 
@@ -521,11 +709,15 @@ where
                     let response_id = chunk.response.id.clone();
                     self.previous_response_id = Some(response_id.clone());
                     self.pending_done_response_id = Some(response_id);
+                    if let Some(envelope) = self.pending_envelope.take() {
+                        self.last_envelope = Some(envelope);
+                    }
                     self.in_flight = false;
                 }
                 ResponseChunkKind::ResponseFailed | ResponseChunkKind::ResponseIncomplete => {
                     self.pending_done_response_id = Some(chunk.response.id.clone());
                     self.previous_response_id = None;
+                    self.pending_envelope = None;
                     self.in_flight = false;
                 }
                 ResponseChunkKind::ResponseCreated | ResponseChunkKind::ResponseInProgress => {}
@@ -536,11 +728,15 @@ where
                         if let Some(response_id) = done.response_id() {
                             self.previous_response_id = Some(response_id.to_string());
                         }
+                        if let Some(envelope) = self.pending_envelope.take() {
+                            self.last_envelope = Some(envelope);
+                        }
                     }
                     Some(ResponseStatus::Failed)
                     | Some(ResponseStatus::Incomplete)
                     | Some(ResponseStatus::Cancelled) => {
                         self.previous_response_id = None;
+                        self.pending_envelope = None;
                     }
                     Some(ResponseStatus::InProgress | ResponseStatus::Queued) | None => {}
                 }
@@ -550,6 +746,7 @@ where
             ResponsesWebSocketEvent::Error(_) => {
                 self.previous_response_id = None;
                 self.pending_done_response_id = None;
+                self.pending_envelope = None;
                 self.in_flight = false;
             }
             ResponsesWebSocketEvent::Item(_) => {}
@@ -559,6 +756,7 @@ where
     fn abort_turn(&mut self) {
         self.previous_response_id = None;
         self.pending_done_response_id = None;
+        self.pending_envelope = None;
         self.in_flight = false;
     }
 
@@ -602,7 +800,7 @@ where
     }
 }
 
-impl<H> Drop for ResponsesWebSocketSession<H> {
+impl<B> Drop for ResponsesWebSocketSession<B> {
     fn drop(&mut self) {
         if !self.closed {
             tracing::warn!(
@@ -774,19 +972,57 @@ fn websocket_request(
 async fn connect_websocket(
     request: http::Request<()>,
     connect_timeout: Option<Duration>,
+    tls_connector: Option<WebSocketTlsConnector>,
 ) -> Result<OpenAIWebSocket, CompletionError> {
+    let connect = async move {
+        match tls_connector {
+            Some(connector) => {
+                connect_async_tls_with_config(
+                    request,
+                    None,
+                    false,
+                    Some(connector.into_connector()),
+                )
+                .await
+            }
+            None => {
+                ensure_default_crypto_provider();
+                connect_async(request).await
+            }
+        }
+    };
+
     if let Some(timeout_duration) = connect_timeout {
-        match tokio::time::timeout(timeout_duration, connect_async(request)).await {
+        match tokio::time::timeout(timeout_duration, connect).await {
             Ok(result) => result
                 .map(|(socket, _)| socket)
                 .map_err(websocket_provider_error),
             Err(_) => Err(connect_timeout_error(timeout_duration)),
         }
     } else {
-        connect_async(request)
+        connect
             .await
             .map(|(socket, _)| socket)
             .map_err(websocket_provider_error)
+    }
+}
+
+/// Best-effort installation of a process-wide default rustls crypto provider.
+///
+/// On the no-connector path, `tokio-tungstenite` builds an implicit default
+/// `rustls::ClientConfig`. When more than one crypto provider is linked into the
+/// final binary, constructing that config panics unless a process-wide default
+/// provider has been installed. This installs one idempotently and treats an
+/// already-installed provider as success — the common case for hosts (such as
+/// Muninn) that install their own provider at startup before Rig runs.
+fn ensure_default_crypto_provider() {
+    use rustls::crypto::{CryptoProvider, aws_lc_rs};
+
+    if CryptoProvider::get_default().is_none() {
+        // `install_default` returns `Err` only if another thread installed a
+        // provider between the check above and this call. That still satisfies
+        // our requirement (a default is now present), so both outcomes are success.
+        let _ = aws_lc_rs::default_provider().install_default();
     }
 }
 
@@ -849,6 +1085,7 @@ mod tests {
             output: Vec::new(),
             tools: Vec::new(),
             additional_parameters: Default::default(),
+            provider_reasoning: None,
         }
     }
 
@@ -2000,5 +2237,76 @@ mod tests {
         assert_eq!(response.id, "resp_after_unknown");
 
         server.await.expect("server task should finish");
+    }
+
+    fn empty_client_config() -> rustls::ClientConfig {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .expect("default protocol versions should build")
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth()
+    }
+
+    #[test]
+    fn ensure_default_crypto_provider_is_idempotent() {
+        // The no-connector connect path calls this before building tokio-tungstenite's
+        // implicit default config; calling it repeatedly must remain panic-free and
+        // always leave a process-wide default provider installed.
+        super::ensure_default_crypto_provider();
+        super::ensure_default_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+
+    #[test]
+    fn rustls_connector_maps_to_rustls_variant() {
+        let connector =
+            super::WebSocketTlsConnector::rustls(std::sync::Arc::new(empty_client_config()));
+
+        // `Clone` and `Debug` are part of the connector's public contract.
+        let cloned = connector.clone();
+        assert_eq!(format!("{cloned:?}"), "WebSocketTlsConnector");
+
+        // The injected config must surface as the rustls connector variant, not the
+        // default connector that tokio-tungstenite would otherwise build.
+        assert!(matches!(
+            connector.into_connector(),
+            super::Connector::Rustls(_)
+        ));
+    }
+
+    #[test]
+    fn openai_backend_defaults_to_chaining() {
+        use super::{OpenAIResponsesWebSocketBackend, ResponsesWebSocketBackend};
+
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url("https://api.openai.com/v1")
+            .build()
+            .expect("client should build");
+
+        let backend = OpenAIResponsesWebSocketBackend::new(client.completion_model("gpt-4o"));
+
+        // OpenAI must keep auto-chaining turns via `previous_response_id`.
+        assert!(backend.chains_previous_response_id());
+        assert!(backend.base_url().contains("api.openai.com"));
+    }
+
+    #[test]
+    fn builder_records_injected_tls_connector() {
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .build()
+            .expect("client should build");
+
+        let default_builder = client.responses_websocket_builder("gpt-4o");
+        assert!(default_builder.tls_connector.is_none());
+
+        let connector =
+            super::WebSocketTlsConnector::rustls(std::sync::Arc::new(empty_client_config()));
+        let configured_builder = client
+            .responses_websocket_builder("gpt-4o")
+            .tls_connector(connector);
+        assert!(configured_builder.tls_connector.is_some());
     }
 }
