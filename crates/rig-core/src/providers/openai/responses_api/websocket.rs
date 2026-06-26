@@ -10,7 +10,7 @@ use crate::providers::openai::responses_api::streaming::{
     ItemChunk, ResponseChunk, ResponseChunkKind, StreamingCompletionChunk,
 };
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::time::Duration;
@@ -601,6 +601,85 @@ where
             self.update_state_for_event(&event);
             return Ok(event);
         }
+    }
+
+    /// Services the live websocket between turns without consuming a response.
+    ///
+    /// OpenAI's Responses websocket sends server keepalive pings while a session
+    /// is idle. Between turns nothing polls the socket, so those pings go
+    /// unanswered and the provider eventually closes the connection with a
+    /// keepalive ping timeout. This drains every frame that is already buffered
+    /// — letting `tokio-tungstenite` enqueue its automatic pong replies — and
+    /// then flushes the sink so those pongs reach the wire.
+    ///
+    /// It never reads a turn's response: it is a no-op while a turn is in flight
+    /// (and after the session has closed or failed), it never sends
+    /// `response.create`, and it never advances `previous_response_id`, so it can
+    /// neither root nor advance the live tip. The only server event it consumes
+    /// is the trailing `response.done` for the turn that just completed (the same
+    /// event [`next_event`](Self::next_event) filters); any other server event
+    /// arriving while idle is a protocol violation, so it fails the session
+    /// loudly rather than silently discarding a semantic frame.
+    pub async fn keepalive(&mut self) -> Result<(), CompletionError> {
+        if self.closed || self.failed || self.in_flight {
+            return Ok(());
+        }
+
+        // Drain only frames that are already buffered so an idle socket with
+        // nothing to read returns immediately instead of blocking; reading a
+        // server ping lets `tokio-tungstenite` enqueue its automatic pong.
+        loop {
+            let Some(message) = self.socket.next().now_or_never() else {
+                break;
+            };
+
+            let Some(message) = message else {
+                self.mark_closed();
+                return Err(CompletionError::ProviderError(
+                    "The OpenAI websocket connection closed during idle keepalive".to_string(),
+                ));
+            };
+
+            let message = match message {
+                Ok(message) => message,
+                Err(error) => return Err(self.fail_session(websocket_provider_error(error))),
+            };
+
+            match websocket_message_to_text(message) {
+                // Ping/pong/control frames carry no turn data; keep draining.
+                Ok(None) => continue,
+                Ok(Some(payload)) => {
+                    let event = match parse_server_event(&payload) {
+                        Ok(Some(event)) => event,
+                        Ok(None) => continue,
+                        Err(error) => return Err(self.fail_session(error)),
+                    };
+                    // The trailing `response.done` for the just-finished turn is
+                    // the only server event expected between turns; consume it
+                    // exactly as `next_event` does and keep the tip untouched.
+                    if let ResponsesWebSocketEvent::Done(done) = &event {
+                        if self.pending_done_response_id.as_deref() == done.response_id() {
+                            self.pending_done_response_id = None;
+                            continue;
+                        }
+                    }
+                    // Any other server event is real turn data with no turn in
+                    // flight. Fail loudly rather than discard a semantic frame.
+                    return Err(self.fail_session(CompletionError::ProviderError(
+                        "The OpenAI websocket delivered an unexpected server event during idle keepalive"
+                            .to_string(),
+                    )));
+                }
+                Err(error) => return Err(self.fail_session(error)),
+            }
+        }
+
+        // Flush so any pong enqueued above reaches the server.
+        if let Err(error) = self.socket.flush().await {
+            return Err(self.fail_session(websocket_provider_error(error)));
+        }
+
+        Ok(())
     }
 
     /// Sends a warmup turn (`generate: false`) and returns the resulting response ID.
@@ -2308,5 +2387,385 @@ mod tests {
             .responses_websocket_builder("gpt-4o")
             .tls_connector(connector);
         assert!(configured_builder.tls_connector.is_some());
+    }
+
+    #[tokio::test]
+    async fn keepalive_flushes_pong_for_server_ping() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            socket
+                .send(Message::Ping(Vec::new().into()))
+                .await
+                .expect("server ping should send");
+
+            let message = socket
+                .next()
+                .await
+                .expect("pong should arrive")
+                .expect("pong should be valid");
+            assert!(
+                matches!(message, Message::Pong(_)),
+                "expected pong, got {message:?}"
+            );
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        // Let the server's ping reach the socket buffer before servicing it.
+        sleep(Duration::from_millis(100)).await;
+        session
+            .keepalive()
+            .await
+            .expect("keepalive should service the server ping");
+        // Servicing a ping must not invent or advance a live tip.
+        assert_eq!(session.previous_response_id(), None);
+
+        server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn keepalive_consumes_trailing_done_and_preserves_tip() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            let first_request = socket
+                .next()
+                .await
+                .expect("first request should exist")
+                .expect("first request should be valid");
+            let payload = first_request
+                .into_text()
+                .expect("first request should be text");
+            assert!(
+                payload.contains("\"type\":\"response.create\""),
+                "expected response.create payload, got {payload}"
+            );
+
+            let response = serde_json::to_value(CompletionResponse {
+                id: "resp_1".to_string(),
+                ..sample_response(ResponseStatus::Completed)
+            })
+            .expect("response should serialize");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.completed",
+                        "sequence_number": 1,
+                        "response": response,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("completed event should send");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.done",
+                        "response": { "id": "resp_1", "status": "completed" },
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("done event should send");
+
+            let second_request = socket
+                .next()
+                .await
+                .expect("second request should exist")
+                .expect("second request should be valid");
+            let payload = second_request
+                .into_text()
+                .expect("second request should be text");
+            assert!(
+                payload.contains("\"type\":\"response.create\""),
+                "expected response.create payload, got {payload}"
+            );
+            assert!(
+                payload.contains("\"previous_response_id\":\"resp_1\""),
+                "expected chained previous_response_id after keepalive, got {payload}"
+            );
+
+            let response = serde_json::to_value(CompletionResponse {
+                id: "resp_2".to_string(),
+                ..sample_response(ResponseStatus::Completed)
+            })
+            .expect("response should serialize");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.completed",
+                        "sequence_number": 2,
+                        "response": response,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("completed event should send");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.done",
+                        "response": { "id": "resp_2", "status": "completed" },
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("done event should send");
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-4o");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        session
+            .send(model.completion_request("first").build())
+            .await
+            .expect("first request should send");
+        let first = session
+            .wait_for_completed_response()
+            .await
+            .expect("first response should complete");
+        assert_eq!(first.id, "resp_1");
+        assert_eq!(session.previous_response_id(), Some("resp_1"));
+
+        // Let the trailing response.done reach the buffer, then service it.
+        sleep(Duration::from_millis(100)).await;
+        session
+            .keepalive()
+            .await
+            .expect("keepalive should consume the trailing done");
+        assert_eq!(session.previous_response_id(), Some("resp_1"));
+
+        session
+            .send(model.completion_request("second").build())
+            .await
+            .expect("second request should send");
+        let second = session
+            .wait_for_completed_response()
+            .await
+            .expect("second response should complete");
+        assert_eq!(second.id, "resp_2");
+        assert_eq!(session.previous_response_id(), Some("resp_2"));
+
+        server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn keepalive_fails_loud_on_unexpected_data_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            // A streaming delta with no turn in flight is a protocol violation.
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.output_text.delta",
+                        "content_index": 0,
+                        "delta": "stray",
+                        "item_id": "msg_stray",
+                        "logprobs": [],
+                        "output_index": 0,
+                        "sequence_number": 1
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("stray delta should send");
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-4o");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        // Let the stray frame reach the buffer before servicing the idle socket.
+        sleep(Duration::from_millis(100)).await;
+        let error = session
+            .keepalive()
+            .await
+            .expect_err("idle data frame should fail keepalive");
+        assert!(
+            error.to_string().contains("unexpected server event"),
+            "expected unexpected-server-event error, got {error}"
+        );
+
+        let closed = session
+            .send(model.completion_request("after failure").build())
+            .await
+            .expect_err("session should be unusable after a failed keepalive");
+        assert!(
+            closed.to_string().contains("session is closed"),
+            "expected closed-session error, got {closed}"
+        );
+
+        server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn keepalive_is_noop_while_in_flight() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            let request = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+            let payload = request.into_text().expect("request should be text");
+            assert!(
+                payload.contains("\"type\":\"response.create\""),
+                "expected response.create payload, got {payload}"
+            );
+
+            // Reply only after the client has had a chance to call keepalive,
+            // proving keepalive did not consume the in-flight response.
+            sleep(Duration::from_millis(50)).await;
+            let response = serde_json::to_value(CompletionResponse {
+                id: "resp_in_flight".to_string(),
+                ..sample_response(ResponseStatus::Completed)
+            })
+            .expect("response should serialize");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.completed",
+                        "sequence_number": 1,
+                        "response": response,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("completed event should send");
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-4o");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        session
+            .send(model.completion_request("hello").build())
+            .await
+            .expect("request should send");
+        session
+            .keepalive()
+            .await
+            .expect("keepalive should be a no-op while in flight");
+
+        let response = session
+            .wait_for_completed_response()
+            .await
+            .expect("in-flight response should still be readable after keepalive");
+        assert_eq!(response.id, "resp_in_flight");
+
+        server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn keepalive_is_noop_after_close() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            let message = socket
+                .next()
+                .await
+                .expect("close frame should arrive")
+                .expect("close frame should be valid");
+            assert!(
+                matches!(message, Message::Close(_)),
+                "expected close frame, got {message:?}"
+            );
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        session.close().await.expect("close should succeed");
+        session
+            .keepalive()
+            .await
+            .expect("keepalive should be a no-op after close");
+
+        server.await.expect("server task should finish");
     }
 }
