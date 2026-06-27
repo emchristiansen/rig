@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, enabled, info_span};
 use tracing_futures::Instrument as _;
 
-use super::{CompletionResponse, GenericResponsesCompletionModel, Output};
+use super::{
+    CompletionResponse, GenericResponsesCompletionModel, IncompleteDetailsReason, Output,
+    RESPONSES_TOLERATE_INCOMPLETE_KEY, ResponseStatus,
+};
 
 type StreamingRawChoice = RawStreamingChoice<StreamingCompletionResponse>;
 
@@ -38,6 +41,15 @@ pub enum StreamingCompletionChunk {
 pub struct StreamingCompletionResponse {
     /// Token usage
     pub usage: ResponsesUsage,
+    /// Terminal response status from the final `response.*` event
+    /// (`response.completed`/`response.failed`/`response.incomplete`), when one
+    /// was observed. Preserved so callers can distinguish a normal completion
+    /// from a truncated or failed one.
+    pub status: Option<ResponseStatus>,
+    /// The reason a terminal response was incomplete, mirrored from the final
+    /// response object's `incomplete_details` (e.g. `max_output_tokens`). `None`
+    /// for completed responses or when the provider omitted it.
+    pub incomplete_details: Option<IncompleteDetailsReason>,
 }
 
 pub(crate) fn reasoning_choices_from_done_item(
@@ -140,6 +152,13 @@ fn response_error_message(error: Option<&super::ResponseError>, fallback: &str) 
 pub(crate) enum ResponsesStreamOptions {
     Strict,
     StrictWithImmediateToolCalls,
+    /// Like [`Self::Strict`] for tool-call timing, but a terminal
+    /// `response.incomplete` (e.g. a `max_output_tokens` truncation) is recorded
+    /// and aggregated into the final response instead of erroring the stream.
+    /// `response.failed` still errors. Lets a caller opt into surfacing
+    /// truncation as a successful completion carrying `status`/
+    /// `incomplete_details` evidence rather than a provider error.
+    TolerateIncomplete,
 }
 
 impl ResponsesStreamOptions {
@@ -151,8 +170,23 @@ impl ResponsesStreamOptions {
         Self::StrictWithImmediateToolCalls
     }
 
-    const fn errors_on_terminal_response(self) -> bool {
-        true
+    pub(crate) const fn tolerate_incomplete() -> Self {
+        Self::TolerateIncomplete
+    }
+
+    const fn tolerates_incomplete(self) -> bool {
+        matches!(self, Self::TolerateIncomplete)
+    }
+
+    /// Whether a terminal `response.*` chunk of the given kind aborts the stream
+    /// with an error. `response.failed` always errors; `response.incomplete`
+    /// errors unless the caller opted into tolerating it.
+    const fn errors_on_terminal_chunk(self, kind: &ResponseChunkKind) -> bool {
+        match kind {
+            ResponseChunkKind::ResponseFailed => true,
+            ResponseChunkKind::ResponseIncomplete => !self.tolerates_incomplete(),
+            _ => false,
+        }
     }
 
     const fn emits_completed_tool_calls_immediately(self) -> bool {
@@ -255,6 +289,8 @@ pub(crate) fn parse_sse_completion_body(
 
 struct RawChoiceAccumulator {
     final_usage: ResponsesUsage,
+    final_status: Option<ResponseStatus>,
+    final_incomplete_details: Option<IncompleteDetailsReason>,
     tool_calls: Vec<StreamingRawChoice>,
     tool_call_internal_ids: std::collections::HashMap<String, String>,
 }
@@ -263,6 +299,8 @@ impl RawChoiceAccumulator {
     fn new(initial_usage: ResponsesUsage) -> Self {
         Self {
             final_usage: initial_usage,
+            final_status: None,
+            final_incomplete_details: None,
             tool_calls: Vec::new(),
             tool_call_internal_ids: std::collections::HashMap::new(),
         }
@@ -343,6 +381,13 @@ impl RawChoiceAccumulator {
         provider_name: &str,
         options: ResponsesStreamOptions,
     ) -> Result<(), CompletionError> {
+        // Record the terminal status and incomplete reason regardless of which
+        // arm handles the chunk. The non-erroring incomplete case (e.g. a
+        // truncation due to `max_output_tokens`) falls through to `_ => Ok(())`
+        // below, so capturing here is the only place these survive to `finish()`.
+        self.final_status = Some(response.status.clone());
+        self.final_incomplete_details = response.incomplete_details.clone();
+
         match kind {
             ResponseChunkKind::ResponseCompleted => {
                 if let Some(usage) = response.usage {
@@ -351,7 +396,7 @@ impl RawChoiceAccumulator {
                 Ok(())
             }
             ResponseChunkKind::ResponseFailed | ResponseChunkKind::ResponseIncomplete
-                if options.errors_on_terminal_response() =>
+                if options.errors_on_terminal_chunk(&kind) =>
             {
                 let error_message = response_chunk_error_message(&kind, &response, provider_name)
                     .unwrap_or_else(|| {
@@ -362,6 +407,9 @@ impl RawChoiceAccumulator {
                     });
                 Err(CompletionError::ProviderError(error_message))
             }
+            // A tolerated `response.incomplete` falls through here: its `status`
+            // and `incomplete_details` were captured above, so `finish()` will
+            // surface them on the final aggregated response.
             _ => Ok(()),
         }
     }
@@ -416,6 +464,8 @@ impl RawChoiceAccumulator {
         choices.push(RawStreamingChoice::FinalResponse(
             StreamingCompletionResponse {
                 usage: self.final_usage,
+                status: self.final_status,
+                incomplete_details: self.final_incomplete_details,
             },
         ));
         choices
@@ -875,6 +925,22 @@ where
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<streaming::StreamingCompletionResponse<StreamingCompletionResponse>, CompletionError>
     {
+        // Per-call opt-in (read before `create_completion_request` consumes the
+        // request) into tolerating a terminal `response.incomplete`. The control
+        // key is dropped from the wire body when the payload is deserialized into
+        // `AdditionalParameters`, so it never reaches the provider.
+        let tolerate_incomplete = completion_request
+            .additional_params
+            .as_ref()
+            .and_then(|params| params.get(RESPONSES_TOLERATE_INCOMPLETE_KEY))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let stream_options = if tolerate_incomplete {
+            ResponsesStreamOptions::tolerate_incomplete()
+        } else {
+            ResponsesStreamOptions::strict()
+        };
+
         let mut request = self.create_completion_request(completion_request)?;
         request.stream = Some(true);
 
@@ -917,7 +983,12 @@ where
         let client = self.client.clone();
         let event_source = GenericEventSource::new(client, req);
 
-        Ok(stream_from_event_source(event_source, span, "OpenAI"))
+        Ok(stream_from_event_source_with_options(
+            event_source,
+            span,
+            "OpenAI",
+            stream_options,
+        ))
     }
 }
 
@@ -1001,6 +1072,66 @@ mod tests {
         }
 
         panic!("stream should yield a final response");
+    }
+
+    /// Drives a single-event stream with the per-call tolerate-incomplete opt-in
+    /// set, returning the final aggregated Responses streaming response.
+    async fn final_response_tolerating_incomplete(
+        event: serde_json::Value,
+    ) -> super::StreamingCompletionResponse {
+        let client = openai::Client::builder()
+            .http_client(MockStreamingClient {
+                sse_bytes: sse_bytes_from_json_events(&[event]),
+            })
+            .api_key("test-key")
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-5.4");
+        let request = model
+            .completion_request("hello")
+            .additional_params(json!({
+                super::RESPONSES_TOLERATE_INCOMPLETE_KEY: true
+            }))
+            .build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        while let Some(item) = stream.next().await {
+            match item.expect("tolerated incomplete stream should not error") {
+                StreamedAssistantContent::Final(res) => return res,
+                _ => continue,
+            }
+        }
+
+        panic!("stream should yield a final response");
+    }
+
+    /// Drives a single-event stream with the tolerate-incomplete opt-in set,
+    /// expecting the stream to still surface a provider error (used to prove
+    /// `response.failed` is never tolerated).
+    async fn first_error_tolerating_incomplete(
+        event: serde_json::Value,
+    ) -> crate::completion::CompletionError {
+        let client = openai::Client::builder()
+            .http_client(MockStreamingClient {
+                sse_bytes: sse_bytes_from_json_events(&[event]),
+            })
+            .api_key("test-key")
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-5.4");
+        let request = model
+            .completion_request("hello")
+            .additional_params(json!({
+                super::RESPONSES_TOLERATE_INCOMPLETE_KEY: true
+            }))
+            .build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        stream
+            .next()
+            .await
+            .expect("stream should yield an item")
+            .expect_err("stream should surface a provider error")
     }
 
     #[test]
@@ -1297,6 +1428,85 @@ mod tests {
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[tokio::test]
+    async fn strict_response_incomplete_chunk_errors_without_opt_in() {
+        // Without the per-call opt-in, a terminal `response.incomplete` keeps the
+        // strict behavior: the stream errors rather than producing a final
+        // response. (Companion to the tolerant test below.)
+        let mut response = sample_response(ResponseStatus::Incomplete);
+        response.incomplete_details = Some(IncompleteDetailsReason {
+            reason: "max_output_tokens".to_string(),
+        });
+
+        let event = json!({
+            "type": "response.incomplete",
+            "sequence_number": 1,
+            "response": response,
+        });
+
+        let err = first_error_from_event(event).await;
+
+        assert_eq!(
+            err.to_string(),
+            "ProviderError: OpenAI response stream was incomplete: max_output_tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn tolerant_response_incomplete_chunk_reaches_final_with_status() {
+        // With the per-call opt-in, a terminal `response.incomplete` is recorded
+        // and aggregated into a final response carrying the `status` and
+        // `incomplete_details` evidence instead of erroring the stream.
+        let mut response = sample_response(ResponseStatus::Incomplete);
+        response.incomplete_details = Some(IncompleteDetailsReason {
+            reason: "max_output_tokens".to_string(),
+        });
+
+        let event = json!({
+            "type": "response.incomplete",
+            "sequence_number": 1,
+            "response": response,
+        });
+
+        let final_response = final_response_tolerating_incomplete(event).await;
+
+        assert!(matches!(
+            final_response.status,
+            Some(ResponseStatus::Incomplete)
+        ));
+        assert_eq!(
+            final_response
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str()),
+            Some("max_output_tokens")
+        );
+    }
+
+    #[tokio::test]
+    async fn tolerant_opt_in_does_not_tolerate_response_failed() {
+        // The opt-in only tolerates `response.incomplete`. A genuine
+        // `response.failed` still aborts the stream with a provider error.
+        let mut response = sample_response(ResponseStatus::Failed);
+        response.error = Some(ResponseError {
+            code: "server_error".to_string(),
+            message: "response stream failed".to_string(),
+        });
+
+        let event = json!({
+            "type": "response.failed",
+            "sequence_number": 1,
+            "response": response,
+        });
+
+        let err = first_error_tolerating_incomplete(event).await;
+
+        assert_eq!(
+            err.to_string(),
+            "ProviderError: server_error: response stream failed"
+        );
     }
 
     #[tokio::test]
