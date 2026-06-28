@@ -1093,6 +1093,15 @@ pub struct CompletionResponse {
     pub additional_parameters: AdditionalParameters,
 }
 
+/// Per-call control key carried inside the `additional_params` JSON object that
+/// opts a streaming Responses request into tolerating a terminal
+/// `response.incomplete` (aggregating it as a final response with
+/// `status`/`incomplete_details`) instead of erroring the stream. Read by the
+/// streaming `stream()` path and never forwarded to the provider wire body
+/// (unknown keys are dropped when the payload is deserialized into
+/// [`AdditionalParameters`]). `response.failed` still errors regardless.
+pub const RESPONSES_TOLERATE_INCOMPLETE_KEY: &str = "__rig_tolerate_incomplete";
+
 /// Additional parameters for the completion request type for OpenAI's Response API: <https://platform.openai.com/docs/api-reference/responses/create>
 /// Intended to be derived from [`crate::completion::request::CompletionRequest`].
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
