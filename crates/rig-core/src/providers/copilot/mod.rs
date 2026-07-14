@@ -37,6 +37,7 @@ use crate::providers::internal::openai_chat_completions_compatible::{
 use crate::providers::openai;
 use crate::providers::openai::responses_api::{self, CompletionRequest as ResponsesRequest};
 use crate::streaming::{self, RawStreamingChoice, StreamingCompletionResponse};
+use crate::telemetry::{CompletionOperation, CompletionSpanBuilder};
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use async_stream::stream;
 use futures::StreamExt;
@@ -47,7 +48,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
-use tracing::info_span;
 use tracing_futures::Instrument as _;
 
 const GITHUB_COPILOT_API_BASE_URL: &str = "https://api.githubcopilot.com";
@@ -155,6 +155,7 @@ pub struct CopilotBuilder {
     access_token_file: Option<PathBuf>,
     api_key_file: Option<PathBuf>,
     device_code_handler: auth::DeviceCodeHandler,
+    allow_device_flow: bool,
 }
 
 #[derive(Clone)]
@@ -181,6 +182,7 @@ impl Default for CopilotBuilder {
             access_token_file: token_dir.as_ref().map(|dir| dir.join("access-token")),
             api_key_file: token_dir.map(|dir| dir.join("api-key.json")),
             device_code_handler: auth::DeviceCodeHandler::default(),
+            allow_device_flow: true,
         }
     }
 }
@@ -235,6 +237,7 @@ impl ProviderBuilder for CopilotBuilder {
                 ext.access_token_file.clone(),
                 ext.api_key_file.clone(),
                 ext.device_code_handler.clone(),
+                ext.allow_device_flow,
             ),
         })
     }
@@ -291,6 +294,19 @@ impl<H> ClientBuilder<H> {
     {
         self.over_ext(|mut ext| {
             ext.device_code_handler = auth::DeviceCodeHandler::new(handler);
+            ext
+        })
+    }
+
+    /// Control whether OAuth may fall back to an interactive device-code login
+    /// when the cached token is missing or cannot refresh.
+    ///
+    /// Default is `true` for CLI-style interactive use. Services should set it
+    /// to `false` so unattended background work returns a clear auth error
+    /// instead of printing a device code and waiting.
+    pub fn allow_device_flow(self, allow: bool) -> Self {
+        self.over_ext(|mut ext| {
+            ext.allow_device_flow = allow;
             ext
         })
     }
@@ -382,7 +398,7 @@ fn default_headers(
         ("user-agent", USER_AGENT.to_string()),
         ("openai-intent", intent.as_header().to_string()),
         ("x-github-api-version", API_VERSION.to_string()),
-        ("x-request-id", nanoid::nanoid!()),
+        ("x-request-id", crate::id::generate()),
         (
             "x-vscode-user-agent-library-version",
             "electron-fetch".to_string(),
@@ -555,7 +571,7 @@ fn route_for_model(model: &str) -> CompletionRoute {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "api", rename_all = "snake_case")]
 pub enum CopilotCompletionResponse {
-    Chat(ChatCompletionResponse),
+    Chat(Box<ChatCompletionResponse>),
     Responses(Box<responses_api::CompletionResponse>),
 }
 
@@ -775,6 +791,8 @@ where
             request: completion_request,
             strict_tools: self.strict_tools,
             tool_result_array_content: self.tool_result_array_content,
+            supports_response_format: true,
+            supports_tools: true,
         })
     }
 
@@ -782,7 +800,21 @@ where
         &self,
         completion_request: completion::CompletionRequest,
     ) -> Result<ResponsesRequest, CompletionError> {
-        ResponsesRequest::try_from((self.model.clone(), completion_request))
+        let mut request = ResponsesRequest::try_from(responses_api::ResponsesRequestParams {
+            model: self.model.clone(),
+            request: completion_request,
+            system_instructions_placement:
+                responses_api::SystemInstructionsPlacement::InputSystemMessages,
+        })?;
+        // Copilot's Responses endpoint expects strict function tool schemas for
+        // reliable tool calls. Preserve that provider-specific behavior while
+        // keeping Chat Completions strict mode opt-in.
+        request.tools = request
+            .tools
+            .into_iter()
+            .map(responses_api::ResponsesToolDefinition::with_strict)
+            .collect();
+        Ok(request)
     }
 
     async fn completion_chat(
@@ -791,6 +823,7 @@ where
     ) -> Result<completion::CompletionResponse<CopilotCompletionResponse>, CompletionError> {
         let initiator = request_initiator(&completion_request);
         let has_vision = request_has_vision(&completion_request);
+        let system_instructions = completion_request.preamble.clone();
         let request = self.chat_request(completion_request)?;
         let body = serde_json::to_vec(&request)?;
         let auth = self.auth_context().await?;
@@ -803,27 +836,15 @@ where
         .body(body)
         .map_err(|err| CompletionError::HttpError(err.into()))?;
 
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat",
-                gen_ai.operation.name = "chat",
-                gen_ai.provider.name = "copilot",
-                gen_ai.request.model = self.model,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = tracing::field::Empty,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
+        let span = CompletionSpanBuilder::new("copilot", &request.model, CompletionOperation::Chat)
+            .system_instructions(system_instructions.as_deref())
+            .build();
 
         async move {
             let response = self.client.send(req).await?;
 
-            if response.status().is_success() {
+            let status = response.status();
+            if status.is_success() {
                 let body = http_client::text(response).await?;
                 match serde_json::from_str::<ChatApiResponse<ChatCompletionResponse>>(&body)? {
                     ChatApiResponse::Ok(response) => {
@@ -850,17 +871,21 @@ where
                         Ok(completion::CompletionResponse {
                             choice: core.choice,
                             usage: core.usage,
-                            raw_response: CopilotCompletionResponse::Chat(response),
+                            raw_response: CopilotCompletionResponse::Chat(Box::new(response)),
                             message_id: core.message_id,
                         })
                     }
-                    ChatApiResponse::Err(err) => Err(CompletionError::ProviderError(
-                        err.error_message().to_string(),
-                    )),
+                    ChatApiResponse::Err(err) => {
+                        tracing::warn!(
+                            message = %err.error_message(),
+                            "provider returned an error response"
+                        );
+                        Err(CompletionError::from_http_response(status, body))
+                    }
                 }
             } else {
                 let body = http_client::text(response).await?;
-                Err(CompletionError::ProviderError(body))
+                Err(CompletionError::from_http_response(status, body))
             }
         }
         .instrument(span)
@@ -873,6 +898,7 @@ where
     ) -> Result<completion::CompletionResponse<CopilotCompletionResponse>, CompletionError> {
         let initiator = request_initiator(&completion_request);
         let has_vision = request_has_vision(&completion_request);
+        let system_instructions = completion_request.preamble.clone();
         let request = self.responses_request(completion_request)?;
         let auth = self.auth_context().await?;
 
@@ -884,26 +910,14 @@ where
         .body(serde_json::to_vec(&request)?)
         .map_err(|err| CompletionError::HttpError(err.into()))?;
 
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat",
-                gen_ai.operation.name = "chat",
-                gen_ai.provider.name = "copilot",
-                gen_ai.request.model = self.model,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = tracing::field::Empty,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
+        let span = CompletionSpanBuilder::new("copilot", &request.model, CompletionOperation::Chat)
+            .system_instructions(system_instructions.as_deref())
+            .build();
 
         async move {
             let response = self.client.send(req).await?;
-            if response.status().is_success() {
+            let status = response.status();
+            if status.is_success() {
                 let body = http_client::text(response).await?;
                 let response = serde_json::from_str::<responses_api::CompletionResponse>(&body)?;
                 let core = completion::CompletionResponse::try_from(response.clone())?;
@@ -932,7 +946,7 @@ where
                 })
             } else {
                 let body = http_client::text(response).await?;
-                Err(CompletionError::ProviderError(body))
+                Err(CompletionError::from_http_response(status, body))
             }
         }
         .instrument(span)
@@ -945,6 +959,7 @@ where
     ) -> Result<StreamingCompletionResponse<CopilotStreamingResponse>, CompletionError> {
         let initiator = request_initiator(&completion_request);
         let has_vision = request_has_vision(&completion_request);
+        let system_instructions = completion_request.preamble.clone();
         let request = self.chat_request(completion_request)?;
         let auth = self.auth_context().await?;
         let headers = default_headers(&auth.api_key, initiator, has_vision, self.intent);
@@ -965,22 +980,13 @@ where
         .body(serde_json::to_vec(&request_json)?)
         .map_err(|err| CompletionError::HttpError(err.into()))?;
 
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat_streaming",
-                gen_ai.operation.name = "chat_streaming",
-                gen_ai.provider.name = "copilot",
-                gen_ai.request.model = self.model,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = tracing::field::Empty,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
+        let span = CompletionSpanBuilder::new(
+            "copilot",
+            &request.model,
+            CompletionOperation::ChatStreaming,
+        )
+        .system_instructions(system_instructions.as_deref())
+        .build();
 
         tracing::Instrument::instrument(
             send_copilot_chat_streaming_request(self.client.clone(), req),
@@ -995,6 +1001,7 @@ where
     ) -> Result<StreamingCompletionResponse<CopilotStreamingResponse>, CompletionError> {
         let initiator = request_initiator(&completion_request);
         let has_vision = request_has_vision(&completion_request);
+        let system_instructions = completion_request.preamble.clone();
         let mut request = self.responses_request(completion_request)?;
         request.stream = Some(true);
         let auth = self.auth_context().await?;
@@ -1007,22 +1014,13 @@ where
         .body(serde_json::to_vec(&request)?)
         .map_err(|err| CompletionError::HttpError(err.into()))?;
 
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat_streaming",
-                gen_ai.operation.name = "chat_streaming",
-                gen_ai.provider.name = "copilot",
-                gen_ai.request.model = self.model,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = tracing::field::Empty,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
+        let span = CompletionSpanBuilder::new(
+            "copilot",
+            &request.model,
+            CompletionOperation::ChatStreaming,
+        )
+        .system_instructions(system_instructions.as_deref())
+        .build();
 
         let client = self.client.clone();
         let mut event_source = crate::http_client::sse::GenericEventSource::new(client, req);
@@ -1030,6 +1028,8 @@ where
         let stream = tracing_futures::Instrument::instrument(
             stream! {
                 let mut final_usage = responses_api::ResponsesUsage::new();
+                let mut reasoning_metadata = None;
+                let mut reasoning_context = None;
                 let mut tool_calls: Vec<streaming::RawStreamingChoice<CopilotStreamingResponse>> = Vec::new();
                 let mut tool_call_internal_ids: HashMap<String, String> = HashMap::new();
                 let span = tracing::Span::current();
@@ -1056,7 +1056,7 @@ where
                                         if let StreamingItemDoneOutput { item: responses_api::Output::FunctionCall(func), .. } = message {
                                             let internal_call_id = tool_call_internal_ids
                                                 .entry(func.id.clone())
-                                                .or_insert_with(|| nanoid::nanoid!())
+                                                .or_insert_with(crate::id::generate)
                                                 .clone();
                                             yield Ok(RawStreamingChoice::ToolCallDelta {
                                                 id: func.id.clone(),
@@ -1069,7 +1069,7 @@ where
                                         StreamingItemDoneOutput { item: responses_api::Output::FunctionCall(func), .. } => {
                                             let internal_id = tool_call_internal_ids
                                                 .entry(func.id.clone())
-                                                .or_insert_with(|| nanoid::nanoid!())
+                                                .or_insert_with(crate::id::generate)
                                                 .clone();
                                             let raw_tool_call = streaming::RawStreamingToolCall::new(
                                                 func.id.clone(),
@@ -1080,10 +1080,11 @@ where
                                             .with_call_id(func.call_id.clone());
                                             tool_calls.push(RawStreamingChoice::ToolCall(raw_tool_call));
                                         }
-                                        StreamingItemDoneOutput { item: responses_api::Output::Reasoning { summary, id, encrypted_content, .. }, .. } => {
+                                        StreamingItemDoneOutput { item: responses_api::Output::Reasoning { summary, id, content, encrypted_content, .. }, .. } => {
                                             for reasoning_choice in responses_api::streaming::reasoning_choices_from_done_item(
                                                 id,
                                                 summary,
+                                                content,
                                                 encrypted_content.as_deref(),
                                             ) {
                                                 match reasoning_choice {
@@ -1100,7 +1101,10 @@ where
                                         StreamingItemDoneOutput { item: responses_api::Output::Message(msg), .. } => {
                                             yield Ok(RawStreamingChoice::MessageId(msg.id.clone()));
                                         }
-                                        StreamingItemDoneOutput { item: responses_api::Output::Unknown, .. } => {}
+                                        // Surface an unmodeled output item (e.g. a hosted-tool result) to the consumer verbatim.
+                                        StreamingItemDoneOutput { item: responses_api::Output::Unknown(value), .. } => {
+                                            yield Ok(RawStreamingChoice::Unknown(value.clone()));
+                                        }
                                     },
                                     ItemChunkKind::OutputTextDelta(delta) => {
                                         yield Ok(RawStreamingChoice::Message(delta.delta.clone()))
@@ -1115,7 +1119,7 @@ where
                                         if let Some(item_id) = chunk.item_id.as_ref() {
                                             let internal_call_id = tool_call_internal_ids
                                                 .entry(item_id.clone())
-                                                .or_insert_with(|| nanoid::nanoid!())
+                                                .or_insert_with(crate::id::generate)
                                                 .clone();
                                             yield Ok(RawStreamingChoice::ToolCallDelta {
                                                 id: item_id.clone(),
@@ -1137,16 +1141,34 @@ where
                                         if let Some(usage) = response.usage {
                                             final_usage = usage;
                                         }
+                                        if response.reasoning_metadata.is_some() {
+                                            reasoning_metadata = response.reasoning_metadata;
+                                        }
+                                        if response.reasoning_context.is_some() {
+                                            reasoning_context = response.reasoning_context;
+                                        }
                                     }
                                     responses_api::streaming::ResponseChunkKind::ResponseFailed
                                     | responses_api::streaming::ResponseChunkKind::ResponseIncomplete => {
-                                        let error = response
-                                            .error
-                                            .as_ref()
-                                            .map(|err| err.message.clone())
-                                            .unwrap_or_else(|| "Copilot response stream failed".into());
                                         terminated_with_error = true;
-                                        yield Err(CompletionError::ProviderError(error));
+                                        // Deliberate two-tier behaviour matching the OpenAI Responses
+                                        // SSE path: when the provider supplies an error object we
+                                        // preserve the raw event JSON via `completion_error_from_body`
+                                        // so the `provider_response_*` helpers surface the full payload
+                                        // (code + message). The error arrives over an established 2xx
+                                        // stream, so there is no HTTP status to attach (status: None).
+                                        // When the object is absent we emit a Rig-authored
+                                        // `ProviderError` diagnostic (provider_response_body() is None).
+                                        match response.error.as_ref() {
+                                            Some(_) => yield Err(
+                                                crate::provider_response::completion_error_from_body(
+                                                    evt.data.clone(),
+                                                ),
+                                            ),
+                                            None => yield Err(CompletionError::ProviderError(
+                                                "Copilot response stream failed".into(),
+                                            )),
+                                        }
                                         break;
                                     }
                                     _ => continue,
@@ -1158,7 +1180,7 @@ where
                         }
                         Err(error) => {
                             terminated_with_error = true;
-                            yield Err(CompletionError::ProviderError(error.to_string()));
+                            yield Err(CompletionError::from_stream_transport(error));
                             break;
                         }
                     }
@@ -1191,6 +1213,8 @@ where
                             usage: final_usage,
                             status: None,
                             incomplete_details: None,
+                            reasoning_metadata,
+                            reasoning_context,
                         }
                     )
                 ));
@@ -1334,7 +1358,8 @@ where
         .map_err(|err| EmbeddingError::HttpError(err.into()))?;
 
         let response = self.client.send(req).await?;
-        if response.status().is_success() {
+        let status = response.status();
+        if status.is_success() {
             let body: Vec<u8> = response.into_body().await?;
             #[derive(Deserialize)]
             struct NestedApiError {
@@ -1350,7 +1375,11 @@ where
                 Ok(parsed) => parsed,
                 Err(parse_error) => {
                     if let Ok(err) = serde_json::from_slice::<NestedApiError>(&body) {
-                        return Err(EmbeddingError::ProviderError(err.error.message));
+                        tracing::warn!(message = %err.error.message, "provider returned an error response");
+                        return Err(EmbeddingError::from_http_response(
+                            status,
+                            String::from_utf8_lossy(&body).into_owned(),
+                        ));
                     }
 
                     let preview = String::from_utf8_lossy(&body);
@@ -1381,7 +1410,7 @@ where
                 .collect())
         } else {
             let text = http_client::text(response).await?;
-            Err(EmbeddingError::ProviderError(text))
+            Err(EmbeddingError::from_http_response(status, text))
         }
     }
 }
@@ -2092,14 +2121,90 @@ mod tests {
             Ok(_) => panic!("stream should surface a provider error"),
             Err(err) => err,
         };
+        // The terminal `response.failed` event carries the provider's error
+        // payload, so the full raw event JSON is preserved for inspection
+        // (status: None — the error arrived over an already-established stream),
+        // matching the OpenAI Responses SSE path.
+        assert!(matches!(
+            err,
+            crate::completion::CompletionError::ProviderResponse(_)
+        ));
+        assert_eq!(err.provider_response_status(), None);
+        let json = err
+            .provider_response_json()
+            .expect("preserved body should parse as JSON")
+            .expect("preserved body should not be empty");
+        let response_error = json
+            .get("response")
+            .and_then(|response| response.get("error"))
+            .expect("preserved body should retain the provider error object");
         assert_eq!(
-            err.to_string(),
-            "ProviderError: Copilot response stream failed"
+            response_error.get("code").and_then(|value| value.as_str()),
+            Some("server_error")
+        );
+        assert_eq!(
+            response_error
+                .get("message")
+                .and_then(|value| value.as_str()),
+            Some("Copilot response stream failed")
         );
         assert!(
             stream.next().await.is_none(),
             "responses stream should terminate immediately after a terminal error"
         );
+    }
+
+    #[tokio::test]
+    async fn responses_stream_preserves_reasoning_metadata_on_final_response() {
+        let metadata = serde_json::json!({
+            "context": "all_turns",
+            "effort": "ultra",
+            "summary": null,
+            "future_control": true
+        });
+        let completed = serde_json::json!({
+            "type": "response.completed",
+            "sequence_number": 1,
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "created_at": 1700000000,
+                "status": "completed",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-5.3-codex",
+                "reasoning": metadata.clone(),
+                "usage": null,
+                "output": [],
+                "tools": []
+            }
+        });
+        let http_client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_json_events(&[completed]),
+        };
+        let client = Client::builder()
+            .api_key("copilot-token")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-5.3-codex");
+        let request = model.completion_request("hello").build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        while let Some(item) = stream.next().await {
+            if let StreamedAssistantContent::Final(super::CopilotStreamingResponse::Responses(
+                response,
+            )) = item.expect("completed stream should not error")
+            {
+                assert_eq!(response.reasoning_context.as_deref(), Some("all_turns"));
+                assert_eq!(response.reasoning_metadata.as_ref(), metadata.as_object());
+                return;
+            }
+        }
+
+        panic!("responses stream should yield a final response");
     }
 
     #[tokio::test]
@@ -2130,8 +2235,13 @@ mod tests {
                 Err(err) => {
                     assert_eq!(
                         err.to_string(),
-                        "ProviderError: Invalid status code: 502 Bad Gateway"
+                        "HttpError: Invalid status code: 502 Bad Gateway"
                     );
+                    assert_eq!(
+                        err.provider_response_status(),
+                        Some(http::StatusCode::BAD_GATEWAY)
+                    );
+                    assert_eq!(err.provider_response_body(), None);
                     saw_error = true;
                     break;
                 }

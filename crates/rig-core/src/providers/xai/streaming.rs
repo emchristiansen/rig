@@ -3,7 +3,8 @@
 //! This module reuses OpenAI's Responses API streaming types since xAI's API
 //! is designed to be compatible with OpenAI's format.
 
-use tracing::{Level, enabled, info_span};
+use crate::telemetry::{CompletionOperation, CompletionSpanBuilder};
+use tracing::{Level, enabled};
 use tracing_futures::Instrument;
 
 use crate::completion::{CompletionError, CompletionRequest};
@@ -50,23 +51,10 @@ where
             .body(body)
             .map_err(|e| CompletionError::HttpError(e.into()))?;
 
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat_streaming",
-                gen_ai.operation.name = "chat_streaming",
-                gen_ai.provider.name = "xai",
-                gen_ai.request.model = self.model,
-                gen_ai.system_instructions = preamble,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = tracing::field::Empty,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
+        let span =
+            CompletionSpanBuilder::new("xai", &request.model, CompletionOperation::ChatStreaming)
+                .system_instructions(preamble.as_deref())
+                .build();
 
         send_xai_streaming_request(self.client.clone(), req)
             .instrument(span)
@@ -88,7 +76,6 @@ where
     Ok(stream_from_event_source_with_options(
         event_source,
         span,
-        "xAI",
         ResponsesStreamOptions::strict_with_immediate_tool_calls(),
     ))
 }
@@ -112,7 +99,7 @@ mod tests {
                 text: "s2".to_string(),
             },
         ];
-        let choices = reasoning_choices_from_done_item("xr_1", &summary, Some("enc"));
+        let choices = reasoning_choices_from_done_item("xr_1", &summary, &[], Some("enc"));
 
         assert_eq!(choices.len(), 3);
         assert!(matches!(
@@ -213,10 +200,14 @@ mod tests {
             .await
             .expect("stream should yield terminal error")
             .expect_err("stream should surface a provider error");
-        assert_eq!(
-            err.to_string(),
-            "ProviderError: server_error: response stream failed"
-        );
+        assert!(matches!(
+            err,
+            crate::completion::CompletionError::ProviderResponse(_)
+        ));
+        assert_eq!(err.provider_response_status(), None);
+        assert!(err.provider_response_body().is_some_and(|body| {
+            body.contains("response.failed") && body.contains("response stream failed")
+        }));
         assert!(
             stream.next().await.is_none(),
             "stream should terminate immediately after the first terminal error"

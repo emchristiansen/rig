@@ -20,13 +20,19 @@ agents must follow while reading, editing, testing, and documenting code.
 - Root facade crate: `rig`
 - Core crate: `crates/rig-core`
 - Companion provider and vector-store crates: `crates/rig-*`
-- Root examples: `examples/`
+- Derive macros: `crates/rig-derive`
+- Workspace example packages: `examples/*`
 - Per-crate examples: `crates/<crate>/examples/`
-- Provider-backed tests: `tests/providers/` and provider-specific integration tests
+- Root integration test targets: `tests/*.rs`
+- Provider test modules: `tests/providers/<provider>/`
+- Provider cassette fixtures: `tests/cassettes/<provider>/`
+- External-service integration tests: `tests/integrations/`
 
 The root `rig` crate re-exports `rig-core` and exposes companion crates behind
-feature flags. Check `Cargo.toml` before documenting or changing exposed
-features, integrations, or module paths.
+feature flags. Check `Cargo.toml` and `src/lib.rs` before documenting or changing
+exposed features, integrations, or module paths. If adding or exposing a
+companion provider/vector-store crate, update the root dependency, feature,
+facade re-export, examples, README, and crate docs as applicable.
 
 ## Core Architecture
 
@@ -108,15 +114,25 @@ Provider implementations should include:
 - `Provider` implementation
 - `Capabilities` declaration
 - `ProviderBuilder` implementation
-- client type aliases
+- `ProviderClient::{from_env, from_val}`
+- public `Client` and `ClientBuilder` aliases; the `ClientBuilder` API-key generic must match `ProviderBuilder::ApiKey`
+- explicit API-key marker/auth types with redacted debug behavior for credential-bearing values
 - model constants where useful
 - request conversion from Rig request types
 - response conversion into Rig response types
 - streaming support when the provider supports streaming
-- telemetry spans following existing GenAI conventions
+- provider-response error preservation through the relevant Rig error helpers
+- `ProviderResponseExt` and telemetry spans following existing GenAI conventions
 - tests or examples appropriate to the provider
 
 Do not add request or response fields that do not exist in the provider's real API.
+
+For provider bug fixes or behavior changes, add or update regression coverage in
+one of these places, preferring the smallest reliable scope:
+
+- unit tests near the implementation in `crates/rig-core/src/providers/...`;
+- cassette-backed provider tests in `tests/providers/<provider>/cassette/`;
+- ignored live tests only when cassette replay is unsuitable.
 
 ## Vector Store Changes
 
@@ -134,19 +150,48 @@ Return `VectorStoreError` variants instead of ad hoc string errors.
 
 Use `WasmCompatSend` and `WasmCompatSync` bounds.
 
-## Prompt Hook Changes
+## Agent Hook Changes
 
-Prompt hooks are per-request lifecycle hooks.
+Agent hooks are per-run lifecycle observers and steerers: a single
+`AgentHook<M>::on_event(&HookContext, StepEvent) -> Flow` method, composed in
+registration order via `HookStack`. Every `on_event` receives a run-scoped
+`HookContext` (run id, turn, streaming flag, agent name, shared `Scratchpad`).
 
-When modifying hook behavior, preserve the intended control flow:
+How a `HookStack` combines several hooks' `Flow` results depends on the event —
+this is the central contract:
 
-- `HookAction::Continue`
-- `HookAction::Terminate`
-- `ToolCallHookAction::Continue`
-- `ToolCallHookAction::Skip`
-- `ToolCallHookAction::Terminate`
+- **`CompletionCall` — accumulate & merge.** Every hook runs; each hook's
+  `Flow::PatchRequest(RequestPatch)` is merged in registration order into one
+  effective patch (a mergeable patch does **not** short-circuit later hooks).
+  `Flow::Terminate` stops the stack; any unsupported flow fails closed.
+- **`ToolCall` / `ToolResult` — chain.** Every hook runs; a
+  `Flow::RewriteArgs` / `Flow::RewriteResult` is threaded into the next hook's
+  event so rewrites compose. `Flow::Skip` / `Flow::Terminate` are terminal.
+- **Every other event — first non-`Continue` wins** (observe-only / recovery
+  events: `CompletionResponse`, `ModelTurnFinished`, `InvalidToolCall`, the
+  streamed deltas).
 
-Check both streaming and non-streaming paths.
+Register observe-only hooks (telemetry) before steering hooks, since
+`Flow::Terminate` short-circuits the stack. A `HookStack` pushed as a hook into
+another stack composes correctly (it returns its own net flow).
+
+When modifying hook behavior, preserve the intended control flow. `Flow` is
+**fail-closed** — an action an event cannot honor terminates the run rather than
+silently proceeding:
+
+- `Flow::Continue` (observe only)
+- `Flow::Terminate`
+- `Flow::PatchRequest` (completion call only; per-turn, non-sticky, mergeable)
+- `Flow::RewriteArgs` (tool call only) / `Flow::RewriteResult` (tool result only)
+- `Flow::Skip` (tool call / invalid tool call only)
+- `Flow::Fail` / `Flow::Retry` / `Flow::Repair` (invalid tool call only)
+
+`RequestPatch` is per-turn and non-sticky (it never mutates the agent baseline);
+its per-field merge rules (append `extra_context`, shallow-merge
+`additional_params`, intersect `active_tools`, last-writer-wins scalars/`history`
+with a warning) are documented on the type. Every new hook semantic must behave
+identically on both surfaces — check streaming and non-streaming paths
+(`AgentRunner::stream` and `AgentRunner::run` share one drive loop, `drive_agent`).
 
 ## Style
 
@@ -155,9 +200,42 @@ Check both streaming and non-streaming paths.
 - Follow local naming, module layout, and test patterns.
 - Avoid unrelated refactors.
 
+## Cassette Regression Tests
+
+Provider regressions should usually include cassette-backed tests. Read
+`tests/README.md` before adding, updating, or running provider tests.
+
+- Test code lives under `tests/providers/<provider>/cassette/`.
+- Fixtures live under `tests/cassettes/<provider>/...`.
+- Replay cassettes by default; this should not require provider API keys.
+- Record mode requires the relevant provider API key and overwrites fixtures.
+- Keep record runs targeted to the provider and test being changed.
+
+Replay examples:
+
+```bash
+cargo test -p rig --all-features --test openai openai::cassette -- --nocapture --test-threads=1
+cargo test -p rig --all-features --test anthropic anthropic::cassette -- --nocapture --test-threads=1
+cargo test -p rig --all-features --test gemini gemini::cassette -- --nocapture --test-threads=1
+```
+
+Record example:
+
+```bash
+RIG_PROVIDER_TEST_MODE=record \
+  cargo test -p rig --all-features --test openai openai::cassette -- --nocapture --test-threads=1
+```
+
+Review cassette diffs carefully. They must not contain API keys, bearer tokens,
+cookies, provider account identifiers, or unrelated request/response churn. The
+repo includes cassette scrub/safety checks in `tests/common/cassette_safety.rs`,
+but agents are still responsible for inspecting generated fixtures before
+presenting changes.
+
 ## Verification
 
-Run the smallest useful checks first, then broaden as needed.
+Run the smallest useful checks first, then broaden as needed. For tests, prefer
+the targeted commands in `tests/README.md` before running broad workspace checks.
 
 Before considering code complete, run when feasible:
 

@@ -1,6 +1,6 @@
 //! Internal provider helpers shared across provider implementations.
 
-pub(crate) mod buffered;
+pub(crate) mod auth;
 pub(crate) mod openai_chat_completions_compatible;
 
 pub(crate) fn completion_usage(

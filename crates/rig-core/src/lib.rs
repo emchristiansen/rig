@@ -93,7 +93,6 @@
 //! - ChatGPT and GitHub Copilot auth-backed clients
 //! - Cohere
 //! - DeepSeek
-//! - Galadriel
 //! - Gemini
 //! - Groq
 //! - Hugging Face
@@ -150,12 +149,9 @@ pub mod audio_generation;
 pub mod client;
 pub mod completion;
 pub mod embeddings;
-
-#[cfg(feature = "experimental")]
-#[cfg_attr(docsrs, doc(cfg(feature = "experimental")))]
-pub mod evals;
 pub mod extractor;
 pub mod http_client;
+pub mod id;
 #[cfg(feature = "image")]
 #[cfg_attr(docsrs, doc(cfg(feature = "image")))]
 pub mod image_generation;
@@ -166,8 +162,8 @@ pub mod markers;
 pub mod memory;
 pub mod model;
 pub mod one_or_many;
-pub mod pipeline;
 pub mod prelude;
+pub(crate) mod provider_response;
 pub mod providers;
 pub mod rerank;
 
@@ -176,7 +172,6 @@ pub mod streaming;
 #[cfg_attr(docsrs, doc(cfg(feature = "test-utils")))]
 pub mod test_utils;
 pub mod tool;
-pub mod tools;
 pub mod transcription;
 pub mod vector_store;
 pub mod wasm_compat;
@@ -186,6 +181,7 @@ pub use completion::message;
 pub use embeddings::Embed;
 pub use extractor::ExtractionResponse;
 pub use one_or_many::{EmptyListError, OneOrMany};
+pub use provider_response::ProviderResponseError;
 pub use schemars;
 
 #[cfg(feature = "derive")]

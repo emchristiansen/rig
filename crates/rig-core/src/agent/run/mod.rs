@@ -53,7 +53,10 @@
 //! # }
 //! ```
 
+pub mod output_mode;
 pub mod streamed;
+
+pub use output_mode::OutputMode;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -61,11 +64,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     OneOrMany,
+    agent::hook::{InvalidToolCallContext, InvalidToolCallHookAction},
     agent::prompt_request::{
         CompletionCall, PromptResponse, TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER,
         assistant_text_from_choice, build_full_history, build_history_for_request,
-        hooks::{InvalidToolCallContext, InvalidToolCallHookAction},
-        invalid_tool_retry_user_message, is_empty_assistant_turn, tool_result_user_content,
+        invalid_tool_retry_user_message, is_empty_assistant_turn, tool_result_message,
     },
     completion::{Message, PromptError, Usage},
     json_utils,
@@ -76,6 +79,30 @@ pub use streamed::{
     PartialStreamedTurn, StreamedInvalidToolCall, StreamedResolution, StreamedTurn,
     StreamedTurnAssembler, StreamedTurnEvent,
 };
+
+/// Build the canonical "the model called a tool that isn't available" error.
+/// The identical shape is raised from every recovery-rejection path
+/// (`resolve_invalid_tool_call`, `resolve_streamed_invalid_tool_call`) and the
+/// streamed fail-fast in `streamed_turn`; this collapses the copied struct
+/// literal to one place while leaving each caller's control flow untouched.
+fn unknown_tool_call_error(
+    tool_name: String,
+    available_tools: Vec<String>,
+    allowed_tools: Vec<String>,
+    chat_history: Vec<Message>,
+) -> PromptError {
+    PromptError::UnknownToolCall {
+        tool_name,
+        available_tools,
+        allowed_tools,
+        chat_history: Box::new(chat_history),
+    }
+}
+
+/// Default number of times Tool output mode re-prompts the model for valid
+/// structured output before finalizing best-effort (see #1928). Mirrors
+/// pydantic-ai's default output-retry budget of 1.
+pub(crate) const DEFAULT_OUTPUT_RETRIES: usize = 1;
 
 /// What a driver must do next to advance an [`AgentRun`].
 ///
@@ -247,6 +274,22 @@ pub struct AgentRun {
     max_turns: usize,
     max_invalid_tool_call_retries: usize,
     tool_choice: Option<ToolChoice>,
+    /// Name of the synthetic output tool when the agent uses Tool output mode
+    /// (see #1928). A model turn calling this tool finalizes the run with the
+    /// call's arguments as the response, instead of executing it as a tool.
+    #[serde(default)]
+    output_tool_name: Option<String>,
+    /// JSON schema the Tool-mode output must satisfy, used to re-prompt on
+    /// missing required fields before finalizing best-effort (#1928).
+    #[serde(default)]
+    output_schema: Option<serde_json::Value>,
+    /// Budget for re-prompting the model in Tool output mode when it finalizes
+    /// without calling the output tool, or calls it with arguments missing
+    /// required fields. Exhausting it finalizes best-effort.
+    #[serde(default)]
+    max_output_retries: usize,
+    #[serde(default)]
+    output_retries: usize,
     chat_history: Option<Vec<Message>>,
     new_messages: Vec<Message>,
     current_turn: usize,
@@ -267,13 +310,17 @@ pub struct AgentRun {
 }
 
 impl AgentRun {
-    /// Create a run for one prompt with no input history, no multi-turn depth
-    /// and no invalid tool-call retries.
+    /// Create a run for one prompt with no input history, a one-model-call
+    /// budget, and no invalid tool-call retries.
     pub fn new(prompt: impl Into<Message>) -> Self {
         Self {
-            max_turns: 0,
+            max_turns: 1,
             max_invalid_tool_call_retries: 0,
             tool_choice: None,
+            output_tool_name: None,
+            output_schema: None,
+            max_output_retries: 0,
+            output_retries: 0,
             chat_history: None,
             new_messages: vec![prompt.into()],
             current_turn: 0,
@@ -293,15 +340,81 @@ impl AgentRun {
         self
     }
 
-    /// Set the maximum multi-turn depth. Exceeding it makes
-    /// [`AgentRun::next_step`] return [`PromptError::MaxTurnsError`].
+    /// Set the total model-call budget, including the initial call and every
+    /// retry or continuation. A budget of zero emits no model calls. Exceeding
+    /// the budget makes [`AgentRun::next_step`] return
+    /// [`PromptError::MaxTurnsError`].
     pub fn max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns;
         self
     }
 
+    /// Configure Tool output-mode validation (#1928): the JSON schema the
+    /// output-tool arguments should satisfy, and how many times to re-prompt the
+    /// model — when it finalizes without calling the output tool, or calls it
+    /// with arguments missing required fields — before finalizing best-effort.
+    pub fn with_output_validation(
+        mut self,
+        output_schema: Option<serde_json::Value>,
+        max_output_retries: usize,
+    ) -> Self {
+        self.output_schema = output_schema;
+        self.max_output_retries = max_output_retries;
+        self
+    }
+
+    /// Top-level `required` schema fields absent from the output-tool arguments.
+    /// A lightweight structural check (not full JSON Schema validation): empty
+    /// when there is no schema, no `required` array, or every required field is
+    /// present. Non-object arguments (e.g. `null`) count every required field as
+    /// missing.
+    fn missing_required_output_fields(&self, args: &serde_json::Value) -> Vec<String> {
+        let Some(required) = self
+            .output_schema
+            .as_ref()
+            .and_then(|schema| schema.get("required"))
+            .and_then(|required| required.as_array())
+        else {
+            return Vec::new();
+        };
+        let object = args.as_object();
+        required
+            .iter()
+            .filter_map(|field| field.as_str())
+            .filter(|field| object.is_none_or(|object| !object.contains_key(*field)))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Whether `text` already parses as a JSON object satisfying the output
+    /// schema's required fields — i.e. it is acceptable structured output even
+    /// though the model returned it as plain text instead of an output-tool call.
+    fn text_satisfies_output_schema(&self, text: &str) -> bool {
+        serde_json::from_str::<serde_json::Value>(text.trim())
+            .ok()
+            .is_some_and(|value| self.missing_required_output_fields(&value).is_empty())
+    }
+
+    /// Whether the run may re-prompt for valid Tool-mode output: both the
+    /// output-retry budget and the total model-call budget must remain.
+    /// Otherwise, finalize best-effort rather than surface a max-turns error.
+    fn can_reprompt_for_output(&self) -> bool {
+        self.output_retries < self.max_output_retries && self.current_turn < self.max_turns
+    }
+
+    /// Roll the run back to re-prompt for valid output (#1928). The caller must
+    /// have already appended the assistant turn and the corrective feedback
+    /// message to the history. Consumes one output-retry, then emits the retry
+    /// [`AgentRunStep::CallModel`].
+    fn reprompt_for_output(&mut self) -> Result<AgentRunStep, PromptError> {
+        self.output_retries += 1;
+        self.state = RunState::PreparingRequest;
+        self.next_step()
+    }
+
     /// Set the retry budget for [`InvalidToolCallHookAction::Retry`]
-    /// resolutions. Invalid tool-call retries also consume multi-turn depth.
+    /// resolutions. Invalid tool-call retries also consume the total model-call
+    /// budget.
     pub fn max_invalid_tool_call_retries(mut self, retries: usize) -> Self {
         self.max_invalid_tool_call_retries = retries;
         self
@@ -313,6 +426,33 @@ impl AgentRun {
     pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
         self.tool_choice = Some(tool_choice);
         self
+    }
+
+    /// Set the synthetic output-tool name for Tool output mode (see #1928).
+    /// When a model turn calls this tool, the run finalizes with the call's
+    /// arguments (serialized JSON) as the response.
+    pub fn with_output_tool_name(mut self, name: impl Into<String>) -> Self {
+        self.output_tool_name = Some(name.into());
+        self
+    }
+
+    /// Set (or clear) the output-tool name in place. The driver resolves the
+    /// name from the prepared request inside the run loop, where the agent's
+    /// tool set (and thus the resolved output mode) is known.
+    pub(crate) fn set_output_tool_name(&mut self, name: Option<String>) {
+        // The name is committed once and pinned for the whole run, so the
+        // request the driver builds each turn stays consistent with the
+        // intercept (and a tool set that shifts mid-run cannot flip the mode).
+        if self.output_tool_name.is_none() {
+            self.output_tool_name = name;
+        }
+    }
+
+    /// The synthetic output-tool name committed for this run, if any. The driver
+    /// passes this back when preparing later turns so Tool output mode stays
+    /// pinned even if the per-turn tool set changes (see #1928).
+    pub(crate) fn output_tool_name(&self) -> Option<&str> {
+        self.output_tool_name.as_deref()
     }
 
     /// Aggregated token usage across all completed model calls so far.
@@ -399,7 +539,7 @@ impl AgentRun {
     /// Advance the machine and return the next action for the driver.
     ///
     /// # Errors
-    /// - [`PromptError::MaxTurnsError`] when the multi-turn depth is exhausted.
+    /// - [`PromptError::MaxTurnsError`] when the total model-call budget is exhausted.
     /// - [`PromptError::PromptCancelled`] when the machine is driven out of
     ///   protocol (for example, calling this while a model response is
     ///   pending).
@@ -414,7 +554,7 @@ impl AgentRun {
                 };
                 let prompt = prompt_ref.clone();
 
-                if self.current_turn > self.max_turns + 1 {
+                if self.current_turn >= self.max_turns {
                     return Err(PromptError::MaxTurnsError {
                         max_turns: self.max_turns,
                         chat_history: self.full_history().into(),
@@ -449,6 +589,74 @@ impl AgentRun {
                     ));
                 };
 
+                // Tool output mode (#1928): a call to the synthetic output tool
+                // finalizes the run with the call's arguments as the response,
+                // instead of executing it as a tool. First match wins; any
+                // sibling tool calls in the same turn are dropped.
+                if has_tool_calls
+                    && let Some(output_tool_name) = self.output_tool_name.clone()
+                    && let Some(tool_call) = items.iter().find_map(|item| match item {
+                        AssistantContent::ToolCall(tc) if tc.function.name == output_tool_name => {
+                            Some(tc)
+                        }
+                        _ => None,
+                    })
+                {
+                    let args = tool_call.function.arguments.clone();
+                    let tool_call_id = tool_call.id.clone();
+                    let output = json_utils::value_to_json_string(&args);
+
+                    // Validate the output against the schema's required fields and
+                    // re-prompt while budget remains, so a model that omits fields
+                    // gets a chance to fix it before we finalize best-effort.
+                    let missing = self.missing_required_output_fields(&args);
+                    if !missing.is_empty() && self.can_reprompt_for_output() {
+                        self.new_messages.push(Message::Assistant {
+                            id: message_id,
+                            content: choice.clone(),
+                        });
+                        let feedback = format!(
+                            "The `{output_tool_name}` arguments were missing required field(s): \
+                             {}. Call `{output_tool_name}` again with every required field.",
+                            missing.join(", ")
+                        );
+                        if let Some(user_message) =
+                            invalid_tool_retry_user_message(&choice, &tool_call_id, feedback)
+                        {
+                            self.new_messages.push(user_message);
+                        }
+                        return self.reprompt_for_output();
+                    }
+
+                    // Finalize. The turn is persisted as the assistant's final
+                    // *text* (keeping any reasoning, dropping every tool call)
+                    // rather than the raw output-tool call. Otherwise the saved
+                    // history would carry an unanswered tool_use, which providers
+                    // reject when the conversation is replayed on a later turn.
+                    let mut final_items: Vec<AssistantContent> = items
+                        .iter()
+                        .filter(|item| !matches!(item, AssistantContent::ToolCall(_)))
+                        .cloned()
+                        .collect();
+                    final_items.push(AssistantContent::text(output.clone()));
+                    let final_content = OneOrMany::from_iter_optional(final_items);
+                    if let Some(content) = final_content.clone() {
+                        self.new_messages.push(Message::Assistant {
+                            id: message_id,
+                            content,
+                        });
+                    }
+
+                    let mut response = PromptResponse::new(output, self.usage)
+                        .with_messages(self.new_messages.clone())
+                        .with_completion_calls(self.completion_calls.clone());
+                    if let Some(content) = final_content {
+                        response = response.with_content(content);
+                    }
+                    self.state = RunState::Done(Box::new(response.clone()));
+                    return Ok(AgentRunStep::Done(response));
+                }
+
                 if !is_empty_assistant_turn(&choice) {
                     self.new_messages.push(Message::Assistant {
                         id: message_id,
@@ -457,6 +665,11 @@ impl AgentRun {
                 }
 
                 if has_tool_calls {
+                    // The model is making progress with real tools, so reset the
+                    // output-retry budget: it is per finalization attempt, not a
+                    // single per-run allowance an early stray turn could burn
+                    // before the model genuinely needs to produce output (#1928).
+                    self.output_retries = 0;
                     let calls: Vec<PendingToolCall> = items
                         .iter()
                         .filter_map(|item| match item {
@@ -480,10 +693,34 @@ impl AgentRun {
                     self.state = RunState::ExecutingTools(calls.clone());
                     Ok(AgentRunStep::CallTools { calls })
                 } else {
+                    // Tool output mode (#1928): the model produced a final text
+                    // answer without calling the output tool. Re-prompt while
+                    // budget remains so it returns structured output; the
+                    // assistant text was already appended above, so just add the
+                    // corrective feedback. Empty turns finalize best-effort.
+                    //
+                    // But if the text already *is* valid output (parses as JSON
+                    // with every required field), accept it rather than wasting a
+                    // turn — the model answered correctly, just via the wrong
+                    // channel.
+                    if let Some(output_tool_name) = self.output_tool_name.clone()
+                        && !is_empty_assistant_turn(&choice)
+                        && self.can_reprompt_for_output()
+                        && !self.text_satisfies_output_schema(&assistant_text_from_choice(&choice))
+                    {
+                        let feedback = format!(
+                            "Provide your final answer by calling the `{output_tool_name}` tool \
+                             with the structured result as its arguments, not as plain text."
+                        );
+                        self.new_messages.push(Message::user(feedback));
+                        return self.reprompt_for_output();
+                    }
+
                     let response =
                         PromptResponse::new(assistant_text_from_choice(&choice), self.usage)
                             .with_messages(self.new_messages.clone())
-                            .with_completion_calls(self.completion_calls.clone());
+                            .with_completion_calls(self.completion_calls.clone())
+                            .with_content(choice.clone());
                     self.state = RunState::Done(Box::new(response.clone()));
                     Ok(AgentRunStep::Done(response))
                 }
@@ -537,10 +774,7 @@ impl AgentRun {
             ));
         }
 
-        self.completion_calls
-            .push(CompletionCall::new(self.completion_call_index, turn.usage));
-        self.completion_call_index += 1;
-        self.usage += turn.usage;
+        self.record_completion_call(turn.usage);
 
         let items: Vec<AssistantContent> = turn.choice.iter().cloned().collect();
         let has_tool_calls = items
@@ -563,13 +797,49 @@ impl AgentRun {
         self.advance_resolution()
     }
 
+    /// Record one provider completion call: assign it the next call index,
+    /// push it, and aggregate its usage into the run total. The single home for
+    /// this accounting arithmetic, shared by the non-streamed and streamed
+    /// ingestion paths. Callers own the once-per-turn `streamed_completion_call_recorded`
+    /// guard/flag; this helper never touches it, so it cannot be mistaken for
+    /// "a completion call happened" and re-introduce a double count.
+    fn record_completion_call(&mut self, usage: Usage) -> CompletionCall {
+        let call = CompletionCall::new(self.completion_call_index, usage);
+        self.completion_call_index += 1;
+        self.completion_calls.push(call);
+        self.usage += usage;
+        call
+    }
+
+    /// Park an accepted model turn in [`RunState::AwaitingAdvance`]. Both the
+    /// non-streamed (`advance_resolution`) and streamed (`streamed_turn`)
+    /// ingestion paths converge here, differing only in the `skipped` map and
+    /// the streamed `internal_call_ids`.
+    fn finalize_turn(
+        &mut self,
+        message_id: Option<String>,
+        items: Vec<AssistantContent>,
+        has_tool_calls: bool,
+        skipped: BTreeMap<String, UserContent>,
+        internal_call_ids: Vec<(String, String)>,
+    ) {
+        self.state = RunState::AwaitingAdvance(Box::new(TurnState {
+            message_id,
+            items,
+            has_tool_calls,
+            skipped,
+            internal_call_ids,
+        }));
+    }
+
     /// Answer a pending [`ModelTurnOutcome::NeedsResolution`].
     ///
     /// Applies the agent loop's recovery semantics:
     /// - [`InvalidToolCallHookAction::Fail`] fails the run with
     ///   [`PromptError::UnknownToolCall`].
     /// - [`InvalidToolCallHookAction::Retry`] rolls the turn back with
-    ///   corrective feedback while budget remains, consuming multi-turn depth.
+    ///   corrective feedback while budget remains, consuming the total
+    ///   model-call budget.
     /// - [`InvalidToolCallHookAction::Repair`] renames the tool call; the
     ///   repaired name is revalidated against the allowed tools.
     /// - [`InvalidToolCallHookAction::Skip`] records a synthetic tool result
@@ -613,20 +883,20 @@ impl AgentRun {
             resolving.allowed_tool_names.iter().cloned().collect();
 
         match action {
-            InvalidToolCallHookAction::Fail => Err(PromptError::UnknownToolCall {
-                tool_name: tool_call.function.name,
-                available_tools: executable_tool_names,
-                allowed_tools: allowed_tool_names,
-                chat_history: Box::new(diagnostic_history),
-            }),
+            InvalidToolCallHookAction::Fail => Err(unknown_tool_call_error(
+                tool_call.function.name,
+                executable_tool_names,
+                allowed_tool_names,
+                diagnostic_history,
+            )),
             InvalidToolCallHookAction::Retry { feedback } => {
                 if self.invalid_tool_call_retries >= self.max_invalid_tool_call_retries {
-                    return Err(PromptError::UnknownToolCall {
-                        tool_name: tool_call.function.name,
-                        available_tools: executable_tool_names,
-                        allowed_tools: allowed_tool_names,
-                        chat_history: Box::new(diagnostic_history),
-                    });
+                    return Err(unknown_tool_call_error(
+                        tool_call.function.name,
+                        executable_tool_names,
+                        allowed_tool_names,
+                        diagnostic_history,
+                    ));
                 }
                 self.invalid_tool_call_retries += 1;
 
@@ -650,12 +920,12 @@ impl AgentRun {
             }
             InvalidToolCallHookAction::Repair { tool_name } => {
                 if !allowed_tool_names.contains(&tool_name) {
-                    return Err(PromptError::UnknownToolCall {
+                    return Err(unknown_tool_call_error(
                         tool_name,
-                        available_tools: executable_tool_names,
-                        allowed_tools: allowed_tool_names,
-                        chat_history: Box::new(diagnostic_history),
-                    });
+                        executable_tool_names,
+                        allowed_tool_names,
+                        diagnostic_history,
+                    ));
                 }
                 if let Some(AssistantContent::ToolCall(tool_call)) =
                     resolving.items.get_mut(resolving.next_index)
@@ -668,12 +938,12 @@ impl AgentRun {
             }
             InvalidToolCallHookAction::Skip { reason } => {
                 if matches!(self.tool_choice, Some(ToolChoice::None)) {
-                    return Err(PromptError::UnknownToolCall {
-                        tool_name: tool_call.function.name,
-                        available_tools: executable_tool_names,
-                        allowed_tools: allowed_tool_names,
-                        chat_history: Box::new(diagnostic_history),
-                    });
+                    return Err(unknown_tool_call_error(
+                        tool_call.function.name,
+                        executable_tool_names,
+                        allowed_tool_names,
+                        diagnostic_history,
+                    ));
                 }
                 let user_content = if let Some(call_id) = tool_call.call_id.clone() {
                     UserContent::tool_result_with_call_id(
@@ -804,7 +1074,7 @@ impl AgentRun {
             for item in &items {
                 if let AssistantContent::ToolCall(tool_call) = item {
                     skipped.entry(tool_call.id.clone()).or_insert_with(|| {
-                        tool_result_user_content(
+                        tool_result_message(
                             tool_call.id.clone(),
                             tool_call.call_id.clone(),
                             TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER.to_string(),
@@ -814,13 +1084,7 @@ impl AgentRun {
             }
         }
 
-        self.state = RunState::AwaitingAdvance(Box::new(TurnState {
-            message_id,
-            items,
-            has_tool_calls,
-            skipped,
-            internal_call_ids: Vec::new(),
-        }));
+        self.finalize_turn(message_id, items, has_tool_calls, skipped, Vec::new());
         Ok(ModelTurnOutcome::Continue {
             response_hook_suppressed: recovered,
         })
@@ -857,11 +1121,7 @@ impl AgentRun {
         }
         self.streamed_completion_call_recorded = true;
 
-        let call = CompletionCall::new(self.completion_call_index, usage);
-        self.completion_call_index += 1;
-        self.completion_calls.push(call);
-        self.usage += usage;
-        Ok(call)
+        Ok(self.record_completion_call(usage))
     }
 
     /// The recovery-hook context for an invalid tool call surfaced
@@ -913,22 +1173,22 @@ impl AgentRun {
         match action {
             InvalidToolCallHookAction::Fail => {
                 self.state = RunState::Failed;
-                Err(PromptError::UnknownToolCall {
-                    tool_name: invalid.tool_call.function.name.clone(),
-                    available_tools: executable_tool_names,
-                    allowed_tools: allowed_tool_names,
-                    chat_history: Box::new(diagnostic_history),
-                })
+                Err(unknown_tool_call_error(
+                    invalid.tool_call.function.name.clone(),
+                    executable_tool_names,
+                    allowed_tool_names,
+                    diagnostic_history,
+                ))
             }
             InvalidToolCallHookAction::Retry { feedback } => {
                 if self.invalid_tool_call_retries >= self.max_invalid_tool_call_retries {
                     self.state = RunState::Failed;
-                    return Err(PromptError::UnknownToolCall {
-                        tool_name: invalid.tool_call.function.name.clone(),
-                        available_tools: executable_tool_names,
-                        allowed_tools: allowed_tool_names,
-                        chat_history: Box::new(diagnostic_history),
-                    });
+                    return Err(unknown_tool_call_error(
+                        invalid.tool_call.function.name.clone(),
+                        executable_tool_names,
+                        allowed_tool_names,
+                        diagnostic_history,
+                    ));
                 }
                 self.invalid_tool_call_retries += 1;
 
@@ -952,30 +1212,33 @@ impl AgentRun {
             InvalidToolCallHookAction::Repair { tool_name } => {
                 if !invalid.allowed_tool_names.contains(&tool_name) {
                     self.state = RunState::Failed;
-                    return Err(PromptError::UnknownToolCall {
+                    return Err(unknown_tool_call_error(
                         tool_name,
-                        available_tools: executable_tool_names,
-                        allowed_tools: allowed_tool_names,
-                        chat_history: Box::new(diagnostic_history),
-                    });
+                        executable_tool_names,
+                        allowed_tool_names,
+                        diagnostic_history,
+                    ));
                 }
                 Ok(StreamedResolution::Repaired { tool_name })
             }
             InvalidToolCallHookAction::Skip { reason } => {
                 if matches!(self.tool_choice, Some(ToolChoice::None)) {
                     self.state = RunState::Failed;
-                    return Err(PromptError::UnknownToolCall {
-                        tool_name: invalid.tool_call.function.name.clone(),
-                        available_tools: executable_tool_names,
-                        allowed_tools: allowed_tool_names,
-                        chat_history: Box::new(diagnostic_history),
-                    });
+                    return Err(unknown_tool_call_error(
+                        invalid.tool_call.function.name.clone(),
+                        executable_tool_names,
+                        allowed_tool_names,
+                        diagnostic_history,
+                    ));
                 }
 
+                // Synthetic skip reason: emit verbatim text, matching the
+                // non-streamed `resolve_invalid_tool_call` skip path (parity) and
+                // avoiding re-parsing a rejection message as structured output.
                 let skipped_tool_result = ToolResult {
                     id: invalid.tool_call.id.clone(),
                     call_id: invalid.tool_call.call_id.clone(),
-                    content: ToolResultContent::from_tool_output(reason.clone()),
+                    content: OneOrMany::one(ToolResultContent::text(reason.clone())),
                 };
                 let Some((assistant_message, user_message)) =
                     partial.rollback_messages(invalid.tool_call.clone(), reason)
@@ -1014,11 +1277,10 @@ impl AgentRun {
         // never learned usage (no record before the turn completed) still get
         // the call recorded, with no reported usage.
         if !self.streamed_completion_call_recorded {
-            self.completion_calls.push(CompletionCall::new(
-                self.completion_call_index,
-                Usage::new(),
-            ));
-            self.completion_call_index += 1;
+            // `Usage::new()` is the additive identity for `Usage`'s `AddAssign`,
+            // so routing the no-usage fallback through `record_completion_call`
+            // leaves the run total unchanged while unifying the accounting.
+            self.record_completion_call(Usage::new());
             self.streamed_completion_call_recorded = true;
         }
 
@@ -1042,22 +1304,22 @@ impl AgentRun {
                 let diagnostic_history =
                     build_full_history(self.chat_history.as_deref(), diagnostic_messages);
                 self.state = RunState::Failed;
-                return Err(PromptError::UnknownToolCall {
-                    tool_name: tool_call.function.name.clone(),
-                    available_tools: turn.executable_tool_names.iter().cloned().collect(),
-                    allowed_tools: turn.allowed_tool_names.iter().cloned().collect(),
-                    chat_history: Box::new(diagnostic_history),
-                });
+                return Err(unknown_tool_call_error(
+                    tool_call.function.name.clone(),
+                    turn.executable_tool_names.iter().cloned().collect(),
+                    turn.allowed_tool_names.iter().cloned().collect(),
+                    diagnostic_history,
+                ));
             }
         }
 
-        self.state = RunState::AwaitingAdvance(Box::new(TurnState {
-            message_id: turn.message_id,
+        self.finalize_turn(
+            turn.message_id,
             items,
             has_tool_calls,
-            skipped: BTreeMap::new(),
-            internal_call_ids: turn.internal_call_ids,
-        }));
+            BTreeMap::new(),
+            turn.internal_call_ids,
+        );
         Ok(())
     }
 
@@ -1317,25 +1579,67 @@ mod tests {
     }
 
     #[test]
-    fn max_turns_exhaustion_returns_max_turns_error() {
-        let mut run = AgentRun::new("loop forever");
+    fn max_turns_zero_rejects_initial_model_call() {
+        let mut run = AgentRun::new("do not call").max_turns(0);
 
-        for turn_id in ["call_1", "call_2"] {
-            expect_call_model(&mut run);
-            expect_continue(
-                run.model_response(tool_call_turn(turn_id, "add"))
-                    .expect("model_response should succeed"),
-            );
-            expect_call_tools(&mut run);
-            run.tool_results(vec![tool_result(turn_id, "0")])
-                .expect("tool_results should succeed");
-        }
-
-        let err = run.next_step().expect_err("depth should be exhausted");
+        let err = run
+            .next_step()
+            .expect_err("zero budget should emit no call");
         assert!(matches!(
             err,
             PromptError::MaxTurnsError { max_turns: 0, .. }
         ));
+        assert_eq!(run.turn(), 0);
+    }
+
+    #[test]
+    fn new_implicitly_allows_one_model_call_and_rejects_tool_continuation() {
+        let mut run = AgentRun::new("add things");
+
+        let (_, _, turn) = expect_call_model(&mut run);
+        assert_eq!(turn, 1);
+        expect_continue(
+            run.model_response(tool_call_turn("call_1", "add"))
+                .expect("model_response should succeed"),
+        );
+        expect_call_tools(&mut run);
+        run.tool_results(vec![tool_result("call_1", "2")])
+            .expect("tool_results should succeed");
+
+        let err = run
+            .next_step()
+            .expect_err("second model call should exceed budget");
+        assert!(matches!(
+            err,
+            PromptError::MaxTurnsError { max_turns: 1, .. }
+        ));
+        assert_eq!(run.turn(), 1);
+    }
+
+    #[test]
+    fn max_turns_n_allows_exactly_n_model_calls() {
+        let mut run = AgentRun::new("loop").max_turns(3);
+
+        for (expected_turn, call_id) in [(1, "call_1"), (2, "call_2"), (3, "call_3")] {
+            let (_, _, turn) = expect_call_model(&mut run);
+            assert_eq!(turn, expected_turn);
+            expect_continue(
+                run.model_response(tool_call_turn(call_id, "add"))
+                    .expect("model_response should succeed"),
+            );
+            expect_call_tools(&mut run);
+            run.tool_results(vec![tool_result(call_id, "0")])
+                .expect("tool_results should succeed");
+        }
+
+        let err = run
+            .next_step()
+            .expect_err("fourth model call should exceed budget");
+        assert!(matches!(
+            err,
+            PromptError::MaxTurnsError { max_turns: 3, .. }
+        ));
+        assert_eq!(run.turn(), 3);
     }
 
     #[test]
@@ -1397,6 +1701,33 @@ mod tests {
             .resolve_invalid_tool_call(InvalidToolCallHookAction::retry("again"))
             .expect_err("budget exhausted");
         assert!(matches!(err, PromptError::UnknownToolCall { .. }));
+    }
+
+    #[test]
+    fn invalid_tool_call_retry_cannot_emit_call_past_total_budget() {
+        let mut run = AgentRun::new("call something")
+            .max_turns(1)
+            .max_invalid_tool_call_retries(1);
+
+        expect_call_model(&mut run);
+        expect_needs_resolution(
+            run.model_response(tool_call_turn("call_1", "unknown"))
+                .expect("model_response should succeed"),
+        );
+        let outcome = run
+            .resolve_invalid_tool_call(InvalidToolCallHookAction::retry("use add instead"))
+            .expect("retry resolution should be accepted");
+        assert!(matches!(outcome, ModelTurnOutcome::TurnRetried));
+        assert_eq!(run.completion_calls().len(), 1);
+
+        let err = run
+            .next_step()
+            .expect_err("retry must not emit a second model call");
+        assert!(matches!(
+            err,
+            PromptError::MaxTurnsError { max_turns: 1, .. }
+        ));
+        assert_eq!(run.turn(), 1);
     }
 
     #[test]
@@ -1658,6 +1989,32 @@ mod tests {
     }
 
     #[test]
+    fn serde_round_trip_at_exhausted_budget_preserves_boundary() {
+        let mut run = AgentRun::new("add things").max_turns(1);
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(tool_call_turn("call_1", "add"))
+                .expect("model_response should succeed"),
+        );
+        expect_call_tools(&mut run);
+        run.tool_results(vec![tool_result("call_1", "2")])
+            .expect("tool_results should succeed");
+
+        let serialized = serde_json::to_string(&run).expect("exhausted run should serialize");
+        let mut restored: AgentRun =
+            serde_json::from_str(&serialized).expect("exhausted run should deserialize");
+        assert_eq!(restored.completion_calls().len(), 1);
+        let err = restored
+            .next_step()
+            .expect_err("restored run must not emit a second model call");
+        assert!(matches!(
+            err,
+            PromptError::MaxTurnsError { max_turns: 1, .. }
+        ));
+        assert_eq!(restored.turn(), 1);
+    }
+
+    #[test]
     fn serde_round_trip_mid_run_resumes_identically() {
         let drive_to_pending_tools = || {
             let mut run = AgentRun::new("add things").max_turns(2);
@@ -1725,10 +2082,341 @@ mod tests {
         );
     }
 
+    /// A turn calling `name`, advertising it as an allowed-but-not-executable
+    /// tool (the shape Tool output mode produces — see #1928).
+    fn output_tool_turn(id: &str, name: &str) -> ModelTurn {
+        ModelTurn::new(
+            None,
+            OneOrMany::one(tool_call(id, name)),
+            Usage::new(),
+            tool_names(&["add"]),
+            tool_names(&["add", name]),
+        )
+    }
+
+    /// Every assistant tool call in `messages` must have a matching user tool
+    /// result — an unanswered tool_use is rejected by providers on replay.
+    fn assert_no_orphan_tool_use(messages: &[Message]) {
+        let mut answered = BTreeSet::new();
+        for message in messages {
+            if let Message::User { content } = message {
+                for item in content.iter() {
+                    if let UserContent::ToolResult(result) = item {
+                        answered.insert(result.id.clone());
+                    }
+                }
+            }
+        }
+        for message in messages {
+            if let Message::Assistant { content, .. } = message {
+                for item in content.iter() {
+                    if let AssistantContent::ToolCall(call) = item {
+                        assert!(
+                            answered.contains(&call.id),
+                            "assistant tool_call {:?} has no matching tool_result in history",
+                            call.id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn output_tool_call_finalizes_run_with_arguments() {
+        let mut run = AgentRun::new("summarize").with_output_tool_name("final_result");
+
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(output_tool_turn("call_1", "final_result"))
+                .expect("model_response should succeed"),
+        );
+
+        // The output tool is not executed; its arguments become the run output.
+        let response = expect_done(&mut run);
+        assert_eq!(response.output, r#"{"x":1}"#);
+        assert!(run.is_done());
+
+        // The finalizing turn is persisted as assistant text, not as the raw
+        // output-tool call, so the saved history has no dangling tool_use.
+        let messages = response.messages.expect("messages should be recorded");
+        assert_no_orphan_tool_use(&messages);
+        assert!(matches!(
+            messages.last(),
+            Some(Message::Assistant { content, .. })
+                if assistant_text_from_choice(content) == r#"{"x":1}"#
+        ));
+    }
+
+    #[test]
+    fn output_tool_call_wins_over_sibling_real_tool_calls() {
+        let mut run = AgentRun::new("do it")
+            .max_turns(2)
+            .with_output_tool_name("final_result");
+
+        expect_call_model(&mut run);
+        // The model emits a real tool call *and* the output tool in one turn;
+        // the output-tool intercept wins and the real call is never executed.
+        let turn = ModelTurn::new(
+            None,
+            OneOrMany::many(vec![
+                tool_call("call_1", "add"),
+                tool_call("call_2", "final_result"),
+            ])
+            .expect("two items"),
+            Usage::new(),
+            tool_names(&["add"]),
+            tool_names(&["add", "final_result"]),
+        );
+        expect_continue(
+            run.model_response(turn)
+                .expect("model_response should succeed"),
+        );
+
+        let response = expect_done(&mut run);
+        assert_eq!(response.output, r#"{"x":1}"#);
+        assert!(run.is_done());
+
+        // Both the sibling `add` call and the output-tool call are dropped from
+        // the persisted assistant message, leaving no unanswered tool_use.
+        let messages = response.messages.expect("messages should be recorded");
+        assert_no_orphan_tool_use(&messages);
+        assert!(
+            messages.iter().all(|message| match message {
+                Message::Assistant { content, .. } => !content
+                    .iter()
+                    .any(|item| matches!(item, AssistantContent::ToolCall(_))),
+                _ => true,
+            }),
+            "no assistant tool calls should survive in the finalized history"
+        );
+    }
+
+    #[test]
+    fn real_tool_calls_still_execute_when_output_tool_unused() {
+        // With an output tool configured but only real tools called, the run
+        // proceeds to tool execution as normal (the intercept must not fire).
+        let mut run = AgentRun::new("add things")
+            .max_turns(2)
+            .with_output_tool_name("final_result");
+
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(tool_call_turn("call_1", "add"))
+                .expect("model_response should succeed"),
+        );
+
+        let calls = expect_call_tools(&mut run);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool_call.function.name, "add");
+    }
+
+    fn required_field_schema(field: &str) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": [field],
+            "properties": { field: { "type": "string" } },
+        })
+    }
+
+    #[test]
+    fn tool_mode_reprompts_when_output_tool_not_called() {
+        // #1928: in Tool mode the model finalized with plain text instead of
+        // calling the output tool, so the run re-prompts (within budget).
+        let mut run = AgentRun::new("summarize")
+            .max_turns(2)
+            .with_output_tool_name("final_result")
+            .with_output_validation(Some(required_field_schema("summary")), 1);
+
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(text_turn("here is the answer"))
+                .expect("model_response should succeed"),
+        );
+
+        // Instead of finalizing, the run emits a second CallModel with corrective
+        // feedback naming the output tool.
+        let (prompt, _history, turn) = expect_call_model(&mut run);
+        assert_eq!(turn, 2);
+        let prompt_json = serde_json::to_string(&prompt).expect("prompt should serialize");
+        assert!(
+            prompt_json.contains("final_result"),
+            "re-prompt feedback should name the output tool: {prompt_json}"
+        );
+        assert!(!run.is_done());
+    }
+
+    #[test]
+    fn tool_mode_reprompts_when_output_args_missing_required_fields() {
+        // #1928: the output tool was called but its arguments omit a required
+        // field, so the run re-prompts rather than finalizing invalid output.
+        let mut run = AgentRun::new("summarize")
+            .max_turns(2)
+            .with_output_tool_name("final_result")
+            // `output_tool_turn` calls with args {"x":1}; require a different key.
+            .with_output_validation(Some(required_field_schema("summary")), 1);
+
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(output_tool_turn("call_1", "final_result"))
+                .expect("model_response should succeed"),
+        );
+
+        let (_prompt, _history, turn) = expect_call_model(&mut run);
+        assert_eq!(turn, 2);
+        assert!(!run.is_done());
+    }
+
+    #[test]
+    fn tool_mode_accepts_valid_json_text_without_reprompting() {
+        // The model returned valid structured output as plain text instead of an
+        // output-tool call — accept it rather than wasting a turn re-prompting.
+        let mut run = AgentRun::new("summarize")
+            .max_turns(3)
+            .with_output_tool_name("final_result")
+            .with_output_validation(Some(required_field_schema("summary")), 1);
+
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(text_turn(r#"{"summary":"all good"}"#))
+                .expect("model_response should succeed"),
+        );
+
+        let response = expect_done(&mut run);
+        assert_eq!(response.output, r#"{"summary":"all good"}"#);
+        assert!(run.is_done());
+    }
+
+    #[test]
+    fn tool_mode_finalizes_best_effort_when_model_call_budget_exhausted() {
+        let mut run = AgentRun::new("summarize")
+            .max_turns(1)
+            .with_output_tool_name("final_result")
+            .with_output_validation(Some(required_field_schema("summary")), 1);
+
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(text_turn("invalid output"))
+                .expect("model_response should succeed"),
+        );
+
+        let response = expect_done(&mut run);
+        assert_eq!(response.output, "invalid output");
+        assert_eq!(run.turn(), 1);
+    }
+
+    #[test]
+    fn tool_mode_finalizes_best_effort_when_output_retry_budget_exhausted() {
+        // With no retry budget, invalid output finalizes best-effort (the caller
+        // validates) rather than looping — and history stays free of orphan
+        // tool_use.
+        let mut run = AgentRun::new("summarize")
+            .max_turns(3)
+            .with_output_tool_name("final_result")
+            .with_output_validation(Some(required_field_schema("summary")), 0);
+
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(output_tool_turn("call_1", "final_result"))
+                .expect("model_response should succeed"),
+        );
+
+        let response = expect_done(&mut run);
+        assert_eq!(response.output, r#"{"x":1}"#);
+        let messages = response.messages.expect("messages should be recorded");
+        assert_no_orphan_tool_use(&messages);
+    }
+
+    #[test]
+    fn set_output_tool_name_is_idempotent_and_only_fills_when_unset() {
+        // A pre-set name (e.g. via `with_output_tool_name`) is never overwritten,
+        // keeping a resumed run deterministic.
+        let mut run = AgentRun::new("x").with_output_tool_name("first");
+        run.set_output_tool_name(Some("second".to_string()));
+        run.set_output_tool_name(None);
+        assert_eq!(run.output_tool_name.as_deref(), Some("first"));
+
+        // When unset, the first non-None value fills it.
+        let mut run = AgentRun::new("x");
+        run.set_output_tool_name(None);
+        assert_eq!(run.output_tool_name, None);
+        run.set_output_tool_name(Some("filled".to_string()));
+        assert_eq!(run.output_tool_name.as_deref(), Some("filled"));
+    }
+
     impl ModelTurn {
         fn with_usage_for_test(mut self, usage: Usage) -> Self {
             self.usage = usage;
             self
         }
+    }
+
+    /// Durable human-in-the-loop: the run is serialized while tool calls are
+    /// pending, reconstructed from JSON (as a separate process / request would),
+    /// and only then does the human decision land — approve one call, deny the
+    /// other. The resumed-from-bytes run accepts those results and continues to
+    /// completion, proving approval can happen out-of-process / arbitrarily later.
+    /// This is the state-machine foundation for `examples/agent_with_durable_approval`.
+    #[test]
+    fn durable_human_in_the_loop_approval_survives_serialize_resume() {
+        let mut run = AgentRun::new("pay two invoices").max_turns(3);
+        let (_, _, turn) = expect_call_model(&mut run);
+        assert_eq!(turn, 1);
+
+        // Turn 1: the model emits two tool calls.
+        let two_calls =
+            OneOrMany::many([tool_call("c1", "add"), tool_call("c2", "add")]).expect("two calls");
+        let outcome = run
+            .model_response(ModelTurn::new(
+                None,
+                two_calls,
+                Usage::new(),
+                tool_names(&["add"]),
+                tool_names(&["add"]),
+            ))
+            .expect("model_response");
+        expect_continue(outcome);
+
+        // CallTools is now pending. Serialize the run (a durable checkpoint) and
+        // reconstruct it from the bytes — nothing live crosses this boundary.
+        let checkpoint = serde_json::to_string(&run).expect("serialize suspended run");
+        let mut resumed: AgentRun = serde_json::from_str(&checkpoint).expect("deserialize run");
+
+        // The resumed run re-emits the pending calls purely from its own state.
+        let calls = expect_call_tools(&mut resumed);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].tool_call.id, "c1");
+        assert_eq!(calls[1].tool_call.id, "c2");
+
+        // The human decision lands only after the resume: approve c1 (real
+        // result), deny c2 (the reason becomes the tool result the model sees).
+        resumed
+            .tool_results(vec![
+                tool_result("c1", "approved-result"),
+                tool_result("c2", "denied by reviewer: second payment not authorized"),
+            ])
+            .expect("tool_results on the resumed run");
+
+        // Both decisions are recorded in the resumed run's persisted state.
+        let after = serde_json::to_string(&resumed).expect("serialize resumed run");
+        assert!(
+            after.contains("approved-result"),
+            "the approved call's result must be in the resumed run state"
+        );
+        assert!(
+            after.contains("denied by reviewer: second payment not authorized"),
+            "the denied call's reason must be in the resumed run state"
+        );
+
+        // Turn 2: the model wraps up; the run completes from the resumed state.
+        let (_, _, turn2) = expect_call_model(&mut resumed);
+        assert_eq!(turn2, 2);
+        expect_continue(
+            resumed
+                .model_response(text_turn("done"))
+                .expect("model_response 2"),
+        );
+        let response = expect_done(&mut resumed);
+        assert_eq!(response.output, "done");
     }
 }

@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
+use rig::agent::{AgentHook, Flow, StepEvent};
 use rig::client::CompletionClient;
-use rig::completion::{CompletionModel, CompletionResponse, Message, ToolDefinition, TypedPrompt};
+use rig::completion::{CompletionModel, TypedPrompt};
 use rig::tool::Tool;
 
 use super::support;
@@ -55,70 +55,69 @@ impl StepLogger {
     }
 }
 
-impl<M> PromptHook<M> for StepLogger
+impl<M> AgentHook<M> for StepLogger
 where
     M: CompletionModel,
     M::Response: Serialize,
 {
-    async fn on_completion_call(&self, prompt: &Message, history: &[Message]) -> HookAction {
-        let call_no = self.next_completion_call();
+    async fn on_event(&self, _ctx: &rig::agent::HookContext, event: StepEvent<'_, M>) -> Flow {
+        match event {
+            StepEvent::CompletionCall {
+                prompt, history, ..
+            } => {
+                let call_no = self.next_completion_call();
 
-        println!("\n=== completion call #{call_no}: model input ===");
-        println!("history:\n{}", pretty_json(history));
-        println!("prompt:\n{}", pretty_json(prompt));
+                println!("\n=== completion call #{call_no}: model input ===");
+                println!("history:\n{}", pretty_json(history));
+                println!("prompt:\n{}", pretty_json(prompt));
 
-        HookAction::cont()
-    }
+                Flow::cont()
+            }
+            StepEvent::CompletionResponse { response, .. } => {
+                let call_no = self.current_completion_call();
 
-    async fn on_completion_response(
-        &self,
-        _prompt: &Message,
-        response: &CompletionResponse<M::Response>,
-    ) -> HookAction {
-        let call_no = self.current_completion_call();
+                println!("\n=== completion response #{call_no}: normalized choice ===");
+                println!("{}", pretty_json(&response.choice));
+                println!("\n=== completion response #{call_no}: raw provider payload ===");
+                println!("{}", pretty_json(&response.raw_response));
 
-        println!("\n=== completion response #{call_no}: normalized choice ===");
-        println!("{}", pretty_json(&response.choice));
-        println!("\n=== completion response #{call_no}: raw provider payload ===");
-        println!("{}", pretty_json(&response.raw_response));
+                Flow::cont()
+            }
+            StepEvent::ToolCall {
+                tool_name,
+                tool_call_id,
+                internal_call_id,
+                args,
+            } => {
+                let tool_no = self.next_tool_call();
 
-        HookAction::cont()
-    }
+                println!("\n=== tool call #{tool_no}: model requested tool ===");
+                println!("tool_name: {tool_name}");
+                println!("tool_call_id: {tool_call_id:?}");
+                println!("internal_call_id: {internal_call_id}");
+                println!("args: {args}");
 
-    async fn on_tool_call(
-        &self,
-        tool_name: &str,
-        tool_call_id: Option<String>,
-        internal_call_id: &str,
-        args: &str,
-    ) -> ToolCallHookAction {
-        let tool_no = self.next_tool_call();
+                Flow::cont()
+            }
+            StepEvent::ToolResult {
+                tool_name,
+                tool_call_id,
+                internal_call_id,
+                args,
+                result,
+                ..
+            } => {
+                println!("\n=== tool result: tool returned ===");
+                println!("tool_name: {tool_name}");
+                println!("tool_call_id: {tool_call_id:?}");
+                println!("internal_call_id: {internal_call_id}");
+                println!("args: {args}");
+                println!("result: {result}");
 
-        println!("\n=== tool call #{tool_no}: model requested tool ===");
-        println!("tool_name: {tool_name}");
-        println!("tool_call_id: {tool_call_id:?}");
-        println!("internal_call_id: {internal_call_id}");
-        println!("args: {args}");
-
-        ToolCallHookAction::cont()
-    }
-
-    async fn on_tool_result(
-        &self,
-        tool_name: &str,
-        tool_call_id: Option<String>,
-        internal_call_id: &str,
-        args: &str,
-        result: &str,
-    ) -> HookAction {
-        println!("\n=== tool result: tool returned ===");
-        println!("tool_name: {tool_name}");
-        println!("tool_call_id: {tool_call_id:?}");
-        println!("internal_call_id: {internal_call_id}");
-        println!("args: {args}");
-        println!("result: {result}");
-
-        HookAction::cont()
+                Flow::cont()
+            }
+            _ => Flow::cont(),
+        }
     }
 }
 
@@ -137,20 +136,17 @@ impl Tool for WeatherTool {
     type Args = WeatherArgs;
     type Output = String;
 
-    fn definition(
-        &self,
-        _prompt: String,
-    ) -> impl std::future::Future<Output = ToolDefinition> + Send + Sync {
-        std::future::ready(ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Get the current weather for a city".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" }
-                },
-                "required": ["city"]
-            }),
+    fn description(&self) -> String {
+        "Get the current weather for a city".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
         })
     }
 
@@ -193,7 +189,7 @@ async fn prompt_typed_with_tool_call_verbatim_roundtrip() -> Result<()> {
 
     let result = agent
         .prompt_typed::<WeatherResponse>("Hello, whats the weather in London?")
-        .with_hook(hook)
+        .add_hook(hook)
         .await;
 
     println!("prompt_typed result: {result:#?}");

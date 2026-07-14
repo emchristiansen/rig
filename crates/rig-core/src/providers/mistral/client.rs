@@ -20,11 +20,85 @@ type MistralApiKey = BearerAuth;
 
 pub type Client<H = reqwest::Client> = client::Client<MistralExt, H>;
 pub type ClientBuilder<H = crate::markers::Missing> =
-    client::ClientBuilder<MistralBuilder, String, H>;
+    client::ClientBuilder<MistralBuilder, MistralApiKey, H>;
 
 impl Provider for MistralExt {
     type Builder = MistralBuilder;
     const VERIFY_PATH: &'static str = "/models";
+}
+
+impl crate::providers::openai::completion::OpenAICompatibleProvider for MistralExt {
+    const PROVIDER_NAME: &'static str = "mistral";
+
+    type StreamingUsage = Usage;
+
+    const EMITS_COMPLETE_SINGLE_CHUNK_TOOL_CALLS: bool = true;
+
+    // Mistral is strict about unknown parameters and reports usage on the
+    // final stream chunk without `stream_options`.
+    const STREAM_INCLUDE_USAGE: bool = false;
+
+    type Response = super::CompletionResponse;
+
+    // The client base URL is the bare host; other Mistral capabilities
+    // (embeddings, transcription, model listing) build their own v1 paths.
+    fn completion_path(&self, _model: &str) -> String {
+        "/v1/chat/completions".to_string()
+    }
+
+    fn finalize_request_body(
+        &self,
+        body: &mut serde_json::Value,
+    ) -> Result<(), crate::completion::CompletionError> {
+        let Some(map) = body.as_object_mut() else {
+            return Ok(());
+        };
+
+        // Mistral spells the "must call some tool" mode `any`, not `required`.
+        if let Some(tool_choice) = map.get_mut("tool_choice")
+            && tool_choice.as_str() == Some("required")
+        {
+            *tool_choice = serde_json::Value::String("any".to_string());
+        }
+
+        if let Some(messages) = map
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for message in messages {
+                let Some(message) = message.as_object_mut() else {
+                    continue;
+                };
+                let is_assistant =
+                    message.get("role").and_then(serde_json::Value::as_str) == Some("assistant");
+
+                // Mistral takes message `content` as a plain string.
+                if let Some(content) = message.get_mut("content") {
+                    crate::providers::openai::completion::flatten_text_content_parts(
+                        content, "", false,
+                    );
+                }
+
+                if is_assistant {
+                    if !message.contains_key("content") {
+                        message.insert(
+                            "content".to_string(),
+                            serde_json::Value::String(String::new()),
+                        );
+                    }
+                    // `prefix` is part of Mistral's assistant message schema.
+                    message
+                        .entry("prefix")
+                        .or_insert(serde_json::Value::Bool(false));
+                    // Mistral rejects unknown assistant fields; hidden
+                    // reasoning cannot be echoed back.
+                    message.remove("reasoning_content");
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<H> Capabilities<H> for MistralExt {
@@ -98,7 +172,7 @@ pub struct PromptTokensDetails {
 /// always present; the remaining fields are populated by Mistral on a best-effort
 /// basis (e.g. cached-token information appears once a prompt is large enough to
 /// be cached).
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Usage {
     pub completion_tokens: usize,
     pub prompt_tokens: usize,
@@ -161,9 +235,8 @@ mod tests {
     fn test_client_initialization() {
         let _client =
             crate::providers::mistral::Client::new("dummy-key").expect("Client::new() failed");
-        let _client_from_builder = crate::providers::mistral::Client::builder()
-            .api_key("dummy-key")
-            .build()
-            .expect("Client::builder() failed");
+        let builder: crate::providers::mistral::ClientBuilder =
+            crate::providers::mistral::Client::builder().api_key("dummy-key");
+        let _client_from_builder = builder.build().expect("Client::builder() failed");
     }
 }

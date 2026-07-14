@@ -83,6 +83,8 @@ pub(crate) const IMAGE_FIXTURE_PATH: &str = concat!(
 );
 pub(crate) const PDF_FIXTURE_PATH: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/pages.pdf");
+pub(crate) const VIDEO_FIXTURE_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/sample_video.mp4");
 
 pub(crate) const EMBEDDING_INPUTS: [&str; 3] = [
     "Rust values memory safety and predictable performance.",
@@ -129,15 +131,15 @@ impl Tool for Adder {
     type Args = OperationArgs;
     type Output = i32;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "add".to_string(),
-            description: "Add x and y together".to_string(),
-            parameters: serde_json::from_str(
+    fn description(&self) -> String {
+        "Add x and y together".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::from_str(
                 r#"{"type":"object","properties":{"x":{"type":"number","description":"The first number to add"},"y":{"type":"number","description":"The second number to add"}},"required":["x","y"]}"#,
             )
-            .expect("adder schema should deserialize"),
-        }
+            .expect("adder schema should deserialize")
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -154,15 +156,15 @@ impl Tool for Subtract {
     type Args = OperationArgs;
     type Output = i32;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "subtract".to_string(),
-            description: "Subtract y from x (i.e.: x - y)".to_string(),
-            parameters: serde_json::from_str(
+    fn description(&self) -> String {
+        "Subtract y from x (i.e.: x - y)".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::from_str(
                 r#"{"type":"object","properties":{"x":{"type":"number","description":"The number to subtract from"},"y":{"type":"number","description":"The number to subtract"}},"required":["x","y"]}"#,
             )
-            .expect("subtract schema should deserialize"),
-        }
+            .expect("subtract schema should deserialize")
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -179,16 +181,16 @@ impl Tool for AlphaSignal {
     type Args = EmptyArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Return the alpha signal marker.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-            }),
-        }
+    fn description(&self) -> String {
+        "Return the alpha signal marker.".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+        })
     }
 
     async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -205,16 +207,16 @@ impl Tool for BetaSignal {
     type Args = EmptyArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: "Return the beta signal marker.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-            }),
-        }
+    fn description(&self) -> String {
+        "Return the beta signal marker.".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+        })
     }
 
     async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -382,7 +384,7 @@ pub(crate) async fn collect_stream_final_response<R>(
 
     while let Some(item) = stream.next().await {
         if let MultiTurnStreamItem::FinalResponse(response) = item? {
-            final_response = Some(response.response().to_owned());
+            final_response = Some(response.output().to_owned());
         }
     }
 
@@ -512,6 +514,9 @@ pub(crate) async fn collect_stream_observation<R>(
                 StreamedAssistantContent::Final(_) => {
                     observation.events.push("stream_final");
                 }
+                StreamedAssistantContent::Unknown(_) => {
+                    observation.events.push("unknown");
+                }
             },
             Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult { .. })) => {
                 observation.tool_results += 1;
@@ -519,7 +524,7 @@ pub(crate) async fn collect_stream_observation<R>(
                 observation.events.push("tool_result");
             }
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
-                observation.final_response_text = Some(response.response().to_owned());
+                observation.final_response_text = Some(response.output().to_owned());
                 observation.got_final_response = true;
                 observation.events.push("final_response");
             }
@@ -569,6 +574,9 @@ where
             Ok(StreamedAssistantContent::Final(_)) => {
                 observation.got_final = true;
                 observation.events.push("final");
+            }
+            Ok(StreamedAssistantContent::Unknown(_)) => {
+                observation.events.push("unknown");
             }
             Err(error) => {
                 observation.errors.push(error.to_string());
@@ -621,7 +629,7 @@ pub(crate) fn assert_two_tool_roundtrip_contract(
     assert_eq!(
         observation.final_response_text.as_deref(),
         Some(observation.final_turn_text.as_str()),
-        "FinalResponse.response() should match the final turn's streamed text"
+        "FinalResponse.output() should match the final turn's streamed text"
     );
     assert!(
         observation.tool_results >= expected_tools.len(),
@@ -705,7 +713,7 @@ pub(crate) fn assert_tool_call_precedes_later_text(
     assert_eq!(
         observation.final_response_text.as_deref(),
         Some(observation.final_turn_text.as_str()),
-        "FinalResponse.response() should match the final turn's streamed text"
+        "FinalResponse.output() should match the final turn's streamed text"
     );
     assert!(
         observation
@@ -855,6 +863,45 @@ pub(crate) fn assert_raw_stream_contains_distinct_tool_calls_before_text(
             expected_tools.len(),
             tool_calls_before_text,
             observation.events
+        );
+    }
+}
+
+/// Every tool call surfaced on the raw stream must carry a JSON **object** as
+/// its `function.arguments` (never a bare string), the invariant fixed in #1958:
+/// a downstream object-typed serializer (e.g. Anthropic's `tool_use.input`)
+/// rejects a string input. This guards the streaming aggregator end-to-end on
+/// real provider traffic, complementing the in-crate eviction unit tests.
+pub(crate) fn assert_raw_stream_tool_call_arguments_are_objects(
+    observation: &RawStreamObservation,
+    expected_tools: &[&str],
+) {
+    assert!(
+        observation.errors.is_empty(),
+        "raw stream should not emit errors: {:?}",
+        observation.errors
+    );
+    assert!(
+        observation.got_final,
+        "raw stream should emit a final response"
+    );
+    assert!(
+        observation.tool_calls.len() >= expected_tools.len(),
+        "expected at least {} raw stream tool calls, saw {:?}",
+        expected_tools.len(),
+        observation
+            .tool_calls
+            .iter()
+            .map(|tool_call| tool_call.function.name.clone())
+            .collect::<Vec<_>>(),
+    );
+
+    for tool_call in &observation.tool_calls {
+        assert!(
+            tool_call.function.arguments.is_object(),
+            "tool call `{}` must surface object arguments, got {:?}",
+            tool_call.function.name,
+            tool_call.function.arguments,
         );
     }
 }

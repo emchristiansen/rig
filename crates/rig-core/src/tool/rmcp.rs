@@ -28,20 +28,43 @@
 //!     .tool_server_handle(tool_server_handle)
 //!     .build();
 //! ```
+//!
+//! # Per-call metadata
+//!
+//! [`McpTool`] forwards an [`rmcp::model::Meta`] (re-exported here as [`Meta`])
+//! placed in a [`ToolCallExtensions`] as the MCP request's `_meta` (SEP-1319) —
+//! the idiomatic channel for per-call values such as auth tokens, session ids,
+//! or A2A `context_id`/`task_id`, which the model never sees:
+//!
+//! ```rust,ignore
+//! use rig_core::tool::rmcp::Meta;
+//! use rig_core::tool::ToolCallExtensions;
+//!
+//! let mut meta = Meta::new();
+//! meta.0.insert("authorization".into(), serde_json::json!("Bearer …"));
+//! let mut extensions = ToolCallExtensions::new();
+//! extensions.insert(meta);
+//! let answer = agent.prompt("…").tool_extensions(extensions).await?;
+//! ```
 
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::ServiceExt;
-use rmcp::model::RawContent;
+use rmcp::model::ContentBlock;
 use tokio::sync::RwLock;
 
 use crate::completion::ToolDefinition;
-use crate::tool::ToolDyn;
-use crate::tool::ToolError;
 use crate::tool::server::{ToolServerError, ToolServerHandle};
+use crate::tool::{
+    ToolCallExtensions, ToolDyn, ToolError, ToolExecutionResult, ToolFailure, ToolFailureKind,
+};
 use crate::wasm_compat::WasmBoxedFuture;
+
+/// Re-export of [`rmcp::model::Meta`]: place one in a [`ToolCallExtensions`] to have
+/// [`McpTool`] forward it as a call's MCP `_meta` (see the module docs).
+pub use rmcp::model::Meta;
 
 /// Default per-call timeout applied to MCP tools (see issue #1914).
 ///
@@ -128,9 +151,39 @@ impl From<rmcp::model::Tool> for ToolDefinition {
     }
 }
 
+/// Error returned by an [`McpTool`] call.
+///
+/// Carries a structured [`ToolFailureKind`] so an MCP timeout, transport
+/// failure, or tool-reported error reaches hooks and telemetry as a classified
+/// [`ToolFailure`] (via [`McpTool`]'s
+/// [`ToolDyn::call_structured`]) instead
+/// of an opaque string.
 #[derive(Debug, thiserror::Error)]
-#[error("MCP tool error: {0}")]
-pub struct McpToolError(String);
+#[error("MCP tool error: {message}")]
+pub struct McpToolError {
+    message: String,
+    kind: ToolFailureKind,
+}
+
+impl McpToolError {
+    fn new(kind: ToolFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+        }
+    }
+
+    /// The structured classification of this MCP error.
+    pub fn kind(&self) -> ToolFailureKind {
+        self.kind
+    }
+
+    /// Convert into a structured [`ToolFailure`] carrying the kind's default
+    /// `retryable` hint (e.g. an MCP timeout is retryable).
+    fn into_failure(self) -> ToolFailure {
+        ToolFailure::of_kind(self.kind, self.message)
+    }
+}
 
 impl From<McpToolError> for ToolError {
     fn from(e: McpToolError) -> Self {
@@ -138,37 +191,56 @@ impl From<McpToolError> for ToolError {
     }
 }
 
-impl ToolDyn for McpTool {
-    fn name(&self) -> String {
-        self.definition.name.to_string()
+/// Parse the JSON `args` string into MCP call arguments.
+///
+/// Returns `Ok(None)` for empty input or valid-but-non-object JSON (`null`, an
+/// array, a scalar) — all of which carry no MCP arguments — and `Ok(Some(obj))`
+/// for a JSON object. **Malformed JSON is a hard error** (`Err`): LLMs
+/// occasionally emit invalid JSON, and it must surface as a
+/// [`ToolFailureKind::InvalidArgs`] failure rather than being silently coerced
+/// into a no-argument call that reaches the server.
+fn parse_mcp_arguments(args: &str) -> Result<Option<rmcp::model::JsonObject>, serde_json::Error> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
     }
-
-    fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
-        Box::pin(async move {
-            ToolDefinition {
-                name: self.definition.name.to_string(),
-                description: self
-                    .definition
-                    .description
-                    .clone()
-                    .unwrap_or(Cow::from(""))
-                    .to_string(),
-                parameters: serde_json::to_value(&self.definition.input_schema).unwrap_or_default(),
-            }
-        })
+    let value: serde_json::Value = serde_json::from_str(trimmed)?;
+    match value {
+        serde_json::Value::Object(_) => Ok(Some(serde_json::from_value(value)?)),
+        _ => Ok(None),
     }
+}
 
-    fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
+impl McpTool {
+    /// Shared executor for [`ToolDyn::call`] and [`ToolDyn::call_with_extensions`].
+    ///
+    /// `meta`, when present, is attached as the MCP request's `_meta`
+    /// (SEP-1319) — the idiomatic channel for per-call metadata such as auth
+    /// tokens, session ids, or A2A `context_id`/`task_id`. It is supplied by a
+    /// caller that places an [`rmcp::model::Meta`] into the
+    /// [`ToolCallExtensions`]; otherwise the call behaves exactly as before.
+    fn execute(
+        &self,
+        args: String,
+        meta: Option<rmcp::model::Meta>,
+    ) -> WasmBoxedFuture<'_, Result<String, McpToolError>> {
         let name = self.definition.name.clone();
-        let arguments: Option<rmcp::model::JsonObject> =
-            serde_json::from_str(&args).unwrap_or_default();
 
         Box::pin(async move {
-            let request = arguments
+            // Validate the JSON arguments before contacting the server: malformed
+            // JSON must surface as an InvalidArgs failure, not a silent no-arg call.
+            let arguments = parse_mcp_arguments(&args).map_err(|err| {
+                McpToolError::new(
+                    ToolFailureKind::InvalidArgs,
+                    format!("MCP tool '{name}' received invalid JSON arguments: {err}"),
+                )
+            })?;
+            let mut request = arguments
                 .map(|arguments| {
                     rmcp::model::CallToolRequestParams::new(name.clone()).with_arguments(arguments)
                 })
                 .unwrap_or_else(|| rmcp::model::CallToolRequestParams::new(name));
+            request.meta = meta;
 
             let call = self.client.call_tool(request);
             // Bound the call so a never-answered request (see issue #1914)
@@ -178,42 +250,54 @@ impl ToolDyn for McpTool {
                     crate::wasm_compat::timeout(timeout, call)
                         .await
                         .map_err(|_| {
-                            McpToolError(format!(
-                                "MCP tool '{}' timed out after {timeout:?}",
-                                self.definition.name
-                            ))
+                            McpToolError::new(
+                                ToolFailureKind::Timeout,
+                                format!(
+                                    "MCP tool '{}' timed out after {timeout:?}",
+                                    self.definition.name
+                                ),
+                            )
                         })?
                 }
                 None => call.await,
             };
-            let result =
-                call_result.map_err(|e| McpToolError(format!("Tool returned an error: {e}")))?;
+            // A transport/service error before the tool produced a result.
+            let result = call_result.map_err(|e| {
+                McpToolError::new(
+                    ToolFailureKind::Provider,
+                    format!("Tool returned an error: {e}"),
+                )
+            })?;
 
             if let Some(true) = result.is_error {
                 let error_msg = result
                     .content
                     .into_iter()
-                    .map(|x| x.raw.as_text().map(|y| y.to_owned()))
-                    .map(|x| x.map(|x| x.clone().text))
+                    .map(|x| x.as_text().map(|y| y.text.clone()))
                     .collect::<Option<Vec<String>>>();
 
+                // The MCP tool ran and reported its own error result — a handled
+                // tool failure rather than a transport/timeout condition.
                 let error_message = error_msg.map(|x| x.join("\n"));
                 if let Some(error_message) = error_message {
-                    return Err(McpToolError(error_message).into());
+                    return Err(McpToolError::new(ToolFailureKind::Other, error_message));
                 } else {
-                    return Err(McpToolError("No message returned".to_string()).into());
+                    return Err(McpToolError::new(
+                        ToolFailureKind::Other,
+                        "No message returned".to_string(),
+                    ));
                 }
             };
 
             let mut content = String::new();
 
             for item in result.content {
-                let chunk = match item.raw {
-                    rmcp::model::RawContent::Text(raw) => raw.text,
-                    rmcp::model::RawContent::Image(raw) => {
+                let chunk = match item {
+                    ContentBlock::Text(raw) => raw.text,
+                    ContentBlock::Image(raw) => {
                         format!("data:{};base64,{}", raw.mime_type, raw.data)
                     }
-                    rmcp::model::RawContent::Resource(raw) => match raw.resource {
+                    ContentBlock::Resource(raw) => match raw.resource {
                         rmcp::model::ResourceContents::TextResourceContents {
                             uri,
                             mime_type,
@@ -235,19 +319,27 @@ impl ToolDyn for McpTool {
                             "{mime_type}{uri}:{blob}",
                             mime_type = mime_type.map(|m| format!("data:{m};")).unwrap_or_default(),
                         ),
+                        thing => {
+                            return Err(McpToolError::new(
+                                ToolFailureKind::Other,
+                                format!(
+                                    "MCP tool returned unsupported resource contents: {thing:?}"
+                                ),
+                            ));
+                        }
                     },
-                    RawContent::Audio(_) => {
-                        return Err(McpToolError(
+                    ContentBlock::Audio(_) => {
+                        return Err(McpToolError::new(
+                            ToolFailureKind::Other,
                             "MCP tool returned audio content, which Rig does not support yet"
                                 .to_string(),
-                        )
-                        .into());
+                        ));
                     }
                     thing => {
-                        return Err(McpToolError(format!(
-                            "MCP tool returned unsupported content: {thing:?}"
-                        ))
-                        .into());
+                        return Err(McpToolError::new(
+                            ToolFailureKind::Other,
+                            format!("MCP tool returned unsupported content: {thing:?}"),
+                        ));
                     }
                 };
 
@@ -255,6 +347,64 @@ impl ToolDyn for McpTool {
             }
 
             Ok(content)
+        })
+    }
+}
+
+impl ToolDyn for McpTool {
+    fn name(&self) -> String {
+        self.definition.name.to_string()
+    }
+
+    fn description(&self) -> String {
+        self.definition
+            .description
+            .clone()
+            .unwrap_or(Cow::from(""))
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        self.definition.schema_as_json_value()
+    }
+
+    fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
+        Box::pin(async move { self.execute(args, None).await.map_err(ToolError::from) })
+    }
+
+    /// Forwards an [`rmcp::model::Meta`] from the [`ToolCallExtensions`], if present,
+    /// as the MCP request's `_meta`. This lets callers attach per-call metadata
+    /// (auth, session, A2A `context_id`/`task_id`) to MCP tool invocations
+    /// without exposing it to the model. Absent a `Meta`, behaves like
+    /// [`call`](ToolDyn::call).
+    fn call_with_extensions<'a>(
+        &'a self,
+        args: String,
+        extensions: &'a ToolCallExtensions,
+    ) -> WasmBoxedFuture<'a, Result<String, ToolError>> {
+        let meta = extensions.get::<rmcp::model::Meta>().cloned();
+        Box::pin(async move { self.execute(args, meta).await.map_err(ToolError::from) })
+    }
+
+    /// Surfaces MCP failures as structured outcomes: a per-call timeout (issue
+    /// #1914) becomes a [`Timeout`](ToolFailureKind::Timeout) failure, a
+    /// transport error a [`Provider`](ToolFailureKind::Provider) failure, and a
+    /// tool-reported error result an [`Other`](ToolFailureKind::Other) failure —
+    /// all with the MCP error text as the model-visible output.
+    fn call_structured<'a>(
+        &'a self,
+        args: String,
+        extensions: &'a ToolCallExtensions,
+    ) -> WasmBoxedFuture<'a, ToolExecutionResult> {
+        let meta = extensions.get::<rmcp::model::Meta>().cloned();
+        Box::pin(async move {
+            match self.execute(args, meta).await {
+                Ok(output) => ToolExecutionResult::success(output),
+                Err(err) => {
+                    let failure = err.into_failure();
+                    ToolExecutionResult::failed(failure.message.clone(), failure)
+                }
+            }
         })
     }
 }
@@ -434,6 +584,7 @@ mod tests {
     use rmcp::model::*;
     use rmcp::service::RequestContext;
     use rmcp::{RoleServer, ServerHandler, ServiceExt};
+    use serde_json::json;
     use tokio::sync::RwLock;
 
     use super::McpClientHandler;
@@ -478,7 +629,7 @@ mod tests {
             request: CallToolRequestParams,
             _context: RequestContext<RoleServer>,
         ) -> Result<CallToolResult, ErrorData> {
-            Ok(CallToolResult::success(vec![Content::text(format!(
+            Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "called {}",
                 request.name
             ))]))
@@ -652,6 +803,53 @@ mod tests {
         let returned = handler.get_info();
         assert_eq!(returned.client_info.name, "test-client");
         assert_eq!(returned.client_info.version, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn mcp_tool_exposes_flattened_metadata() {
+        use super::McpTool;
+        use crate::tool::{ToolDyn, tool_definition};
+
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".to_string(), json!("object"));
+        schema.insert(
+            "properties".to_string(),
+            json!({ "query": { "type": "string" } }),
+        );
+        let server_tool = Tool::new(
+            "search_docs".to_string(),
+            "Search the docs".to_string(),
+            Arc::new(schema),
+        );
+
+        let (client_to_server, server_from_client) = tokio::io::duplex(8192);
+        let (server_to_client, client_from_server) = tokio::io::duplex(8192);
+        let server = DynamicToolServer::new(vec![server_tool.clone()]);
+        let server_task = tokio::spawn(async move {
+            let running = server
+                .serve((server_from_client, server_to_client))
+                .await
+                .expect("server failed to start");
+            running.waiting().await.expect("server error");
+        });
+
+        let client = ClientInfo::default()
+            .serve((client_from_server, client_to_server))
+            .await
+            .expect("client connect failed");
+        let mcp_tool = McpTool::from_mcp_server(server_tool, client.peer().clone());
+        let definition = tool_definition(&mcp_tool);
+
+        assert_eq!(mcp_tool.name(), "search_docs");
+        assert_eq!(definition.name, "search_docs");
+        assert_eq!(definition.description, "Search the docs");
+        assert_eq!(
+            definition.parameters["properties"]["query"]["type"],
+            "string"
+        );
+
+        client.cancel().await.expect("client cancel failed");
+        server_task.abort();
     }
 
     /// Documents the unbounded escape hatch and the underlying issue #1914 hazard.
@@ -905,6 +1103,232 @@ mod tests {
             err.to_string().contains("timed out"),
             "expected a timeout error, got: {err}"
         );
+
+        server_task.abort();
+    }
+
+    /// An MCP server that records the `_meta` of the last `call_tool` request, so
+    /// a test can assert what metadata reached the server.
+    #[derive(Clone)]
+    struct MetaCapturingServer {
+        seen_meta: Arc<RwLock<Option<Meta>>>,
+    }
+
+    impl ServerHandler for MetaCapturingServer {
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+                .with_protocol_version(ProtocolVersion::LATEST)
+                .with_server_info(Implementation::new("meta-capturing-server", "0.1.0"))
+        }
+
+        async fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, ErrorData> {
+            Ok(ListToolsResult::with_all_items(vec![make_tool(
+                "echo_meta",
+                "records the request _meta",
+            )]))
+        }
+
+        async fn call_tool(
+            &self,
+            _request: CallToolRequestParams,
+            context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResult, ErrorData> {
+            // rmcp's router moves the request's `_meta` into `RequestContext.meta`
+            // (a `std::mem::swap`), so the forwarded metadata lands here.
+            *self.seen_meta.write().await = Some(context.meta.clone());
+            Ok(CallToolResult::success(vec![ContentBlock::text("ok")]))
+        }
+    }
+
+    /// `McpTool::call_with_extensions` forwards an [`rmcp::model::Meta`] placed in the
+    /// [`ToolCallExtensions`] as the request's `_meta`, so callers can attach per-call
+    /// auth/session metadata to MCP tool invocations (the A2A use-case).
+    #[tokio::test]
+    async fn mcp_tool_forwards_meta_from_context() {
+        use super::McpTool;
+        use crate::tool::{ToolCallExtensions, ToolDyn};
+
+        let seen_meta = Arc::new(RwLock::new(None));
+        let server = MetaCapturingServer {
+            seen_meta: seen_meta.clone(),
+        };
+
+        let (client_to_server, server_from_client) = tokio::io::duplex(8192);
+        let (server_to_client, client_from_server) = tokio::io::duplex(8192);
+
+        let server_clone = server.clone();
+        let server_task = tokio::spawn(async move {
+            let running = server_clone
+                .serve((server_from_client, server_to_client))
+                .await
+                .expect("server failed to start");
+            running.waiting().await.expect("server error");
+        });
+
+        let client = ClientInfo::default()
+            .serve((client_from_server, client_to_server))
+            .await
+            .expect("client connect failed");
+
+        let tools = client
+            .peer()
+            .list_all_tools()
+            .await
+            .expect("list_tools failed");
+        let mcp_tool = McpTool::from_mcp_server(tools[0].clone(), client.peer().clone());
+
+        // Caller-supplied per-call metadata, the kind an A2A integration carries.
+        let mut meta = Meta::new();
+        meta.0
+            .insert("authorization".to_string(), json!("Bearer xyz"));
+        let mut extensions = ToolCallExtensions::new();
+        extensions.insert(meta);
+
+        let out = mcp_tool
+            .call_with_extensions("{}".to_string(), &extensions)
+            .await
+            .expect("call should succeed");
+        assert_eq!(out, "ok");
+
+        let received = seen_meta
+            .read()
+            .await
+            .clone()
+            .expect("server should have observed a request");
+        assert_eq!(received.0.get("authorization"), Some(&json!("Bearer xyz")));
+
+        // Without a Meta in the context, the caller metadata is not forwarded.
+        *seen_meta.write().await = None;
+        let empty_ctx = ToolCallExtensions::new();
+        let out = mcp_tool
+            .call_with_extensions("{}".to_string(), &empty_ctx)
+            .await
+            .expect("call should succeed");
+        assert_eq!(out, "ok");
+        let received = seen_meta
+            .read()
+            .await
+            .clone()
+            .expect("server should have observed a request");
+        assert!(
+            received.0.get("authorization").is_none(),
+            "no caller metadata should be forwarded when the context carries none"
+        );
+
+        server_task.abort();
+    }
+
+    /// `parse_mcp_arguments` distinguishes malformed JSON (a hard error) from
+    /// valid-but-argument-free inputs (empty / `null` / non-object) which map to
+    /// `None`, while a JSON object round-trips.
+    #[test]
+    fn parse_mcp_arguments_classifies_inputs() {
+        use super::parse_mcp_arguments;
+
+        assert!(parse_mcp_arguments("").expect("empty is no-args").is_none());
+        assert!(
+            parse_mcp_arguments("   ")
+                .expect("whitespace is no-args")
+                .is_none()
+        );
+        assert!(
+            parse_mcp_arguments("null")
+                .expect("null is no-args")
+                .is_none()
+        );
+        assert!(
+            parse_mcp_arguments("[1,2]")
+                .expect("array is no-args")
+                .is_none()
+        );
+        assert!(parse_mcp_arguments("{}").expect("empty object").is_some());
+        let obj = parse_mcp_arguments("{\"a\":1}")
+            .expect("valid object")
+            .expect("object present");
+        assert_eq!(obj.get("a"), Some(&json!(1)));
+
+        // Malformed JSON is a hard error, not a silent no-arg call.
+        assert!(parse_mcp_arguments("{not valid json").is_err());
+        assert!(parse_mcp_arguments("{\"a\":").is_err());
+    }
+
+    /// Malformed JSON arguments are classified as [`ToolFailureKind::InvalidArgs`]
+    /// and short-circuit **before** the MCP server is contacted — proven by
+    /// pointing the tool at a server that never responds and asserting the call
+    /// returns fast with a structured invalid-args outcome instead of hanging.
+    #[tokio::test]
+    async fn mcp_tool_invalid_json_args_short_circuit_as_invalid_args() {
+        use super::McpTool;
+        use crate::tool::{ToolCallExtensions, ToolDyn, ToolFailureKind, ToolOutcome};
+
+        let (client_to_server, server_from_client) = tokio::io::duplex(8192);
+        let (server_to_client, client_from_server) = tokio::io::duplex(8192);
+
+        let server_task = tokio::spawn(async move {
+            let running = HangingToolServer
+                .serve((server_from_client, server_to_client))
+                .await
+                .expect("server failed to start");
+            running.waiting().await.expect("server error");
+        });
+
+        let client = ClientInfo::default()
+            .serve((client_from_server, client_to_server))
+            .await
+            .expect("client connect failed");
+
+        let tools = client
+            .peer()
+            .list_all_tools()
+            .await
+            .expect("list_tools failed");
+
+        // A generous per-call timeout: if invalid args wrongly reached the hanging
+        // server, the call would take this long; the safety timeout below is much
+        // shorter, so the test fails fast on a regression rather than short-circuiting.
+        let mcp_tool = McpTool::from_mcp_server(tools[0].clone(), client.peer().clone())
+            .with_timeout(Duration::from_secs(30));
+
+        let structured = tokio::time::timeout(
+            Duration::from_secs(2),
+            mcp_tool.call_structured("{not valid json".to_string(), &ToolCallExtensions::new()),
+        )
+        .await
+        .expect(
+            "invalid JSON args must be classified before contacting the (hanging) server; \
+             the call reached the server and hung",
+        );
+
+        match &structured.outcome {
+            ToolOutcome::Error(failure) => {
+                assert_eq!(
+                    failure.kind,
+                    ToolFailureKind::InvalidArgs,
+                    "malformed MCP args must classify as InvalidArgs, got {:?}",
+                    failure.kind
+                );
+            }
+            other => panic!("expected an InvalidArgs error outcome, got {other:?}"),
+        }
+        assert!(
+            structured.model_output.contains("invalid JSON"),
+            "the model-visible output should explain the parse failure, got {:?}",
+            structured.model_output
+        );
+
+        // The string `call` path surfaces the same failure as a `ToolError`.
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            mcp_tool.call("{not valid json".to_string()),
+        )
+        .await
+        .expect("invalid JSON args must short-circuit on the string path too")
+        .expect_err("malformed args must be an error");
+        assert!(err.to_string().contains("invalid JSON"), "got: {err}");
 
         server_task.abort();
     }

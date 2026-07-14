@@ -1,9 +1,9 @@
 //! Groq permission-control regression coverage.
 
 use anyhow::Result;
-use rig::agent::{HookAction, PromptHook, ToolCallHookAction, stream_to_stdout};
+use rig::agent::{AgentHook, Flow, StepEvent, stream_to_stdout};
 use rig::client::{CompletionClient, ProviderClient};
-use rig::completion::{CompletionModel, Prompt, ToolDefinition};
+use rig::completion::{CompletionModel, Prompt};
 use rig::providers::groq;
 use rig::streaming::StreamingPrompt;
 use rig::tool::Tool;
@@ -51,16 +51,16 @@ impl Tool for ReadFileHead {
     type Args = ReadFileArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "read_file_head".to_string(),
-            description: "Read the first line of test.txt using the head command".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-            }),
-        }
+    fn description(&self) -> String {
+        "Read the first line of test.txt using the head command".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+        })
     }
 
     async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -83,16 +83,16 @@ impl Tool for ReadFileTail {
     type Args = ReadFileArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "read_file_tail".to_string(),
-            description: "Read the last line of test.txt using the tail command".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-            }),
-        }
+    fn description(&self) -> String {
+        "Read the last line of test.txt using the tail command".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "required": [],
+        })
     }
 
     async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -112,43 +112,34 @@ struct PermissionHook {
     last_result: Arc<Mutex<Option<String>>>,
 }
 
-impl<M: CompletionModel> PromptHook<M> for PermissionHook {
-    async fn on_tool_call(
-        &self,
-        tool_name: &str,
-        _tool_call_id: Option<String>,
-        _internal_call_id: &str,
-        _args: &str,
-    ) -> ToolCallHookAction {
-        let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+impl<M: CompletionModel> AgentHook<M> for PermissionHook {
+    async fn on_event(&self, _ctx: &rig::agent::HookContext, event: StepEvent<'_, M>) -> Flow {
+        match event {
+            StepEvent::ToolCall { tool_name, .. } => {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
 
-        if count == 0 {
-            ToolCallHookAction::Skip {
-                reason: format!(
-                    "Tool '{}' is currently unavailable. \
-                     Please use 'read_file_tail' instead to read the file.",
-                    tool_name
-                ),
+                if count == 0 {
+                    Flow::Skip {
+                        reason: format!(
+                            "Tool '{}' is currently unavailable. \
+                             Please use 'read_file_tail' instead to read the file.",
+                            tool_name
+                        ),
+                    }
+                } else {
+                    Flow::Continue
+                }
             }
-        } else {
-            ToolCallHookAction::Continue
+            StepEvent::ToolResult { result, .. } => {
+                let normalized =
+                    serde_json::from_str::<String>(result).unwrap_or_else(|_| result.to_string());
+                let mut last = self.last_result.lock().expect("lock last_result");
+                *last = Some(normalized);
+
+                Flow::cont()
+            }
+            _ => Flow::cont(),
         }
-    }
-
-    async fn on_tool_result(
-        &self,
-        _tool_name: &str,
-        _tool_call_id: Option<String>,
-        _internal_call_id: &str,
-        _args: &str,
-        result: &str,
-    ) -> HookAction {
-        let normalized =
-            serde_json::from_str::<String>(result).unwrap_or_else(|_| result.to_string());
-        let mut last = self.last_result.lock().expect("lock last_result");
-        *last = Some(normalized);
-
-        HookAction::cont()
     }
 }
 
@@ -178,7 +169,7 @@ async fn permission_control_prompt_example() -> Result<()> {
              Do not ask any follow-up questions; just read the file and report its content.",
         )
         .max_turns(5)
-        .with_hook(hook)
+        .add_hook(hook)
         .await?;
 
     let last = last_result.lock().expect("lock last_result").clone();
@@ -218,20 +209,20 @@ async fn permission_control_streaming_example() -> Result<()> {
              Both tools take zero arguments and return the file content. \
              Do not ask any follow-up questions. After a tool succeeds, reply with the exact file content.",
         )
-        .multi_turn(5)
-        .with_hook(hook)
+        .max_turns(5)
+        .add_hook(hook)
         .await;
 
     let final_response = stream_to_stdout(&mut stream).await?;
     let last = last_result.lock().expect("lock last_result").clone();
-    assert_nonempty_response(final_response.response());
+    assert_nonempty_response(final_response.output());
     anyhow::ensure!(
         final_response
-            .response()
+            .output()
             .to_ascii_lowercase()
             .contains("hello world"),
         "expected the streamed final response to mention the file content, got {:?}",
-        final_response.response()
+        final_response.output()
     );
     anyhow::ensure!(last.as_deref() == Some("hello world"));
     anyhow::ensure!(

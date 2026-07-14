@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use futures::StreamExt;
 use rig::OneOrMany;
 use rig::agent::{MultiTurnStreamItem, StreamingError};
-use rig::completion::request::ToolDefinition;
 use rig::completion::{self, CompletionModel};
 use rig::message::{
     AssistantContent, Message, Reasoning, ReasoningContent, ToolResultContent, UserContent,
@@ -57,6 +56,17 @@ where
     M: CompletionModel,
     M::StreamingResponse: WasmCompatSend,
 {
+    run_reasoning_roundtrip_streaming_with_final(agent, |_| {}).await;
+}
+
+pub(crate) async fn run_reasoning_roundtrip_streaming_with_final<M, F>(
+    agent: ReasoningRoundtripAgent<M>,
+    mut inspect_final: F,
+) where
+    M: CompletionModel,
+    M::StreamingResponse: WasmCompatSend,
+    F: FnMut(&M::StreamingResponse),
+{
     let turn1_prompt = Message::User {
         content: OneOrMany::one(UserContent::text(ROUNDTRIP_TURN1_TEXT)),
     };
@@ -93,6 +103,7 @@ where
             Ok(StreamedAssistantContent::ReasoningDelta { reasoning, .. }) => {
                 reasoning_delta_text.push_str(&reasoning);
             }
+            Ok(StreamedAssistantContent::Final(response)) => inspect_final(&response),
             Ok(_) => {}
             Err(error) => panic!("Turn 1 stream error: {error}"),
         }
@@ -285,23 +296,21 @@ impl Tool for WeatherTool {
     type Args = WeatherArgs;
     type Output = String;
 
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: "get_weather".to_string(),
-            description:
-                "Get the current weather for a city. Must be called for weather questions."
-                    .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": "City name to get weather for"
-                    }
-                },
-                "required": ["city"]
-            }),
-        }
+    fn description(&self) -> String {
+        "Get the current weather for a city. Must be called for weather questions.".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "description": "City name to get weather for"
+                }
+            },
+            "required": ["city"]
+        })
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -447,6 +456,9 @@ pub(crate) async fn collect_stream_stats<R>(
                 StreamedAssistantContent::Final(_) => {
                     stats.events.push("final");
                 }
+                StreamedAssistantContent::Unknown(_) => {
+                    stats.events.push("unknown");
+                }
             },
             Ok(MultiTurnStreamItem::StreamUserItem(ref content)) => match content {
                 StreamedUserContent::ToolResult { .. } => {
@@ -456,7 +468,7 @@ pub(crate) async fn collect_stream_stats<R>(
                 }
             },
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
-                stats.final_response_text = Some(response.response().to_owned());
+                stats.final_response_text = Some(response.output().to_owned());
                 stats.got_final_response = true;
             }
             Ok(_) => {}
@@ -540,7 +552,7 @@ pub(crate) fn assert_universal(
     assert_eq!(
         stats.final_response_text.as_deref(),
         Some(stats.final_turn_text.as_str()),
-        "[{provider}] FinalResponse.response() diverged from streamed text."
+        "[{provider}] FinalResponse.output() diverged from streamed text."
     );
 }
 

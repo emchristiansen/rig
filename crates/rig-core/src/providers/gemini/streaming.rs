@@ -1,7 +1,7 @@
 use async_stream::stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::{Level, enabled, info_span};
+use tracing::{Level, enabled};
 use tracing_futures::Instrument;
 
 use super::completion::gemini_api_types::{
@@ -16,11 +16,12 @@ use crate::completion::{CompletionError, CompletionRequest, GetTokenUsage};
 use crate::http_client::HttpClientExt;
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::streaming;
-use crate::telemetry::SpanCombinator;
+use crate::telemetry::{CompletionOperation, CompletionSpanBuilder, SpanCombinator};
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PartialUsage {
+    #[serde(default)]
     pub total_token_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_content_token_count: Option<i32>,
@@ -102,26 +103,13 @@ where
     ) -> Result<streaming::StreamingCompletionResponse<StreamingCompletionResponse>, CompletionError>
     {
         let request_model = resolve_request_model(&self.model, &completion_request);
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat_streaming",
-                gen_ai.operation.name = "chat_streaming",
-                gen_ai.provider.name = "gcp.gemini",
-                gen_ai.request.model = &request_model,
-                gen_ai.system_instructions = &completion_request.preamble,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = &request_model,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
-                gen_ai.usage.tool_use_prompt_tokens = tracing::field::Empty,
-                gen_ai.usage.reasoning_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
+        let span = CompletionSpanBuilder::new(
+            "gcp.gemini",
+            &request_model,
+            CompletionOperation::ChatStreaming,
+        )
+        .system_instructions(completion_request.preamble.as_deref())
+        .build();
         let request = create_request_body(completion_request)?;
 
         if enabled!(Level::TRACE) {
@@ -282,7 +270,7 @@ where
                     Err(error) => {
                         tracing::error!(?error, "SSE error");
                         stream_failed = true;
-                        yield Err(CompletionError::ProviderError(error.to_string()));
+                        yield Err(CompletionError::from_stream_transport(error));
                         break;
                     }
                 }
@@ -710,6 +698,16 @@ mod tests {
         assert_eq!(token_usage.output_tokens, 30);
         assert_eq!(token_usage.reasoning_tokens, 0);
         assert_eq!(token_usage.total_tokens, 50);
+    }
+
+    #[test]
+    fn test_partial_usage_deserializes_without_total_token_count() {
+        // Gemini's proto3-JSON encoding omits fields whose value is the default (0),
+        // so `totalTokenCount` is absent on short/empty/blocked generations.
+        let usage: PartialUsage =
+            serde_json::from_str(r#"{"promptTokenCount": 12}"#).expect("should deserialize");
+        assert_eq!(usage.total_token_count, 0);
+        assert_eq!(usage.prompt_token_count, 12);
     }
 
     #[test]

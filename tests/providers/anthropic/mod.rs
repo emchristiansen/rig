@@ -6,6 +6,11 @@ mod cassette {
     mod document_file_id;
     mod empty_end_turn;
     mod image;
+    mod messages_behaviors;
+    mod messages_sessions;
+    mod messages_thinking;
+    mod messages_tool_args;
+    mod messages_tool_choice;
     mod models;
     mod multi_turn_streaming;
     mod opus_4_7;
@@ -14,11 +19,14 @@ mod cassette {
     mod prompt_caching;
     mod reasoning_roundtrip;
     mod reasoning_tool_roundtrip;
+    mod request_override;
     mod streaming;
     mod streaming_tools;
     mod structured_output;
     mod think_tool;
     mod think_tool_with_other_tools;
+    mod tool_call_rewrite_args;
+    mod tool_result_rewrite;
 }
 
 mod live {}

@@ -57,6 +57,10 @@ pub fn merge(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
     }
 }
 
+// Only the feature-gated `image` / `audio` provider request builders call this
+// now; the default feature set has no caller, so allow it to be unused there
+// rather than warning on an otherwise-live utility.
+#[cfg_attr(not(any(feature = "image", feature = "audio")), allow(dead_code))]
 pub fn merge_inplace(a: &mut serde_json::Value, b: serde_json::Value) {
     if let (serde_json::Value::Object(a_map), serde_json::Value::Object(b_map)) = (a, b) {
         b_map.into_iter().for_each(|(key, value)| {
@@ -410,5 +414,63 @@ mod tests {
     fn test_parse_tool_arguments_valid_json() {
         let parsed = parse_tool_arguments(r#"{"key":"value"}"#).unwrap();
         assert_eq!(parsed, serde_json::json!({"key": "value"}));
+    }
+
+    /// The OFF arm of [`from_str`] — the default-build production parse path — must be a
+    /// behavior-identical delegate to `serde_json::from_str`. This is the inverse-gated
+    /// complement of `streaming.rs::tests::arbitrary_precision_flatten_workaround` (gated ON):
+    /// gating on the workaround being OFF means this module compiles under exactly the build in
+    /// which the OFF arm is compiled, so it can never accidentally exercise the ON arm. The
+    /// comparison holds under both the default feature set and `_internal-test-arbitrary-precision`,
+    /// because it asserts the OFF arm mirrors `serde_json` whatever `serde_json` does under the
+    /// active features.
+    #[cfg(not(feature = "arbitrary-precision-flatten-workaround"))]
+    mod off_arm_equivalence {
+        use super::super::from_str;
+        use serde::Deserialize;
+
+        // Reproduces the serde-rs/json#1157 shape the ON arm exists to work around:
+        // `#[serde(flatten)]` reaching a concrete `f64`. Exercising equivalence on this shape (not
+        // a trivial struct) covers the one input class where the two arms could plausibly diverge.
+        #[derive(Deserialize, Debug, PartialEq)]
+        struct Flattened {
+            name: String,
+            #[serde(flatten)]
+            rest: Inner,
+        }
+        #[derive(Deserialize, Debug, PartialEq)]
+        struct Inner {
+            top_p: Option<f64>,
+        }
+
+        // Reduce a `serde_json` result to a form comparable across the two call paths: success
+        // values by `PartialEq`; failures by their public observable surface — category, line,
+        // column, and Display message. `serde_json::Error` is not `PartialEq`, so this normalized
+        // tuple is the strongest available comparison; for a literal delegate the OFF arm must
+        // yield the identical normalized result.
+        fn observable<T>(
+            r: Result<T, serde_json::Error>,
+        ) -> Result<T, (serde_json::error::Category, usize, usize, String)> {
+            r.map_err(|e| (e.classify(), e.line(), e.column(), e.to_string()))
+        }
+
+        #[test]
+        fn off_arm_from_str_matches_serde_json_direct() {
+            let inputs = [
+                r#"{"name":"a","top_p":0.5}"#, // flatten + float — the #1157 shape (Ok by default; Err under AP)
+                r#"{"name":"b","top_p":null}"#, // absent number
+                r#"{"name":"c"}"#,             // missing optional
+                r#"{"name":"a","top_p":"not-a-number"}"#, // type mismatch → Err on both
+                r#"{"top_p":0.5}"#,            // missing required `name` → Err on both
+                r#"{ this is not json "#,      // syntax error → Err on both
+            ];
+            for s in inputs {
+                assert_eq!(
+                    observable(from_str::<Flattened>(s)),
+                    observable(serde_json::from_str::<Flattened>(s)),
+                    "OFF arm diverged from serde_json::from_str for input: {s}",
+                );
+            }
+        }
     }
 }

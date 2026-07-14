@@ -6,7 +6,6 @@ use rig::completion::CompletionModel;
 use rig::message::{AssistantContent, Message, ToolChoice};
 use rig::providers::deepseek::DEEPSEEK_V4_FLASH;
 use rig::streaming::StreamingChat;
-use rig::tool::Tool;
 
 use super::support::with_deepseek_cassette;
 use crate::support::{
@@ -14,10 +13,10 @@ use crate::support::{
     ORDERED_TOOL_STREAM_PREAMBLE, ORDERED_TOOL_STREAM_PROMPT, REQUIRED_ZERO_ARG_TOOL_PROMPT,
     Subtract, TWO_TOOL_STREAM_PREAMBLE, TWO_TOOL_STREAM_PROMPT, assert_mentions_expected_number,
     assert_raw_stream_contains_distinct_tool_calls_before_text, assert_raw_stream_text_contains,
-    assert_raw_stream_tool_call_precedes_text, assert_stream_contains_zero_arg_tool_call_named,
-    assert_tool_call_precedes_later_text, assert_two_tool_roundtrip_contract,
-    collect_raw_stream_observation, collect_stream_final_response, collect_stream_observation,
-    zero_arg_tool_definition,
+    assert_raw_stream_tool_call_arguments_are_objects, assert_raw_stream_tool_call_precedes_text,
+    assert_stream_contains_zero_arg_tool_call_named, assert_tool_call_precedes_later_text,
+    assert_two_tool_roundtrip_contract, collect_raw_stream_observation,
+    collect_stream_final_response, collect_stream_observation, zero_arg_tool_definition,
 };
 
 fn non_thinking_params() -> serde_json::Value {
@@ -40,6 +39,7 @@ async fn streaming_chat_with_tools() {
                 .tool(Adder)
                 .tool(Subtract)
                 .additional_params(non_thinking_params())
+                .default_max_turns(2)
                 .build();
 
             let history: &[Message] = &[];
@@ -83,8 +83,8 @@ async fn raw_stream_surfaces_two_distinct_tool_calls_before_text() {
             let request = model
                 .completion_request(TWO_TOOL_STREAM_PROMPT)
                 .preamble(TWO_TOOL_STREAM_PREAMBLE.to_string())
-                .tool(AlphaSignal.definition(String::new()).await)
-                .tool(BetaSignal.definition(String::new()).await)
+                .tool(rig::tool::tool_definition(&AlphaSignal))
+                .tool(rig::tool::tool_definition(&BetaSignal))
                 .additional_params(non_thinking_params())
                 .build();
 
@@ -97,6 +97,44 @@ async fn raw_stream_surfaces_two_distinct_tool_calls_before_text() {
             .await;
 
             assert_raw_stream_contains_distinct_tool_calls_before_text(
+                &observation,
+                &["lookup_harbor_label", "lookup_orchard_label"],
+            );
+        },
+    )
+    .await;
+}
+
+/// Live end-to-end guard for the #1958 invariant: every tool call surfaced by
+/// the streaming aggregator carries a JSON **object** as its arguments, never a
+/// bare string. Recorded against real DeepSeek traffic with two tool calls in a
+/// single streamed turn (which exercises the same-turn multi-tool accumulation
+/// path). DeepSeek assigns distinct indices, so this complements — rather than
+/// replaces — the in-crate unit tests that drive the same-index eviction path
+/// directly (a quirk only some API gateways emit and not reproducible live).
+#[tokio::test]
+async fn raw_stream_tool_call_arguments_are_objects() {
+    with_deepseek_cassette(
+        "streaming_tools/raw_stream_tool_call_arguments_are_objects",
+        |client| async move {
+            let model = client.completion_model(DEEPSEEK_V4_FLASH);
+            let request = model
+                .completion_request(TWO_TOOL_STREAM_PROMPT)
+                .preamble(TWO_TOOL_STREAM_PREAMBLE.to_string())
+                .tool(rig::tool::tool_definition(&AlphaSignal))
+                .tool(rig::tool::tool_definition(&BetaSignal))
+                .additional_params(non_thinking_params())
+                .build();
+
+            let observation = collect_raw_stream_observation(
+                model
+                    .stream(request)
+                    .await
+                    .expect("raw stream should start"),
+            )
+            .await;
+
+            assert_raw_stream_tool_call_arguments_are_objects(
                 &observation,
                 &["lookup_harbor_label", "lookup_orchard_label"],
             );
@@ -121,7 +159,7 @@ async fn streaming_chat_surfaces_two_distinct_tool_calls_before_final_answer() {
             let history: &[Message] = &[];
             let mut stream = agent
                 .stream_chat(TWO_TOOL_STREAM_PROMPT, history)
-                .multi_turn(8)
+                .max_turns(8)
                 .await;
             let observation = collect_stream_observation(&mut stream).await;
 
@@ -150,7 +188,7 @@ async fn streaming_chat_emits_tool_call_before_later_text() {
             let history: &[Message] = &[];
             let mut stream = agent
                 .stream_chat(ORDERED_TOOL_STREAM_PROMPT, history)
-                .multi_turn(5)
+                .max_turns(5)
                 .await;
             let observation = collect_stream_observation(&mut stream).await;
 
@@ -173,7 +211,7 @@ async fn raw_followup_uses_tool_result_without_new_tool_calls() {
             let request = model
                 .completion_request(ORDERED_TOOL_STREAM_PROMPT)
                 .preamble(ORDERED_TOOL_STREAM_PREAMBLE.to_string())
-                .tool(AlphaSignal.definition(String::new()).await)
+                .tool(rig::tool::tool_definition(&AlphaSignal))
                 .additional_params(non_thinking_params())
                 .build();
 

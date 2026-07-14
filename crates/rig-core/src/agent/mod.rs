@@ -106,21 +106,28 @@
 //! ```
 mod builder;
 mod completion;
+pub mod hook;
 pub(crate) mod prompt_request;
 pub mod run;
+pub mod runner;
 mod tool;
+
+/// Fallback display name used in telemetry spans and logs when an agent has no
+/// configured name.
+pub(crate) const UNKNOWN_AGENT_NAME: &str = "Unnamed Agent";
 
 pub use crate::message::Text;
 pub use builder::{AgentBuilder, NoToolConfig, WithBuilderTools, WithToolServerHandle};
 pub use completion::Agent;
-pub use prompt_request::hooks::{
-    HookAction, InvalidToolCallContext, InvalidToolCallHookAction, PromptHook, ToolCallHookAction,
+pub use hook::{
+    AgentHook, Flow, HookContext, HookStack, InvalidToolCallContext, InvalidToolCallHookAction,
+    RequestPatch, RunId, Scratchpad, StepEvent, StepEventKind,
 };
 pub use prompt_request::streaming::{
-    FinalResponse, MultiTurnStreamItem, StreamingError, StreamingPromptRequest, StreamingResult,
-    stream_to_stdout,
+    MultiTurnStreamItem, StreamingError, StreamingPromptRequest, StreamingResult, stream_to_stdout,
 };
 pub use prompt_request::{
     CompletionCall, PromptRequest, PromptResponse, TypedPromptRequest, TypedPromptResponse,
 };
-pub use run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome, PendingToolCall};
+pub use run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome, OutputMode, PendingToolCall};
+pub use runner::AgentRunner;

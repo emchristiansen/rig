@@ -3,12 +3,16 @@
 //! handling transcription responses, and defining transcription models.
 use crate::markers::{Missing, Provided};
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
-use crate::{http_client, json_utils};
+use crate::{http_client, json_utils, provider_response};
 use std::io;
 use std::{fs, path::Path};
 use thiserror::Error;
 
 // Errors
+/// Errors returned by transcription models.
+///
+/// Inspect provider failures with [`Self::provider_response_body`],
+/// [`Self::provider_response_json`], and [`Self::provider_response_status`].
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TranscriptionError {
@@ -37,29 +41,13 @@ pub enum TranscriptionError {
     /// Error returned by the transcription model provider
     #[error("ProviderError: {0}")]
     ProviderError(String),
+
+    /// Raw error response preserved from the transcription model provider
+    #[error("ProviderResponseError: {0}")]
+    ProviderResponse(provider_response::ProviderResponseError),
 }
 
-/// Trait defining a low-level LLM transcription interface
-pub trait Transcription<M>
-where
-    M: TranscriptionModel,
-{
-    /// Generates a transcription request builder for the given `file`.
-    /// This function is meant to be called by the user to further customize the
-    /// request at transcription time before sending it.
-    ///
-    /// ❗IMPORTANT: The type that implements this trait might have already
-    /// populated fields in the builder (the exact fields depend on the type).
-    /// For fields that have already been set by the model, calling the corresponding
-    /// method on the builder will overwrite the value set by the model.
-    fn transcription(
-        &self,
-        filename: &str,
-        data: &[u8],
-    ) -> impl std::future::Future<
-        Output = Result<TranscriptionRequestBuilder<M, Provided<Vec<u8>>>, TranscriptionError>,
-    > + WasmCompatSend;
-}
+crate::provider_response::impl_provider_response_helpers!(TranscriptionError);
 
 /// General transcription response struct that contains the transcription text
 /// and the raw response.
@@ -294,5 +282,78 @@ where
     pub async fn send(self) -> Result<TranscriptionResponse<M::Response>, TranscriptionError> {
         let model = self.model.clone();
         model.transcription(self.build()).await
+    }
+}
+
+#[cfg(test)]
+mod provider_response_tests {
+    use super::*;
+    use http::StatusCode;
+
+    #[test]
+    fn transcription_error_provider_response_helpers_with_preserved_json_body() {
+        let body = r#"{"error":{"message":"rate limited"}}"#;
+        let error =
+            TranscriptionError::ProviderResponse(provider_response::ProviderResponseError {
+                status: None,
+                body: body.to_string(),
+            });
+
+        assert_eq!(error.provider_response_body(), Some(body));
+        assert_eq!(error.provider_response_status(), None);
+        assert_eq!(
+            error.provider_response_json().expect("valid JSON"),
+            Some(serde_json::json!({ "error": { "message": "rate limited" } }))
+        );
+    }
+
+    #[test]
+    fn transcription_error_provider_response_helpers_with_http_non_success() {
+        let body = r#"{"error":{"message":"bad request"}}"#;
+        let error =
+            TranscriptionError::HttpError(http_client::Error::InvalidStatusCodeWithMessage(
+                StatusCode::BAD_REQUEST,
+                body.to_string(),
+            ));
+
+        assert_eq!(error.provider_response_body(), Some(body));
+        assert_eq!(
+            error.provider_response_status(),
+            Some(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            error.provider_response_json().expect("valid JSON"),
+            Some(serde_json::json!({ "error": { "message": "bad request" } }))
+        );
+    }
+
+    #[test]
+    fn transcription_error_provider_response_helpers_with_preserved_plain_text_body() {
+        let error =
+            TranscriptionError::ProviderResponse(provider_response::ProviderResponseError {
+                status: None,
+                body: "not json".to_string(),
+            });
+
+        assert_eq!(error.provider_response_body(), Some("not json"));
+        assert!(error.provider_response_json().is_err());
+    }
+
+    #[test]
+    fn transcription_error_provider_error_is_not_a_provider_response() {
+        let error = TranscriptionError::ProviderError("internal diagnostic".to_string());
+
+        assert_eq!(error.provider_response_body(), None);
+        assert_eq!(error.provider_response_status(), None);
+        assert_eq!(error.provider_response_json().expect("no body"), None);
+    }
+
+    #[test]
+    fn transcription_error_provider_response_helpers_with_unrelated_variant() {
+        let error = TranscriptionError::ResponseError("parse failed".to_string());
+
+        assert_eq!(error.provider_response_body(), None);
+        assert_eq!(error.provider_response_status(), None);
+        assert_eq!(error.provider_response_json().expect("no body"), None);
     }
 }

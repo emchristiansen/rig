@@ -25,17 +25,27 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
             "with_openai_completions_cassette",
             "with_openai_cassette_result",
             "with_openai_completions_cassette_result",
+            "with_openai_vllm_cassette",
+            "with_local_reasoning_content_cassette",
         ],
     },
     ProviderCassetteSuite {
         provider: "chatgpt",
         source_dir: "tests/providers/chatgpt/cassette",
-        wrapper_names: &["with_chatgpt_cassette"],
+        wrapper_names: &[
+            "with_chatgpt_cassette",
+            "with_chatgpt_cassette_default_instructions",
+            "with_chatgpt_noninteractive_oauth_cassette",
+        ],
     },
     ProviderCassetteSuite {
         provider: "copilot",
         source_dir: "tests/providers/copilot",
-        wrapper_names: &["with_copilot_cassette", "with_copilot_cassette_result"],
+        wrapper_names: &[
+            "with_copilot_cassette",
+            "with_copilot_cassette_result",
+            "with_copilot_noninteractive_oauth_cassette",
+        ],
     },
     ProviderCassetteSuite {
         provider: "anthropic",
@@ -47,9 +57,24 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         ],
     },
     ProviderCassetteSuite {
+        provider: "bedrock",
+        source_dir: "tests/providers/bedrock/cassette",
+        wrapper_names: &["with_bedrock_cassette"],
+    },
+    ProviderCassetteSuite {
         provider: "gemini",
         source_dir: "tests/providers/gemini/cassette",
         wrapper_names: &["with_gemini_cassette", "with_gemini_interactions_cassette"],
+    },
+    ProviderCassetteSuite {
+        provider: "ollama",
+        source_dir: "tests/providers/ollama/cassette",
+        wrapper_names: &["with_ollama_cassette"],
+    },
+    ProviderCassetteSuite {
+        provider: "llamafile",
+        source_dir: "tests/providers/llamafile/cassette",
+        wrapper_names: &["with_llamafile_cassette"],
     },
     ProviderCassetteSuite {
         provider: "xai",
@@ -69,6 +94,21 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         provider: "deepseek",
         source_dir: "tests/providers/deepseek",
         wrapper_names: &["with_deepseek_cassette", "with_deepseek_cassette_result"],
+    },
+    ProviderCassetteSuite {
+        provider: "groq",
+        source_dir: "tests/providers/groq",
+        wrapper_names: &["with_groq_cassette_result"],
+    },
+    ProviderCassetteSuite {
+        provider: "mistral",
+        source_dir: "tests/providers/mistral",
+        wrapper_names: &["with_mistral_cassette_result"],
+    },
+    ProviderCassetteSuite {
+        provider: "perplexity",
+        source_dir: "tests/providers/perplexity/cassette",
+        wrapper_names: &["with_perplexity_cassette"],
     },
     ProviderCassetteSuite {
         provider: "mistralrs",

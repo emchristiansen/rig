@@ -1,18 +1,20 @@
 use crate::types::completion_request::AwsCompletionRequest;
 use crate::{
     completion::{CompletionModel, resolve_request_model},
-    types::errors::AwsSdkConverseStreamError,
+    types::errors::{AwsSdkConverseStreamError, converse_stream_output_completion_error},
 };
 use async_stream::stream;
 use aws_sdk_bedrockruntime::types as aws_bedrock;
 use rig_core::completion::GetTokenUsage;
 use rig_core::streaming::StreamingCompletionResponse;
+use rig_core::telemetry::{CompletionOperation, CompletionSpanBuilder, SpanCombinator};
 use rig_core::{
     completion::CompletionError,
     message::ReasoningContent,
     streaming::{RawStreamingChoice, RawStreamingToolCall, ToolCallDeltaContent},
 };
 use serde::{Deserialize, Serialize};
+use tracing_futures::Instrument;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct BedrockStreamingResponse {
@@ -91,10 +93,18 @@ impl CompletionModel {
         completion_request: rig_core::completion::CompletionRequest,
     ) -> Result<StreamingCompletionResponse<BedrockStreamingResponse>, CompletionError> {
         let request_model = resolve_request_model(&self.model, &completion_request);
+        let system_instructions = completion_request.preamble.clone();
         let request = AwsCompletionRequest {
             inner: completion_request,
             prompt_caching: self.prompt_caching,
         };
+        let span = CompletionSpanBuilder::new(
+            "aws_bedrock",
+            &request_model,
+            CompletionOperation::ChatStreaming,
+        )
+        .system_instructions(system_instructions.as_deref())
+        .build();
 
         let mut converse_builder = self
             .client
@@ -114,15 +124,28 @@ impl CompletionModel {
             .set_messages(Some(prompt_with_history))
             .set_output_config(output_config);
 
-        let response = converse_builder.send().await.map_err(|sdk_error| {
-            Into::<CompletionError>::into(AwsSdkConverseStreamError(sdk_error))
-        })?;
+        let response = converse_builder
+            .send()
+            .instrument(span.clone())
+            .await
+            .map_err(|sdk_error| {
+                Into::<CompletionError>::into(AwsSdkConverseStreamError(sdk_error))
+            })?;
 
         let stream = Box::pin(stream! {
+            let span = tracing::Span::current();
             let mut current_tool_call: Option<ToolCallState> = None;
             let mut current_reasoning: Option<ReasoningState> = None;
             let mut stream = response.stream;
-            while let Ok(Some(output)) = stream.recv().await {
+            loop {
+                let output = match stream.recv().await {
+                    Ok(Some(output)) => output,
+                    Ok(None) => break,
+                    Err(err) => {
+                        yield Err(converse_stream_output_completion_error(err.into_service_error()));
+                        break;
+                    }
+                };
                 match output {
                     aws_bedrock::ConverseStreamOutput::ContentBlockDelta(event) => {
                         let delta = event.delta.ok_or(CompletionError::ProviderError("The delta for a content block is missing".into()))?;
@@ -181,7 +204,7 @@ impl CompletionModel {
                     aws_bedrock::ConverseStreamOutput::ContentBlockStart(event) => {
                         match event.start.ok_or(CompletionError::ProviderError("ContentBlockStart has no data".into()))? {
                             aws_bedrock::ContentBlockStart::ToolUse(tool_use) => {
-                                let internal_call_id = nanoid::nanoid!();
+                                let internal_call_id = rig_core::id::generate();
                                 current_tool_call = Some(ToolCallState {
                                     name: tool_use.name.clone(),
                                     id: tool_use.tool_use_id.clone(),
@@ -230,7 +253,7 @@ impl CompletionModel {
                     aws_bedrock::ConverseStreamOutput::Metadata(metadata_event) => {
                         // Extract usage information from metadata
                         if let Some(usage) = metadata_event.usage {
-                            yield Ok(RawStreamingChoice::FinalResponse(BedrockStreamingResponse {
+                            let final_response = BedrockStreamingResponse {
                                 usage: Some(BedrockUsage {
                                     input_tokens: usage.input_tokens,
                                     output_tokens: usage.output_tokens,
@@ -238,13 +261,15 @@ impl CompletionModel {
                                     cache_read_input_tokens: usage.cache_read_input_tokens,
                                     cache_write_input_tokens: usage.cache_write_input_tokens,
                                 }),
-                            }));
+                            };
+                            span.record_token_usage(&final_response);
+                            yield Ok(RawStreamingChoice::FinalResponse(final_response));
                         }
                     },
                     _ => {}
                 }
             }
-        });
+        }.instrument(span));
 
         Ok(StreamingCompletionResponse::stream(stream))
     }
@@ -449,7 +474,7 @@ mod tests {
         let mut state = ToolCallState {
             name: "my_tool".to_string(),
             id: "tool_123".to_string(),
-            internal_call_id: nanoid::nanoid!(),
+            internal_call_id: rig_core::id::generate(),
             input_json: String::new(),
         };
 
@@ -467,7 +492,7 @@ mod tests {
         let state = ToolCallState {
             name: "test_tool".to_string(),
             id: "tool_abc".to_string(),
-            internal_call_id: nanoid::nanoid!(),
+            internal_call_id: rig_core::id::generate(),
             input_json: String::new(),
         };
 
@@ -481,7 +506,7 @@ mod tests {
         let mut state = ToolCallState {
             name: "get_weather".to_string(),
             id: "call_123".to_string(),
-            internal_call_id: nanoid::nanoid!(),
+            internal_call_id: rig_core::id::generate(),
             input_json: String::new(),
         };
 
@@ -495,7 +520,7 @@ mod tests {
         let mut state = ToolCallState {
             name: "search".to_string(),
             id: "call_xyz".to_string(),
-            internal_call_id: nanoid::nanoid!(),
+            internal_call_id: rig_core::id::generate(),
             input_json: String::new(),
         };
 
@@ -514,7 +539,7 @@ mod tests {
         let mut state = ToolCallState {
             name: "analyze_data".to_string(),
             id: "call_456".to_string(),
-            internal_call_id: nanoid::nanoid!(),
+            internal_call_id: rig_core::id::generate(),
             input_json: String::new(),
         };
 

@@ -4,7 +4,9 @@ use tokio::sync::RwLock;
 
 use crate::{
     completion::{CompletionError, ToolDefinition},
-    tool::{Tool, ToolDyn, ToolSet, ToolSetError},
+    tool::{
+        Tool, ToolCallExtensions, ToolDyn, ToolExecutionResult, ToolFailure, ToolSet, ToolSetError,
+    },
     vector_store::{VectorSearchRequest, VectorStoreError, VectorStoreIndexDyn, request::Filter},
 };
 
@@ -81,8 +83,7 @@ impl ToolServer {
     /// Add a static tool to the agent. Re-registering an existing name
     /// replaces the implementation (last wins) and keeps its position.
     pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
-        let toolname = tool.name();
-        self.toolset.add_tool(tool);
+        let toolname = self.toolset.add_tool(tool);
         push_unique_name(&mut self.static_tool_names, toolname);
         self
     }
@@ -110,8 +111,8 @@ impl ToolServer {
         timeout: impl Into<Option<std::time::Duration>>,
     ) -> Self {
         use crate::tool::rmcp::McpTool;
-        let toolname = tool.name.to_string();
-        self.toolset
+        let toolname = self
+            .toolset
             .add_tool(McpTool::from_mcp_server(tool, client).with_timeout(timeout));
         push_unique_name(&mut self.static_tool_names, toolname);
         self
@@ -153,9 +154,8 @@ impl ToolServerHandle {
     /// the implementation (last wins) and keeps its position.
     pub async fn add_tool(&self, tool: impl ToolDyn + 'static) -> Result<(), ToolServerError> {
         let mut state = self.0.write().await;
-        let toolname = tool.name();
+        let toolname = state.toolset.add_tool_boxed(Box::new(tool));
         push_unique_name(&mut state.static_tool_names, toolname);
-        state.toolset.add_tool_boxed(Box::new(tool));
         Ok(())
     }
 
@@ -186,6 +186,22 @@ impl ToolServerHandle {
     /// The tool handle is cloned under a brief read lock so that
     /// long-running tool executions never block writers.
     pub async fn call_tool(&self, tool_name: &str, args: &str) -> Result<String, ToolServerError> {
+        self.call_tool_with_extensions(tool_name, args, &ToolCallExtensions::EMPTY)
+            .await
+    }
+
+    /// Look up and execute a tool by name with per-call runtime extensions.
+    ///
+    /// The extensions are threaded through to [`Tool::call_with_extensions`],
+    /// allowing tools to access caller-provided values (auth tokens, session
+    /// IDs, etc.). The tool handle is cloned under a brief read lock so that
+    /// long-running tool executions never block writers.
+    pub async fn call_tool_with_extensions(
+        &self,
+        tool_name: &str,
+        args: &str,
+        extensions: &ToolCallExtensions,
+    ) -> Result<String, ToolServerError> {
         let tool = {
             let state = self.0.read().await;
             state.toolset.get(tool_name).cloned()
@@ -197,13 +213,49 @@ impl ToolServerHandle {
                     "Calling tool {tool_name} with args:\n{}",
                     serde_json::to_string_pretty(&args).unwrap_or_default()
                 );
-                tool.call(args.to_string())
+                tool.call_with_extensions(args.to_string(), extensions)
                     .await
                     .map_err(|e| ToolSetError::ToolCallError(e).into())
             }
             None => Err(ToolServerError::ToolsetError(
                 ToolSetError::ToolNotFoundError(tool_name.to_string()),
             )),
+        }
+    }
+
+    /// Look up and execute a tool by name, returning the structured
+    /// [`ToolExecutionResult`] (model output + [`ToolOutcome`](crate::tool::ToolOutcome)
+    /// + result extensions).
+    ///
+    /// The structured counterpart of [`call_tool_with_extensions`](Self::call_tool_with_extensions),
+    /// and the path the agent loop drives so hooks, tracing, and policies observe
+    /// the structured outcome. A missing tool resolves to a
+    /// [`NotFound`](crate::tool::ToolFailureKind::NotFound) outcome rather than a
+    /// `Result::Err`. The tool handle is cloned under a brief read lock so that
+    /// long-running tool executions never block writers.
+    pub async fn call_tool_structured(
+        &self,
+        tool_name: &str,
+        args: &str,
+        extensions: &ToolCallExtensions,
+    ) -> ToolExecutionResult {
+        let tool = {
+            let state = self.0.read().await;
+            state.toolset.get(tool_name).cloned()
+        };
+
+        match tool {
+            Some(tool) => {
+                tracing::debug!(target: "rig",
+                    "Calling tool {tool_name} with args:\n{}",
+                    serde_json::to_string_pretty(&args).unwrap_or_default()
+                );
+                tool.call_structured(args.to_string(), extensions).await
+            }
+            None => ToolExecutionResult::failed(
+                format!("tool `{tool_name}` not found"),
+                ToolFailure::not_found(format!("no tool named `{tool_name}` is registered")),
+            ),
         }
     }
 
@@ -263,16 +315,15 @@ impl ToolServerHandle {
                         if handle.is_none() {
                             tracing::warn!("Tool implementation not found in toolset: {}", doc);
                         }
-                        handle
+                        handle.map(|handle| (doc.clone(), handle))
                     })
                     .collect()
             };
 
-            let mut tools = Vec::new();
-            for tool in dynamic_tool_handles {
-                tools.push(tool.definition(text.clone()).await);
-            }
-            tools
+            dynamic_tool_handles
+                .into_iter()
+                .map(|(name, tool)| tool.definition_with_name(name))
+                .collect()
         } else {
             Vec::new()
         };
@@ -286,13 +337,13 @@ impl ToolServerHandle {
                     if handle.is_none() {
                         tracing::warn!("Tool implementation not found in toolset: {}", toolname);
                     }
-                    handle
+                    handle.map(|handle| (toolname.clone(), handle))
                 })
                 .collect()
         };
 
-        for tool in static_tool_handles {
-            tools.push(tool.definition(String::new()).await);
+        for (name, tool) in static_tool_handles {
+            tools.push(tool.definition_with_name(name));
         }
 
         // One shared toolset backs both lists, so a name appearing in the
@@ -325,15 +376,79 @@ pub enum ToolServerError {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use crate::{
         test_utils::{
             BarrierMockToolIndex, MockAddTool, MockBarrierTool, MockControlledTool,
-            MockSubtractTool, MockToolIndex,
+            MockSubtractTool, MockToolError, MockToolIndex,
         },
-        tool::{ToolSet, server::ToolServer},
+        tool::{Tool, ToolEmbedding, ToolSet, server::ToolServer},
     };
+
+    struct ChangingNameTool {
+        calls: AtomicUsize,
+    }
+
+    impl ChangingNameTool {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Tool for ChangingNameTool {
+        const NAME: &'static str = "unused";
+        type Error = MockToolError;
+        type Args = serde_json::Value;
+        type Output = String;
+
+        fn name(&self) -> String {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => "registered_changing".to_string(),
+                _ => "changed_after_registration".to_string(),
+            }
+        }
+
+        fn description(&self) -> String {
+            "changes name after registration".to_string()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+
+        async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+            Ok("ok".to_string())
+        }
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("init error")]
+    struct InitError;
+
+    impl ToolEmbedding for ChangingNameTool {
+        type InitError = InitError;
+        type Context = ();
+        type State = ();
+
+        fn embedding_docs(&self) -> Vec<String> {
+            vec!["changing dynamic tool".to_string()]
+        }
+
+        fn context(&self) -> Self::Context {}
+
+        fn init(_state: Self::State, _context: Self::Context) -> Result<Self, Self::InitError> {
+            Ok(Self::new())
+        }
+    }
 
     #[tokio::test]
     pub async fn test_toolserver() {
@@ -384,6 +499,55 @@ mod tests {
                 .zip(via_append_toolset.iter())
                 .all(|(a, b)| a.name == b.name),
             "append_toolset must surface the same LLM-visible tools as add_tool",
+        );
+    }
+
+    #[tokio::test]
+    pub async fn builder_tool_uses_registered_key_for_static_names() {
+        let handle = ToolServer::new().tool(ChangingNameTool::new()).run();
+
+        let defs = handle.get_tool_defs(None).await.unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "registered_changing");
+    }
+
+    #[tokio::test]
+    pub async fn handle_add_tool_uses_registered_key_for_static_names() {
+        let handle = ToolServer::new().run();
+        handle.add_tool(ChangingNameTool::new()).await.unwrap();
+
+        let defs = handle.get_tool_defs(None).await.unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "registered_changing");
+    }
+
+    #[tokio::test]
+    pub async fn dynamic_retrieval_resolves_registered_key() {
+        let toolset = ToolSet::builder()
+            .dynamic_tool(ChangingNameTool::new())
+            .build();
+        let handle = ToolServer::new()
+            .dynamic_tools(1, MockToolIndex::new(["registered_changing"]), toolset)
+            .run();
+
+        let defs = handle
+            .get_tool_defs(Some("use the changing tool".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "registered_changing");
+    }
+
+    #[tokio::test]
+    pub async fn get_tool_defs_preserves_static_registration_order() {
+        let handle = ToolServer::new().run();
+        handle.add_tool(MockSubtractTool).await.unwrap();
+        handle.add_tool(MockAddTool).await.unwrap();
+
+        let defs = handle.get_tool_defs(None).await.unwrap();
+        assert_eq!(
+            defs.iter().map(|def| def.name.as_str()).collect::<Vec<_>>(),
+            vec!["subtract", "add"]
         );
     }
 
@@ -590,5 +754,119 @@ mod tests {
         let tool_names: Vec<&str> = defs.iter().map(|t| t.name.as_str()).collect();
         assert!(tool_names.contains(&"add"));
         assert!(tool_names.contains(&"subtract"));
+    }
+
+    // --- call_with_extensions tests ---
+
+    #[derive(Clone)]
+    struct SessionId(String);
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct ExtensionsReader;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("context reader error")]
+    struct ExtensionsReaderError;
+
+    impl crate::tool::Tool for ExtensionsReader {
+        const NAME: &'static str = "context_reader";
+        type Error = ExtensionsReaderError;
+        type Args = serde_json::Value;
+        type Output = String;
+
+        fn description(&self) -> String {
+            "Reads SessionId from context".to_string()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+
+        async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+            Ok("no context".to_string())
+        }
+
+        async fn call_with_extensions(
+            &self,
+            _args: Self::Args,
+            extensions: &crate::tool::ToolCallExtensions,
+        ) -> Result<Self::Output, Self::Error> {
+            match extensions.get::<SessionId>() {
+                Some(session) => Ok(format!("session:{}", session.0)),
+                None => Ok("no session".to_string()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_call_tool_with_extensions_reaches_tool() {
+        let server = ToolServer::new().tool(ExtensionsReader);
+        let handle = server.run();
+
+        let mut extensions = crate::tool::ToolCallExtensions::new();
+        extensions.insert(SessionId("abc-123".to_string()));
+
+        let result = handle
+            .call_tool_with_extensions("context_reader", "{}", &extensions)
+            .await
+            .unwrap();
+
+        assert_eq!(result, "session:abc-123");
+    }
+
+    #[tokio::test]
+    async fn test_call_tool_without_extensions_uses_default() {
+        let server = ToolServer::new().tool(ExtensionsReader);
+        let handle = server.run();
+
+        let result = handle.call_tool("context_reader", "{}").await.unwrap();
+        assert_eq!(result, "no session");
+    }
+
+    #[tokio::test]
+    async fn test_tool_ignoring_extensions_still_works() {
+        let server = ToolServer::new().tool(MockAddTool);
+        let handle = server.run();
+
+        let mut extensions = crate::tool::ToolCallExtensions::new();
+        extensions.insert(SessionId("ignored".to_string()));
+
+        let args = serde_json::to_string(&serde_json::json!({"x": 3, "y": 7})).unwrap();
+        let result = handle
+            .call_tool_with_extensions("add", &args, &extensions)
+            .await
+            .unwrap();
+
+        assert_eq!(result, "10");
+    }
+
+    #[tokio::test]
+    async fn call_tool_structured_returns_success_for_a_known_tool() {
+        use crate::tool::{ToolCallExtensions, ToolOutcome};
+
+        let handle = ToolServer::new().tool(MockAddTool).run();
+        let args = serde_json::to_string(&serde_json::json!({"x": 2, "y": 5})).unwrap();
+        let result = handle
+            .call_tool_structured("add", &args, &ToolCallExtensions::EMPTY)
+            .await;
+
+        assert!(matches!(result.outcome, ToolOutcome::Success));
+        assert_eq!(result.model_output, "7");
+    }
+
+    #[tokio::test]
+    async fn call_tool_structured_classifies_a_missing_tool_as_not_found() {
+        use crate::tool::{ToolCallExtensions, ToolFailureKind, ToolOutcome};
+
+        let handle = ToolServer::new().tool(MockAddTool).run();
+        let result = handle
+            .call_tool_structured("does_not_exist", "{}", &ToolCallExtensions::EMPTY)
+            .await;
+
+        match result.outcome {
+            ToolOutcome::Error(failure) => assert_eq!(failure.kind, ToolFailureKind::NotFound),
+            other => panic!("expected a NotFound error outcome, got {other:?}"),
+        }
+        assert!(result.model_output.contains("does_not_exist"));
     }
 }

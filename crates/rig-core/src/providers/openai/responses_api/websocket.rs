@@ -22,7 +22,7 @@ use tokio_tungstenite::{
 use tracing::Level;
 use url::Url;
 
-use super::{CompletionResponse, ResponseError, ResponseStatus, ResponsesCompletionModel};
+use super::{CompletionResponse, ResponseStatus, ResponsesCompletionModel};
 
 type OpenAIWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -774,7 +774,11 @@ where
                     return Err(CompletionError::ProviderError(message));
                 }
                 ResponsesWebSocketEvent::Error(error) => {
-                    return Err(CompletionError::ProviderError(error.to_string()));
+                    // Genuine provider error event: preserve the serialized payload
+                    // (code + message + any extra fields) so provider_response_json()
+                    // parses it, matching the response.failed path. No HTTP status on
+                    // the websocket stream, so status: None.
+                    return Err(provider_error_from_event(error));
                 }
                 ResponsesWebSocketEvent::Item(_) => {}
             }
@@ -896,10 +900,24 @@ fn terminal_response_result(
 ) -> Result<CompletionResponse, CompletionError> {
     match response.status {
         ResponseStatus::Completed => Ok(response),
-        ResponseStatus::Failed => Err(CompletionError::ProviderError(response_error_message(
-            response.error.as_ref(),
-            "failed response",
-        ))),
+        // Deliberate two-tier behaviour: when the provider supplies its own error
+        // object we preserve the full failed-response envelope through
+        // `from_provider_body` (status: None, no HTTP status on the websocket
+        // stream) so `provider_response_json()` parses it — consistent with the
+        // `error` event and the streaming paths. The body is re-serialized from
+        // the parsed response (not byte-identical to the wire bytes, which aren't
+        // retained past parsing) — semantically the provider's payload. When the
+        // object is absent we have nothing provider-authored to surface, so we
+        // emit a Rig-authored `ProviderError` diagnostic (provider_response_body()
+        // is None).
+        ResponseStatus::Failed => match response.error.as_ref() {
+            Some(error) => Err(CompletionError::from_provider_body(
+                serde_json::to_string(&response).unwrap_or_else(|_| error.message.clone()),
+            )),
+            None => Err(CompletionError::ProviderError(response_error_message(
+                "failed response",
+            ))),
+        },
         ResponseStatus::Incomplete => {
             let reason = response
                 .incomplete_details
@@ -910,23 +928,26 @@ fn terminal_response_result(
                 "OpenAI websocket response was incomplete: {reason}"
             )))
         }
-        status => Err(CompletionError::ProviderError(format!(
-            "OpenAI websocket response ended with status {:?}",
-            status
+        other => Err(CompletionError::ProviderError(format!(
+            "OpenAI websocket response ended in state {other:?}"
         ))),
     }
 }
 
-fn response_error_message(error: Option<&ResponseError>, fallback: &str) -> String {
-    if let Some(error) = error {
-        if error.code.is_empty() {
-            error.message.clone()
-        } else {
-            format!("{}: {}", error.code, error.message)
-        }
-    } else {
-        format!("OpenAI websocket returned a {fallback}")
-    }
+fn response_error_message(fallback: &str) -> String {
+    format!("OpenAI websocket returned a {fallback}")
+}
+
+/// Maps a provider `error` event into a [`CompletionError`] that preserves the
+/// raw error payload as JSON (code + message + any extra provider fields) so the
+/// `provider_response_*` helpers can inspect it. The websocket stream carries no
+/// HTTP status, so `status` is `None`. The body is the event re-serialized from
+/// the parsed representation (not byte-identical to the original wire bytes,
+/// which are not retained past parsing) — semantically the provider's payload.
+fn provider_error_from_event(error: ResponsesWebSocketErrorEvent) -> CompletionError {
+    CompletionError::from_provider_body(
+        serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()),
+    )
 }
 
 fn is_known_streaming_event(kind: &str) -> bool {
@@ -1130,7 +1151,7 @@ mod tests {
     use crate::client::CompletionClient;
     use crate::completion::CompletionModel;
     use crate::providers::openai::responses_api::{
-        CompletionResponse, ResponseObject, ResponseStatus, ResponsesUsage,
+        CompletionResponse, ResponseError, ResponseObject, ResponseStatus, ResponsesUsage,
     };
     use futures::{SinkExt, StreamExt};
     use serde_json::json;
@@ -1138,6 +1159,36 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::time::sleep;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    #[test]
+    fn websocket_error_event_preserves_provider_payload_as_json() {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "type".to_string(),
+            serde_json::Value::String("invalid_request_error".to_string()),
+        );
+        let event = super::ResponsesWebSocketErrorEvent {
+            kind: super::ResponsesWebSocketErrorEventKind::Error,
+            error: super::ResponsesWebSocketErrorPayload {
+                code: Some("rate_limit_exceeded".to_string()),
+                message: Some("slow down".to_string()),
+                extra,
+            },
+        };
+
+        let err = super::provider_error_from_event(event);
+
+        // No HTTP status on the websocket stream, and the raw payload round-trips
+        // through provider_response_json() (code + message + extra all preserved).
+        assert_eq!(err.provider_response_status(), None);
+        let json = err
+            .provider_response_json()
+            .expect("preserved body should be valid JSON")
+            .expect("provider response body should be present");
+        assert_eq!(json["error"]["code"], "rate_limit_exceeded");
+        assert_eq!(json["error"]["message"], "slow down");
+        assert_eq!(json["error"]["type"], "invalid_request_error");
+    }
 
     fn sample_response(status: ResponseStatus) -> CompletionResponse {
         CompletionResponse {
@@ -1165,6 +1216,8 @@ mod tests {
             tools: Vec::new(),
             additional_parameters: Default::default(),
             provider_reasoning: None,
+            reasoning_metadata: None,
+            reasoning_context: None,
         }
     }
 
@@ -1308,6 +1361,49 @@ mod tests {
         let failed = terminal_response_result(sample_response(ResponseStatus::Failed))
             .expect_err("failed response should error");
         assert!(failed.to_string().contains("failed response"));
+    }
+
+    #[test]
+    fn terminal_failed_response_with_error_preserves_raw_payload() {
+        let mut response = sample_response(ResponseStatus::Failed);
+        response.error = Some(ResponseError {
+            code: "server_error".to_string(),
+            message: "the model failed to generate a response".to_string(),
+        });
+
+        let err = match terminal_response_result(response) {
+            Ok(_) => panic!("failed response with an error object should fail"),
+            Err(e) => e,
+        };
+
+        // The full failed-response envelope is preserved as a ProviderResponse with
+        // no HTTP status (the websocket stream carries none), so the raw JSON parses
+        // back with the provider error nested under `error` — proving the whole
+        // envelope is kept, not just the error object.
+        assert_eq!(err.provider_response_status(), None);
+
+        let json = err
+            .provider_response_json()
+            .expect("preserved body should parse as JSON")
+            .expect("preserved body should not be empty");
+        assert_eq!(
+            json["error"]["message"],
+            "the model failed to generate a response"
+        );
+        assert_eq!(json["error"]["code"], "server_error");
+    }
+
+    #[test]
+    fn terminal_failed_response_without_error_is_rig_diagnostic() {
+        let err = match terminal_response_result(sample_response(ResponseStatus::Failed)) {
+            Ok(_) => panic!("failed response should fail"),
+            Err(e) => e,
+        };
+
+        // No provider error object, so this is a Rig-authored diagnostic and exposes
+        // no preserved provider response body.
+        assert_eq!(err.provider_response_body(), None);
+        assert!(err.to_string().contains("failed response"));
     }
 
     #[tokio::test]
@@ -2243,7 +2339,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_event_is_skipped_during_session() {
+    async fn unknown_event_is_skipped_and_reasoning_metadata_is_preserved() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
@@ -2273,12 +2369,23 @@ mod tests {
                 .await
                 .expect("unknown event should send");
 
-            // Then send the real completed response
-            let response = serde_json::to_value(CompletionResponse {
-                id: "resp_after_unknown".to_string(),
-                ..sample_response(ResponseStatus::Completed)
-            })
-            .expect("response should serialize");
+            // Then send the real completed response, including reasoning
+            // metadata to verify that the WebSocket path preserves it.
+            let mut response = sample_response(ResponseStatus::Completed);
+            response.id = "resp_after_unknown".to_string();
+            response.reasoning_metadata = Some(
+                json!({
+                    "context": "all_turns",
+                    "effort": "ultra",
+                    "summary": null,
+                    "future_control": true
+                })
+                .as_object()
+                .expect("reasoning metadata should be an object")
+                .clone(),
+            );
+            response.reasoning_context = Some("all_turns".to_string());
+            let response = serde_json::to_value(response).expect("response should serialize");
 
             socket
                 .send(Message::text(
@@ -2314,6 +2421,17 @@ mod tests {
             .await
             .expect("response should complete despite unknown event");
         assert_eq!(response.id, "resp_after_unknown");
+        assert_eq!(response.reasoning_context.as_deref(), Some("all_turns"));
+        assert_eq!(
+            response.reasoning_metadata.as_ref(),
+            json!({
+                "context": "all_turns",
+                "effort": "ultra",
+                "summary": null,
+                "future_control": true
+            })
+            .as_object()
+        );
 
         server.await.expect("server task should finish");
     }

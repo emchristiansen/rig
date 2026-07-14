@@ -1,4 +1,5 @@
 mod agent_run_support;
+mod hook_stress_support;
 mod support;
 mod tools_support;
 
@@ -14,6 +15,16 @@ mod cassette {
     mod dynamic_tools;
     mod embeddings;
     mod extractor;
+    mod generate_behaviors;
+    mod generate_sessions;
+    mod generate_tool_args;
+    mod generate_tool_modes;
+    mod hook_stress;
+    mod hook_stress_context;
+    mod hook_stress_patch;
+    mod hook_stress_streaming;
+    mod hook_stress_tools;
+    #[cfg(feature = "image")]
     mod image_generation;
     mod interactions_api;
     mod models;

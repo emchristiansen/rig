@@ -7,11 +7,12 @@ use crate::message::ReasoningContent;
 use crate::providers::openai::responses_api::{ReasoningSummary, ResponsesUsage};
 use crate::streaming;
 use crate::streaming::RawStreamingChoice;
+use crate::telemetry::{CompletionOperation, CompletionSpanBuilder};
 use crate::wasm_compat::WasmCompatSend;
 use async_stream::stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::{Level, debug, enabled, info_span};
+use tracing::{Level, debug, enabled};
 use tracing_futures::Instrument as _;
 
 use super::{
@@ -50,11 +51,18 @@ pub struct StreamingCompletionResponse {
     /// response object's `incomplete_details` (e.g. `max_output_tokens`). `None`
     /// for completed responses or when the provider omitted it.
     pub incomplete_details: Option<IncompleteDetailsReason>,
+    /// The complete object-shaped reasoning metadata from the terminal response event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The effective reasoning context from the terminal response event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_context: Option<String>,
 }
 
 pub(crate) fn reasoning_choices_from_done_item(
     id: &str,
     summary: &[ReasoningSummary],
+    content: &[String],
     encrypted_content: Option<&str>,
 ) -> Vec<RawStreamingChoice<StreamingCompletionResponse>> {
     let mut choices = summary
@@ -66,6 +74,14 @@ pub(crate) fn reasoning_choices_from_done_item(
             },
         })
         .collect::<Vec<_>>();
+
+    choices.extend(content.iter().map(|text| RawStreamingChoice::Reasoning {
+        id: Some(id.to_owned()),
+        content: ReasoningContent::Text {
+            text: text.to_owned(),
+            signature: None,
+        },
+    }));
 
     if let Some(encrypted_content) = encrypted_content {
         choices.push(RawStreamingChoice::Reasoning {
@@ -111,41 +127,25 @@ pub enum ResponseChunkKind {
     ResponseIncomplete,
 }
 
-fn response_chunk_error_message(
-    kind: &ResponseChunkKind,
-    response: &CompletionResponse,
-    provider_name: &str,
-) -> Option<String> {
-    match kind {
-        ResponseChunkKind::ResponseFailed => Some(response_error_message(
-            response.error.as_ref(),
-            &format!("{provider_name} response stream returned a failed response"),
-        )),
-        ResponseChunkKind::ResponseIncomplete => {
-            let reason = response
-                .incomplete_details
-                .as_ref()
-                .map(|details| details.reason.as_str())
-                .unwrap_or("unknown reason");
-
-            Some(format!(
-                "{provider_name} response stream was incomplete: {reason}"
-            ))
-        }
-        _ => None,
+fn provider_response_from_responses_error_value(
+    value: &serde_json::Value,
+    data: &str,
+) -> CompletionError {
+    if let Some(message) = value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+    {
+        tracing::warn!(message, "provider returned a streaming error event");
     }
+
+    crate::provider_response::completion_error_from_body(data)
 }
 
-fn response_error_message(error: Option<&super::ResponseError>, fallback: &str) -> String {
-    if let Some(error) = error {
-        if error.code.is_empty() {
-            error.message.clone()
-        } else {
-            format!("{}: {}", error.code, error.message)
-        }
-    } else {
-        fallback.to_string()
-    }
+fn provider_response_from_responses_sse_data(data: &str) -> Option<CompletionError> {
+    let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    (value.get("type").and_then(serde_json::Value::as_str) == Some("error"))
+        .then(|| provider_response_from_responses_error_value(&value, data))
 }
 
 #[derive(Clone, Copy)]
@@ -199,7 +199,6 @@ pub(crate) fn parse_sse_completion_body(
     provider_name: &str,
 ) -> Result<CompletionResponse, CompletionError> {
     let mut completed = None;
-    let mut provider_error = None;
 
     for line in body.lines() {
         let data = line
@@ -219,8 +218,7 @@ pub(crate) fn parse_sse_completion_body(
                         break;
                     }
                     ResponseChunkKind::ResponseFailed | ResponseChunkKind::ResponseIncomplete => {
-                        provider_error =
-                            response_chunk_error_message(&kind, &response, provider_name);
+                        return Err(crate::provider_response::completion_error_from_body(data));
                     }
                     _ => {}
                 }
@@ -241,49 +239,19 @@ pub(crate) fn parse_sse_completion_body(
                 }
             }
             Some("response.failed") | Some("response.incomplete") => {
-                provider_error = value
-                    .get("response")
-                    .cloned()
-                    .and_then(|response| {
-                        serde_json::from_value::<CompletionResponse>(response).ok()
-                    })
-                    .and_then(|response| {
-                        let kind = if value.get("type").and_then(serde_json::Value::as_str)
-                            == Some("response.failed")
-                        {
-                            ResponseChunkKind::ResponseFailed
-                        } else {
-                            ResponseChunkKind::ResponseIncomplete
-                        };
-                        response_chunk_error_message(&kind, &response, provider_name)
-                    })
-                    .or_else(|| {
-                        value
-                            .get("error")
-                            .and_then(|error| error.get("message"))
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToOwned::to_owned)
-                    })
-                    .or_else(|| Some(data.to_string()));
+                return Err(crate::provider_response::completion_error_from_body(data));
             }
             Some("error") => {
-                provider_error = value
-                    .get("error")
-                    .and_then(|error| error.get("message"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .or_else(|| Some(data.to_string()));
+                return Err(provider_response_from_responses_error_value(&value, data));
             }
             _ => {}
         }
     }
 
     completed.ok_or_else(|| {
-        CompletionError::ProviderError(
-            provider_error.unwrap_or_else(|| {
-                format!("{provider_name} stream did not yield response.completed")
-            }),
-        )
+        CompletionError::ProviderError(format!(
+            "{provider_name} stream did not yield response.completed"
+        ))
     })
 }
 
@@ -291,6 +259,8 @@ struct RawChoiceAccumulator {
     final_usage: ResponsesUsage,
     final_status: Option<ResponseStatus>,
     final_incomplete_details: Option<IncompleteDetailsReason>,
+    reasoning_metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    reasoning_context: Option<String>,
     tool_calls: Vec<StreamingRawChoice>,
     tool_call_internal_ids: std::collections::HashMap<String, String>,
 }
@@ -301,6 +271,8 @@ impl RawChoiceAccumulator {
             final_usage: initial_usage,
             final_status: None,
             final_incomplete_details: None,
+            reasoning_metadata: None,
+            reasoning_context: None,
             tool_calls: Vec::new(),
             tool_call_internal_ids: std::collections::HashMap::new(),
         }
@@ -327,7 +299,7 @@ impl RawChoiceAccumulator {
                 let internal_call_id = self
                     .tool_call_internal_ids
                     .entry(func.id.clone())
-                    .or_insert_with(|| nanoid::nanoid!())
+                    .or_insert_with(crate::id::generate)
                     .clone();
                 immediate.push(streaming::RawStreamingChoice::ToolCallDelta {
                     id: func.id,
@@ -351,6 +323,12 @@ impl RawChoiceAccumulator {
                     reasoning: delta.delta,
                 });
             }
+            ItemChunkKind::ReasoningTextDelta(delta) => {
+                immediate.push(streaming::RawStreamingChoice::ReasoningDelta {
+                    id: outer_item_id,
+                    reasoning: delta.delta,
+                });
+            }
             ItemChunkKind::RefusalDelta(delta) => {
                 immediate.push(streaming::RawStreamingChoice::Message(delta.delta));
             }
@@ -359,7 +337,7 @@ impl RawChoiceAccumulator {
                     let internal_call_id = self
                         .tool_call_internal_ids
                         .entry(item_id.clone())
-                        .or_insert_with(|| nanoid::nanoid!())
+                        .or_insert_with(crate::id::generate)
                         .clone();
                     immediate.push(streaming::RawStreamingChoice::ToolCallDelta {
                         id: item_id,
@@ -378,7 +356,7 @@ impl RawChoiceAccumulator {
         &mut self,
         kind: ResponseChunkKind,
         response: CompletionResponse,
-        provider_name: &str,
+        raw_event_data: &str,
         options: ResponsesStreamOptions,
     ) -> Result<(), CompletionError> {
         // Record the terminal status and incomplete reason regardless of which
@@ -393,19 +371,20 @@ impl RawChoiceAccumulator {
                 if let Some(usage) = response.usage {
                     self.final_usage = usage;
                 }
+                if response.reasoning_metadata.is_some() {
+                    self.reasoning_metadata = response.reasoning_metadata;
+                }
+                if response.reasoning_context.is_some() {
+                    self.reasoning_context = response.reasoning_context;
+                }
                 Ok(())
             }
             ResponseChunkKind::ResponseFailed | ResponseChunkKind::ResponseIncomplete
                 if options.errors_on_terminal_chunk(&kind) =>
             {
-                let error_message = response_chunk_error_message(&kind, &response, provider_name)
-                    .unwrap_or_else(|| {
-                        format!(
-                            "{provider_name} returned terminal response {:?} without an error message",
-                            kind
-                        )
-                    });
-                Err(CompletionError::ProviderError(error_message))
+                Err(crate::provider_response::completion_error_from_body(
+                    raw_event_data,
+                ))
             }
             // A tolerated `response.incomplete` falls through here: its `status`
             // and `incomplete_details` were captured above, so `finish()` will
@@ -425,7 +404,7 @@ impl RawChoiceAccumulator {
                 let internal_call_id = self
                     .tool_call_internal_ids
                     .entry(func.id.clone())
-                    .or_insert_with(|| nanoid::nanoid!())
+                    .or_insert_with(crate::id::generate)
                     .clone();
                 let tool_call =
                     streaming::RawStreamingToolCall::new(func.id, func.name, func.arguments)
@@ -442,19 +421,27 @@ impl RawChoiceAccumulator {
             Output::Reasoning {
                 id,
                 summary,
+                content,
                 encrypted_content,
                 ..
             } => {
                 immediate.extend(reasoning_choices_from_done_item(
                     &id,
                     &summary,
+                    &content,
                     encrypted_content.as_deref(),
                 ));
             }
             Output::Message(message) => {
                 immediate.push(streaming::RawStreamingChoice::MessageId(message.id));
             }
-            Output::Unknown => {}
+            // An unmodeled output item (e.g. a hosted-tool result such as
+            // `web_search_call`) arriving on `response.output_item.done`. Surface
+            // the raw item to stream consumers, mirroring how the non-streaming
+            // decode preserves it on `CompletionResponse.output`.
+            Output::Unknown(value) => {
+                immediate.push(streaming::RawStreamingChoice::Unknown(value));
+            }
         }
     }
 
@@ -466,6 +453,8 @@ impl RawChoiceAccumulator {
                 usage: self.final_usage,
                 status: self.final_status,
                 incomplete_details: self.final_incomplete_details,
+                reasoning_metadata: self.reasoning_metadata,
+                reasoning_context: self.reasoning_context,
             },
         ));
         choices
@@ -475,7 +464,6 @@ impl RawChoiceAccumulator {
 pub(crate) fn raw_choices_from_sse_body(
     body: &str,
     initial_usage: ResponsesUsage,
-    provider_name: &str,
 ) -> Result<Vec<StreamingRawChoice>, CompletionError> {
     let mut raw_choices = Vec::new();
     let mut accumulator = RawChoiceAccumulator::new(initial_usage);
@@ -497,7 +485,7 @@ pub(crate) fn raw_choices_from_sse_body(
                 }
                 StreamingCompletionChunk::Response(chunk) => {
                     let ResponseChunk { kind, response, .. } = *chunk;
-                    accumulator.record_response_chunk(kind, response, provider_name, options)?;
+                    accumulator.record_response_chunk(kind, response, data, options)?;
                 }
             }
             continue;
@@ -522,6 +510,17 @@ pub(crate) fn raw_choices_from_sse_body(
                     });
                 }
             }
+            Some("response.reasoning_text.delta") => {
+                if let Some(delta) = value.get("delta").and_then(serde_json::Value::as_str) {
+                    raw_choices.push(streaming::RawStreamingChoice::ReasoningDelta {
+                        id: value
+                            .get("item_id")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned),
+                        reasoning: delta.to_owned(),
+                    });
+                }
+            }
             Some("response.output_item.added") => {
                 if let Some(item) = value
                     .get("item")
@@ -532,7 +531,7 @@ pub(crate) fn raw_choices_from_sse_body(
                     let internal_call_id = accumulator
                         .tool_call_internal_ids
                         .entry(func.id.clone())
-                        .or_insert_with(|| nanoid::nanoid!())
+                        .or_insert_with(crate::id::generate)
                         .clone();
                     raw_choices.push(streaming::RawStreamingChoice::ToolCallDelta {
                         id: func.id,
@@ -558,7 +557,7 @@ pub(crate) fn raw_choices_from_sse_body(
                     let internal_call_id = accumulator
                         .tool_call_internal_ids
                         .entry(item_id.to_owned())
-                        .or_insert_with(|| nanoid::nanoid!())
+                        .or_insert_with(crate::id::generate)
                         .clone();
                     raw_choices.push(streaming::RawStreamingChoice::ToolCallDelta {
                         id: item_id.to_owned(),
@@ -578,16 +577,11 @@ pub(crate) fn raw_choices_from_sse_body(
                     }) else {
                         continue;
                     };
-                    accumulator.record_response_chunk(kind, response, provider_name, options)?;
+                    accumulator.record_response_chunk(kind, response, data, options)?;
                 }
             }
             Some("error") => {
-                let message = value
-                    .get("error")
-                    .and_then(|error| error.get("message"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(data);
-                return Err(CompletionError::ProviderError(message.to_owned()));
+                return Err(provider_response_from_responses_error_value(&value, data));
             }
             _ => {}
         }
@@ -600,7 +594,6 @@ pub(crate) fn raw_choices_from_sse_body(
 pub(crate) async fn completion_response_from_sse_body(
     body: &str,
     raw_response: CompletionResponse,
-    provider_name: &str,
 ) -> Result<completion::CompletionResponse<CompletionResponse>, CompletionError> {
     let raw_choices = raw_choices_from_sse_body(
         body,
@@ -608,7 +601,6 @@ pub(crate) async fn completion_response_from_sse_body(
             .usage
             .clone()
             .unwrap_or_else(ResponsesUsage::new),
-        provider_name,
     )?;
     let stream = futures::stream::iter(
         raw_choices
@@ -670,24 +662,17 @@ fn usage_from_raw_response(response: &CompletionResponse) -> completion::Usage {
 pub(crate) fn stream_from_event_source<HttpClient, RequestBody>(
     event_source: GenericEventSource<HttpClient, RequestBody>,
     span: tracing::Span,
-    provider_name: &'static str,
 ) -> streaming::StreamingCompletionResponse<StreamingCompletionResponse>
 where
     HttpClient: HttpClientExt + Clone + 'static,
     RequestBody: Into<bytes::Bytes> + Clone + WasmCompatSend + 'static,
 {
-    stream_from_event_source_with_options(
-        event_source,
-        span,
-        provider_name,
-        ResponsesStreamOptions::strict(),
-    )
+    stream_from_event_source_with_options(event_source, span, ResponsesStreamOptions::strict())
 }
 
 pub(crate) fn stream_from_event_source_with_options<HttpClient, RequestBody>(
     mut event_source: GenericEventSource<HttpClient, RequestBody>,
     span: tracing::Span,
-    provider_name: &'static str,
     options: ResponsesStreamOptions,
 ) -> streaming::StreamingCompletionResponse<StreamingCompletionResponse>
 where
@@ -709,6 +694,12 @@ where
                 Ok(Event::Message(evt)) => {
                     if evt.data.trim().is_empty() || evt.data == "[DONE]" {
                         continue;
+                    }
+
+                    if let Some(error) = provider_response_from_responses_sse_data(&evt.data) {
+                        terminated_with_error = true;
+                        yield Err(error);
+                        break;
                     }
 
                     let data = crate::json_utils::from_str::<StreamingCompletionChunk>(&evt.data);
@@ -736,9 +727,12 @@ where
                                 span.record("gen_ai.response.id", response.id.as_str());
                                 span.record("gen_ai.response.model", response.model.as_str());
                             }
-                            if let Err(error) =
-                                accumulator.record_response_chunk(kind, response, provider_name, options)
-                            {
+                            if let Err(error) = accumulator.record_response_chunk(
+                                kind,
+                                response,
+                                &evt.data,
+                                options,
+                            ) {
                                 terminated_with_error = true;
                                 yield Err(error);
                                 break;
@@ -752,7 +746,7 @@ where
                 Err(error) => {
                     tracing::error!(?error, "SSE error");
                     terminated_with_error = true;
-                    yield Err(CompletionError::ProviderError(error.to_string()));
+                    yield Err(CompletionError::from_stream_transport(error));
                     break;
                 }
             }
@@ -830,6 +824,8 @@ pub enum ItemChunkKind {
     ReasoningSummaryTextDelta(SummaryTextChunk),
     #[serde(rename = "response.reasoning_summary_text.done")]
     ReasoningSummaryTextDone(SummaryTextChunk),
+    #[serde(rename = "response.reasoning_text.delta")]
+    ReasoningTextDelta(DeltaTextChunkWithItemId),
     /// Catch-all for unknown item chunk types (e.g., `web_search_call` events).
     /// This prevents unknown streaming events from breaking deserialization.
     #[serde(other)]
@@ -917,7 +913,7 @@ impl<Ext, H> GenericResponsesCompletionModel<Ext, H>
 where
     crate::client::Client<Ext, H>:
         HttpClientExt + Clone + std::fmt::Debug + WasmCompatSend + 'static,
-    Ext: crate::client::Provider + Clone + 'static,
+    Ext: crate::client::Provider + super::ResponsesProviderExt + Clone + 'static,
     H: Clone + Default + std::fmt::Debug + WasmCompatSend + 'static,
 {
     pub(crate) async fn stream(
@@ -941,6 +937,7 @@ where
             ResponsesStreamOptions::strict()
         };
 
+        let system_instructions = completion_request.preamble.clone();
         let mut request = self.create_completion_request(completion_request)?;
         request.stream = Some(true);
 
@@ -960,33 +957,19 @@ where
             .body(body)
             .map_err(|e| CompletionError::HttpError(e.into()))?;
 
-        // let request_builder = self.client.post_reqwest("/responses").json(&request);
-
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat_streaming",
-                gen_ai.operation.name = "chat_streaming",
-                gen_ai.provider.name = tracing::field::Empty,
-                gen_ai.request.model = tracing::field::Empty,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = tracing::field::Empty,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
-        span.record("gen_ai.provider.name", "openai");
-        span.record("gen_ai.request.model", &self.model);
+        let span = CompletionSpanBuilder::new(
+            "openai",
+            &request.model,
+            CompletionOperation::ChatStreaming,
+        )
+        .system_instructions(system_instructions.as_deref())
+        .build();
         let client = self.client.clone();
         let event_source = GenericEventSource::new(client, req);
 
         Ok(stream_from_event_source_with_options(
             event_source,
             span,
-            "OpenAI",
             stream_options,
         ))
     }
@@ -994,7 +977,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{ItemChunkKind, StreamingCompletionChunk, reasoning_choices_from_done_item};
+    use super::{
+        ItemChunkKind, StreamingCompletionChunk, raw_choices_from_sse_body,
+        reasoning_choices_from_done_item,
+    };
     use crate::completion::CompletionModel;
     use crate::message::ReasoningContent;
     use crate::providers::internal::openai_chat_completions_compatible::test_support::sse_bytes_from_json_events;
@@ -1024,6 +1010,8 @@ mod tests {
             max_output_tokens: None,
             model: "gpt-5.4".to_string(),
             provider_reasoning: None,
+            reasoning_metadata: None,
+            reasoning_context: None,
             usage: None,
             output: Vec::new(),
             tools: Vec::new(),
@@ -1052,7 +1040,9 @@ mod tests {
             .expect_err("stream should surface a provider error")
     }
 
-    async fn final_usage_from_event(event: serde_json::Value) -> ResponsesUsage {
+    async fn final_response_from_event(
+        event: serde_json::Value,
+    ) -> super::StreamingCompletionResponse {
         let client = openai::Client::builder()
             .http_client(MockStreamingClient {
                 sse_bytes: sse_bytes_from_json_events(&[event]),
@@ -1066,7 +1056,7 @@ mod tests {
 
         while let Some(item) = stream.next().await {
             match item.expect("completed stream should not error") {
-                StreamedAssistantContent::Final(res) => return res.usage,
+                StreamedAssistantContent::Final(response) => return response,
                 _ => continue,
             }
         }
@@ -1135,6 +1125,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_sse_completion_body_preserves_error_payloads() {
+        let mut response = sample_response(ResponseStatus::Failed);
+        response.error = Some(ResponseError {
+            code: "server_error".to_string(),
+            message: "response failed".to_string(),
+        });
+        let events = [
+            json!({
+                "type": "response.failed",
+                "sequence_number": 1,
+                "response": response,
+            }),
+            json!({
+                "type": "error",
+                "error": {
+                    "message": "boom",
+                    "code": "server_error",
+                    "type": "server_error"
+                }
+            }),
+        ];
+
+        for event in events {
+            let payload = serde_json::to_string(&event).expect("event should serialize");
+            let body = format!("data: {payload}\n");
+            let err = super::parse_sse_completion_body(&body, "ChatGPT")
+                .expect_err("error payload should surface as provider response");
+
+            assert!(matches!(
+                err,
+                crate::completion::CompletionError::ProviderResponse(_)
+            ));
+            assert_eq!(err.provider_response_status(), None);
+            assert_eq!(err.provider_response_body(), Some(payload.as_str()));
+        }
+    }
+
+    #[test]
     fn reasoning_done_item_emits_summary_then_encrypted() {
         let summary = vec![
             ReasoningSummary::SummaryText {
@@ -1144,9 +1172,11 @@ mod tests {
                 text: "step 2".to_string(),
             },
         ];
-        let choices = reasoning_choices_from_done_item("rs_1", &summary, Some("enc_blob"));
+        let content = vec!["private reasoning".to_string()];
+        let choices =
+            reasoning_choices_from_done_item("rs_1", &summary, &content, Some("enc_blob"));
 
-        assert_eq!(choices.len(), 3);
+        assert_eq!(choices.len(), 4);
         assert!(matches!(
             choices.first(),
             Some(RawStreamingChoice::Reasoning {
@@ -1165,9 +1195,106 @@ mod tests {
             choices.get(2),
             Some(RawStreamingChoice::Reasoning {
                 id: Some(id),
+                content: ReasoningContent::Text { text, signature: None },
+            }) if id == "rs_1" && text == "private reasoning"
+        ));
+        assert!(matches!(
+            choices.get(3),
+            Some(RawStreamingChoice::Reasoning {
+                id: Some(id),
                 content: ReasoningContent::Encrypted(data),
             }) if id == "rs_1" && data == "enc_blob"
         ));
+    }
+
+    #[test]
+    fn reasoning_output_item_done_emits_reasoning_text_content() {
+        let body = format!(
+            "data: {}\n",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "sequence_number": 1,
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_text_1",
+                    "summary": [],
+                    "content": [{ "type": "reasoning_text", "text": "visible reasoning" }],
+                    "status": "completed"
+                },
+            })
+        );
+
+        let choices = raw_choices_from_sse_body(&body, ResponsesUsage::new())
+            .expect("sse body should decode");
+
+        assert!(matches!(
+            choices.first(),
+            Some(RawStreamingChoice::Reasoning {
+                id: Some(id),
+                content: ReasoningContent::Text { text, signature: None },
+            }) if id == "rs_text_1" && text == "visible reasoning"
+        ));
+    }
+
+    #[test]
+    fn reasoning_text_delta_emits_reasoning_delta() {
+        let body = format!(
+            "data: {}\n",
+            json!({
+                "type": "response.reasoning_text.delta",
+                "item_id": "rs_delta_1",
+                "output_index": 0,
+                "content_index": 0,
+                "sequence_number": 1,
+                "delta": "thinking",
+            })
+        );
+
+        let choices = raw_choices_from_sse_body(&body, ResponsesUsage::new())
+            .expect("sse body should decode");
+
+        assert!(matches!(
+            choices.first(),
+            Some(RawStreamingChoice::ReasoningDelta { id: Some(id), reasoning })
+                if id == "rs_delta_1" && reasoning == "thinking"
+        ));
+    }
+
+    #[test]
+    fn unknown_output_item_surfaces_as_raw_unknown_choice() {
+        // A hosted-tool item (web_search_call) arriving on
+        // `response.output_item.done` must surface to stream consumers as
+        // `RawStreamingChoice::Unknown` carrying the verbatim item, mirroring how
+        // the non-streaming decode preserves it on `CompletionResponse.output`.
+        let item = json!({
+            "type": "web_search_call",
+            "id": "ws_001",
+            "status": "completed",
+            "action": { "type": "search", "queries": ["rig framework"] },
+        });
+        let body = format!(
+            "data: {}\n",
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "sequence_number": 1,
+                "item": item,
+            })
+        );
+
+        let choices = raw_choices_from_sse_body(&body, ResponsesUsage::new())
+            .expect("sse body should decode");
+
+        let unknown = choices.iter().find_map(|choice| match choice {
+            RawStreamingChoice::Unknown(value) => Some(value),
+            _ => None,
+        });
+        assert_eq!(
+            unknown,
+            Some(&item),
+            "the raw web_search_call item should reach the consumer verbatim",
+        );
     }
 
     #[test]
@@ -1175,7 +1302,7 @@ mod tests {
         let summary = vec![ReasoningSummary::SummaryText {
             text: "only summary".to_string(),
         }];
-        let choices = reasoning_choices_from_done_item("rs_2", &summary, None);
+        let choices = reasoning_choices_from_done_item("rs_2", &summary, &[], None);
 
         assert_eq!(choices.len(), 1);
         assert!(matches!(
@@ -1303,10 +1430,14 @@ mod tests {
 
         let err = first_error_from_event(event).await;
 
-        assert_eq!(
-            err.to_string(),
-            "ProviderError: maximum context length exceeded"
-        );
+        assert!(matches!(
+            err,
+            crate::completion::CompletionError::ProviderResponse(_)
+        ));
+        assert_eq!(err.provider_response_status(), None);
+        assert!(err.provider_response_body().is_some_and(|body| {
+            body.contains("response.failed") && body.contains("maximum context length exceeded")
+        }));
     }
 
     #[tokio::test]
@@ -1325,10 +1456,16 @@ mod tests {
 
         let err = first_error_from_event(event).await;
 
-        assert_eq!(
-            err.to_string(),
-            "ProviderError: context_length_exceeded: maximum context length exceeded"
-        );
+        assert!(matches!(
+            err,
+            crate::completion::CompletionError::ProviderResponse(_)
+        ));
+        assert_eq!(err.provider_response_status(), None);
+        assert!(err.provider_response_body().is_some_and(|body| {
+            body.contains("response.failed")
+                && body.contains("context_length_exceeded")
+                && body.contains("maximum context length exceeded")
+        }));
     }
 
     #[tokio::test]
@@ -1346,10 +1483,14 @@ mod tests {
 
         let err = first_error_from_event(event).await;
 
-        assert_eq!(
-            err.to_string(),
-            "ProviderError: OpenAI response stream was incomplete: max_output_tokens"
-        );
+        assert!(matches!(
+            err,
+            crate::completion::CompletionError::ProviderResponse(_)
+        ));
+        assert_eq!(err.provider_response_status(), None);
+        assert!(err.provider_response_body().is_some_and(|body| {
+            body.contains("response.incomplete") && body.contains("max_output_tokens")
+        }));
     }
 
     #[tokio::test]
@@ -1395,14 +1536,149 @@ mod tests {
             .await
             .expect("stream should yield an item")
             .expect_err("stream should surface a provider error");
-        assert_eq!(
-            err.to_string(),
-            "ProviderError: server_error: response stream failed"
-        );
+        assert!(matches!(
+            err,
+            crate::completion::CompletionError::ProviderResponse(_)
+        ));
+        assert_eq!(err.provider_response_status(), None);
+        assert!(err.provider_response_body().is_some_and(|body| {
+            body.contains("response.failed") && body.contains("response stream failed")
+        }));
         assert!(
             stream.next().await.is_none(),
             "stream should terminate immediately after the first terminal error"
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_error_event_preserves_full_payload_in_live_loop() {
+        use crate::providers::internal::openai_chat_completions_compatible::test_support::sse_bytes_from_json_events;
+        use crate::test_utils::MockStreamingClient;
+
+        let payload = json!({
+            "type": "error",
+            "error": {
+                "message": "boom",
+                "code": "server_error",
+                "type": "server_error"
+            }
+        });
+
+        let client = openai::Client::builder()
+            .http_client(MockStreamingClient {
+                sse_bytes: sse_bytes_from_json_events(&[payload]),
+            })
+            .api_key("test-key")
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-5.4");
+        let request = model.completion_request("hello").build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        let err = stream
+            .next()
+            .await
+            .expect("stream should yield an item")
+            .expect_err("stream should surface a provider response error");
+        assert_eq!(err.provider_response_status(), None);
+        assert!(
+            err.provider_response_body().is_some_and(|body| {
+                body.contains("\"type\":\"error\"") && body.contains("boom")
+            })
+        );
+        assert!(
+            stream.next().await.is_none(),
+            "stream should terminate after error event"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_http_non_success_preserves_status_and_body() {
+        use crate::http_client::sse::GenericEventSource;
+        use crate::test_utils::HttpErrorStreamingClient;
+
+        let body = r#"{"error":{"message":"quota exceeded"}}"#;
+        let client = HttpErrorStreamingClient::new(http::StatusCode::TOO_MANY_REQUESTS, body);
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("http://localhost/v1/responses")
+            .body(Vec::new())
+            .expect("request should build");
+        let event_source = GenericEventSource::new(client, req);
+        let span = tracing::Span::none();
+        let mut stream = super::stream_from_event_source(event_source, span);
+
+        let err = stream
+            .next()
+            .await
+            .expect("stream should yield transport error")
+            .expect_err("HTTP non-success should surface as a stream error");
+        assert_eq!(
+            err.provider_response_status(),
+            Some(http::StatusCode::TOO_MANY_REQUESTS)
+        );
+        assert_eq!(err.provider_response_body(), Some(body));
+        assert_eq!(
+            err.provider_response_json().expect("valid JSON body"),
+            Some(serde_json::json!({"error": {"message": "quota exceeded"}}))
+        );
+        assert!(
+            stream.next().await.is_none(),
+            "stream should terminate after HTTP non-success"
+        );
+    }
+
+    #[test]
+    fn streaming_error_event_preserves_full_payload() {
+        let payload = r#"{"type":"error","error":{"message":"boom","code":"server_error","type":"server_error"}}"#;
+        let body = format!("data: {payload}\n");
+
+        let err = super::raw_choices_from_sse_body(&body, super::ResponsesUsage::new())
+            .expect_err("error event should surface as a provider response error");
+
+        assert_eq!(err.provider_response_status(), None);
+        assert_eq!(err.provider_response_body(), Some(payload));
+        let json = err
+            .provider_response_json()
+            .expect("raw body should be valid JSON")
+            .expect("parsed JSON should be present");
+        assert_eq!(json["error"]["code"], "server_error");
+    }
+
+    #[tokio::test]
+    async fn streaming_non_http_transport_error_stays_provider_error() {
+        use crate::http_client::sse::GenericEventSource;
+        use crate::test_utils::SequencedStreamingHttpClient;
+
+        let chunks = vec![Err(crate::http_client::Error::InvalidContentType(
+            http::HeaderValue::from_static("application/json"),
+        ))];
+        let client = SequencedStreamingHttpClient::new(chunks);
+        let req = http::Request::builder()
+            .method("POST")
+            .uri("http://localhost/v1/responses")
+            .body(Vec::new())
+            .expect("request should build");
+        let event_source = GenericEventSource::new(client, req);
+        let span = tracing::Span::none();
+        let mut stream = super::stream_from_event_source(event_source, span);
+
+        let err = stream
+            .next()
+            .await
+            .expect("stream should yield transport error")
+            .expect_err("non-HTTP transport failure should surface as provider error");
+        assert_eq!(
+            err.to_string(),
+            "ProviderError: Invalid content type was returned: \"application/json\""
+        );
+        assert!(matches!(
+            err,
+            crate::completion::CompletionError::ProviderError(_)
+        ));
+        // Rig-generated transport diagnostics are not provider response bodies.
+        assert_eq!(err.provider_response_body(), None);
+        assert_eq!(err.provider_response_status(), None);
     }
 
     #[tokio::test]
@@ -1424,7 +1700,7 @@ mod tests {
             "response": response,
         });
 
-        let usage = final_usage_from_event(event).await;
+        let usage = final_response_from_event(event).await.usage;
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.total_tokens, 15);
@@ -1448,10 +1724,14 @@ mod tests {
 
         let err = first_error_from_event(event).await;
 
-        assert_eq!(
-            err.to_string(),
-            "ProviderError: OpenAI response stream was incomplete: max_output_tokens"
-        );
+        assert!(matches!(
+            err,
+            crate::completion::CompletionError::ProviderResponse(_)
+        ));
+        assert_eq!(err.provider_response_status(), None);
+        assert!(err.provider_response_body().is_some_and(|body| {
+            body.contains("response.incomplete") && body.contains("max_output_tokens")
+        }));
     }
 
     #[tokio::test]
@@ -1503,10 +1783,35 @@ mod tests {
 
         let err = first_error_tolerating_incomplete(event).await;
 
-        assert_eq!(
-            err.to_string(),
-            "ProviderError: server_error: response stream failed"
-        );
+        assert!(matches!(
+            err,
+            crate::completion::CompletionError::ProviderResponse(_)
+        ));
+        assert_eq!(err.provider_response_status(), None);
+        assert!(err.provider_response_body().is_some_and(|body| {
+            body.contains("response.failed") && body.contains("response stream failed")
+        }));
+    }
+
+    #[tokio::test]
+    async fn response_completed_chunk_populates_reasoning_metadata_and_context() {
+        let response = sample_response(ResponseStatus::Completed);
+        let mut event = json!({
+            "type": "response.completed",
+            "sequence_number": 1,
+            "response": response,
+        });
+        let metadata = json!({
+            "context": "all_turns",
+            "effort": "ultra",
+            "summary": null,
+            "future_control": true
+        });
+        event["response"]["reasoning"] = metadata.clone();
+
+        let response = final_response_from_event(event).await;
+        assert_eq!(response.reasoning_context.as_deref(), Some("all_turns"));
+        assert_eq!(response.reasoning_metadata.as_ref(), metadata.as_object());
     }
 
     #[tokio::test]
@@ -1621,7 +1926,7 @@ mod tests {
         let chat_history: Vec<Message> = Vec::new();
         let mut stream = agent
             .stream_chat("Call my example tool", &chat_history)
-            .multi_turn(5)
+            .max_turns(5)
             .await;
 
         while let Some(item) = stream.next().await {

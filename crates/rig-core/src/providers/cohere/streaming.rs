@@ -2,16 +2,14 @@ use crate::completion::{CompletionError, CompletionRequest, GetTokenUsage};
 use crate::http_client::HttpClientExt;
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::providers::cohere::CompletionModel;
-use crate::providers::cohere::completion::{
-    AssistantContent, CohereCompletionRequest, Message, ToolCall, ToolCallFunction, ToolType, Usage,
-};
+use crate::providers::cohere::completion::{CohereCompletionRequest, Usage};
 use crate::streaming::{RawStreamingChoice, RawStreamingToolCall, ToolCallDeltaContent};
-use crate::telemetry::SpanCombinator;
+use crate::telemetry::{CompletionOperation, CompletionSpanBuilder, SpanCombinator};
 use crate::{json_utils, streaming};
 use async_stream::stream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::{Level, enabled, info_span};
+use tracing::{Level, enabled};
 use tracing_futures::Instrument;
 
 #[derive(Debug, Deserialize)]
@@ -99,23 +97,15 @@ where
         request: CompletionRequest,
     ) -> Result<streaming::StreamingCompletionResponse<StreamingCompletionResponse>, CompletionError>
     {
+        let system_instructions = request.preamble.clone();
         let mut request = CohereCompletionRequest::try_from((self.model.as_ref(), request))?;
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat_streaming",
-                gen_ai.operation.name = "chat_streaming",
-                gen_ai.provider.name = "cohere",
-                gen_ai.request.model = self.model,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = self.model,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
+        let span = CompletionSpanBuilder::new(
+            "cohere",
+            &request.model,
+            CompletionOperation::ChatStreaming,
+        )
+        .system_instructions(system_instructions.as_deref())
+        .build();
 
         let params = json_utils::merge(
             request.additional_params.unwrap_or(serde_json::json!({})),
@@ -144,8 +134,6 @@ where
 
         let stream = stream! {
             let mut current_tool_call: Option<(String, String, String, String)> = None;
-            let mut text_response = String::new();
-            let mut tool_calls = Vec::new();
             let mut final_usage = None;
 
             while let Some(event_result) = event_source.next().await {
@@ -175,22 +163,12 @@ where
                                 let Some(content) = &message.content else { continue; };
                                 let Some(text) = &content.text else { continue; };
 
-                                text_response += text;
-
                                 yield Ok(RawStreamingChoice::Message(text.clone()));
                             },
 
                             StreamingEvent::MessageEnd { delta: Some(delta) } => {
-                                let message = Message::Assistant {
-                                    tool_calls: tool_calls.clone(),
-                                    content: vec![AssistantContent::Text { text: text_response.clone() }],
-                                    tool_plan: None,
-                                    citations: vec![]
-                                };
-
                                 let span = tracing::Span::current();
                                 span.record_token_usage(&delta.usage);
-                                span.record_model_output(&vec![message]);
 
                                 final_usage = Some(delta.usage.clone());
                                 break;
@@ -204,7 +182,7 @@ where
                                 let Some(name) = function.name.clone() else { continue; };
                                 let Some(arguments) = function.arguments.clone() else { continue; };
 
-                                let internal_call_id = nanoid::nanoid!();
+                                let internal_call_id = crate::id::generate();
                                 current_tool_call = Some((id.clone(), internal_call_id.clone(), name.clone(), arguments));
 
                                 yield Ok(RawStreamingChoice::ToolCallDelta {
@@ -235,15 +213,6 @@ where
                                 let Some(tc) = current_tool_call.clone() else { continue; };
                                 let Ok(args) = json_utils::parse_tool_arguments(&tc.3) else { continue; };
 
-                                tool_calls.push(ToolCall {
-                                    id: Some(tc.0.clone()),
-                                    r#type: Some(ToolType::Function),
-                                    function: Some(ToolCallFunction {
-                                        name: tc.2.clone(),
-                                        arguments: args.clone()
-                                    })
-                                });
-
                                 let raw_tool_call = RawStreamingToolCall::new(tc.0, tc.2, args)
                                     .with_internal_call_id(tc.1);
                                 yield Ok(RawStreamingChoice::ToolCall(raw_tool_call));
@@ -259,7 +228,7 @@ where
                     }
                     Err(err) => {
                         tracing::error!(?err, "SSE error");
-                        yield Err(CompletionError::ProviderError(err.to_string()));
+                        yield Err(CompletionError::from_stream_transport(err));
                         break;
                     }
                 }

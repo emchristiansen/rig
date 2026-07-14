@@ -164,16 +164,6 @@ pub struct Nothing;
 
 impl ApiKey for Nothing {}
 
-impl TryFrom<String> for Nothing {
-    type Error = &'static str;
-
-    fn try_from(_: String) -> Result<Self, Self::Error> {
-        Err(
-            "Tried to create a Nothing from a string - this should not happen, please file an issue",
-        )
-    }
-}
-
 #[derive(Clone)]
 /// Generic provider client shared by Rig provider integrations.
 ///
@@ -233,8 +223,6 @@ pub enum Transport {
     Http,
     /// Server-sent events streaming transport.
     Sse,
-    /// Newline-delimited JSON streaming transport.
-    NdJson,
 }
 
 /// An API provider extension, this abstracts over extensions which may be used in conjunction with
@@ -543,11 +531,18 @@ where
             }
             StatusCode::INTERNAL_SERVER_ERROR => {
                 let text = http_client::text(response).await?;
-                Err(VerifyError::ProviderError(text))
+                Err(VerifyError::HttpError(
+                    http_client::Error::InvalidStatusCodeWithMessage(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        text,
+                    ),
+                ))
             }
             status if status.as_u16() == 529 => {
                 let text = http_client::text(response).await?;
-                Err(VerifyError::ProviderError(text))
+                Err(VerifyError::HttpError(
+                    http_client::Error::InvalidStatusCodeWithMessage(status, text),
+                ))
             }
             _ => {
                 let status = response.status();
@@ -556,9 +551,9 @@ where
                     Ok(())
                 } else {
                     let text: String = String::from_utf8_lossy(&response.into_body().await?).into();
-                    Err(VerifyError::HttpError(http_client::Error::Instance(
-                        format!("Failed with '{status}': {text}").into(),
-                    )))
+                    Err(VerifyError::HttpError(
+                        http_client::Error::InvalidStatusCodeWithMessage(status, text),
+                    ))
                 }
             }
         }

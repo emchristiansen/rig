@@ -119,7 +119,7 @@ async fn streaming_multi_turn_executes_tools_via_builtin_driver() {
                 .tool(subtract)
                 .build();
 
-            let mut stream = agent.stream_prompt(CHAINED_PROMPT).multi_turn(5).await;
+            let mut stream = agent.stream_prompt(CHAINED_PROMPT).max_turns(5).await;
             let observation = crate::support::collect_stream_observation(&mut stream).await;
 
             assert!(
@@ -238,7 +238,7 @@ async fn tool_concurrency_one_preserves_parallel_call_contract() {
             let response = agent
                 .prompt(PARALLEL_PROMPT)
                 .max_turns(3)
-                .with_tool_concurrency(1)
+                .tool_concurrency(1)
                 .extended_details()
                 .await
                 .expect("serial tool execution should succeed");

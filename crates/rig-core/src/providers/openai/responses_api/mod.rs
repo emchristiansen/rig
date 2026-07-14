@@ -14,7 +14,6 @@
 //! # }
 //! ```
 use super::InputAudio;
-use super::completion::ToolChoice;
 use super::responses_api::streaming::StreamingCompletionResponse;
 use crate::completion::{CompletionError, GetTokenUsage};
 use crate::http_client;
@@ -25,12 +24,13 @@ use crate::message::{
     MimeType, Text,
 };
 use crate::one_or_many::string_or_one_or_many;
+use crate::telemetry::{CompletionOperation, CompletionSpanBuilder};
 
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use crate::{OneOrMany, completion, message};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
-use tracing::{Instrument, Level, enabled, info_span};
+use tracing::{Instrument, Level, enabled};
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -198,6 +198,13 @@ pub enum InputContent {
 pub struct OpenAIReasoning {
     id: String,
     pub summary: Vec<ReasoningSummary>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_reasoning_text_content",
+        serialize_with = "serialize_reasoning_text_content",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub content: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -221,6 +228,48 @@ impl ReasoningSummary {
         let ReasoningSummary::SummaryText { text } = self;
         text.clone()
     }
+}
+
+fn reasoning_text_content_json(content: &[String]) -> Value {
+    Value::Array(
+        content
+            .iter()
+            .map(|text| {
+                serde_json::json!({
+                    "type": "reasoning_text",
+                    "text": text,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn serialize_reasoning_text_content<S>(content: &[String], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    reasoning_text_content_json(content).serialize(serializer)
+}
+
+fn deserialize_reasoning_text_content<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(match value {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                Value::Object(mut item) => item
+                    .remove("text")
+                    .and_then(|text| text.as_str().map(ToOwned::to_owned)),
+                Value::String(text) => Some(text),
+                _ => None,
+            })
+            .collect(),
+        Value::String(text) => vec![text],
+        _ => Vec::new(),
+    })
 }
 
 /// A tool result.
@@ -318,10 +367,10 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                                 }) = tool_result_content
                                 else {
                                     return Err(CompletionError::ProviderError(
-                                        "This thing only supports text!".to_string(),
+                                        "The OpenAI Responses API only supports text tool results"
+                                            .to_string(),
                                     ));
                                 };
-                                // let output = serde_json::from_str(&text)?;
                                 items.push(InputItem {
                                     role: None,
                                     input: InputContent::FunctionCallOutput(ToolResult {
@@ -540,11 +589,14 @@ fn openai_reasoning_from_core(
     };
 
     let mut summary = Vec::new();
+    let mut reasoning_content = Vec::new();
     let mut encrypted_content = None;
     for content in &reasoning.content {
         match content {
-            crate::message::ReasoningContent::Text { text, .. }
-            | crate::message::ReasoningContent::Summary(text) => {
+            crate::message::ReasoningContent::Text { text, .. } => {
+                reasoning_content.push(text.clone());
+            }
+            crate::message::ReasoningContent::Summary(text) => {
                 summary.push(ReasoningSummary::new(text));
             }
             // OpenAI reasoning input has one opaque payload field; preserve either
@@ -559,21 +611,10 @@ fn openai_reasoning_from_core(
     Ok(Some(OpenAIReasoning {
         id,
         summary,
+        content: reasoning_content,
         encrypted_content,
         status: None,
     }))
-}
-
-fn optional_reasoning_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(
-        match Option::<serde_json::Value>::deserialize(deserializer)? {
-            Some(serde_json::Value::String(reasoning)) => Some(reasoning),
-            _ => None,
-        },
-    )
 }
 
 /// The definition of a tool response, repurposed for OpenAI's Responses API.
@@ -585,10 +626,11 @@ pub struct ResponsesToolDefinition {
     /// Tool name
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
-    /// Parameters - this should be a JSON schema. Tools should additionally ensure an "additionalParameters" field has been added with the value set to false, as this is required if using OpenAI's strict mode (enabled by default).
+    /// Parameters - this should be a JSON schema. Strict function tools must use OpenAI's supported strict schema subset.
     #[serde(default, skip_serializing_if = "is_json_null")]
     pub parameters: serde_json::Value,
-    /// Whether to use strict mode. Enabled by default as it allows for improved efficiency.
+    /// Whether to use strict mode. Disabled by default; opt in with [`Self::with_strict`]
+    /// or [`GenericResponsesCompletionModel::with_strict_tools`].
     #[serde(default, skip_serializing_if = "is_false")]
     pub strict: bool,
     /// Tool description.
@@ -608,22 +650,44 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl ResponsesToolDefinition {
-    /// Creates a function tool definition.
+    /// Creates a function tool definition with strict mode disabled.
     pub fn function(
         name: impl Into<String>,
         description: impl Into<String>,
-        mut parameters: serde_json::Value,
+        parameters: serde_json::Value,
     ) -> Self {
-        super::sanitize_schema(&mut parameters);
-
         Self {
             kind: "function".to_string(),
             name: name.into(),
             parameters,
-            strict: true,
+            strict: false,
             description: description.into(),
             config: Map::new(),
         }
+    }
+
+    /// Creates a strict function tool definition.
+    ///
+    /// The schema is sanitized to OpenAI's strict subset (`additionalProperties: false`
+    /// added and every property forced into `required`).
+    pub fn strict_function(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self::function(name, description, parameters).with_strict()
+    }
+
+    /// Enables strict mode for this function tool.
+    ///
+    /// Function schemas are sanitized to OpenAI's strict subset. Hosted tools are
+    /// returned unchanged because strict mode only applies to function tools.
+    pub fn with_strict(mut self) -> Self {
+        if self.kind == "function" {
+            super::sanitize_schema(&mut self.parameters);
+            self.strict = true;
+        }
+        self
     }
 
     /// Creates a hosted tool definition for an arbitrary hosted tool type.
@@ -659,12 +723,8 @@ impl ResponsesToolDefinition {
         self
     }
 
-    fn normalize(mut self) -> Self {
-        if self.kind == "function" {
-            super::sanitize_schema(&mut self.parameters);
-            self.strict = true;
-        }
-        self
+    fn normalize(self) -> Self {
+        self.with_strict()
     }
 }
 
@@ -677,6 +737,103 @@ impl From<completion::ToolDefinition> for ResponsesToolDefinition {
         } = value;
 
         Self::function(name, description, parameters)
+    }
+}
+
+/// Tool choice for the OpenAI Responses API.
+///
+/// The Responses API accepts the `"auto"`/`"none"`/`"required"` modes shared
+/// with the Chat Completions API, and additionally supports forcing one
+/// specific function (`{"type": "function", "name": "..."}`) or restricting
+/// the model to a subset of the request's tools
+/// (`{"type": "allowed_tools", ...}`).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum ToolChoice {
+    /// `"auto"`, `"none"`, or `"required"`. The wrapped chat-completions
+    /// enum also has a `Function` variant whose nested wire shape the
+    /// Responses API rejects — use [`ToolChoiceDefinition::Function`] to
+    /// force a function here.
+    Mode(super::completion::ToolChoice),
+    /// A typed tool-choice object (`function` or `allowed_tools`).
+    Definition(ToolChoiceDefinition),
+}
+
+/// A typed Responses API tool-choice object.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolChoiceDefinition {
+    /// Force the model to call the named function tool.
+    Function {
+        /// Name of the function tool the model must call.
+        name: String,
+    },
+    /// Restrict the model to a subset of the request's tools.
+    AllowedTools {
+        /// Whether the model may still answer without a tool call (`auto`)
+        /// or must call one of the allowed tools (`required`).
+        mode: AllowedToolsMode,
+        /// The tools the model is allowed to call.
+        tools: Vec<AllowedTool>,
+    },
+}
+
+/// Constrains how the model may use the tools listed in
+/// [`ToolChoiceDefinition::AllowedTools`].
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowedToolsMode {
+    /// The model may call one of the allowed tools or answer directly.
+    Auto,
+    /// The model must call one of the allowed tools.
+    Required,
+}
+
+/// One entry of a [`ToolChoiceDefinition::AllowedTools`] tool list.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AllowedTool {
+    /// A function tool referenced by name.
+    Function {
+        /// Name of the allowed function tool.
+        name: String,
+    },
+}
+
+impl TryFrom<message::ToolChoice> for ToolChoice {
+    type Error = CompletionError;
+
+    fn try_from(value: message::ToolChoice) -> Result<Self, Self::Error> {
+        let choice = match value {
+            message::ToolChoice::Auto => Self::Mode(super::completion::ToolChoice::Auto),
+            message::ToolChoice::None => Self::Mode(super::completion::ToolChoice::None),
+            message::ToolChoice::Required => Self::Mode(super::completion::ToolChoice::Required),
+            message::ToolChoice::Specific { function_names } => {
+                let mut names = function_names.into_iter();
+                let Some(first) = names.next() else {
+                    return Err(CompletionError::RequestError(
+                        "ToolChoice::Specific requires at least one function name".into(),
+                    ));
+                };
+
+                match names.next() {
+                    None => Self::Definition(ToolChoiceDefinition::Function { name: first }),
+                    Some(second) => {
+                        let tools = std::iter::once(first)
+                            .chain(std::iter::once(second))
+                            .chain(names)
+                            .map(|name| AllowedTool::Function { name })
+                            .collect();
+                        Self::Definition(ToolChoiceDefinition::AllowedTools {
+                            mode: AllowedToolsMode::Required,
+                            tools,
+                        })
+                    }
+                }
+            }
+        };
+
+        Ok(choice)
     }
 }
 
@@ -843,26 +1000,86 @@ pub enum ResponseStatus {
     Incomplete,
 }
 
+/// Controls where Rig system instructions are placed in an OpenAI Responses request.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SystemInstructionsPlacement {
+    /// Send the leading run of system instructions (the preamble and any system
+    /// messages that open the conversation) through the official top-level
+    /// `instructions` field. Mid-conversation system messages keep their
+    /// position in `input`.
+    #[default]
+    Instructions,
+    /// Send every system message through the top-level `instructions` field,
+    /// including mid-conversation ones.
+    ///
+    /// Use this for backends that reject the `system` role in `input` entirely.
+    AllInstructions,
+    /// Send system instructions as `system` messages in `input`.
+    ///
+    /// Use this only for OpenAI-compatible providers that do not support top-level
+    /// `instructions`.
+    InputSystemMessages,
+}
+
+/// Provider extensions that drive the OpenAI Responses request conversion.
+///
+/// Implemented by the `Ext` type of a [`crate::client::Client`] used with
+/// [`GenericResponsesCompletionModel`], so a client-level configuration can
+/// control request shaping for every model created from that client.
+pub trait ResponsesProviderExt {
+    /// Where Rig system instructions are placed in requests built from this
+    /// provider. See [`SystemInstructionsPlacement`].
+    ///
+    /// Deliberately has no default body: each provider must state its
+    /// placement explicitly, so a backend that can't handle the default
+    /// (top-level `instructions`) is never inherited by accident.
+    fn system_instructions_placement(&self) -> SystemInstructionsPlacement;
+}
+
 /// Attempt to try and create a `NewCompletionRequest` from a model name and [`crate::completion::CompletionRequest`]
 impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionRequest {
     type Error = CompletionError;
     fn try_from(
-        (model, mut req): (String, crate::completion::CompletionRequest),
+        (model, request): (String, crate::completion::CompletionRequest),
     ) -> Result<Self, Self::Error> {
+        Self::try_from(ResponsesRequestParams {
+            model,
+            request,
+            system_instructions_placement: SystemInstructionsPlacement::default(),
+        })
+    }
+}
+
+/// Parameters for converting a [`crate::completion::CompletionRequest`] into a
+/// Responses API [`CompletionRequest`] with a non-default configuration.
+pub struct ResponsesRequestParams {
+    pub model: String,
+    pub request: crate::completion::CompletionRequest,
+    pub system_instructions_placement: SystemInstructionsPlacement,
+}
+
+impl TryFrom<ResponsesRequestParams> for CompletionRequest {
+    type Error = CompletionError;
+
+    fn try_from(params: ResponsesRequestParams) -> Result<Self, Self::Error> {
+        let ResponsesRequestParams {
+            model,
+            request: mut req,
+            system_instructions_placement,
+        } = params;
         let chat_history = req.chat_history_with_documents();
         let model = req.model.clone().unwrap_or(model);
-        let input = {
+        let preamble = req.preamble.take();
+        let mut instruction_parts = Vec::new();
+        let mut input = {
             let mut partial_history = vec![];
             partial_history.extend(chat_history);
 
-            // Initialize full history with preamble (or empty if non-existent)
-            // Some "Responses API compatible" providers don't support `instructions` field
-            // so we need to add a system message until further notice
-            let mut full_history: Vec<InputItem> = if let Some(content) = req.preamble {
-                vec![InputItem::system_message(content)]
-            } else {
-                Vec::new()
-            };
+            let mut full_history: Vec<InputItem> = preamble
+                .map(InputItem::system_message)
+                .into_iter()
+                .collect();
 
             for history_item in partial_history {
                 full_history.extend(<Vec<InputItem>>::try_from(history_item)?);
@@ -871,10 +1088,54 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
             full_history
         };
 
+        let mut lift_system_text = |text: String| {
+            let text = text.trim();
+            if !text.is_empty() {
+                instruction_parts.push(text.to_string());
+            }
+        };
+        let items_before_lift = input.len();
+        match system_instructions_placement {
+            SystemInstructionsPlacement::Instructions => {
+                // Lift only the leading run of system items (the preamble and any
+                // system messages that open the conversation) into the top-level
+                // `instructions` field. Mid-conversation system messages keep
+                // their position in `input`, and a request made up solely of
+                // system messages keeps them in `input` so it stays non-empty.
+                let leading_system_texts: Vec<String> =
+                    input.iter().map_while(InputItem::system_text).collect();
+                if leading_system_texts.len() < input.len() {
+                    input.drain(..leading_system_texts.len());
+                    leading_system_texts
+                        .into_iter()
+                        .for_each(&mut lift_system_text);
+                }
+            }
+            SystemInstructionsPlacement::AllInstructions => {
+                // Lift every system item, wherever it appears, for backends
+                // that reject the `system` role in `input` entirely.
+                let mut remaining = Vec::with_capacity(input.len());
+                for item in input {
+                    match item.system_text() {
+                        Some(text) => lift_system_text(text),
+                        None => remaining.push(item),
+                    }
+                }
+                input = remaining;
+            }
+            SystemInstructionsPlacement::InputSystemMessages => {}
+        }
+        let instructions = (!instruction_parts.is_empty()).then(|| instruction_parts.join("\n\n"));
+        let lifted_system_items = input.len() < items_before_lift;
+
         let input = OneOrMany::many(input).map_err(|_| {
-            CompletionError::RequestError(
-                "OpenAI Responses request input must contain at least one item".into(),
-            )
+            CompletionError::RequestError(if lifted_system_items {
+                "OpenAI Responses request input must contain at least one non-system item \
+                 (system messages were lifted into the top-level `instructions` field)"
+                    .into()
+            } else {
+                "OpenAI Responses request input must contain at least one item".into()
+            })
         })?;
 
         let mut additional_params_payload = req.additional_params.take().unwrap_or(Value::Null);
@@ -905,11 +1166,6 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
         if additional_params_payload.is_boolean() {
             additional_params_payload = Value::Null;
         }
-
-        additional_tools = additional_tools
-            .into_iter()
-            .map(ResponsesToolDefinition::normalize)
-            .collect();
 
         let mut additional_parameters = if additional_params_payload.is_null() {
             // If there's no additional parameters, initialise an empty object
@@ -959,7 +1215,7 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
         Ok(Self {
             input,
             model,
-            instructions: None, // is currently None due to lack of support in compliant providers
+            instructions,
             max_output_tokens: req.max_tokens,
             stream,
             tool_choice,
@@ -980,6 +1236,10 @@ pub struct GenericResponsesCompletionModel<Ext = super::OpenAIResponsesExt, H = 
     pub model: String,
     /// Model-level default tools that are always added to outgoing requests.
     pub tools: Vec<ResponsesToolDefinition>,
+    /// Whether function tools should use strict mode. Disabled by default to match
+    /// the Chat Completions API; enable with [`Self::with_strict_tools`].
+    pub strict_tools: bool,
+    system_instructions_placement: SystemInstructionsPlacement,
 }
 
 /// The completion model struct for OpenAI's Responses API.
@@ -992,24 +1252,53 @@ pub type ResponsesCompletionModel<H = reqwest::Client> =
 impl<Ext, H> GenericResponsesCompletionModel<Ext, H>
 where
     crate::client::Client<Ext, H>: HttpClientExt + Clone + std::fmt::Debug + 'static,
-    Ext: crate::client::Provider + Clone + 'static,
+    Ext: crate::client::Provider + ResponsesProviderExt + Clone + 'static,
     H: Clone + Default + std::fmt::Debug + 'static,
 {
     /// Creates a new [`ResponsesCompletionModel`].
     pub fn new(client: crate::client::Client<Ext, H>, model: impl Into<String>) -> Self {
+        let system_instructions_placement = client.ext().system_instructions_placement();
         Self {
             client,
             model: model.into(),
             tools: Vec::new(),
+            strict_tools: false,
+            system_instructions_placement,
         }
     }
 
     pub fn with_model(client: crate::client::Client<Ext, H>, model: &str) -> Self {
-        Self {
-            client,
-            model: model.to_string(),
-            tools: Vec::new(),
-        }
+        Self::new(client, model)
+    }
+
+    /// Enable strict mode for function tool schemas.
+    ///
+    /// When enabled, function tool schemas are sanitized to meet OpenAI's strict
+    /// mode requirements and `strict: true` is set on each function definition.
+    pub fn with_strict_tools(mut self) -> Self {
+        self.strict_tools = true;
+        self
+    }
+
+    /// Sets where Rig system instructions are placed in requests from this
+    /// model, overriding the client-level default. See
+    /// [`SystemInstructionsPlacement`] for when each placement applies.
+    pub fn with_system_instructions_placement(
+        mut self,
+        placement: SystemInstructionsPlacement,
+    ) -> Self {
+        self.system_instructions_placement = placement;
+        self
+    }
+
+    /// Sends Rig system instructions as `system` messages in `input` instead of
+    /// as top-level Responses API `instructions`.
+    ///
+    /// OpenAI's Responses API supports `instructions`, and Rig uses it by
+    /// default. Use this compatibility fallback for OpenAI-compatible providers
+    /// that reject or ignore top-level `instructions`.
+    pub fn with_system_instructions_as_messages(self) -> Self {
+        self.with_system_instructions_placement(SystemInstructionsPlacement::InputSystemMessages)
     }
 
     /// Adds a default tool to all requests from this model.
@@ -1033,8 +1322,20 @@ where
         &self,
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<CompletionRequest, CompletionError> {
-        let mut req = CompletionRequest::try_from((self.model.clone(), completion_request))?;
+        let mut req = CompletionRequest::try_from(ResponsesRequestParams {
+            model: self.model.clone(),
+            request: completion_request,
+            system_instructions_placement: self.system_instructions_placement,
+        })?;
         req.tools.extend(self.tools.clone());
+
+        if self.strict_tools {
+            req.tools = req
+                .tools
+                .into_iter()
+                .map(ResponsesToolDefinition::normalize)
+                .collect();
+        }
 
         Ok(req)
     }
@@ -1046,12 +1347,12 @@ where
 {
     /// Use the Completions API instead of Responses.
     pub fn completions_api(self) -> crate::providers::openai::completion::CompletionModel<T> {
-        super::completion::CompletionModel::with_model(self.client.completions_api(), &self.model)
+        super::completion::CompletionModel::new(self.client.completions_api(), &self.model)
     }
 }
 
 /// The standard response format from OpenAI's Responses API.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct CompletionResponse {
     /// The ID of a completion response.
     pub id: String,
@@ -1073,23 +1374,29 @@ pub struct CompletionResponse {
     pub model: String,
     /// Provider-specific top-level reasoning content returned by some
     /// OpenAI-compatible Responses implementations.
-    #[serde(
-        default,
-        rename = "reasoning",
-        deserialize_with = "optional_reasoning_string",
-        skip_serializing_if = "Option::is_none"
-    )]
     pub provider_reasoning: Option<String>,
+    /// The complete object-shaped top-level reasoning metadata returned by the provider.
+    ///
+    /// Unknown fields, unknown values, and null-valued members inside the object
+    /// are preserved value-equivalently. A top-level null, missing field, or
+    /// unsupported non-object shape is normalized to no reasoning metadata.
+    /// When serializing manually constructed responses, [`Self::provider_reasoning`]
+    /// takes precedence over this field, and this field takes precedence over
+    /// [`Self::reasoning_context`].
+    pub reasoning_metadata: Option<Map<String, Value>>,
+    /// The effective reasoning context returned by OpenAI.
+    ///
+    /// This is populated as a convenience projection of
+    /// [`Self::reasoning_metadata`]. String-shaped reasoning returned by compatible
+    /// providers remains available through [`Self::provider_reasoning`].
+    pub reasoning_context: Option<String>,
     /// Token usage
     pub usage: Option<ResponsesUsage>,
     /// The model output (messages, etc will go here)
-    #[serde(default)]
     pub output: Vec<Output>,
     /// Tools
-    #[serde(default)]
     pub tools: Vec<ResponsesToolDefinition>,
     /// Additional parameters
-    #[serde(flatten)]
     pub additional_parameters: AdditionalParameters,
 }
 
@@ -1101,6 +1408,144 @@ pub struct CompletionResponse {
 /// (unknown keys are dropped when the payload is deserialized into
 /// [`AdditionalParameters`]). `response.failed` still errors regardless.
 pub const RESPONSES_TOLERATE_INCOMPLETE_KEY: &str = "__rig_tolerate_incomplete";
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum CompletionResponseReasoningRef<'a> {
+    Text(&'a str),
+    Metadata(&'a Map<String, Value>),
+    Context { context: &'a str },
+}
+
+#[derive(Serialize)]
+struct CompletionResponseWireRef<'a> {
+    id: &'a str,
+    object: &'a ResponseObject,
+    created_at: u64,
+    status: &'a ResponseStatus,
+    error: &'a Option<ResponseError>,
+    incomplete_details: &'a Option<IncompleteDetailsReason>,
+    instructions: &'a Option<String>,
+    max_output_tokens: &'a Option<u64>,
+    model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<CompletionResponseReasoningRef<'a>>,
+    usage: &'a Option<ResponsesUsage>,
+    output: &'a Vec<Output>,
+    tools: &'a Vec<ResponsesToolDefinition>,
+    #[serde(flatten)]
+    additional_parameters: &'a AdditionalParameters,
+}
+
+#[derive(Deserialize)]
+struct CompletionResponseWire {
+    id: String,
+    object: ResponseObject,
+    created_at: u64,
+    status: ResponseStatus,
+    error: Option<ResponseError>,
+    incomplete_details: Option<IncompleteDetailsReason>,
+    instructions: Option<String>,
+    max_output_tokens: Option<u64>,
+    model: String,
+    #[serde(default)]
+    reasoning: Option<Value>,
+    usage: Option<ResponsesUsage>,
+    #[serde(default)]
+    output: Vec<Output>,
+    #[serde(default)]
+    tools: Vec<ResponsesToolDefinition>,
+    #[serde(flatten)]
+    additional_parameters: AdditionalParameters,
+}
+
+impl Serialize for CompletionResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // `AdditionalParameters::reasoning` models request configuration. A
+        // response's top-level `reasoning` field is represented by the three
+        // response surfaces above, so omit the request field here to avoid
+        // serializing duplicate `reasoning` keys.
+        let mut additional_parameters = self.additional_parameters.clone();
+        additional_parameters.reasoning = None;
+
+        let reasoning = self
+            .provider_reasoning
+            .as_deref()
+            .map(CompletionResponseReasoningRef::Text)
+            .or_else(|| {
+                self.reasoning_metadata
+                    .as_ref()
+                    .map(CompletionResponseReasoningRef::Metadata)
+            })
+            .or_else(|| {
+                self.reasoning_context
+                    .as_deref()
+                    .map(|context| CompletionResponseReasoningRef::Context { context })
+            });
+
+        CompletionResponseWireRef {
+            id: &self.id,
+            object: &self.object,
+            created_at: self.created_at,
+            status: &self.status,
+            error: &self.error,
+            incomplete_details: &self.incomplete_details,
+            instructions: &self.instructions,
+            max_output_tokens: &self.max_output_tokens,
+            model: &self.model,
+            reasoning,
+            usage: &self.usage,
+            output: &self.output,
+            tools: &self.tools,
+            additional_parameters: &additional_parameters,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CompletionResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let response = CompletionResponseWire::deserialize(deserializer)?;
+        let (provider_reasoning, reasoning_metadata) = match response.reasoning {
+            Some(Value::String(reasoning)) => (Some(reasoning), None),
+            Some(Value::Object(metadata)) => (None, Some(metadata)),
+            // Null, arrays, numbers, and booleans are not documented top-level
+            // reasoning response shapes. Ignore them to preserve the lenient
+            // behavior that predates object-shaped metadata support.
+            _ => (None, None),
+        };
+        let reasoning_context = reasoning_metadata
+            .as_ref()
+            .and_then(|reasoning| reasoning.get("context"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+
+        Ok(Self {
+            id: response.id,
+            object: response.object,
+            created_at: response.created_at,
+            status: response.status,
+            error: response.error,
+            incomplete_details: response.incomplete_details,
+            instructions: response.instructions,
+            max_output_tokens: response.max_output_tokens,
+            model: response.model,
+            provider_reasoning,
+            reasoning_metadata,
+            reasoning_context,
+            usage: response.usage,
+            output: response.output,
+            tools: response.tools,
+            additional_parameters: response.additional_parameters,
+        })
+    }
+}
 
 /// Additional parameters for the completion request type for OpenAI's Response API: <https://platform.openai.com/docs/api-reference/responses/create>
 /// Intended to be derived from [`crate::completion::request::CompletionRequest`].
@@ -1124,8 +1569,18 @@ pub struct AdditionalParameters {
     /// The username of the user (that you want to use).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// A stable cache routing key for prompt caching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    /// Prompt cache retention policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention: Option<String>,
     /// Any additional metadata you'd like to add. This will additionally be returned by the response.
-    #[serde(skip_serializing_if = "Map::is_empty", default)]
+    #[serde(
+        skip_serializing_if = "Map::is_empty",
+        default,
+        deserialize_with = "deserialize_metadata"
+    )]
     pub metadata: serde_json::Map<String, serde_json::Value>,
     /// Whether or not you want tool calls to run in parallel.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1142,15 +1597,22 @@ pub struct AdditionalParameters {
     /// Whether or not to store the response for later retrieval by API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
-    /// A stable cache-routing affinity key serialized at the top level of the
-    /// request. For ChatGPT/Codex this is the session's thread identifier; the
-    /// provider treats it as routing metadata, not a hard cache partition key.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt_cache_key: Option<String>,
     /// Provider-specific client metadata serialized at the top level of the
     /// request. Empty by default and omitted from the payload when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub client_metadata: BTreeMap<String, String>,
+}
+
+fn deserialize_metadata<'de, D>(
+    deserializer: D,
+) -> Result<serde_json::Map<String, serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        Option::<serde_json::Map<String, serde_json::Value>>::deserialize(deserializer)?
+            .unwrap_or_default(),
+    )
 }
 
 impl AdditionalParameters {
@@ -1216,22 +1678,41 @@ pub struct StructuredOutputsInput {
 }
 
 /// Add reasoning to a [`CompletionRequest`].
+///
+/// # Example
+/// ```
+/// use rig_core::providers::openai::responses_api::{
+///     Reasoning, ReasoningContext, ReasoningEffort, ReasoningMode,
+/// };
+///
+/// // GPT-5.6 reasoning controls: effort, pro mode, and persisted-reasoning context.
+/// let reasoning = Reasoning::new()
+///     .with_effort(ReasoningEffort::Max)
+///     .with_mode(ReasoningMode::Pro)
+///     .with_context(ReasoningContext::AllTurns);
+/// ```
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Reasoning {
     /// How much effort you want the model to put into thinking/reasoning.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
     /// How much effort you want the model to put into writing the reasoning summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ReasoningSummaryLevel>,
+    /// The reasoning mode. Independent from `effort`; the standard mode is
+    /// represented by omitting the field. Supported by the GPT-5.6 model family.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ReasoningMode>,
+    /// How persisted reasoning is carried across turns. Supported by the
+    /// GPT-5.6 model family.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ReasoningContext>,
 }
 
 impl Reasoning {
     /// Creates a new Reasoning instantiation (with empty values).
     pub fn new() -> Self {
-        Self {
-            effort: None,
-            summary: None,
-        }
+        Self::default()
     }
 
     /// Adds reasoning effort.
@@ -1244,6 +1725,20 @@ impl Reasoning {
     /// Adds summary level (how detailed the reasoning summary will be).
     pub fn with_summary_level(mut self, reasoning_summary_level: ReasoningSummaryLevel) -> Self {
         self.summary = Some(reasoning_summary_level);
+
+        self
+    }
+
+    /// Sets the reasoning mode (e.g. pro mode on GPT-5.6 models).
+    pub fn with_mode(mut self, reasoning_mode: ReasoningMode) -> Self {
+        self.mode = Some(reasoning_mode);
+
+        self
+    }
+
+    /// Sets how persisted reasoning is carried across turns (GPT-5.6 models).
+    pub fn with_context(mut self, reasoning_context: ReasoningContext) -> Self {
+        self.context = Some(reasoning_context);
 
         self
     }
@@ -1311,6 +1806,33 @@ pub enum ReasoningEffort {
     Medium,
     High,
     Xhigh,
+    /// The highest reasoning effort. Supported by the GPT-5.6 model family.
+    Max,
+}
+
+/// The reasoning mode used by a given model. Independent from
+/// [`ReasoningEffort`]; the standard mode is represented by omitting the field
+/// (`None` on [`Reasoning::mode`]), so this enum only carries the documented
+/// non-default modes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningMode {
+    /// Pro mode. Supported by the GPT-5.6 model family.
+    Pro,
+}
+
+/// How persisted reasoning is carried across turns. Supported by the GPT-5.6
+/// model family.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningContext {
+    /// Let the model decide how much persisted reasoning to reuse.
+    #[default]
+    Auto,
+    /// Reuse persisted reasoning from all previous turns.
+    AllTurns,
+    /// Only use reasoning from the current turn.
+    CurrentTurn,
 }
 
 /// The amount of effort that will go into a reasoning summary by a given model.
@@ -1339,28 +1861,151 @@ pub enum Include {
     CodeInterpreterCallOutputs,
 }
 
-/// A currently non-exhaustive list of output types.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type")]
-#[serde(rename_all = "snake_case")]
+/// A modeled output item from the OpenAI Responses API.
+///
+/// Unrecognized output items — notably provider-native hosted tools such as
+/// `web_search_call`, `file_search_call`, `computer_call`, and
+/// `code_interpreter_call` — decode to [`Output::Unknown`], which preserves
+/// the verbatim item object so callers can inspect or forward it. This keeps
+/// unknown item types from breaking deserialization of the entire
+/// `CompletionResponse` (the invariant that previously caused streaming token
+/// usage to be silently dropped) without discarding the payload along the way.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Output {
     Message(OutputMessage),
-    #[serde(alias = "function_call")]
     FunctionCall(OutputFunctionCall),
     Reasoning {
         id: String,
         summary: Vec<ReasoningSummary>,
-        #[serde(default)]
+        content: Vec<String>,
         encrypted_content: Option<String>,
-        #[serde(default)]
         status: Option<ToolStatus>,
     },
-    /// Catch-all variant for unknown output types (e.g., `web_search_call`,
-    /// `file_search_call`, `computer_use_call`). This prevents unknown types
-    /// from breaking deserialization of the entire `CompletionResponse`,
-    /// which previously caused streaming token usage to be silently dropped.
-    #[serde(other)]
-    Unknown,
+    /// Catch-all for output item types this version does not model. Holds the
+    /// raw item object exactly as it appeared in the provider's `output[]`
+    /// array, so hosted-tool payloads survive the typed decode.
+    Unknown(Value),
+}
+
+/// Deserialize helper for the inline-field [`Output::Reasoning`] variant.
+///
+/// `Output`'s (de)serialization is hand-written so [`Output::Unknown`] can carry
+/// a raw [`Value`] (`#[serde(other)]` only applies to a unit variant, which
+/// would force the payload to be dropped). The modeled `Message`/`FunctionCall`
+/// variants deserialize straight into their payload structs; `Reasoning` has no
+/// payload struct of its own, so this mirrors its fields. Same approach as
+/// Anthropic's `Citation`.
+#[derive(Deserialize)]
+struct ReasoningFields {
+    id: String,
+    #[serde(default)]
+    summary: Vec<ReasoningSummary>,
+    #[serde(default, deserialize_with = "deserialize_reasoning_text_content")]
+    content: Vec<String>,
+    #[serde(default)]
+    encrypted_content: Option<String>,
+    #[serde(default)]
+    status: Option<ToolStatus>,
+}
+
+impl From<ReasoningFields> for Output {
+    fn from(fields: ReasoningFields) -> Self {
+        Output::Reasoning {
+            id: fields.id,
+            summary: fields.summary,
+            content: fields.content,
+            encrypted_content: fields.encrypted_content,
+            status: fields.status,
+        }
+    }
+}
+
+/// Serialize a modeled payload as its tagged wire object — the payload's own
+/// fields plus the internally tagged `"type"`. The key is appended, so the
+/// result is value-equal (not byte-for-byte ordered) to the original item.
+fn tagged_output_object<T>(tag: &str, payload: &T) -> Result<Value, serde_json::Error>
+where
+    T: Serialize,
+{
+    let mut value = serde_json::to_value(payload)?;
+    let map = value.as_object_mut().ok_or_else(|| {
+        <serde_json::Error as serde::ser::Error>::custom(
+            "output payload must serialize to a JSON object",
+        )
+    })?;
+    map.insert("type".to_string(), Value::String(tag.to_string()));
+    Ok(value)
+}
+
+impl Serialize for Output {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Hand-written to keep `Unknown` verbatim (mirrors Anthropic's
+        // `Citation`). Known variants emit their modeled fields plus the
+        // internally tagged `type`; `Unknown` re-emits its raw value. The result
+        // is value-equal — not byte-for-byte — to the wire item, since `type` is
+        // appended rather than threaded in declaration order.
+        let value = match self {
+            Output::Message(message) => tagged_output_object("message", message),
+            Output::FunctionCall(call) => tagged_output_object("function_call", call),
+            Output::Reasoning {
+                id,
+                summary,
+                content,
+                encrypted_content,
+                status,
+            } => {
+                let mut value = serde_json::json!({
+                    "type": "reasoning",
+                    "id": id,
+                    "summary": summary,
+                    "encrypted_content": encrypted_content,
+                    "status": status,
+                });
+                if !content.is_empty() {
+                    let map = value.as_object_mut().ok_or_else(|| {
+                        serde::ser::Error::custom("reasoning output must serialize to an object")
+                    })?;
+                    map.insert("content".to_string(), reasoning_text_content_json(content));
+                }
+                Ok(value)
+            }
+            Output::Unknown(value) => return value.serialize(serializer),
+        };
+        value
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Output {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Decode to a `Value` first so an unmodeled item is captured verbatim as
+        // `Unknown`. A modeled `type` with a malformed body still errors (rather
+        // than silently degrading to `Unknown`); an absent or non-string `type`
+        // is itself unmodeled and is captured as `Unknown`. Mirrors `Citation`.
+        let value = Value::deserialize(deserializer)?;
+        let Some(tag) = value.get("type").and_then(Value::as_str) else {
+            return Ok(Output::Unknown(value));
+        };
+        match tag {
+            "message" => serde_json::from_value(value)
+                .map(Output::Message)
+                .map_err(serde::de::Error::custom),
+            "function_call" => serde_json::from_value(value)
+                .map(Output::FunctionCall)
+                .map_err(serde::de::Error::custom),
+            "reasoning" => serde_json::from_value::<ReasoningFields>(value)
+                .map(Output::from)
+                .map_err(serde::de::Error::custom),
+            _ => Ok(Output::Unknown(value)),
+        }
+    }
 }
 
 impl From<Output> for Vec<completion::AssistantContent> {
@@ -1382,6 +2027,7 @@ impl From<Output> for Vec<completion::AssistantContent> {
             Output::Reasoning {
                 id,
                 summary,
+                content: reasoning_content,
                 encrypted_content,
                 ..
             } => {
@@ -1393,6 +2039,12 @@ impl From<Output> for Vec<completion::AssistantContent> {
                         }
                     })
                     .collect::<Vec<_>>();
+                content.extend(reasoning_content.into_iter().map(|text| {
+                    message::ReasoningContent::Text {
+                        text,
+                        signature: None,
+                    }
+                }));
                 if let Some(encrypted_content) = encrypted_content {
                     content.push(message::ReasoningContent::Encrypted(encrypted_content));
                 }
@@ -1403,7 +2055,7 @@ impl From<Output> for Vec<completion::AssistantContent> {
                     },
                 )]
             }
-            Output::Unknown => Vec::new(),
+            Output::Unknown(_) => Vec::new(),
         };
 
         res
@@ -1420,12 +2072,24 @@ pub struct OutputReasoning {
 /// An OpenAI Responses API tool call. A call ID will be returned that must be used when creating a tool result to send back to OpenAI as a message input, otherwise an error will be received.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct OutputFunctionCall {
+    /// Provider-assigned `fc_...` item ID. The Responses API rejects
+    /// `function_call` input IDs that are not native `fc` item IDs, so IDs
+    /// minted outside the Responses API (by Rig's agent loop or another
+    /// provider) are omitted on serialization and the call is paired with its
+    /// output by `call_id` alone.
+    #[serde(default, skip_serializing_if = "is_not_function_call_item_id")]
     pub id: String,
     #[serde(with = "json_utils::stringified_json")]
     pub arguments: serde_json::Value,
     pub call_id: String,
     pub name: String,
     pub status: ToolStatus,
+}
+
+/// See [`OutputFunctionCall::id`]: only provider-native `fc` item IDs may be
+/// sent back to the Responses API.
+fn is_not_function_call_item_id(id: &str) -> bool {
+    !id.starts_with("fc_")
 }
 
 /// The status of a given tool.
@@ -1462,6 +2126,7 @@ where
     crate::client::Client<Ext, H>:
         HttpClientExt + Clone + WasmCompatSend + WasmCompatSync + 'static,
     Ext: crate::client::Provider
+        + ResponsesProviderExt
         + crate::client::DebugExt
         + Clone
         + WasmCompatSend
@@ -1478,32 +2143,22 @@ where
         Self::new(client.clone(), model)
     }
 
+    // The OpenAI Responses API constrains only the final assistant message via
+    // `text.format`; tools are still called across turns, so native structured
+    // output composes with tool calls. See issue #1928.
+    fn composes_native_output_with_tools(&self) -> bool {
+        true
+    }
+
     async fn completion(
         &self,
         completion_request: crate::completion::CompletionRequest,
     ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError> {
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "chat",
-                gen_ai.operation.name = "chat",
-                gen_ai.provider.name = tracing::field::Empty,
-                gen_ai.request.model = tracing::field::Empty,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = tracing::field::Empty,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-                gen_ai.input.messages = tracing::field::Empty,
-                gen_ai.output.messages = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
-
-        span.record("gen_ai.provider.name", "openai");
-        span.record("gen_ai.request.model", &self.model);
+        let system_instructions = completion_request.preamble.clone();
         let request = self.create_completion_request(completion_request)?;
+        let span = CompletionSpanBuilder::new("openai", &request.model, CompletionOperation::Chat)
+            .system_instructions(system_instructions.as_deref())
+            .build();
         let body = serde_json::to_vec(&request)?;
 
         if enabled!(Level::TRACE) {
@@ -1548,8 +2203,9 @@ where
                 }
                 response.try_into()
             } else {
+                let status = response.status();
                 let text = http_client::text(response).await?;
-                Err(CompletionError::ProviderError(text))
+                Err(CompletionError::from_http_response(status, text))
             }
         }
         .instrument(span)
@@ -2042,6 +2698,478 @@ mod tests {
         }
     }
 
+    fn weather_tool_definition() -> completion::ToolDefinition {
+        completion::ToolDefinition {
+            name: "get_weather".to_string(),
+            description: "Get the weather".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                },
+                "required": ["location"]
+            }),
+        }
+    }
+
+    fn weather_tool_request() -> completion::CompletionRequest {
+        completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: crate::OneOrMany::one(message::Message::user("what's the weather?")),
+            documents: Vec::new(),
+            tools: vec![weather_tool_definition()],
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        }
+    }
+
+    #[test]
+    fn responses_tool_choice_modes_serialize_as_plain_strings() {
+        for (choice, expected) in [
+            (message::ToolChoice::Auto, json!("auto")),
+            (message::ToolChoice::None, json!("none")),
+            (message::ToolChoice::Required, json!("required")),
+        ] {
+            let converted = ToolChoice::try_from(choice).expect("mode should convert");
+            assert_eq!(
+                serde_json::to_value(&converted).expect("serialize tool choice"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn responses_tool_choice_specific_single_name_serializes_as_named_function() {
+        let converted = ToolChoice::try_from(message::ToolChoice::Specific {
+            function_names: vec!["get_weather".to_string()],
+        })
+        .expect("single specific tool should convert");
+
+        assert_eq!(
+            serde_json::to_value(&converted).expect("serialize tool choice"),
+            json!({"type": "function", "name": "get_weather"})
+        );
+    }
+
+    #[test]
+    fn responses_tool_choice_specific_multiple_names_serialize_as_allowed_tools() {
+        let converted = ToolChoice::try_from(message::ToolChoice::Specific {
+            function_names: vec!["add".to_string(), "subtract".to_string()],
+        })
+        .expect("multiple specific tools should convert");
+
+        assert_eq!(
+            serde_json::to_value(&converted).expect("serialize tool choice"),
+            json!({
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [
+                    {"type": "function", "name": "add"},
+                    {"type": "function", "name": "subtract"}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn responses_tool_choice_specific_empty_names_error() {
+        let converted = ToolChoice::try_from(message::ToolChoice::Specific {
+            function_names: vec![],
+        });
+
+        assert!(matches!(
+            converted,
+            Err(CompletionError::RequestError(error))
+                if error.to_string().contains("at least one function name")
+        ));
+    }
+
+    #[test]
+    fn responses_request_with_specific_tool_choice_serializes_named_function() {
+        let mut request = weather_tool_request();
+        request.tool_choice = Some(message::ToolChoice::Specific {
+            function_names: vec!["get_weather".to_string()],
+        });
+
+        let request =
+            CompletionRequest::try_from(("gpt-test".to_string(), request)).expect("convert");
+        let request_json = serde_json::to_value(&request).expect("serialize request");
+
+        assert_eq!(
+            request_json.get("tool_choice"),
+            Some(&json!({"type": "function", "name": "get_weather"}))
+        );
+    }
+
+    #[test]
+    fn responses_function_tools_are_non_strict_by_default() {
+        let tool = ResponsesToolDefinition::function(
+            "get_weather",
+            "Get the weather",
+            weather_tool_definition().parameters,
+        );
+
+        assert!(!tool.strict);
+        assert_eq!(tool.parameters["required"], json!(["location"]));
+        assert!(tool.parameters.get("additionalProperties").is_none());
+
+        let serialized = serde_json::to_value(tool).expect("tool should serialize");
+        assert!(serialized.get("strict").is_none());
+    }
+
+    #[test]
+    fn responses_strict_function_tools_sanitize_schema() {
+        let tool = ResponsesToolDefinition::strict_function(
+            "get_weather",
+            "Get the weather",
+            weather_tool_definition().parameters,
+        );
+
+        assert!(tool.strict);
+        assert_eq!(tool.parameters["additionalProperties"], json!(false));
+        assert_eq!(tool.parameters["required"], json!(["location", "unit"]));
+    }
+
+    fn request_with_preamble(preamble: &str) -> completion::CompletionRequest {
+        completion::CompletionRequest {
+            model: None,
+            preamble: Some(preamble.to_string()),
+            chat_history: crate::OneOrMany::one(message::Message::user("Hello")),
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        }
+    }
+
+    fn system_only_request(system_text: &str) -> completion::CompletionRequest {
+        completion::CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: crate::OneOrMany::one(completion::Message::system(system_text)),
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+        }
+    }
+
+    #[test]
+    fn responses_request_uses_top_level_instructions_for_preamble_by_default() {
+        let req = CompletionRequest::try_from((
+            "gpt-4o-mini".to_string(),
+            request_with_preamble("You are concise."),
+        ))
+        .expect("request should convert");
+        let serialized = serde_json::to_value(&req).expect("request should serialize");
+        let input = serialized["input"]
+            .as_array()
+            .expect("input should be array");
+
+        assert_eq!(serialized["instructions"], json!("You are concise."));
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn responses_request_drops_whitespace_only_preamble() {
+        let req = CompletionRequest::try_from((
+            "gpt-4o-mini".to_string(),
+            request_with_preamble("  \n "),
+        ))
+        .expect("request should convert");
+        let serialized = serde_json::to_value(&req).expect("request should serialize");
+        let input = serialized["input"]
+            .as_array()
+            .expect("input should be array");
+
+        assert!(
+            serialized.get("instructions").is_none(),
+            "a whitespace-only preamble carries no content and is dropped"
+        );
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn responses_request_lifts_system_messages_to_top_level_instructions_by_default() {
+        let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "Hello")
+            .preamble("System one".to_string())
+            .message(completion::Message::system("System two"))
+            .build();
+
+        let req = CompletionRequest::try_from(("gpt-4o-mini".to_string(), request))
+            .expect("request should convert");
+        let serialized = serde_json::to_value(&req).expect("request should serialize");
+        let input = serialized["input"]
+            .as_array()
+            .expect("input should be array");
+
+        assert_eq!(
+            serialized["instructions"],
+            json!("System one\n\nSystem two")
+        );
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn responses_request_with_only_system_messages_keeps_them_in_input() {
+        let req = CompletionRequest::try_from((
+            "gpt-4o-mini".to_string(),
+            system_only_request("System only"),
+        ))
+        .expect("request conversion should succeed");
+        let serialized = serde_json::to_value(&req).expect("request should serialize");
+        let input = serialized["input"]
+            .as_array()
+            .expect("input should be array");
+
+        assert!(
+            serialized.get("instructions").is_none(),
+            "lifting a system-only history would leave input empty, so it stays in input"
+        );
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "system");
+        assert!(input[0].to_string().contains("System only"));
+    }
+
+    #[test]
+    fn responses_model_can_fallback_to_system_messages_in_input() {
+        let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-4o-mini")
+            .with_system_instructions_as_messages();
+
+        let req = model
+            .create_completion_request(request_with_preamble("You are concise."))
+            .expect("request should convert");
+        let serialized = serde_json::to_value(&req).expect("request should serialize");
+        let input = serialized["input"]
+            .as_array()
+            .expect("input should be array");
+
+        assert!(serialized.get("instructions").is_none());
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], "system");
+        assert!(input[0].to_string().contains("You are concise."));
+        assert_eq!(input[1]["role"], "user");
+    }
+
+    #[test]
+    fn responses_client_can_fallback_to_system_messages_in_input() {
+        use crate::prelude::CompletionClient;
+
+        let client = crate::providers::openai::Client::new("dummy-key")
+            .expect("client")
+            .with_system_instructions_as_messages();
+        let model = client.completion_model("gpt-4o-mini");
+
+        let req = model
+            .create_completion_request(request_with_preamble("You are concise."))
+            .expect("request should convert");
+        let serialized = serde_json::to_value(&req).expect("request should serialize");
+        let input = serialized["input"]
+            .as_array()
+            .expect("input should be array");
+
+        assert!(serialized.get("instructions").is_none());
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], "system");
+        assert!(input[0].to_string().contains("You are concise."));
+        assert_eq!(input[1]["role"], "user");
+    }
+
+    #[test]
+    fn responses_model_can_lift_all_system_messages_via_placement() {
+        let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-4o-mini")
+            .with_system_instructions_placement(SystemInstructionsPlacement::AllInstructions);
+
+        let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "again")
+            .preamble("System one".to_string())
+            .message(completion::Message::user("hi"))
+            .message(completion::Message::system("Mid-conversation instruction"))
+            .build();
+
+        let req = model
+            .create_completion_request(request)
+            .expect("request should convert");
+        let serialized = serde_json::to_value(&req).expect("request should serialize");
+        let input = serialized["input"]
+            .as_array()
+            .expect("input should be array");
+
+        assert_eq!(
+            serialized["instructions"],
+            json!("System one\n\nMid-conversation instruction")
+        );
+        assert!(
+            input.iter().all(|item| item["role"] != "system"),
+            "AllInstructions should leave no system items in input: {input:?}"
+        );
+    }
+
+    #[test]
+    fn responses_client_placement_survives_completions_api_round_trip() {
+        use crate::prelude::CompletionClient;
+
+        let client = crate::providers::openai::Client::new("dummy-key")
+            .expect("client")
+            .with_system_instructions_placement(SystemInstructionsPlacement::InputSystemMessages)
+            .completions_api()
+            .responses_api();
+        let model = client.completion_model("gpt-4o-mini");
+
+        let req = model
+            .create_completion_request(request_with_preamble("You are concise."))
+            .expect("request should convert");
+        let serialized = serde_json::to_value(&req).expect("request should serialize");
+
+        assert!(
+            serialized.get("instructions").is_none(),
+            "placement configured before completions_api() should survive responses_api()"
+        );
+        assert_eq!(serialized["input"][0]["role"], "system");
+    }
+
+    #[test]
+    fn all_instructions_system_only_input_reports_non_system_requirement() {
+        let err = CompletionRequest::try_from(ResponsesRequestParams {
+            model: "gpt-4o-mini".to_string(),
+            request: system_only_request("System only"),
+            system_instructions_placement: SystemInstructionsPlacement::AllInstructions,
+        })
+        .expect_err("system-only input should fail once every item is lifted");
+
+        assert!(
+            err.to_string().contains("non-system item"),
+            "error should explain that lifted system messages left input empty: {err}"
+        );
+    }
+
+    #[test]
+    fn all_instructions_whitespace_only_system_input_reports_non_system_requirement() {
+        let err = CompletionRequest::try_from(ResponsesRequestParams {
+            model: "gpt-4o-mini".to_string(),
+            request: system_only_request("   "),
+            system_instructions_placement: SystemInstructionsPlacement::AllInstructions,
+        })
+        .expect_err("whitespace-only system input should fail once every item is lifted");
+
+        assert!(
+            err.to_string().contains("non-system item"),
+            "even when lifted system text is whitespace-only (so no `instructions` field is \
+             produced), the error should explain that system messages were lifted: {err}"
+        );
+    }
+
+    #[test]
+    fn responses_request_conversion_keeps_tools_non_strict_by_default() {
+        let req = CompletionRequest::try_from(("gpt-4o-mini".to_string(), weather_tool_request()))
+            .expect("request should convert");
+
+        let tool = &req.tools[0];
+        assert!(!tool.strict);
+        assert_eq!(tool.parameters["required"], json!(["location"]));
+        assert!(tool.parameters.get("additionalProperties").is_none());
+    }
+
+    #[test]
+    fn responses_model_strict_tools_opt_in_sanitizes_all_function_tools() {
+        let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-4o-mini")
+            .with_strict_tools()
+            .with_tool(completion::ToolDefinition {
+                name: "lookup".to_string(),
+                description: "Look something up".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}}
+                }),
+            });
+
+        let mut request = weather_tool_request();
+        request.additional_params = Some(json!({
+            "tools": [{
+                "type": "function",
+                "name": "extra",
+                "description": "An additional_params tool",
+                "parameters": {"type": "object", "properties": {"x": {"type": "string"}}}
+            }]
+        }));
+
+        let req = model
+            .create_completion_request(request)
+            .expect("request should convert");
+
+        assert_eq!(req.tools.len(), 3);
+        for tool in &req.tools {
+            assert!(tool.strict, "{} should be strict", tool.name);
+            assert_eq!(tool.parameters["additionalProperties"], json!(false));
+        }
+    }
+
+    #[test]
+    fn responses_model_default_preserves_all_function_tools_as_constructed() {
+        let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-4o-mini")
+            .with_tool(weather_tool_definition());
+
+        let mut request = weather_tool_request();
+        request.additional_params = Some(json!({
+            "tools": [{
+                "type": "function",
+                "name": "extra",
+                "description": "An additional_params tool",
+                "parameters": {"type": "object", "properties": {"x": {"type": "string"}}}
+            }]
+        }));
+
+        let req = model
+            .create_completion_request(request)
+            .expect("request should convert");
+
+        assert_eq!(req.tools.len(), 3);
+        for tool in &req.tools {
+            assert!(!tool.strict, "{} should not be strict", tool.name);
+            assert!(tool.parameters.get("additionalProperties").is_none());
+        }
+    }
+
+    #[test]
+    fn responses_explicit_strict_tool_stays_strict_on_default_model() {
+        let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-4o-mini").with_tool(
+            ResponsesToolDefinition::strict_function(
+                "lookup",
+                "Look something up",
+                json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+            ),
+        );
+
+        let req = model
+            .create_completion_request(weather_tool_request())
+            .expect("request should convert");
+
+        assert!(!req.tools[0].strict);
+        assert!(req.tools[1].strict);
+        assert_eq!(
+            req.tools[1].parameters["additionalProperties"],
+            json!(false)
+        );
+    }
+
     fn response_with_service_tier(service_tier: &str) -> Value {
         json!({
             "id": "resp_123",
@@ -2094,7 +3222,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_request_keeps_documents_after_system_messages() {
+    fn responses_request_keeps_documents_after_lifted_system_messages() {
         let request = CompletionRequestBuilder::new(MockCompletionModel::default(), "Prompt")
             .message(completion::Message::system("System prompt"))
             .message(completion::Message::user("Earlier user turn"))
@@ -2106,35 +3234,37 @@ mod tests {
             .expect("request conversion should succeed");
 
         let serialized =
-            serde_json::to_value(&responses_request.input).expect("input should serialize");
-        let input = serialized.as_array().expect("input should be an array");
+            serde_json::to_value(&responses_request).expect("request should serialize");
+        let input = serialized["input"]
+            .as_array()
+            .expect("input should be an array");
 
-        assert_eq!(input.len(), 5);
-        assert_eq!(input[0]["role"], "system");
+        assert_eq!(serialized["instructions"], json!("System prompt"));
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["role"], "user");
+        assert!(
+            input[0].to_string().contains("<file id: doc1>"),
+            "document input should be first after system instructions are lifted: {input:?}"
+        );
         assert_eq!(input[1]["role"], "user");
         assert!(
-            input[1].to_string().contains("<file id: doc1>"),
-            "document input should follow system input: {input:?}"
-        );
-        assert_eq!(input[2]["role"], "user");
-        assert!(
-            input[2].to_string().contains("Earlier user turn"),
+            input[1].to_string().contains("Earlier user turn"),
             "prior user history should follow document input: {input:?}"
         );
-        assert_eq!(input[3]["role"], "assistant");
+        assert_eq!(input[2]["role"], "assistant");
         assert!(
-            input[3].to_string().contains("Earlier assistant turn"),
+            input[2].to_string().contains("Earlier assistant turn"),
             "prior assistant history should follow prior user history: {input:?}"
         );
-        assert_eq!(input[4]["role"], "user");
+        assert_eq!(input[3]["role"], "user");
         assert!(
-            input[4].to_string().contains("Prompt"),
+            input[3].to_string().contains("Prompt"),
             "prompt should remain last: {input:?}"
         );
     }
 
     #[test]
-    fn responses_direct_request_keeps_documents_after_system_messages() {
+    fn responses_direct_request_keeps_mid_conversation_system_messages_in_input() {
         let request = crate::completion::CompletionRequest {
             model: None,
             preamble: None,
@@ -2158,19 +3288,31 @@ mod tests {
             .expect("request conversion should succeed");
 
         let serialized =
-            serde_json::to_value(&responses_request.input).expect("input should serialize");
-        let input = serialized.as_array().expect("input should be an array");
+            serde_json::to_value(&responses_request).expect("request should serialize");
+        let input = serialized["input"]
+            .as_array()
+            .expect("input should be an array");
 
-        assert_eq!(input.len(), 5);
-        assert_eq!(input[0]["role"], "system");
-        assert_eq!(input[1]["role"], "user");
-        assert!(
-            input[1].to_string().contains("<file id: doc1>"),
-            "document input should follow leading system input: {input:?}"
+        assert_eq!(
+            serialized["instructions"],
+            json!("System prompt"),
+            "only the leading run of system messages should be lifted"
         );
-        assert_eq!(input[2]["role"], "assistant");
-        assert_eq!(input[3]["role"], "system");
-        assert_eq!(input[4]["role"], "user");
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0]["role"], "user");
+        assert!(
+            input[0].to_string().contains("<file id: doc1>"),
+            "document input should follow lifted system instructions: {input:?}"
+        );
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[2]["role"], "system");
+        assert!(
+            input[2]
+                .to_string()
+                .contains("Mid-conversation instruction"),
+            "mid-conversation system messages should keep their position: {input:?}"
+        );
+        assert_eq!(input[3]["role"], "user");
         assert_eq!(
             input
                 .iter()
@@ -2284,6 +3426,12 @@ mod tests {
             response.provider_reasoning.as_deref(),
             Some("thinking through the answer")
         );
+        assert_eq!(response.reasoning_metadata, None);
+        assert_eq!(response.reasoning_context, None);
+        assert_eq!(
+            serde_json::to_value(&response).expect("response should serialize")["reasoning"],
+            json!("thinking through the answer")
+        );
 
         let completion: completion::CompletionResponse<CompletionResponse> =
             response.try_into().expect("response should convert");
@@ -2293,6 +3441,33 @@ mod tests {
             completion::AssistantContent::Reasoning(_)
         ));
         assert!(matches!(items[1], completion::AssistantContent::Text(_)));
+    }
+
+    #[test]
+    fn completion_response_accepts_null_metadata() {
+        let response: CompletionResponse = serde_json::from_value(json!({
+            "id": "resp_123",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "openai-compatible-model",
+            "metadata": null,
+            "output": [{
+                "type": "message",
+                "id": "msg_123",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "annotations": [],
+                    "text": "done"
+                }]
+            }],
+            "tools": []
+        }))
+        .expect("response with null metadata should deserialize");
+
+        assert!(response.additional_parameters.metadata.is_empty());
     }
 
     #[test]
@@ -2349,7 +3524,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_response_ignores_top_level_reasoning_object_as_text() {
+    fn completion_response_preserves_context_without_treating_config_as_text() {
         let response: CompletionResponse = serde_json::from_value(json!({
             "id": "resp_123",
             "object": "response",
@@ -2357,7 +3532,10 @@ mod tests {
             "status": "completed",
             "model": "Qwen/Qwen3-4B",
             "reasoning": {
-                "effort": "high"
+                "context": "all_turns",
+                "effort": "high",
+                "mode": "standard",
+                "summary": null
             },
             "output": [{
                 "type": "message",
@@ -2375,12 +3553,200 @@ mod tests {
         .expect("object-shaped reasoning should be tolerated");
 
         assert!(response.provider_reasoning.is_none());
+        assert_eq!(response.reasoning_context.as_deref(), Some("all_turns"));
+        assert_eq!(
+            response.reasoning_metadata.as_ref(),
+            json!({
+                "context": "all_turns",
+                "effort": "high",
+                "mode": "standard",
+                "summary": null
+            })
+            .as_object()
+        );
+        assert_eq!(
+            serde_json::to_value(&response).expect("response should serialize")["reasoning"],
+            json!({
+                "context": "all_turns",
+                "effort": "high",
+                "mode": "standard",
+                "summary": null
+            })
+        );
 
         let completion: completion::CompletionResponse<CompletionResponse> =
             response.try_into().expect("response should convert");
         let items = completion.choice.iter().collect::<Vec<_>>();
         assert_eq!(items.len(), 1);
         assert!(matches!(items[0], completion::AssistantContent::Text(_)));
+    }
+
+    #[test]
+    fn completion_response_preserves_unknown_reasoning_metadata_and_nulls() {
+        let metadata = json!({
+            "context": "future_context",
+            "effort": "ultra",
+            "summary": null,
+            "future_control": { "depth": 3 }
+        });
+        let response: CompletionResponse = serde_json::from_value(json!({
+            "id": "resp_123",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "gpt-future",
+            "reasoning": metadata.clone(),
+            "output": [],
+            "tools": []
+        }))
+        .expect("unknown reasoning metadata should deserialize");
+
+        assert_eq!(
+            response.reasoning_context.as_deref(),
+            Some("future_context")
+        );
+        assert_eq!(response.reasoning_metadata.as_ref(), metadata.as_object());
+        assert_eq!(
+            serde_json::to_value(&response).expect("response should serialize")["reasoning"],
+            metadata
+        );
+    }
+
+    #[test]
+    fn completion_response_ignores_unsupported_reasoning_shapes() {
+        for reasoning in [Value::Null, json!(["unexpected"]), json!(42), json!(true)] {
+            let response: CompletionResponse = serde_json::from_value(json!({
+                "id": "resp_123",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "model": "openai-compatible-model",
+                "reasoning": reasoning,
+                "output": [],
+                "tools": []
+            }))
+            .expect("unsupported reasoning shapes should remain non-fatal");
+
+            assert_eq!(response.provider_reasoning, None);
+            assert_eq!(response.reasoning_metadata, None);
+            assert_eq!(response.reasoning_context, None);
+            let serialized = serde_json::to_value(&response).expect("response should serialize");
+            assert!(
+                !serialized
+                    .as_object()
+                    .expect("response should serialize as an object")
+                    .contains_key("reasoning")
+            );
+        }
+    }
+
+    #[test]
+    fn completion_response_reasoning_serialization_precedence_is_stable() {
+        let mut response: CompletionResponse = serde_json::from_value(json!({
+            "id": "resp_123",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "gpt-5.6",
+            "reasoning": { "context": "all_turns", "effort": "max" },
+            "output": [],
+            "tools": []
+        }))
+        .expect("reasoning metadata should deserialize");
+
+        response.reasoning_context = Some("current_turn".to_owned());
+        response.additional_parameters.reasoning =
+            Some(Reasoning::new().with_effort(ReasoningEffort::Low));
+        let serialized = serde_json::to_string(&response).expect("response should serialize");
+        assert_eq!(serialized.matches("\"reasoning\":").count(), 1);
+        assert_eq!(
+            serde_json::to_value(&response).expect("response should serialize")["reasoning"],
+            json!({ "context": "all_turns", "effort": "max" })
+        );
+
+        let metadata = response.reasoning_metadata.take();
+        assert_eq!(
+            serde_json::to_value(&response).expect("response should serialize")["reasoning"],
+            json!({ "context": "current_turn" })
+        );
+
+        response.reasoning_metadata = metadata;
+        response.provider_reasoning = Some("compatible-provider text".to_owned());
+        assert_eq!(
+            serde_json::to_value(&response).expect("response should serialize")["reasoning"],
+            json!("compatible-provider text")
+        );
+    }
+
+    fn request_with_reasoning_params(reasoning: Value) -> CompletionRequest {
+        let mut request = request_with_preamble("You are concise.");
+        request.additional_params = Some(json!({ "reasoning": reasoning }));
+
+        CompletionRequest::try_from(("gpt-5.6".to_string(), request))
+            .expect("request with reasoning params should convert")
+    }
+
+    #[test]
+    fn reasoning_effort_max_survives_request_conversion() {
+        let request = request_with_reasoning_params(json!({ "effort": "max" }));
+        let serialized = serde_json::to_value(&request).expect("request should serialize");
+
+        assert_eq!(serialized["reasoning"], json!({ "effort": "max" }));
+    }
+
+    #[test]
+    fn reasoning_mode_pro_composes_with_independent_effort() {
+        let request = request_with_reasoning_params(json!({ "effort": "high", "mode": "pro" }));
+        let serialized = serde_json::to_value(&request).expect("request should serialize");
+
+        assert_eq!(
+            serialized["reasoning"],
+            json!({ "effort": "high", "mode": "pro" })
+        );
+    }
+
+    #[test]
+    fn reasoning_context_values_survive_request_conversion() {
+        for (context, wire_value) in [
+            (ReasoningContext::Auto, "auto"),
+            (ReasoningContext::AllTurns, "all_turns"),
+            (ReasoningContext::CurrentTurn, "current_turn"),
+        ] {
+            let typed = serde_json::to_value(Reasoning::new().with_context(context))
+                .expect("typed reasoning should serialize");
+            assert_eq!(typed, json!({ "context": wire_value }));
+
+            let request = request_with_reasoning_params(json!({ "context": wire_value }));
+            let serialized = serde_json::to_value(&request).expect("request should serialize");
+            assert_eq!(serialized["reasoning"], json!({ "context": wire_value }));
+        }
+    }
+
+    #[test]
+    fn reasoning_omits_unset_optional_fields() {
+        let reasoning = serde_json::to_value(Reasoning::new().with_mode(ReasoningMode::Pro))
+            .expect("reasoning should serialize");
+
+        assert_eq!(reasoning, json!({ "mode": "pro" }));
+
+        let reasoning = serde_json::to_value(
+            Reasoning::new()
+                .with_effort(ReasoningEffort::Max)
+                .with_mode(ReasoningMode::Pro)
+                .with_context(ReasoningContext::CurrentTurn)
+                .with_summary_level(ReasoningSummaryLevel::Detailed),
+        )
+        .expect("reasoning should serialize");
+
+        assert_eq!(
+            reasoning,
+            json!({
+                "effort": "max",
+                "mode": "pro",
+                "context": "current_turn",
+                "summary": "detailed"
+            })
+        );
     }
 
     #[test]
@@ -2825,5 +4191,262 @@ mod tests {
         assert_eq!(json["content"][0]["file_id"], "file_abc");
         assert!(json["content"][0].get("file_data").is_none());
         assert!(json["content"][0].get("file_url").is_none());
+    }
+
+    #[tokio::test]
+    async fn responses_completion_http_non_success_preserves_status_and_body() {
+        use crate::client::CompletionClient;
+        use crate::completion::CompletionModel;
+        use crate::providers::openai::Client;
+        use crate::test_utils::RecordingHttpClient;
+
+        let body = r#"{"error":{"message":"bad image","type":"invalid_request_error","code":"invalid_value"}}"#;
+        let http_client =
+            RecordingHttpClient::with_error_response(http::StatusCode::BAD_REQUEST, body);
+        let client = Client::builder()
+            .api_key("test-key")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-4o-mini");
+        let request = model.completion_request("hello").build();
+
+        let error = model
+            .completion(request)
+            .await
+            .expect_err("completion should fail with non-success status");
+
+        assert!(matches!(error, CompletionError::HttpError(_)));
+        assert_eq!(
+            error.provider_response_status(),
+            Some(http::StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(error.provider_response_body(), Some(body));
+        let json = error
+            .provider_response_json()
+            .expect("raw body should be valid JSON")
+            .expect("parsed JSON should be present");
+        assert_eq!(json["error"]["code"], "invalid_value");
+    }
+
+    #[test]
+    fn output_unknown_preserves_hosted_tool_payload() {
+        let item = json!({
+            "type": "web_search_call",
+            "id": "ws_001",
+            "status": "completed",
+            "action": { "type": "search", "queries": ["rig framework"] },
+        });
+
+        let output: Output =
+            serde_json::from_value(item.clone()).expect("unknown output should deserialize");
+
+        let Output::Unknown(value) = output else {
+            panic!("expected Output::Unknown for an unmodeled item type");
+        };
+        assert_eq!(value, item);
+    }
+
+    #[test]
+    fn output_unknown_round_trips_value_equal() {
+        let item = json!({
+            "type": "file_search_call",
+            "id": "fs_007",
+            "status": "in_progress",
+            "queries": ["lifecycle"],
+        });
+
+        let output: Output =
+            serde_json::from_value(item.clone()).expect("unknown output should deserialize");
+        let serialized = serde_json::to_value(&output).expect("unknown output should serialize");
+
+        assert_eq!(serialized, item);
+    }
+
+    #[test]
+    fn output_known_variant_with_bad_body_errors() {
+        // A recognized `type` tag with a malformed body must still error rather
+        // than silently degrading to `Output::Unknown`.
+        let malformed = json!({
+            "type": "function_call",
+            "id": "call_1",
+            // missing `arguments`, `call_id`, `name`
+        });
+
+        let result: Result<Output, _> = serde_json::from_value(malformed);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn completion_response_with_unknown_output_keeps_usage() {
+        // Guards the original reason the catch-all exists: an unknown item must
+        // not break decoding of the whole response or drop token usage.
+        let response = json!({
+            "id": "resp_123",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "gpt-5.4",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_001",
+                    "status": "completed",
+                },
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [ { "type": "output_text", "text": "hi", "annotations": [] } ],
+                },
+            ],
+            "usage": {
+                "input_tokens": 100,
+                "input_tokens_details": { "cached_tokens": 25 },
+                "output_tokens": 50,
+                "output_tokens_details": { "reasoning_tokens": 15 },
+                "total_tokens": 150,
+            },
+        });
+
+        let response: CompletionResponse =
+            serde_json::from_value(response).expect("response should deserialize");
+
+        assert!(matches!(response.output.first(), Some(Output::Unknown(_))));
+        let usage = response.usage.expect("usage should be present");
+        assert_eq!(usage.total_tokens, 150);
+    }
+
+    #[test]
+    fn output_known_variant_round_trips_value_equal() {
+        // The hand-written Serialize must reproduce the modeled wire shape, so a
+        // decoded known item re-serializes value-equal to what it came from
+        // (guards the `function_call` arm, including its stringified `arguments`).
+        // The item ID uses the provider-native `fc_` prefix; other IDs are
+        // intentionally dropped on serialization (see `OutputFunctionCall::id`).
+        let item = json!({
+            "type": "function_call",
+            "id": "fc_1",
+            "arguments": "{}",
+            "call_id": "c1",
+            "name": "search",
+            "status": "completed",
+        });
+
+        let output: Output =
+            serde_json::from_value(item.clone()).expect("known output should deserialize");
+        assert!(matches!(output, Output::FunctionCall(_)));
+
+        let serialized = serde_json::to_value(&output).expect("known output should serialize");
+        assert_eq!(serialized, item);
+    }
+
+    #[test]
+    fn output_reasoning_round_trips_value_equal() {
+        // Highest-value parity guard: the `Reasoning` struct variant threads its
+        // fields by hand in *both* directions. Populated `encrypted_content` /
+        // `status` (the `#[serde(default)]` optionals) must survive
+        // serialize -> deserialize unchanged — catching a dropped field or a
+        // forgotten `reasoning` dispatch arm (which would degrade to `Unknown`).
+        let original = Output::Reasoning {
+            id: "reasoning_1".to_string(),
+            summary: vec![ReasoningSummary::SummaryText {
+                text: "weighing options".to_string(),
+            }],
+            content: vec!["private reasoning".to_string()],
+            encrypted_content: Some("ENCRYPTED".to_string()),
+            status: Some(ToolStatus::Completed),
+        };
+
+        let value = serde_json::to_value(&original).expect("reasoning should serialize");
+        let round_tripped: Output =
+            serde_json::from_value(value).expect("reasoning should deserialize");
+
+        assert_eq!(round_tripped, original);
+    }
+
+    #[test]
+    fn output_reasoning_none_optionals_serialize_as_explicit_null() {
+        // Wire-anchored complement to the round-trip test: with `None`
+        // optionals, the keys must still be emitted as explicit `null` (the
+        // derived behavior this hand-written serde replaced has no
+        // `skip_serializing_if`). Guards against a future refactor silently
+        // dropping the keys and changing the wire shape.
+        let value = serde_json::to_value(Output::Reasoning {
+            id: "reasoning_1".to_string(),
+            summary: vec![],
+            content: vec![],
+            encrypted_content: None,
+            status: None,
+        })
+        .expect("reasoning should serialize");
+
+        assert_eq!(value["type"], "reasoning");
+        assert_eq!(value["encrypted_content"], Value::Null);
+        assert_eq!(value["status"], Value::Null);
+        assert!(value.get("encrypted_content").is_some());
+        assert!(value.get("status").is_some());
+    }
+
+    #[test]
+    fn output_message_round_trips_value_equal() {
+        // Wire-anchored serialize check for the `message` arm (only
+        // `function_call` was anchored): a decoded message item re-serializes
+        // value-equal to the input, tag included.
+        let item = json!({
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [ { "type": "output_text", "text": "hello", "annotations": [] } ],
+        });
+
+        let output: Output =
+            serde_json::from_value(item.clone()).expect("message item should deserialize");
+        assert!(matches!(output, Output::Message(_)));
+
+        let serialized = serde_json::to_value(&output).expect("message should serialize");
+        assert_eq!(serialized, item);
+    }
+
+    #[test]
+    fn each_known_tag_decodes_to_its_modeled_variant() {
+        // Guards every modeled dispatch arm: a well-formed item for each known
+        // `type` must decode to its specific variant, never to `Unknown`. Adding
+        // an `Output` variant without a matching deserialize arm fails here
+        // instead of silently routing real items to `Unknown`.
+        let message: Output = serde_json::from_value(json!({
+            "type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+            "content": [ { "type": "output_text", "text": "hi", "annotations": [] } ],
+        }))
+        .expect("message item should decode");
+        assert!(matches!(message, Output::Message(_)));
+
+        let function_call: Output = serde_json::from_value(json!({
+            "type": "function_call", "id": "call_1", "arguments": "{}",
+            "call_id": "c1", "name": "f", "status": "completed",
+        }))
+        .expect("function_call item should decode");
+        assert!(matches!(function_call, Output::FunctionCall(_)));
+
+        let reasoning: Output =
+            serde_json::from_value(json!({ "type": "reasoning", "id": "r1", "summary": [] }))
+                .expect("reasoning item should decode");
+        assert!(matches!(reasoning, Output::Reasoning { .. }));
+    }
+
+    #[test]
+    fn output_without_usable_type_tag_decodes_to_unknown() {
+        // An absent or non-string `type` is itself unmodeled, so it is captured
+        // verbatim as `Unknown` rather than erroring.
+        for item in [
+            json!({ "id": "x", "note": "no type field" }),
+            json!({ "type": 7, "id": "x" }),
+        ] {
+            let output: Output =
+                serde_json::from_value(item.clone()).expect("should decode to Unknown");
+            assert_eq!(output, Output::Unknown(item));
+        }
     }
 }

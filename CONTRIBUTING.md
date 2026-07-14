@@ -34,7 +34,9 @@ Most non-trivial open source projects often have a set of code contribution guid
 While we will not strictly enforce any guidelines as such because we want to make it as easy as possible to contribute to Rig, we do have three policies that we advise contributors to stick to:
 - Use docstrings on any new public items (structs, enums, methods whether free-standing or associated).
 - Ensure that you use full syntax for trait bounds where possible. This makes the code much easier to read.
-- If your PR adds additional functionality to Rig, it must include relevant tests that pass (if the code does not directly interact with an API model provider), or alternatively an example that compiles if the code is user-facing.
+- If your PR adds additional functionality to Rig, it must include relevant tests that pass. Provider behavior changes should usually include cassette-backed regression tests when feasible; user-facing changes should also update examples or documentation as appropriate.
+
+The workspace enforces strict clippy lints, including forbidding `unwrap`, `expect`, `todo`, and `unimplemented` in workspace code. Prefer explicit error types, `?`, and complete edge-case handling.
 
 As a contributor, you are welcome to use AI assistance for coding. Using AI does not change the quality bar or transfer responsibility away from you.
 
@@ -52,6 +54,54 @@ AI-generated PRs may require additional review to ensure correctness and long-te
 
 Other than that, each PR will be taken on a case-by-case basis.
 
+### Provider implementation checklist
+
+When adding or changing a provider, use this checklist to keep the provider
+integration consistent with Rig's generic client architecture and contributor
+expectations:
+
+- New OpenAI-chat-compatible providers MUST drive completions through
+  `openai::completion::GenericCompletionModel<Ext>` by implementing
+  `OpenAICompatibleProvider` on the provider extension (see `minimax`, `zai`,
+  `groq`, or `deepseek` for the template). Wire-dialect differences belong in
+  the trait's hooks (`completion_path`, `prepare_request`,
+  `finalize_request_body`) — not in a hand-rolled `CompletionModel`, request
+  struct, or `TryFrom<message::Message>` conversion. The same applies to
+  Anthropic-shaped APIs via `AnthropicCompatibleProvider`.
+- `Client` and `ClientBuilder` public aliases use the correct generic types;
+  the `ClientBuilder` API-key generic must match `ProviderBuilder::ApiKey`.
+- Provider extension and builder types are defined and wired through the
+  `Provider` implementation.
+- `Capabilities` declares each supported capability with `Capable<T>` and each
+  unsupported capability with `Nothing`.
+- `ProviderBuilder` sets the correct base URL, API-key type, and provider
+  extension construction behavior.
+- `ProviderClient::{from_env, from_val}` use the correct environment variable
+  and input type.
+- API-key marker/auth types are explicit, insert the intended headers, and keep
+  credential-bearing debug output redacted.
+- Model constants are added where they are useful and are current with the
+  provider's real API.
+- Requests convert from Rig request types such as `CompletionRequest` without
+  adding fields that the provider API does not support.
+- Responses convert into Rig response types, including token usage and tool or
+  multimodal content where applicable.
+- Streaming is implemented when the provider supports it, and follows existing
+  streaming normalization patterns.
+- Provider error responses preserve status/body details through the relevant Rig
+  error helpers, so callers can inspect provider response details.
+- Non-2xx completion responses surface through the capability error's
+  `from_http_response(status, body)` helper so retry/status logic can inspect
+  `provider_response_status()` and the raw provider body.
+- `ProviderResponseExt`, telemetry spans, and GenAI fields are populated
+  consistently with nearby providers where applicable.
+- Tests cover the smallest reliable scope: unit tests, cassette-backed provider
+  tests, or ignored live tests when cassette replay is unsuitable.
+- Companion provider crates update the root facade dependency, feature flag,
+  re-export, README, examples, and crate docs as applicable.
+- Examples and documentation use actual feature flags, module paths, model
+  constants, and credential requirements.
+
 ### PRs that will be rejected
 As with every open source repo, not every contribution is within the scope of the repo and as Rig grows, so will the number of potential contributions - which also means defining an absolute list of things that are not within the scope of Rig. This includes but is not limited to:
 - Changes that would force model provider integrations to diverge from the original API (eg attempting to add a field to the OpenAI API that does not actually exist within the OpenAI API for the sake of satisfying another model provider)
@@ -68,7 +118,19 @@ This will be reviewed on a case by case basis, but generally unjustifiable break
 
 ## Project Structure
 
-Rig is split up into multiple crates in a monorepo structure. The main crate `rig-core` contains all of the foundational abstractions for building with LLMs. This crate avoids adding many new dependencies to keep to lean and only really contains simple provider integrations on top of the base layer of abstractions. Side crates are leveraged to help add important first-party behavior without over burdening the main library with dependencies. For example, `rig-mongodb` contains extra dependencies to be able to interact with `mongodb` as a vector store.
+Rig is split up into multiple crates in a monorepo structure:
+
+- `rig`: the root facade crate. It re-exports `rig-core` and exposes companion crates behind feature flags.
+- `crates/rig-core`: foundational abstractions for agents, completion, embeddings, tools, vector stores, providers, telemetry, loaders, memory traits, and test utilities.
+- `crates/rig-derive`: derive macros.
+- `crates/rig-*`: first-party provider, vector-store, memory, and companion integration crates.
+- `examples/*`: workspace example packages.
+- `tests/*.rs`: root integration test targets.
+- `tests/providers/<provider>/`: provider-specific test modules.
+- `tests/cassettes/<provider>/`: committed HTTP cassette fixtures for replayable provider tests.
+- `tests/integrations/`: external-service and vector-store integration tests.
+
+The main crate `rig-core` avoids adding many new dependencies to keep it lean and only really contains simple provider integrations on top of the base layer of abstractions. Side crates are leveraged to help add important first-party behavior without overburdening the main library with dependencies. For example, `rig-mongodb` contains extra dependencies to be able to interact with `mongodb` as a vector store.
 
 If you are unsure whether a side-crate should live in the main repo, you can spin up a personal repo containing your crate and create an issue in our repo making the case on whether this side-crate should be integrated in the main repo and maintained by the Rig team.
 
@@ -96,15 +158,62 @@ cargo fmt -- --check
 
 ### Tests
 
-Make sure to test against the test suite before making a pull request.
+Make sure to test against the relevant test suite before making a pull request. See `tests/README.md` for the most current provider, cassette, live, and integration test commands.
+
+Common checks:
 
 ```bash
-cargo test
+cargo test -p rig
+cargo test -p rig --all-features
+```
+
+Provider-agnostic core tests:
+
+```bash
+cargo test -p rig --test core
+```
+
+External-service integration tests are collected under the `integrations` target and may require feature flags, Docker, credentials, or pre-provisioned services. For example:
+
+```bash
+cargo test -p rig --features qdrant --test integrations qdrant -- --nocapture
+cargo test -p rig --all-features --test integrations
+```
+
+### Cassette regression tests
+
+Provider behavior changes should include cassette-backed regression tests when feasible. Cassette tests replay committed HTTP interactions and usually do not require provider API keys.
+
+Test code lives under `tests/providers/<provider>/cassette/`; fixtures live under `tests/cassettes/<provider>/...`.
+
+Replay an existing cassette suite with:
+
+```bash
+cargo test -p rig --all-features --test openai openai::cassette -- --nocapture --test-threads=1
+```
+
+Record or update fixtures with the relevant provider API key set:
+
+```bash
+RIG_PROVIDER_TEST_MODE=record \
+  cargo test -p rig --all-features --test openai openai::cassette -- --nocapture --test-threads=1
+```
+
+Keep record runs targeted to the provider and test being changed. Review cassette diffs carefully for secrets, bearer tokens, cookies, provider account identifiers, unrelated request/response churn, and unexpected provider behavior. Mention in your PR whether cassettes were replayed, recorded, or not applicable.
+
+Run one cassette test by passing a test-name substring after the test target:
+
+```bash
+cargo test -p rig --all-features --test gemini \
+  streaming_tools_smoke \
+  -- --nocapture --test-threads=1
 ```
 
 ## AI Agent Instructions
 
 Rig keeps one canonical AI instruction source in `AGENTS.md`.
+
+As a contributor, you are responsible for AI-assisted changes exactly as if you had written them manually. Review the generated code and docs, understand the design, and run the relevant checks, including cassette or integration tests when they apply.
 
 When updating AI guidance:
 

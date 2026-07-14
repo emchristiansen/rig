@@ -2,7 +2,7 @@ use async_stream::stream;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
-use tracing::{Level, enabled, info_span};
+use tracing::{Level, enabled};
 use tracing_futures::Instrument;
 
 use super::InteractionsCompletionModel;
@@ -17,7 +17,7 @@ use crate::http_client::HttpClientExt;
 use crate::http_client::Request;
 use crate::http_client::sse::{Event, GenericEventSource};
 use crate::streaming;
-use crate::telemetry::SpanCombinator;
+use crate::telemetry::{CompletionOperation, CompletionSpanBuilder, SpanCombinator};
 use serde_json::{Map, Value};
 
 /// Final metadata yielded by an Interactions streaming response.
@@ -58,26 +58,13 @@ where
         completion_request: CompletionRequest,
     ) -> Result<streaming::StreamingCompletionResponse<StreamingCompletionResponse>, CompletionError>
     {
-        let span = if tracing::Span::current().is_disabled() {
-            info_span!(
-                target: "rig::completions",
-                "interactions_streaming",
-                gen_ai.operation.name = "interactions_streaming",
-                gen_ai.provider.name = "gcp.gemini",
-                gen_ai.request.model = self.model,
-                gen_ai.system_instructions = &completion_request.preamble,
-                gen_ai.response.id = tracing::field::Empty,
-                gen_ai.response.model = tracing::field::Empty,
-                gen_ai.usage.output_tokens = tracing::field::Empty,
-                gen_ai.usage.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_read.input_tokens = tracing::field::Empty,
-                gen_ai.usage.cache_creation.input_tokens = tracing::field::Empty,
-                gen_ai.usage.tool_use_prompt_tokens = tracing::field::Empty,
-                gen_ai.usage.reasoning_tokens = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::current()
-        };
+        let span = CompletionSpanBuilder::new(
+            "gcp.gemini",
+            &self.model,
+            CompletionOperation::InteractionsStreaming,
+        )
+        .system_instructions(completion_request.preamble.as_deref())
+        .build();
 
         let request = create_request_body(self.model.clone(), completion_request, Some(true))?;
 
@@ -149,8 +136,15 @@ where
                                 }
                                 final_interaction = Some(interaction);
                             }
-                            InteractionSseEvent::Error { error, .. } => {
-                                yield Err(CompletionError::ProviderError(error.message));
+                            InteractionSseEvent::Error { .. } => {
+                                // Preserve the full provider error payload (code +
+                                // message) by reusing the raw SSE event JSON, matching
+                                // the SSE path's `completion_error_from_body`. The error
+                                // arrives over an established stream, so there is no HTTP
+                                // status to attach (status: None).
+                                yield Err(crate::provider_response::completion_error_from_body(
+                                    message.data,
+                                ));
                                 break;
                             }
                             _ => continue,
@@ -161,7 +155,7 @@ where
                     }
                     Err(error) => {
                         tracing::error!(?error, "SSE error");
-                        yield Err(CompletionError::ProviderError(error.to_string()));
+                        yield Err(CompletionError::from_stream_transport(error));
                         break;
                     }
                 }
@@ -216,7 +210,7 @@ where
                 Err(crate::http_client::Error::StreamEnded) => break,
                 Err(error) => {
                     tracing::error!(?error, "SSE error");
-                    yield Err(CompletionError::ProviderError(error.to_string()));
+                    yield Err(CompletionError::from_stream_transport(error));
                     break;
                 }
             }

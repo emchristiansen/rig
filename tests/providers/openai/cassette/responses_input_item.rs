@@ -76,7 +76,7 @@ fn assistant_reasoning_encrypted_only_serializes_encrypted_content() {
 }
 
 #[test]
-fn assistant_reasoning_mixed_content_serializes_only_text_like_summaries() {
+fn assistant_reasoning_mixed_content_serializes_text_content_and_summaries() {
     let mut reasoning =
         Reasoning::new_with_signature("step-1", Some("sig-1".to_string())).with_id("rs_2".into());
     reasoning
@@ -100,6 +100,15 @@ fn assistant_reasoning_mixed_content_serializes_only_text_like_summaries() {
     assert_eq!(items.len(), 1);
 
     let item_json = serde_json::to_value(&items[0]).expect("serialize InputItem");
+    let content = item_json
+        .get("content")
+        .and_then(|value| value.as_array())
+        .expect("reasoning item should include reasoning content array");
+    let content_texts: Vec<&str> = content
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|kind| kind.as_str()) == Some("reasoning_text"))
+        .filter_map(|entry| entry.get("text").and_then(|text| text.as_str()))
+        .collect();
     let summary = item_json
         .get("summary")
         .and_then(|value| value.as_array())
@@ -109,7 +118,8 @@ fn assistant_reasoning_mixed_content_serializes_only_text_like_summaries() {
         .filter_map(|entry| entry.get("text").and_then(|text| text.as_str()))
         .collect();
 
-    assert_eq!(summary_texts, vec!["step-1", "summary-2"]);
+    assert_eq!(content_texts, vec!["step-1"]);
+    assert_eq!(summary_texts, vec!["summary-2"]);
     assert_eq!(
         item_json
             .get("encrypted_content")
@@ -174,6 +184,31 @@ fn openai_responses_reasoning_output_preserves_encrypted_content() {
     assert!(matches!(
         reasoning.content.get(1),
         Some(ReasoningContent::Encrypted(value)) if value == "cipher_blob"
+    ));
+}
+
+#[test]
+fn openai_responses_reasoning_output_preserves_reasoning_text_content() {
+    let output: Output = serde_json::from_value(serde_json::json!({
+        "type": "reasoning",
+        "id": "rs_text_1",
+        "summary": [],
+        "content": [
+            { "type": "reasoning_text", "text": "visible reasoning" }
+        ],
+        "status": "completed"
+    }))
+    .expect("deserialize reasoning output");
+
+    let content: Vec<AssistantContent> = output.into();
+    assert_eq!(content.len(), 1);
+    let Some(AssistantContent::Reasoning(reasoning)) = content.first() else {
+        panic!("expected reasoning output content");
+    };
+    assert_eq!(reasoning.id.as_deref(), Some("rs_text_1"));
+    assert!(matches!(
+        reasoning.content.first(),
+        Some(ReasoningContent::Text { text, signature: None }) if text == "visible reasoning"
     ));
 }
 
@@ -297,6 +332,83 @@ fn openai_responses_request_reasoning_without_id_is_omitted_without_panicking() 
 }
 
 #[test]
+fn assistant_tool_call_with_local_id_omits_function_call_item_id() {
+    let message = CompletionMessage::Assistant {
+        id: None,
+        content: OneOrMany::one(AssistantContent::tool_call_with_call_id(
+            "history_tool_1",
+            "call_local_1".to_string(),
+            "my_tool",
+            serde_json::json!({}),
+        )),
+    };
+
+    let items: Vec<InputItem> = message
+        .try_into()
+        .expect("tool call with call_id should convert");
+    assert_eq!(items.len(), 1);
+
+    let item_json = serde_json::to_value(&items[0]).expect("serialize InputItem");
+    assert_eq!(
+        item_json.get("type").and_then(|value| value.as_str()),
+        Some("function_call")
+    );
+    assert!(
+        item_json.get("id").is_none(),
+        "non-`fc_` tool-call IDs must be omitted so the API pairs by call_id: {item_json}"
+    );
+    assert_eq!(
+        item_json.get("call_id").and_then(|value| value.as_str()),
+        Some("call_local_1")
+    );
+}
+
+#[test]
+fn assistant_tool_call_with_local_fc_prefix_without_separator_omits_function_call_item_id() {
+    let message = CompletionMessage::Assistant {
+        id: None,
+        content: OneOrMany::one(AssistantContent::tool_call_with_call_id(
+            "fclocal_1",
+            "call_local_1".to_string(),
+            "my_tool",
+            serde_json::json!({}),
+        )),
+    };
+
+    let items: Vec<InputItem> = message
+        .try_into()
+        .expect("tool call with call_id should convert");
+    let item_json = serde_json::to_value(&items[0]).expect("serialize InputItem");
+    assert!(
+        item_json.get("id").is_none(),
+        "only provider-native `fc_` item IDs should round-trip: {item_json}"
+    );
+}
+
+#[test]
+fn assistant_tool_call_with_provider_item_id_keeps_it() {
+    let message = CompletionMessage::Assistant {
+        id: None,
+        content: OneOrMany::one(AssistantContent::tool_call_with_call_id(
+            "fc_native_1",
+            "call_native_1".to_string(),
+            "my_tool",
+            serde_json::json!({}),
+        )),
+    };
+
+    let items: Vec<InputItem> = message
+        .try_into()
+        .expect("tool call with call_id should convert");
+    let item_json = serde_json::to_value(&items[0]).expect("serialize InputItem");
+    assert_eq!(
+        item_json.get("id").and_then(|value| value.as_str()),
+        Some("fc_native_1"),
+        "provider-native fc item IDs must round-trip"
+    );
+}
+
+#[test]
 fn assistant_tool_call_without_call_id_returns_request_error() {
     let message = CompletionMessage::Assistant {
         id: Some("assistant_message_id".to_string()),
@@ -357,4 +469,40 @@ fn openai_responses_invalid_additional_params_returns_error_without_panicking() 
                 .to_string()
                 .contains("Invalid OpenAI Responses additional_params payload")
     ));
+}
+
+#[test]
+fn openai_responses_request_preserves_prompt_cache_parameters() {
+    let request = rig::completion::CompletionRequest {
+        preamble: None,
+        chat_history: OneOrMany::one(CompletionMessage::user("hello")),
+        documents: vec![],
+        tools: vec![],
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        additional_params: Some(serde_json::json!({
+            "prompt_cache_key": "tenant-agent-scaffold",
+            "prompt_cache_retention": "24h"
+        })),
+        model: None,
+        output_schema: None,
+    };
+
+    let request = OpenAIResponsesRequest::try_from(("gpt-test".to_string(), request))
+        .expect("convert request");
+    let request_json = serde_json::to_value(request).expect("serialize request");
+
+    assert_eq!(
+        request_json
+            .get("prompt_cache_key")
+            .and_then(|value| value.as_str()),
+        Some("tenant-agent-scaffold")
+    );
+    assert_eq!(
+        request_json
+            .get("prompt_cache_retention")
+            .and_then(|value| value.as_str()),
+        Some("24h")
+    );
 }
