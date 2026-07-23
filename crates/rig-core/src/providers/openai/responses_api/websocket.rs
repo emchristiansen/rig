@@ -972,6 +972,7 @@ fn is_known_streaming_event(kind: &str) -> bool {
             | "response.reasoning_summary_part.done"
             | "response.reasoning_summary_text.delta"
             | "response.reasoning_summary_text.done"
+            | "response.reasoning_text.delta"
     )
 }
 
@@ -1150,6 +1151,7 @@ mod tests {
     };
     use crate::client::CompletionClient;
     use crate::completion::CompletionModel;
+    use crate::providers::openai::responses_api::streaming::ItemChunkKind;
     use crate::providers::openai::responses_api::{
         CompletionResponse, ResponseError, ResponseObject, ResponseStatus, ResponsesUsage,
     };
@@ -1350,6 +1352,105 @@ mod tests {
             .expect("output text delta event should not be skipped");
 
         assert!(matches!(event, ResponsesWebSocketEvent::Item(_)));
+    }
+
+    #[test]
+    fn parse_reasoning_text_delta_event() {
+        let payload = json!({
+            "type": "response.reasoning_text.delta",
+            "content_index": 0,
+            "delta": "thinking",
+            "item_id": "rs_023af0f0a91bc2a90069ae788612e881958345bb156915ba29",
+            "output_index": 0,
+            "sequence_number": 4
+        });
+
+        let event = parse_server_event(&payload.to_string())
+            .expect("reasoning text delta event should parse")
+            .expect("reasoning text delta event should not be skipped");
+
+        let ResponsesWebSocketEvent::Item(chunk) = event else {
+            panic!("expected an item event");
+        };
+        assert!(matches!(
+            chunk.data,
+            ItemChunkKind::ReasoningTextDelta(ref delta) if delta.delta == "thinking"
+        ));
+    }
+
+    #[test]
+    fn parse_reasoning_summary_delta_event_into_delta_chunk() {
+        let payload = json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_REDACTED_1",
+            "output_index": 0,
+            "sequence_number": 51,
+            "summary_index": 0,
+            "delta": " far"
+        });
+
+        let event = parse_server_event(&payload.to_string())
+            .expect("reasoning summary delta event should parse")
+            .expect("reasoning summary delta event should not be skipped");
+
+        let ResponsesWebSocketEvent::Item(chunk) = event else {
+            panic!("expected an item event");
+        };
+        assert!(matches!(
+            chunk.data,
+            ItemChunkKind::ReasoningSummaryTextDelta(ref delta)
+                if delta.summary_index == 0 && delta.sequence_number == 51 && delta.delta == " far"
+        ));
+    }
+
+    #[test]
+    fn parse_reasoning_summary_done_event_into_text_chunk() {
+        let payload = json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "rs_REDACTED_1",
+            "output_index": 0,
+            "sequence_number": 54,
+            "summary_index": 0,
+            "text": "The problem: A train leaves Station A at 60 km/h."
+        });
+
+        let event = parse_server_event(&payload.to_string())
+            .expect("reasoning summary done event should parse")
+            .expect("reasoning summary done event should not be skipped");
+
+        let ResponsesWebSocketEvent::Item(chunk) = event else {
+            panic!("expected an item event");
+        };
+        assert!(matches!(
+            chunk.data,
+            ItemChunkKind::ReasoningSummaryTextDone(ref done)
+                if done.summary_index == 0
+                    && done.sequence_number == 54
+                    && done.text == "The problem: A train leaves Station A at 60 km/h."
+        ));
+    }
+
+    #[test]
+    fn reasoning_summary_done_rejects_delta_shaped_payload() {
+        // A `response.reasoning_summary_text.done` payload carrying `delta`
+        // instead of the real `text` field must fail to deserialize rather than
+        // silently defaulting `text` to empty — neither new struct declares a
+        // serde default, so a missing required field is a hard parse error.
+        let payload = json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "rs_REDACTED_1",
+            "output_index": 0,
+            "sequence_number": 54,
+            "summary_index": 0,
+            "delta": "wrong field shape"
+        });
+
+        let error = parse_server_event(&payload.to_string())
+            .expect_err("delta-shaped payload should not parse as a done chunk");
+        assert!(
+            error.to_string().contains("StreamingCompletionChunk"),
+            "expected strict decode failure, got {error}"
+        );
     }
 
     #[test]

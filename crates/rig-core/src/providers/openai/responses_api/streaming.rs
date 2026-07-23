@@ -821,9 +821,9 @@ pub enum ItemChunkKind {
     #[serde(rename = "response.reasoning_summary_part.done")]
     ReasoningSummaryPartDone(SummaryPartChunk),
     #[serde(rename = "response.reasoning_summary_text.delta")]
-    ReasoningSummaryTextDelta(SummaryTextChunk),
+    ReasoningSummaryTextDelta(SummaryTextDeltaChunk),
     #[serde(rename = "response.reasoning_summary_text.done")]
-    ReasoningSummaryTextDone(SummaryTextChunk),
+    ReasoningSummaryTextDone(SummaryTextDoneChunk),
     #[serde(rename = "response.reasoning_text.delta")]
     ReasoningTextDelta(DeltaTextChunkWithItemId),
     /// Catch-all for unknown item chunk types (e.g., `web_search_call` events).
@@ -896,11 +896,28 @@ pub struct SummaryPartChunk {
     pub part: SummaryPartChunkPart,
 }
 
+/// A reasoning-summary text delta chunk from OpenAI's Responses API
+/// (`response.reasoning_summary_text.delta`).
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SummaryTextChunk {
+pub struct SummaryTextDeltaChunk {
+    /// The index of the reasoning summary this delta belongs to.
     pub summary_index: u64,
+    /// The item sequence number.
     pub sequence_number: u64,
+    /// The incremental text delta.
     pub delta: String,
+}
+
+/// A reasoning-summary text done chunk from OpenAI's Responses API
+/// (`response.reasoning_summary_text.done`).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SummaryTextDoneChunk {
+    /// The index of the reasoning summary this done event belongs to.
+    pub summary_index: u64,
+    /// The item sequence number.
+    pub sequence_number: u64,
+    /// The full accumulated text of the reasoning summary.
+    pub text: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
