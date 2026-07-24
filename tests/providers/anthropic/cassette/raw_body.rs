@@ -23,7 +23,7 @@ use super::super::support::with_anthropic_cassette;
 /// and `raw_body/completion_delegates_identically_on_success.yaml` exactly,
 /// byte for byte: the replay server serves the fixture body verbatim, so this
 /// constant is the ground truth the seam must reproduce.
-const EXPECTED_SUCCESS_BODY: &str = r#"{"content":[{"text":"seam","type":"text"}],"id":"msg_raw_body_seam_1","model":"claude-sonnet-4-6","role":"assistant","stop_reason":"end_turn","stop_sequence":null,"type":"message","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":21,"output_tokens":5},"x_rig_raw_body_probe":"exact-bytes-fidelity"}"#;
+const EXPECTED_SUCCESS_BODY: &str = r#"{"content":[{"text":"seam","type":"text"}],"id":"msg_REDACTED_1","model":"claude-sonnet-4-6","role":"assistant","stop_reason":"end_turn","stop_sequence":null,"type":"message","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":21,"output_tokens":5},"x_rig_raw_body_probe":"exact-bytes-fidelity"}"#;
 
 fn text_of(
     response: &rig::completion::CompletionResponse<anthropic::completion::CompletionResponse>,
@@ -73,7 +73,7 @@ async fn success_returns_exact_bytes() {
                 response.raw_response.stop_reason.as_deref(),
                 Some("end_turn")
             );
-            assert_eq!(response.raw_response.id, "msg_raw_body_seam_1");
+            assert_eq!(response.raw_response.id, "msg_REDACTED_1");
             assert_eq!(text_of(&response), "seam");
         },
     )
@@ -101,7 +101,7 @@ async fn completion_delegates_identically_on_success() {
                 response.raw_response.stop_reason.as_deref(),
                 Some("end_turn")
             );
-            assert_eq!(response.raw_response.id, "msg_raw_body_seam_1");
+            assert_eq!(response.raw_response.id, "msg_REDACTED_1");
             assert_eq!(response.raw_response.usage.input_tokens, 21);
             assert_eq!(response.raw_response.usage.output_tokens, 5);
             assert_eq!(text_of(&response), "seam");

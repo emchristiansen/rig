@@ -15,4 +15,4 @@ then:
   header:
   - name: content-type
     value: application/json
-  body: '{"type":"error","error":{"type":"rate_limit_error","message":"raw-body seam probe: rate limited"}}'
+  body: '{"error":{"message":"raw-body seam probe: rate limited","type":"rate_limit_error"},"type":"error"}'

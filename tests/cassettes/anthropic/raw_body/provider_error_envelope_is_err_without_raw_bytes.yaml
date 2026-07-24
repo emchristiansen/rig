@@ -15,4 +15,4 @@ then:
   header:
   - name: content-type
     value: application/json
-  body: '{"type":"error","message":"raw-body seam probe: provider error envelope"}'
+  body: '{"message":"raw-body seam probe: provider error envelope","type":"error"}'
