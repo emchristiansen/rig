@@ -2429,30 +2429,29 @@ pub(super) fn build_tool_definitions(
     Ok(tools)
 }
 
-impl<Ext, T> completion::CompletionModel for GenericCompletionModel<Ext, T>
+impl<Ext, T> GenericCompletionModel<Ext, T>
 where
     T: HttpClientExt + Clone + Default + WasmCompatSend + WasmCompatSync + 'static,
     Ext: AnthropicCompatibleProvider + Clone + WasmCompatSend + WasmCompatSync + 'static,
 {
-    type Response = CompletionResponse;
-    type StreamingResponse = StreamingCompletionResponse;
-    type Client = crate::client::Client<Ext, T>;
-
-    fn make(client: &Self::Client, model: impl Into<String>) -> Self {
-        Self::new(client.clone(), model.into())
-    }
-
-    // Anthropic's native structured outputs (constrained decoding) are designed
-    // to compose with strict tool use, so the schema constraint does not suppress
-    // tool calls. See issue #1928.
-    fn composes_native_output_with_tools(&self) -> bool {
-        true
-    }
-
-    async fn completion(
+    /// Execute a completion request and additionally return the exact raw
+    /// success-response body bytes alongside the typed response.
+    ///
+    /// This is the single implementation behind
+    /// [`completion`](completion::CompletionModel::completion): request
+    /// assembly, HTTP status handling, and success/error envelope
+    /// discrimination happen exactly once, here. Non-success statuses,
+    /// provider error envelopes, and malformed bodies return the same errors
+    /// as [`completion`](completion::CompletionModel::completion); raw bytes
+    /// are returned only for a successfully parsed `type: "message"` response,
+    /// so the bytes always correspond byte-for-byte to the typed response
+    /// derived from them — including any response fields the typed
+    /// representation does not model. Streaming (SSE) responses never pass
+    /// through this method.
+    pub async fn completion_with_raw_body(
         &self,
         mut completion_request: completion::CompletionRequest,
-    ) -> Result<completion::CompletionResponse<CompletionResponse>, CompletionError> {
+    ) -> Result<(completion::CompletionResponse<CompletionResponse>, Bytes), CompletionError> {
         let request_model = completion_request
             .model
             .clone()
@@ -2532,7 +2531,9 @@ where
                             serde_json::to_string_pretty(&completion)?
                         );
                     }
-                    completion.try_into()
+                    let response: completion::CompletionResponse<CompletionResponse> =
+                        completion.try_into()?;
+                    Ok((response, body))
                 }
                 ApiResponse::Error(ApiErrorResponse { message }) => {
                     tracing::warn!(message = %message, "provider returned an error response");
@@ -2545,6 +2546,38 @@ where
         }
         .instrument(span)
         .await
+    }
+}
+
+impl<Ext, T> completion::CompletionModel for GenericCompletionModel<Ext, T>
+where
+    T: HttpClientExt + Clone + Default + WasmCompatSend + WasmCompatSync + 'static,
+    Ext: AnthropicCompatibleProvider + Clone + WasmCompatSend + WasmCompatSync + 'static,
+{
+    type Response = CompletionResponse;
+    type StreamingResponse = StreamingCompletionResponse;
+    type Client = crate::client::Client<Ext, T>;
+
+    fn make(client: &Self::Client, model: impl Into<String>) -> Self {
+        Self::new(client.clone(), model.into())
+    }
+
+    // Anthropic's native structured outputs (constrained decoding) are designed
+    // to compose with strict tool use, so the schema constraint does not suppress
+    // tool calls. See issue #1928.
+    fn composes_native_output_with_tools(&self) -> bool {
+        true
+    }
+
+    // Delegates so request assembly and response discrimination exist exactly
+    // once; the raw body is dropped rather than re-derived.
+    async fn completion(
+        &self,
+        completion_request: completion::CompletionRequest,
+    ) -> Result<completion::CompletionResponse<CompletionResponse>, CompletionError> {
+        self.completion_with_raw_body(completion_request)
+            .await
+            .map(|(response, _raw_body)| response)
     }
 
     async fn stream(

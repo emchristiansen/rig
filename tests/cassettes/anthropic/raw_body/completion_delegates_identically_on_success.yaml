@@ -1,0 +1,18 @@
+when:
+  path: /v1/messages
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  - name: anthropic-version
+    value: 2023-06-01
+  body: '{"max_tokens":64,"messages":[{"content":[{"text":"Reply with the single word: seam.","type":"text"}],"role":"user"}],"model":"claude-sonnet-4-6","system":[{"text":"You are a terse test responder.","type":"text"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  body: '{"content":[{"text":"seam","type":"text"}],"id":"msg_raw_body_seam_1","model":"claude-sonnet-4-6","role":"assistant","stop_reason":"end_turn","stop_sequence":null,"type":"message","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":21,"output_tokens":5},"x_rig_raw_body_probe":"exact-bytes-fidelity"}'
