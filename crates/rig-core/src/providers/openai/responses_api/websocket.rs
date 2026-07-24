@@ -1454,6 +1454,30 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_summary_delta_rejects_done_shaped_payload() {
+        // The inverse of `reasoning_summary_done_rejects_delta_shaped_payload`:
+        // a `response.reasoning_summary_text.delta` payload carrying `text`
+        // instead of the real `delta` field must also fail to deserialize.
+        // `SummaryTextDeltaChunk::delta` has no serde default either, so both
+        // halves of the public wire-shape split are strict in the same way.
+        let payload = json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "rs_REDACTED_1",
+            "output_index": 0,
+            "sequence_number": 51,
+            "summary_index": 0,
+            "text": "wrong field shape"
+        });
+
+        let error = parse_server_event(&payload.to_string())
+            .expect_err("done-shaped payload should not parse as a delta chunk");
+        assert!(
+            error.to_string().contains("StreamingCompletionChunk"),
+            "expected strict decode failure, got {error}"
+        );
+    }
+
+    #[test]
     fn terminal_response_requires_completed_status() {
         let completed = terminal_response_result(sample_response(ResponseStatus::Completed))
             .expect("completed response should succeed");
