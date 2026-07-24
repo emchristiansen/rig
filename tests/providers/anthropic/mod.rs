@@ -17,6 +17,7 @@ mod cassette {
     mod opus_4_8;
     mod plaintext_document;
     mod prompt_caching;
+    mod raw_body;
     mod reasoning_roundtrip;
     mod reasoning_tool_roundtrip;
     mod request_override;
