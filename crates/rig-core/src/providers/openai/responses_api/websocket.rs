@@ -278,12 +278,22 @@ pub enum ResponsesWebSocketEvent {
     ///
     /// Rig's own higher-level paths keep ignoring these events, so surfacing them
     /// changes only [`ResponsesWebSocketSession::next_event`].
-    Unrecognized {
-        /// The event's `type` field.
-        kind: String,
-        /// The complete parsed JSON value of the event.
-        payload: serde_json::Value,
-    },
+    Unrecognized(UnrecognizedEvent),
+}
+
+/// An outer server event this client does not model.
+///
+/// A named value rather than inline variant fields because it is returned on its
+/// own by [`ResponsesWebSocketSession::keepalive`]. That signature is the reason
+/// it exists: a `Vec<UnrecognizedEvent>` says in the type that every element is
+/// an unmodelled event, where a `Vec<ResponsesWebSocketEvent>` would oblige the
+/// caller to re-match variants the drain has already decided.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnrecognizedEvent {
+    /// The event's `type` field.
+    pub kind: String,
+    /// The complete parsed JSON value of the event.
+    pub payload: serde_json::Value,
 }
 
 impl ResponsesWebSocketEvent {
@@ -293,7 +303,7 @@ impl ResponsesWebSocketEvent {
         match self {
             Self::Response(chunk) => Some(&chunk.response.id),
             Self::Done(done) => done.response_id(),
-            Self::Item(_) | Self::Error(_) | Self::Unrecognized { .. } => None,
+            Self::Item(_) | Self::Error(_) | Self::Unrecognized(_) => None,
         }
     }
 
@@ -310,7 +320,7 @@ impl ResponsesWebSocketEvent {
             Self::Error(_) | Self::Done(_) => true,
             // An unmodelled event ends nothing at the protocol level; whether it
             // is tolerable is the consumer's decision, not this predicate's.
-            Self::Item(_) | Self::Unrecognized { .. } => false,
+            Self::Item(_) | Self::Unrecognized(_) => false,
         }
     }
 }
@@ -638,13 +648,24 @@ where
     /// `response.create`, and it never advances `previous_response_id`, so it can
     /// neither root nor advance the live tip. The only server event it consumes
     /// is the trailing `response.done` for the turn that just completed (the same
-    /// event [`next_event`](Self::next_event) filters); any other server event
-    /// arriving while idle is a protocol violation, so it fails the session
-    /// loudly rather than silently discarding a semantic frame.
-    pub async fn keepalive(&mut self) -> Result<(), CompletionError> {
+    /// event [`next_event`](Self::next_event) filters); any other *modelled*
+    /// server event arriving while idle is a protocol violation, so it fails the
+    /// session loudly rather than silently discarding a semantic frame.
+    ///
+    /// Unmodelled events are returned rather than dropped, in socket arrival
+    /// order. They were previously skipped here, which made this a reader that
+    /// could discard a frame a consumer needed to place — an unmodelled
+    /// `response.*` arriving after the terminal chunk carries turn data no caller
+    /// could then account for. Returning them keeps the drain's tolerance (an
+    /// unknown event still never fails an idle socket) while leaving the decision
+    /// with the caller, which is the same split [`next_event`](Self::next_event)
+    /// already makes. An empty vector means nothing unmodelled was buffered.
+    pub async fn keepalive(&mut self) -> Result<Vec<UnrecognizedEvent>, CompletionError> {
         if self.closed || self.failed || self.in_flight {
-            return Ok(());
+            return Ok(Vec::new());
         }
+
+        let mut unrecognized = Vec::new();
 
         // Drain only frames that are already buffered so an idle socket with
         // nothing to read returns immediately instead of blocking; reading a
@@ -675,11 +696,13 @@ where
                         Ok(None) => continue,
                         Err(error) => return Err(self.fail_session(error)),
                     };
-                    // An unmodelled event carries no turn data this session can
-                    // act on, and it was silently dropped here before it was
-                    // surfaced to `next_event`. Keep skipping it, so idle
-                    // tolerance is unchanged and only in-turn consumers see it.
-                    if let ResponsesWebSocketEvent::Unrecognized { .. } = &event {
+                    // An unmodelled event is collected rather than acted on: this
+                    // session still cannot place it, but discarding it here is
+                    // what let a trailing frame vanish between turns. Idle
+                    // tolerance is unchanged — it does not fail the drain — and
+                    // the caller decides what the frame means.
+                    if let ResponsesWebSocketEvent::Unrecognized(event) = event {
+                        unrecognized.push(event);
                         continue;
                     }
                     // The trailing `response.done` for the just-finished turn is
@@ -707,7 +730,7 @@ where
             return Err(self.fail_session(websocket_provider_error(error)));
         }
 
-        Ok(())
+        Ok(unrecognized)
     }
 
     /// Sends a warmup turn (`generate: false`) and returns the resulting response ID.
@@ -811,7 +834,7 @@ where
                 // An unmodelled event contributes nothing this assembler can use,
                 // and ignoring it preserves the behavior callers had while these
                 // events were dropped during parsing.
-                ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized { .. } => {
+                ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized(_) => {
                 }
             }
         }
@@ -866,7 +889,7 @@ where
             }
             // Neither advances the turn's lifecycle state. An unmodelled event is
             // not evidence about `in_flight`, the response id, or the envelope.
-            ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized { .. } => {}
+            ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized(_) => {}
         }
     }
 
@@ -1044,10 +1067,12 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
             // the consumer needs every field, including the ones no modelled
             // variant would have kept.
             let payload = serde_json::from_str::<serde_json::Value>(payload)?;
-            Ok(Some(ResponsesWebSocketEvent::Unrecognized {
-                kind: event_type.kind,
-                payload,
-            }))
+            Ok(Some(ResponsesWebSocketEvent::Unrecognized(
+                UnrecognizedEvent {
+                    kind: event_type.kind,
+                    payload,
+                },
+            )))
         }
     }
 }
@@ -1188,7 +1213,7 @@ fn websocket_provider_error(error: tungstenite::Error) -> CompletionError {
 mod tests {
     use super::{
         ResponsesWebSocketCreateOptions, ResponsesWebSocketDoneEvent, ResponsesWebSocketEvent,
-        parse_server_event, terminal_response_result, websocket_url,
+        UnrecognizedEvent, parse_server_event, terminal_response_result, websocket_url,
     };
     use crate::client::CompletionClient;
     use crate::completion::CompletionModel;
@@ -2314,10 +2339,10 @@ mod tests {
             .expect("unknown event should not error")
             .expect("unknown event should be surfaced rather than skipped");
 
-        let ResponsesWebSocketEvent::Unrecognized {
+        let ResponsesWebSocketEvent::Unrecognized(UnrecognizedEvent {
             kind,
             payload: parsed,
-        } = event
+        }) = event
         else {
             panic!("an unmodelled event type must parse as Unrecognized");
         };
@@ -2602,7 +2627,8 @@ mod tests {
             .expect("send should succeed");
 
         let event = session.next_event().await.expect("event should arrive");
-        let ResponsesWebSocketEvent::Unrecognized { kind, payload } = event else {
+        let ResponsesWebSocketEvent::Unrecognized(UnrecognizedEvent { kind, payload }) = event
+        else {
             panic!("the unmodelled event must reach next_event rather than be dropped");
         };
         assert_eq!(kind, "response.some_future_event");
@@ -2622,7 +2648,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keepalive_skips_an_unknown_event_between_turns() {
+    async fn keepalive_returns_an_unknown_event_between_turns() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
@@ -2691,7 +2717,7 @@ mod tests {
                 .expect("second request should be text");
             assert!(
                 payload.contains("\"previous_response_id\":\"resp_1\""),
-                "expected the tip to survive the skipped idle event, got {payload}"
+                "expected the tip to survive the returned idle event, got {payload}"
             );
 
             let response = serde_json::to_value(CompletionResponse {
@@ -2737,14 +2763,25 @@ mod tests {
         // `keepalive_consumes_trailing_done_and_preserves_tip` does.
         sleep(Duration::from_millis(100)).await;
 
-        // Idle tolerance is unchanged: an unmodelled event is skipped here rather
-        // than failing the session, which is what
-        // `keepalive_fails_loud_on_unexpected_data_frame` proves happens to a
-        // genuine unexpected data frame.
-        session
+        // Idle tolerance is unchanged: an unmodelled event does not fail the
+        // session, which is what `keepalive_fails_loud_on_unexpected_data_frame`
+        // proves happens to a genuine unexpected data frame. What changed is that
+        // the frame is now handed back instead of dropped — a trailing unmodelled
+        // `response.*` is exactly the case a caller must be able to account for.
+        let drained = session
             .keepalive()
             .await
             .expect("an unknown idle event must not fail the session");
+        assert_eq!(
+            drained.len(),
+            1,
+            "the unmodelled idle event must be returned, not discarded"
+        );
+        assert_eq!(drained[0].kind, "response.some_future_event");
+        assert_eq!(
+            drained[0].payload["type"], "response.some_future_event",
+            "the complete parsed value is returned, not just the kind"
+        );
         assert_eq!(session.previous_response_id(), Some("resp_1"));
 
         // The session is still usable, so the skip neither failed it nor left the
@@ -2760,6 +2797,124 @@ mod tests {
         assert_eq!(second.id, "resp_2");
 
         server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn keepalive_returns_every_unknown_event_in_arrival_order() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            let _request = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+
+            let response = serde_json::to_value(CompletionResponse {
+                id: "resp_1".to_string(),
+                ..sample_response(ResponseStatus::Completed)
+            })
+            .expect("response should serialize");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.completed",
+                        "sequence_number": 1,
+                        "response": response,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("completed event should send");
+
+            // Three unmodelled events from three different namespaces, with the
+            // trailing `done` in the middle: the drain must neither reorder them
+            // nor let its own `done` handling drop the one that follows it.
+            for kind in ["codex.rate_limits", "responsesapi.websocket_timing"] {
+                socket
+                    .send(Message::text(
+                        json!({ "type": kind, "seen": kind }).to_string(),
+                    ))
+                    .await
+                    .expect("unknown event should send");
+            }
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.done",
+                        "response": { "id": "resp_1", "status": "completed" },
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("done event should send");
+            socket
+                .send(Message::text(
+                    json!({ "type": "response.some_future_event", "seen": "last" }).to_string(),
+                ))
+                .await
+                .expect("trailing unknown event should send");
+
+            // Hold the socket open so the assertions are about the drain rather
+            // than about a close race.
+            let _ = socket.next().await;
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-4o");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        session
+            .send(model.completion_request("hello").build())
+            .await
+            .expect("send should succeed");
+        let _response = session
+            .wait_for_completed_response()
+            .await
+            .expect("response should complete");
+
+        sleep(Duration::from_millis(100)).await;
+
+        let drained = session
+            .keepalive()
+            .await
+            .expect("unknown idle events must not fail the session");
+
+        let kinds: Vec<&str> = drained.iter().map(|event| event.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "codex.rate_limits",
+                "responsesapi.websocket_timing",
+                "response.some_future_event",
+            ],
+            "every unmodelled frame must be returned exactly once, in arrival \
+             order, including the one that arrived after the trailing `done`"
+        );
+        assert_eq!(
+            session.previous_response_id(),
+            Some("resp_1"),
+            "draining unknowns must not disturb the tip"
+        );
+
+        drop(session);
+        let _ = server.await;
     }
 
     #[tokio::test]
@@ -3253,10 +3408,15 @@ mod tests {
             .send(model.completion_request("hello").build())
             .await
             .expect("request should send");
-        session
+        let drained = session
             .keepalive()
             .await
             .expect("keepalive should be a no-op while in flight");
+        assert!(
+            drained.is_empty(),
+            "a no-op drain must return nothing: reading here would steal the \
+             in-flight turn's own events"
+        );
 
         let response = session
             .wait_for_completed_response()
