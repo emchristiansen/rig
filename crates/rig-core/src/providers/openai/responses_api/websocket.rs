@@ -986,8 +986,7 @@ where
                 // An unmodelled event contributes nothing this assembler can use,
                 // and ignoring it preserves the behavior callers had while these
                 // events were dropped during parsing.
-                ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized(_) => {
-                }
+                ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized(_) => {}
             }
         }
     }

@@ -532,7 +532,7 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                             other_items.push(InputItem {
                                 role: None,
                                 input: InputContent::FunctionCall(OutputFunctionCall {
-                                    arguments: function.arguments,
+                                    arguments: function.arguments.into(),
                                     call_id: require_call_id(call_id, "Assistant tool call")?,
                                     id: tool_id,
                                     name: function.name,
@@ -2022,7 +2022,10 @@ impl From<Output> for Vec<completion::AssistantContent> {
                 name,
                 ..
             }) => vec![completion::AssistantContent::tool_call_with_call_id(
-                id, call_id, name, arguments,
+                id,
+                call_id,
+                name,
+                arguments.into_value(),
             )],
             Output::Reasoning {
                 id,
@@ -2079,11 +2082,71 @@ pub struct OutputFunctionCall {
     /// output by `call_id` alone.
     #[serde(default, skip_serializing_if = "is_not_function_call_item_id")]
     pub id: String,
-    #[serde(with = "json_utils::stringified_json")]
-    pub arguments: serde_json::Value,
+    pub arguments: FunctionCallArguments,
     pub call_id: String,
     pub name: String,
     pub status: ToolStatus,
+}
+
+/// A function call's arguments, always as parsed JSON.
+///
+/// One type for both events that carry them. A call's arguments arrive twice in
+/// a streamed turn — on `response.function_call_arguments.done` and again inside
+/// the `response.output_item.done` item — and a consumer reconciling the stream
+/// against its item snapshot compares those two values. The provider spells them
+/// as stringified JSON on both, but a `serde_json::Value` does not record which
+/// spelling it was decoded from, so two `Value` fields carrying their own serde
+/// attributes can drift apart without any call site looking wrong. That drift is
+/// not hypothetical: it made every well-formed tool call compare
+/// `Value::String("{…}")` against `Value::Object`. Putting the decode on the type
+/// is what makes the two fields unable to disagree.
+///
+/// The value is private and always parsed. [`Deserialize`] accepts the
+/// provider's stringified spelling and the raw-JSON spelling some
+/// OpenAI-compatible servers use, and *rejects* a malformed stringified payload
+/// rather than passing it on as an opaque string — arguments that cannot be
+/// parsed are a protocol error, and carrying them forward only relocates the
+/// failure to whoever compares or executes them. [`Serialize`] always writes the
+/// stringified spelling the Responses API requires.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FunctionCallArguments(Value);
+
+impl FunctionCallArguments {
+    /// The parsed arguments.
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+
+    /// Consumes the wrapper, yielding the parsed arguments.
+    pub fn into_value(self) -> Value {
+        self.0
+    }
+}
+
+/// Arguments assembled in-process — by Rig's agent loop or converted from
+/// another provider — are already parsed, so they enter without a decode.
+impl From<Value> for FunctionCallArguments {
+    fn from(value: Value) -> Self {
+        Self(value)
+    }
+}
+
+impl Serialize for FunctionCallArguments {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        json_utils::stringified_json::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FunctionCallArguments {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        json_utils::stringified_json::deserialize_maybe_stringified(deserializer).map(Self)
+    }
 }
 
 /// See [`OutputFunctionCall::id`]: only provider-native `fc` item IDs may be
@@ -2632,7 +2695,7 @@ impl TryFrom<message::Message> for Vec<Message> {
                                                     .into(),
                                             )
                                         })?,
-                                        arguments: function.arguments,
+                                        arguments: function.arguments.into(),
                                         id: tool_id,
                                         name: function.name,
                                         status: ToolStatus::Completed,

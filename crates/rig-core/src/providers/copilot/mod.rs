@@ -1074,7 +1074,7 @@ where
                                             let raw_tool_call = streaming::RawStreamingToolCall::new(
                                                 func.id.clone(),
                                                 func.name.clone(),
-                                                func.arguments.clone(),
+                                                func.arguments.as_value().clone(),
                                             )
                                             .with_internal_call_id(internal_id)
                                             .with_call_id(func.call_id.clone());

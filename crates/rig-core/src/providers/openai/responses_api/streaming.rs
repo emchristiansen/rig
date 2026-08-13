@@ -16,8 +16,8 @@ use tracing::{Level, debug, enabled};
 use tracing_futures::Instrument as _;
 
 use super::{
-    CompletionResponse, GenericResponsesCompletionModel, IncompleteDetailsReason, Output,
-    RESPONSES_TOLERATE_INCOMPLETE_KEY, ResponseStatus,
+    CompletionResponse, FunctionCallArguments, GenericResponsesCompletionModel,
+    IncompleteDetailsReason, Output, RESPONSES_TOLERATE_INCOMPLETE_KEY, ResponseStatus,
 };
 
 type StreamingRawChoice = RawStreamingChoice<StreamingCompletionResponse>;
@@ -406,10 +406,13 @@ impl RawChoiceAccumulator {
                     .entry(func.id.clone())
                     .or_insert_with(crate::id::generate)
                     .clone();
-                let tool_call =
-                    streaming::RawStreamingToolCall::new(func.id, func.name, func.arguments)
-                        .with_internal_call_id(internal_call_id)
-                        .with_call_id(func.call_id);
+                let tool_call = streaming::RawStreamingToolCall::new(
+                    func.id,
+                    func.name,
+                    func.arguments.into_value(),
+                )
+                .with_internal_call_id(internal_call_id)
+                .with_call_id(func.call_id);
 
                 if emit_completed_tool_calls_immediately {
                     immediate.push(streaming::RawStreamingChoice::ToolCall(tool_call));
@@ -886,7 +889,7 @@ pub struct ArgsTextChunk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_index: Option<u64>,
     pub sequence_number: u64,
-    pub arguments: serde_json::Value,
+    pub arguments: FunctionCallArguments,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2074,6 +2077,128 @@ mod tests {
                     panic!("expected Response variant, got Delta");
                 }
             }
+        }
+    }
+
+    /// A streamed function call states its arguments twice, and the two
+    /// statements must decode to one value.
+    ///
+    /// These decode real wire payloads rather than constructing the chunk
+    /// structs, because the defect they cover lives entirely in
+    /// deserialization: both events spell arguments as a JSON *string*, and a
+    /// consumer that reconciles the stream against the item snapshot sees only
+    /// the decoded values. Building the structs in Rust cannot reach it.
+    mod function_call_arguments {
+        use super::super::{ItemChunk, ItemChunkKind};
+        use crate::providers::openai::responses_api::Output;
+        use serde_json::json;
+
+        /// `response.function_call_arguments.done` as OpenAI sends it.
+        const ARGS_DONE: &str = r#"{
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_1",
+            "output_index": 1,
+            "sequence_number": 22,
+            "arguments": "{\"command\":\"concept-list\"}"
+        }"#;
+
+        /// `response.output_item.done` for that same call.
+        const ITEM_DONE: &str = r#"{
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "sequence_number": 23,
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "CommandAsyncTool",
+                "arguments": "{\"command\":\"concept-list\"}",
+                "status": "completed"
+            }
+        }"#;
+
+        fn args_done_value(payload: &str) -> serde_json::Value {
+            let chunk: ItemChunk = serde_json::from_str(payload).expect("args done should decode");
+            match chunk.data {
+                ItemChunkKind::FunctionCallArgsDone(args) => args.arguments.into_value(),
+                other => panic!("expected FunctionCallArgsDone, got {other:?}"),
+            }
+        }
+
+        fn item_done_value(payload: &str) -> serde_json::Value {
+            let chunk: ItemChunk = serde_json::from_str(payload).expect("item done should decode");
+            match chunk.data {
+                ItemChunkKind::OutputItemDone(done) => match done.item {
+                    Output::FunctionCall(call) => call.arguments.into_value(),
+                    other => panic!("expected a function call item, got {other:?}"),
+                },
+                other => panic!("expected OutputItemDone, got {other:?}"),
+            }
+        }
+
+        /// The regression: both events decode to the same parsed object.
+        ///
+        /// Before the shared argument type, only the item-side field parsed the
+        /// stringified payload, so this compared `Value::String` against
+        /// `Value::Object` — unequal for *every* well-formed tool call.
+        #[test]
+        fn both_events_decode_one_call_to_the_same_parsed_arguments() {
+            let expected = json!({ "command": "concept-list" });
+
+            assert_eq!(args_done_value(ARGS_DONE), expected);
+            assert_eq!(item_done_value(ITEM_DONE), expected);
+        }
+
+        /// The raw-JSON spelling some OpenAI-compatible servers send decodes to
+        /// the same value, so accepting it costs no fidelity.
+        #[test]
+        fn the_raw_json_spelling_decodes_to_the_same_arguments() {
+            let raw = r#"{
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_1",
+                "output_index": 1,
+                "sequence_number": 22,
+                "arguments": { "command": "concept-list" }
+            }"#;
+
+            assert_eq!(args_done_value(raw), json!({ "command": "concept-list" }));
+        }
+
+        /// Arguments that cannot be parsed are a protocol failure here, not an
+        /// opaque string handed to whoever compares or executes them.
+        ///
+        /// Both events are checked: a decode that failed closed on one side and
+        /// degraded on the other would reintroduce the asymmetry in a new place.
+        #[test]
+        fn malformed_stringified_arguments_fail_to_decode() {
+            let malformed_args_done =
+                ARGS_DONE.replace(r#""{\"command\":\"concept-list\"}""#, r#""{\"command\": ""#);
+            let malformed_item_done =
+                ITEM_DONE.replace(r#""{\"command\":\"concept-list\"}""#, r#""{\"command\": ""#);
+
+            assert!(
+                serde_json::from_str::<ItemChunk>(&malformed_args_done).is_err(),
+                "a malformed stringified argument must not decode",
+            );
+            assert!(
+                serde_json::from_str::<ItemChunk>(&malformed_item_done).is_err(),
+                "a malformed stringified argument must not decode inside an item either",
+            );
+        }
+
+        /// Serialization keeps the stringified spelling the Responses API
+        /// requires, so a decoded event still re-serializes to what the provider
+        /// would accept.
+        #[test]
+        fn arguments_reserialize_as_stringified_json() {
+            let chunk: ItemChunk =
+                serde_json::from_str(ARGS_DONE).expect("args done should decode");
+            let reserialized = serde_json::to_value(&chunk).expect("chunk should serialize");
+
+            assert_eq!(
+                reserialized["arguments"],
+                json!(r#"{"command":"concept-list"}"#),
+            );
         }
     }
 }
