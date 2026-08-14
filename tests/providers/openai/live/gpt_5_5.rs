@@ -450,7 +450,7 @@ async fn responses_websocket_smoke() -> anyhow::Result<()> {
                     break;
                 }
             }
-            ResponsesWebSocketEvent::Done(_) => {}
+            ResponsesWebSocketEvent::Done(_) | ResponsesWebSocketEvent::Unrecognized { .. } => {}
             ResponsesWebSocketEvent::Error(error) => return Err(anyhow::anyhow!(error.to_string())),
         }
     }

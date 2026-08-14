@@ -265,6 +265,25 @@ pub enum ResponsesWebSocketEvent {
     Error(ResponsesWebSocketErrorEvent),
     /// An optional `response.done` event emitted by OpenAI over WebSockets.
     Done(ResponsesWebSocketDoneEvent),
+    /// A server event whose `type` this client does not model, surfaced with its
+    /// parsed JSON payload rather than discarded.
+    ///
+    /// Consumers that reconstruct the turn's canonical text cannot treat an
+    /// unmodelled event as absent: it may carry output this client would
+    /// otherwise silently drop. Reporting it lets such a consumer fail closed on
+    /// something it cannot place. `payload` is the complete parsed JSON value of
+    /// the server event — every field, not a modelled subset. It is not the raw
+    /// bytes: parsing discards lexical formatting and may normalize representation,
+    /// so this preserves the event's JSON *value*, not its wire spelling.
+    ///
+    /// Rig's own higher-level paths keep ignoring these events, so surfacing them
+    /// changes only [`ResponsesWebSocketSession::next_event`].
+    Unrecognized {
+        /// The event's `type` field.
+        kind: String,
+        /// The complete parsed JSON value of the event.
+        payload: serde_json::Value,
+    },
 }
 
 impl ResponsesWebSocketEvent {
@@ -274,7 +293,7 @@ impl ResponsesWebSocketEvent {
         match self {
             Self::Response(chunk) => Some(&chunk.response.id),
             Self::Done(done) => done.response_id(),
-            Self::Item(_) | Self::Error(_) => None,
+            Self::Item(_) | Self::Error(_) | Self::Unrecognized { .. } => None,
         }
     }
 
@@ -289,7 +308,9 @@ impl ResponsesWebSocketEvent {
                     | ResponseChunkKind::ResponseIncomplete
             ),
             Self::Error(_) | Self::Done(_) => true,
-            Self::Item(_) => false,
+            // An unmodelled event ends nothing at the protocol level; whether it
+            // is tolerable is the consumer's decision, not this predicate's.
+            Self::Item(_) | Self::Unrecognized { .. } => false,
         }
     }
 }
@@ -654,6 +675,13 @@ where
                         Ok(None) => continue,
                         Err(error) => return Err(self.fail_session(error)),
                     };
+                    // An unmodelled event carries no turn data this session can
+                    // act on, and it was silently dropped here before it was
+                    // surfaced to `next_event`. Keep skipping it, so idle
+                    // tolerance is unchanged and only in-turn consumers see it.
+                    if let ResponsesWebSocketEvent::Unrecognized { .. } = &event {
+                        continue;
+                    }
                     // The trailing `response.done` for the just-finished turn is
                     // the only server event expected between turns; consume it
                     // exactly as `next_event` does and keep the tip untouched.
@@ -780,7 +808,11 @@ where
                     // the websocket stream, so status: None.
                     return Err(provider_error_from_event(error));
                 }
-                ResponsesWebSocketEvent::Item(_) => {}
+                // An unmodelled event contributes nothing this assembler can use,
+                // and ignoring it preserves the behavior callers had while these
+                // events were dropped during parsing.
+                ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized { .. } => {
+                }
             }
         }
     }
@@ -832,7 +864,9 @@ where
                 self.pending_envelope = None;
                 self.in_flight = false;
             }
-            ResponsesWebSocketEvent::Item(_) => {}
+            // Neither advances the turn's lifecycle state. An unmodelled event is
+            // not evidence about `in_flight`, the response id, or the envelope.
+            ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized { .. } => {}
         }
     }
 
@@ -1004,9 +1038,16 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
             tracing::debug!(
                 target: "rig::completions",
                 event_type = event_type.kind.as_str(),
-                "Skipping unrecognised OpenAI websocket event"
+                "Surfacing unrecognised OpenAI websocket event"
             );
-            Ok(None)
+            // Reparsed as a whole value rather than reusing the `EventType` probe:
+            // the consumer needs every field, including the ones no modelled
+            // variant would have kept.
+            let payload = serde_json::from_str::<serde_json::Value>(payload)?;
+            Ok(Some(ResponsesWebSocketEvent::Unrecognized {
+                kind: event_type.kind,
+                payload,
+            }))
         }
     }
 }
@@ -2262,15 +2303,45 @@ mod tests {
     }
 
     #[test]
-    fn unknown_event_type_is_skipped() {
+    fn unknown_event_type_is_surfaced_with_its_complete_parsed_payload() {
         let payload = json!({
             "type": "response.some_future_event",
-            "data": "hello"
+            "data": "hello",
+            "nested": { "sequence_number": 7 }
         });
 
-        let result =
-            parse_server_event(&payload.to_string()).expect("unknown event should not error");
-        assert!(result.is_none(), "unknown event should be skipped");
+        let event = parse_server_event(&payload.to_string())
+            .expect("unknown event should not error")
+            .expect("unknown event should be surfaced rather than skipped");
+
+        let ResponsesWebSocketEvent::Unrecognized {
+            kind,
+            payload: parsed,
+        } = event
+        else {
+            panic!("an unmodelled event type must parse as Unrecognized");
+        };
+        assert_eq!(kind, "response.some_future_event");
+        // Compared as a JSON value, not as text: parsing preserves the event's
+        // value, and its wire spelling is deliberately not a claim this makes.
+        assert_eq!(
+            parsed, payload,
+            "every field must survive, including ones no modelled variant keeps"
+        );
+    }
+
+    #[test]
+    fn unknown_event_is_nonterminal_and_carries_no_response_id() {
+        let event =
+            parse_server_event(&json!({ "type": "response.some_future_event" }).to_string())
+                .expect("unknown event should not error")
+                .expect("unknown event should be surfaced");
+
+        assert!(
+            !event.is_terminal(),
+            "an unmodelled event ends no turn at the protocol level"
+        );
+        assert_eq!(event.response_id(), None);
     }
 
     #[test]
@@ -2464,7 +2535,235 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_event_is_skipped_and_reasoning_metadata_is_preserved() {
+    async fn unknown_event_reaches_next_event_before_the_terminal_event() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            let _request = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.some_future_event",
+                        "sequence_number": 1,
+                        "output_index": 0,
+                        "text": "content a modelled variant would drop",
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("unknown event should send");
+
+            let response = serde_json::to_value(CompletionResponse {
+                id: "resp_after_unknown".to_string(),
+                ..sample_response(ResponseStatus::Completed)
+            })
+            .expect("response should serialize");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.completed",
+                        "sequence_number": 2,
+                        "response": response,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("completed event should send");
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-4o");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        session
+            .send(model.completion_request("hello").build())
+            .await
+            .expect("send should succeed");
+
+        let event = session.next_event().await.expect("event should arrive");
+        let ResponsesWebSocketEvent::Unrecognized { kind, payload } = event else {
+            panic!("the unmodelled event must reach next_event rather than be dropped");
+        };
+        assert_eq!(kind, "response.some_future_event");
+        assert_eq!(
+            payload.get("text").and_then(serde_json::Value::as_str),
+            Some("content a modelled variant would drop"),
+            "the payload must carry fields no modelled variant would have kept"
+        );
+
+        let terminal = session.next_event().await.expect("terminal should arrive");
+        assert!(
+            terminal.is_terminal(),
+            "surfacing the unmodelled event must not disturb the turn's terminal event"
+        );
+
+        server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn keepalive_skips_an_unknown_event_between_turns() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            let _request = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+
+            let response = serde_json::to_value(CompletionResponse {
+                id: "resp_1".to_string(),
+                ..sample_response(ResponseStatus::Completed)
+            })
+            .expect("response should serialize");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.completed",
+                        "sequence_number": 1,
+                        "response": response,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("completed event should send");
+            // Ordered before the trailing `done` so the two are indistinguishable
+            // in arrival: whenever `done` has reached the buffer, this has too.
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.some_future_event",
+                        "data": "arriving while the session is idle",
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("unknown event should send");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.done",
+                        "response": { "id": "resp_1", "status": "completed" },
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("done event should send");
+
+            // Hold the socket open and serve a whole second turn, so the proof is
+            // the session's continued health rather than any close/timing order.
+            let second_request = socket
+                .next()
+                .await
+                .expect("second request should exist")
+                .expect("second request should be valid");
+            let payload = second_request
+                .into_text()
+                .expect("second request should be text");
+            assert!(
+                payload.contains("\"previous_response_id\":\"resp_1\""),
+                "expected the tip to survive the skipped idle event, got {payload}"
+            );
+
+            let response = serde_json::to_value(CompletionResponse {
+                id: "resp_2".to_string(),
+                ..sample_response(ResponseStatus::Completed)
+            })
+            .expect("response should serialize");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.completed",
+                        "sequence_number": 2,
+                        "response": response,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("second completed event should send");
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-4o");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        session
+            .send(model.completion_request("hello").build())
+            .await
+            .expect("send should succeed");
+        let _response = session
+            .wait_for_completed_response()
+            .await
+            .expect("response should complete");
+
+        // Let the idle frames reach the buffer before servicing them, exactly as
+        // `keepalive_consumes_trailing_done_and_preserves_tip` does.
+        sleep(Duration::from_millis(100)).await;
+
+        // Idle tolerance is unchanged: an unmodelled event is skipped here rather
+        // than failing the session, which is what
+        // `keepalive_fails_loud_on_unexpected_data_frame` proves happens to a
+        // genuine unexpected data frame.
+        session
+            .keepalive()
+            .await
+            .expect("an unknown idle event must not fail the session");
+        assert_eq!(session.previous_response_id(), Some("resp_1"));
+
+        // The session is still usable, so the skip neither failed it nor left the
+        // stream misaligned.
+        session
+            .send(model.completion_request("second").build())
+            .await
+            .expect("second request should send");
+        let second = session
+            .wait_for_completed_response()
+            .await
+            .expect("second response should complete after the skipped idle event");
+        assert_eq!(second.id, "resp_2");
+
+        server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn unknown_event_is_ignored_by_response_assembly_and_reasoning_metadata_is_preserved() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
