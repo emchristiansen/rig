@@ -27,6 +27,31 @@ use super::{CompletionResponse, ResponseStatus, ResponsesCompletionModel};
 type OpenAIWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The most frames one idle keepalive drain consumes before it stops and hands
+/// back what it has taken.
+///
+/// The drain's reads never suspend — see
+/// [`keepalive`](ResponsesWebSocketSession::keepalive) — so a peer delivering
+/// faster than the loop consumes is the only way the loop fails to terminate
+/// promptly. A frame budget bounds it without introducing an await, which a
+/// timer would require; an await inside the read loop is exactly what would put
+/// the already-consumed frames at risk of being dropped by a cancellation.
+const MAX_KEEPALIVE_DRAIN_FRAMES: usize = 4_096;
+
+const _: () = assert!(
+    MAX_KEEPALIVE_DRAIN_FRAMES > 0,
+    "a zero budget would consume nothing and report a flood on every idle drain"
+);
+
+/// How long the post-drain pong flush may take before the socket is treated as
+/// unserviceable.
+///
+/// This bound is internal on purpose. It is the one suspension point in the
+/// whole drain, and it holds the recovered frames, so bounding it from the
+/// outside with a `timeout`/`select!` would cancel the future and destroy them.
+/// Bounded here, expiry *returns* them alongside the failure instead.
+const KEEPALIVE_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// An explicit TLS connector for the Responses WebSocket connection.
 ///
 /// Wraps a [`tokio_tungstenite::Connector`] so callers can inject a custom TLS
@@ -278,12 +303,93 @@ pub enum ResponsesWebSocketEvent {
     ///
     /// Rig's own higher-level paths keep ignoring these events, so surfacing them
     /// changes only [`ResponsesWebSocketSession::next_event`].
-    Unrecognized {
-        /// The event's `type` field.
-        kind: String,
-        /// The complete parsed JSON value of the event.
-        payload: serde_json::Value,
-    },
+    Unrecognized(UnrecognizedEvent),
+}
+
+/// An outer server event this client does not model.
+///
+/// A named value rather than inline variant fields because it is returned on its
+/// own by [`ResponsesWebSocketSession::keepalive`]. That signature is the reason
+/// it exists: a `Vec<UnrecognizedEvent>` says in the type that every element is
+/// an unmodelled event, where a `Vec<ResponsesWebSocketEvent>` would oblige the
+/// caller to re-match variants the drain has already decided.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnrecognizedEvent {
+    /// The event's `type` field.
+    pub kind: String,
+    /// The complete parsed JSON value of the event.
+    pub payload: serde_json::Value,
+}
+
+/// How far an idle [`keepalive`](ResponsesWebSocketSession::keepalive) drain
+/// got, and every unmodelled frame it consumed getting there.
+///
+/// **Deliberately not a `Result`.** The recovered frames have already been taken
+/// off the socket and can never be re-read, so a shape with an error position
+/// would let `?` — or any `From` conversion a later caller adds — return the
+/// failure while silently discarding them. A caller that lost them this way
+/// could not tell a socket that closed after delivering an unaccountable frame
+/// from one that merely closed, which is the difference between a proven and an
+/// unproven session. There is no error position here, and the ending is
+/// reachable only through [`Self::into_parts`], which surrenders the frames in
+/// the same expression.
+#[derive(Debug)]
+pub struct KeepaliveDrain {
+    recovered: Vec<UnrecognizedEvent>,
+    ending: KeepaliveEnding,
+}
+
+/// How a [`KeepaliveDrain`] ended.
+///
+/// Private: the two states are total, but the public surface is
+/// [`KeepaliveDrain::into_parts`], which hands the ending back as an `Option`
+/// beside the frames. Keeping the enum internal is what stops a caller from
+/// destructuring an ending on its own and leaving the frames behind.
+#[derive(Debug)]
+enum KeepaliveEnding {
+    /// Read to the end of what was buffered, and the queued pongs reached the
+    /// wire.
+    Serviced,
+    /// The drain stopped here, and the session has been marked failed or closed.
+    Failed(CompletionError),
+}
+
+impl KeepaliveDrain {
+    fn serviced(recovered: Vec<UnrecognizedEvent>) -> Self {
+        Self {
+            recovered,
+            ending: KeepaliveEnding::Serviced,
+        }
+    }
+
+    fn failed(recovered: Vec<UnrecognizedEvent>, error: CompletionError) -> Self {
+        Self {
+            recovered,
+            ending: KeepaliveEnding::Failed(error),
+        }
+    }
+
+    /// The unmodelled frames the drain consumed, in socket arrival order.
+    #[must_use]
+    pub fn recovered(&self) -> &[UnrecognizedEvent] {
+        &self.recovered
+    }
+
+    /// Split into the recovered frames and the failure that ended the drain, if
+    /// one did.
+    ///
+    /// The only way to read the ending, so a caller that wants the failure
+    /// necessarily receives everything consumed before it. Frames recovered
+    /// ahead of a failure are ordinary recovered frames: the failure says the
+    /// socket stopped being readable, never that they did not arrive.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<UnrecognizedEvent>, Option<CompletionError>) {
+        let ending = match self.ending {
+            KeepaliveEnding::Serviced => None,
+            KeepaliveEnding::Failed(error) => Some(error),
+        };
+        (self.recovered, ending)
+    }
 }
 
 impl ResponsesWebSocketEvent {
@@ -293,7 +399,7 @@ impl ResponsesWebSocketEvent {
         match self {
             Self::Response(chunk) => Some(&chunk.response.id),
             Self::Done(done) => done.response_id(),
-            Self::Item(_) | Self::Error(_) | Self::Unrecognized { .. } => None,
+            Self::Item(_) | Self::Error(_) | Self::Unrecognized(_) => None,
         }
     }
 
@@ -310,7 +416,7 @@ impl ResponsesWebSocketEvent {
             Self::Error(_) | Self::Done(_) => true,
             // An unmodelled event ends nothing at the protocol level; whether it
             // is tolerable is the consumer's decision, not this predicate's.
-            Self::Item(_) | Self::Unrecognized { .. } => false,
+            Self::Item(_) | Self::Unrecognized(_) => false,
         }
     }
 }
@@ -638,32 +744,67 @@ where
     /// `response.create`, and it never advances `previous_response_id`, so it can
     /// neither root nor advance the live tip. The only server event it consumes
     /// is the trailing `response.done` for the turn that just completed (the same
-    /// event [`next_event`](Self::next_event) filters); any other server event
-    /// arriving while idle is a protocol violation, so it fails the session
-    /// loudly rather than silently discarding a semantic frame.
-    pub async fn keepalive(&mut self) -> Result<(), CompletionError> {
+    /// event [`next_event`](Self::next_event) filters); any other *modelled*
+    /// server event arriving while idle is a protocol violation, so it fails the
+    /// session loudly rather than silently discarding a semantic frame.
+    ///
+    /// Unmodelled events are returned rather than dropped, in socket arrival
+    /// order. They were previously skipped here, which made this a reader that
+    /// could discard a frame a consumer needed to place — an unmodelled
+    /// `response.*` arriving after the terminal chunk carries turn data no caller
+    /// could then account for. Returning them keeps the drain's tolerance (an
+    /// unknown event still never fails an idle socket) while leaving the decision
+    /// with the caller, which is the same split [`next_event`](Self::next_event)
+    /// already makes. An empty [`KeepaliveDrain::recovered`] means nothing
+    /// unmodelled was buffered.
+    ///
+    /// **A failure never costs the caller what was already consumed.** Every
+    /// exit — close, read error, parse error, unexpected modelled event, flood,
+    /// flush error, flush timeout — returns a [`KeepaliveDrain`] carrying the
+    /// complete ordered prefix taken before it. Returning a bare error instead
+    /// is what made a consumed unaccountable frame followed by a socket close
+    /// indistinguishable from an ordinary transport fault.
+    ///
+    /// **Cancellation cannot cost the caller that prefix either, and callers
+    /// must not add an outer bound to get one.** The reads use `now_or_never`
+    /// and therefore never suspend, so the read loop has no cancellation point
+    /// between consuming a frame and returning it; it terminates on
+    /// [`MAX_KEEPALIVE_DRAIN_FRAMES`] rather than a timer for that exact reason.
+    /// The single suspension is the pong flush, bounded internally by
+    /// [`KEEPALIVE_FLUSH_TIMEOUT`]. The whole operation is therefore already
+    /// bounded, and wrapping it in a caller-side `timeout` or racing it in a
+    /// `select!` would only reintroduce the drop this shape exists to prevent.
+    pub async fn keepalive(&mut self) -> KeepaliveDrain {
         if self.closed || self.failed || self.in_flight {
-            return Ok(());
+            return KeepaliveDrain::serviced(Vec::new());
         }
+
+        let mut unrecognized = Vec::new();
 
         // Drain only frames that are already buffered so an idle socket with
         // nothing to read returns immediately instead of blocking; reading a
         // server ping lets `tokio-tungstenite` enqueue its automatic pong.
-        loop {
+        for _ in 0..MAX_KEEPALIVE_DRAIN_FRAMES {
             let Some(message) = self.socket.next().now_or_never() else {
-                break;
+                return self.flush_pongs(unrecognized).await;
             };
 
             let Some(message) = message else {
                 self.mark_closed();
-                return Err(CompletionError::ProviderError(
-                    "The OpenAI websocket connection closed during idle keepalive".to_string(),
-                ));
+                return KeepaliveDrain::failed(
+                    unrecognized,
+                    CompletionError::ProviderError(
+                        "The OpenAI websocket connection closed during idle keepalive".to_string(),
+                    ),
+                );
             };
 
             let message = match message {
                 Ok(message) => message,
-                Err(error) => return Err(self.fail_session(websocket_provider_error(error))),
+                Err(error) => {
+                    let error = self.fail_session(websocket_provider_error(error));
+                    return KeepaliveDrain::failed(unrecognized, error);
+                }
             };
 
             match websocket_message_to_text(message) {
@@ -673,13 +814,18 @@ where
                     let event = match parse_server_event(&payload) {
                         Ok(Some(event)) => event,
                         Ok(None) => continue,
-                        Err(error) => return Err(self.fail_session(error)),
+                        Err(error) => {
+                            let error = self.fail_session(error);
+                            return KeepaliveDrain::failed(unrecognized, error);
+                        }
                     };
-                    // An unmodelled event carries no turn data this session can
-                    // act on, and it was silently dropped here before it was
-                    // surfaced to `next_event`. Keep skipping it, so idle
-                    // tolerance is unchanged and only in-turn consumers see it.
-                    if let ResponsesWebSocketEvent::Unrecognized { .. } = &event {
+                    // An unmodelled event is collected rather than acted on: this
+                    // session still cannot place it, but discarding it here is
+                    // what let a trailing frame vanish between turns. Idle
+                    // tolerance is unchanged — it does not fail the drain — and
+                    // the caller decides what the frame means.
+                    if let ResponsesWebSocketEvent::Unrecognized(event) = event {
+                        unrecognized.push(event);
                         continue;
                     }
                     // The trailing `response.done` for the just-finished turn is
@@ -692,22 +838,51 @@ where
                         }
                     }
                     // Any other server event is real turn data with no turn in
-                    // flight. Fail loudly rather than discard a semantic frame.
-                    return Err(self.fail_session(CompletionError::ProviderError(
+                    // flight. Fail loudly rather than discard a semantic frame —
+                    // and hand back the unmodelled frames that preceded it, which
+                    // is the case where losing them mattered most: an unexpected
+                    // modelled event is itself evidence the projection is broken.
+                    let error = self.fail_session(CompletionError::ProviderError(
                         "The OpenAI websocket delivered an unexpected server event during idle keepalive"
                             .to_string(),
-                    )));
+                    ));
+                    return KeepaliveDrain::failed(unrecognized, error);
                 }
-                Err(error) => return Err(self.fail_session(error)),
+                Err(error) => {
+                    let error = self.fail_session(error);
+                    return KeepaliveDrain::failed(unrecognized, error);
+                }
             }
         }
 
-        // Flush so any pong enqueued above reaches the server.
-        if let Err(error) = self.socket.flush().await {
-            return Err(self.fail_session(websocket_provider_error(error)));
-        }
+        // The peer is delivering faster than this loop consumes. The socket
+        // cannot be read to a known state, so it is not serviceable — but what
+        // was consumed still belongs to the caller.
+        let error = self.fail_session(keepalive_flood_error(MAX_KEEPALIVE_DRAIN_FRAMES));
+        KeepaliveDrain::failed(unrecognized, error)
+    }
 
-        Ok(())
+    /// Flush so any pong enqueued by the drain reaches the server.
+    ///
+    /// Takes the recovered frames by value because this is the one place the
+    /// drain suspends, and the bound is inside: expiry returns them with a typed
+    /// failure rather than abandoning them. A stalled peer can leave a write
+    /// buffer unflushable indefinitely, and this session is serviced from a
+    /// single caller-side task, so an unbounded wait here is not a slow
+    /// keepalive — it is a socket that never answers again.
+    async fn flush_pongs(&mut self, recovered: Vec<UnrecognizedEvent>) -> KeepaliveDrain {
+        match tokio::time::timeout(KEEPALIVE_FLUSH_TIMEOUT, self.socket.flush()).await {
+            Ok(Ok(())) => KeepaliveDrain::serviced(recovered),
+            Ok(Err(error)) => {
+                let error = self.fail_session(websocket_provider_error(error));
+                KeepaliveDrain::failed(recovered, error)
+            }
+            Err(_elapsed) => {
+                let error =
+                    self.fail_session(keepalive_flush_timeout_error(KEEPALIVE_FLUSH_TIMEOUT));
+                KeepaliveDrain::failed(recovered, error)
+            }
+        }
     }
 
     /// Sends a warmup turn (`generate: false`) and returns the resulting response ID.
@@ -811,8 +986,7 @@ where
                 // An unmodelled event contributes nothing this assembler can use,
                 // and ignoring it preserves the behavior callers had while these
                 // events were dropped during parsing.
-                ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized { .. } => {
-                }
+                ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized(_) => {}
             }
         }
     }
@@ -866,7 +1040,7 @@ where
             }
             // Neither advances the turn's lifecycle state. An unmodelled event is
             // not evidence about `in_flight`, the response id, or the envelope.
-            ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized { .. } => {}
+            ResponsesWebSocketEvent::Item(_) | ResponsesWebSocketEvent::Unrecognized(_) => {}
         }
     }
 
@@ -1044,10 +1218,12 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
             // the consumer needs every field, including the ones no modelled
             // variant would have kept.
             let payload = serde_json::from_str::<serde_json::Value>(payload)?;
-            Ok(Some(ResponsesWebSocketEvent::Unrecognized {
-                kind: event_type.kind,
-                payload,
-            }))
+            Ok(Some(ResponsesWebSocketEvent::Unrecognized(
+                UnrecognizedEvent {
+                    kind: event_type.kind,
+                    payload,
+                },
+            )))
         }
     }
 }
@@ -1184,13 +1360,27 @@ fn websocket_provider_error(error: tungstenite::Error) -> CompletionError {
     CompletionError::ProviderError(error.to_string())
 }
 
+fn keepalive_flush_timeout_error(timeout: Duration) -> CompletionError {
+    CompletionError::ProviderError(format!(
+        "Timed out flushing the OpenAI websocket idle keepalive pong after {timeout:?}"
+    ))
+}
+
+fn keepalive_flood_error(budget: usize) -> CompletionError {
+    CompletionError::ProviderError(format!(
+        "The OpenAI websocket delivered more than {budget} buffered frames during idle keepalive"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ResponsesWebSocketCreateOptions, ResponsesWebSocketDoneEvent, ResponsesWebSocketEvent,
+        KeepaliveDrain, MAX_KEEPALIVE_DRAIN_FRAMES, ResponsesWebSocketCreateOptions,
+        ResponsesWebSocketDoneEvent, ResponsesWebSocketEvent, UnrecognizedEvent,
         parse_server_event, terminal_response_result, websocket_url,
     };
     use crate::client::CompletionClient;
+    use crate::completion::CompletionError;
     use crate::completion::CompletionModel;
     use crate::providers::openai::responses_api::streaming::ItemChunkKind;
     use crate::providers::openai::responses_api::{
@@ -1202,6 +1392,29 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::time::sleep;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    /// The frames of a drain that must have serviced the socket cleanly.
+    fn serviced(drain: KeepaliveDrain, context: &str) -> Vec<UnrecognizedEvent> {
+        let (recovered, ending) = drain.into_parts();
+        if let Some(error) = ending {
+            panic!("{context}, but the drain failed: {error}");
+        }
+        recovered
+    }
+
+    /// The frames a failing drain still recovered, and the failure itself.
+    ///
+    /// Both halves, always: the whole point of the drain's shape is that a
+    /// caller cannot take the failure without also taking what preceded it, so
+    /// a test helper that returned only the error would hide the property under
+    /// test.
+    fn failed(drain: KeepaliveDrain, context: &str) -> (Vec<UnrecognizedEvent>, CompletionError) {
+        let (recovered, ending) = drain.into_parts();
+        let Some(error) = ending else {
+            panic!("{context}, but the drain reported success");
+        };
+        (recovered, error)
+    }
 
     #[test]
     fn websocket_error_event_preserves_provider_payload_as_json() {
@@ -2314,10 +2527,10 @@ mod tests {
             .expect("unknown event should not error")
             .expect("unknown event should be surfaced rather than skipped");
 
-        let ResponsesWebSocketEvent::Unrecognized {
+        let ResponsesWebSocketEvent::Unrecognized(UnrecognizedEvent {
             kind,
             payload: parsed,
-        } = event
+        }) = event
         else {
             panic!("an unmodelled event type must parse as Unrecognized");
         };
@@ -2602,7 +2815,8 @@ mod tests {
             .expect("send should succeed");
 
         let event = session.next_event().await.expect("event should arrive");
-        let ResponsesWebSocketEvent::Unrecognized { kind, payload } = event else {
+        let ResponsesWebSocketEvent::Unrecognized(UnrecognizedEvent { kind, payload }) = event
+        else {
             panic!("the unmodelled event must reach next_event rather than be dropped");
         };
         assert_eq!(kind, "response.some_future_event");
@@ -2622,7 +2836,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keepalive_skips_an_unknown_event_between_turns() {
+    async fn keepalive_returns_an_unknown_event_between_turns() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
@@ -2691,7 +2905,7 @@ mod tests {
                 .expect("second request should be text");
             assert!(
                 payload.contains("\"previous_response_id\":\"resp_1\""),
-                "expected the tip to survive the skipped idle event, got {payload}"
+                "expected the tip to survive the returned idle event, got {payload}"
             );
 
             let response = serde_json::to_value(CompletionResponse {
@@ -2737,14 +2951,25 @@ mod tests {
         // `keepalive_consumes_trailing_done_and_preserves_tip` does.
         sleep(Duration::from_millis(100)).await;
 
-        // Idle tolerance is unchanged: an unmodelled event is skipped here rather
-        // than failing the session, which is what
-        // `keepalive_fails_loud_on_unexpected_data_frame` proves happens to a
-        // genuine unexpected data frame.
-        session
-            .keepalive()
-            .await
-            .expect("an unknown idle event must not fail the session");
+        // Idle tolerance is unchanged: an unmodelled event does not fail the
+        // session, which is what `keepalive_fails_loud_on_unexpected_data_frame`
+        // proves happens to a genuine unexpected data frame. What changed is that
+        // the frame is now handed back instead of dropped — a trailing unmodelled
+        // `response.*` is exactly the case a caller must be able to account for.
+        let drained = serviced(
+            session.keepalive().await,
+            "an unknown idle event must not fail the session",
+        );
+        assert_eq!(
+            drained.len(),
+            1,
+            "the unmodelled idle event must be returned, not discarded"
+        );
+        assert_eq!(drained[0].kind, "response.some_future_event");
+        assert_eq!(
+            drained[0].payload["type"], "response.some_future_event",
+            "the complete parsed value is returned, not just the kind"
+        );
         assert_eq!(session.previous_response_id(), Some("resp_1"));
 
         // The session is still usable, so the skip neither failed it nor left the
@@ -2760,6 +2985,269 @@ mod tests {
         assert_eq!(second.id, "resp_2");
 
         server.await.expect("server task should finish");
+    }
+
+    #[tokio::test]
+    async fn keepalive_returns_every_unknown_event_in_arrival_order() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            let _request = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+
+            let response = serde_json::to_value(CompletionResponse {
+                id: "resp_1".to_string(),
+                ..sample_response(ResponseStatus::Completed)
+            })
+            .expect("response should serialize");
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.completed",
+                        "sequence_number": 1,
+                        "response": response,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("completed event should send");
+
+            // Three unmodelled events from three different namespaces, with the
+            // trailing `done` in the middle: the drain must neither reorder them
+            // nor let its own `done` handling drop the one that follows it.
+            for kind in ["codex.rate_limits", "responsesapi.websocket_timing"] {
+                socket
+                    .send(Message::text(
+                        json!({ "type": kind, "seen": kind }).to_string(),
+                    ))
+                    .await
+                    .expect("unknown event should send");
+            }
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.done",
+                        "response": { "id": "resp_1", "status": "completed" },
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("done event should send");
+            socket
+                .send(Message::text(
+                    json!({ "type": "response.some_future_event", "seen": "last" }).to_string(),
+                ))
+                .await
+                .expect("trailing unknown event should send");
+
+            // Hold the socket open so the assertions are about the drain rather
+            // than about a close race.
+            let _ = socket.next().await;
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-4o");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        session
+            .send(model.completion_request("hello").build())
+            .await
+            .expect("send should succeed");
+        let _response = session
+            .wait_for_completed_response()
+            .await
+            .expect("response should complete");
+
+        sleep(Duration::from_millis(100)).await;
+
+        let drained = serviced(
+            session.keepalive().await,
+            "unknown idle events must not fail the session",
+        );
+
+        let kinds: Vec<&str> = drained.iter().map(|event| event.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "codex.rate_limits",
+                "responsesapi.websocket_timing",
+                "response.some_future_event",
+            ],
+            "every unmodelled frame must be returned exactly once, in arrival \
+             order, including the one that arrived after the trailing `done`"
+        );
+        assert_eq!(
+            session.previous_response_id(),
+            Some("resp_1"),
+            "draining unknowns must not disturb the tip"
+        );
+
+        drop(session);
+        let _ = server.await;
+    }
+
+    /// A drain that ends in failure still hands back everything it consumed.
+    ///
+    /// This is the case the previous `Result` shape could not express. The
+    /// unmodelled frame is taken off the socket and can never be re-read, so
+    /// returning only the close error made a session that had delivered an
+    /// unaccountable frame indistinguishable from one that had merely closed —
+    /// and a caller deciding whether its turn is provable needs exactly that
+    /// distinction.
+    #[tokio::test]
+    async fn keepalive_recovers_unknown_frames_consumed_before_a_close() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            socket
+                .send(Message::text(
+                    json!({
+                        "type": "response.some_future_event",
+                        "sequence_number": 1,
+                    })
+                    .to_string(),
+                ))
+                .await
+                .expect("unknown event should send");
+
+            // Drop without a close handshake, so the client sees the frame and
+            // then the end of the stream in the same drain.
+            drop(socket);
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        // Let both the frame and the end of the stream reach the buffer.
+        sleep(Duration::from_millis(100)).await;
+
+        let (recovered, error) = failed(
+            session.keepalive().await,
+            "a socket that ends mid-drain must report the failure",
+        );
+        assert_eq!(
+            recovered.len(),
+            1,
+            "the frame consumed before the close is still the caller's: {error}"
+        );
+        assert_eq!(recovered[0].kind, "response.some_future_event");
+
+        server.await.expect("server task should finish");
+    }
+
+    /// The drain consumes at most [`MAX_KEEPALIVE_DRAIN_FRAMES`], and stopping
+    /// there costs the caller nothing it already took.
+    ///
+    /// The budget is what makes the read loop terminate without an await. A
+    /// timer would bound it too, but only by introducing the one thing this
+    /// design excludes: a suspension point between consuming a frame and
+    /// returning it, where a cancellation could drop the whole prefix.
+    #[tokio::test]
+    async fn keepalive_stops_at_the_frame_budget_and_keeps_what_it_consumed() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+
+            // One more than the budget, so the cap is what stops the drain
+            // rather than the supply running out. The frames are as small as an
+            // unmodelled event can be for the same reason: the client drains
+            // without ever awaiting, so it outruns anything it has to wait for,
+            // and only a batch that fits in the receive buffer whole can prove
+            // the budget rather than the network stopped it.
+            let frame = json!({ "type": "z" }).to_string();
+            for _ in 0..=MAX_KEEPALIVE_DRAIN_FRAMES {
+                socket
+                    .send(Message::text(frame.clone()))
+                    .await
+                    .expect("unknown event should send");
+            }
+
+            // Hold the socket open so the drain stops on the budget rather than
+            // on an end of stream.
+            futures::future::pending::<()>().await;
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        sleep(Duration::from_millis(500)).await;
+
+        let (recovered, error) = failed(
+            session.keepalive().await,
+            "exceeding the frame budget must be reported",
+        );
+        assert_eq!(
+            recovered.len(),
+            MAX_KEEPALIVE_DRAIN_FRAMES,
+            "the drain stops at the budget and keeps every frame up to it"
+        );
+        assert!(
+            error.to_string().contains("buffered frames"),
+            "expected a flood error, got {error}"
+        );
+
+        // A socket that cannot be read to a known state is not serviceable, so
+        // the session is failed and a later drain is the ordinary no-op.
+        let after = serviced(
+            session.keepalive().await,
+            "a failed session drains as a no-op",
+        );
+        assert!(
+            after.is_empty(),
+            "a failed session must not keep consuming frames"
+        );
+
+        server.abort();
     }
 
     #[tokio::test]
@@ -2973,10 +3461,10 @@ mod tests {
 
         // Let the server's ping reach the socket buffer before servicing it.
         sleep(Duration::from_millis(100)).await;
-        session
-            .keepalive()
-            .await
-            .expect("keepalive should service the server ping");
+        serviced(
+            session.keepalive().await,
+            "keepalive should service the server ping",
+        );
         // Servicing a ping must not invent or advance a live tip.
         assert_eq!(session.previous_response_id(), None);
 
@@ -3106,10 +3594,10 @@ mod tests {
 
         // Let the trailing response.done reach the buffer, then service it.
         sleep(Duration::from_millis(100)).await;
-        session
-            .keepalive()
-            .await
-            .expect("keepalive should consume the trailing done");
+        serviced(
+            session.keepalive().await,
+            "keepalive should consume the trailing done",
+        );
         assert_eq!(session.previous_response_id(), Some("resp_1"));
 
         session
@@ -3171,13 +3659,17 @@ mod tests {
 
         // Let the stray frame reach the buffer before servicing the idle socket.
         sleep(Duration::from_millis(100)).await;
-        let error = session
-            .keepalive()
-            .await
-            .expect_err("idle data frame should fail keepalive");
+        let (recovered, error) = failed(
+            session.keepalive().await,
+            "an idle data frame should fail keepalive",
+        );
         assert!(
             error.to_string().contains("unexpected server event"),
             "expected unexpected-server-event error, got {error}"
+        );
+        assert!(
+            recovered.is_empty(),
+            "nothing unmodelled preceded the stray frame, so nothing is recovered"
         );
 
         let closed = session
@@ -3253,10 +3745,15 @@ mod tests {
             .send(model.completion_request("hello").build())
             .await
             .expect("request should send");
-        session
-            .keepalive()
-            .await
-            .expect("keepalive should be a no-op while in flight");
+        let drained = serviced(
+            session.keepalive().await,
+            "keepalive should be a no-op while in flight",
+        );
+        assert!(
+            drained.is_empty(),
+            "a no-op drain must return nothing: reading here would steal the \
+             in-flight turn's own events"
+        );
 
         let response = session
             .wait_for_completed_response()
@@ -3303,10 +3800,10 @@ mod tests {
             .expect("session should connect");
 
         session.close().await.expect("close should succeed");
-        session
-            .keepalive()
-            .await
-            .expect("keepalive should be a no-op after close");
+        serviced(
+            session.keepalive().await,
+            "keepalive should be a no-op after close",
+        );
 
         server.await.expect("server task should finish");
     }
