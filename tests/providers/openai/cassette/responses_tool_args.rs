@@ -8,9 +8,9 @@
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
-use rig::client::CompletionClient;
 use rig::completion::{Chat, CompletionModel, Message, ToolDefinition};
 use rig::message::AssistantContent;
+use rig::prelude::*;
 use rig::providers::openai;
 use rig::tool::Tool;
 use serde::Deserialize;
@@ -72,7 +72,11 @@ impl Tool for PlanTrip {
         plan_trip_parameters()
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         Ok(format!(
             "Booked {} for {} day(s), {} room(s) at {}, with {} planned activities. \
              Confirmation code SAKURA-77.",

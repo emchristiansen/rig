@@ -7,16 +7,16 @@
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
-use rig::client::CompletionClient;
-use rig::completion::CompletionModel;
+use rig::completion::{CompletionModel, FinishReason};
 use rig::message::{AssistantContent, ToolChoice};
+use rig::prelude::*;
 use rig::providers::anthropic;
 use rig::tool::Tool;
 
 use super::super::support::with_anthropic_cassette;
 use crate::support::{Adder, Subtract, TOOLS_PREAMBLE};
 
-fn tool_call_names(choice: &rig::OneOrMany<AssistantContent>) -> Vec<String> {
+fn tool_call_names(choice: &[AssistantContent]) -> Vec<String> {
     choice
         .iter()
         .filter_map(|content| match content {
@@ -57,8 +57,8 @@ async fn required_maps_to_any_and_forces_tool_use() {
                 "only the provided tool can be called, saw {names:?}"
             );
             assert_eq!(
-                response.raw_response.stop_reason.as_deref(),
-                Some("tool_use"),
+                response.finish_reason(),
+                Some(FinishReason::ToolCalls),
                 "a forced tool_use turn should preserve the tool_use stop reason"
             );
         },
@@ -106,8 +106,8 @@ async fn none_suppresses_tool_use() {
                 "model should answer directly without tools, got {text:?}"
             );
             assert_eq!(
-                response.raw_response.stop_reason.as_deref(),
-                Some("end_turn"),
+                response.finish_reason(),
+                Some(FinishReason::Stop),
                 "a plain answer should preserve the end_turn stop reason"
             );
         },

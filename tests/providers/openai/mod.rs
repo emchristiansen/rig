@@ -1,10 +1,15 @@
 mod support;
 
+mod regressions;
+
 mod cassette {
+    mod additional_params_tools;
     mod agent;
     mod chat_history;
     mod completions_api;
     mod document_ordering;
+    mod error_envelope;
+    mod error_identity_edge;
     mod extractor;
     mod extractor_usage;
     mod gpt_5_6_reasoning;
@@ -14,7 +19,11 @@ mod cassette {
     mod permission_control;
     mod reasoning_roundtrip;
     mod reasoning_tool_roundtrip;
+    mod regression_suite;
     mod request_hook;
+    mod response_identity;
+    mod response_identity_edge;
+    mod response_retry;
     mod response_schema;
     mod responses_behaviors;
     mod responses_input_item;
@@ -22,9 +31,12 @@ mod cassette {
     mod responses_tool_args;
     mod responses_tool_choice;
     mod streaming;
+    mod streaming_grammar;
+    mod streaming_grammar_chat;
     mod streaming_tools;
     mod structured_output;
     mod typed_prompt_tools;
+    mod url_pdf_document;
     mod vllm;
 }
 
@@ -35,6 +47,7 @@ mod live {
     mod gpt_5_5;
     #[cfg(feature = "image")]
     mod image_generation;
+    mod streaming_tools_reasoning;
     mod transcription;
     #[cfg(feature = "websocket")]
     mod websocket;

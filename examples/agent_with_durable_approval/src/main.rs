@@ -28,13 +28,13 @@
 //! Requires `OPENAI_API_KEY`. Run with: `cargo run -p agent_with_durable_approval`
 
 use anyhow::Result;
-use rig::agent::InvalidToolCallHookAction;
+use rig::agent::InvalidToolCallAction;
 use rig::agent::run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome};
-use rig::client::{CompletionClient, ProviderClient};
-use rig::completion::Completion;
+use rig::completion::CompletionModel;
 use rig::message::{ToolResultContent, UserContent};
+use rig::prelude::*;
 use rig::providers::openai;
-use rig::tool::Tool;
+use rig::tool::{Tool, ToolSet};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -72,7 +72,11 @@ impl Tool for GetBalance {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         println!("   💰 [get_balance] -> {}", args.account);
         Ok(format!("account {} balance: $1000", args.account))
     }
@@ -107,7 +111,11 @@ impl Tool for TransferFunds {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         // A real implementation would move money here.
         println!("   🏦 [transfer_funds] -> ${} to {}", args.amount, args.to);
         Ok(format!("transferred ${} to {}", args.amount, args.to))
@@ -137,15 +145,16 @@ async fn ask(prompt: &str) -> Option<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let agent = openai::Client::from_env()?
-        .agent(openai::GPT_4O)
-        .preamble(
-            "You are a banking assistant. Use the tools to carry out the user's request. \
-             Call one tool at a time.",
-        )
-        .tool(GetBalance)
-        .tool(TransferFunds)
-        .build();
+    // A serializable `AgentRun` is a sans-IO protocol primitive. This example
+    // intentionally supplies raw model transport and tool dispatch explicitly;
+    // configured `Agent` execution instead always goes through `AgentRunner`.
+    let model = openai::Client::from_env()?.completion_model(openai::GPT_4O);
+    let preamble = "You are a banking assistant. Use the tools to carry out the user's request. \
+                    Call one tool at a time.";
+    let mut tools = ToolSet::default();
+    tools.add_tool(GetBalance);
+    tools.add_tool(TransferFunds);
+    let tool_definitions = tools.get_tool_definitions();
 
     let prompt = "Check the balance of account A-1, then transfer $500 to account B-2.";
     println!("User: {prompt}");
@@ -164,13 +173,16 @@ async fn main() -> Result<()> {
                 turn,
             } => {
                 println!("\n→ model call #{turn}");
-                let response = agent.completion(prompt, history).await?.send().await?;
-                let tool_names: BTreeSet<String> = agent
-                    .tool_server_handle
-                    .get_tool_defs(None)
-                    .await?
-                    .into_iter()
-                    .map(|def| def.name)
+                let response = model
+                    .completion_request(prompt)
+                    .messages(history)
+                    .preamble(preamble.to_string())
+                    .tools(tool_definitions.clone())
+                    .send()
+                    .await?;
+                let tool_names: BTreeSet<String> = tool_definitions
+                    .iter()
+                    .map(|def| def.name.clone())
                     .collect();
                 let mut outcome = run.model_response(ModelTurn::new(
                     response.message_id.clone(),
@@ -181,7 +193,7 @@ async fn main() -> Result<()> {
                 ))?;
                 while let ModelTurnOutcome::NeedsResolution(context) = outcome {
                     eprintln!("model called unknown tool `{}`", context.tool_name);
-                    outcome = run.resolve_invalid_tool_call(InvalidToolCallHookAction::fail())?;
+                    outcome = run.resolve_invalid_tool_call(InvalidToolCallAction::fail())?;
                 }
             }
 
@@ -209,6 +221,7 @@ async fn main() -> Result<()> {
                         continue;
                     }
                     let id = call.tool_call.id.clone();
+                    let provider = call.tool_call.provider.clone();
                     let name = call.tool_call.function.name.clone();
                     let args = call.tool_call.function.arguments.to_string();
 
@@ -218,10 +231,14 @@ async fn main() -> Result<()> {
                         .as_deref()
                     {
                         Some("a") | Some("approve") => {
-                            let output = agent.tool_server_handle.call_tool(&name, &args).await?;
-                            results.push(UserContent::tool_result(
+                            let execution = tools
+                                .execute(&name, args, &mut rig::tool::ToolContext::new())
+                                .await;
+                            results.push(UserContent::tool_result_for(
                                 id,
-                                ToolResultContent::from_tool_output(output),
+                                provider,
+                                name,
+                                execution.output().clone().into_content(),
                             ));
                         }
                         Some("e") | Some("edit") => {
@@ -231,22 +248,29 @@ async fn main() -> Result<()> {
                                 .map(serde_json::from_str::<serde_json::Value>)
                             {
                                 Some(Ok(value)) => {
-                                    let output = agent
-                                        .tool_server_handle
-                                        .call_tool(&name, &value.to_string())
-                                        .await?;
-                                    results.push(UserContent::tool_result(
+                                    let execution = tools
+                                        .execute(
+                                            &name,
+                                            value.to_string(),
+                                            &mut rig::tool::ToolContext::new(),
+                                        )
+                                        .await;
+                                    results.push(UserContent::tool_result_for(
                                         id,
-                                        ToolResultContent::from_tool_output(output),
+                                        provider,
+                                        name,
+                                        execution.output().clone().into_content(),
                                     ));
                                 }
                                 _ => {
                                     println!("     ! no valid JSON; denying instead");
-                                    results.push(UserContent::tool_result(
+                                    results.push(UserContent::tool_result_for(
                                         id,
-                                        ToolResultContent::from_tool_output(
+                                        provider,
+                                        name,
+                                        vec![ToolResultContent::text(
                                             "denied: the reviewer supplied no valid JSON to edit with",
-                                        ),
+                                        )],
                                     ));
                                 }
                             }
@@ -266,9 +290,11 @@ async fn main() -> Result<()> {
                             } else {
                                 "denied: no clear approval given".to_string()
                             };
-                            results.push(UserContent::tool_result(
+                            results.push(UserContent::tool_result_for(
                                 id,
-                                ToolResultContent::from_tool_output(reason),
+                                provider,
+                                name,
+                                vec![ToolResultContent::text(reason)],
                             ));
                         }
                     }

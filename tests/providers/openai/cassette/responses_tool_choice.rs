@@ -8,16 +8,16 @@
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
-use rig::client::CompletionClient;
 use rig::completion::CompletionModel;
 use rig::message::{AssistantContent, ToolChoice};
+use rig::prelude::*;
 use rig::providers::openai;
 use rig::tool::Tool;
 
 use super::super::support::with_openai_cassette;
 use crate::support::{Adder, AlphaSignal, Subtract, TOOLS_PREAMBLE};
 
-fn tool_call_names(choice: &rig::OneOrMany<AssistantContent>) -> Vec<String> {
+fn tool_call_names(choice: &[AssistantContent]) -> Vec<String> {
     choice
         .iter()
         .filter_map(|content| match content {

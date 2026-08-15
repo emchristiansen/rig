@@ -3,15 +3,16 @@
 //! machine is fed restricted allowed-tool sets to trigger each recovery path
 //! (fail, repair, skip, retry-budget exhaustion, bad repair).
 
-use rig::agent::InvalidToolCallHookAction;
+use rig::agent::InvalidToolCallAction;
 use rig::agent::run::{AgentRun, AgentRunStep, ModelTurnOutcome};
-use rig::client::CompletionClient;
 use rig::completion::PromptError;
 use rig::message::ToolChoice;
+use rig::prelude::*;
 use rig::providers::gemini;
+use rig_agent::test_utils::validate_unknown_tool_failure;
 
 use super::super::agent_run_support::{
-    Add, FORCE_TOOLS_PREAMBLE, Subtract, Sum, assistant_tool_call_names, call_model,
+    FORCE_TOOLS_PREAMBLE, GeminiAgent, assistant_tool_call_names, call_model,
     execute_pending_calls, history_has_assistant_tool_call, tool_names,
     user_content_tool_result_texts,
 };
@@ -52,17 +53,20 @@ async fn fail_resolution_returns_unknown_tool_call() {
     with_gemini_cassette(
         "agent_run_recovery/fail_resolution_returns_unknown_tool_call",
         |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble(FORCE_TOOLS_PREAMBLE)
-                .tool(Add)
-                .tool_choice(ToolChoice::Required)
-                .build();
+            let agent = GeminiAgent::new(
+                client.completion_model(gemini::completion::GEMINI_2_5_FLASH),
+                FORCE_TOOLS_PREAMBLE,
+                &["add"],
+                Some(ToolChoice::Required),
+            );
 
             let mut run = run_until_invalid_add_call(&agent, &tool_names(&[]), 0).await;
             let error = run
-                .resolve_invalid_tool_call(InvalidToolCallHookAction::fail())
+                .resolve_invalid_tool_call(InvalidToolCallAction::fail())
                 .expect_err("fail resolution must error the run");
+
+            validate_unknown_tool_failure(&error, "add", &[])
+                .expect("portable unknown-tool diagnostics should hold");
 
             let PromptError::UnknownToolCall {
                 tool_name,
@@ -92,12 +96,12 @@ async fn repair_renames_tool_call_and_executes_it() {
         |client| async move {
             // `sum` is registered alongside `add` so the post-repair wire
             // history references a tool Gemini saw advertised.
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble(FORCE_TOOLS_PREAMBLE)
-                .tool(Add)
-                .tool(Sum)
-                .build();
+            let agent = GeminiAgent::new(
+                client.completion_model(gemini::completion::GEMINI_2_5_FLASH),
+                FORCE_TOOLS_PREAMBLE,
+                &["add", "sum"],
+                None,
+            );
             let machine_names = tool_names(&["sum"]);
 
             let mut run =
@@ -120,7 +124,7 @@ async fn repair_renames_tool_call_and_executes_it() {
                         while let ModelTurnOutcome::NeedsResolution(context) = outcome {
                             assert_eq!(context.tool_name, "add");
                             outcome = run
-                                .resolve_invalid_tool_call(InvalidToolCallHookAction::repair("sum"))
+                                .resolve_invalid_tool_call(InvalidToolCallAction::repair("sum"))
                                 .expect("repair to an allowed tool should be accepted");
                             repaired_calls += 1;
                             assert!(repaired_calls < 6, "repair loop did not converge");
@@ -177,12 +181,12 @@ async fn skip_suppresses_every_call_in_the_turn() {
     with_gemini_cassette(
         "agent_run_recovery/skip_suppresses_every_call_in_the_turn",
         |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble(FORCE_TOOLS_PREAMBLE)
-                .tool(Add)
-                .tool(Subtract)
-                .build();
+            let agent = GeminiAgent::new(
+                client.completion_model(gemini::completion::GEMINI_2_5_FLASH),
+                FORCE_TOOLS_PREAMBLE,
+                &["add", "subtract"],
+                None,
+            );
             let executable = tool_names(&["add", "subtract"]);
             // `add` is disallowed for the first turn.
             let restricted = tool_names(&["subtract"]);
@@ -212,7 +216,7 @@ async fn skip_suppresses_every_call_in_the_turn() {
                             assert!(expect_invalid, "only the first turn restricts tools");
                             assert_eq!(context.tool_name, "add");
                             outcome = run
-                                .resolve_invalid_tool_call(InvalidToolCallHookAction::skip(
+                                .resolve_invalid_tool_call(InvalidToolCallAction::skip(
                                     SKIP_REASON,
                                 ))
                                 .expect("skip should be accepted");
@@ -269,20 +273,21 @@ async fn retry_with_exhausted_budget_fails_with_unknown_tool_call() {
     with_gemini_cassette(
         "agent_run_recovery/retry_with_exhausted_budget_fails_with_unknown_tool_call",
         |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble(FORCE_TOOLS_PREAMBLE)
-                .tool(Add)
-                .tool_choice(ToolChoice::Required)
-                .build();
+            let agent = GeminiAgent::new(
+                client.completion_model(gemini::completion::GEMINI_2_5_FLASH),
+                FORCE_TOOLS_PREAMBLE,
+                &["add"],
+                Some(ToolChoice::Required),
+            );
 
             // Zero retry budget: the first retry resolution must fail.
             let mut run = run_until_invalid_add_call(&agent, &tool_names(&[]), 0).await;
             let error = run
-                .resolve_invalid_tool_call(InvalidToolCallHookAction::retry(
-                    "Try a different tool.",
-                ))
+                .resolve_invalid_tool_call(InvalidToolCallAction::retry("Try a different tool."))
                 .expect_err("retry without budget must error the run");
+
+            validate_unknown_tool_failure(&error, "add", &[])
+                .expect("portable retry-exhaustion diagnostics should hold");
 
             let PromptError::UnknownToolCall { tool_name, .. } = error else {
                 panic!("expected UnknownToolCall, got {error:?}");
@@ -298,17 +303,20 @@ async fn repair_to_disallowed_name_fails_with_unknown_tool_call() {
     with_gemini_cassette(
         "agent_run_recovery/repair_to_disallowed_name_fails_with_unknown_tool_call",
         |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble(FORCE_TOOLS_PREAMBLE)
-                .tool(Add)
-                .tool_choice(ToolChoice::Required)
-                .build();
+            let agent = GeminiAgent::new(
+                client.completion_model(gemini::completion::GEMINI_2_5_FLASH),
+                FORCE_TOOLS_PREAMBLE,
+                &["add"],
+                Some(ToolChoice::Required),
+            );
 
             let mut run = run_until_invalid_add_call(&agent, &tool_names(&["subtract"]), 0).await;
             let error = run
-                .resolve_invalid_tool_call(InvalidToolCallHookAction::repair("multiply"))
+                .resolve_invalid_tool_call(InvalidToolCallAction::repair("multiply"))
                 .expect_err("repairing to a disallowed name must error the run");
+
+            validate_unknown_tool_failure(&error, "multiply", &["subtract"])
+                .expect("portable rejected-repair diagnostics should hold");
 
             let PromptError::UnknownToolCall {
                 tool_name,

@@ -7,9 +7,300 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(anthropic)* [**breaking**] carry `stop_sequence` on the streamed terminal record: Anthropic's terminal `message_delta` reports which of the caller's `stop_sequences` matched, and the adapter parsed that field and then dropped it — so a streamed turn could report only that *a* sequence fired while its blocking twin (`CompletionResponse::stop_sequence`) named it, and Anthropic strips the matched sequence from the text so the frame was the only source. `anthropic::streaming::StreamingCompletionResponse` gains a `stop_sequence` field stamped from that frame; it is not `#[non_exhaustive]`, so code constructing it with a full struct literal must add the field or switch to `..Default::default()`. The Anthropic-compatible gateways sharing this adapter (minimax, moonshot, xiaomimimo, zai) get the field too ([#2329](https://github.com/0xPlaygrounds/rig/pull/2329))
+- *(anthropic)* stop turning a completed stop-sequence turn into an error: when the matched sequence is the first thing the model emits, Anthropic strips it and returns `content: []` with a 200, and the empty-content carve-out in `CompletionResponse::normalize` covered only `end_turn` — so that turn became `ResponseError("Response contained no message or tool call (empty)")`, discarding the usage, message id, transport request id and finish reason it carried. The streamed twin of the same request already finished cleanly with an empty choice, making this a blocking/streaming divergence. `stop_sequence` now joins `end_turn` as a legal empty case, but only when the response names the sequence that fired; every other empty response stays guarded ([#2329](https://github.com/0xPlaygrounds/rig/pull/2329))
+- *(gemini)* stop ending a `streamGenerateContent` stream on the first `finishReason`: Gemini emits an *intermediate* `finishReason` when a built-in tool (code execution) runs a round and then keeps streaming, so the whole answer after it was dropped while the stream still reported a clean `STOP`. The terminal record is now deferred to EOF — a truncated stream (EOF with no `finishReason` at all) still yields no terminal record. Note the deliberate consequence: a stream whose transport fails *after* a `finishReason` now surfaces the error and no terminal record, where it previously reported a completed turn, because on this wire a `finishReason` is not proof the turn finished ([#2328](https://github.com/0xPlaygrounds/rig/pull/2328))
+- *(gemini)* preserve Gemini 3's trailing `thoughtSignature`: the wire attaches it to a text part carrying no `thought` flag, and the blocking mapper dropped that replay-required state while the streaming adapter kept it. Blocking now places it exactly where the streaming accumulator does — on the chain-of-thought block it signs, or as a signature-only block when the turn has no reasoning — so the same bytes normalize to the same choice and a signed turn replays identically from either transport. `rig-gemini-grpc`'s unary mapper had the same drop against its own streaming adapter and shares the fix ([#2328](https://github.com/0xPlaygrounds/rig/pull/2328))
+- *(gemini)* stop failing a whole `generateContent` response on `executableCode`/`codeExecutionResult` parts: enabling Gemini's built-in code-execution tool through `additional_params.tools` made every blocking turn fail with `ResponseError("Response did not contain a message or tool call")`, discarding the model's text answer. Those parts now contribute no assistant content instead of failing the response, matching the streaming path ([#2328](https://github.com/0xPlaygrounds/rig/pull/2328))
+- *(gemini)* stop reporting the model's chain-of-thought as output text: with `thinkingConfig.includeThoughts`, `TranscriptionResponse::text` returned the reasoning from `parts[0]` and dropped the transcript, and `ProviderResponseExt::get_text_response` concatenated reasoning onto the answer. Both now skip `thought: true` parts, and the transcript is every visible text part rather than only the first. `rig-gemini-grpc`'s `get_text_response` carried the same defect and is fixed with it ([#2328](https://github.com/0xPlaygrounds/rig/pull/2328))
+- *(streaming)* preserve body and request id when an SSE handshake fails: a streaming connect 4xx/401 on a request-id-contract provider (anthropic, openai, xai, groq, copilot) now classifies as `CompletionError::ProviderResponse` with the response body and provider request id, matching the blocking path, instead of a bare status ([#2315](https://github.com/0xPlaygrounds/rig/pull/2315))
+- *(client)* `VerifyClient::verify` now maps 401/403 to `VerifyError::InvalidAuthentication` again under the reqwest transport; the transport reports non-success as an error before the status match, which had made those arms unreachable ([#2315](https://github.com/0xPlaygrounds/rig/pull/2315))
+
 ### Changed
 
-- *(core)* [**breaking**] Mark `PromptError`, `StructuredOutputError`, `ToolError`, `ToolSetError`, and `VectorStoreError` as non-exhaustive, requiring downstream match expressions to include a wildcard arm. Conversation memory load failures now surface as the typed `PromptError::MemoryError` variant instead of `CompletionError::RequestError`.
+- *(providers)* [**breaking**] xAI completion and streaming now use the shared OpenAI-compatible Responses driver. `xai::completion::CompletionResponse` is the shared Responses wire type, and unknown response statuses deserialize as `ResponseStatus::Other` instead of rejecting the response. xAI and OpenRouter audio generation also use the existing shared raw-audio request driver.
+
+## [0.41.0](https://github.com/0xPlaygrounds/rig/compare/v0.40.0...v0.41.0) - 2026-07-28
+
+### Added
+
+- *(agent)* restore dynamic context helper ([#2219](https://github.com/0xPlaygrounds/rig/pull/2219)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- [**breaking**] split rig-core and rig-agent behind the rig facade ([#2197](https://github.com/0xPlaygrounds/rig/pull/2197)) (by [gold-silver-copper](https://github.com/gold-silver-copper)) - #2197
+- *(agent)* add response retry hooks ([#2182](https://github.com/0xPlaygrounds/rig/pull/2182)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(doubleword)* add provider with cassette coverage ([#2163](https://github.com/0xPlaygrounds/rig/pull/2163)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(telemetry)* make sensitive span content opt-in ([#2151](https://github.com/0xPlaygrounds/rig/pull/2151)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(openai)* expose complete Responses reasoning metadata ([#2112](https://github.com/0xPlaygrounds/rig/pull/2112)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(openai)* support GPT-5.6 models and reasoning controls ([#2106](https://github.com/0xPlaygrounds/rig/pull/2106)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+
+### Fixed
+
+- *(ollama)* send max_tokens as options.num_predict in native requests ([#2185](https://github.com/0xPlaygrounds/rig/pull/2185)) (by [bugprone](https://github.com/bugprone))
+- *(openai)* omit filename for URL-backed PDFs in Responses API requests ([#2166](https://github.com/0xPlaygrounds/rig/pull/2166)) (by [dgrijalva](https://github.com/dgrijalva))
+- *(anthropic)* support URL-backed PDF documents in requests ([#2215](https://github.com/0xPlaygrounds/rig/pull/2215)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(openai)* omit empty non-streaming encrypted reasoning ([#2209](https://github.com/0xPlaygrounds/rig/pull/2209)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(anthropic)* support code execution tool results ([#2158](https://github.com/0xPlaygrounds/rig/pull/2158)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(aws)* remove legacy rustls connector ([#2152](https://github.com/0xPlaygrounds/rig/pull/2152)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(release)* avoid contributor mention notifications ([#2110](https://github.com/0xPlaygrounds/rig/pull/2110)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+
+### Other
+
+- *(openai)* cover nullable strict extractor responses ([#2218](https://github.com/0xPlaygrounds/rig/pull/2218)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(candle)* harden local model runtime ([#2214](https://github.com/0xPlaygrounds/rig/pull/2214)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(core,agent)* [**breaking**] make the WASM support matrix explicit and true ([#2213](https://github.com/0xPlaygrounds/rig/pull/2213)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(telemetry)* single declarative completion-parent contract ([#2208](https://github.com/0xPlaygrounds/rig/pull/2208)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(derive)* [**breaking**] single resolution authority, coherent required semantics, dependency hygiene ([#2207](https://github.com/0xPlaygrounds/rig/pull/2207)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(agent)* [**breaking**] remove premature runtime-conformance crate, backfill gaps ([#2206](https://github.com/0xPlaygrounds/rig/pull/2206)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(client)* [**breaking**] single canonical CompletionClient + AgentClientExt ([#2205](https://github.com/0xPlaygrounds/rig/pull/2205)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- Make managed agent hooks provider-independent ([#2176](https://github.com/0xPlaygrounds/rig/pull/2176)) (by [gold-silver-copper](https://github.com/gold-silver-copper)) - #2176
+- Remove built-in agent dynamic context ([#2174](https://github.com/0xPlaygrounds/rig/pull/2174)) (by [gold-silver-copper](https://github.com/gold-silver-copper)) - #2174
+- Make AgentRunner the only Agent execution path ([#2161](https://github.com/0xPlaygrounds/rig/pull/2161)) (by [gold-silver-copper](https://github.com/gold-silver-copper)) - #2161
+- Add rig-candle local inference and WASM chat ([#2155](https://github.com/0xPlaygrounds/rig/pull/2155)) (by [gold-silver-copper](https://github.com/gold-silver-copper)) - #2155
+- remove AI assistance policy ([#2159](https://github.com/0xPlaygrounds/rig/pull/2159)) (by [gold-silver-copper](https://github.com/gold-silver-copper)) - #2159
+- Simplify tool execution and hook APIs ([#2132](https://github.com/0xPlaygrounds/rig/pull/2132)) (by [gold-silver-copper](https://github.com/gold-silver-copper)) - #2132
+- *(telemetry)* centralize completion span lifecycle ([#2115](https://github.com/0xPlaygrounds/rig/pull/2115)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- *(core)* [**breaking**] make core errors non-exhaustive ([#2114](https://github.com/0xPlaygrounds/rig/pull/2114)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+- bump rmcp depency to latest ([#2103](https://github.com/0xPlaygrounds/rig/pull/2103)) (by [ThomasMarches](https://github.com/ThomasMarches)) - #2103
+- update README links to new rig.rs/docs URL structure ([#2105](https://github.com/0xPlaygrounds/rig/pull/2105)) (by [gold-silver-copper](https://github.com/gold-silver-copper)) - #2105
+
+### Contributors
+
+* [alshdavid](https://github.com/alshdavid)
+* [arnold-jr](https://github.com/arnold-jr)
+* [BANG404](https://github.com/BANG404)
+* [boondocklabs](https://github.com/boondocklabs)
+* [bugprone](https://github.com/bugprone)
+* [christoph-wulf](https://github.com/christoph-wulf)
+* [dgrijalva](https://github.com/dgrijalva)
+* [gold-silver-copper](https://github.com/gold-silver-copper)
+* [hacctarr](https://github.com/hacctarr)
+* [joshua-mo-143](https://github.com/joshua-mo-143)
+* [KaasPeer1](https://github.com/KaasPeer1)
+* [macaujack](https://github.com/macaujack)
+* [Niedzwiedzw](https://github.com/Niedzwiedzw)
+* [suxiaoshao](https://github.com/suxiaoshao)
+* [Sytten](https://github.com/Sytten)
+* [ThomasMarches](https://github.com/ThomasMarches)
+* [xiao-e-yun](https://github.com/xiao-e-yun)
+
+### Added
+
+- *(agent)* Restore `AgentBuilder::dynamic_context` and
+  `ExtractorBuilder::dynamic_context` as convenience wrappers around the
+  existing completion-call hook lifecycle. The helper retains the former query
+  selection and document formatting behavior without restoring a separate
+  retrieval path in agent request construction. As an ordinary hook, retrieval
+  and injected documents follow registration order relative to application
+  hooks; register stop policies before it when they should prevent retrieval.
+
+- *(core)* `rig_core::telemetry::Empty` re-exports `tracing::field::Empty`, so a
+  runtime can declare a completion-parent field as not-yet-valued without taking
+  a direct `tracing` dependency.
+
+### Changed
+
+- *(core, agent)* [**breaking**] Remove every wasm feature flag in the workspace
+  — `rig-core`'s `wasm`, `rig-agent`'s `wasm`, and the `rig` facade's `wasm`.
+  Browser wasm needs **no feature flags at all**: `cargo build --target
+  wasm32-unknown-unknown` is the entire opt-in. The feature was a pure `cfg`
+  switch that every consumer already flipped from a target table, and its one
+  optional dependency was never referenced. Relaxing the bounds cannot break
+  implementors — the relaxed markers are blanket-implemented
+  (`impl<T> WasmCompatSend for T {}`), so every type that satisfied the strict
+  form satisfies the relaxed one. (Generic *consumers* on browser wasm that
+  wrote `T: WasmCompatSend` and then relied on `T: Send` internally are the one
+  exception, and only if they were previously building with the feature off.)
+  Dependents passing `features = ["wasm"]` should drop it; nothing replaces it.
+
+- *(core)* `if_wasm!`/`if_not_wasm!` now key on the target rather than a feature.
+  These are `#[macro_export]`ed, and a `cfg` inside a macro expansion is
+  evaluated in the *calling* crate — so the old expansion tested whether the
+  **caller** had a feature named `wasm`, not `rig-core`. Any caller without one
+  took the `if_not_wasm!` branch on every target, browser wasm included. Called
+  out separately because unlike the feature removal, which Cargo rejects at
+  resolution, this one changes behavior with nothing to fail on: a downstream
+  crate that did define a `wasm` feature and expected it to drive these macros
+  gets the target's answer now, silently. Gate on the target directly if you
+  need the old association.
+
+- *(agent)* [**breaking**] The `rmcp` feature is native-only. It never compiled
+  for wasm — rmcp's `ClientHandler` requires `Send + Sync` unconditionally,
+  which rig's wasm tool registry cannot satisfy — but it failed with a wall of
+  `dyn ErasedTool` trait errors. It now fails with one sentence naming the cause,
+  and CI asserts that stays true.
+
+- *(agent)* Document the supported target matrix: native is fully supported,
+  `wasm32-unknown-unknown` (browser) is supported, and WASI is not — its
+  dependency graph has never built. Browser-only dependencies and `Send`-relaxed
+  aliases are scoped accordingly, and `wasm-bindgen-futures` is no longer a
+  `rig-agent` dependency, its only user having been the now-native-only MCP
+  cancellation dispatch.
+
+- *(core)* Fix `rig-core`'s SSE `ResponseFuture`/`EventStream` aliases, whose
+  `cfg` arms did not partition and left some targets matching neither, so the
+  types were undefined there. Both arms now share one predicate.
+
+- *(core)* The telemetry completion-parent contract has one declarative
+  source: the new `rig_core::telemetry::completion_parent_span!` macro
+  declares the adoption marker and every required `gen_ai.*` field. `tracing`
+  bakes a span's field set into static metadata and `Span::record` silently
+  no-ops on undeclared fields, so a hand-mirrored field list that drops one
+  field loses that telemetry with no error — the contract was previously
+  duplicated in six places. Exact-set tests now pin the macro against
+  `COMPLETION_PARENT_REQUIRED_FIELDS` and against the span the completion
+  builder itself creates, so those lists (including `rig-agent`'s chat span,
+  which now delegates to the macro) can no longer drift. A completion parent
+  that carries the marker but omits a required field triggers a `warn!` naming
+  the missing fields — once per offending span callsite, so two broken runtimes
+  are both reported — before it degrades to a fresh `rig::completions` child
+  span, so the degradation is visible in logs rather than only as a duplicated
+  span layer in dashboards. The macro accepts an
+  optional `parent:` argument (default: the current span), and its expansion
+  resolves `tracing` through `rig-core`, so downstream crates do not need a
+  direct `tracing` dependency merely to invoke it (see the `Empty` re-export
+  above). Nothing is breaking: the marker field and the required field set are
+  unchanged.
+
+- *(derive)* [**breaking**] `#[rig_tool]` required-ness is now derived from the
+  parameter types, and the advertised schema always agrees with the
+  deserializer. Without an explicit `required(...)`, non-`Option` parameters
+  are required and `Option<T>` parameters are optional (previously `Option`
+  parameters were advertised as required even though absence deserialized to
+  `None`). With an explicit `required(...)`, parameters omitted from the list
+  are deserialized with `#[serde(default)]`, so omitting a non-`Option`,
+  non-`Default` parameter is now a compile error instead of a runtime
+  deserialization failure when the model leaves it out. Names in `params(...)`
+  and `required(...)` must match actual parameters, and malformed or duplicate
+  attribute entries are compile errors instead of being silently ignored.
+  Listing an `Option<T>` parameter in `required(...)` is a compile error
+  (schemars and serde would both silently ignore the directive), and a
+  wildcard context binding (`#[rig(context)] _: &mut ToolContext`) is now
+  rejected — name it `_context` instead.
+
+- *(derive)* `#[rig_tool]` recognizes fully qualified `&mut ToolContext`
+  parameters under renamed `rig`/`rig-agent` dependencies without the
+  `#[rig(context)]` marker; crate-name resolution and context classification
+  now share one authority. A contextual tool in a crate with neither `rig` nor
+  `rig-agent` reachable gets a targeted diagnostic instead of an unresolved
+  `::rig_agent` path error. Generated `parameters()` builds the schema once
+  (`LazyLock`) and no longer contains an `expect`, so downstream crates
+  denying `clippy::expect_used` are unaffected.
+
+- *(derive, core)* Macro-generated code resolves `serde`, `serde_json`, and
+  `schemars` through `rig-core`'s re-exports (`rig_core::{serde, serde_json,
+  schemars}` are now public), so crates using `#[rig_tool]` or
+  `#[derive(Embed)]` no longer need direct `serde`/`serde_json` dependencies.
+  The `Embed` derive emits fully qualified trait impls and no longer requires
+  the `Embed` trait to be imported at the call site. A field carrying both
+  `#[embed]` and `#[embed(embed_with = "...")]` is now a compile error instead
+  of being embedded twice, and a field carrying more than one
+  `#[embed(embed_with = "...")]` attribute is a compile error instead of the
+  first silently winning.
+
+### Removed
+
+- *(agent)* Remove the experimental `rig-runtime-conformance` crate and its
+  classic-runtime adapter. With a single runtime it was a premature cross-runtime
+  abstraction, and its scenarios were ~90% redundant with `rig-agent`'s own test
+  suite. The genuinely-unique invariants (multi-step memory append-once, append
+  of only newly-committed messages, no-append on hook stop, committed-transcript
+  role validity, and a two-sided concurrency bound) are now covered by direct
+  tests in `rig-agent`. A real conformance contract can be re-extracted once a
+  second runtime exists.
+
+### Fixed
+
+- *(examples)* `candle_wasm_chat` now declares the `agent` feature it actually
+  imports (`rig::agent::{Agent, AgentBuilder}`, `rig::completion::Chat`), so it
+  builds standalone rather than only inside a workspace-wide `--all-features`
+  build that happened to unify the feature onto the shared `rig`. The wasm CI
+  matrix now checks the example on its own, so a manifest that under-declares its
+  features fails instead of being masked by feature unification.
+
+- *(openai)* Treat empty `encrypted_content` in non-streaming Responses API
+  reasoning items as absent, matching streaming behavior and avoiding empty
+  encrypted reasoning blocks.
+
+- *(aws)* Stop enabling the AWS SDK's legacy Rustls connector in the Bedrock and S3 Vectors integrations, removing vulnerable `rustls-webpki` 0.101 from their active dependency graphs while retaining the modern default HTTPS client.
+
+### Changed
+
+- *(core, agent)* [**breaking**] Split the monolithic core into a portable
+  contracts crate (`rig-core`) and the classic agent runtime crate (`rig-agent`),
+  presented behind the `rig` facade. Code using the `rig` facade needs
+  essentially no source changes — `rig::…` paths, `rig::prelude::*`, and
+  `rig::tool::{Tool, ToolContext}` all keep working. Direct `rig-core` dependents
+  that constructed agents must now depend on `rig-agent`. See the migration
+  guide (`MIGRATING.md`).
+
+- *(tool)* [**breaking**] The portable, context-free tool contract is now named
+  `PortableTool` (with `PortableToolEmbedding`, `PortableDynamicTool`,
+  `portable_tool_definition`); the `rig_core::tool::Tool` alias is removed. On
+  the `rig` facade, `rig::tool::Tool` remains the classic *contextual* trait, so
+  existing facade code is unchanged; portable contracts are always available as
+  `rig::tool::PortableTool` (and in full under `rig::tool::portable`).
+
+- *(client)* [**breaking**] Provider clients no longer carry inherent
+  `agent()` / `extractor()` methods. There is a single canonical
+  `CompletionClient` trait (in `rig-core`, providing `completion_model`); the
+  classic `agent()` / `extractor()` constructors live on the new `AgentClientExt`
+  extension trait. `use rig::prelude::*;` brings both into scope for the full
+  pre-split client surface (or import `rig::client::{CompletionClient,
+  AgentClientExt}` explicitly).
+
+- *(agent)* [**breaking**] `rig-agent` no longer re-exports all of `rig-core`
+  at its crate root. The previous `pub use rig_core::*;` made `rig-agent` an
+  implicit second facade; the root now exports only runtime-owned items (plus
+  the runtime-facing `rig_tool` / `tool_macro` macros). Code that depends on
+  `rig-agent` directly and reached a portable `rig-core` item through the
+  `rig-agent` root must import it from `rig_agent::core` (e.g.
+  `rig_agent::core::OneOrMany`) or depend on `rig-core` directly. The root
+  `rig` facade is unaffected: `rig::…` and `rig::prelude::*` are unchanged.
+
+  ```rust
+  // Before
+  use rig_agent::{OneOrMany, message::Message};
+
+  // After
+  use rig_agent::core::{OneOrMany, message::Message};
+  ```
+
+- *(agent)* [**breaking**] Managed agent hooks are now provider-independent.
+  `AgentHook`, `HookStack`, and the internal erased-hook interface no longer
+  carry a completion-model type parameter. `CompletionResponseEvent` and
+  `StreamResponseFinish` now expose canonical Rig content, usage, prompt, and
+  message ID fields instead of typed provider responses. Direct
+  `CompletionModel` completion and streaming APIs continue to return their
+  typed raw provider responses.
+
+  ```rust
+  // Before
+  impl<M: CompletionModel> AgentHook<M> for TelemetryHook { /* ... */ }
+
+  // After
+  impl AgentHook for TelemetryHook { /* ... */ }
+  ```
+
+- *(agent)* [**breaking**] Make `AgentRunner` the only execution path for configured agents: remove the raw `Completion` and `StreamingCompletion` traits and their `Agent` implementations, make agent execution state private, add runner-backed per-request overrides, and route `Extractor` through the full hook lifecycle. Raw hook-free requests remain available explicitly through `CompletionModel`.
+  - For managed agent execution, replace `agent.completion(prompt, history).await?.send().await?` with `agent.runner(prompt).history(history).max_turns(3).run().await?`, choosing a turn budget large enough for tool follow-ups.
+  - For managed streaming execution, replace `agent.stream_completion(prompt, history).await?.stream().await?` with `agent.runner(prompt).history(history).max_turns(3).stream().await`.
+  - The runner consumes tool calls rather than returning the first raw model response. Callers that handled that response manually, and other intentionally hook-free transport, should start from `model.completion_request(prompt).messages(history)` and then call `.send().await?` or `.stream().await?`.
+  - `AgentRun::new(prompt).with_history(history)` remains a sans-I/O state machine for custom drivers; it contains no configured agent model, tools, memory, or hooks and is not an alternate configured-agent execution path.
+  - An `Agent`'s model is fixed and private. Former per-call `.model(...)` / `.model_opt(...)` users should retain the provider `CompletionModel` and use its raw request API, or construct a separate `Agent` for the selected model.
+- *(tool)* [**breaking**] Replace the parallel tool-execution APIs with one structured path. Typed tools now implement only `Tool::call(&mut ToolContext, Args) -> Result<Output, Error>`; author-facing errors remain typed until private runtime erasure normalizes them into `ToolExecutionError`, `ToolContext` carries inbound values and host-only result metadata, `ToolResult` is the single runtime observation, and `ToolSet::execute` / `ToolServerHandle::execute` are the dispatch surfaces. Event-specific hook action types make invalid event/action combinations unrepresentable.
+  - Tool implementations: retain one typed `type Error` for ordinary `?` propagation and direct-call tests; remove `classify_error`, `call_with_extensions`, and `call_structured`. The optional `map_error` method classifies domain failures at the erased boundary, while its default preserves the source as `Other`. Return refusals through `map_error` with `ToolExecutionError::refused`, and attach host-only result metadata with `ToolContext::insert_result`.
+  - Context: replace `ToolCallExtensions` and `ToolResultExtensions` with `ToolContext`; replace request/runner `.tool_extensions(...)` with `.tool_context(...)`. Each dispatch snapshots inbound context exactly once, isolates tool-local mutations, and publishes only result metadata back to the caller and hooks.
+  - Dynamic tools: `ToolDyn` is removed from the public API; use `DynamicTool` for runtime-defined tools. Rig's erased dispatch trait is private. Typed tools use `Tool::NAME` as their sole identity; runtime-named agents convert explicitly with `Agent::into_tool()`.
+  - Registration vocabulary: `AgentBuilder::tools(Vec<Box<dyn ToolDyn>>)` is removed; use repeated `.tool(...)` calls for typed tools or `dynamic_tools(Vec<DynamicTool>)` for runtime-defined callbacks. Retrieval-backed `dynamic_tools(sample, index, toolset)` becomes `retrieved_tools`. On `ToolSetBuilder`, `static_tool` remains the typed-tool path, the former embedding-backed `dynamic_tool(ToolEmbedding)` becomes `retrieved_tool`, and runtime-defined callbacks use `dynamic_tool(DynamicTool)`.
+  - Results and errors: replace `ToolError`, `ToolFailure`, `ToolFailureKind`, `ToolReturn`, `ToolReturnOutcome`, `ToolExecutionResult`, and `ToolOutcome` with `ToolExecutionError`, `ToolErrorKind`, and the read-only `ToolResult` observed by hooks.
+  - Model presentation: serializable outputs convert once into canonical `ToolOutput` content blocks; strings remain literal text, explicit `serde_json::Value` values remain JSON, and multimodal tools use `ToolOutput::content` / `ToolOutput::one` or return typed `ToolResultContent` directly. Result hooks now rewrite `ToolOutput`, provider adapters preserve native JSON where supported or render it only at their terminal wire boundary, mixed user/tool-result blocks retain order, and Rig never reparses strings to infer rich content. Consumers can inspect `ToolResultContent` with `as_text` / `as_json` and explicitly decode either structured JSON or legacy JSON-bearing text with `deserialize_json`.
+  - Error presentation: explicit `ToolExecutionError` constructors keep actionable diagnostics model-visible, while the generic `ToolExecutionError::from_error` path preserves operator diagnostics and the concrete source but defaults to safe kind-level model feedback. Use `with_model_feedback` for deliberate replacement text or `with_model_output` for JSON/multimodal feedback. MCP responses preserve ordered supported text/image content, retain unsupported and future blocks as typed JSON, and attach raw `CallToolResult`, `structuredContent`, and response metadata to `ToolContext`. MCP list installation and refresh are atomic and ownership-aware, so stale handlers cannot replace or remove newer registrations, while disconnected owners are retired during refresh, provider exposure, or direct dispatch.
+  - Dispatch: replace `ToolSet::{call, call_with_extensions, call_structured}` with `ToolSet::execute`; replace `ToolServerHandle::{call_tool, call_tool_with_extensions, call_tool_structured}` with `ToolServerHandle::execute`.
+  - Registration and definitions: `ToolSet` is the single ordered registry and records whether each tool is always advertised or retrieval-only. `ToolSet::{get_tool_definitions, documents}` are now synchronous and infallible, `ToolServerHandle` registration/removal methods no longer return an artificial `Result`, and the obsolete `ToolSetError` is removed.
+  - Hooks: replace `AgentHook::on_event`, `StepEvent`, and `Flow` with the event-specific `AgentHook` methods and their corresponding action types (`CompletionCallAction`, `ToolCallAction`, `ToolResultAction`, `InvalidToolCallAction`, and `ObservationAction`). Result rewrites replace the effective model and result-content telemetry presentation while preserving the raw `ToolResult` and `ToolContext` for policy; result stops omit result-content telemetry. Invalid-tool hooks return `None` to defer; every explicit action, including `Fail`, is terminal for that hook stack.
+  - Streaming execution observation: the atomically surfaced post-batch event is named `ToolExecutionCommitted`, reflecting that it is not a real-time start notification. Applications that need live host lifecycle events should observe `on_tool_call` / `on_tool_result`; typed result metadata remains available through `ToolResultEvent::tool_context` without entering model-facing messages.
+- *(core)* [**breaking**] Mark `PromptError`, `StructuredOutputError`, and `VectorStoreError` as non-exhaustive, requiring downstream match expressions to include a wildcard arm. Conversation memory load failures now surface as the typed `PromptError::MemoryError` variant instead of `CompletionError::RequestError`.
 
 ## [0.40.0](https://github.com/0xPlaygrounds/rig/compare/v0.39.0...v0.40.0) - 2026-07-10
 

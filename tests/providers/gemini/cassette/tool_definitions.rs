@@ -5,8 +5,8 @@
 //! changes (e.g. swapping the handrolled definitions for rmcp-derived ones),
 //! replay fails with a body mismatch.
 
-use rig::client::CompletionClient;
 use rig::completion::{Chat, Message};
+use rig::prelude::*;
 use rig::providers::gemini;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
@@ -72,7 +72,11 @@ impl Tool for PlanTrip {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         Ok(format!(
             "itinerary booked: {} travellers to {} by {} via {}",
             args.travellers,
@@ -113,7 +117,11 @@ impl Tool for LegacyEcho {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         Ok(format!("legacy:{}", args.text))
     }
 }
@@ -141,7 +149,11 @@ impl Tool for ModernEcho {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         Ok(format!("modern:{}", args.text))
     }
 }
@@ -227,7 +239,7 @@ mod derive_macro {
 
     use super::super::super::agent_run_support::tool_result_texts;
     use super::super::super::support::with_gemini_cassette;
-    use rig::client::CompletionClient;
+    use rig::prelude::*;
     use rig::providers::gemini;
 
     #[rig_tool(
@@ -242,15 +254,15 @@ mod derive_macro {
         x: i64,
         y: i64,
         operation: String,
-    ) -> Result<i64, rig::tool::ToolError> {
+    ) -> Result<i64, rig::tool::ToolExecutionError> {
         match operation.as_str() {
             "add" => Ok(x + y),
             "subtract" => Ok(x - y),
             "multiply" => Ok(x * y),
             "divide" => Ok(x / y),
-            _ => Err(rig::tool::ToolError::ToolCallError(
-                format!("Unknown operation: {operation}").into(),
-            )),
+            _ => Err(rig::tool::ToolExecutionError::other(format!(
+                "Unknown operation: {operation}"
+            ))),
         }
     }
 

@@ -25,12 +25,12 @@ Most examples expect provider API keys in the environment (e.g. `OPENAI_API_KEY`
 | `agent_with_default_max_turns` | Demonstrates extending the default agent loop budget for tool-heavy prompts. |
 | `agent_with_durable_approval` | Demonstrates **durable** HITL: the hand-driven `AgentRun` is serialized while tool calls are pending and resumed from JSON (as another process would), so approval can happen out-of-process / later. |
 | `agent_with_echochambers` | See source. |
-| `agent_with_human_in_the_loop` | Demonstrates human-in-the-loop tool-call approval: an `AgentHook` pauses on each tool call so a human can approve/deny/edit/abort, mapped onto `Flow` (`cont`/`skip`/`rewrite_args`/`terminate`). |
+| `agent_with_human_in_the_loop` | Demonstrates human-in-the-loop tool-call approval: an `AgentHook` pauses on each tool call so a human can approve/deny/edit/abort, mapped onto typed `ToolCallAction` values (`Run`/`Skip`/`Rewrite`/`Stop`). |
 | `agent_with_loaders` | Demonstrates loading real example files into agent context. |
 | `agent_with_memory_streaming` | Demonstrates Rig-managed conversation memory with streaming. |
 | `agent_with_memory` | Demonstrates Rig-managed conversation memory with an in-memory backend. |
 | `agent_with_tools_otel` | Agent multi-turn with tools, but with a tracing subscriber that sends all logs/traces to an OTel collector. |
-| `agent_with_tools` | Demonstrates registering boxed tools on an agent. |
+| `agent_with_tools` | Demonstrates registering runtime-defined tools on an agent. |
 | `agent` | Demonstrates the smallest useful agent setup with OpenAI. |
 | `calculator_chatbot` | See source. |
 | `chain` | Demonstrates a retrieval-augmented pipeline with `parallel!` and `lookup`. |
@@ -47,7 +47,7 @@ Most examples expect provider API keys in the environment (e.g. `OPENAI_API_KEY`
 | `gemini_nanobanana_image_generation` | See source. |
 | `gemini_stream_kill_token_count` | Live Gemini example: obtaining a token-count estimate when a streaming |
 | `gemini_video_understanding` | Demonstrates Gemini video understanding with provider-specific request parameters. |
-| `manual_tool_calls` | Demonstrates manual tool-call handling with `Agent::completion()`. |
+| `manual_tool_calls` | Demonstrates manual tool-call handling with an explicit raw `CompletionModel` request. |
 | `multi_agent` | See source. |
 | `multi_extract` | Demonstrates fan-out structured extraction with `try_parallel!`. |
 | `multi_turn_agent_extended` | See source. |

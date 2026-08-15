@@ -50,6 +50,7 @@
 - [Table of contents](#table-of-contents)
 - [What is Rig?](#what-is-rig)
 - [Features](#features)
+- [Runtime choices](#runtime-choices)
 - [Who's using Rig?](#who-is-using-rig)
 - [Get Started](#get-started)
   - [Simple example](#simple-example)
@@ -62,13 +63,29 @@ More information about this crate can be found in the [official](https://rig.rs/
 
 ## Features
 - Agentic workflows that can handle multi-turn streaming and prompting
+- A classic agent runtime enabled by default
 - Full [GenAI Semantic Convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) compatibility
 - 20+ model providers, all under one singular unified interface
 - 10+ vector store integrations, all under one singular unified interface
 - Full support for LLM completion and embedding workflows
 - Support for transcription, audio generation and image generation model capabilities
 - Integrate LLMs in your app with minimal boilerplate
-- Full WASM compatibility (core library only)
+- Browser-WASM (`wasm32-unknown-unknown`) support for the portable core and
+  classic runtime — see [target support](crates/rig-agent/README.md#target-support)
+  for the full matrix (WASI is not supported; `rmcp` is native-only)
+
+## Runtime choices
+
+Rig separates portable provider/backend contracts from agent orchestration:
+
+- `rig-core` contains provider-neutral messages, completion models, portable tools,
+  memory and vector-store contracts, and built-in provider mappings.
+- `rig-agent` contains the classic builder, prompt/streaming traits, typed hooks,
+  contextual tools, extraction, and the serializable `AgentRun` state machine. It
+  remains enabled by default.
+
+The root `rig` facade re-exports both at their familiar paths, so most code
+depends only on `rig`.
 
 ## Who is using Rig?
 Below is a non-exhaustive list of companies and people who are using Rig:
@@ -103,8 +120,7 @@ cargo add rig
 
 ### Simple example
 ```rust
-use rig::client::{CompletionClient, ProviderClient};
-use rig::completion::Prompt;
+use rig::prelude::*;
 use rig::providers::openai;
 
 #[tokio::main]
@@ -143,6 +159,7 @@ rig = { version = "0.36.0", features = ["lancedb", "fastembed"] }
 | --- | --- | --- | --- |
 | AWS Bedrock | [`rig-bedrock`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-bedrock) | `bedrock` | `rig::bedrock` |
 | AWS S3Vectors | [`rig-s3vectors`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-s3vectors) | `s3vectors` | `rig::s3vectors` |
+| Candle (local Llama/SmolLM2/Qwen3 tools) | [`rig-candle`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-candle) | `candle` | `rig::candle` |
 | Cloudflare Vectorize | [`rig-vectorize`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-vectorize) | `vectorize` | `rig::vectorize` |
 | FastEmbed | [`rig-fastembed`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-fastembed) | `fastembed` | `rig::fastembed` |
 | Google Gemini gRPC | [`rig-gemini-grpc`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-gemini-grpc) | `gemini-grpc` | `rig::gemini_grpc` |

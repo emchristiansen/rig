@@ -1,21 +1,22 @@
-//! Verifies that a `Flow::RewriteArgs` hook rewrites a tool call's arguments
+//! Verifies that a `ToolCallAction::Rewrite` hook rewrites a tool call's arguments
 //! before the tool executes, end-to-end through a real Anthropic round-trip.
 //!
 //! The `get_weather` tool advertises only a `location` parameter, so the model
 //! never sends a `units` field. A default hook injects `units: "celsius"` on the
-//! `ToolCall` event via `Flow::rewrite_args`, and the tool records what it was
+//! `ToolCall` event via `ToolCallAction::rewrite`, and the tool records what it was
 //! actually called with. A recorded `units` value therefore proves the rewritten
 //! arguments reached execution — and the blocking and streaming tests assert the
 //! same behavior, since both drivers share the same tool-execution seam.
 
 use std::sync::{Arc, Mutex};
 
-use rig::agent::{AgentHook, Flow, StepEvent};
-use rig::client::CompletionClient;
-use rig::completion::{CompletionModel, Prompt};
+use rig::agent::{AgentHook, ToolCall as ToolCallEvent, ToolCallAction};
+use rig::completion::Prompt;
+use rig::prelude::*;
 use rig::providers::anthropic;
 use rig::streaming::StreamingPrompt;
 use rig::tool::Tool;
+use rig_agent::test_utils::validate_rewritten_arguments;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -81,7 +82,11 @@ impl Tool for GetWeather {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         self.calls.lock().expect("calls lock").push(ObservedCall {
             location: args.location.clone(),
             units: args.units.clone(),
@@ -99,42 +104,40 @@ impl Tool for GetWeather {
 }
 
 /// A guardrail hook that injects `units: "celsius"` into every `get_weather`
-/// call before it runs — the parameter-normalization use case `RewriteArgs`
+/// call before it runs — the parameter-normalization use case for `ToolCallAction::Rewrite`
 /// exists for. It reads the model's emitted arguments, adds the field, and
-/// returns the rewritten object via [`Flow::rewrite_args`].
+/// returns the rewritten object via [`ToolCallAction::rewrite`].
 struct PinUnitsToCelsius;
 
-impl<M: CompletionModel> AgentHook<M> for PinUnitsToCelsius {
-    async fn on_event(&self, _ctx: &rig::agent::HookContext, event: StepEvent<'_, M>) -> Flow {
-        if let StepEvent::ToolCall {
-            tool_name, args, ..
-        } = event
-            && tool_name == GetWeather::NAME
-        {
-            let mut value: serde_json::Value =
-                serde_json::from_str(args).unwrap_or_else(|_| json!({}));
-            if let Some(object) = value.as_object_mut() {
-                object.insert("units".to_string(), json!("celsius"));
-            }
-            return Flow::rewrite_args(value);
+impl AgentHook for PinUnitsToCelsius {
+    async fn on_tool_call(
+        &self,
+        _ctx: &rig::agent::HookContext,
+        event: ToolCallEvent<'_>,
+    ) -> ToolCallAction {
+        if event.tool_name != GetWeather::NAME {
+            return ToolCallAction::run();
         }
-        Flow::cont()
+        let mut value: serde_json::Value =
+            serde_json::from_str(event.args).unwrap_or_else(|_| json!({}));
+        if let Some(object) = value.as_object_mut() {
+            object.insert("units".to_string(), json!("celsius"));
+        }
+        ToolCallAction::rewrite(value)
     }
 }
 
 fn assert_units_were_injected(observations: &[ObservedCall]) {
-    assert!(
-        !observations.is_empty(),
-        "the get_weather tool should have been called"
-    );
-    for call in observations {
-        assert_eq!(
-            call.units.as_deref(),
-            Some("celsius"),
-            "the hook must inject units=celsius into every call (the model cannot, \
-             since units is not in the tool's schema); saw {call:?}"
-        );
-    }
+    let values = observations
+        .iter()
+        .map(|call| json!({ "location": call.location, "units": call.units }))
+        .collect::<Vec<_>>();
+    validate_rewritten_arguments(
+        "anthropic_tool_call_args_rewritten",
+        &values,
+        &json!({ "units": "celsius" }),
+    )
+    .expect("portable argument-rewrite contract should hold");
 }
 
 #[tokio::test]

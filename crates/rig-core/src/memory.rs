@@ -1,9 +1,9 @@
 //! Conversation memory: Rig-managed persistent conversation history for agents.
 //!
 //! Memory differs from existing agent context features:
-//! - [`crate::agent::AgentBuilder::context`]: static documents always included in prompts.
-//! - [`crate::agent::AgentBuilder::dynamic_context`]: RAG documents fetched from a vector store.
-//! - [`crate::agent::prompt_request::PromptRequest::history`]: caller-managed message history.
+//! - classic runtime context: static documents always included in prompts;
+//! - classic runtime request patches: per-turn documents supplied by application hooks;
+//! - caller-managed message history supplied directly on completion requests;
 //! - **Memory** (this module): Rig-managed history loaded and saved automatically per
 //!   conversation id.
 //!
@@ -11,23 +11,23 @@
 //!
 //! ```no_run
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! use rig_core::client::{CompletionClient, ProviderClient};
-//! use rig_core::completion::Prompt;
-//! use rig_core::memory::InMemoryConversationMemory;
-//! use rig_core::providers::openai;
+//! use rig_core::{
+//!     completion::Message,
+//!     memory::{ConversationMemory, InMemoryConversationMemory},
+//! };
 //!
 //! let memory = InMemoryConversationMemory::new();
-//!
-//! let openai = openai::Client::from_env()?;
-//! let agent = openai.agent("gpt-4o").memory(memory).build();
-//!
-//! agent.prompt("My name is Alice.")
-//!     .conversation("thread-1")
+//! memory
+//!     .append(
+//!         "thread-1",
+//!         vec![
+//!             Message::user("My name is Alice."),
+//!             Message::assistant("Hello, Alice!"),
+//!         ],
+//!     )
 //!     .await?;
-//!
-//! let answer = agent.prompt("What's my name?")
-//!     .conversation("thread-1")
-//!     .await?;
+//! let history = memory.load("thread-1").await?;
+//! assert_eq!(history.len(), 2);
 //! # Ok(()) }
 //! ```
 //!
@@ -85,7 +85,7 @@ impl MemoryError {
 /// A persistent conversation history backend.
 ///
 /// Implementors store an ordered list of [`Message`]s per `conversation_id`. Rig
-/// invokes [`ConversationMemory::load`] before sending a prompt and
+/// runtimes invoke [`ConversationMemory::load`] before sending a prompt and
 /// [`ConversationMemory::append`] after a successful turn.
 ///
 /// Implementations should keep `append` cheap; it runs inline before the agent
@@ -116,59 +116,73 @@ pub trait ConversationMemory: WasmCompatSend + WasmCompatSync {
     ) -> WasmBoxedFuture<'a, Result<(), MemoryError>>;
 }
 
-impl<M> ConversationMemory for Arc<M>
-where
-    M: ConversationMemory + ?Sized,
-{
-    fn load<'a>(
-        &'a self,
-        conversation_id: &'a str,
-    ) -> WasmBoxedFuture<'a, Result<Vec<Message>, MemoryError>> {
-        (**self).load(conversation_id)
-    }
+// Forwarding impls so callers can pass smart pointers (`Arc<M>`, `Box<M>`,
+// including unsized trait objects) wherever a memory trait is expected. Each
+// arm forwards every method of one trait through `(**self)` for the listed
+// pointer types.
+macro_rules! forward_memory_trait {
+    (ConversationMemory: $($ptr:ident)+) => {$(
+        impl<M> ConversationMemory for $ptr<M>
+        where
+            M: ConversationMemory + ?Sized,
+        {
+            fn load<'a>(
+                &'a self,
+                conversation_id: &'a str,
+            ) -> WasmBoxedFuture<'a, Result<Vec<Message>, MemoryError>> {
+                (**self).load(conversation_id)
+            }
 
-    fn append<'a>(
-        &'a self,
-        conversation_id: &'a str,
-        messages: Vec<Message>,
-    ) -> WasmBoxedFuture<'a, Result<(), MemoryError>> {
-        (**self).append(conversation_id, messages)
-    }
+            fn append<'a>(
+                &'a self,
+                conversation_id: &'a str,
+                messages: Vec<Message>,
+            ) -> WasmBoxedFuture<'a, Result<(), MemoryError>> {
+                (**self).append(conversation_id, messages)
+            }
 
-    fn clear<'a>(
-        &'a self,
-        conversation_id: &'a str,
-    ) -> WasmBoxedFuture<'a, Result<(), MemoryError>> {
-        (**self).clear(conversation_id)
-    }
+            fn clear<'a>(
+                &'a self,
+                conversation_id: &'a str,
+            ) -> WasmBoxedFuture<'a, Result<(), MemoryError>> {
+                (**self).clear(conversation_id)
+            }
+        }
+    )+};
+    (DemotionHook: $($ptr:ident)+) => {$(
+        impl<H> DemotionHook for $ptr<H>
+        where
+            H: DemotionHook + ?Sized,
+        {
+            fn on_demote<'a>(
+                &'a self,
+                conversation_id: &'a str,
+                messages: Vec<Message>,
+            ) -> WasmBoxedFuture<'a, Result<(), MemoryError>> {
+                (**self).on_demote(conversation_id, messages)
+            }
+        }
+    )+};
+    (Compactor: $($ptr:ident)+) => {$(
+        impl<C> Compactor for $ptr<C>
+        where
+            C: Compactor + ?Sized,
+        {
+            type Artifact = C::Artifact;
+
+            fn compact<'a>(
+                &'a self,
+                conversation_id: &'a str,
+                evicted: &'a [Message],
+                carry_over: Option<&'a Self::Artifact>,
+            ) -> WasmBoxedFuture<'a, Result<Self::Artifact, MemoryError>> {
+                (**self).compact(conversation_id, evicted, carry_over)
+            }
+        }
+    )+};
 }
 
-impl<M> ConversationMemory for Box<M>
-where
-    M: ConversationMemory + ?Sized,
-{
-    fn load<'a>(
-        &'a self,
-        conversation_id: &'a str,
-    ) -> WasmBoxedFuture<'a, Result<Vec<Message>, MemoryError>> {
-        (**self).load(conversation_id)
-    }
-
-    fn append<'a>(
-        &'a self,
-        conversation_id: &'a str,
-        messages: Vec<Message>,
-    ) -> WasmBoxedFuture<'a, Result<(), MemoryError>> {
-        (**self).append(conversation_id, messages)
-    }
-
-    fn clear<'a>(
-        &'a self,
-        conversation_id: &'a str,
-    ) -> WasmBoxedFuture<'a, Result<(), MemoryError>> {
-        (**self).clear(conversation_id)
-    }
-}
+forward_memory_trait!(ConversationMemory: Arc Box);
 
 /// A history-shaping closure applied during [`InMemoryConversationMemory::load`].
 ///
@@ -245,21 +259,10 @@ impl DemotionHook for NoopDemotionHook {
     }
 }
 
-/// Forwarding impl so callers can pass `Arc<H>` wherever a `DemotionHook`
-/// is expected (e.g. when sharing a single hook between multiple memory
-/// adapters).
-impl<H> DemotionHook for Arc<H>
-where
-    H: DemotionHook + ?Sized,
-{
-    fn on_demote<'a>(
-        &'a self,
-        conversation_id: &'a str,
-        messages: Vec<Message>,
-    ) -> WasmBoxedFuture<'a, Result<(), MemoryError>> {
-        (**self).on_demote(conversation_id, messages)
-    }
-}
+// Forwarding impl so callers can pass `Arc<H>` wherever a `DemotionHook`
+// is expected (e.g. when sharing a single hook between multiple memory
+// adapters).
+forward_memory_trait!(DemotionHook: Arc);
 
 /// Derives a single [`Message`]-shaped artifact from a slice of messages
 /// that a memory policy has evicted from the active window.
@@ -319,23 +322,9 @@ pub trait Compactor: WasmCompatSend + WasmCompatSync {
     ) -> WasmBoxedFuture<'a, Result<Self::Artifact, MemoryError>>;
 }
 
-/// Forwarding impl so callers can pass `Arc<C>` wherever a `Compactor` is
-/// expected (e.g. when sharing a single compactor across adapters).
-impl<C> Compactor for Arc<C>
-where
-    C: Compactor + ?Sized,
-{
-    type Artifact = C::Artifact;
-
-    fn compact<'a>(
-        &'a self,
-        conversation_id: &'a str,
-        evicted: &'a [Message],
-        carry_over: Option<&'a Self::Artifact>,
-    ) -> WasmBoxedFuture<'a, Result<Self::Artifact, MemoryError>> {
-        (**self).compact(conversation_id, evicted, carry_over)
-    }
-}
+// Forwarding impl so callers can pass `Arc<C>` wherever a `Compactor` is
+// expected (e.g. when sharing a single compactor across adapters).
+forward_memory_trait!(Compactor: Arc);
 
 /// A simple thread-safe in-memory [`ConversationMemory`] backed by a `HashMap`.
 ///

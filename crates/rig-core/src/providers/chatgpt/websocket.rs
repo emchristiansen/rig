@@ -15,11 +15,10 @@
 //! `x-codex-turn-state`, and similar), which the live handshake tolerates absent.
 
 use super::{Client, ResponsesCompletionModel};
-use crate::OneOrMany;
 use crate::completion::{self, CompletionError};
 use crate::http_client::HttpClientExt;
 use crate::providers::openai::responses_api::CompletionRequest as ResponsesRequest;
-use crate::providers::openai::responses_api::InputItem;
+use crate::providers::openai::responses_api::websocket::InputDelta;
 use crate::providers::openai::responses_api::websocket::{
     ResponsesWebSocketBackend, ResponsesWebSocketSession,
 };
@@ -200,6 +199,15 @@ where
         // `previous_response_id`.
         false
     }
+
+    fn provider_name(&self) -> &'static str {
+        // The one identity constant this provider already normalizes every
+        // non-websocket response with, so a websocket response reports
+        // `chatgpt` rather than the `openai` the shared Responses path would
+        // imply. Not delegated to the model: ChatGPT's model type reuses the
+        // Responses shape without carrying a provider descriptor of its own.
+        super::PROVIDER_NAME
+    }
 }
 
 impl<H> ResponsesWebSocketSession<ChatGptWsBackend<H>>
@@ -218,10 +226,7 @@ where
     /// failure clears the tip so the next call fails until a fresh `send` re-roots
     /// the session. Changing any non-input configuration likewise requires a fresh
     /// `send`; an incremental turn cannot reconfigure the chain.
-    pub async fn send_incremental(
-        &mut self,
-        delta: OneOrMany<InputItem>,
-    ) -> Result<(), CompletionError> {
+    pub async fn send_incremental(&mut self, delta: InputDelta) -> Result<(), CompletionError> {
         self.send_incremental_frame(delta).await
     }
 }
@@ -247,6 +252,7 @@ fn insert_header(
 mod tests {
     use super::*;
     use crate::providers::chatgpt::{ChatGPTAuth, Client as ChatGptClient, GPT_5_3_CODEX};
+    use crate::providers::openai::responses_api::InputItem;
 
     fn access_token_model(base_url: &str) -> ResponsesCompletionModel {
         let client = ChatGptClient::builder()
@@ -264,7 +270,7 @@ mod tests {
         crate::completion::CompletionRequest {
             model: None,
             preamble: None,
-            chat_history: crate::OneOrMany::one(crate::completion::Message::user(text)),
+            chat_history: vec![crate::completion::Message::user(text)],
             documents: Vec::new(),
             tools: Vec::new(),
             temperature: None,
@@ -272,6 +278,7 @@ mod tests {
             tool_choice: None,
             additional_params: None,
             output_schema: None,
+            record_telemetry_content: false,
         }
     }
 
@@ -319,10 +326,10 @@ mod tests {
         .to_string()
     }
 
-    fn delta_turn(text: &str) -> crate::OneOrMany<InputItem> {
+    fn delta_turn(text: &str) -> InputDelta {
         let items = Vec::<InputItem>::try_from(crate::completion::Message::user(text))
             .expect("user message should convert into input items");
-        crate::OneOrMany::many(items).expect("delta should contain at least one item")
+        InputDelta::new(items).expect("delta should contain at least one item")
     }
 
     #[test]

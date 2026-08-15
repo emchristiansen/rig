@@ -5,6 +5,8 @@
 //! fixtures. Record mode overwrites existing cassette files.
 #![allow(dead_code)]
 
+use aws_smithy_eventstream::frame::{read_message_from, write_message_to};
+use aws_smithy_types::event_stream::Message as EventStreamMessage;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
@@ -32,6 +34,8 @@ use tokio::task::JoinHandle;
 const MODE_ENV: &str = "RIG_PROVIDER_TEST_MODE";
 const CASSETTE_ROOT: &str = "tests/cassettes";
 const REDACTED: &str = "[REDACTED]";
+/// Stand-in for a generated image payload (`"hello"` in base64).
+const IMAGE_PAYLOAD_PLACEHOLDER: &str = "aGVsbG8=";
 const DUMMY_API_KEY: &str = REDACTED;
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -105,7 +109,7 @@ pub(crate) struct CassettePolicy {
 impl CassettePolicy {
     fn for_scenario(provider: &str, scenario: &str, replay_matching: ReplayMatching) -> Self {
         let required_request_headers = match provider {
-            "openai" => OPENAI_REQUIRED_REQUEST_HEADERS,
+            "openai" | "doubleword" | "venice" => OPENAI_REQUIRED_REQUEST_HEADERS,
             "chatgpt" => CHATGPT_REQUIRED_REQUEST_HEADERS,
             "anthropic" => ANTHROPIC_REQUIRED_REQUEST_HEADERS,
             "gemini" if scenario.starts_with("interactions_api/") => {
@@ -138,10 +142,12 @@ impl CassettePolicy {
     }
 
     fn generated_prefix_for(self, value: &str) -> Option<TokenPrefix> {
+        // Callers pass a value taken from a known id field, so the
+        // id-position gate is satisfied by construction.
         self.generated_token_prefixes
             .iter()
             .copied()
-            .find(|prefix| is_generated_token(value, *prefix))
+            .find(|prefix| is_generated_token(value, *prefix, true))
     }
 
     fn matching_generated_prefix(self, text: &str, index: usize) -> Option<TokenPrefix> {
@@ -424,6 +430,18 @@ impl ProviderCassette {
 
     pub(crate) fn base_url(&self) -> String {
         format!("{}{}", self.server.base_url(), self.base_path)
+    }
+
+    /// A deliberately invalid API key for recording real auth failures: the
+    /// bogus literal in record mode, the dummy key in replay — so providers
+    /// that carry the key in a *matched* location (Gemini's query string)
+    /// still replay (the recorded value is scrubbed either way).
+    pub(crate) fn bogus_api_key(&self) -> String {
+        if self.mode.records() {
+            "invalid-edge-matrix-key".to_string()
+        } else {
+            DUMMY_API_KEY.to_string()
+        }
     }
 
     pub(crate) fn api_key(&self, env_name: &str) -> String {
@@ -1073,7 +1091,14 @@ fn body_matches(
     expected_encoding: BodyEncoding,
 ) -> bool {
     let Some(expected) = expected else {
-        return actual.is_empty();
+        // A cassette recorded through the httpmock proxy stores bodies as
+        // strings, so a non-UTF-8 multipart upload (an audio file posted to a
+        // transcription endpoint) is exported with no body at all. Requiring
+        // an empty request body there would make every such scenario
+        // unreplayable; the multipart *shape* those endpoints receive is
+        // pinned by unit tests next to each provider instead. Non-multipart
+        // requests still have to be body-less to match.
+        return actual.is_empty() || is_multipart_request(actual_headers, expected_headers);
     };
     let expected_bytes = decode_body(expected, expected_encoding)
         .unwrap_or_else(|error| panic!("cassette request body should decode: {error}"));
@@ -1678,6 +1703,11 @@ const FORBIDDEN_CASSETTE_PATTERNS: &[&str] = &[
     "openai_api_key",
     "anthropic_api_key",
     "gemini_api_key",
+    "venice_api_key",
+    // Venice inference keys carry this literal prefix, so a recording that
+    // ever echoes one back (Venice quotes request material in some error
+    // bodies) fails the scan instead of being committed.
+    "venice_inference_key_",
     "__cf_bm=",
     "proj_",
     "set-cookie",
@@ -1732,7 +1762,22 @@ const SENSITIVE_QUERY_PARAMS: &[&str] = &[
     "x-amz-security-token",
 ];
 
-const RESPONSE_HEADER_ALLOWLIST: &[&str] = &["content-type"];
+// `x-amzn-errortype` is how the AWS SDKs classify an error response into a
+// modeled exception; dropping it made every recorded AWS error replay as an
+// unclassified `Unhandled` error, so a cassette could not reproduce the error
+// path it recorded. The value is an exception class name, not account state.
+// `x-amzn-requestid` is the only place the AWS request id appears — the SDK
+// reads it off the header, not the body — so a cassette that drops it cannot
+// replay any behavior that reads the id. It is a per-call opaque identifier,
+// not account state, and the scrubber placeholders its value.
+const RESPONSE_HEADER_ALLOWLIST: &[&str] = &[
+    "content-type",
+    "x-amzn-errortype",
+    "x-amzn-requestid",
+    // Provider transport request ids (rig#2265): Anthropic / OpenAI-and-xAI.
+    "request-id",
+    "x-request-id",
+];
 
 const VOLATILE_JSON_KEYS: &[&str] = &[
     "completed_at",
@@ -1751,6 +1796,9 @@ const SENSITIVE_STRING_KEYS: &[&str] = &[
     "signature",
     "thoughtsignature",
 ];
+
+/// Allowlisted response headers whose value is a generated per-call id.
+const GENERATED_ID_HEADERS: &[&str] = &["x-amzn-requestid", "request-id", "x-request-id"];
 
 const GENERATED_ID_KEYS: &[&str] = &[
     "call_id",
@@ -1819,6 +1867,15 @@ impl CassetteScrubber {
     fn scrub_response(&mut self, response: &mut CassetteResponse) {
         scrub_headers(self.policy, &mut response.header, HeaderMode::Response);
 
+        // An allowlisted header is kept for its *shape*, not its value: the
+        // request id is a per-call generated token and gets the same
+        // placeholder treatment as one carried in a body.
+        for header in response.header.iter_mut() {
+            if contains_case_insensitive(GENERATED_ID_HEADERS, &header.name) {
+                header.value = self.placeholder(&header.value, "req_");
+            }
+        }
+
         if let Some(body) = &mut response.body {
             *body = self.scrub_encoded_body(body, response.body_encoding);
         }
@@ -1831,12 +1888,33 @@ impl CassetteScrubber {
                 let Ok(bytes) = decode_body(body, BodyEncoding::Base64) else {
                     return body.to_string();
                 };
-                let Ok(text) = std::str::from_utf8(&bytes) else {
-                    return body.to_string();
-                };
-                BASE64_STANDARD.encode(self.scrub_body(text))
+                if let Ok(text) = std::str::from_utf8(&bytes) {
+                    return BASE64_STANDARD.encode(self.scrub_body(text));
+                }
+
+                self.scrub_event_stream_body(bytes)
+                    .map(|bytes| BASE64_STANDARD.encode(bytes))
+                    .unwrap_or_else(|| body.to_string())
             }
         }
+    }
+
+    fn scrub_event_stream_body(&mut self, bytes: Vec<u8>) -> Option<Vec<u8>> {
+        let mut input = Bytes::from(bytes);
+        let mut output = Vec::new();
+
+        while !input.is_empty() {
+            let message = read_message_from(&mut input).ok()?;
+            let payload = std::str::from_utf8(message.payload()).ok()?;
+            let scrubbed_payload = self.scrub_body(payload);
+            let scrubbed = EventStreamMessage::new_from_parts(
+                message.headers().to_vec(),
+                scrubbed_payload.into_bytes(),
+            );
+            write_message_to(&scrubbed, &mut output).ok()?;
+        }
+
+        Some(output)
     }
 
     fn scrub_body(&mut self, body: &str) -> String {
@@ -1909,6 +1987,19 @@ impl CassetteScrubber {
                     .get("object")
                     .and_then(Value::as_str)
                     .map(str::to_ascii_lowercase);
+                // Venice's image payload carries neither `object` nor `type`:
+                // it is `{ id, images: [base64], … }`, and its `id` is a bare
+                // account-scoped token with no prefix for the generated-token
+                // rules to recognize. Both halves of the shape are required —
+                // cohere's image-embedding *request* also has an `images`
+                // array of (data-URI) strings but no `id`, and its response's
+                // `images` holds metadata objects rather than payloads.
+                let venice_image_payload = map.get("id").is_some_and(Value::is_string)
+                    && map.get("images").is_some_and(|images| {
+                        images
+                            .as_array()
+                            .is_some_and(|images| images.iter().all(Value::is_string))
+                    });
 
                 for (key, value) in map {
                     if key == "data" && object_type.as_deref() == Some("reasoning.encrypted") {
@@ -1924,6 +2015,34 @@ impl CassetteScrubber {
                     if key == "data" && object_type.as_deref() == Some("redacted_thinking") {
                         if let Value::String(data) = value {
                             *data = self.placeholder(data, "redacted_thinking_");
+                        }
+                        continue;
+                    }
+
+                    if key == "id"
+                        && venice_image_payload
+                        && let Value::String(id) = value
+                    {
+                        *id = self.placeholder(id, "id_");
+                        continue;
+                    }
+
+                    // Venice returns generated images as bare base64 strings
+                    // in an `images` array rather than OpenAI's `b64_json`
+                    // objects; same payload, same treatment — keeping the
+                    // bytes would commit generated media and inflate the
+                    // fixture (Gemini's unscrubbed image cassette is 328 KB).
+                    // Scoped to the response shape, not the key name: cohere's
+                    // image-embedding requests carry their own `images` array
+                    // of data URIs that must survive verbatim.
+                    if key == "images"
+                        && venice_image_payload
+                        && let Value::Array(images) = value
+                    {
+                        for image in images.iter_mut() {
+                            if let Value::String(image) = image {
+                                *image = IMAGE_PAYLOAD_PLACEHOLDER.to_string();
+                            }
                         }
                         continue;
                     }
@@ -1981,7 +2100,7 @@ impl CassetteScrubber {
                     }
 
                     if key == "b64_json" {
-                        *text = "aGVsbG8=".to_string();
+                        *text = IMAGE_PAYLOAD_PLACEHOLDER.to_string();
                         return;
                     }
                 }
@@ -2008,7 +2127,53 @@ impl CassetteScrubber {
             scrubbed = scrub_query_param(&scrubbed, key, REDACTED);
         }
         let scrubbed = self.scrub_grounding_redirects(&scrubbed);
+        let scrubbed = self.scrub_aws_account_ids(&scrubbed);
         self.scrub_generated_tokens(&scrubbed)
+    }
+
+    /// Replace the account-id segment of every ARN.
+    ///
+    /// A Bedrock guardrail assessment echoes the guardrail's ARN, which
+    /// carries the caller's 12-digit AWS account id — a provider account
+    /// identifier, which cassettes must not commit. The rest of the ARN
+    /// (partition, service, region, resource) stays readable so the fixture
+    /// still shows which resource answered.
+    fn scrub_aws_account_ids(&mut self, text: &str) -> String {
+        const PREFIX: &str = "arn:";
+        const ACCOUNT_FIELD: usize = 4;
+        const ACCOUNT_LEN: usize = 12;
+
+        let mut output = String::with_capacity(text.len());
+        let mut rest = text;
+
+        while let Some(start) = rest.find(PREFIX) {
+            output.push_str(&rest[..start]);
+            let arn = &rest[start..];
+            // An ARN ends at the first character that cannot appear in one;
+            // the surrounding JSON quote or comma is the usual terminator.
+            let end = arn
+                .find(['"', ',', ' ', '\n', '}', ']'])
+                .unwrap_or(arn.len());
+            let (arn, tail) = arn.split_at(end);
+
+            let mut fields = arn.split(':').map(str::to_string).collect::<Vec<_>>();
+            match fields.get(ACCOUNT_FIELD) {
+                Some(account)
+                    if account.len() == ACCOUNT_LEN
+                        && account.chars().all(|ch| ch.is_ascii_digit()) =>
+                {
+                    let placeholder = self.placeholder(account, "account_");
+                    fields[ACCOUNT_FIELD] = placeholder;
+                    output.push_str(&fields.join(":"));
+                }
+                _ => output.push_str(arn),
+            }
+
+            rest = tail;
+        }
+
+        output.push_str(rest);
+        output
     }
 
     fn scrub_grounding_redirects(&mut self, text: &str) -> String {
@@ -2046,7 +2211,7 @@ impl CassetteScrubber {
                 let end = token_end(text, index);
                 let token = &text[index..end];
 
-                if is_generated_token(token, prefix) {
+                if is_generated_token(token, prefix, in_id_field_position(text, index)) {
                     output.push_str(&self.placeholder(token, prefix.placeholder_prefix));
                     index = end;
                     continue;
@@ -2065,6 +2230,15 @@ impl CassetteScrubber {
     }
 
     fn placeholder(&mut self, original: &str, kind: &'static str) -> String {
+        // An empty value carries nothing to redact, and minting a placeholder
+        // for it *invents data*: a recording would show a non-empty token
+        // where the wire sent `""`, changing replay semantics for any code
+        // that reads the field (observed on Anthropic's
+        // `content_block_start.signature`, which is empty on the wire).
+        if original.is_empty() {
+            return String::new();
+        }
+
         if let Some(existing) = self.placeholders.get(original) {
             return existing.clone();
         }
@@ -2207,7 +2381,7 @@ fn is_token_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
 }
 
-fn is_generated_token(token: &str, prefix: TokenPrefix) -> bool {
+fn is_generated_token(token: &str, prefix: TokenPrefix, in_id_field: bool) -> bool {
     if is_redacted_placeholder(token) {
         return false;
     }
@@ -2216,11 +2390,52 @@ fn is_generated_token(token: &str, prefix: TokenPrefix) -> bool {
         return false;
     };
 
-    suffix.len() >= prefix.min_suffix_len
-        && suffix
+    if suffix.len() < prefix.min_suffix_len
+        || !suffix
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-        && suffix.chars().any(|ch| ch.is_ascii_digit())
+    {
+        return false;
+    }
+
+    // The digit requirement keeps prose identifiers (`call_id`,
+    // `tool_call_id`) out of the generated-token class. Ollama daemons mint
+    // digit-less lowercase call ids (`call_kqpofucm`), so for `call_` a
+    // long all-lowercase suffix also counts as generated — but only in an
+    // id-bearing field position: a real tool named `call_forwarding` in a
+    // name field or prose must survive recording untouched. Redaction keys
+    // off field identity, not value shape.
+    suffix.chars().any(|ch| ch.is_ascii_digit())
+        || (prefix.raw == "call_"
+            && in_id_field
+            && suffix.len() >= 8
+            && suffix.chars().all(|ch| ch.is_ascii_lowercase()))
+}
+
+/// Whether the token starting at `token_start` is the value of an
+/// id-bearing JSON field (`"id":"…"`, `"tool_call_id":"…"`, `"toolCallId":"…"`),
+/// tolerating the escaped-quote spelling of bodies that are themselves
+/// JSON-encoded (`\"id\":\"…\"`).
+fn in_id_field_position(text: &str, token_start: usize) -> bool {
+    // The value's opening string delimiter: `"` or `\"`.
+    let Some(rest) = text[..token_start].strip_suffix('"') else {
+        return false;
+    };
+    let rest = rest.strip_suffix('\\').unwrap_or(rest);
+    let rest = rest.trim_end();
+    let Some(rest) = rest.strip_suffix(':') else {
+        return false;
+    };
+    // The field name's closing delimiter.
+    let Some(rest) = rest.trim_end().strip_suffix('"') else {
+        return false;
+    };
+    let rest = rest.strip_suffix('\\').unwrap_or(rest);
+    let name_start = rest
+        .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .map_or(0, |at| at + 1);
+    let name = &rest[name_start..];
+    name == "id" || name.ends_with("_id") || name.ends_with("Id")
 }
 
 fn is_redacted_placeholder(value: &str) -> bool {
@@ -2249,7 +2464,9 @@ fn generated_tokens(policy: CassettePolicy, contents: &str) -> Vec<String> {
         if let Some(prefix) = policy.matching_generated_prefix(contents, index) {
             let end = token_end(contents, index);
             let token = &contents[index..end];
-            if is_generated_token(token, prefix) && !token.contains("REDACTED_") {
+            if is_generated_token(token, prefix, in_id_field_position(contents, index))
+                && !token.contains("REDACTED_")
+            {
                 tokens.push(token.to_string());
             }
             index = end;
@@ -2483,6 +2700,26 @@ fn assert_path_is_repo_relative(path: &Path) {
 mod tests {
     use super::*;
 
+    /// Scrubbing must redact, never invent. An empty wire value carries
+    /// nothing sensitive, and minting a placeholder for it makes a recording
+    /// claim the provider sent a token where it sent `""` — which silently
+    /// changes replay semantics for code that reads the field (found via
+    /// Anthropic's `content_block_start.signature`, empty on the wire).
+    #[test]
+    fn scrubbing_an_empty_value_invents_nothing() {
+        let mut scrubber = CassetteScrubber::new(CassettePolicy::default());
+        assert_eq!(scrubber.placeholder("", "signature_"), "");
+        // A real value still redacts, and stays stable across occurrences.
+        let first = scrubber.placeholder("sig-abc", "signature_");
+        assert!(!first.is_empty());
+        assert_eq!(scrubber.placeholder("sig-abc", "signature_"), first);
+        // The empty value did not consume a counter slot.
+        assert!(
+            first.ends_with('1'),
+            "the first real value should take placeholder 1, got {first}"
+        );
+    }
+
     fn query_pair(name: &str, value: &str) -> NameValue {
         NameValue {
             name: name.to_string(),
@@ -2646,37 +2883,40 @@ mod tests {
     }
 
     #[test]
-    fn replay_matching_requires_provider_auth_header_presence_without_recorded_value() {
-        let policy = CassettePolicy::for_scenario(
-            "openai",
-            "agent/completion_smoke",
-            ReplayMatching::Ordered,
-        );
-        let interaction = ReplayInteraction {
-            when: cassette_request("/v1/responses"),
-            then: cassette_response(),
-            consumed: false,
-        };
-        let interactions = vec![interaction];
-        let request_without_auth = incoming_request("/v1/responses", Bytes::new());
-        let mut request_with_auth = incoming_request("/v1/responses", Bytes::new());
-        request_with_auth.headers.insert(
-            axum::http::header::AUTHORIZATION,
-            HeaderValue::from_static("Bearer [REDACTED]"),
-        );
+    fn replay_matching_requires_bearer_provider_auth_without_recording_its_value() {
+        for provider in ["openai", "doubleword"] {
+            let policy = CassettePolicy::for_scenario(
+                provider,
+                "agent/completion_smoke",
+                ReplayMatching::Ordered,
+            );
+            let interaction = ReplayInteraction {
+                when: cassette_request("/v1/responses"),
+                then: cassette_response(),
+                consumed: false,
+            };
+            let interactions = vec![interaction];
+            let request_without_auth = incoming_request("/v1/responses", Bytes::new());
+            let mut request_with_auth = incoming_request("/v1/responses", Bytes::new());
+            request_with_auth.headers.insert(
+                axum::http::header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer [REDACTED]"),
+            );
 
-        assert_eq!(
-            matching_interaction_index(policy, &interactions, &request_without_auth),
-            None
-        );
-        assert_eq!(
-            missing_required_headers(policy, &request_without_auth.headers),
-            vec!["authorization"]
-        );
-        assert_eq!(
-            matching_interaction_index(policy, &interactions, &request_with_auth),
-            Some(0)
-        );
+            assert_eq!(
+                matching_interaction_index(policy, &interactions, &request_without_auth),
+                None,
+                "{provider} replay should require bearer authentication"
+            );
+            assert_eq!(
+                missing_required_headers(policy, &request_without_auth.headers),
+                vec!["authorization"]
+            );
+            assert_eq!(
+                matching_interaction_index(policy, &interactions, &request_with_auth),
+                Some(0)
+            );
+        }
     }
 
     #[test]
@@ -2743,8 +2983,23 @@ mod tests {
             .expect("interaction should be recorded");
         assert_eq!(interaction.when.header.len(), 1);
         assert_eq!(interaction.when.header[0].name, "content-type");
-        assert_eq!(interaction.then.header.len(), 1);
-        assert_eq!(interaction.then.header[0].name, "content-type");
+
+        // The response keeps `x-amzn-requestid` — the SDK reads the AWS
+        // request id off that header and nowhere else — with its value
+        // placeholdered, and still drops everything outside the allowlist.
+        let response_headers = interaction
+            .then
+            .header
+            .iter()
+            .map(|header| (header.name.as_str(), header.value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            response_headers,
+            vec![
+                ("content-type", "application/json"),
+                ("x-amzn-requestid", "req_REDACTED_1"),
+            ]
+        );
     }
 
     #[test]
@@ -2959,6 +3214,41 @@ mod tests {
 
         assert_eq!(recorded.encoding, BodyEncoding::Base64);
         assert_eq!(recorded.body.as_deref(), Some("AJ+Slg=="));
+    }
+
+    #[test]
+    fn scrubber_reframes_binary_event_stream_payloads() {
+        let generated_id = "tooluse_123456789";
+        let message = EventStreamMessage::new(format!(
+            r#"{{"contentBlockStart":{{"start":{{"toolUse":{{"toolUseId":"{generated_id}"}}}}}}}}"#
+        ));
+        let mut event_stream = Vec::new();
+        write_message_to(&message, &mut event_stream).expect("event stream should encode");
+        let cassette = format!(
+            "when:\n  path: /model/test/converse-stream\n  method: POST\nthen:\n  status: 200\n  body: {}\n  body_encoding: base64\n",
+            BASE64_STANDARD.encode(event_stream)
+        );
+
+        let scrubbed = scrub_cassette_contents(&cassette);
+        assert!(!scrubbed.contains(generated_id));
+        assert!(
+            cassette_safety_failures(Path::new("fixture.yaml"), &scrubbed).is_empty(),
+            "scrubbed event stream should pass cassette safety"
+        );
+
+        let interaction = parse_cassette_interactions(Path::new("fixture.yaml"), &scrubbed)
+            .into_iter()
+            .next()
+            .expect("cassette interaction");
+        let encoded = interaction.then.body.expect("response body");
+        let mut reframed = Bytes::from(
+            BASE64_STANDARD
+                .decode(encoded)
+                .expect("base64 body should decode"),
+        );
+        let message = read_message_from(&mut reframed).expect("event stream should remain valid");
+        let payload = std::str::from_utf8(message.payload()).expect("JSON payload should be UTF-8");
+        assert!(payload.contains("tooluse_REDACTED_1"));
     }
 
     #[test]
@@ -3200,6 +3490,27 @@ then:
         assert!(!scrubbed.contains("id_REDACTED"));
     }
 
+    /// The digit-less `call_` rule (Ollama's minted `call_kqpofucm` ids)
+    /// keys off field identity, not value shape: a legitimate tool *named*
+    /// `call_forwarding` survives recording untouched, while the same
+    /// spelling in an id field is redacted.
+    #[test]
+    fn scrubber_redacts_digitless_call_tokens_only_in_id_fields() {
+        let cassette = r#"when:
+  path: /api/chat
+  method: POST
+  body: '{"tool_calls":[{"id":"call_kqpofucm","function":{"name":"call_forwarding"}}]}'
+then:
+  status: 200
+  body: '{"message":"use call_forwarding for this"}'
+"#;
+
+        let scrubbed = scrub_cassette_contents(cassette);
+
+        assert!(!scrubbed.contains("call_kqpofucm"));
+        assert_eq!(scrubbed.matches("call_forwarding").count(), 2);
+    }
+
     #[test]
     fn scrubber_removes_volatile_headers_and_sensitive_query_params() {
         let cassette = r#"when:
@@ -3224,7 +3535,12 @@ then:
 
         assert!(scrubbed.contains("value: '[REDACTED]'"));
         assert!(!scrubbed.contains("AIzaSySecret"));
-        assert!(!scrubbed.contains("x-request-id"));
+        // `x-request-id` is allowlisted since rig#2265 (provider transport
+        // request ids are feature data), but its value is a generated id and
+        // must record scrubbed.
+        assert!(scrubbed.contains("x-request-id"));
+        assert!(!scrubbed.contains("req_abc123456789"));
+        assert!(scrubbed.contains("req_REDACTED"));
         assert!(!scrubbed.contains("set-cookie"));
         assert!(scrubbed.contains("content-type"));
     }

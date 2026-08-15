@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rig::client::CompletionClient;
 use rig::completion::TypedPrompt;
+use rig::prelude::*;
 use rig::providers::xai;
 use rig::tool::Tool;
 
@@ -38,7 +38,6 @@ impl WeatherTool {
 
 impl Tool for WeatherTool {
     const NAME: &'static str = "weather";
-
     type Error = std::io::Error;
     type Args = WeatherArgs;
     type Output = String;
@@ -59,6 +58,7 @@ impl Tool for WeatherTool {
 
     fn call(
         &self,
+        _context: &mut rig::tool::ToolContext,
         args: Self::Args,
     ) -> impl std::future::Future<Output = Result<Self::Output, Self::Error>> + Send {
         self.call_count.fetch_add(1, Ordering::SeqCst);

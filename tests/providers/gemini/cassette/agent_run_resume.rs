@@ -2,14 +2,14 @@
 //! point can be serialized, dropped, deserialized in a fresh context, and
 //! driven to completion against real Gemini turns.
 
-use rig::agent::InvalidToolCallHookAction;
+use rig::agent::InvalidToolCallAction;
 use rig::agent::run::{AgentRun, AgentRunStep, ModelTurnOutcome};
-use rig::client::CompletionClient;
+use rig::prelude::*;
 use rig::providers::gemini;
 
 use super::super::agent_run_support::{
-    Add, FORCE_TOOLS_PREAMBLE, call_model, execute_pending_calls, history_has_assistant_tool_call,
-    is_tool_result_user_message, tool_names, tool_result_texts,
+    FORCE_TOOLS_PREAMBLE, GeminiAgent, call_model, execute_pending_calls,
+    history_has_assistant_tool_call, is_tool_result_user_message, tool_names, tool_result_texts,
 };
 use super::super::support::with_gemini_cassette;
 use crate::support::{assert_mentions_expected_number, assert_nonempty_response};
@@ -26,11 +26,12 @@ async fn resume_from_serialized_state_mid_tool_execution() {
     with_gemini_cassette(
         "agent_run_resume/resume_from_serialized_state_mid_tool_execution",
         |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble(FORCE_TOOLS_PREAMBLE)
-                .tool(Add)
-                .build();
+            let agent = GeminiAgent::new(
+                client.completion_model(gemini::completion::GEMINI_2_5_FLASH),
+                FORCE_TOOLS_PREAMBLE,
+                &["add"],
+                None,
+            );
             let names = tool_names(&["add"]);
 
             let mut run = AgentRun::new("What is 21 + 21? Use the add tool.").max_turns(2);
@@ -131,11 +132,12 @@ async fn resume_while_invalid_tool_call_awaits_resolution() {
     with_gemini_cassette(
         "agent_run_resume/resume_while_invalid_tool_call_awaits_resolution",
         |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble(FORCE_TOOLS_PREAMBLE)
-                .tool(Add)
-                .build();
+            let agent = GeminiAgent::new(
+                client.completion_model(gemini::completion::GEMINI_2_5_FLASH),
+                FORCE_TOOLS_PREAMBLE,
+                &["add"],
+                None,
+            );
             let executable = tool_names(&["add"]);
             // Machine-side restriction: the model's `add` call is disallowed
             // for this turn even though it was advertised on the wire.
@@ -168,7 +170,7 @@ async fn resume_while_invalid_tool_call_awaits_resolution() {
             assert_eq!(rederived.allowed_tools, vec!["subtract".to_string()]);
 
             let outcome = resumed
-                .resolve_invalid_tool_call(InvalidToolCallHookAction::skip(
+                .resolve_invalid_tool_call(InvalidToolCallAction::skip(
                     "The add tool is disabled for this request.",
                 ))
                 .expect("skip resolution should be accepted");
@@ -229,11 +231,12 @@ async fn resume_after_invalid_tool_call_retry_rollback() {
     with_gemini_cassette(
         "agent_run_resume/resume_after_invalid_tool_call_retry_rollback",
         |client| async move {
-            let agent = client
-                .agent(gemini::completion::GEMINI_2_5_FLASH)
-                .preamble(FORCE_TOOLS_PREAMBLE)
-                .tool(Add)
-                .build();
+            let agent = GeminiAgent::new(
+                client.completion_model(gemini::completion::GEMINI_2_5_FLASH),
+                FORCE_TOOLS_PREAMBLE,
+                &["add"],
+                None,
+            );
             let executable = tool_names(&["add"]);
             let nothing_allowed = tool_names(&[]);
             const FEEDBACK: &str = "Tools are temporarily unavailable. Answer the question directly in plain text without calling any tools.";
@@ -257,7 +260,7 @@ async fn resume_after_invalid_tool_call_retry_rollback() {
             };
 
             let outcome = run
-                .resolve_invalid_tool_call(InvalidToolCallHookAction::retry(FEEDBACK))
+                .resolve_invalid_tool_call(InvalidToolCallAction::retry(FEEDBACK))
                 .expect("retry should be accepted within budget");
             assert!(matches!(outcome, ModelTurnOutcome::TurnRetried));
 

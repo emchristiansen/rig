@@ -2,8 +2,8 @@
 
 use futures::StreamExt;
 use rig::agent::{MultiTurnStreamItem, StreamingError, StreamingResult};
-use rig::client::CompletionClient;
-use rig::message::{Message, UserContent};
+use rig::message::{Message, ToolCallId, UserContent};
+use rig::prelude::*;
 use rig::providers::anthropic;
 use rig::streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt};
 use rig::tool::Tool;
@@ -213,7 +213,11 @@ impl Tool for OutOfOrderAlphaSignal {
         AlphaSignal.parameters()
     }
 
-    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         self.0.wait_until_this_tool_should_finish().await;
         Ok(ALPHA_SIGNAL_OUTPUT.to_string())
     }
@@ -236,7 +240,11 @@ impl Tool for OutOfOrderBetaSignal {
         BetaSignal.parameters()
     }
 
-    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         self.0.wait_until_this_tool_should_finish().await;
         Ok(BETA_SIGNAL_OUTPUT.to_string())
     }
@@ -254,8 +262,8 @@ struct ConcurrentToolObservation {
     events: Vec<&'static str>,
 }
 
-async fn collect_concurrent_tool_observation<R>(
-    stream: &mut StreamingResult<R>,
+async fn collect_concurrent_tool_observation(
+    stream: &mut StreamingResult,
 ) -> ConcurrentToolObservation {
     let mut observation = ConcurrentToolObservation::default();
     let mut tool_names_by_id = HashMap::new();
@@ -270,8 +278,8 @@ async fn collect_concurrent_tool_observation<R>(
                 observation.tool_calls.push(tool_call.function.name);
                 observation.events.push("tool_call");
             }
-            Ok(MultiTurnStreamItem::ToolExecutionStart { .. }) => {
-                observation.events.push("tool_execution_start");
+            Ok(MultiTurnStreamItem::ToolExecutionCommitted { .. }) => {
+                observation.events.push("tool_execution_committed");
             }
             Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                 tool_result,
@@ -279,7 +287,7 @@ async fn collect_concurrent_tool_observation<R>(
             })) => {
                 observation
                     .streamed_tool_results
-                    .push(tool_name_for_result(&tool_names_by_id, &tool_result.id));
+                    .push(tool_name_for_result(&tool_names_by_id, &tool_result.call));
                 observation.events.push("tool_result");
             }
             Ok(MultiTurnStreamItem::FinalResponse(response)) => {
@@ -301,9 +309,9 @@ async fn collect_concurrent_tool_observation<R>(
             )) => {
                 observation.events.push("tool_call_delta");
             }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
-                _,
-            ))) => {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning {
+                ..
+            })) => {
                 observation.events.push("reasoning");
             }
             Ok(MultiTurnStreamItem::StreamAssistantItem(
@@ -335,7 +343,7 @@ fn streaming_error_to_string(error: StreamingError) -> String {
 
 fn tool_result_names_in_history(
     history: &[Message],
-    tool_names_by_id: &HashMap<String, String>,
+    tool_names_by_id: &HashMap<ToolCallId, String>,
 ) -> Vec<String> {
     history
         .iter()
@@ -344,7 +352,7 @@ fn tool_result_names_in_history(
                 .iter()
                 .filter_map(|item| match item {
                     UserContent::ToolResult(tool_result) => {
-                        Some(tool_name_for_result(tool_names_by_id, &tool_result.id))
+                        Some(tool_name_for_result(tool_names_by_id, &tool_result.call))
                     }
                     _ => None,
                 })
@@ -356,7 +364,7 @@ fn tool_result_names_in_history(
 
 fn last_tool_result_message_names(
     history: &[Message],
-    tool_names_by_id: &HashMap<String, String>,
+    tool_names_by_id: &HashMap<ToolCallId, String>,
 ) -> Vec<String> {
     history
         .iter()
@@ -372,7 +380,7 @@ fn last_tool_result_message_names(
                         .iter()
                         .filter_map(|item| match item {
                             UserContent::ToolResult(tool_result) => {
-                                Some(tool_name_for_result(tool_names_by_id, &tool_result.id))
+                                Some(tool_name_for_result(tool_names_by_id, &tool_result.call))
                             }
                             _ => None,
                         })
@@ -384,11 +392,14 @@ fn last_tool_result_message_names(
         .unwrap_or_default()
 }
 
-fn tool_name_for_result(tool_names_by_id: &HashMap<String, String>, id: &str) -> String {
+fn tool_name_for_result(
+    tool_names_by_id: &HashMap<ToolCallId, String>,
+    call: &ToolCallId,
+) -> String {
     tool_names_by_id
-        .get(id)
+        .get(call)
         .cloned()
-        .unwrap_or_else(|| format!("<unknown tool result id {id}>"))
+        .unwrap_or_else(|| format!("<unknown tool result id {call}>"))
 }
 
 fn assert_events_emit_all_tool_calls_before_results(events: &[&'static str]) {

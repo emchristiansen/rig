@@ -23,29 +23,25 @@
 mod auth;
 
 use crate::client::{
-    self, ApiKey, Capabilities, Capable, DebugExt, ModelLister, Nothing, Provider, ProviderBuilder,
-    ProviderClient, Transport,
+    self, ApiKey, DebugExt, ModelLister, Provider, ProviderBuilder, ProviderClient, Transport,
 };
-use crate::completion::{self, CompletionError, GetTokenUsage};
+use crate::completion::NormalizeCompletionResponse;
+use crate::completion::{self, CompletionError};
 use crate::embeddings::{self, EmbeddingError};
 use crate::http_client::{self, HttpClientExt};
 use crate::model::{Model, ModelList, ModelListingError};
-use crate::providers::internal::openai_chat_completions_compatible::{
-    self, CompatibleChoiceData, CompatibleChunk, CompatibleFinishReason, CompatibleStreamProfile,
-    CompatibleToolCallChunk,
-};
+use crate::providers::internal::completion_send::send_completion;
+use crate::providers::internal::envelope::DirectPayload;
 use crate::providers::openai;
 use crate::providers::openai::responses_api::{self, CompletionRequest as ResponsesRequest};
-use crate::streaming::{self, RawStreamingChoice, StreamingCompletionResponse};
-use crate::telemetry::{CompletionOperation, CompletionSpanBuilder};
+use crate::streaming::StreamingCompletionResponse;
+use crate::telemetry::{CompletionOperation, CompletionSpanBuilder, SpanCombinator};
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
-use async_stream::stream;
 use futures::StreamExt;
 use http::Request;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 use tracing_futures::Instrument as _;
@@ -55,6 +51,17 @@ pub(crate) const EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
 pub(crate) const USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
 pub(crate) const EDITOR_VERSION: &str = "vscode/1.107.0";
 const API_VERSION: &str = "2025-04-01";
+
+/// Whether Copilot's `/responses` route emits a complete function call as soon
+/// as its `output_item.done` arrives, rather than buffering to the terminal.
+///
+/// Copilot routes between Chat Completions and Responses and so implements no
+/// [`responses_api::ResponsesProviderExt`], which is the authority every other
+/// Responses-carrying provider reads this from. Absent that authority the route
+/// states its own policy here rather than spelling a bare literal at the stream
+/// boundary. The value matches the trait's default, which is the behavior this
+/// route has always had.
+const RESPONSES_EMITS_COMPLETE_TOOL_CALLS_IMMEDIATELY: bool = false;
 
 /// Copilot conversation intent sent in the `openai-intent` request header.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -193,17 +200,12 @@ impl Provider for CopilotExt {
     const VERIFY_PATH: &'static str = "";
 }
 
-impl<H> Capabilities<H> for CopilotExt {
-    type Completion = Capable<CompletionModel<H>>;
-    type Embeddings = Capable<EmbeddingModel<H>>;
-    type Transcription = Nothing;
-    type ModelListing = Capable<CopilotModelLister<H>>;
-    #[cfg(feature = "image")]
-    type ImageGeneration = Nothing;
-    #[cfg(feature = "audio")]
-    type AudioGeneration = Nothing;
-    type Rerank = Nothing;
-}
+client::impl_capabilities!(
+    CopilotExt,
+    completion = CompletionModel<H>,
+    embeddings = EmbeddingModel<H>,
+    model_listing = CopilotModelLister<H>,
+);
 
 impl DebugExt for CopilotExt {}
 
@@ -554,6 +556,26 @@ fn request_has_vision(request: &completion::CompletionRequest) -> bool {
     })
 }
 
+/// Per-request inputs shared by every Copilot route, read off the incoming
+/// request before a route-specific conversion consumes it.
+struct RequestFacts {
+    initiator: &'static str,
+    has_vision: bool,
+    system_instructions: Option<String>,
+    record_telemetry_content: bool,
+}
+
+impl RequestFacts {
+    fn capture(request: &completion::CompletionRequest) -> Self {
+        Self {
+            initiator: request_initiator(request),
+            has_vision: request_has_vision(request),
+            system_instructions: request.preamble.clone(),
+            record_telemetry_content: request.record_telemetry_content,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CompletionRoute {
     ChatCompletions,
@@ -571,7 +593,7 @@ fn route_for_model(model: &str) -> CompletionRoute {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "api", rename_all = "snake_case")]
 pub enum CopilotCompletionResponse {
-    Chat(Box<ChatCompletionResponse>),
+    Chat(Box<openai::completion::CompletionResponse>),
     Responses(Box<responses_api::CompletionResponse>),
 }
 
@@ -582,118 +604,28 @@ pub enum CopilotStreamingResponse {
     Responses(responses_api::streaming::StreamingCompletionResponse),
 }
 
-impl GetTokenUsage for CopilotStreamingResponse {
-    fn token_usage(&self) -> completion::Usage {
-        match self {
-            Self::Chat(response) => response.token_usage(),
-            Self::Responses(response) => response.token_usage(),
+impl From<&CopilotStreamingResponse> for completion::Usage {
+    fn from(response: &CopilotStreamingResponse) -> Self {
+        match response {
+            CopilotStreamingResponse::Chat(response) => (&response.usage).into(),
+            CopilotStreamingResponse::Responses(response) => (&response.usage).into(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatCompletionResponse {
-    pub id: String,
-    #[serde(default)]
-    pub object: Option<String>,
-    #[serde(default)]
-    pub created: Option<u64>,
-    pub model: String,
-    pub system_fingerprint: Option<String>,
-    pub choices: Vec<ChatChoice>,
-    pub usage: Option<openai::completion::Usage>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChatChoice {
-    #[serde(default)]
-    pub index: usize,
-    pub message: openai::completion::Message,
-    pub logprobs: Option<serde_json::Value>,
-    #[serde(default)]
-    pub finish_reason: Option<String>,
-}
-
-impl TryFrom<ChatCompletionResponse> for completion::CompletionResponse<ChatCompletionResponse> {
-    type Error = CompletionError;
-
-    fn try_from(response: ChatCompletionResponse) -> Result<Self, Self::Error> {
-        let choice = response.choices.first().ok_or_else(|| {
-            CompletionError::ResponseError("Response contained no choices".to_owned())
-        })?;
-
-        let content = match &choice.message {
-            openai::completion::Message::Assistant {
-                content,
-                tool_calls,
-                ..
-            } => {
-                let mut content = content
-                    .iter()
-                    .filter_map(|c| {
-                        let s = match c {
-                            openai::completion::AssistantContent::Text { text } => text,
-                            openai::completion::AssistantContent::Refusal { refusal } => refusal,
-                        };
-                        if s.is_empty() {
-                            None
-                        } else {
-                            Some(completion::AssistantContent::text(s))
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
-                content.extend(
-                    tool_calls
-                        .iter()
-                        .map(|call| {
-                            completion::AssistantContent::tool_call(
-                                &call.id,
-                                &call.function.name,
-                                call.function.arguments.clone(),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                );
-                Ok(content)
-            }
-            _ => Err(CompletionError::ResponseError(
-                "Response did not contain a valid message or tool call".into(),
-            )),
-        }?;
-
-        let choice = crate::OneOrMany::many(content).map_err(|_| {
-            CompletionError::ResponseError(
-                "Response contained no message or tool call (empty)".to_owned(),
-            )
-        })?;
-
-        let usage = response
-            .usage
-            .as_ref()
-            .map(|usage| completion::Usage {
-                input_tokens: usage.prompt_tokens as u64,
-                output_tokens: (usage.total_tokens - usage.prompt_tokens) as u64,
-                total_tokens: usage.total_tokens as u64,
-                cached_input_tokens: usage
-                    .prompt_tokens_details
-                    .as_ref()
-                    .map(|d| d.cached_tokens as u64)
-                    .unwrap_or(0),
-                cache_creation_input_tokens: 0,
-                tool_use_prompt_tokens: 0,
-                reasoning_tokens: 0,
-            })
-            .unwrap_or_default();
-
-        Ok(completion::CompletionResponse {
-            choice,
-            usage,
-            raw_response: response,
-            message_id: None,
-        })
+impl From<(&str, CopilotStreamingResponse)> for crate::streaming::StreamFinal {
+    fn from((provider, response): (&str, CopilotStreamingResponse)) -> Self {
+        // Both Copilot routes reuse an upstream terminal record, so each maps
+        // through that route's own conversion rather than re-deriving it here.
+        match response {
+            CopilotStreamingResponse::Chat(response) => (provider, response).into(),
+            CopilotStreamingResponse::Responses(response) => (provider, response).into(),
+        }
     }
 }
+
+/// Stable descriptor name reported on normalized Copilot responses.
+pub const PROVIDER_NAME: &str = "copilot";
 
 #[derive(Debug, Deserialize)]
 pub struct ChatApiErrorResponse {
@@ -717,6 +649,17 @@ impl ChatApiErrorResponse {
 enum ChatApiResponse<T> {
     Ok(T),
     Err(ChatApiErrorResponse),
+}
+
+impl<T> crate::providers::internal::envelope::ProviderEnvelope for ChatApiResponse<T> {
+    type Payload = T;
+
+    fn into_payload(self) -> Result<T, String> {
+        match self {
+            Self::Ok(payload) => Ok(payload),
+            Self::Err(error) => Err(error.error_message().to_owned()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -817,152 +760,136 @@ where
         Ok(request)
     }
 
-    async fn completion_chat(
+    /// Authenticates, signs a POST to `path`, and opens the route's completion
+    /// span.
+    ///
+    /// Call this only *after* the route's request conversion: auth happens
+    /// inside, so calling it earlier would report an auth failure ahead of a
+    /// malformed request and invert the routes' error precedence.
+    async fn signed_request(
         &self,
-        completion_request: completion::CompletionRequest,
-    ) -> Result<completion::CompletionResponse<CopilotCompletionResponse>, CompletionError> {
-        let initiator = request_initiator(&completion_request);
-        let has_vision = request_has_vision(&completion_request);
-        let system_instructions = completion_request.preamble.clone();
-        let request = self.chat_request(completion_request)?;
-        let body = serde_json::to_vec(&request)?;
+        facts: &RequestFacts,
+        path: &str,
+        transport: Transport,
+        model: &str,
+        operation: CompletionOperation,
+        body: Vec<u8>,
+    ) -> Result<(Request<Vec<u8>>, tracing::Span), CompletionError> {
         let auth = self.auth_context().await?;
 
-        let headers = default_headers(&auth.api_key, initiator, has_vision, self.intent);
+        let headers = default_headers(
+            &auth.api_key,
+            facts.initiator,
+            facts.has_vision,
+            self.intent,
+        );
         let req = apply_headers(
-            post_with_auth_base(&self.client, &auth, "/chat/completions", Transport::Http)?,
+            post_with_auth_base(&self.client, &auth, path, transport)?,
             &headers,
         )
         .body(body)
         .map_err(|err| CompletionError::HttpError(err.into()))?;
 
-        let span = CompletionSpanBuilder::new("copilot", &request.model, CompletionOperation::Chat)
-            .system_instructions(system_instructions.as_deref())
+        let span = CompletionSpanBuilder::new("copilot", model, operation)
+            .system_instructions(
+                facts.system_instructions.as_deref(),
+                facts.record_telemetry_content,
+            )
             .build();
 
-        async move {
-            let response = self.client.send(req).await?;
+        Ok((req, span))
+    }
 
-            let status = response.status();
-            if status.is_success() {
-                let body = http_client::text(response).await?;
-                match serde_json::from_str::<ChatApiResponse<ChatCompletionResponse>>(&body)? {
-                    ChatApiResponse::Ok(response) => {
-                        let core = completion::CompletionResponse::try_from(response.clone())?;
-                        let span = tracing::Span::current();
-                        span.record("gen_ai.response.id", response.id.as_str());
-                        span.record("gen_ai.response.model", response.model.as_str());
-                        if let Some(usage) = &response.usage {
-                            span.record("gen_ai.usage.input_tokens", usage.prompt_tokens);
-                            span.record(
-                                "gen_ai.usage.output_tokens",
-                                usage.total_tokens - usage.prompt_tokens,
-                            );
-                            span.record(
-                                "gen_ai.usage.cache_read.input_tokens",
-                                usage
-                                    .prompt_tokens_details
-                                    .as_ref()
-                                    .map(|details| details.cached_tokens)
-                                    .unwrap_or(0),
-                            );
-                        }
+    /// The chat wire type has no transport-metadata slot, so the captured
+    /// request id rides alongside; `completion()` stamps it onto the
+    /// normalized response.
+    async fn raw_completion_chat(
+        &self,
+        completion_request: completion::CompletionRequest,
+    ) -> Result<(openai::completion::CompletionResponse, Option<String>), CompletionError> {
+        let facts = RequestFacts::capture(&completion_request);
+        let request = self.chat_request(completion_request)?;
+        let (req, span) = self
+            .signed_request(
+                &facts,
+                "/chat/completions",
+                Transport::Http,
+                &request.model,
+                CompletionOperation::Chat,
+                serde_json::to_vec(&request)?,
+            )
+            .await?;
 
-                        Ok(completion::CompletionResponse {
-                            choice: core.choice,
-                            usage: core.usage,
-                            raw_response: CopilotCompletionResponse::Chat(Box::new(response)),
-                            message_id: core.message_id,
-                        })
-                    }
-                    ChatApiResponse::Err(err) => {
-                        tracing::warn!(
-                            message = %err.error_message(),
-                            "provider returned an error response"
-                        );
-                        Err(CompletionError::from_http_response(status, body))
-                    }
-                }
-            } else {
-                let body = http_client::text(response).await?;
-                Err(CompletionError::from_http_response(status, body))
-            }
-        }
+        send_completion::<_, ChatApiResponse<openai::completion::CompletionResponse>, _>(
+            &self.client,
+            req,
+            "Copilot chat completion",
+            // The OpenAI-compatible default; a gateway that omits the header
+            // yields None. Matches the streaming path, which goes through the
+            // shared OpenAI wrapper and captures the same header.
+            Some("x-request-id"),
+            |response| {
+                let span = tracing::Span::current();
+                span.record_response_metadata(response);
+                let usage = response
+                    .usage
+                    .as_ref()
+                    .map(|usage| usage.to_normalized())
+                    .unwrap_or_default();
+                span.record_token_usage(&usage);
+            },
+        )
         .instrument(span)
         .await
     }
 
-    async fn completion_responses(
+    async fn raw_completion_responses(
         &self,
         completion_request: completion::CompletionRequest,
-    ) -> Result<completion::CompletionResponse<CopilotCompletionResponse>, CompletionError> {
-        let initiator = request_initiator(&completion_request);
-        let has_vision = request_has_vision(&completion_request);
-        let system_instructions = completion_request.preamble.clone();
+    ) -> Result<responses_api::CompletionResponse, CompletionError> {
+        let facts = RequestFacts::capture(&completion_request);
         let request = self.responses_request(completion_request)?;
-        let auth = self.auth_context().await?;
+        let (req, span) = self
+            .signed_request(
+                &facts,
+                "/responses",
+                Transport::Http,
+                &request.model,
+                CompletionOperation::Chat,
+                serde_json::to_vec(&request)?,
+            )
+            .await?;
 
-        let headers = default_headers(&auth.api_key, initiator, has_vision, self.intent);
-        let req = apply_headers(
-            post_with_auth_base(&self.client, &auth, "/responses", Transport::Http)?,
-            &headers,
-        )
-        .body(serde_json::to_vec(&request)?)
-        .map_err(|err| CompletionError::HttpError(err.into()))?;
-
-        let span = CompletionSpanBuilder::new("copilot", &request.model, CompletionOperation::Chat)
-            .system_instructions(system_instructions.as_deref())
-            .build();
-
-        async move {
-            let response = self.client.send(req).await?;
-            let status = response.status();
-            if status.is_success() {
-                let body = http_client::text(response).await?;
-                let response = serde_json::from_str::<responses_api::CompletionResponse>(&body)?;
-                let core = completion::CompletionResponse::try_from(response.clone())?;
-
+        send_completion::<_, DirectPayload<responses_api::CompletionResponse>, _>(
+            &self.client,
+            req,
+            "Copilot responses completion",
+            // See the chat path: the OpenAI-compatible default header.
+            Some("x-request-id"),
+            |response| {
                 let span = tracing::Span::current();
                 span.record("gen_ai.response.id", response.id.as_str());
                 span.record("gen_ai.response.model", response.model.as_str());
                 if let Some(usage) = &response.usage {
-                    span.record("gen_ai.usage.input_tokens", usage.input_tokens);
-                    span.record("gen_ai.usage.output_tokens", usage.output_tokens);
-                    span.record(
-                        "gen_ai.usage.cache_read.input_tokens",
-                        usage
-                            .input_tokens_details
-                            .as_ref()
-                            .map(|details| details.cached_tokens)
-                            .unwrap_or(0),
-                    );
+                    span.record_token_usage(&usage.into());
                 }
-
-                Ok(completion::CompletionResponse {
-                    choice: core.choice,
-                    usage: core.usage,
-                    raw_response: CopilotCompletionResponse::Responses(Box::new(response)),
-                    message_id: core.message_id,
-                })
-            } else {
-                let body = http_client::text(response).await?;
-                Err(CompletionError::from_http_response(status, body))
-            }
-        }
+            },
+        )
         .instrument(span)
         .await
+        .map(|(mut payload, provider_request_id)| {
+            payload.provider_request_id = provider_request_id;
+            payload
+        })
     }
 
-    async fn stream_chat(
+    async fn raw_stream_chat(
         &self,
         completion_request: completion::CompletionRequest,
-    ) -> Result<StreamingCompletionResponse<CopilotStreamingResponse>, CompletionError> {
-        let initiator = request_initiator(&completion_request);
-        let has_vision = request_has_vision(&completion_request);
-        let system_instructions = completion_request.preamble.clone();
+    ) -> Result<crate::streaming::RawStreamingResult<CopilotStreamingResponse>, CompletionError>
+    {
+        let facts = RequestFacts::capture(&completion_request);
         let request = self.chat_request(completion_request)?;
-        let auth = self.auth_context().await?;
-        let headers = default_headers(&auth.api_key, initiator, has_vision, self.intent);
         let mut request_json = serde_json::to_value(&request)?;
         let request_object = request_json.as_object_mut().ok_or_else(|| {
             CompletionError::ResponseError("copilot request body must be a JSON object".into())
@@ -973,256 +900,141 @@ where
             json!({ "include_usage": true }),
         );
 
-        let req = apply_headers(
-            post_with_auth_base(&self.client, &auth, "/chat/completions", Transport::Sse)?,
-            &headers,
-        )
-        .body(serde_json::to_vec(&request_json)?)
-        .map_err(|err| CompletionError::HttpError(err.into()))?;
-
-        let span = CompletionSpanBuilder::new(
-            "copilot",
-            &request.model,
-            CompletionOperation::ChatStreaming,
-        )
-        .system_instructions(system_instructions.as_deref())
-        .build();
+        let (req, span) = self
+            .signed_request(
+                &facts,
+                "/chat/completions",
+                Transport::Sse,
+                &request.model,
+                CompletionOperation::ChatStreaming,
+                serde_json::to_vec(&request_json)?,
+            )
+            .await?;
 
         tracing::Instrument::instrument(
-            send_copilot_chat_streaming_request(self.client.clone(), req),
+            send_copilot_chat_raw_streaming_request(self.client.clone(), req),
             span,
         )
         .await
     }
 
-    async fn stream_responses(
+    async fn raw_stream_responses(
         &self,
         completion_request: completion::CompletionRequest,
-    ) -> Result<StreamingCompletionResponse<CopilotStreamingResponse>, CompletionError> {
-        let initiator = request_initiator(&completion_request);
-        let has_vision = request_has_vision(&completion_request);
-        let system_instructions = completion_request.preamble.clone();
+    ) -> Result<crate::streaming::RawStreamingResult<CopilotStreamingResponse>, CompletionError>
+    {
+        let facts = RequestFacts::capture(&completion_request);
+        // Built before `responses_request` consumes the request, which is where
+        // the control key is dropped. Copilot routes between two APIs and so
+        // implements no `ResponsesProviderExt`; this route must therefore read
+        // the caller's opt-in itself, which it previously did not, silently
+        // discarding it.
+        let options = responses_api::streaming::ResponsesStreamOptions::for_request(
+            &completion_request,
+            RESPONSES_EMITS_COMPLETE_TOOL_CALLS_IMMEDIATELY,
+        );
         let mut request = self.responses_request(completion_request)?;
         request.stream = Some(true);
-        let auth = self.auth_context().await?;
-
-        let headers = default_headers(&auth.api_key, initiator, has_vision, self.intent);
-        let req = apply_headers(
-            post_with_auth_base(&self.client, &auth, "/responses", Transport::Sse)?,
-            &headers,
-        )
-        .body(serde_json::to_vec(&request)?)
-        .map_err(|err| CompletionError::HttpError(err.into()))?;
-
-        let span = CompletionSpanBuilder::new(
-            "copilot",
-            &request.model,
-            CompletionOperation::ChatStreaming,
-        )
-        .system_instructions(system_instructions.as_deref())
-        .build();
+        let (req, span) = self
+            .signed_request(
+                &facts,
+                "/responses",
+                Transport::Sse,
+                &request.model,
+                CompletionOperation::ChatStreaming,
+                serde_json::to_vec(&request)?,
+            )
+            .await?;
 
         let client = self.client.clone();
-        let mut event_source = crate::http_client::sse::GenericEventSource::new(client, req);
+        // The OpenAI-compatible default header, matching the chat route.
+        let (event_source, request_id_slot) =
+            crate::http_client::sse::GenericEventSource::new(client, req)
+                .capture_request_id("x-request-id");
 
-        let stream = tracing_futures::Instrument::instrument(
-            stream! {
-                let mut final_usage = responses_api::ResponsesUsage::new();
-                let mut reasoning_metadata = None;
-                let mut reasoning_context = None;
-                let mut tool_calls: Vec<streaming::RawStreamingChoice<CopilotStreamingResponse>> = Vec::new();
-                let mut tool_call_internal_ids: HashMap<String, String> = HashMap::new();
-                let span = tracing::Span::current();
-
-                let mut terminated_with_error = false;
-
-                while let Some(event_result) = event_source.next().await {
-                    match event_result {
-                        Ok(crate::http_client::sse::Event::Open) => continue,
-                        Ok(crate::http_client::sse::Event::Message(evt)) => {
-                            if evt.data.trim().is_empty() {
-                                continue;
-                            }
-
-                            let Ok(data) = serde_json::from_str::<responses_api::streaming::StreamingCompletionChunk>(&evt.data) else {
-                                continue;
-                            };
-
-                            if let responses_api::streaming::StreamingCompletionChunk::Delta(chunk) = &data {
-                                use responses_api::streaming::{ItemChunkKind, StreamingItemDoneOutput};
-
-                                match &chunk.data {
-                                    ItemChunkKind::OutputItemAdded(message) => {
-                                        if let StreamingItemDoneOutput { item: responses_api::Output::FunctionCall(func), .. } = message {
-                                            let internal_call_id = tool_call_internal_ids
-                                                .entry(func.id.clone())
-                                                .or_insert_with(crate::id::generate)
-                                                .clone();
-                                            yield Ok(RawStreamingChoice::ToolCallDelta {
-                                                id: func.id.clone(),
-                                                internal_call_id,
-                                                content: streaming::ToolCallDeltaContent::Name(func.name.clone()),
-                                            });
-                                        }
-                                    }
-                                    ItemChunkKind::OutputItemDone(message) => match message {
-                                        StreamingItemDoneOutput { item: responses_api::Output::FunctionCall(func), .. } => {
-                                            let internal_id = tool_call_internal_ids
-                                                .entry(func.id.clone())
-                                                .or_insert_with(crate::id::generate)
-                                                .clone();
-                                            let raw_tool_call = streaming::RawStreamingToolCall::new(
-                                                func.id.clone(),
-                                                func.name.clone(),
-                                                func.arguments.as_value().clone(),
-                                            )
-                                            .with_internal_call_id(internal_id)
-                                            .with_call_id(func.call_id.clone());
-                                            tool_calls.push(RawStreamingChoice::ToolCall(raw_tool_call));
-                                        }
-                                        StreamingItemDoneOutput { item: responses_api::Output::Reasoning { summary, id, content, encrypted_content, .. }, .. } => {
-                                            for reasoning_choice in responses_api::streaming::reasoning_choices_from_done_item(
-                                                id,
-                                                summary,
-                                                content,
-                                                encrypted_content.as_deref(),
-                                            ) {
-                                                match reasoning_choice {
-                                                    RawStreamingChoice::Reasoning { id, content } => {
-                                                        yield Ok(RawStreamingChoice::Reasoning { id, content });
-                                                    }
-                                                    RawStreamingChoice::ReasoningDelta { id, reasoning } => {
-                                                        yield Ok(RawStreamingChoice::ReasoningDelta { id, reasoning });
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                        StreamingItemDoneOutput { item: responses_api::Output::Message(msg), .. } => {
-                                            yield Ok(RawStreamingChoice::MessageId(msg.id.clone()));
-                                        }
-                                        // Surface an unmodeled output item (e.g. a hosted-tool result) to the consumer verbatim.
-                                        StreamingItemDoneOutput { item: responses_api::Output::Unknown(value), .. } => {
-                                            yield Ok(RawStreamingChoice::Unknown(value.clone()));
-                                        }
-                                    },
-                                    ItemChunkKind::OutputTextDelta(delta) => {
-                                        yield Ok(RawStreamingChoice::Message(delta.delta.clone()))
-                                    }
-                                    ItemChunkKind::ReasoningSummaryTextDelta(delta) => {
-                                        yield Ok(RawStreamingChoice::ReasoningDelta { id: None, reasoning: delta.delta.clone() })
-                                    }
-                                    ItemChunkKind::RefusalDelta(delta) => {
-                                        yield Ok(RawStreamingChoice::Message(delta.delta.clone()))
-                                    }
-                                    ItemChunkKind::FunctionCallArgsDelta(delta) => {
-                                        if let Some(item_id) = chunk.item_id.as_ref() {
-                                            let internal_call_id = tool_call_internal_ids
-                                                .entry(item_id.clone())
-                                                .or_insert_with(crate::id::generate)
-                                                .clone();
-                                            yield Ok(RawStreamingChoice::ToolCallDelta {
-                                                id: item_id.clone(),
-                                                internal_call_id,
-                                                content: streaming::ToolCallDeltaContent::Delta(delta.delta.clone())
-                                            })
-                                        }
-                                    }
-                                    _ => continue,
-                                }
-                            }
-
-                            if let responses_api::streaming::StreamingCompletionChunk::Response(chunk) = data {
-                                let responses_api::streaming::ResponseChunk { kind, response, .. } = *chunk;
-                                match kind {
-                                    responses_api::streaming::ResponseChunkKind::ResponseCompleted => {
-                                        span.record("gen_ai.response.id", response.id.as_str());
-                                        span.record("gen_ai.response.model", response.model.as_str());
-                                        if let Some(usage) = response.usage {
-                                            final_usage = usage;
-                                        }
-                                        if response.reasoning_metadata.is_some() {
-                                            reasoning_metadata = response.reasoning_metadata;
-                                        }
-                                        if response.reasoning_context.is_some() {
-                                            reasoning_context = response.reasoning_context;
-                                        }
-                                    }
-                                    responses_api::streaming::ResponseChunkKind::ResponseFailed
-                                    | responses_api::streaming::ResponseChunkKind::ResponseIncomplete => {
-                                        terminated_with_error = true;
-                                        // Deliberate two-tier behaviour matching the OpenAI Responses
-                                        // SSE path: when the provider supplies an error object we
-                                        // preserve the raw event JSON via `completion_error_from_body`
-                                        // so the `provider_response_*` helpers surface the full payload
-                                        // (code + message). The error arrives over an established 2xx
-                                        // stream, so there is no HTTP status to attach (status: None).
-                                        // When the object is absent we emit a Rig-authored
-                                        // `ProviderError` diagnostic (provider_response_body() is None).
-                                        match response.error.as_ref() {
-                                            Some(_) => yield Err(
-                                                crate::provider_response::completion_error_from_body(
-                                                    evt.data.clone(),
-                                                ),
-                                            ),
-                                            None => yield Err(CompletionError::ProviderError(
-                                                "Copilot response stream failed".into(),
-                                            )),
-                                        }
-                                        break;
-                                    }
-                                    _ => continue,
-                                }
-                            }
-                        }
-                        Err(crate::http_client::Error::StreamEnded) => {
-                            break;
-                        }
-                        Err(error) => {
-                            terminated_with_error = true;
-                            yield Err(CompletionError::from_stream_transport(error));
-                            break;
-                        }
-                    }
-                }
-
-                event_source.close();
-
-                if terminated_with_error {
-                    return;
-                }
-
-                for tool_call in &tool_calls {
-                    yield Ok(tool_call.to_owned())
-                }
-
-                span.record("gen_ai.usage.input_tokens", final_usage.input_tokens);
-                span.record("gen_ai.usage.output_tokens", final_usage.output_tokens);
-                span.record(
-                    "gen_ai.usage.cache_read.input_tokens",
-                    final_usage
-                        .input_tokens_details
-                        .as_ref()
-                        .map(|details| details.cached_tokens)
-                        .unwrap_or(0),
-                );
-
-                yield Ok(RawStreamingChoice::FinalResponse(
-                    CopilotStreamingResponse::Responses(
-                        responses_api::streaming::StreamingCompletionResponse {
-                            usage: final_usage,
-                            status: None,
-                            incomplete_details: None,
-                            reasoning_metadata,
-                            reasoning_context,
-                        }
-                    )
-                ));
-            },
-            span,
+        // Copilot's `/responses` route relays OpenAI's Responses SSE wire
+        // verbatim, so the shared classify + `RawChoiceAccumulator` machinery
+        // is the event interpreter — only the auth/transport above and the
+        // route-carrying terminal wrapper below are Copilot-specific.
+        let raw =
+            responses_api::streaming::raw_stream_from_event_source(event_source, span, options);
+        let raw = crate::providers::internal::sse_transport::stamp_terminal_request_id(
+            raw,
+            Some(request_id_slot),
+            Some("x-request-id"),
+            |response, id| response.provider_request_id = Some(id),
         );
+        let stream = raw.map(|item| {
+            item.and_then(|choice| {
+                choice.try_map_final(|response| Ok(CopilotStreamingResponse::Responses(response)))
+            })
+        });
 
-        Ok(StreamingCompletionResponse::stream(Box::pin(stream)))
+        Ok(Box::pin(stream))
+    }
+
+    /// Execute a completion on whichever route this model is configured for and
+    /// return Copilot's own wire response.
+    ///
+    /// This is the escape hatch for fields rig does not normalize;
+    /// [`completion::CompletionModel::completion`] shares the same request,
+    /// transport, telemetry and error path.
+    pub async fn raw_completion(
+        &self,
+        completion_request: completion::CompletionRequest,
+    ) -> Result<CopilotCompletionResponse, CompletionError> {
+        match self.route() {
+            CompletionRoute::ChatCompletions => self
+                .raw_completion_chat(completion_request)
+                .await
+                // The chat wire type has no transport-metadata slot; the
+                // captured id is a normalized-surface concern.
+                .map(|(response, _)| CopilotCompletionResponse::Chat(Box::new(response))),
+            CompletionRoute::Responses => self
+                .raw_completion_responses(completion_request)
+                .await
+                .map(|response| CopilotCompletionResponse::Responses(Box::new(response))),
+        }
+    }
+
+    /// Open a stream on whichever route this model is configured for, keeping
+    /// the terminal record provider-native.
+    pub async fn raw_stream(
+        &self,
+        completion_request: completion::CompletionRequest,
+    ) -> Result<crate::streaming::RawStreamingResult<CopilotStreamingResponse>, CompletionError>
+    {
+        match self.route() {
+            CompletionRoute::ChatCompletions => self.raw_stream_chat(completion_request).await,
+            CompletionRoute::Responses => self.raw_stream_responses(completion_request).await,
+        }
+    }
+
+    /// Open a stream normalized to rig's terminal record. Delegates to
+    /// [`CompletionModel::raw_stream`] — one request either way.
+    async fn stream_normalized(
+        &self,
+        completion_request: completion::CompletionRequest,
+    ) -> Result<StreamingCompletionResponse, CompletionError> {
+        let raw = self.raw_stream(completion_request).await?;
+
+        Ok(StreamingCompletionResponse::stream(
+            PROVIDER_NAME,
+            crate::streaming::normalize_stream(
+                raw,
+                |response| Ok((PROVIDER_NAME, response).into()),
+            ),
+        ))
+    }
+}
+
+impl<H> crate::client::ConstructCompletionModel<Client<H>> for CompletionModel<H>
+where
+    Client<H>: HttpClientExt + Clone + Debug + 'static,
+    H: Clone + Default + Debug + WasmCompatSend + WasmCompatSync + 'static,
+{
+    fn construct(client: &Client<H>, model: String) -> Self {
+        Self::new(client.clone(), model)
     }
 }
 
@@ -1231,32 +1043,31 @@ where
     Client<H>: HttpClientExt + Clone + Debug + 'static,
     H: Clone + Default + Debug + WasmCompatSend + WasmCompatSync + 'static,
 {
-    type Response = CopilotCompletionResponse;
-    type StreamingResponse = CopilotStreamingResponse;
-    type Client = Client<H>;
-
-    fn make(client: &Self::Client, model: impl Into<String>) -> Self {
-        Self::new(client.clone(), model)
-    }
-
     async fn completion(
         &self,
         completion_request: completion::CompletionRequest,
-    ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError> {
+    ) -> Result<completion::CompletionResponse, CompletionError> {
         match self.route() {
-            CompletionRoute::ChatCompletions => self.completion_chat(completion_request).await,
-            CompletionRoute::Responses => self.completion_responses(completion_request).await,
+            CompletionRoute::ChatCompletions => {
+                let (response, provider_request_id) =
+                    self.raw_completion_chat(completion_request).await?;
+                Ok(response
+                    .normalize(PROVIDER_NAME)?
+                    .with_optional_provider_request_id(provider_request_id))
+            }
+            // The responses wire type carries the id; `normalize` maps it.
+            CompletionRoute::Responses => self
+                .raw_completion_responses(completion_request)
+                .await?
+                .normalize(PROVIDER_NAME),
         }
     }
 
     async fn stream(
         &self,
         completion_request: completion::CompletionRequest,
-    ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
-        match self.route() {
-            CompletionRoute::ChatCompletions => self.stream_chat(completion_request).await,
-            CompletionRoute::Responses => self.stream_responses(completion_request).await,
-        }
+    ) -> Result<StreamingCompletionResponse, CompletionError> {
+        self.stream_normalized(completion_request).await
     }
 }
 
@@ -1272,6 +1083,9 @@ pub struct EmbeddingModel<H = reqwest::Client> {
 #[derive(Deserialize)]
 struct CopilotEmbeddingResponse {
     data: Vec<CopilotEmbeddingData>,
+    // Copilot fronts several vendors, so usage is not guaranteed on the wire.
+    #[serde(default)]
+    usage: Option<openai::completion::Usage>,
 }
 
 #[derive(Deserialize)]
@@ -1321,6 +1135,15 @@ where
         &self,
         documents: impl IntoIterator<Item = String>,
     ) -> Result<Vec<embeddings::Embedding>, EmbeddingError> {
+        let documents = documents.into_iter().collect::<Vec<_>>();
+        let response = self.embed_texts_with_usage(documents).await?;
+        Ok(response.embeddings)
+    }
+
+    async fn embed_texts_with_usage(
+        &self,
+        documents: impl IntoIterator<Item = String>,
+    ) -> Result<embeddings::EmbeddingResponse, EmbeddingError> {
         let documents = documents.into_iter().collect::<Vec<_>>();
         let auth = self
             .client
@@ -1395,7 +1218,15 @@ where
                 }
             };
 
-            Ok(body
+            // Embeddings consume only prompt tokens, so a missing usage
+            // payload normalizes to the documented zero-usage sentinel.
+            let usage = body
+                .usage
+                .as_ref()
+                .map(|usage| usage.to_normalized())
+                .unwrap_or_default();
+
+            let embeddings = body
                 .data
                 .into_iter()
                 .zip(documents.into_iter())
@@ -1407,7 +1238,9 @@ where
                         .filter_map(|n| n.as_f64())
                         .collect(),
                 })
-                .collect())
+                .collect();
+
+            Ok(embeddings::EmbeddingResponse { embeddings, usage })
         } else {
             let text = http_client::text(response).await?;
             Err(EmbeddingError::from_http_response(status, text))
@@ -1482,186 +1315,63 @@ where
         )
         .body(http_client::NoBody)?;
 
-        let response = self.client.send::<_, Vec<u8>>(req).await?;
-
-        if !response.status().is_success() {
-            let status_code = response.status().as_u16();
-            let body = response.into_body().await?;
-            return Err(ModelListingError::api_error_with_context(
+        let response = self.client.send::<_, Vec<u8>>(req).await.map_err(|error| {
+            crate::providers::internal::model_listing::map_transport_error(
                 MODEL_LISTING_PROVIDER,
                 MODEL_LISTING_PATH,
-                status_code,
-                &body,
-            ));
-        }
-
-        let body = response.into_body().await?;
-        let api_resp: ListModelsResponse = serde_json::from_slice(&body).map_err(|error| {
-            ModelListingError::parse_error_with_context(
-                MODEL_LISTING_PROVIDER,
-                MODEL_LISTING_PATH,
-                &error,
-                &body,
+                error,
             )
         })?;
+
+        let api_resp: ListModelsResponse =
+            crate::providers::internal::model_listing::decode_json_response(
+                response,
+                MODEL_LISTING_PROVIDER,
+                MODEL_LISTING_PATH,
+            )
+            .await?;
         let models = api_resp.data.into_iter().map(Model::from).collect();
 
         Ok(ModelList::new(models))
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct ChatStreamingFunction {
-    name: Option<String>,
-    arguments: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
-struct ChatStreamingToolCall {
-    index: usize,
-    id: Option<String>,
-    function: ChatStreamingFunction,
-}
-
-impl From<&ChatStreamingToolCall> for CompatibleToolCallChunk {
-    fn from(value: &ChatStreamingToolCall) -> Self {
-        Self {
-            index: value.index,
-            id: value.id.clone(),
-            name: value.function.name.clone(),
-            arguments: value.function.arguments.clone(),
-        }
-    }
-}
-
-#[derive(Deserialize, Debug, Default)]
-struct ChatStreamingDelta {
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    reasoning_content: Option<String>,
-    #[serde(default, deserialize_with = "crate::json_utils::null_or_vec")]
-    tool_calls: Vec<ChatStreamingToolCall>,
-}
-
-#[derive(Deserialize, Debug, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum ChatFinishReason {
-    ToolCalls,
-    Stop,
-    ContentFilter,
-    Length,
-    #[serde(untagged)]
-    Other(String),
-}
-
-#[derive(Deserialize, Debug)]
-struct ChatStreamingChoice {
-    delta: ChatStreamingDelta,
-    finish_reason: Option<ChatFinishReason>,
-}
-
-#[derive(Deserialize, Debug)]
-struct ChatStreamingChunk {
-    id: Option<String>,
-    model: Option<String>,
-    choices: Vec<ChatStreamingChoice>,
-    usage: Option<openai::completion::Usage>,
-}
-
-#[derive(Clone, Copy)]
-struct CopilotChatCompatibleProfile;
-
-impl CompatibleStreamProfile for CopilotChatCompatibleProfile {
-    type Usage = openai::completion::Usage;
-    type Detail = ();
-    type FinalResponse = CopilotStreamingResponse;
-
-    fn normalize_chunk(
-        &self,
-        data: &str,
-    ) -> Result<Option<CompatibleChunk<Self::Usage, Self::Detail>>, CompletionError> {
-        let data = match serde_json::from_str::<ChatStreamingChunk>(data) {
-            Ok(data) => data,
-            Err(error) => {
-                tracing::debug!(?error, "Couldn't parse Copilot chat SSE payload");
-                return Ok(None);
-            }
-        };
-
-        Ok(Some(
-            openai_chat_completions_compatible::normalize_first_choice_chunk(
-                data.id,
-                data.model,
-                data.usage,
-                &data.choices,
-                |choice| CompatibleChoiceData {
-                    finish_reason: if choice.finish_reason == Some(ChatFinishReason::ToolCalls) {
-                        CompatibleFinishReason::ToolCalls
-                    } else {
-                        CompatibleFinishReason::Other
-                    },
-                    text: choice.delta.content.clone(),
-                    reasoning: choice.delta.reasoning_content.clone(),
-                    tool_calls: openai_chat_completions_compatible::tool_call_chunks(
-                        &choice.delta.tool_calls,
-                    ),
-                    details: Vec::new(),
-                },
-            ),
-        ))
-    }
-
-    fn build_final_response(&self, usage: Self::Usage) -> Self::FinalResponse {
-        CopilotStreamingResponse::Chat(openai::completion::streaming::StreamingCompletionResponse {
-            usage,
-        })
-    }
-
-    fn uses_distinct_tool_call_eviction(&self) -> bool {
-        true
-    }
-}
-
-async fn send_copilot_chat_streaming_request<T>(
+async fn send_copilot_chat_raw_streaming_request<T>(
     http_client: T,
     req: Request<Vec<u8>>,
-) -> Result<StreamingCompletionResponse<CopilotStreamingResponse>, CompletionError>
+) -> Result<crate::streaming::RawStreamingResult<CopilotStreamingResponse>, CompletionError>
 where
     T: HttpClientExt + Clone + 'static,
 {
-    openai_chat_completions_compatible::send_compatible_streaming_request(
-        http_client,
-        req,
-        CopilotChatCompatibleProfile,
-    )
-    .await
+    // Copilot's `/chat/completions` route relays OpenAI's chat-completions
+    // SSE wire verbatim, so OpenAI's shared streaming profile (tolerant
+    // deserializers, reasoning handling, finish-reason mapping) is the event
+    // interpreter — only the auth/transport in the caller and the
+    // route-carrying terminal wrapper below are Copilot-specific.
+    let raw =
+        openai::completion::streaming::send_compatible_raw_streaming_request(http_client, req)
+            .await?;
+    let stream = raw.map(|item| {
+        item.and_then(|choice| {
+            choice.try_map_final(|response| Ok(CopilotStreamingResponse::Chat(response)))
+        })
+    });
+
+    Ok(Box::pin(stream))
 }
 
 fn default_token_dir() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("github_copilot"))
 }
 
-fn config_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-    }
-}
+use crate::providers::internal::auth::config_dir;
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatApiErrorResponse, ChatCompletionResponse, Client, CompletionRoute, CopilotIntent,
-        TEXT_EMBEDDING_3_SMALL, base_url_from_token, default_headers, env_api_key, env_base_url,
-        env_github_access_token, route_for_model,
+        ChatApiErrorResponse, Client, CompletionRoute, CopilotIntent, TEXT_EMBEDDING_3_SMALL,
+        base_url_from_token, default_headers, env_api_key, env_base_url, env_github_access_token,
+        route_for_model,
     };
     use crate::client::CompletionClient;
     use crate::completion::CompletionModel;
@@ -1669,6 +1379,7 @@ mod tests {
     use crate::providers::internal::openai_chat_completions_compatible::test_support::{
         sse_bytes_from_data_lines, sse_bytes_from_json_events,
     };
+    use crate::providers::openai;
     use crate::streaming::StreamedAssistantContent;
     use crate::test_utils::MockStreamingClient;
     use crate::test_utils::{RecordingHttpClient, SequencedStreamingHttpClient};
@@ -1772,24 +1483,25 @@ mod tests {
             }
         }"#;
 
-        let response: ChatCompletionResponse =
+        let response: openai::completion::CompletionResponse =
             serde_json::from_str(json).expect("standard OpenAI response should deserialize");
         assert_eq!(response.id, "chatcmpl-abc123");
-        assert_eq!(response.object.as_deref(), Some("chat.completion"));
-        assert_eq!(response.created, Some(1700000000));
+        assert_eq!(response.object, "chat.completion");
+        assert_eq!(response.created, 1700000000);
         assert_eq!(response.model, "gpt-4o");
         assert_eq!(response.choices.len(), 1);
-        assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(response.choices[0].finish_reason, "stop");
     }
 
     #[test]
     fn deserialize_copilot_response_without_object_and_created() {
-        let response: ChatCompletionResponse = serde_json::from_str(minimal_chat_response())
-            .expect("Copilot response should deserialize");
+        let response: openai::completion::CompletionResponse =
+            serde_json::from_str(minimal_chat_response())
+                .expect("Copilot response should deserialize");
 
         assert_eq!(response.id, "chatcmpl-123");
-        assert_eq!(response.object, None);
-        assert_eq!(response.created, None);
+        assert_eq!(response.object, "");
+        assert_eq!(response.created, 0);
         assert_eq!(response.model, "gpt-4o");
         assert_eq!(response.choices.len(), 1);
     }
@@ -1811,11 +1523,11 @@ mod tests {
             }
         }"#;
 
-        let response: ChatCompletionResponse =
+        let response: openai::completion::CompletionResponse =
             serde_json::from_str(json).expect("Claude-via-Copilot response should deserialize");
 
         assert_eq!(response.model, "claude-3.5-sonnet");
-        assert_eq!(response.choices[0].finish_reason, None);
+        assert_eq!(response.choices[0].finish_reason, "");
         assert_eq!(response.choices[0].index, 0);
     }
 
@@ -2074,6 +1786,7 @@ mod tests {
     async fn responses_stream_terminates_after_terminal_error() {
         let tool_call_done = serde_json::json!({
             "type": "response.output_item.done",
+            "output_index": 0,
             "sequence_number": 1,
             "item": {
                 "type": "function_call",
@@ -2117,8 +1830,24 @@ mod tests {
         let request = model.completion_request("hello").build();
         let mut stream = model.stream(request).await.expect("stream should start");
 
+        // The fully-delivered tool call is content, so it is flushed *before*
+        // the terminal error: consumers that stop at the first `Err` still
+        // see the completed work.
+        let tool_call = stream
+            .next()
+            .await
+            .expect("fully-delivered tool call should be flushed before the error")
+            .expect("flushed tool call should not be an error");
+        assert!(
+            matches!(
+                tool_call,
+                StreamedAssistantContent::ToolCall { ref tool_call, .. }
+                    if tool_call.function.name == "example_tool"
+            ),
+            "expected the flushed tool call, got {tool_call:?}"
+        );
         let err = match stream.next().await.expect("stream should yield an item") {
-            Ok(_) => panic!("stream should surface a provider error"),
+            Ok(item) => panic!("stream should surface a provider error, got {item:?}"),
             Err(err) => err,
         };
         // The terminal `response.failed` event carries the provider's error
@@ -2150,7 +1879,347 @@ mod tests {
         );
         assert!(
             stream.next().await.is_none(),
-            "responses stream should terminate immediately after a terminal error"
+            "responses stream should end without a terminal record after a terminal error"
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_stream_object_less_failed_still_attaches_the_raw_event() {
+        // #2258 F4 decision: the old Copilot code kept a deliberate two-tier
+        // shape — `response.failed` WITHOUT an error object surfaced as a
+        // `ProviderError` with `provider_response_body() == None`. The shared
+        // Responses interpreter unifies this: the raw event body is ALWAYS
+        // attached, error object or not, so callers can inspect what the
+        // provider actually sent. Documented in MIGRATING.
+        let failed = serde_json::json!({
+            "type": "response.failed",
+            "sequence_number": 1,
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "created_at": 1700000000,
+                "status": "failed",
+                "error": null,
+                "incomplete_details": null,
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-5.3-codex",
+                "usage": null,
+                "output": [],
+                "tools": []
+            }
+        });
+        let http_client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_json_events(&[failed]),
+        };
+        let client = Client::builder()
+            .api_key("copilot-token")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-5.3-codex");
+        let request = model.completion_request("hello").build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        let err = match stream.next().await.expect("stream should yield an item") {
+            Ok(item) => panic!("stream should surface a provider error, got {item:?}"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            crate::completion::CompletionError::ProviderResponse(_)
+        ));
+        assert_eq!(err.provider_response_status(), None);
+        assert!(
+            err.provider_response_body()
+                .is_some_and(|body| body.contains("response.failed")),
+            "an object-less response.failed must still carry the raw event body"
+        );
+        assert!(
+            stream.next().await.is_none(),
+            "responses stream should end after the terminal error"
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_stream_incomplete_is_a_terminal_with_partial_content() {
+        // The content exists only in the delta; the terminal
+        // `response.incomplete` body has an empty `output`.
+        let text_delta = serde_json::json!({
+            "type": "response.output_text.delta",
+            "content_index": 0,
+            "delta": "partial",
+            "item_id": "msg_1",
+            "logprobs": [],
+            "output_index": 0,
+            "sequence_number": 1
+        });
+        let incomplete = serde_json::json!({
+            "type": "response.incomplete",
+            "sequence_number": 2,
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "created_at": 1700000000,
+                "status": "incomplete",
+                "error": null,
+                "incomplete_details": { "reason": "max_output_tokens" },
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-5.3-codex",
+                "usage": { "input_tokens": 1, "output_tokens": 2, "total_tokens": 3 },
+                "output": [],
+                "tools": []
+            }
+        });
+        let http_client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_json_events(&[text_delta, incomplete]),
+        };
+        let client = Client::builder()
+            .api_key("copilot-token")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-5.3-codex");
+        // The merged crate keeps the strict default, so this route's tolerance
+        // is a per-request opt-in. It reads the key itself; before it did, this
+        // was inert here and the stream errored.
+        let request = model
+            .completion_request("hello")
+            .additional_params(serde_json::json!({
+                crate::providers::openai::responses_api::RESPONSES_TOLERATE_INCOMPLETE_KEY: true
+            }))
+            .build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        let mut text = String::new();
+        let mut terminal = None;
+        while let Some(item) = stream.next().await {
+            match item.expect("incomplete turn should not surface an error") {
+                StreamedAssistantContent::Text(chunk) => text.push_str(&chunk.text),
+                StreamedAssistantContent::Final(final_response) => terminal = Some(final_response),
+                other => panic!("unexpected stream item: {other:?}"),
+            }
+        }
+
+        assert_eq!(text, "partial");
+        let terminal = terminal.expect("incomplete turn should emit a terminal record");
+        assert_eq!(
+            terminal.finish_reason,
+            Some(crate::completion::FinishReason::Length)
+        );
+        assert_eq!(terminal.usage.input_tokens, 1);
+        assert_eq!(terminal.usage.output_tokens, 2);
+        assert_eq!(terminal.usage.total_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn responses_stream_incomplete_errors_without_the_opt_in() {
+        // The strict default, on the same wire the tolerant companion above
+        // drives. This route reads the opt-in itself rather than inheriting the
+        // generic boundary's read, so both polarities are asserted here.
+        let text_delta = serde_json::json!({
+            "type": "response.output_text.delta",
+            "content_index": 0,
+            "delta": "partial",
+            "item_id": "msg_1",
+            "logprobs": [],
+            "output_index": 0,
+            "sequence_number": 1
+        });
+        let incomplete = serde_json::json!({
+            "type": "response.incomplete",
+            "sequence_number": 2,
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "created_at": 1700000000,
+                "status": "incomplete",
+                "error": null,
+                "incomplete_details": { "reason": "max_output_tokens" },
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-5.3-codex",
+                "usage": { "input_tokens": 1, "output_tokens": 2, "total_tokens": 3 },
+                "output": [],
+                "tools": []
+            }
+        });
+        let http_client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_json_events(&[text_delta, incomplete]),
+        };
+        let client = Client::builder()
+            .api_key("copilot-token")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-5.3-codex");
+        let request = model.completion_request("hello").build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        let mut error = None;
+        while let Some(item) = stream.next().await {
+            if let Err(surfaced) = item {
+                error = Some(surfaced);
+                break;
+            }
+        }
+
+        let error = error.expect("the strict default must surface a provider error");
+        assert!(matches!(
+            error,
+            crate::completion::CompletionError::ProviderResponse(_)
+        ));
+        assert!(error.provider_response_body().is_some_and(|body| {
+            body.contains("response.incomplete") && body.contains("max_output_tokens")
+        }));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_surfaces_malformed_frame_and_still_completes() {
+        let http_client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines([
+                "{\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}],\"usage\":null}",
+                "{not valid json",
+                "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}",
+                "[DONE]",
+            ]),
+        };
+        let client = Client::builder()
+            .api_key("copilot-token")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-4o");
+        let request = model.completion_request("hello").build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        let mut text = String::new();
+        let mut saw_error = false;
+        let mut terminal = None;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(StreamedAssistantContent::Text(chunk)) => text.push_str(&chunk.text),
+                Ok(StreamedAssistantContent::Final(final_response)) => {
+                    terminal = Some(final_response)
+                }
+                Ok(other) => panic!("unexpected stream item: {other:?}"),
+                Err(err) => {
+                    assert!(
+                        matches!(err, crate::completion::CompletionError::JsonError(_)),
+                        "expected a JSON parse error item, got {err:?}"
+                    );
+                    saw_error = true;
+                }
+            }
+        }
+
+        // The malformed frame is surfaced as an error item, and the content
+        // and genuine terminal on either side of it both still arrive.
+        assert_eq!(text, "hello");
+        assert!(saw_error, "malformed frame should surface an error item");
+        let terminal = terminal.expect("stream should still emit its terminal record");
+        assert_eq!(
+            terminal.finish_reason,
+            Some(crate::completion::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_surfaces_recognizable_chunk_with_malformed_field() {
+        // The frame is recognizably a chat completion chunk (it has
+        // `choices`), but the payload fails the full parse — a data-level
+        // defect surfaced as an error item, not a skippable unknown event.
+        let http_client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines([
+                "{\"object\":\"chat.completion.chunk\",\"choices\":42}",
+                "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}",
+                "[DONE]",
+            ]),
+        };
+        let client = Client::builder()
+            .api_key("copilot-token")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-4o");
+        let request = model.completion_request("hello").build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        let mut saw_error = false;
+        let mut terminal = None;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(StreamedAssistantContent::Final(final_response)) => {
+                    terminal = Some(final_response)
+                }
+                Ok(other) => panic!("unexpected stream item: {other:?}"),
+                Err(err) => {
+                    assert!(
+                        matches!(err, crate::completion::CompletionError::JsonError(_)),
+                        "expected a JSON parse error item, got {err:?}"
+                    );
+                    saw_error = true;
+                }
+            }
+        }
+
+        assert!(
+            saw_error,
+            "a recognizable chunk with a malformed field should surface an error item"
+        );
+        let terminal = terminal.expect("stream should still emit its terminal record");
+        assert_eq!(
+            terminal.finish_reason,
+            Some(crate::completion::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_skips_unrecognized_event_and_still_completes() {
+        // Valid JSON that is not recognizably a chat completion chunk (no
+        // `choices`, no `"object": "chat.completion.chunk"`) is an event this
+        // client doesn't know yet — skipped semantically for forward
+        // compatibility, surfaced verbatim on the raw passthrough channel.
+        let http_client = MockStreamingClient {
+            sse_bytes: sse_bytes_from_data_lines([
+                "{\"type\":\"copilot.heartbeat\",\"payload\":{}}",
+                "{\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}],\"usage\":null}",
+                "{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}",
+                "[DONE]",
+            ]),
+        };
+        let client = Client::builder()
+            .api_key("copilot-token")
+            .http_client(http_client)
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-4o");
+        let request = model.completion_request("hello").build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        let mut text = String::new();
+        let mut terminal = None;
+        let mut unknown = None;
+        while let Some(item) = stream.next().await {
+            match item.expect("unrecognized events must not surface errors") {
+                StreamedAssistantContent::Text(chunk) => text.push_str(&chunk.text),
+                StreamedAssistantContent::Final(final_response) => terminal = Some(final_response),
+                StreamedAssistantContent::Unknown(value) => unknown = Some(value),
+                other => panic!("unexpected stream item: {other:?}"),
+            }
+        }
+
+        assert_eq!(text, "hello");
+        assert_eq!(
+            unknown,
+            Some(serde_json::json!({"type": "copilot.heartbeat", "payload": {}}).into()),
+            "the unrecognized frame must surface verbatim on the raw channel"
+        );
+        let terminal = terminal.expect("stream should still emit its terminal record");
+        assert_eq!(
+            terminal.finish_reason,
+            Some(crate::completion::FinishReason::Stop)
         );
     }
 
@@ -2191,12 +2260,17 @@ mod tests {
             .expect("build client");
         let model = client.completion_model("gpt-5.3-codex");
         let request = model.completion_request("hello").build();
-        let mut stream = model.stream(request).await.expect("stream should start");
+        // Reasoning metadata is Copilot's own terminal payload, not part of
+        // the normalized `StreamFinal`, so this reads it through `raw_stream`.
+        let mut stream = model
+            .raw_stream(request)
+            .await
+            .expect("stream should start");
 
         while let Some(item) = stream.next().await {
-            if let StreamedAssistantContent::Final(super::CopilotStreamingResponse::Responses(
-                response,
-            )) = item.expect("completed stream should not error")
+            if let crate::streaming::RawStreamingChoice::FinalResponse(
+                super::CopilotStreamingResponse::Responses(response),
+            ) = item.expect("completed stream should not error")
             {
                 assert_eq!(response.reasoning_context.as_deref(), Some("all_turns"));
                 assert_eq!(response.reasoning_metadata.as_ref(), metadata.as_object());
@@ -2228,10 +2302,24 @@ mod tests {
         let request = model.completion_request("hello").build();
         let mut stream = model.stream(request).await.expect("stream should start");
 
+        // The fully-delivered tool call is content, so it is flushed *before*
+        // the terminal error: consumers that stop at the first `Err` still
+        // see the completed work.
         let mut saw_error = false;
+        let mut saw_tool_call = false;
         while let Some(item) = stream.next().await {
             match item {
-                Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {}
+                Ok(StreamedAssistantContent::ToolCallDelta { .. }) => {
+                    assert!(!saw_error, "deltas should precede the terminal error");
+                }
+                Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
+                    assert!(
+                        !saw_error,
+                        "flushed tool call should precede the terminal error"
+                    );
+                    assert_eq!(tool_call.function.name, "ping");
+                    saw_tool_call = true;
+                }
                 Err(err) => {
                     assert_eq!(
                         err.to_string(),
@@ -2243,16 +2331,19 @@ mod tests {
                     );
                     assert_eq!(err.provider_response_body(), None);
                     saw_error = true;
-                    break;
                 }
-                Ok(_) => panic!("unexpected non-error stream item before transport failure"),
+                Ok(other) => panic!("unexpected stream item: {other:?}"),
             }
         }
 
+        assert!(
+            saw_tool_call,
+            "fully-delivered tool call should be flushed before the error"
+        );
         assert!(saw_error, "stream should surface the transport error");
         assert!(
             stream.next().await.is_none(),
-            "chat stream should terminate immediately after a transport error"
+            "chat stream should end without a terminal record after a transport error"
         );
     }
 
@@ -2319,5 +2410,78 @@ mod tests {
             env_github_access_token(&get).as_deref(),
             Some("bootstrap-token")
         );
+    }
+}
+
+#[cfg(test)]
+mod response_identity_tests {
+    use super::*;
+
+    /// Both Copilot routes' streaming terminals carry the transport request id
+    /// (stamped by the shared SSE capture) into the normalized `StreamFinal`.
+    /// Deterministic and credential-free: the transport halves — the shared
+    /// OpenAI chat wrapper's capture and `stamp_terminal_request_id` on the
+    /// Responses route — are covered by the shared-path tests; this locks the
+    /// Copilot-specific conversion layer.
+    #[test]
+    fn streaming_terminals_carry_request_id_into_stream_final() {
+        let mut chat_terminal = openai::completion::streaming::StreamingCompletionResponse::<
+            openai::completion::Usage,
+        >::new(openai::completion::Usage::default());
+        chat_terminal.provider_request_id = Some("req-chat".to_string());
+        let chat_final: crate::streaming::StreamFinal =
+            (PROVIDER_NAME, CopilotStreamingResponse::Chat(chat_terminal)).into();
+        assert_eq!(chat_final.provider_request_id.as_deref(), Some("req-chat"));
+
+        let mut responses_terminal = responses_api::streaming::StreamingCompletionResponse::new(
+            serde_json::from_value(
+                serde_json::json!({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}),
+            )
+            .expect("usage should parse"),
+        );
+        responses_terminal.provider_request_id = Some("req-responses".to_string());
+        let responses_final: crate::streaming::StreamFinal = (
+            PROVIDER_NAME,
+            CopilotStreamingResponse::Responses(responses_terminal),
+        )
+            .into();
+        assert_eq!(
+            responses_final.provider_request_id.as_deref(),
+            Some("req-responses")
+        );
+    }
+
+    /// The Responses-route unary wire type carries the stamped id through
+    /// `normalize` into the core response; the chat route has no wire slot,
+    /// so `completion()` stamps the normalized response from the returned
+    /// pair — asserted here at the conversion layer for the responses half.
+    #[test]
+    fn responses_unary_wire_id_survives_normalize() {
+        use crate::completion::NormalizeCompletionResponse;
+
+        let payload = serde_json::json!({
+            "id": "resp_123",
+            "object": "response",
+            "created_at": 0,
+            "status": "completed",
+            "model": "gpt-test",
+            "output": [{
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "hi", "annotations": []}]
+            }]
+        });
+        let mut response: responses_api::CompletionResponse =
+            serde_json::from_value(payload).expect("wire response should parse");
+        response.provider_request_id = Some("req-unary".to_string());
+
+        let normalized = response
+            .normalize(PROVIDER_NAME)
+            .expect("response should normalize");
+        assert_eq!(normalized.provider_request_id.as_deref(), Some("req-unary"));
+        assert_eq!(normalized.response_id.as_deref(), Some("resp_123"));
+        assert_eq!(normalized.provider, PROVIDER_NAME);
     }
 }

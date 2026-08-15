@@ -1,7 +1,7 @@
 use rig::prelude::*;
 use rig::{
     agent::Agent,
-    completion::{CompletionError, CompletionModel, Prompt, PromptError},
+    completion::{CompletionError, Prompt, PromptError},
     extractor::Extractor,
     message::Message,
     providers::anthropic,
@@ -21,12 +21,12 @@ struct ChainOfThoughtSteps {
     steps: Vec<String>,
 }
 
-struct ReasoningAgent<M: CompletionModel> {
-    chain_of_thought_extractor: Extractor<M, ChainOfThoughtSteps>,
-    executor: Agent<M>,
+struct ReasoningAgent {
+    chain_of_thought_extractor: Extractor<ChainOfThoughtSteps>,
+    executor: Agent,
 }
 
-impl<M: CompletionModel + 'static> Prompt for ReasoningAgent<M> {
+impl Prompt for ReasoningAgent {
     #[allow(refining_impl_trait)]
     async fn prompt(&self, prompt: impl Into<Message> + Send) -> Result<String, PromptError> {
         let prompt: Message = prompt.into();
@@ -146,7 +146,11 @@ impl Tool for Add {
             }
         })
     }
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let result = args.x + args.y;
         Ok(result)
     }
@@ -178,7 +182,11 @@ impl Tool for Subtract {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let result = args.x - args.y;
         Ok(result)
     }
@@ -212,7 +220,11 @@ impl Tool for Multiply {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let result = args.x * args.y;
         Ok(result)
     }
@@ -246,7 +258,11 @@ impl Tool for Divide {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         let result = args.x / args.y;
         Ok(result)
     }

@@ -3,7 +3,27 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).## [0.2.6](https://github.com/0xPlaygrounds/rig/compare/rig-gemini-grpc-v0.2.5...rig-gemini-grpc-v0.2.6) - 2026-05-13
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Changed
+
+- *(streaming)* [**behavior**] streamed function calls carry a single-wire identity: the wire's one id travels as the part id only, so `provider` is `{call_id, item_id: None}` — filling both slots fabricated a dual identity the wire never issued (mirrors the rig-core gemini fix)
+
+- *(completion)* message and tool-result content conversions follow rig-core's message-content change from `OneOrMany<T>` to `Vec<T>`; wire payloads are unchanged
+
+### Fixed
+
+- *(gemini)* [**behavior**] the gRPC surface now reports `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL` and `TOO_MANY_TOOL_CALLS` as errors and stops the stream, matching REST — previously an aborted turn was reported as a completed one, and the wire's `finish_message` was never read
+- *(gemini)* a `thought_signature` carried on a trailing non-thought part is no longer dropped — it attaches to the reasoning block it signs via the shared `ReasoningSignature` lifecycle event
+- *(gemini)* [**behavior**] the tool name is no longer used as the tool-call id when the wire omits one; id-less calls carry the absent id and stay distinct
+
+### Changed
+
+- *(streaming)* the gRPC stream routes through the shared `WireAdapter` driver; an unrecognized part kind (`part.data` oneof decoding to `None`) is warn-skipped instead of silently dropped; `streaming::stream_from_events` is the events-first conformance seam; the generated `proto` module is public to support it
+
+## [0.2.6](https://github.com/0xPlaygrounds/rig/compare/rig-gemini-grpc-v0.2.5...rig-gemini-grpc-v0.2.6) - 2026-05-13
 
 ### Fixed
 
@@ -34,7 +54,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Contributors
 
-* @gold-silver-copper
+* @gold-silver-copper## [0.41.0](https://github.com/0xPlaygrounds/rig/compare/rig-gemini-grpc-v0.40.0...rig-gemini-grpc-v0.41.0) - 2026-07-28
+
+### Added
+
+- [**breaking**] split rig-core and rig-agent behind the rig facade ([#2197](https://github.com/0xPlaygrounds/rig/pull/2197)) (by [gold-silver-copper](https://github.com/gold-silver-copper)) - #2197
+- *(telemetry)* make sensitive span content opt-in ([#2151](https://github.com/0xPlaygrounds/rig/pull/2151)) (by [gold-silver-copper](https://github.com/gold-silver-copper))
+
+### Other
+
+- Simplify tool execution and hook APIs ([#2132](https://github.com/0xPlaygrounds/rig/pull/2132)) (by [gold-silver-copper](https://github.com/gold-silver-copper)) - #2132
+
+### Contributors
+
+* [gold-silver-copper](https://github.com/gold-silver-copper)
+
 ## [0.40.0](https://github.com/0xPlaygrounds/rig/compare/rig-gemini-grpc-v0.39.0...rig-gemini-grpc-v0.40.0) - 2026-07-10
 
 ### Added

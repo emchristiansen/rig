@@ -1,6 +1,6 @@
 //! Cassette-backed OpenRouter reasoning roundtrip tests.
 
-use rig::client::CompletionClient;
+use rig::prelude::*;
 
 use crate::reasoning::{self, ReasoningRoundtripAgent};
 
@@ -31,6 +31,22 @@ async fn nonstreaming() {
                 "include_reasoning": true
             })),
         ))
+        .await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn reasoning_delta_hook_streaming() {
+    with_openrouter_cassette("reasoning_delta_hook/streaming", |client| async move {
+        reasoning::run_reasoning_delta_hook_streaming(
+            client.completion_model("openai/gpt-5.2"),
+            serde_json::json!({
+                "reasoning": { "effort": "medium" },
+                "include_reasoning": true
+            }),
+            "openrouter",
+        )
         .await;
     })
     .await;

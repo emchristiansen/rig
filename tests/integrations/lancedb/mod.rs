@@ -12,12 +12,12 @@ use fixture::{Word, as_record_batch, words};
 use lancedb::index::vector::IvfPqIndexBuilder;
 use rig::lancedb::{LanceDbVectorIndex, SearchParams};
 use rig::{
-    client::EmbeddingsClient,
+    client::{AgentModelExt, EmbeddingsClient},
     completion::Prompt,
     embeddings::{EmbeddingModel, EmbeddingsBuilder},
-    prelude::CompletionClient,
+    prelude::*,
     providers::openai,
-    vector_store::{VectorStoreIndex, request::VectorSearchRequest},
+    vector_store::VectorStoreIndex,
 };
 
 #[path = "./fixtures/lib.rs"]
@@ -393,7 +393,7 @@ async fn agent_with_dynamic_context_test() {
         .await
         .unwrap();
 
-    // Build RAG agent with dynamic context
+    // Build RAG agent with dynamic context.
     let agent = openai_client
         .completion_model(openai::GPT_4O)
         .completions_api()
