@@ -1711,7 +1711,10 @@ pub struct CompletionResponse {
 /// (unknown keys are dropped when the payload is deserialized into
 /// [`AdditionalParameters`]). `response.failed` still errors regardless.
 ///
-/// Read in exactly one place — [`streaming::ResponsesStreamOptions::for_request`].
+/// Read in exactly one place — the crate-private
+/// `streaming::ResponsesStreamOptions::for_request`, which is the sole reader
+/// of this key and is what keeps every Responses raw-stream boundary from
+/// spelling the tolerance axis for itself.
 pub const RESPONSES_TOLERATE_INCOMPLETE_KEY: &str = "__rig_tolerate_incomplete";
 
 #[derive(Serialize)]

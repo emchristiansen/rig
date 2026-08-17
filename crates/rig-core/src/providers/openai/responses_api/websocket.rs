@@ -874,9 +874,11 @@ where
     /// doing so is what would lose it.** The reads use `now_or_never` and
     /// therefore never suspend, so the read loop has no cancellation point
     /// between consuming a frame and returning it; it terminates on
-    /// [`MAX_KEEPALIVE_DRAIN_FRAMES`] rather than a timer for that exact reason.
-    /// The single suspension is the pong flush, bounded internally by
-    /// [`KEEPALIVE_FLUSH_TIMEOUT`]. The whole operation is therefore already
+    /// a fixed frame budget rather than a timer for that exact reason (the
+    /// private `MAX_KEEPALIVE_DRAIN_FRAMES`). The single suspension is the pong
+    /// flush, bounded internally by the private `KEEPALIVE_FLUSH_TIMEOUT`,
+    /// whose expiry is reported as a typed failure. The whole operation is
+    /// therefore already
     /// bounded, and wrapping it in a caller-side `timeout` or racing it in a
     /// `select!` would only reintroduce the drop this shape exists to prevent:
     /// `flush_pongs` owns the recovered frames by value across that await, so a

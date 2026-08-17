@@ -384,6 +384,15 @@ impl ResponsesStreamOptions {
     /// `response.incomplete` as a successful terminal before accumulation —
     /// the WebSocket terminal and the conformance drain. Not an opt-in
     /// forwarded from a caller, so it reads no request.
+    ///
+    /// Compiled exactly where its callers are. Both of them — the WebSocket
+    /// terminal in `responses_api::websocket` and the conformance drain's
+    /// `drain_openai_responses_websocket_events` — carry this same cfg, so a
+    /// default-feature build has neither and this constructor would be dead
+    /// code there. Mirroring their gate rather than allowing `dead_code` keeps
+    /// the compiler's reachability check live: drop the last caller and this
+    /// becomes an error again instead of silently surviving as unreachable.
+    #[cfg(all(not(target_family = "wasm"), feature = "websocket"))]
     pub(crate) const fn tolerate_incomplete() -> Self {
         Self {
             immediate_tool_calls: false,
