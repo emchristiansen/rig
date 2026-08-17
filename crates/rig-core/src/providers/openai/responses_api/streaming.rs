@@ -874,7 +874,9 @@ impl RawChoiceAccumulator {
                 // how far the provider stands behind this call, and nothing
                 // about why an argument string might fail to parse. That
                 // confidence selects the policy the shared assembler applies to
-                // whatever bytes reach the buffer.
+                // the argument observation it resolves — the authoritative
+                // restatement when this item carries one, the assembly buffer
+                // only when it does not.
                 let on_unparseable = match func.status {
                     // The provider does not assert a complete executable call.
                     ToolStatus::Incomplete => streaming::UnparseableToolInput::Drop,
@@ -922,8 +924,20 @@ impl RawChoiceAccumulator {
                                 content: streaming::ToolCallDeltaContent::Delta(restated.clone()),
                             });
                         }
+                        // Classified rather than asserted. `classify` and this
+                        // wrapper's own constructor both decide with
+                        // `json_utils::parse_tool_arguments` (see
+                        // `FunctionCallArguments`'s `Deserialize`), so on these
+                        // exact bytes they cannot disagree: whatever that
+                        // function rejected here it rejects again. Routing
+                        // through it keeps the malformed state closed without
+                        // this producer asserting anything the type cannot
+                        // check for itself — and in particular the
+                        // empty/whitespace strings that normalize to `{}` never
+                        // reach this arm at all, because the same function sent
+                        // them to `Complete`.
                         end.arguments =
-                            Some(streaming::AuthoritativeArguments::Unparseable(restated));
+                            Some(streaming::AuthoritativeArguments::classify(&restated));
                     }
                 }
                 end.call_id = Some(func.call_id);
@@ -1777,8 +1791,9 @@ mod tests {
     };
     use crate::providers::internal::wire::WireEvent;
     use crate::providers::openai::responses_api::{
-        AdditionalParameters, CompletionResponse, IncompleteDetailsReason, OutputTokensDetails,
-        ReasoningSummary, ResponseError, ResponseObject, ResponseStatus, ResponsesUsage,
+        AdditionalParameters, CompletionResponse, IncompleteDetailsReason, Output,
+        OutputFunctionCall, OutputTokensDetails, ReasoningSummary, ResponseError, ResponseObject,
+        ResponseStatus, ResponsesUsage, ToolStatus,
     };
     use crate::streaming::{RawStreamingChoice, StreamedAssistantContent};
     use crate::test_utils::MockStreamingClient;
@@ -3649,25 +3664,57 @@ data: {done}
     }
 
     /// Streaming and unary normalization must reach the same verdict on the
-    /// same item, which is what the two-channel contract claims. The unary side
-    /// of this contract is
-    /// `unparseable_function_call_conversion_turns_on_asserted_status`; this
-    /// asserts streaming agrees even when a delta preceded the restatement.
+    /// same item — and, for an asserted status, report it in the *same words*.
+    ///
+    /// `malformed_tool_call_error` documents that its message is
+    /// character-for-character the shared assembler's, so the two surfaces are
+    /// indistinguishable to an operator reading logs. Asserting only the shared
+    /// prefix would let the streamed side drift while still passing — by
+    /// wrapping the parser diagnostic in extra prose, or by pasting the raw
+    /// argument bytes into the error — so this compares the whole message
+    /// against the error the unary conversion actually produces.
     #[tokio::test]
     async fn streaming_matches_unary_on_a_delta_preceded_malformed_restatement() {
-        for status in ["completed", "in_progress"] {
+        for (status, unary_status) in [
+            ("completed", ToolStatus::Completed),
+            ("in_progress", ToolStatus::InProgress),
+        ] {
             let (tool_calls, error) =
                 drain_tool_calls(&delta_then_malformed_done("   ", status)).await;
             assert!(
                 tool_calls.is_empty(),
                 "unary errors for {status}; streaming must not deliver a call: {tool_calls:?}"
             );
-            let error =
+            let streamed =
                 error.unwrap_or_else(|| panic!("unary errors for {status}; streaming must too"));
+
+            let unary = Vec::<crate::completion::AssistantContent>::try_from(Output::FunctionCall(
+                OutputFunctionCall {
+                    id: "fc_1".to_string(),
+                    arguments: serde_json::from_value(json!(r#"{"x":481"#))
+                        .expect("a malformed argument string decodes"),
+                    call_id: "call_1".to_string(),
+                    name: "add".to_string(),
+                    status: unary_status,
+                },
+            ))
+            .expect_err("an asserted malformed call is a response defect on the unary surface");
+
+            let (CompletionError::ResponseError(streamed), CompletionError::ResponseError(unary)) =
+                (&streamed, &unary)
+            else {
+                panic!("both surfaces report a response defect, got {streamed:?} and {unary:?}");
+            };
+            assert_eq!(
+                streamed, unary,
+                "the two surfaces must be indistinguishable in an operator's log for {status}"
+            );
+            // The bytes are the model's; the diagnostic is the parser's. A
+            // message carrying the former would also break the equality above,
+            // but this says why it must not.
             assert!(
-                matches!(&error, CompletionError::ResponseError(message)
-                    if message.contains("tool call `add` arrived with malformed JSON input")),
-                "streaming must surface the same error class unary does for {status}, got {error:?}"
+                !streamed.contains("481"),
+                "the restated argument bytes must not reach the error text: {streamed}"
             );
         }
     }
@@ -3706,32 +3753,44 @@ data: {done}
     /// object rather than a failed parse, and must still be delivered as `{}`.
     #[tokio::test]
     async fn a_parameterless_call_still_delivers_empty_arguments() {
-        let done = json!({
-            "type": "response.output_item.done",
-            "output_index": 0,
-            "sequence_number": 1,
-            "item": {
-                "type": "function_call",
-                "id": "fc_1",
-                "call_id": "call_1",
-                "name": "ping",
-                "arguments": "",
-                "status": "completed"
-            },
-        });
+        // Both spellings `parse_tool_arguments` normalizes to `{}` via
+        // `trim().is_empty()`. They are the wires a classifier reasoning about
+        // "no arguments" would misread as malformed, and the reason the
+        // malformed state is reachable only through that shared function: the
+        // provider's own `FunctionCallArguments` decoder sends these to
+        // `Complete`, so the unary surface delivers the call too.
+        for arguments in ["", "   "] {
+            let done = json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "sequence_number": 1,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "ping",
+                    "arguments": arguments,
+                    "status": "completed"
+                },
+            });
 
-        let (tool_calls, error) = drain_tool_calls(&[done]).await;
+            let (tool_calls, error) = drain_tool_calls(&[done]).await;
 
-        assert!(
-            error.is_none(),
-            "a parameterless call is not a malformed one: {error:?}"
-        );
-        assert_eq!(tool_calls.len(), 1, "one call is delivered: {tool_calls:?}");
-        assert_eq!(
-            tool_calls[0].function.arguments,
-            json!({}),
-            "a parameterless invocation delivers `{{}}`"
-        );
+            assert!(
+                error.is_none(),
+                "a parameterless call is not a malformed one for {arguments:?}: {error:?}"
+            );
+            assert_eq!(
+                tool_calls.len(),
+                1,
+                "one call is delivered for {arguments:?}: {tool_calls:?}"
+            );
+            assert_eq!(
+                tool_calls[0].function.arguments,
+                json!({}),
+                "a parameterless invocation delivers `{{}}` for {arguments:?}"
+            );
+        }
     }
 
     /// A slot mixing id-bearing and id-less reasoning frames (gateways and

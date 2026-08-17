@@ -662,9 +662,12 @@ impl PartsAccumulator {
             // normalizing to `{}`, or a delta disagreeing with the
             // restatement — would otherwise deliver a call the provider never
             // asserted and skip the policy entirely.
-            Some(AuthoritativeArguments::Unparseable(restated)) => Err(format!(
-                "the completed item restated arguments that do not parse: {restated}"
-            )),
+            // The diagnostic is the shared parser's own, so the message the
+            // `Error` policy builds below is character-for-character the unary
+            // surface's for the same wire — the property the provider's own
+            // `malformed_tool_call_error` documents. The offending bytes are
+            // not carried here and never reach the error text.
+            Some(AuthoritativeArguments::Unparseable(diagnostic)) => Err(diagnostic.into_string()),
             None => match buffer {
                 // No streamed arguments: a parameterless invocation.
                 None => Ok(serde_json::Value::Object(serde_json::Map::new())),
@@ -687,12 +690,15 @@ impl PartsAccumulator {
         let arguments = match resolved {
             Ok(arguments) => arguments,
             Err(err) => match end.on_unparseable {
-                // Partial input (truncation): the call never fully
-                // arrived, so it must not reach the consumer.
+                // The call never became executable — assembly truncated, or
+                // the wire restated arguments it did not deliver under a
+                // status asserting nothing. The policy speaks to what the
+                // provider asserted, never to the cause, so either way the
+                // call must not reach the consumer.
                 UnparseableToolInput::Drop => {
                     tracing::debug!(
                         tool = %name,
-                        "dropping streamed tool call whose arguments never fully arrived"
+                        "dropping streamed tool call whose arguments never became executable"
                     );
                     // The drop finalizes the entity, exactly like
                     // a successful completion.

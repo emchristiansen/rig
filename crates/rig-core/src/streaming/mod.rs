@@ -78,8 +78,11 @@ pub enum ToolCallDeltaContent {
 /// event rather than hand-rolled per provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnparseableToolInput {
-    /// Drop the call silently: the input never fully arrived (the
-    /// OpenAI-compatible end-of-stream flush of pending calls).
+    /// Drop the call silently: the arguments never became executable and the
+    /// wire asserted no complete call to answer for it — whether because the
+    /// input never fully arrived (the OpenAI-compatible end-of-stream flush of
+    /// pending calls) or because the completed item restated arguments it did
+    /// not deliver under a non-asserting status (Responses `incomplete`).
     Drop,
     /// Deliver the call with `{}` arguments: the wire superseded the call
     /// mid-assembly (the OpenAI-compatible same-slot eviction path).
@@ -107,17 +110,69 @@ pub enum UnparseableToolInput {
 /// the assembly buffer for both. When earlier fragments happen to parse, that
 /// fallback silently answers a malformed authoritative restatement with a call
 /// the provider never asserted — bypassing [`UnparseableToolInput`] entirely.
-/// Keeping the malformed bytes representable is what lets the assembler apply
+/// Keeping the malformed state representable is what lets the assembler apply
 /// the policy on the authority it actually received.
+///
+/// [`classify`](Self::classify) is the only way to reach that third state, so
+/// the state space is closed under the shared parser: bytes the parser accepts
+/// cannot be spelled as malformed.
 #[derive(Debug, Clone)]
 pub enum AuthoritativeArguments {
     /// The completed item restated arguments that parse.
     Parsed(serde_json::Value),
-    /// The completed item restated arguments that do not parse, carried as the
-    /// provider's exact bytes. Never repaired, and never normalized to `{}`:
-    /// the policy on the end event decides what happens to a call the provider
-    /// promised and then malformed.
-    Unparseable(String),
+    /// The completed item restated arguments the shared parser rejected,
+    /// carried as its diagnostic. Never repaired, and never normalized to
+    /// `{}`: the policy on the end event decides what happens to a call the
+    /// provider promised and then malformed.
+    Unparseable(UnparseableDiagnostic),
+}
+
+impl AuthoritativeArguments {
+    /// Classify a wire's restated argument string with the shared parser.
+    ///
+    /// This is the only constructor of
+    /// [`Unparseable`](Self::Unparseable), which is what makes the malformed
+    /// state unforgeable: the parser decides, so anything it accepts lands in
+    /// [`Parsed`](Self::Parsed) instead. A caller that has already parsed the
+    /// arguments builds [`Parsed`](Self::Parsed) directly and never comes here.
+    pub fn classify(arguments: &str) -> Self {
+        match crate::json_utils::parse_tool_arguments(arguments) {
+            Ok(arguments) => Self::Parsed(arguments),
+            Err(error) => Self::Unparseable(UnparseableDiagnostic(error.to_string())),
+        }
+    }
+}
+
+/// Why a restated argument string did not parse: the shared parser's own
+/// diagnostic, and nothing else.
+///
+/// The field is private, and the sole constructor is
+/// [`AuthoritativeArguments::classify`], which obtains one only from the
+/// failing arm of [`parse_tool_arguments`](crate::json_utils::parse_tool_arguments).
+/// A value of this type is therefore *proof* that the shared parser rejected
+/// the bytes it came from. That proof is load-bearing because the parser
+/// accepts more than a naive classifier would — `""` and whitespace normalize
+/// to `{}` — so a public byte-carrying variant would let an adapter reasoning
+/// about "empty arguments" force [`UnparseableToolInput`] onto a perfectly
+/// valid parameterless call.
+///
+/// The offending bytes are deliberately not retained. The diagnostic is what
+/// an operator needs, it is exactly what the unary surface reports for the
+/// same wire, and the bytes themselves are model-supplied content with no
+/// business in an error message.
+#[derive(Debug, Clone)]
+pub struct UnparseableDiagnostic(String);
+
+impl UnparseableDiagnostic {
+    /// The parser diagnostic, as it will appear in the response error.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the wrapper, yielding the diagnostic.
+    pub fn into_string(self) -> String {
+        self.0
+    }
 }
 
 /// End of a streamed tool call's input: the signal for the shared assembler
