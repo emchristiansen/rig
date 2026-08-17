@@ -870,15 +870,19 @@ where
     /// is what made a consumed unaccountable frame followed by a socket close
     /// indistinguishable from an ordinary transport fault.
     ///
-    /// **Cancellation cannot cost the caller that prefix either, and callers
-    /// must not add an outer bound to get one.** The reads use `now_or_never`
-    /// and therefore never suspend, so the read loop has no cancellation point
+    /// **Callers must not add an outer bound to protect that prefix, because
+    /// doing so is what would lose it.** The reads use `now_or_never` and
+    /// therefore never suspend, so the read loop has no cancellation point
     /// between consuming a frame and returning it; it terminates on
     /// [`MAX_KEEPALIVE_DRAIN_FRAMES`] rather than a timer for that exact reason.
     /// The single suspension is the pong flush, bounded internally by
     /// [`KEEPALIVE_FLUSH_TIMEOUT`]. The whole operation is therefore already
     /// bounded, and wrapping it in a caller-side `timeout` or racing it in a
-    /// `select!` would only reintroduce the drop this shape exists to prevent.
+    /// `select!` would only reintroduce the drop this shape exists to prevent:
+    /// `flush_pongs` owns the recovered frames by value across that await, so a
+    /// caller that drops the future there loses them with no [`KeepaliveDrain`]
+    /// to return them. The guarantee is unconditional for callers that observe
+    /// this contract, not for cancellation at an arbitrary point.
     pub async fn keepalive(&mut self) -> KeepaliveDrain {
         if self.closed || self.failed || self.in_flight {
             return KeepaliveDrain::serviced(Vec::new());
@@ -1567,7 +1571,7 @@ fn keepalive_flush_timeout_error(timeout: Duration) -> CompletionError {
 
 fn keepalive_flood_error(budget: usize) -> CompletionError {
     CompletionError::ProviderError(format!(
-        "The OpenAI websocket delivered more than {budget} buffered frames during idle keepalive"
+        "The OpenAI websocket delivered at least {budget} buffered frames during idle keepalive"
     ))
 }
 
