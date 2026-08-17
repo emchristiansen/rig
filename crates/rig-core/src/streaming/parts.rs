@@ -662,11 +662,17 @@ impl PartsAccumulator {
             // normalizing to `{}`, or a delta disagreeing with the
             // restatement — would otherwise deliver a call the provider never
             // asserted and skip the policy entirely.
-            // The diagnostic is the shared parser's own, so the message the
-            // `Error` policy builds below is character-for-character the unary
-            // surface's for the same wire — the property the provider's own
-            // `malformed_tool_call_error` documents. The offending bytes are
-            // not carried here and never reach the error text.
+            // The diagnostic is the shared parser's own, so for a call that
+            // reaches this policy the message the `Error` arm builds below is
+            // character-for-character the unary surface's — the property the
+            // provider's own `malformed_tool_call_error` documents. That scope
+            // matters: a call whose authoritative name is empty is dropped
+            // above, before arguments are resolved at all, so it never reaches
+            // this arm even though unary would error on it. Parity holds for
+            // matching call shape and status, not for every wire the decoder
+            // accepts. The restatement is not carried here, though the
+            // diagnostic is `serde_json`'s verbatim — see
+            // `UnparseableDiagnostic` for what that does and does not promise.
             Some(AuthoritativeArguments::Unparseable(diagnostic)) => Err(diagnostic.into_string()),
             None => match buffer {
                 // No streamed arguments: a parameterless invocation.
@@ -690,11 +696,12 @@ impl PartsAccumulator {
         let arguments = match resolved {
             Ok(arguments) => arguments,
             Err(err) => match end.on_unparseable {
-                // The call never became executable — assembly truncated, or
-                // the wire restated arguments it did not deliver under a
-                // status asserting nothing. The policy speaks to what the
-                // provider asserted, never to the cause, so either way the
-                // call must not reach the consumer.
+                // The call never became executable, and the adapter's family
+                // treats that as an absent call. The policy speaks to that
+                // verdict and never to the cause — truncation, a terminal
+                // closing an unparsed assembly, and a non-asserting
+                // restatement all arrive here alike — so the call must not
+                // reach the consumer either way.
                 UnparseableToolInput::Drop => {
                     tracing::debug!(
                         tool = %name,

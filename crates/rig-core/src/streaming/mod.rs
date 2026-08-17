@@ -78,11 +78,15 @@ pub enum ToolCallDeltaContent {
 /// event rather than hand-rolled per provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnparseableToolInput {
-    /// Drop the call silently: the arguments never became executable and the
-    /// wire asserted no complete call to answer for it — whether because the
-    /// input never fully arrived (the OpenAI-compatible end-of-stream flush of
-    /// pending calls) or because the completed item restated arguments it did
-    /// not deliver under a non-asserting status (Responses `incomplete`).
+    /// Drop the call silently: the arguments never became executable, and the
+    /// wire family treats that as an absent call rather than a defect.
+    ///
+    /// The policy asserts nothing about the cause, and adapters select it from
+    /// several — a stream that ended mid-assembly, a terminal that closes a
+    /// call whose fragments never parsed, or a completed item restating
+    /// arguments it did not deliver under a non-asserting status. Read the
+    /// selecting adapter to learn which applies; this list is illustrative, not
+    /// exhaustive.
     Drop,
     /// Deliver the call with `{}` arguments: the wire superseded the call
     /// mid-assembly (the OpenAI-compatible same-slot eviction path).
@@ -156,10 +160,18 @@ impl AuthoritativeArguments {
 /// about "empty arguments" force [`UnparseableToolInput`] onto a perfectly
 /// valid parameterless call.
 ///
-/// The offending bytes are deliberately not retained. The diagnostic is what
-/// an operator needs, it is exactly what the unary surface reports for the
-/// same wire, and the bytes themselves are model-supplied content with no
-/// business in an error message.
+/// The restatement itself is deliberately not retained: the diagnostic is what
+/// an operator needs, and it is what the unary surface reports for the same
+/// wire, so the two stay legible as one contract.
+///
+/// **This is not a redaction guarantee.** The diagnostic is `serde_json`'s
+/// verbatim, and that crate quotes offending scalar content for its
+/// invalid-type class — reachable here when `serde_json/arbitrary_precision` is
+/// enabled anywhere in the dependency graph, because the private number token
+/// then makes a data error possible where only syntax errors otherwise are. A
+/// caller that must not log model-supplied content should treat this string as
+/// untrusted, exactly as it would the unary surface's, which carries the same
+/// diagnostic for the same input.
 #[derive(Debug, Clone)]
 pub struct UnparseableDiagnostic(String);
 

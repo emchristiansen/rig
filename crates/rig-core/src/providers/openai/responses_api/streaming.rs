@@ -3673,6 +3673,12 @@ data: {done}
     /// wrapping the parser diagnostic in extra prose, or by pasting the raw
     /// argument bytes into the error — so this compares the whole message
     /// against the error the unary conversion actually produces.
+    ///
+    /// Scoped to a named call: an authoritative *empty* name is dropped by the
+    /// assembler before arguments are resolved, so such a wire never reaches
+    /// this policy on the streamed side even though unary errors on it. That
+    /// asymmetry is inherited and predates this contract; the parity asserted
+    /// here is for matching call shape and status.
     #[tokio::test]
     async fn streaming_matches_unary_on_a_delta_preceded_malformed_restatement() {
         for (status, unary_status) in [
