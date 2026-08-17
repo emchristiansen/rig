@@ -2,8 +2,8 @@
 //! terminate-early, and observation of every call/result pair.
 
 use rig::agent::AgentHook;
-use rig::client::CompletionClient;
 use rig::completion::{Prompt, PromptError};
+use rig::prelude::*;
 use rig::providers::gemini;
 use rig::tool::Tool;
 
@@ -169,7 +169,7 @@ async fn hooks_observe_every_tool_call_and_result() {
 // builder code.
 #[allow(unused)]
 fn assert_hook_impls() {
-    fn requires_hook<H: AgentHook<gemini::completion::CompletionModel>>(_hook: H) {}
+    fn requires_hook<H: AgentHook>(_hook: H) {}
     requires_hook(ToolEventRecorder::default());
     requires_hook(SkipToolHook {
         tool_name: "add",

@@ -7,19 +7,9 @@
 //! let client = mira::Client::new("YOUR_API_KEY");
 //!
 //! ```
-use crate::client::{
-    self, BearerAuth, Capabilities, Capable, DebugExt, Nothing, Provider, ProviderBuilder,
-    ProviderClient,
-};
-use crate::http_client::{self, HttpClientExt};
-use crate::{
-    OneOrMany,
-    completion::{self, CompletionError},
-    message::{self, AssistantContent, Message, UserContent},
-};
+use crate::client::{self, BearerAuth, DebugExt, Provider};
+use crate::completion::{self, CompletionError};
 use serde::{Deserialize, Serialize};
-use std::string::FromUtf8Error;
-use thiserror::Error;
 use tracing::{self};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -35,19 +25,21 @@ impl Provider for MiraExt {
     const VERIFY_PATH: &'static str = "/user-credits";
 }
 
-impl<H> Capabilities<H> for MiraExt {
-    type Completion = Capable<CompletionModel<H>>;
-    type Embeddings = Nothing;
-    type Transcription = Nothing;
-    type ModelListing = Nothing;
+client::impl_capabilities!(
+    MiraExt,
+    completion = CompletionModel<H>,
+    model_listing = MiraModelLister<H>,
+);
 
-    #[cfg(feature = "image")]
-    type ImageGeneration = Nothing;
-
-    #[cfg(feature = "audio")]
-    type AudioGeneration = Nothing;
-    type Rerank = Nothing;
-}
+crate::providers::internal::model_listing::impl_model_lister!(
+    /// [`ModelLister`](crate::client::ModelLister) implementation for the
+    /// Mira API (`GET /v1/models`).
+    MiraModelLister,
+    Client<H>,
+    crate::providers::internal::model_listing::ListModelEntry,
+    "Mira",
+    "/v1/models"
+);
 
 impl DebugExt for MiraExt {}
 
@@ -109,42 +101,15 @@ impl crate::providers::openai::completion::OpenAICompatibleProvider for MiraExt 
     }
 }
 
-impl ProviderBuilder for MiraBuilder {
-    type Extension<H>
-        = MiraExt
-    where
-        H: HttpClientExt;
-    type ApiKey = MiraApiKey;
-
-    const BASE_URL: &'static str = MIRA_API_BASE_URL;
-
-    fn build<H>(
-        _builder: &crate::client::ClientBuilder<Self, Self::ApiKey, H>,
-    ) -> http_client::Result<Self::Extension<H>>
-    where
-        H: HttpClientExt,
-    {
-        Ok(MiraExt)
-    }
-}
+client::impl_default_provider_builder!(
+    MiraBuilder => MiraExt,
+    api_key = MiraApiKey,
+    base_url = MIRA_API_BASE_URL,
+);
 
 pub type Client<H = reqwest::Client> = client::Client<MiraExt, H>;
 pub type ClientBuilder<H = crate::markers::Missing> =
     client::ClientBuilder<MiraBuilder, MiraApiKey, H>;
-
-#[derive(Debug, Error)]
-pub enum MiraError {
-    #[error("Invalid API key")]
-    InvalidApiKey,
-    #[error("API error: {0}")]
-    ApiError(u16),
-    #[error("Request error: {0}")]
-    RequestError(#[from] http_client::Error),
-    #[error("UTF-8 error: {0}")]
-    Utf8Error(#[from] FromUtf8Error),
-    #[error("JSON error: {0}")]
-    JsonError(#[from] serde_json::Error),
-}
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
 pub struct RawMessage {
@@ -153,29 +118,6 @@ pub struct RawMessage {
 }
 
 const MIRA_API_BASE_URL: &str = "https://api.mira.network";
-
-impl TryFrom<RawMessage> for message::Message {
-    type Error = CompletionError;
-
-    fn try_from(raw: RawMessage) -> Result<Self, Self::Error> {
-        match raw.role.as_str() {
-            "system" => Ok(message::Message::System {
-                content: raw.content,
-            }),
-            "user" => Ok(message::Message::User {
-                content: OneOrMany::one(UserContent::Text(message::Text::new(raw.content))),
-            }),
-            "assistant" => Ok(message::Message::Assistant {
-                id: None,
-                content: OneOrMany::one(AssistantContent::Text(message::Text::new(raw.content))),
-            }),
-            _ => Err(CompletionError::ResponseError(format!(
-                "Unsupported message role: {}",
-                raw.role
-            ))),
-        }
-    }
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -201,70 +143,13 @@ pub struct ChatChoice {
     pub index: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct ModelsResponse {
-    data: Vec<ModelInfo>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct ModelInfo {
-    id: String,
-}
-
-impl<T> Client<T>
-where
-    T: HttpClientExt + 'static,
-{
-    /// List available models
-    pub async fn list_models(&self) -> Result<Vec<String>, MiraError> {
-        let req = self.get("/v1/models").and_then(|req| {
-            req.body(http_client::NoBody)
-                .map_err(http_client::Error::Protocol)
-        })?;
-
-        let response = self.send(req).await?;
-
-        let status = response.status();
-
-        if !status.is_success() {
-            // Log the error text but don't store it in an unused variable
-            let error_text = http_client::text(response).await.unwrap_or_default();
-            tracing::error!("Error response: {}", error_text);
-            return Err(MiraError::ApiError(status.as_u16()));
-        }
-
-        let response_text = http_client::text(response).await?;
-
-        let models: ModelsResponse = serde_json::from_str(&response_text).map_err(|e| {
-            tracing::error!("Failed to parse response: {}", e);
-            MiraError::JsonError(e)
-        })?;
-
-        Ok(models.data.into_iter().map(|model| model.id).collect())
-    }
-}
-
-impl ProviderClient for Client {
-    type Input = String;
-    type Error = crate::client::ProviderClientError;
-
-    /// Create a new Mira client from the `MIRA_API_KEY` environment variable.
-    fn from_env() -> Result<Self, Self::Error> {
-        let api_key = crate::client::required_env_var("MIRA_API_KEY")?;
-        Self::new(&api_key).map_err(Into::into)
-    }
-
-    fn from_val(input: Self::Input) -> Result<Self, Self::Error> {
-        Self::new(&input).map_err(Into::into)
-    }
-}
+client::impl_provider_client!(Client, input = String, api_key_env = "MIRA_API_KEY");
 
 /// Mira completion model, driven by the shared OpenAI Chat Completions path.
 pub type CompletionModel<H = reqwest::Client> =
     crate::providers::openai::completion::GenericCompletionModel<MiraExt, H>;
 
 impl crate::telemetry::ProviderResponseExt for CompletionResponse {
-    type OutputMessage = ChatChoice;
     type Usage = Usage;
 
     fn get_response_id(&self) -> Option<String> {
@@ -278,20 +163,6 @@ impl crate::telemetry::ProviderResponseExt for CompletionResponse {
         match self {
             Self::Structured { model, .. } => Some(model.clone()),
             Self::Simple(_) => None,
-        }
-    }
-
-    fn get_output_messages(&self) -> Vec<Self::OutputMessage> {
-        match self {
-            Self::Structured { choices, .. } => choices
-                .iter()
-                .map(|choice| ChatChoice {
-                    message: choice.message.clone(),
-                    finish_reason: choice.finish_reason.clone(),
-                    index: choice.index,
-                })
-                .collect(),
-            Self::Simple(_) => Vec::new(),
         }
     }
 
@@ -313,103 +184,103 @@ impl crate::telemetry::ProviderResponseExt for CompletionResponse {
     }
 }
 
-impl crate::completion::GetTokenUsage for Usage {
-    fn token_usage(&self) -> crate::completion::Usage {
-        let mut usage = crate::completion::Usage::new();
-        usage.input_tokens = self.prompt_tokens as u64;
-        usage.output_tokens = self.total_tokens.saturating_sub(self.prompt_tokens) as u64;
-        usage.total_tokens = self.total_tokens as u64;
-        usage
+impl From<&Usage> for completion::Usage {
+    fn from(usage: &Usage) -> Self {
+        crate::providers::internal::completion_usage(
+            usage.prompt_tokens as u64,
+            // Mira reports only prompt and total counts; the completion count
+            // is the remainder.
+            usage.total_tokens.saturating_sub(usage.prompt_tokens) as u64,
+            usage.total_tokens as u64,
+            0,
+        )
     }
 }
 
-impl TryFrom<CompletionResponse> for completion::CompletionResponse<CompletionResponse> {
-    type Error = CompletionError;
+impl From<Usage> for completion::Usage {
+    fn from(usage: Usage) -> Self {
+        Self::from(&usage)
+    }
+}
 
-    fn try_from(response: CompletionResponse) -> Result<Self, Self::Error> {
-        let (content, usage) = match &response {
-            CompletionResponse::Structured { choices, usage, .. } => {
-                let choice = choices.first().ok_or_else(|| {
-                    CompletionError::ResponseError("Response contained no choices".to_owned())
-                })?;
+/// Normalize a Mira chat completion response.
+///
+/// The provider descriptor name is an *input* rather than a constant so the
+/// shared OpenAI-compatible completion path labels the response with the
+/// descriptor that actually produced it.
+impl crate::completion::NormalizeCompletionResponse for CompletionResponse {
+    fn normalize(self, provider: &str) -> Result<completion::CompletionResponse, CompletionError> {
+        use crate::providers::internal::openai_chat_completions_compatible as compat;
 
-                let usage = usage
-                    .as_ref()
-                    .map(|usage| completion::Usage {
-                        input_tokens: usage.prompt_tokens as u64,
-                        output_tokens: usage.total_tokens.saturating_sub(usage.prompt_tokens)
-                            as u64,
-                        total_tokens: usage.total_tokens as u64,
-                        cached_input_tokens: 0,
-                        cache_creation_input_tokens: 0,
-                        tool_use_prompt_tokens: 0,
-                        reasoning_tokens: 0,
-                    })
-                    .unwrap_or_default();
-
-                // Convert RawMessage to message::Message
-                let message = message::Message::try_from(choice.message.clone())?;
-
-                let content = match message {
-                    Message::Assistant { content, .. } => {
-                        if content.is_empty() {
-                            return Err(CompletionError::ResponseError(
-                                "Response contained empty content".to_owned(),
-                            ));
-                        }
-
-                        // Log warning for unsupported content types
-                        for c in content.iter() {
-                            if !matches!(c, AssistantContent::Text(_)) {
-                                tracing::warn!(target: "rig",
-                                    "Unsupported content type encountered: {:?}. The Mira provider currently only supports text content", c
-                                );
-                            }
-                        }
-
-                        content.iter().map(|c| {
-                            match c {
-                                AssistantContent::Text(text) => Ok(completion::AssistantContent::text(&text.text)),
-                                other => Err(CompletionError::ResponseError(
-                                    format!("Unsupported content type: {other:?}. The Mira provider currently only supports text content")
-                                ))
-                            }
-                        }).collect::<Result<Vec<_>, _>>()?
-                    }
-                    Message::User { .. } => {
-                        tracing::warn!(target: "rig", "Received user message in response where assistant message was expected");
-                        return Err(CompletionError::ResponseError(
-                            "Received user message in response where assistant message was expected".to_owned()
-                        ));
-                    }
-                    Message::System { .. } => {
-                        tracing::warn!(target: "rig", "Received system message in response where assistant message was expected");
-                        return Err(CompletionError::ResponseError(
-                            "Received system message in response where assistant message was expected".to_owned(),
-                        ));
-                    }
-                };
-
-                (content, usage)
+        let (id, model, choices, usage) = match self {
+            CompletionResponse::Structured {
+                id,
+                model,
+                choices,
+                usage,
+                ..
+            } => (id, model, choices, usage),
+            // The bare-string variant carries no metadata at all — not even a
+            // terminal reason, so the normalized reason stays `None`.
+            CompletionResponse::Simple(text) => {
+                let choice = crate::message::require_non_empty_response(vec![
+                    completion::AssistantContent::text(&text),
+                ])?;
+                return Ok(completion::CompletionResponse::new(
+                    choice,
+                    completion::Usage::new(),
+                    provider,
+                ));
             }
-            CompletionResponse::Simple(text) => (
-                vec![completion::AssistantContent::text(text)],
-                completion::Usage::new(),
-            ),
         };
 
-        let choice = OneOrMany::many(content).map_err(|_| {
-            CompletionError::ResponseError(
-                "Response contained no message or tool call (empty)".to_owned(),
-            )
-        })?;
+        // Preserve Mira's role-specific error messages: the shared helper
+        // folds every non-assistant message into one generic error. Mira's
+        // wire messages are plain `{role, content}` strings, so an assistant
+        // message can never carry unsupported content types.
+        if let Some(choice) = choices.first() {
+            match choice.message.role.as_str() {
+                "assistant" => {}
+                "user" => {
+                    tracing::warn!(target: "rig", "Received user message in response where assistant message was expected");
+                    return Err(CompletionError::ResponseError(
+                        "Received user message in response where assistant message was expected"
+                            .to_owned(),
+                    ));
+                }
+                "system" => {
+                    tracing::warn!(target: "rig", "Received system message in response where assistant message was expected");
+                    return Err(CompletionError::ResponseError(
+                        "Received system message in response where assistant message was expected"
+                            .to_owned(),
+                    ));
+                }
+                other => {
+                    return Err(CompletionError::ResponseError(format!(
+                        "Unsupported message role: {other}"
+                    )));
+                }
+            }
+        }
 
-        Ok(completion::CompletionResponse {
-            choice,
+        let usage = usage
+            .as_ref()
+            .map(completion::Usage::from)
+            .unwrap_or_default();
+
+        compat::normalize_openai_response(
+            provider,
+            &choices,
+            Some(id.as_str()).filter(|id| !id.is_empty()),
+            Some(model.as_str()).filter(|model| !model.is_empty()),
             usage,
-            raw_response: response,
-            message_id: None,
-        })
+            |choice| choice.finish_reason.as_deref().unwrap_or(""),
+            |choice| {
+                Some(vec![completion::AssistantContent::text(
+                    &choice.message.content,
+                )])
+            },
+        )
     }
 }
 
@@ -432,6 +303,17 @@ impl std::fmt::Display for Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::completion::FinishReason;
+    use crate::completion::NormalizeCompletionResponse;
+    use crate::providers::openai::completion::OpenAICompatibleProvider;
+
+    /// Normalize a Mira wire response the way the shared completion path does,
+    /// threading Mira's own descriptor name through the conversion.
+    fn normalized(response: CompletionResponse) -> completion::CompletionResponse {
+        response
+            .normalize(MiraExt::PROVIDER_NAME)
+            .expect("Mira response should convert")
+    }
 
     #[test]
     fn test_completion_response_conversion() {
@@ -454,14 +336,75 @@ mod tests {
             }),
         };
 
-        let completion_response: completion::CompletionResponse<CompletionResponse> =
-            mira_response.try_into().unwrap();
+        let completion_response = normalized(mira_response);
 
         assert_eq!(
             completion_response.choice.first(),
-            completion::AssistantContent::text("Test response")
+            Some(&completion::AssistantContent::text("Test response"))
         );
+        assert_eq!(completion_response.provider, "mira");
+        assert_eq!(completion_response.response_id.as_deref(), Some("resp_123"));
+        assert_eq!(completion_response.message_id, None);
+        assert_eq!(completion_response.model.as_deref(), Some("deepseek-r1"));
+        assert_eq!(
+            completion_response.finish_reason(),
+            Some(FinishReason::Stop)
+        );
+        assert_eq!(completion_response.usage.input_tokens, 10);
+        assert_eq!(completion_response.usage.output_tokens, 10);
+        assert_eq!(completion_response.usage.total_tokens, 20);
     }
+
+    fn structured_response_with_finish_reason(finish_reason: &str) -> CompletionResponse {
+        CompletionResponse::Structured {
+            id: "resp_123".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "deepseek-r1".to_string(),
+            choices: vec![ChatChoice {
+                message: RawMessage {
+                    role: "assistant".to_string(),
+                    content: "Test response".to_string(),
+                },
+                finish_reason: Some(finish_reason.to_string()),
+                index: Some(0),
+            }],
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn mira_finish_reasons_normalize_and_preserve_unknowns() {
+        for (wire, expected) in [
+            ("stop", FinishReason::Stop),
+            ("length", FinishReason::Length),
+            ("max_tokens", FinishReason::Length),
+            ("tool_calls", FinishReason::ToolCalls),
+            ("function_call", FinishReason::ToolCalls),
+            ("content_filter", FinishReason::ContentFilter),
+            // A gateway-specific reason survives verbatim rather than reading
+            // as a natural stop.
+            (
+                "ERROR_UPSTREAM",
+                FinishReason::Other("ERROR_UPSTREAM".to_owned()),
+            ),
+        ] {
+            let converted = normalized(structured_response_with_finish_reason(wire));
+
+            assert_eq!(converted.finish_reason(), Some(expected), "wire: {wire}");
+        }
+    }
+
+    #[test]
+    fn mira_simple_response_reports_no_metadata() {
+        let converted = normalized(CompletionResponse::Simple("Test response".to_string()));
+
+        assert_eq!(converted.provider, "mira");
+        assert_eq!(converted.message_id, None);
+        assert_eq!(converted.model, None);
+        assert_eq!(converted.finish_reason(), None);
+    }
+
     #[test]
     fn test_client_initialization() {
         let _client =

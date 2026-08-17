@@ -1,4 +1,3 @@
-use rig::OneOrMany;
 use rig::completion::{CompletionError, Message as CompletionMessage};
 use rig::message::{AssistantContent, Reasoning, ReasoningContent};
 use rig::providers::openai::responses_api::{
@@ -9,9 +8,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 #[test]
 fn test_input_item_serialization_avoids_duplicate_role() {
     let message = Message::User {
-        content: OneOrMany::one(UserContent::InputText {
+        content: vec![UserContent::InputText {
             text: "hello".to_string(),
-        }),
+        }],
         name: None,
     };
     let item: InputItem = message.into();
@@ -28,7 +27,7 @@ fn test_input_item_serialization_avoids_duplicate_role() {
 fn assistant_reasoning_without_id_is_omitted() {
     let message = CompletionMessage::Assistant {
         id: Some("assistant_message_id".to_string()),
-        content: OneOrMany::one(AssistantContent::Reasoning(Reasoning::new("thought"))),
+        content: vec![AssistantContent::Reasoning(Reasoning::new("thought"))],
     };
 
     let items: Vec<InputItem> = message
@@ -42,7 +41,7 @@ fn assistant_reasoning_encrypted_only_serializes_encrypted_content() {
     let reasoning = Reasoning::encrypted("encrypted_blob").with_id("rs_1".to_string());
     let message = CompletionMessage::Assistant {
         id: Some("assistant_message_id".to_string()),
-        content: OneOrMany::one(AssistantContent::Reasoning(reasoning)),
+        content: vec![AssistantContent::Reasoning(reasoning)],
     };
 
     let items: Vec<InputItem> = message
@@ -91,7 +90,7 @@ fn assistant_reasoning_mixed_content_serializes_text_content_and_summaries() {
 
     let message = CompletionMessage::Assistant {
         id: Some("assistant_message_id".to_string()),
-        content: OneOrMany::one(AssistantContent::Reasoning(reasoning)),
+        content: vec![AssistantContent::Reasoning(reasoning)],
     };
 
     let items: Vec<InputItem> = message
@@ -132,7 +131,7 @@ fn assistant_reasoning_mixed_content_serializes_text_content_and_summaries() {
 fn openai_responses_request_auto_adds_reasoning_encrypted_include() {
     let core_request = rig::completion::CompletionRequest {
         preamble: None,
-        chat_history: OneOrMany::one(CompletionMessage::user("hello")),
+        chat_history: vec![CompletionMessage::user("hello")],
         documents: vec![],
         tools: vec![],
         temperature: None,
@@ -143,6 +142,7 @@ fn openai_responses_request_auto_adds_reasoning_encrypted_include() {
         })),
         model: None,
         output_schema: None,
+        record_telemetry_content: false,
     };
 
     let request = OpenAIResponsesRequest::try_from(("gpt-test".to_string(), core_request))
@@ -171,7 +171,9 @@ fn openai_responses_reasoning_output_preserves_encrypted_content() {
     }))
     .expect("deserialize reasoning output");
 
-    let content: Vec<AssistantContent> = output.into();
+    let content: Vec<AssistantContent> = output
+        .try_into()
+        .expect("reasoning output carries no tool call to reject");
     assert_eq!(content.len(), 1);
     let Some(AssistantContent::Reasoning(reasoning)) = content.first() else {
         panic!("expected reasoning output content");
@@ -200,7 +202,9 @@ fn openai_responses_reasoning_output_preserves_reasoning_text_content() {
     }))
     .expect("deserialize reasoning output");
 
-    let content: Vec<AssistantContent> = output.into();
+    let content: Vec<AssistantContent> = output
+        .try_into()
+        .expect("reasoning output carries no tool call to reject");
     assert_eq!(content.len(), 1);
     let Some(AssistantContent::Reasoning(reasoning)) = content.first() else {
         panic!("expected reasoning output content");
@@ -221,7 +225,9 @@ fn openai_responses_reasoning_output_without_summary_is_not_dropped() {
     }))
     .expect("deserialize reasoning output");
 
-    let content: Vec<AssistantContent> = output.into();
+    let content: Vec<AssistantContent> = output
+        .try_into()
+        .expect("reasoning output carries no tool call to reject");
     assert_eq!(content.len(), 1);
     let Some(AssistantContent::Reasoning(reasoning)) = content.first() else {
         panic!("expected reasoning output content");
@@ -238,14 +244,16 @@ fn openai_empty_reasoning_content_roundtrips_to_request_item() {
         "summary": []
     }))
     .expect("deserialize reasoning output");
-    let content: Vec<AssistantContent> = output.into();
+    let content: Vec<AssistantContent> = output
+        .try_into()
+        .expect("reasoning output carries no tool call to reject");
     let Some(AssistantContent::Reasoning(reasoning)) = content.first().cloned() else {
         panic!("expected reasoning output content");
     };
 
     let message = CompletionMessage::Assistant {
         id: Some("assistant_message_id".to_string()),
-        content: OneOrMany::one(AssistantContent::Reasoning(reasoning)),
+        content: vec![AssistantContent::Reasoning(reasoning)],
     };
     let items: Vec<InputItem> = message
         .try_into()
@@ -276,7 +284,7 @@ fn assistant_reasoning_redacted_only_serializes_as_encrypted_content() {
     let reasoning = Reasoning::redacted("opaque-redacted").with_id("rs_redacted".to_string());
     let message = CompletionMessage::Assistant {
         id: Some("assistant_message_id".to_string()),
-        content: OneOrMany::one(AssistantContent::Reasoning(reasoning)),
+        content: vec![AssistantContent::Reasoning(reasoning)],
     };
 
     let items: Vec<InputItem> = message
@@ -305,10 +313,10 @@ fn openai_responses_request_reasoning_without_id_is_omitted_without_panicking() 
     let panic_result = catch_unwind(AssertUnwindSafe(|| {
         let request = rig::completion::CompletionRequest {
             preamble: None,
-            chat_history: OneOrMany::one(CompletionMessage::Assistant {
+            chat_history: vec![CompletionMessage::Assistant {
                 id: Some("assistant_message_id".to_string()),
-                content: OneOrMany::one(AssistantContent::Reasoning(Reasoning::new("thought"))),
-            }),
+                content: vec![AssistantContent::Reasoning(Reasoning::new("thought"))],
+            }],
             documents: vec![],
             tools: vec![],
             temperature: None,
@@ -317,6 +325,7 @@ fn openai_responses_request_reasoning_without_id_is_omitted_without_panicking() 
             additional_params: None,
             model: None,
             output_schema: None,
+            record_telemetry_content: false,
         };
         OpenAIResponsesRequest::try_from(("gpt-test".to_string(), request))
     }));
@@ -335,12 +344,12 @@ fn openai_responses_request_reasoning_without_id_is_omitted_without_panicking() 
 fn assistant_tool_call_with_local_id_omits_function_call_item_id() {
     let message = CompletionMessage::Assistant {
         id: None,
-        content: OneOrMany::one(AssistantContent::tool_call_with_call_id(
+        content: vec![AssistantContent::tool_call_with_call_id(
             "history_tool_1",
             "call_local_1".to_string(),
             "my_tool",
             serde_json::json!({}),
-        )),
+        )],
     };
 
     let items: Vec<InputItem> = message
@@ -367,12 +376,12 @@ fn assistant_tool_call_with_local_id_omits_function_call_item_id() {
 fn assistant_tool_call_with_local_fc_prefix_without_separator_omits_function_call_item_id() {
     let message = CompletionMessage::Assistant {
         id: None,
-        content: OneOrMany::one(AssistantContent::tool_call_with_call_id(
+        content: vec![AssistantContent::tool_call_with_call_id(
             "fclocal_1",
             "call_local_1".to_string(),
             "my_tool",
             serde_json::json!({}),
-        )),
+        )],
     };
 
     let items: Vec<InputItem> = message
@@ -389,12 +398,12 @@ fn assistant_tool_call_with_local_fc_prefix_without_separator_omits_function_cal
 fn assistant_tool_call_with_provider_item_id_keeps_it() {
     let message = CompletionMessage::Assistant {
         id: None,
-        content: OneOrMany::one(AssistantContent::tool_call_with_call_id(
+        content: vec![AssistantContent::tool_call_with_call_id(
             "fc_native_1",
             "call_native_1".to_string(),
             "my_tool",
             serde_json::json!({}),
-        )),
+        )],
     };
 
     let items: Vec<InputItem> = message
@@ -409,38 +418,61 @@ fn assistant_tool_call_with_provider_item_id_keeps_it() {
 }
 
 #[test]
-fn assistant_tool_call_without_call_id_returns_request_error() {
+fn assistant_tool_call_without_provider_id_serializes_the_minted_call_id() {
+    // An empty wire id records no provider id and mints rig's correlation
+    // handle; the Responses wire requires a `call_id`, so the minted id is
+    // sent instead of the old "`call_id` is required" request error.
     let message = CompletionMessage::Assistant {
         id: Some("assistant_message_id".to_string()),
-        content: OneOrMany::one(AssistantContent::tool_call(
-            "tool_1",
+        content: vec![AssistantContent::tool_call(
+            "",
             "my_tool",
             serde_json::json!({"arg":"value"}),
-        )),
+        )],
     };
 
-    let items: Result<Vec<InputItem>, CompletionError> = message.try_into();
-    assert!(matches!(
-        items,
-        Err(CompletionError::RequestError(error))
-            if error
-                .to_string()
-                .contains("Assistant tool call `call_id` is required")
-    ));
+    let items: Vec<InputItem> = message
+        .try_into()
+        .expect("id-less tool call should serialize with the minted call_id");
+    let item_json = serde_json::to_value(&items[0]).expect("serialize InputItem");
+    let call_id = item_json
+        .get("call_id")
+        .and_then(|value| value.as_str())
+        .expect("function_call should carry a call_id");
+    assert!(
+        !call_id.is_empty(),
+        "minted call_id must be non-empty: {item_json}"
+    );
+    assert!(
+        item_json.get("id").is_none(),
+        "no provider-native `fc_` item id exists to round-trip: {item_json}"
+    );
 }
 
 #[test]
-fn user_tool_result_without_call_id_returns_request_error() {
-    let message = CompletionMessage::tool_result("tool_1", "result payload");
+fn user_tool_result_without_provider_id_serializes_the_minted_call_id() {
+    // An empty provider call id mints rig's correlation handle; the
+    // Responses wire requires a `call_id`, so the minted id is sent instead
+    // of the old "`call_id` is required" request error.
+    let message = CompletionMessage::tool_result("", "my_tool", "result payload");
 
-    let items: Result<Vec<InputItem>, CompletionError> = message.try_into();
-    assert!(matches!(
-        items,
-        Err(CompletionError::RequestError(error))
-            if error
-                .to_string()
-                .contains("Tool result `call_id` is required")
-    ));
+    let items: Vec<InputItem> = message
+        .try_into()
+        .expect("id-less tool result should serialize with the minted call_id");
+    let item_json = serde_json::to_value(&items[0]).expect("serialize InputItem");
+    assert_eq!(
+        item_json.get("type").and_then(|value| value.as_str()),
+        Some("function_call_output"),
+        "tool result should serialize as a function_call_output: {item_json}"
+    );
+    let call_id = item_json
+        .get("call_id")
+        .and_then(|value| value.as_str())
+        .expect("function_call_output should carry a call_id");
+    assert!(
+        !call_id.is_empty(),
+        "minted call_id must be non-empty: {item_json}"
+    );
 }
 
 #[test]
@@ -448,7 +480,7 @@ fn openai_responses_invalid_additional_params_returns_error_without_panicking() 
     let panic_result = catch_unwind(AssertUnwindSafe(|| {
         let request = rig::completion::CompletionRequest {
             preamble: None,
-            chat_history: OneOrMany::one(CompletionMessage::user("hello")),
+            chat_history: vec![CompletionMessage::user("hello")],
             documents: vec![],
             tools: vec![],
             temperature: None,
@@ -457,6 +489,7 @@ fn openai_responses_invalid_additional_params_returns_error_without_panicking() 
             additional_params: Some(serde_json::json!("not_a_valid_object")),
             model: None,
             output_schema: None,
+            record_telemetry_content: false,
         };
         OpenAIResponsesRequest::try_from(("gpt-test".to_string(), request))
     }));
@@ -475,7 +508,7 @@ fn openai_responses_invalid_additional_params_returns_error_without_panicking() 
 fn openai_responses_request_preserves_prompt_cache_parameters() {
     let request = rig::completion::CompletionRequest {
         preamble: None,
-        chat_history: OneOrMany::one(CompletionMessage::user("hello")),
+        chat_history: vec![CompletionMessage::user("hello")],
         documents: vec![],
         tools: vec![],
         temperature: None,
@@ -487,6 +520,7 @@ fn openai_responses_request_preserves_prompt_cache_parameters() {
         })),
         model: None,
         output_schema: None,
+        record_telemetry_content: false,
     };
 
     let request = OpenAIResponsesRequest::try_from(("gpt-test".to_string(), request))

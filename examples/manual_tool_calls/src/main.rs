@@ -1,4 +1,4 @@
-//! Demonstrates manual tool-call handling with `Agent::completion()`.
+//! Demonstrates manual tool-call handling with a raw `CompletionModel` request.
 //! Requires `OPENAI_API_KEY`.
 //!
 //! Unlike `agent.prompt(...)`, this example never lets Rig execute tools automatically.
@@ -10,12 +10,11 @@
 //! 5. repeats until the model returns a final text answer.
 
 use anyhow::{Result, bail};
-use rig::OneOrMany;
-use rig::client::{CompletionClient, ProviderClient};
-use rig::completion::Completion;
-use rig::message::{AssistantContent, Message, ToolCall, ToolChoice};
+use rig::completion::CompletionModel;
+use rig::message::{AssistantContent, Message, ToolCall, ToolChoice, UserContent};
+use rig::prelude::*;
 use rig::providers::openai;
-use rig::tool::{Tool, ToolSet};
+use rig::tool::{Tool, ToolOutput, ToolSet};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -53,7 +52,11 @@ impl Tool for Add {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         Ok(args.x + args.y)
     }
 }
@@ -82,12 +85,16 @@ impl Tool for Subtract {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         Ok(args.x - args.y)
     }
 }
 
-fn collect_tool_calls(choice: &OneOrMany<AssistantContent>) -> Vec<ToolCall> {
+fn collect_tool_calls(choice: &[AssistantContent]) -> Vec<ToolCall> {
     choice
         .iter()
         .filter_map(|content| match content {
@@ -97,7 +104,7 @@ fn collect_tool_calls(choice: &OneOrMany<AssistantContent>) -> Vec<ToolCall> {
         .collect()
 }
 
-fn extract_text(choice: &OneOrMany<AssistantContent>) -> String {
+fn extract_text(choice: &[AssistantContent]) -> String {
     choice
         .iter()
         .filter_map(|content| match content {
@@ -108,30 +115,32 @@ fn extract_text(choice: &OneOrMany<AssistantContent>) -> String {
         .join("\n")
 }
 
-fn tool_result_message(tool_call: &ToolCall, output: String) -> Message {
-    Message::tool_result_with_call_id(tool_call.id.clone(), tool_call.call_id.clone(), output)
+fn tool_result_message(tool_call: &ToolCall, output: ToolOutput) -> Message {
+    let content = output.into_content();
+    let result = UserContent::tool_result_for(
+        tool_call.id.clone(),
+        tool_call.provider.clone(),
+        tool_call.function.name.clone(),
+        content,
+    );
+    Message::User {
+        content: vec![result],
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     const MAX_ROUNDS: usize = 8;
 
-    let agent = openai::Client::from_env()?
-        .agent(openai::GPT_4O_MINI)
-        .preamble(
-            "You are a calculator. Never do arithmetic from memory. \
-             Use the provided tools for every intermediate step. \
-             You may emit one or multiple tool calls in a single turn. \
-             Once all tool results are available, give a short final answer.",
-        )
-        .tool(Add)
-        .tool(Subtract)
-        .build();
+    let model = openai::Client::from_env()?.completion_model(openai::GPT_4O_MINI);
+    let preamble = "You are a calculator. Never do arithmetic from memory. \
+                    Use the provided tools for every intermediate step. \
+                    You may emit one or multiple tool calls in a single turn. \
+                    Once all tool results are available, give a short final answer.";
 
-    let local_tools = ToolSet::builder()
-        .static_tool(Add)
-        .static_tool(Subtract)
-        .build();
+    let mut local_tools = ToolSet::default();
+    local_tools.add_tool(Add);
+    local_tools.add_tool(Subtract);
 
     let mut history = Vec::new();
     let mut current_prompt = Message::user(
@@ -139,9 +148,13 @@ async fn main() -> Result<()> {
     );
 
     for round in 1..=MAX_ROUNDS {
-        let mut request = agent
-            .completion(current_prompt.clone(), history.clone())
-            .await?;
+        // This example intentionally operates below the Agent abstraction. Raw
+        // model requests have no agent lifecycle or hooks.
+        let mut request = model
+            .completion_request(current_prompt.clone())
+            .preamble(preamble.to_string())
+            .messages(history.clone())
+            .tools(local_tools.get_tool_definitions());
         if round == 1 {
             // Force the first turn through the tool path so the example always demonstrates it.
             request = request.tool_choice(ToolChoice::Required);
@@ -169,10 +182,19 @@ async fn main() -> Result<()> {
 
         for tool_call in &tool_calls {
             let args = serde_json::to_string(&tool_call.function.arguments)?;
-            let output = local_tools
-                .call(&tool_call.function.name, args.clone())
-                .await?;
-            println!("  {}({args}) -> {}", tool_call.function.name, output);
+            let result = local_tools
+                .execute(
+                    &tool_call.function.name,
+                    args.clone(),
+                    &mut rig::tool::ToolContext::new(),
+                )
+                .await;
+            let output = result.output().clone();
+            println!(
+                "  {}({args}) -> {}",
+                tool_call.function.name,
+                output.render()
+            );
             history.push(tool_result_message(tool_call, output));
         }
 

@@ -1,7 +1,8 @@
 //! vLLM OpenAI-compatible Responses API regression tests.
 
-use rig::client::CompletionClient;
 use rig::completion::CompletionModel;
+use rig::completion::NormalizeCompletionResponse;
+use rig::prelude::*;
 use rig::providers::openai;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
@@ -38,21 +39,24 @@ async fn responses_api_accepts_null_metadata() {
                 .max_tokens(8)
                 .build();
 
-            let response = model
-                .completion(request)
+            // `metadata` is a provider-native wire field, so it is read off the
+            // Responses API's own response type. The cassette records a single
+            // interaction, so the normalized response is derived from that same
+            // raw response instead of issuing a second request.
+            let raw = model
+                .raw_completion(request)
                 .await
                 .expect("vLLM Responses API completion with null metadata should deserialize");
 
             assert!(
-                response
-                    .raw_response
-                    .additional_parameters
-                    .metadata
-                    .is_empty(),
+                raw.additional_parameters.metadata.is_empty(),
                 "vLLM returns metadata: null; Rig should preserve the public map API as an empty map"
             );
+
+            let response: rig::completion::CompletionResponse = raw.normalize("openai")
+                .expect("vLLM Responses API completion should normalize");
             assert!(
-                response.choice.iter().next().is_some(),
+                !response.choice.is_empty(),
                 "response should contain assistant content"
             );
         },

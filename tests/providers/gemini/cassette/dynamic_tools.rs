@@ -7,9 +7,9 @@
 //! build time, query embedding at prompt time) alongside the completion
 //! turns.
 
-use rig::client::{CompletionClient, EmbeddingsClient};
 use rig::completion::{Chat, Message};
 use rig::embeddings::EmbeddingsBuilder;
+use rig::prelude::*;
 use rig::providers::gemini;
 use rig::tool::ToolSet;
 use rig::vector_store::in_memory_store::InMemoryVectorStore;
@@ -53,10 +53,9 @@ async fn dynamic_tool_retrieved_and_merged_with_static() {
     with_gemini_cassette(
         "dynamic_tools/dynamic_tool_retrieved_and_merged_with_static",
         |client| async move {
-            let toolset = ToolSet::builder()
-                .dynamic_tool(subtract)
-                .dynamic_tool(EmbedMultiply::default())
-                .build();
+            let mut toolset = ToolSet::default();
+            toolset.add_retrieved_tool(subtract);
+            toolset.add_retrieved_tool(EmbedMultiply::default());
             let index = build_tool_index(&client, &toolset).await;
 
             let agent = client
@@ -64,7 +63,7 @@ async fn dynamic_tool_retrieved_and_merged_with_static() {
                 .preamble(FORCE_TOOLS_PREAMBLE)
                 .temperature(0.0)
                 .tool(add)
-                .dynamic_tools(1, index, toolset)
+                .retrieved_tools(1, index, toolset)
                 .default_max_turns(3)
                 .build();
 
@@ -97,17 +96,16 @@ async fn dynamic_only_agent_retrieves_tool_per_prompt() {
     with_gemini_cassette(
         "dynamic_tools/dynamic_only_agent_retrieves_tool_per_prompt",
         |client| async move {
-            let toolset = ToolSet::builder()
-                .dynamic_tool(add)
-                .dynamic_tool(EmbedSubtract::default())
-                .build();
+            let mut toolset = ToolSet::default();
+            toolset.add_retrieved_tool(add);
+            toolset.add_retrieved_tool(EmbedSubtract::default());
             let index = build_tool_index(&client, &toolset).await;
 
             let agent = client
                 .agent(gemini::completion::GEMINI_2_5_FLASH)
                 .preamble(FORCE_TOOLS_PREAMBLE)
                 .temperature(0.0)
-                .dynamic_tools(1, index, toolset)
+                .retrieved_tools(1, index, toolset)
                 .default_max_turns(3)
                 .build();
 
@@ -135,23 +133,21 @@ async fn sample_caps_retrieved_definitions() {
     with_gemini_cassette(
         "dynamic_tools/sample_caps_retrieved_definitions",
         |client| async move {
-            let toolset = ToolSet::builder()
-                .dynamic_tool(EmbedAdd::default())
-                .dynamic_tool(EmbedSubtract::default())
-                .dynamic_tool(EmbedMultiply::default())
-                .build();
+            let mut toolset = ToolSet::default();
+            toolset.add_retrieved_tool(EmbedAdd::default());
+            toolset.add_retrieved_tool(EmbedSubtract::default());
+            toolset.add_retrieved_tool(EmbedMultiply::default());
             let index = build_tool_index(&client, &toolset).await;
 
             let agent = client
                 .agent(gemini::completion::GEMINI_2_5_FLASH)
                 .preamble(FORCE_TOOLS_PREAMBLE)
                 .temperature(0.0)
-                .dynamic_tools(2, index, toolset)
+                .retrieved_tools(2, index, toolset)
                 .build();
 
             let defs = agent
-                .tool_server_handle
-                .get_tool_defs(Some(
+                .tool_definitions(Some(
                     "Multiply two numbers together to get their product.".to_string(),
                 ))
                 .await

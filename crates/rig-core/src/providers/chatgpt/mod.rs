@@ -20,21 +20,17 @@ mod auth;
 #[cfg(all(not(target_family = "wasm"), feature = "websocket"))]
 pub mod websocket;
 
-use crate::client::{
-    self, ApiKey, Capabilities, Capable, DebugExt, Nothing, Provider, ProviderBuilder,
-    ProviderClient, Transport,
-};
-use crate::completion::{self, CompletionError};
+use crate::client::{self, ApiKey, DebugExt, Provider, ProviderBuilder, ProviderClient, Transport};
+use crate::completion::{self, CompletionError, NormalizeCompletionResponse};
 use crate::http_client::{self, HttpClientExt};
 use crate::providers::openai::responses_api::{
     self, CompletionRequest as ResponsesRequest, Include,
 };
 use crate::streaming::StreamingCompletionResponse;
-use crate::telemetry::{CompletionOperation, CompletionSpanBuilder};
+use crate::telemetry::{CompletionOperation, CompletionSpanBuilder, SpanCombinator};
 use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
-use tracing::{Level, enabled};
 
 const CHATGPT_API_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_ORIGINATOR: &str = "rig";
@@ -171,17 +167,7 @@ impl responses_api::ResponsesProviderExt for ChatGPTExt {
     }
 }
 
-impl<H> Capabilities<H> for ChatGPTExt {
-    type Completion = Capable<ResponsesCompletionModel<H>>;
-    type Embeddings = Nothing;
-    type Transcription = Nothing;
-    type ModelListing = Nothing;
-    #[cfg(feature = "image")]
-    type ImageGeneration = Nothing;
-    #[cfg(feature = "audio")]
-    type AudioGeneration = Nothing;
-    type Rerank = Nothing;
-}
+client::impl_capabilities!(ChatGPTExt, completion = ResponsesCompletionModel<H>);
 
 impl DebugExt for ChatGPTExt {}
 
@@ -446,11 +432,62 @@ where
         }
     }
 
-    async fn completion_from_sse(
+    /// Execute a ChatGPT completion and return the Responses API's own wire
+    /// response.
+    ///
+    /// This is the escape hatch for fields rig does not normalize, and it
+    /// issues the same single request the normalized path does.
+    ///
+    /// One caveat is specific to this provider: `/responses` answers with an
+    /// SSE body even for a non-streaming request, so the value returned here is
+    /// reassembled from the terminal `response.completed` event. That event
+    /// sometimes carries an empty `output`, in which case the assistant content
+    /// exists only in the preceding events and
+    /// [`completion::CompletionModel::completion`] rebuilds it from them. When
+    /// you need the provider's events in full fidelity rather than just its
+    /// terminal record, use [`ResponsesCompletionModel::raw_stream`].
+    pub async fn raw_completion(
+        &self,
+        completion_request: completion::CompletionRequest,
+    ) -> Result<responses_api::CompletionResponse, CompletionError> {
+        let record_telemetry_content = completion_request.record_telemetry_content;
+        let request = self.create_request(completion_request)?;
+        let span = self.completion_span(&request, record_telemetry_content);
+
+        tracing_futures::Instrument::instrument(
+            async move { Ok(self.send_completion(request).await?.0) },
+            span,
+        )
+        .await
+    }
+
+    /// Build the `chat` span for a non-streaming ChatGPT completion.
+    ///
+    /// The instructions recorded here are the ones actually sent: the request's
+    /// merged `instructions`, not the caller's preamble, which
+    /// `SystemInstructionsPlacement::AllInstructions` folds together with the
+    /// client's `default_instructions`.
+    fn completion_span(
+        &self,
+        request: &ResponsesRequest,
+        record_telemetry_content: bool,
+    ) -> tracing::Span {
+        CompletionSpanBuilder::new(PROVIDER_NAME, &request.model, CompletionOperation::Chat)
+            .system_instructions(request.instructions.as_deref(), record_telemetry_content)
+            .build()
+    }
+
+    /// Issue the request and return the reassembled wire response together with
+    /// the SSE body it came from.
+    ///
+    /// Both the raw and the normalized path go through here, so there is one
+    /// transport, one status check, and one parse — and the normalized path can
+    /// still reach the event stream for its empty-`output` fallback without
+    /// issuing a second request.
+    async fn send_completion(
         &self,
         request: ResponsesRequest,
-    ) -> Result<completion::CompletionResponse<responses_api::CompletionResponse>, CompletionError>
-    {
+    ) -> Result<(responses_api::CompletionResponse, String), CompletionError> {
         let body = serde_json::to_vec(&request)?;
         let auth = self
             .client
@@ -472,13 +509,36 @@ where
             return Err(CompletionError::from_http_response(status, text));
         }
 
+        // The `/responses` endpoint answers with an SSE body even for a
+        // non-streaming request, so the wire response is reassembled from the
+        // event stream rather than parsed as one JSON document.
         let raw_response = responses_api::streaming::parse_sse_completion_body(&text, "ChatGPT")?;
 
-        match raw_response.clone().try_into() {
+        let span = tracing::Span::current();
+        span.record_response_metadata(&raw_response);
+
+        Ok((raw_response, text))
+    }
+
+    /// Normalize a ChatGPT completion, falling back to the SSE event stream
+    /// when the reassembled response carries no output items.
+    async fn normalized_completion(
+        &self,
+        request: ResponsesRequest,
+    ) -> Result<completion::CompletionResponse, CompletionError> {
+        let (raw_response, text) = self.send_completion(request).await?;
+
+        match raw_response.clone().normalize(PROVIDER_NAME) {
             Ok(response) => Ok(response),
+            // An empty `output` means the terminal event never carried the
+            // assembled items; rebuild the response from the raw event stream.
             Err(CompletionError::ResponseError(_)) if raw_response.output.is_empty() => {
-                responses_api::streaming::completion_response_from_sse_body(&text, raw_response)
-                    .await
+                responses_api::streaming::completion_response_from_sse_body(
+                    PROVIDER_NAME,
+                    &text,
+                    raw_response,
+                )
+                .await
             }
             Err(error) => Err(error),
         }
@@ -494,41 +554,34 @@ where
     }
 }
 
+impl<H> crate::client::ConstructCompletionModel<Client<H>> for ResponsesCompletionModel<H>
+where
+    Client<H>: HttpClientExt + Clone + Debug + 'static,
+    H: Clone + Default + Debug + WasmCompatSend + WasmCompatSync + 'static,
+{
+    fn construct(client: &Client<H>, model: String) -> Self {
+        Self::new(client.clone(), model)
+    }
+}
+
 impl<H> completion::CompletionModel for ResponsesCompletionModel<H>
 where
     Client<H>: HttpClientExt + Clone + Debug + 'static,
     H: Clone + Default + Debug + WasmCompatSend + WasmCompatSync + 'static,
 {
-    type Response = responses_api::CompletionResponse;
-    type StreamingResponse = responses_api::streaming::StreamingCompletionResponse;
-    type Client = Client<H>;
-
-    fn make(client: &Self::Client, model: impl Into<String>) -> Self {
-        Self::new(client.clone(), model)
-    }
-
     async fn completion(
         &self,
         completion_request: completion::CompletionRequest,
-    ) -> Result<completion::CompletionResponse<Self::Response>, CompletionError> {
+    ) -> Result<completion::CompletionResponse, CompletionError> {
+        let record_telemetry_content = completion_request.record_telemetry_content;
         let request = self.create_request(completion_request)?;
-
-        let span = CompletionSpanBuilder::new("chatgpt", &request.model, CompletionOperation::Chat)
-            .system_instructions(request.instructions.as_deref())
-            .build();
+        let span = self.completion_span(&request, record_telemetry_content);
 
         tracing_futures::Instrument::instrument(
             async move {
-                let response = self.completion_from_sse(request).await?;
+                let response = self.normalized_completion(request).await?;
                 let span = tracing::Span::current();
-                span.record("gen_ai.response.id", &response.raw_response.id);
-                span.record("gen_ai.response.model", &response.raw_response.model);
-                span.record("gen_ai.usage.output_tokens", response.usage.output_tokens);
-                span.record("gen_ai.usage.input_tokens", response.usage.input_tokens);
-                span.record(
-                    "gen_ai.usage.cache_read.input_tokens",
-                    response.usage.cached_input_tokens,
-                );
+                span.record_token_usage(&response.usage);
                 Ok(response)
             },
             span,
@@ -539,7 +592,7 @@ where
     async fn stream(
         &self,
         completion_request: completion::CompletionRequest,
-    ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+    ) -> Result<StreamingCompletionResponse, CompletionError> {
         Self::stream(self, completion_request).await
     }
 }
@@ -549,22 +602,48 @@ where
     Client<H>: HttpClientExt + Clone + Debug + 'static,
     H: Clone + Default + Debug + WasmCompatSend + WasmCompatSync + 'static,
 {
+    /// Open a stream normalized to rig's terminal record.
+    ///
+    /// Delegates to [`ResponsesCompletionModel::raw_stream`] — one request
+    /// either way.
     pub async fn stream(
         &self,
         completion_request: completion::CompletionRequest,
+    ) -> Result<StreamingCompletionResponse, CompletionError> {
+        let raw = self.raw_stream(completion_request).await?;
+
+        Ok(responses_api::streaming::normalize_responses_stream(
+            PROVIDER_NAME,
+            raw,
+        ))
+    }
+
+    /// Open a stream whose terminal record stays the Responses API's own type.
+    pub async fn raw_stream(
+        &self,
+        completion_request: completion::CompletionRequest,
     ) -> Result<
-        StreamingCompletionResponse<responses_api::streaming::StreamingCompletionResponse>,
+        crate::streaming::RawStreamingResult<responses_api::streaming::StreamingCompletionResponse>,
         CompletionError,
     > {
+        let record_telemetry_content = completion_request.record_telemetry_content;
+        // Built before `create_request` consumes the request, which is where the
+        // control key is dropped. This route does not go through the generic
+        // `ResponsesCompletionModel::raw_stream`, so it must read the caller's
+        // opt-in itself — omitting that is what made the opt-in inert here while
+        // OpenAI's route honored it. The tool-call axis reads ChatGPT's own
+        // provider extension rather than restating a local constant.
+        let options = responses_api::streaming::ResponsesStreamOptions::for_request(
+            &completion_request,
+            <ChatGPTExt as responses_api::ResponsesProviderExt>::EMITS_COMPLETE_TOOL_CALLS_IMMEDIATELY,
+        );
         let request = self.create_request(completion_request)?;
 
-        if enabled!(Level::TRACE) {
-            tracing::trace!(
-                target: "rig::completions",
-                "ChatGPT Responses streaming completion request: {}",
-                serde_json::to_string_pretty(&request)?
-            );
-        }
+        crate::providers::internal::trace_json(
+            crate::providers::internal::LogTarget::Completions,
+            "ChatGPT Responses streaming completion request",
+            &request,
+        );
 
         let body = serde_json::to_vec(&request)?;
         let auth = self
@@ -581,20 +660,21 @@ where
             .map_err(|err| CompletionError::HttpError(err.into()))?;
 
         let span = CompletionSpanBuilder::new(
-            "chatgpt",
+            PROVIDER_NAME,
             &request.model,
             CompletionOperation::ChatStreaming,
         )
-        .system_instructions(request.instructions.as_deref())
+        .system_instructions(request.instructions.as_deref(), record_telemetry_content)
         .build();
 
         let client = self.client.clone();
         let event_source = crate::http_client::sse::GenericEventSource::new(client, req)
             .allow_missing_content_type();
 
-        Ok(responses_api::streaming::stream_from_event_source(
+        Ok(responses_api::streaming::raw_stream_from_event_source(
             event_source,
             span,
+            options,
         ))
     }
 }
@@ -621,6 +701,9 @@ where
     }
 }
 
+/// Stable descriptor name reported on normalized ChatGPT responses.
+pub const PROVIDER_NAME: &str = "chatgpt";
+
 fn default_user_agent() -> String {
     format!(
         "rig/{} ({} {}; {})",
@@ -635,19 +718,7 @@ fn default_auth_file() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("chatgpt").join("auth.json"))
 }
 
-fn config_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-    }
-}
+use crate::providers::internal::auth::config_dir;
 
 fn merge_instructions(default_instructions: &str, existing_instructions: Option<&str>) -> String {
     match existing_instructions
@@ -663,7 +734,6 @@ fn merge_instructions(default_instructions: &str, existing_instructions: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::OneOrMany;
 
     #[test]
     fn test_parse_chatgpt_sse_completion() {
@@ -712,9 +782,7 @@ data: [DONE]"#;
         );
     }
 
-    fn chatgpt_conversion_request(
-        chat_history: OneOrMany<completion::Message>,
-    ) -> ResponsesRequest {
+    fn chatgpt_conversion_request(chat_history: Vec<completion::Message>) -> ResponsesRequest {
         let client = crate::providers::chatgpt::Client::builder()
             .oauth()
             .build()
@@ -734,19 +802,17 @@ data: [DONE]"#;
                 tool_choice: None,
                 additional_params: None,
                 output_schema: None,
+                record_telemetry_content: false,
             })
             .expect("request")
     }
 
     #[test]
     fn test_conversion_lifts_leading_system_messages_into_instructions() {
-        let request = chatgpt_conversion_request(
-            OneOrMany::many(vec![
-                completion::Message::system("System two"),
-                completion::Message::user("hi"),
-            ])
-            .expect("history"),
-        );
+        let request = chatgpt_conversion_request(vec![
+            completion::Message::system("System two"),
+            completion::Message::user("hi"),
+        ]);
 
         assert_eq!(
             request.instructions.as_deref(),
@@ -757,14 +823,11 @@ data: [DONE]"#;
 
     #[test]
     fn test_conversion_lifts_mid_conversation_system_messages() {
-        let request = chatgpt_conversion_request(
-            OneOrMany::many(vec![
-                completion::Message::user("hi"),
-                completion::Message::system("Mid-conversation instruction"),
-                completion::Message::user("again"),
-            ])
-            .expect("history"),
-        );
+        let request = chatgpt_conversion_request(vec![
+            completion::Message::user("hi"),
+            completion::Message::system("Mid-conversation instruction"),
+            completion::Message::user("again"),
+        ]);
 
         assert_eq!(
             request.instructions.as_deref(),
@@ -783,9 +846,10 @@ data: [DONE]"#;
 
         let request = model
             .create_request(completion::CompletionRequest {
+                record_telemetry_content: false,
                 model: None,
                 preamble: Some("Respond tersely.".to_string()),
-                chat_history: OneOrMany::one(completion::Message::user("hello")),
+                chat_history: vec![completion::Message::user("hello")],
                 documents: Vec::new(),
                 tools: Vec::new(),
                 temperature: None,
@@ -812,7 +876,7 @@ data: [DONE]"#;
             .create_request(completion::CompletionRequest {
                 model: None,
                 preamble: None,
-                chat_history: OneOrMany::one(completion::Message::user("hello")),
+                chat_history: vec![completion::Message::user("hello")],
                 documents: Vec::new(),
                 tools: Vec::new(),
                 temperature: Some(0.5),
@@ -820,6 +884,7 @@ data: [DONE]"#;
                 tool_choice: None,
                 additional_params: None,
                 output_schema: None,
+                record_telemetry_content: false,
             })
             .expect("request");
 
@@ -838,7 +903,7 @@ data: [DONE]"#;
             .create_request(completion::CompletionRequest {
                 model: None,
                 preamble: None,
-                chat_history: OneOrMany::one(completion::Message::user("hello")),
+                chat_history: vec![completion::Message::user("hello")],
                 documents: Vec::new(),
                 tools: Vec::new(),
                 temperature: None,
@@ -846,6 +911,7 @@ data: [DONE]"#;
                 tool_choice: None,
                 additional_params: None,
                 output_schema: None,
+                record_telemetry_content: false,
             })
             .expect("request");
 
@@ -876,7 +942,7 @@ data: [DONE]"#;
             .create_request(completion::CompletionRequest {
                 model: None,
                 preamble: None,
-                chat_history: OneOrMany::one(completion::Message::user("hello")),
+                chat_history: vec![completion::Message::user("hello")],
                 documents: Vec::new(),
                 tools: Vec::new(),
                 temperature: None,
@@ -884,6 +950,7 @@ data: [DONE]"#;
                 tool_choice: None,
                 additional_params: None,
                 output_schema: None,
+                record_telemetry_content: false,
             })
             .expect("request without reasoning");
         assert!(
@@ -895,7 +962,7 @@ data: [DONE]"#;
             .create_request(completion::CompletionRequest {
                 model: None,
                 preamble: None,
-                chat_history: OneOrMany::one(completion::Message::user("hello")),
+                chat_history: vec![completion::Message::user("hello")],
                 documents: Vec::new(),
                 tools: Vec::new(),
                 temperature: None,
@@ -903,6 +970,7 @@ data: [DONE]"#;
                 tool_choice: None,
                 additional_params: Some(serde_json::json!({ "reasoning": { "effort": "medium" } })),
                 output_schema: None,
+                record_telemetry_content: false,
             })
             .expect("request with reasoning");
         assert!(
@@ -919,10 +987,13 @@ data: [DONE]"#;
 
         let raw_response = responses_api::streaming::parse_sse_completion_body(body, "ChatGPT")
             .expect("expected response");
-        let response =
-            responses_api::streaming::completion_response_from_sse_body(body, raw_response)
-                .await
-                .expect("fallback response");
+        let response = responses_api::streaming::completion_response_from_sse_body(
+            PROVIDER_NAME,
+            body,
+            raw_response,
+        )
+        .await
+        .expect("fallback response");
 
         let text: String = response
             .choice
@@ -982,5 +1053,117 @@ data: [DONE]"#;
                 "error should include provider body: {error}"
             );
         }
+    }
+
+    /// Drives a ChatGPT Responses stream over a text delta and a terminal
+    /// `response.incomplete`, with and without the per-request opt-in.
+    ///
+    /// Returns the accumulated text alongside either the terminal record's
+    /// finish reason or the error the stream surfaced, so each polarity test
+    /// asserts the same two observables against opposite expectations.
+    async fn chatgpt_incomplete_outcome(
+        tolerate: bool,
+    ) -> (
+        String,
+        Result<Option<completion::FinishReason>, CompletionError>,
+    ) {
+        use crate::client::completion::CompletionClient as _;
+        use crate::completion::CompletionModel as _;
+        use futures::StreamExt as _;
+
+        let text_delta = serde_json::json!({
+            "type": "response.output_text.delta",
+            "content_index": 0,
+            "delta": "partial",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "sequence_number": 1
+        });
+        let incomplete = serde_json::json!({
+            "type": "response.incomplete",
+            "sequence_number": 2,
+            "response": {
+                "id": "resp_123",
+                "object": "response",
+                "created_at": 1700000000,
+                "status": "incomplete",
+                "error": null,
+                "incomplete_details": { "reason": "max_output_tokens" },
+                "instructions": null,
+                "max_output_tokens": null,
+                "model": "gpt-5.3-codex",
+                "usage": { "input_tokens": 1, "output_tokens": 2, "total_tokens": 3 },
+                "output": [],
+                "tools": []
+            }
+        });
+
+        let client = crate::providers::chatgpt::Client::builder()
+            .api_key(ChatGPTAuth::AccessToken {
+                access_token: "test-token".to_string(),
+                account_id: Some("account-id".to_string()),
+            })
+            .http_client(crate::test_utils::MockStreamingClient {
+                sse_bytes: crate::providers::internal::openai_chat_completions_compatible::test_support::sse_bytes_from_json_events(
+                    &[text_delta, incomplete],
+                ),
+            })
+            .build()
+            .expect("client should build");
+        let model = client.completion_model(GPT_5_4);
+
+        let mut builder = model.completion_request("hello");
+        if tolerate {
+            builder = builder.additional_params(serde_json::json!({
+                responses_api::RESPONSES_TOLERATE_INCOMPLETE_KEY: true
+            }));
+        }
+        let mut stream = model
+            .stream(builder.build())
+            .await
+            .expect("stream should start");
+
+        let mut text = String::new();
+        let mut finish_reason = None;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(crate::streaming::StreamedAssistantContent::Text(chunk)) => {
+                    text.push_str(&chunk.text)
+                }
+                Ok(crate::streaming::StreamedAssistantContent::Final(response)) => {
+                    finish_reason = response.finish_reason
+                }
+                Ok(_) => {}
+                Err(error) => return (text, Err(error)),
+            }
+        }
+
+        (text, Ok(finish_reason))
+    }
+
+    #[tokio::test]
+    async fn chatgpt_incomplete_terminal_errors_without_the_opt_in() {
+        // The strict default. This route reads the opt-in itself rather than
+        // inheriting the generic boundary's read, so both polarities are
+        // asserted here and not only on the OpenAI path.
+        let (_, outcome) = chatgpt_incomplete_outcome(false).await;
+
+        let error = outcome.expect_err("the strict default must surface a provider error");
+        assert!(matches!(error, CompletionError::ProviderResponse(_)));
+        assert!(error.provider_response_body().is_some_and(|body| {
+            body.contains("response.incomplete") && body.contains("max_output_tokens")
+        }));
+    }
+
+    #[tokio::test]
+    async fn chatgpt_incomplete_terminal_is_tolerated_with_the_opt_in() {
+        // The opt-in Muninn's Codex route sets. Before this route read the key
+        // it was inert here, so a caller asking for tolerance still got the
+        // error above.
+        let (text, outcome) = chatgpt_incomplete_outcome(true).await;
+
+        let finish_reason = outcome.expect("the opt-in must not surface an error");
+        assert_eq!(text, "partial", "the partial output must survive");
+        assert_eq!(finish_reason, Some(completion::FinishReason::Length));
     }
 }

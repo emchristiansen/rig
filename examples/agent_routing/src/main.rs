@@ -3,8 +3,8 @@
 //! Run it to see a classifier agent choose which second prompt should run.
 
 use anyhow::{Result, bail};
-use rig::client::{CompletionClient, ProviderClient};
 use rig::completion::Prompt;
+use rig::prelude::*;
 use rig::providers::openai;
 use rig::providers::openai::client::Client;
 
@@ -14,18 +14,14 @@ const ROUTER_PREAMBLE: &str = "
     Return only the category.
 ";
 
-fn build_router_agent(
-    client: &Client,
-) -> rig::agent::Agent<openai::responses_api::ResponsesCompletionModel> {
+fn build_router_agent(client: &Client) -> rig::agent::Agent {
     client
         .agent(openai::GPT_4)
         .preamble(ROUTER_PREAMBLE)
         .build()
 }
 
-fn build_response_agent(
-    client: &Client,
-) -> rig::agent::Agent<openai::responses_api::ResponsesCompletionModel> {
+fn build_response_agent(client: &Client) -> rig::agent::Agent {
     client.agent(openai::GPT_4).build()
 }
 

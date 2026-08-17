@@ -9,10 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use base64::{Engine, prelude::BASE64_STANDARD};
-use rig::OneOrMany;
-use rig::client::CompletionClient;
 use rig::completion::{Chat, CompletionModel, Message, Prompt};
 use rig::message::{AssistantContent, ImageMediaType, ToolChoice, UserContent};
+use rig::prelude::*;
 use rig::providers::openai::responses_api::Output;
 use rig::providers::xai;
 use rig::streaming::{StreamingChat, StreamingPrompt};
@@ -140,7 +139,11 @@ impl Tool for PingEmpty {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         push_invocation(&self.log, Self::NAME, &args);
         Ok("EMPTY-OK".to_string())
     }
@@ -186,7 +189,11 @@ impl Tool for InspectManifest {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         push_invocation(&self.log, Self::NAME, &args);
         Ok(format!(
             "MANIFEST-OK project={} steps={} retries={}",
@@ -221,7 +228,11 @@ impl Tool for JoinLabels {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         push_invocation(&self.log, Self::NAME, &args);
         Ok(format!("LABELS-OK {}", args.labels.join(&args.separator)))
     }
@@ -247,7 +258,11 @@ impl Tool for EscapeEcho {
         })
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         push_invocation(&self.log, Self::NAME, &args);
         Ok(format!("ESCAPE-OK {}", args.text))
     }
@@ -308,7 +323,7 @@ fn assert_complex_invocations(log: &InvocationLog) {
 
 struct ToolEvent {
     message_index: usize,
-    name_or_id: String,
+    name: String,
 }
 
 fn history_tool_calls(history: &[Message]) -> Vec<ToolEvent> {
@@ -319,7 +334,7 @@ fn history_tool_calls(history: &[Message]) -> Vec<ToolEvent> {
                 if let AssistantContent::ToolCall(tool_call) = item {
                     calls.push(ToolEvent {
                         message_index,
-                        name_or_id: tool_call.function.name.clone(),
+                        name: tool_call.function.name.clone(),
                     });
                 }
             }
@@ -336,7 +351,7 @@ fn history_tool_results(history: &[Message]) -> Vec<ToolEvent> {
                 if let UserContent::ToolResult(tool_result) = item {
                     results.push(ToolEvent {
                         message_index,
-                        name_or_id: tool_result.id.clone(),
+                        name: tool_result.name.clone(),
                     });
                 }
             }
@@ -352,7 +367,7 @@ fn assert_history_records_sequential_tool_roundtrips(history: &[Message], expect
     assert_eq!(
         calls
             .iter()
-            .map(|call| call.name_or_id.as_str())
+            .map(|call| call.name.as_str())
             .collect::<Vec<_>>(),
         expected_tools,
         "caller-owned chat history should preserve tool call order"
@@ -378,15 +393,36 @@ fn assert_history_records_sequential_tool_roundtrips(history: &[Message], expect
     }
 }
 
-fn assert_response_metadata(
-    response: &rig::completion::CompletionResponse<xai::CompletionResponse>,
-) {
-    assert_nonempty_response(&response.raw_response.id);
-    assert_nonempty_response(&response.raw_response.model);
-    assert_eq!(response.raw_response.status.as_deref(), Some("completed"));
+/// Assert the provider-native metadata xAI reports on its own wire response.
+///
+/// The response id (`resp_...`), typed status, and full usage envelope are read
+/// from [`xai::CompletionModel::raw_completion`]. `completion` is that same
+/// call followed by the shared Responses normalization, so a cassette still
+/// records exactly one interaction.
+fn assert_raw_response_metadata(raw: &xai::CompletionResponse) {
+    assert_nonempty_response(&raw.id);
+    assert_nonempty_response(&raw.model);
+    assert_eq!(
+        raw.status,
+        rig::providers::openai::responses_api::ResponseStatus::Completed
+    );
     assert!(
-        response.raw_response.usage.is_some(),
+        raw.usage.is_some(),
         "raw xAI response should preserve usage metadata"
+    );
+}
+
+fn assert_response_metadata(response: &rig::completion::CompletionResponse) {
+    assert_nonempty_response(
+        response
+            .model
+            .as_deref()
+            .expect("normalized xAI response should report the provider model"),
+    );
+    assert_eq!(
+        response.finish_reason(),
+        Some(rig::completion::FinishReason::Stop),
+        "xAI `status: completed` should normalize to a stop finish reason"
     );
     assert!(
         response
@@ -533,7 +569,7 @@ async fn parallel_tool_calls_single_turn_nonstreaming() -> Result<()> {
             let calls = history_tool_calls(&history);
             let call_names = calls
                 .iter()
-                .map(|call| call.name_or_id.as_str())
+                .map(|call| call.name.as_str())
                 .collect::<Vec<_>>();
             anyhow::ensure!(
                 calls.len() == 2
@@ -649,16 +685,16 @@ async fn long_history_replay_with_tool_result_continuation() -> Result<()> {
                 .message(Message::user("Look up the harbor label with the tool."))
                 .message(Message::Assistant {
                     id: None,
-                    content: OneOrMany::one(AssistantContent::tool_call_with_call_id(
+                    content: vec![AssistantContent::tool_call_with_call_id(
                         "call_REDACTED_1",
                         "call_REDACTED_1".to_string(),
                         AlphaSignal::NAME,
                         json!({}),
-                    )),
+                    )],
                 })
-                .message(Message::tool_result_with_call_id(
+                .message(Message::tool_result(
                     "call_REDACTED_1",
-                    Some("call_REDACTED_1".to_string()),
+                    AlphaSignal::NAME,
                     ALPHA_SIGNAL_OUTPUT,
                 ))
                 .message(Message::assistant("The harbor label is crimson-harbor."))
@@ -666,7 +702,10 @@ async fn long_history_replay_with_tool_result_continuation() -> Result<()> {
                 .tool_choice(ToolChoice::None)
                 .build();
 
-            let response = model.completion(request).await?;
+            let raw = model.raw_completion(request).await?;
+            assert_raw_response_metadata(&raw);
+            let response: rig::completion::CompletionResponse =
+                rig::completion::NormalizeCompletionResponse::normalize(raw, "xai")?;
             let text = assistant_text_response(&response.choice)
                 .ok_or_else(|| anyhow::anyhow!("response should include assistant text"))?;
 
@@ -783,7 +822,24 @@ async fn reasoning_effort_preserves_reasoning_content_and_usage() -> Result<()> 
                 }))
                 .build();
 
-            let response = model.completion(request).await?;
+            let raw = model.raw_completion(request).await?;
+
+            anyhow::ensure!(
+                raw.output
+                    .iter()
+                    .any(|output| matches!(output, Output::Reasoning { .. })),
+                "raw xAI output should preserve provider reasoning item"
+            );
+            let raw_reasoning_tokens = raw
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.output_tokens_details.as_ref())
+                .map(|details| details.reasoning_tokens)
+                .unwrap_or_default();
+            assert_raw_response_metadata(&raw);
+
+            let response: rig::completion::CompletionResponse =
+                rig::completion::NormalizeCompletionResponse::normalize(raw, "xai")?;
 
             anyhow::ensure!(
                 response
@@ -793,25 +849,10 @@ async fn reasoning_effort_preserves_reasoning_content_and_usage() -> Result<()> 
                 "xAI reasoning response should preserve a reasoning content block"
             );
             anyhow::ensure!(
-                response
-                    .raw_response
-                    .output
-                    .iter()
-                    .any(|output| matches!(output, Output::Reasoning { .. })),
-                "raw xAI output should preserve provider reasoning item"
-            );
-            anyhow::ensure!(
                 response.usage.reasoning_tokens > 0,
                 "core usage should preserve xAI reasoning tokens: {:?}",
                 response.usage
             );
-            let raw_reasoning_tokens = response
-                .raw_response
-                .usage
-                .as_ref()
-                .and_then(|usage| usage.output_tokens_details.as_ref())
-                .map(|details| details.reasoning_tokens)
-                .unwrap_or_default();
             anyhow::ensure!(
                 response.usage.reasoning_tokens == raw_reasoning_tokens && raw_reasoning_tokens > 0,
                 "usage reasoning tokens should match raw provider details"
@@ -874,7 +915,10 @@ async fn nested_json_schema_response_format_roundtrip() -> Result<()> {
                 }))
                 .build();
 
-            let response = model.completion(request).await?;
+            let raw = model.raw_completion(request).await?;
+            assert_raw_response_metadata(&raw);
+            let response: rig::completion::CompletionResponse =
+                rig::completion::NormalizeCompletionResponse::normalize(raw, "xai")?;
             let text = assistant_text_response(&response.choice)
                 .ok_or_else(|| anyhow::anyhow!("schema response should contain text"))?;
             let plan: serde_json::Value = serde_json::from_str(&text)?;
@@ -916,14 +960,13 @@ async fn multimodal_image_input_mixed_text_ordering() -> Result<()> {
 
             let response = agent
                 .prompt(Message::User {
-                    content: OneOrMany::many(vec![
+                    content: vec![
                         UserContent::text("First, note this is an image-analysis cassette test."),
                         image_content(),
                         UserContent::text(
                             "Then answer in one short sentence naming the main visible subject.",
                         ),
-                    ])
-                    .expect("content should be non-empty"),
+                    ],
                 })
                 .await?;
 

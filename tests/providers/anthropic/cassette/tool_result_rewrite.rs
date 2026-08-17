@@ -1,8 +1,8 @@
-//! Verifies that a `Flow::RewriteResult` hook redacts a tool's output before the
+//! Verifies that a `ToolResultAction::Rewrite` hook redacts a tool's output before the
 //! model sees it, end-to-end through a real Anthropic round-trip.
 //!
 //! The `get_user_record` tool returns a record containing a (fake) SSN. A default
-//! hook redacts the SSN on the `ToolResult` event via `Flow::rewrite_result`, so
+//! hook redacts the SSN on the `ToolResult` event via `ToolResultAction::rewrite`, so
 //! the value the tool actually produced never reaches the model. The tool records
 //! its real output; the assertions check that the tool DID produce the secret but
 //! the model's answer never contains it — and the blocking and streaming tests
@@ -10,12 +10,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use rig::agent::{AgentHook, Flow, StepEvent};
-use rig::client::CompletionClient;
-use rig::completion::{CompletionModel, Prompt};
+use rig::agent::{AgentHook, ToolResultAction, ToolResultEvent};
+use rig::completion::Prompt;
+use rig::prelude::*;
 use rig::providers::anthropic;
 use rig::streaming::StreamingPrompt;
 use rig::tool::Tool;
+use rig_agent::test_utils::validate_result_redaction;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -77,7 +78,11 @@ impl Tool for GetUserRecord {
         })
     }
 
-    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
         // Constant (id-independent) so the round-trip is deterministic for replay.
         let record = format!("name=Alice; ssn={SECRET_SSN}; status=active");
         self.raw_outputs
@@ -105,28 +110,31 @@ fn redact_ssn(record: &str) -> String {
 
 /// A guardrail hook that redacts the SSN from `get_user_record` output on the
 /// `ToolResult` event, before the model ever sees it — the post-tool redaction
-/// use case `RewriteResult` exists for.
+/// use case `ToolResultAction::Rewrite` exists for.
 struct RedactSsnFromResult;
 
-impl<M: CompletionModel> AgentHook<M> for RedactSsnFromResult {
-    async fn on_event(&self, _ctx: &rig::agent::HookContext, event: StepEvent<'_, M>) -> Flow {
-        if let StepEvent::ToolResult {
-            tool_name, result, ..
-        } = event
-            && tool_name == GetUserRecord::NAME
-        {
-            return Flow::rewrite_result(redact_ssn(result));
+impl AgentHook for RedactSsnFromResult {
+    async fn on_tool_result(
+        &self,
+        _ctx: &rig::agent::HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        if event.tool_name == GetUserRecord::NAME {
+            ToolResultAction::rewrite(redact_ssn(&event.presentation.render()))
+        } else {
+            ToolResultAction::keep()
         }
-        Flow::cont()
     }
 }
 
-fn assert_answer_hides_secret(answer: &str) {
-    assert!(!answer.is_empty(), "agent should produce a final answer");
-    assert!(
-        !answer.contains(SECRET_SSN),
-        "the redacted SSN must never reach the model, but the answer contained it: {answer}"
-    );
+fn assert_answer_hides_secret(answer: &str, tool_produced_secret: bool) {
+    validate_result_redaction(
+        "anthropic_tool_result_redaction",
+        tool_produced_secret,
+        answer,
+        SECRET_SSN,
+    )
+    .expect("portable result-redaction contract should hold");
 }
 
 #[tokio::test]
@@ -137,6 +145,7 @@ async fn tool_result_redacted_by_hook_blocking() {
     with_anthropic_cassette(
         "tool_result_rewrite/tool_result_redacted_by_hook_blocking",
         move |client| async move {
+            let execution_probe = tool.clone();
             let agent = client
                 .agent(anthropic::completion::CLAUDE_SONNET_4_6)
                 .preamble(PREAMBLE)
@@ -150,7 +159,7 @@ async fn tool_result_redacted_by_hook_blocking() {
                 .await
                 .expect("blocking lookup should succeed");
 
-            assert_answer_hides_secret(&response);
+            assert_answer_hides_secret(&response, execution_probe.produced_secret());
         },
     )
     .await;
@@ -169,6 +178,7 @@ async fn tool_result_redacted_by_hook_streaming() {
     with_anthropic_cassette(
         "tool_result_rewrite/tool_result_redacted_by_hook_streaming",
         move |client| async move {
+            let execution_probe = tool.clone();
             let agent = client
                 .agent(anthropic::completion::CLAUDE_SONNET_4_6)
                 .preamble(PREAMBLE)
@@ -181,7 +191,7 @@ async fn tool_result_redacted_by_hook_streaming() {
                 .await
                 .expect("streaming lookup should succeed");
 
-            assert_answer_hides_secret(&response);
+            assert_answer_hides_secret(&response, execution_probe.produced_secret());
         },
     )
     .await;

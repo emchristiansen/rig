@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::tool::Tool;
+use crate::tool::PortableTool;
 
 /// Arguments for the Think tool
 #[derive(Deserialize)]
@@ -10,7 +10,7 @@ pub struct ThinkArgs {
     pub thought: String,
 }
 
-/// Error type for the Think tool
+/// Error type for the Think tool.
 #[derive(Debug, thiserror::Error)]
 #[error("Think tool error: {0}")]
 pub struct ThinkError(String);
@@ -27,9 +27,8 @@ pub struct ThinkError(String);
 #[derive(Deserialize, Serialize)]
 pub struct ThinkTool;
 
-impl Tool for ThinkTool {
+impl PortableTool for ThinkTool {
     const NAME: &'static str = "think";
-
     type Error = ThinkError;
     type Args = ThinkArgs;
     type Output = String;
@@ -64,12 +63,12 @@ impl Tool for ThinkTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::tool_definition;
+    use crate::tool::portable_tool_definition;
 
     #[test]
     fn test_think_tool_definition() {
         let tool = ThinkTool;
-        let definition = tool_definition(&tool);
+        let definition = portable_tool_definition(&tool);
 
         assert_eq!(definition.name, "think");
         assert!(
