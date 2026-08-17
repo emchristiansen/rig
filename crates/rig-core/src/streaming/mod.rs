@@ -94,6 +94,32 @@ pub enum UnparseableToolInput {
     Keep,
 }
 
+/// What a wire's completed item asserts about a call's arguments.
+///
+/// A restatement has three states, not two: it can be absent, it can carry
+/// arguments that parse, and it can carry arguments the provider asserted but
+/// did not deliver. Absence is the enclosing `Option`; the two present states
+/// are the variants here.
+///
+/// **The third state is why this type exists.** Modelling authority as a bare
+/// `Option<Value>` collapses "the provider restated nothing" into "the provider
+/// restated something malformed", and the assembler then falls back to parsing
+/// the assembly buffer for both. When earlier fragments happen to parse, that
+/// fallback silently answers a malformed authoritative restatement with a call
+/// the provider never asserted — bypassing [`UnparseableToolInput`] entirely.
+/// Keeping the malformed bytes representable is what lets the assembler apply
+/// the policy on the authority it actually received.
+#[derive(Debug, Clone)]
+pub enum AuthoritativeArguments {
+    /// The completed item restated arguments that parse.
+    Parsed(serde_json::Value),
+    /// The completed item restated arguments that do not parse, carried as the
+    /// provider's exact bytes. Never repaired, and never normalized to `{}`:
+    /// the policy on the end event decides what happens to a call the provider
+    /// promised and then malformed.
+    Unparseable(String),
+}
+
 /// End of a streamed tool call's input: the signal for the shared assembler
 /// ([`RawStreamingChoice::ToolInputEnd`]) to finalize the call.
 ///
@@ -111,8 +137,10 @@ pub struct ToolInputEnd {
     pub tool_id: Option<WireId>,
     /// Authoritative tool name from the wire's completed item.
     pub name: Option<String>,
-    /// Authoritative parsed arguments from the wire's completed item.
-    pub arguments: Option<serde_json::Value>,
+    /// Authoritative arguments from the wire's completed item, parsed or not.
+    /// `None` when the wire restated nothing and the assembled fragments are
+    /// the only evidence.
+    pub arguments: Option<AuthoritativeArguments>,
     /// Provider call-correlation id (e.g. OpenAI Responses `call_id`).
     pub call_id: Option<String>,
     /// Provider signature attached to the completed call.

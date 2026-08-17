@@ -891,33 +891,39 @@ impl RawChoiceAccumulator {
                 // when assembly keyed on a minted slot identity (the
                 // accumulator honors the override).
                 end.tool_id = crate::streaming::WireId::new(func.id.clone());
-                // The restated arguments are authoritative when they parse.
-                // When they do not, the raw string is routed through the
-                // assembly buffer instead, so the policy above has bytes to
-                // judge. `ToolInputEnd::arguments` cannot carry the third state
-                // — an authoritative restatement that is malformed — and
-                // leaving it `None` with an empty buffer would reach the
-                // accumulator's parameterless-call branch and deliver the call
-                // with `{}` — arguments the provider never supplied — which is
-                // why the bytes must arrive.
+                // The restatement is authority in both of its states, and
+                // `AuthoritativeArguments` carries both, so the accumulator
+                // never has to infer authority from the assembly buffer. That
+                // matters most when the restatement is malformed: the buffer
+                // may hold earlier fragments that parse — a whitespace-only
+                // delta normalizing to `{}`, or a delta disagreeing with the
+                // restatement — and answering with those would deliver a call
+                // the provider never asserted, bypassing the policy selected
+                // above.
                 match func.arguments {
-                    FunctionCallArguments::Complete(arguments) => end.arguments = Some(arguments),
-                    // Fragments already streamed these bytes into the assembly
-                    // buffer — re-emitting the restatement doubled them
-                    // (rendered twice by delta consumers and double-charged
-                    // against the accumulation bound). Only a fragment-less done
-                    // item routes its raw string through the buffer.
+                    FunctionCallArguments::Complete(arguments) => {
+                        end.arguments = Some(streaming::AuthoritativeArguments::Parsed(arguments))
+                    }
                     FunctionCallArguments::Unparseable(arguments) => {
+                        let restated = arguments.into_string();
+                        // Delta visibility is unchanged and still governed by
+                        // the same predicate: fragments already streamed these
+                        // bytes into the assembly buffer, and re-emitting the
+                        // restatement doubled them (rendered twice by delta
+                        // consumers and double-charged against the accumulation
+                        // bound). Only a fragment-less done item re-emits. The
+                        // authority recorded below is what the accumulator
+                        // judges, so it no longer depends on this emission.
                         let saw_fragments =
                             slot.as_ref().is_some_and(|slot| slot.saw_arguments_delta);
                         if !saw_fragments {
                             immediate.push(streaming::RawStreamingChoice::ToolCallDelta {
                                 id: item_id,
-                                content: streaming::ToolCallDeltaContent::Delta(
-                                    arguments.into_string(),
-                                ),
+                                content: streaming::ToolCallDeltaContent::Delta(restated.clone()),
                             });
                         }
+                        end.arguments =
+                            Some(streaming::AuthoritativeArguments::Unparseable(restated));
                     }
                 }
                 end.call_id = Some(func.call_id);
@@ -3509,6 +3515,222 @@ data: {done}
             matches!(&error, CompletionError::ResponseError(message)
                 if message.contains("malformed JSON input")),
             "expected a response error rather than a fabricated call, got {error:?}"
+        );
+    }
+
+    /// An argument delta followed by a restatement that does not parse.
+    ///
+    /// The delta's bytes are chosen by the caller precisely because the hazard
+    /// is a delta that *parses*: it lands in the assembly buffer, and if the
+    /// buffer were allowed to answer for the restatement the call would be
+    /// delivered with arguments the provider never asserted.
+    fn delta_then_malformed_done(delta: &str, status: &str) -> Vec<serde_json::Value> {
+        vec![
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "output_index": 0,
+                "sequence_number": 1,
+                "delta": delta,
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "sequence_number": 2,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "add",
+                    "arguments": "{\"x\":481",
+                    "status": status
+                },
+            }),
+        ]
+    }
+
+    /// Drain a normalized stream, returning the delivered tool calls and the
+    /// first error it surfaced.
+    async fn drain_tool_calls(
+        events: &[serde_json::Value],
+    ) -> (
+        Vec<crate::completion::message::ToolCall>,
+        Option<CompletionError>,
+    ) {
+        let client = openai::Client::builder()
+            .http_client(MockStreamingClient {
+                sse_bytes: sse_bytes_from_json_events(events),
+            })
+            .api_key("test-key")
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-5.4");
+        let request = model.completion_request("hello").build();
+        let mut stream = model.stream(request).await.expect("stream should start");
+
+        let mut tool_calls = Vec::new();
+        let mut error = None;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(StreamedAssistantContent::ToolCall { tool_call, .. }) => {
+                    tool_calls.push(tool_call)
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    if error.is_none() {
+                        error = Some(err);
+                    }
+                }
+            }
+        }
+        (tool_calls, error)
+    }
+
+    /// A whitespace-only delta must not rescue a malformed restatement.
+    ///
+    /// This is the narrowest expression of the defect: the delta contributes no
+    /// arguments at all, yet it lands in the assembly buffer, where
+    /// `parse_tool_arguments` normalizes whitespace to `{}`. If the buffer is
+    /// consulted, the parse *succeeds* and the status-selected policy is never
+    /// reached — delivering `add({})` for a call whose arguments the provider
+    /// asserted and then malformed.
+    #[tokio::test]
+    async fn a_whitespace_delta_cannot_rescue_a_malformed_restatement() {
+        let (tool_calls, error) =
+            drain_tool_calls(&delta_then_malformed_done("   ", "completed")).await;
+        assert!(
+            tool_calls.is_empty(),
+            "a malformed restatement must not deliver a call, least of all one \
+             with fabricated `{{}}` arguments: {tool_calls:?}"
+        );
+        let error = error.expect("an asserted malformed restatement is a response defect");
+        assert!(
+            matches!(&error, CompletionError::ResponseError(message)
+                if message.contains("tool call `add` arrived with malformed JSON input")),
+            "expected the shared malformed-input response error, got {error:?}"
+        );
+
+        // The `Incomplete` half: dropped rather than errored, and still never
+        // delivered with fabricated arguments.
+        let (tool_calls, error) =
+            drain_tool_calls(&delta_then_malformed_done("   ", "incomplete")).await;
+        assert!(
+            tool_calls.is_empty(),
+            "an unasserted malformed call is dropped, never fabricated: {tool_calls:?}"
+        );
+        assert!(
+            error.is_none(),
+            "`Incomplete` drops silently rather than erroring, got {error:?}"
+        );
+    }
+
+    /// The general case, of which the whitespace delta is one instance: ANY
+    /// prior delta whose bytes parse would otherwise answer for a malformed
+    /// restatement. Here the delta is a complete, valid `{}` that simply
+    /// disagrees with what the provider went on to restate.
+    ///
+    /// A fix keyed on "the delta had no non-whitespace content" would pass the
+    /// whitespace test above and still fail this one.
+    #[tokio::test]
+    async fn a_parsing_delta_disagreeing_with_a_malformed_restatement_still_errors() {
+        let (tool_calls, error) =
+            drain_tool_calls(&delta_then_malformed_done("{}", "completed")).await;
+
+        assert!(
+            tool_calls.is_empty(),
+            "a parseable delta does not make a malformed restatement executable: {tool_calls:?}"
+        );
+        let error = error.expect("an asserted malformed restatement is a response defect");
+        assert!(
+            matches!(&error, CompletionError::ResponseError(message)
+                if message.contains("tool call `add` arrived with malformed JSON input")),
+            "expected the shared malformed-input response error, got {error:?}"
+        );
+    }
+
+    /// Streaming and unary normalization must reach the same verdict on the
+    /// same item, which is what the two-channel contract claims. The unary side
+    /// of this contract is
+    /// `unparseable_function_call_conversion_turns_on_asserted_status`; this
+    /// asserts streaming agrees even when a delta preceded the restatement.
+    #[tokio::test]
+    async fn streaming_matches_unary_on_a_delta_preceded_malformed_restatement() {
+        for status in ["completed", "in_progress"] {
+            let (tool_calls, error) =
+                drain_tool_calls(&delta_then_malformed_done("   ", status)).await;
+            assert!(
+                tool_calls.is_empty(),
+                "unary errors for {status}; streaming must not deliver a call: {tool_calls:?}"
+            );
+            let error =
+                error.unwrap_or_else(|| panic!("unary errors for {status}; streaming must too"));
+            assert!(
+                matches!(&error, CompletionError::ResponseError(message)
+                    if message.contains("tool call `add` arrived with malformed JSON input")),
+                "streaming must surface the same error class unary does for {status}, got {error:?}"
+            );
+        }
+    }
+
+    /// Guard: whitespace *inside* otherwise valid arguments is ordinary JSON
+    /// formatting, not an absent restatement. The authoritative parsed payload
+    /// is delivered unchanged.
+    #[tokio::test]
+    async fn whitespace_within_valid_restated_arguments_is_delivered_unchanged() {
+        let done = json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "sequence_number": 1,
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "add",
+                "arguments": "{\"x\": 1,  \"y\":  2}",
+                "status": "completed"
+            },
+        });
+
+        let (tool_calls, error) = drain_tool_calls(&[done]).await;
+
+        assert!(error.is_none(), "valid arguments must not error: {error:?}");
+        assert_eq!(tool_calls.len(), 1, "one call is delivered: {tool_calls:?}");
+        assert_eq!(
+            tool_calls[0].function.arguments,
+            json!({"x": 1, "y": 2}),
+            "internal whitespace is JSON formatting, not a malformed restatement"
+        );
+    }
+
+    /// Guard: a parameterless call restates `""`, which is a *parsed* empty
+    /// object rather than a failed parse, and must still be delivered as `{}`.
+    #[tokio::test]
+    async fn a_parameterless_call_still_delivers_empty_arguments() {
+        let done = json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "sequence_number": 1,
+            "item": {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "ping",
+                "arguments": "",
+                "status": "completed"
+            },
+        });
+
+        let (tool_calls, error) = drain_tool_calls(&[done]).await;
+
+        assert!(
+            error.is_none(),
+            "a parameterless call is not a malformed one: {error:?}"
+        );
+        assert_eq!(tool_calls.len(), 1, "one call is delivered: {tool_calls:?}");
+        assert_eq!(
+            tool_calls[0].function.arguments,
+            json!({}),
+            "a parameterless invocation delivers `{{}}`"
         );
     }
 

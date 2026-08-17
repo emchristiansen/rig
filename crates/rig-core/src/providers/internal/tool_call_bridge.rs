@@ -21,7 +21,8 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use crate::streaming::{
-    StreamPartId, SyntheticIds, ToolCallDecoration, ToolInputEnd, UnparseableToolInput,
+    AuthoritativeArguments, StreamPartId, SyntheticIds, ToolCallDecoration, ToolInputEnd,
+    UnparseableToolInput,
 };
 
 /// Wire identity of a tool call whose input is streaming, as tracked by an
@@ -74,7 +75,14 @@ impl ToolCallSlot {
         end.signature = self.signature.clone();
         end.additional_params = self.additional_params.clone();
         if !self.saw_arguments_delta {
-            end.arguments = self.announce_arguments.clone();
+            // The announcement is a parsed payload by construction, so it
+            // enters as `Parsed` authority. This predicate keeps its original
+            // meaning — any fragment at all supersedes the announcement,
+            // because fragments ARE the arguments once they arrive.
+            end.arguments = self
+                .announce_arguments
+                .clone()
+                .map(AuthoritativeArguments::Parsed);
         }
         end
     }

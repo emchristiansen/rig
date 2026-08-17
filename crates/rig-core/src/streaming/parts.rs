@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 use crate::completion::CompletionError;
 use crate::message::{AssistantContent, Reasoning, ReasoningContent, ToolCall, ToolFunction};
 use crate::streaming::identity::{StreamPartId, SyntheticIds, WireId};
-use crate::streaming::{ToolInputEnd, UnparseableToolInput};
+use crate::streaming::{AuthoritativeArguments, ToolInputEnd, UnparseableToolInput};
 
 /// Accumulates the streamed parts of one assistant choice, in arrival order.
 ///
@@ -649,59 +649,72 @@ impl PartsAccumulator {
             return Ok(None);
         }
 
-        let arguments = match end.arguments {
+        // Authority first, assembly second — and a restatement the provider
+        // malformed is authority, not absence. Resolving to a `Result` here
+        // keeps one policy site below: every way of failing to obtain
+        // arguments reaches the same `on_unparseable` decision.
+        let resolved: Result<serde_json::Value, String> = match end.arguments {
             // The wire's completed item is authoritative over assembly.
-            Some(arguments) => arguments,
+            Some(AuthoritativeArguments::Parsed(arguments)) => Ok(arguments),
+            // The provider promised a complete restatement and delivered bytes
+            // that do not parse. The assembly buffer must NOT answer for it:
+            // earlier fragments that happen to parse — a whitespace-only delta
+            // normalizing to `{}`, or a delta disagreeing with the
+            // restatement — would otherwise deliver a call the provider never
+            // asserted and skip the policy entirely.
+            Some(AuthoritativeArguments::Unparseable(restated)) => Err(format!(
+                "the completed item restated arguments that do not parse: {restated}"
+            )),
             None => match buffer {
                 // No streamed arguments: a parameterless invocation.
-                None => serde_json::Value::Object(serde_json::Map::new()),
+                None => Ok(serde_json::Value::Object(serde_json::Map::new())),
                 // A capped (overflowed) buffer is truncated by definition —
                 // the lenient partial-JSON parse could still "succeed" on it
                 // and fabricate a silently corrupted call, so overflow
                 // forces the unparseable path.
-                Some(buffer) => {
-                    match crate::json_utils::parse_tool_arguments(&buffer).and_then(|arguments| {
+                Some(buffer) => crate::json_utils::parse_tool_arguments(&buffer)
+                    .map_err(|err| err.to_string())
+                    .and_then(|arguments| {
                         if overflowed {
-                            Err(serde::de::Error::custom(
-                                "tool-call input exceeded the accumulation bound",
-                            ))
+                            Err("tool-call input exceeded the accumulation bound".to_string())
                         } else {
                             Ok(arguments)
                         }
-                    }) {
-                        Ok(arguments) => arguments,
-                        Err(err) => match end.on_unparseable {
-                            // Partial input (truncation): the call never fully
-                            // arrived, so it must not reach the consumer.
-                            UnparseableToolInput::Drop => {
-                                tracing::debug!(
-                                    tool = %name,
-                                    "dropping streamed tool call whose arguments never fully arrived"
-                                );
-                                // The drop finalizes the entity, exactly like
-                                // a successful completion.
-                                self.finished_tools.insert(end.id);
-                                return Ok(None);
-                            }
-                            // The wire superseded this call mid-assembly; deliver
-                            // it with empty arguments rather than losing it.
-                            UnparseableToolInput::EmptyObject => {
-                                serde_json::Value::Object(serde_json::Map::new())
-                            }
-                            // The wire promised a complete block; malformed input
-                            // is a response defect, never a silent drop.
-                            UnparseableToolInput::Error => {
-                                return Err(CompletionError::ResponseError(format!(
-                                    "tool call `{name}` arrived with malformed JSON input: {err}"
-                                )));
-                            }
-                            // A completion probe: the input may still be extended.
-                            UnparseableToolInput::Keep => {
-                                keep_open(self, open);
-                                return Ok(None);
-                            }
-                        },
-                    }
+                    }),
+            },
+        };
+
+        let arguments = match resolved {
+            Ok(arguments) => arguments,
+            Err(err) => match end.on_unparseable {
+                // Partial input (truncation): the call never fully
+                // arrived, so it must not reach the consumer.
+                UnparseableToolInput::Drop => {
+                    tracing::debug!(
+                        tool = %name,
+                        "dropping streamed tool call whose arguments never fully arrived"
+                    );
+                    // The drop finalizes the entity, exactly like
+                    // a successful completion.
+                    self.finished_tools.insert(end.id);
+                    return Ok(None);
+                }
+                // The wire superseded this call mid-assembly; deliver
+                // it with empty arguments rather than losing it.
+                UnparseableToolInput::EmptyObject => {
+                    serde_json::Value::Object(serde_json::Map::new())
+                }
+                // The wire promised a complete block; malformed input
+                // is a response defect, never a silent drop.
+                UnparseableToolInput::Error => {
+                    return Err(CompletionError::ResponseError(format!(
+                        "tool call `{name}` arrived with malformed JSON input: {err}"
+                    )));
+                }
+                // A completion probe: the input may still be extended.
+                UnparseableToolInput::Keep => {
+                    keep_open(self, open);
+                    return Ok(None);
                 }
             },
         };
@@ -1425,7 +1438,7 @@ mod tests {
 
         let mut done = end("fc_1", UnparseableToolInput::Drop);
         done.name = Some("final_name".to_owned());
-        done.arguments = Some(serde_json::json!({"x": 1}));
+        done.arguments = Some(AuthoritativeArguments::Parsed(serde_json::json!({"x": 1})));
         done.call_id = Some("call_abc".to_owned());
         let (tool_call, internal_after) = accumulator
             .tool_input_end(done)
@@ -1446,7 +1459,7 @@ mod tests {
         let mut accumulator = PartsAccumulator::new();
         let mut done = end("fc_1", UnparseableToolInput::Drop);
         done.name = Some("add".to_owned());
-        done.arguments = Some(serde_json::json!({"x": 2}));
+        done.arguments = Some(AuthoritativeArguments::Parsed(serde_json::json!({"x": 2})));
         let (tool_call, _) = accumulator
             .tool_input_end(done)
             .expect("no error")
@@ -1463,7 +1476,7 @@ mod tests {
         let mut accumulator = PartsAccumulator::new();
         let mut done = end("fc_1", UnparseableToolInput::Drop);
         done.name = Some("add".to_owned());
-        done.arguments = Some(serde_json::json!({"x": 2}));
+        done.arguments = Some(AuthoritativeArguments::Parsed(serde_json::json!({"x": 2})));
         accumulator
             .tool_input_end(done.clone())
             .expect("no error")
@@ -1503,7 +1516,9 @@ mod tests {
         );
         let mut retry = end("call_1", UnparseableToolInput::Drop);
         retry.name = Some("get_weather".to_owned());
-        retry.arguments = Some(serde_json::json!({"loc": "Paris"}));
+        retry.arguments = Some(AuthoritativeArguments::Parsed(
+            serde_json::json!({"loc": "Paris"}),
+        ));
         assert!(
             accumulator
                 .tool_input_end(retry)
@@ -1530,7 +1545,7 @@ mod tests {
         );
         let mut retry = end("call_1", UnparseableToolInput::Drop);
         retry.name = Some("late_name".to_owned());
-        retry.arguments = Some(serde_json::json!({"y": 1}));
+        retry.arguments = Some(AuthoritativeArguments::Parsed(serde_json::json!({"y": 1})));
         assert!(
             accumulator
                 .tool_input_end(retry)
@@ -1712,7 +1727,7 @@ mod tests {
         );
         let mut done = end("tc1", UnparseableToolInput::Drop);
         done.name = Some("add".to_owned());
-        done.arguments = Some(serde_json::json!({"x": 1}));
+        done.arguments = Some(AuthoritativeArguments::Parsed(serde_json::json!({"x": 1})));
         assert!(
             accumulator
                 .tool_input_end(done)
@@ -2050,7 +2065,7 @@ mod property_tests {
                 let mut stale = ToolInputEnd::new(key.clone(), UnparseableToolInput::Drop);
                 if authoritative {
                     stale.name = Some("probe".to_owned());
-                    stale.arguments = Some(serde_json::json!({}));
+                    stale.arguments = Some(AuthoritativeArguments::Parsed(serde_json::json!({})));
                 }
                 prop_assert!(
                     accumulator
