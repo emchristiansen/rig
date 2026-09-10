@@ -1042,6 +1042,7 @@ async fn chat_sourced_history_replays_the_tool_name_not_the_identifier() {
                         call: cross_provider_handle,
                         provider: None,
                         name: "add".to_owned(),
+                        answers: rig_core::message::AnsweredToolCall::Function,
                         content: vec![ToolResultContent::text("5")],
                     })],
                 },

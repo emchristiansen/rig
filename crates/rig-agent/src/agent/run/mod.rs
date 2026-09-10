@@ -1502,6 +1502,9 @@ impl AgentRun {
                     call: invalid.tool_call.id.clone(),
                     provider: invalid.tool_call.provider.clone(),
                     name: invalid.tool_call.function.name.clone(),
+                    // Derived from the call being answered rather than chosen:
+                    // this skip answers whichever kind the model emitted.
+                    answers: invalid.tool_call.function.arguments.answered_by(),
                     content: vec![ToolResultContent::text(reason.clone())],
                 };
                 self.abandon_streamed_turn(

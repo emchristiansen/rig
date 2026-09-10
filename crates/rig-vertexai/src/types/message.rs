@@ -531,6 +531,7 @@ mod tests {
             call: ToolCallId::mint(),
             provider: None,
             name: "add".to_string(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::Text(Text::new("8".to_string()))],
         };
 
@@ -567,6 +568,7 @@ mod tests {
                 call: ToolCallId::mint(),
                 provider: None,
                 name: "lookup".to_string(),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::json(value.clone())],
             })],
         };
@@ -594,6 +596,7 @@ mod tests {
                 call: ToolCallId::mint(),
                 provider: None,
                 name: "inspect".to_string(),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::image_base64(
                     BASE64.encode(&raw),
                     Some(ImageMediaType::PNG),
@@ -635,6 +638,7 @@ mod tests {
                 call: ToolCallId::mint(),
                 provider: None,
                 name: "inspect".to_string(),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content,
             })],
         };
@@ -702,6 +706,7 @@ mod tests {
                 call: ToolCallId::mint(),
                 provider: None,
                 name: "inspect".to_string(),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content,
             })],
         };
@@ -738,6 +743,7 @@ mod tests {
                 call: ToolCallId::mint(),
                 provider: None,
                 name: "inspect".to_string(),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::image_raw(
                     vec![1, 2, 3],
                     Some(ImageMediaType::GIF),

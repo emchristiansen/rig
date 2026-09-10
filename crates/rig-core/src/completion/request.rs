@@ -1358,6 +1358,7 @@ mod tests {
                         call: ToolCallId::new_or_mint("call_1"),
                         provider: None,
                         name: "lookup".to_owned(),
+                        answers: crate::message::AnsweredToolCall::Function,
                         content: Vec::<ToolResultContent>::new(),
                     })],
                 },
@@ -1383,6 +1384,7 @@ mod tests {
                     call: ToolCallId::new_or_mint("call_1"),
                     provider: None,
                     name: "lookup".to_owned(),
+                    answers: crate::message::AnsweredToolCall::Function,
                     content: vec![ToolResultContent::text("")],
                 })],
             }]);

@@ -351,6 +351,37 @@ fn unsupported_document_source(source: DocumentSourceKind) -> CompletionError {
     }
 }
 
+/// A custom (grammar) tool's output, lowered to the single string its wire item
+/// carries.
+///
+/// `CustomToolResult::output` is a plain `String` rather than the
+/// text-or-blocks union a function output accepts, so the rich shapes have
+/// nowhere to go here. Text and JSON lower to their own text. An image does
+/// not, and is refused rather than dropped: a custom tool that produced one has
+/// produced something this wire item cannot carry, and saying so beats sending
+/// an empty output the model would read as a successful empty answer.
+fn responses_custom_tool_result_output(
+    content: Vec<message::ToolResultContent>,
+) -> Result<String, MessageError> {
+    let mut output = String::new();
+
+    for content in content {
+        match content {
+            message::ToolResultContent::Text(Text { text, .. }) => output.push_str(&text),
+            message::ToolResultContent::Json { value } => output.push_str(&value.to_string()),
+            message::ToolResultContent::Image(_) => {
+                return Err(MessageError::ConversionError(
+                    "a custom tool result carries text, not an image: the \
+                     custom_tool_call_output wire item has no image member"
+                        .into(),
+                ));
+            }
+        }
+    }
+
+    Ok(output)
+}
+
 fn responses_tool_result_output(
     content: Vec<message::ToolResultContent>,
 ) -> Result<ToolResultOutput, MessageError> {
@@ -480,18 +511,43 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                             // rig's minted handle — always present and
                             // non-empty.
                             let call_id = tool_result.wire_call_id().to_owned();
-                            let output = responses_tool_result_output(tool_result.content)
-                                .map_err(|error| {
-                                    CompletionError::ProviderError(error.to_string())
-                                })?;
-                            items.push(InputItem {
-                                role: None,
-                                input: InputContent::FunctionCallOutput(ToolResult {
-                                    call_id,
-                                    output,
-                                    status: ToolStatus::Completed,
-                                }),
-                            });
+                            // The kind the result carries selects the wire
+                            // item, exhaustively and with no wildcard. The
+                            // provider pairs `custom_tool_call` only with
+                            // `custom_tool_call_output`, so selecting by
+                            // anything other than what the result says it
+                            // answers leaves the turn unpaired. The two arms
+                            // build different types — a function output's
+                            // text-or-blocks union against a custom output's
+                            // plain string — so an arm cannot be handed the
+                            // other's payload once it is chosen.
+                            let input = match tool_result.answers {
+                                crate::message::AnsweredToolCall::Function => {
+                                    let output = responses_tool_result_output(tool_result.content)
+                                        .map_err(|error| {
+                                            CompletionError::ProviderError(error.to_string())
+                                        })?;
+                                    InputContent::FunctionCallOutput(ToolResult {
+                                        call_id,
+                                        output,
+                                        status: ToolStatus::Completed,
+                                    })
+                                }
+                                crate::message::AnsweredToolCall::Custom => {
+                                    let output =
+                                        responses_custom_tool_result_output(tool_result.content)
+                                            .map_err(|error| {
+                                                CompletionError::ProviderError(error.to_string())
+                                            })?;
+                                    InputContent::CustomToolCallOutput(CustomToolResult {
+                                        id: None,
+                                        call_id,
+                                        name: Some(tool_result.name),
+                                        output,
+                                    })
+                                }
+                            };
+                            items.push(InputItem { role: None, input });
                         }
                         crate::message::UserContent::Document(Document {
                             data: DocumentSourceKind::FileId(file_id),
@@ -3524,6 +3580,7 @@ mod tests {
                 provider: message::ProviderCallId::new("call-id")
                     .map(|provider| provider.with_item_id("result-id")),
                 name: "tool".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![content],
             })],
         }
@@ -3738,6 +3795,7 @@ mod tests {
                 provider: message::ProviderCallId::new("call-id")
                     .map(|provider| provider.with_item_id("result-id")),
                 name: "tool".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content,
             })],
         };
@@ -3833,6 +3891,7 @@ mod tests {
                 provider: message::ProviderCallId::new("call-id")
                     .map(|provider| provider.with_item_id("result-id")),
                 name: "tool".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content,
             })],
         };

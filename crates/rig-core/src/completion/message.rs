@@ -271,6 +271,36 @@ impl Reasoning {
     }
 }
 
+/// Which kind of call a tool result answers.
+///
+/// A result has always named *which* call it answers, and until now that was
+/// all it said — so a wire offering more than one result item shape had nothing
+/// to choose between them, and every result went back as a function output. On
+/// the OpenAI Responses wire that mispairs a custom (grammar) call: the
+/// provider matches `custom_tool_call` only with `custom_tool_call_output`, so
+/// a turn using one could never complete.
+///
+/// The arms mirror [`ToolCallArguments`], because these are the same two axes
+/// seen from either end of one turn — JSON arguments are answered by a function
+/// output, and a custom tool's raw bytes by a custom output. Carrying the kind
+/// on the result makes the pairing a property of the value, rather than
+/// something a conversion has to infer from the messages around it.
+///
+/// No `Default`, deliberately. Defaulting to `Function` would make the
+/// mispairing this type exists to prevent the silent outcome of forgetting to
+/// state a kind, which is exactly the failure being repaired.
+///
+/// Wires with a single result shape — every provider here but Responses — read
+/// nothing from this and are unaffected.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnsweredToolCall {
+    /// Answers a function call, whose arguments were JSON.
+    Function,
+    /// Answers a custom (grammar) tool call, whose input was raw bytes.
+    Custom,
+}
+
 /// Tool result content containing information about a tool call and it's resulting content.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolResult {
@@ -291,6 +321,9 @@ pub struct ToolResult {
     /// collided two calls to the same tool and misnamed cross-provider
     /// replays (review 84a43e9e #5).
     pub name: String,
+    /// Which kind of call this answers, and therefore which result item a wire
+    /// carrying more than one shape must emit for it.
+    pub answers: AnsweredToolCall,
     /// One or more content items produced by the tool.
     pub content: Vec<ToolResultContent>,
 }
@@ -687,6 +720,22 @@ pub enum ToolCallArguments {
 }
 
 impl ToolCallArguments {
+    /// The result kind a call carrying these arguments must be answered by.
+    ///
+    /// The pairing is a property of the call rather than a decision the
+    /// answering site makes, so anywhere the answered call is in hand the
+    /// matching kind is derived instead of chosen — which is what keeps a
+    /// mispaired result out of reach at those sites rather than merely
+    /// discouraged. A site that does *not* hold the call, such as a relay
+    /// rebuilding a turn from its own records, states the kind explicitly
+    /// through [`UserContent::tool_result_answering`].
+    pub fn answered_by(&self) -> AnsweredToolCall {
+        match self {
+            Self::Json(_) => AnsweredToolCall::Function,
+            Self::Raw(_) => AnsweredToolCall::Custom,
+        }
+    }
+
     /// The parsed arguments, or `None` for raw input.
     ///
     /// A wire that can only express JSON arguments calls this and refuses on
@@ -1546,6 +1595,11 @@ impl UserContent {
             call: ToolCallId::new_or_mint(call),
             provider: None,
             name: name.into(),
+            // A rig `Tool` is a function tool, so every result built through
+            // the general constructors answers a function call. A custom
+            // (grammar) call is answered through `tool_result_answering`,
+            // which is the only form that can say otherwise.
+            answers: AnsweredToolCall::Function,
             content,
         })
     }
@@ -1579,6 +1633,7 @@ impl UserContent {
             call,
             provider,
             name: name.into(),
+            answers: AnsweredToolCall::Function,
             content,
         })
     }
@@ -1592,9 +1647,33 @@ impl UserContent {
         name: impl Into<String>,
         content: Vec<ToolResultContent>,
     ) -> Self {
+        Self::tool_result_answering(item_id, call_id, name, AnsweredToolCall::Function, content)
+    }
+
+    /// Dual-identifier variant that states which kind of call it answers.
+    ///
+    /// The form a relay uses when the call it is answering may have been a
+    /// custom (grammar) tool rather than a function: the provider pairs
+    /// `custom_tool_call` only with `custom_tool_call_output`, so a relay that
+    /// could not say which kind it held would have to guess, and guessing wrong
+    /// leaves the turn unpaired. Every other constructor answers a function
+    /// call, which is what they did before this existed.
+    pub fn tool_result_answering(
+        item_id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        answers: AnsweredToolCall,
+        content: Vec<ToolResultContent>,
+    ) -> Self {
         let provider = ProviderCallId::new(call_id).map(|provider| provider.with_item_id(item_id));
         let call = ToolCallId::for_provider(provider.as_ref());
-        Self::tool_result_for(call, provider, name, content)
+        UserContent::ToolResult(ToolResult {
+            call,
+            provider,
+            name: name.into(),
+            answers,
+            content,
+        })
     }
 }
 
@@ -1909,6 +1988,7 @@ impl From<ToolResultContent> for Message {
                 call: ToolCallId::mint(),
                 provider: None,
                 name: String::new(),
+                answers: AnsweredToolCall::Function,
                 content: vec![tool_result_content],
             })],
         }

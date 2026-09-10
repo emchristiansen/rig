@@ -990,6 +990,10 @@ pub mod gemini_api_types {
                     call: _,
                     provider,
                     name,
+                    // Gemini has one tool-result shape, `functionResponse`, so
+                    // there is nothing here for the answered kind to select
+                    // between.
+                    answers: _,
                     content,
                 }) => {
                     // The executed tool's name travels as required data.
@@ -3374,6 +3378,7 @@ mod tests {
             call: message::ToolCallId::new_or_mint("call-123"),
             provider: message::ProviderCallId::new("call-123"),
             name: "test_tool".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![
                 ToolResultContent::Text(message::Text::new(r#"{"status": "success"}"#.to_string())),
                 ToolResultContent::Image(Image {
@@ -3439,6 +3444,7 @@ mod tests {
                 call: message::ToolCallId::mint(),
                 provider: None,
                 name: "ordered_tool".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![
                     ToolResultContent::image_base64("first-image", Some(ImageMediaType::PNG), None),
                     ToolResultContent::text("between-images"),
@@ -3485,6 +3491,7 @@ mod tests {
                 call: message::ToolCallId::mint(),
                 provider: None,
                 name: "ordered_tool".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![
                     ToolResultContent::json(json!({ "status": "ok" })),
                     ToolResultContent::image_base64("image-data", Some(ImageMediaType::PNG), None),
@@ -3520,6 +3527,7 @@ mod tests {
                 call: message::ToolCallId::mint(),
                 provider: None,
                 name: "url_tool".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![
                     ToolResultContent::Image(Image {
                         data: DocumentSourceKind::Url("https://example.com/image.png".to_string()),
@@ -3557,6 +3565,7 @@ mod tests {
                     call: message::ToolCallId::mint(),
                     provider: None,
                     name: "image_tool".to_string(),
+                    answers: crate::message::AnsweredToolCall::Function,
                     content: vec![ToolResultContent::image_base64(
                         "image-data",
                         Some(media_type),
@@ -3585,6 +3594,7 @@ mod tests {
                 call: message::ToolCallId::mint(),
                 provider: None,
                 name: "collision_tool".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![
                     ToolResultContent::json(json!({
                         "literal": {
@@ -3643,6 +3653,7 @@ mod tests {
                     call: message::ToolCallId::mint(),
                     provider: None,
                     name: "test_tool".to_string(),
+                    answers: crate::message::AnsweredToolCall::Function,
                     content: vec![tool_content],
                 })],
             };
@@ -3827,6 +3838,7 @@ mod tests {
             call: message::ToolCallId::mint(),
             provider: None,
             name: "screenshot_tool".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::Image(Image {
                 data: DocumentSourceKind::Url("https://example.com/image.png".to_string()),
                 media_type: Some(ImageMediaType::PNG),

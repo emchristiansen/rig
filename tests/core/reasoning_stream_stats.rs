@@ -20,6 +20,7 @@ async fn collect_stream_stats_tracks_only_final_turn_text() {
         call: tool_call.id.clone(),
         provider: tool_call.provider.clone(),
         name: tool_call.function.name.clone(),
+        answers: rig_core::message::AnsweredToolCall::Function,
         content: vec![ToolResultContent::text("72F and sunny")],
     };
 

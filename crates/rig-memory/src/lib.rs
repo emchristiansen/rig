@@ -1461,6 +1461,7 @@ mod tests {
                 call: ToolCallId::new_or_mint("call_1"),
                 provider: None,
                 name: "t".into(),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::text("ok")],
             })],
         }

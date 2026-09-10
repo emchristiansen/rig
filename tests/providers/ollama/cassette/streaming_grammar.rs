@@ -372,6 +372,7 @@ async fn chat_sourced_history_replays_the_tool_name_not_the_identifier() {
                                 .expect("the chat-sourced identifier is non-empty"),
                             provider: None,
                             name: "add".to_owned(),
+                            answers: rig_core::message::AnsweredToolCall::Function,
                             content: vec![rig::message::ToolResultContent::text("5")],
                         },
                     )],

@@ -2259,6 +2259,7 @@ mod tests {
             call: message::ToolCallId::new_or_mint("call-id"),
             provider: message::ProviderCallId::new("call-id"),
             name: "tool".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![
                 message::ToolResultContent::text("first"),
                 message::ToolResultContent::text("second"),
@@ -2493,6 +2494,7 @@ mod tests {
         let result = message::ToolResult {
             call: message::ToolCallId::new_or_mint("call-id"),
             name: "tool".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             provider: message::ProviderCallId::new("call-id"),
             content: vec![
                 message::ToolResultContent::text("first"),

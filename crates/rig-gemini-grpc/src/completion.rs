@@ -1053,6 +1053,7 @@ mod tests {
                 call: ToolCallId::new_or_mint(wire_id),
                 provider: ProviderCallId::new(wire_id),
                 name: name.to_owned(),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::text("out")],
             })],
         };

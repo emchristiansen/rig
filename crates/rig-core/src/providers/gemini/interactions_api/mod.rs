@@ -2501,6 +2501,7 @@ mod tests {
             call: call.clone(),
             provider: None,
             name: "get_weather".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![message::ToolResultContent::text("ok")],
         });
 
@@ -2518,6 +2519,7 @@ mod tests {
             call: message::ToolCallId::new_or_mint("call-123"),
             provider: message::ProviderCallId::new("call-123"),
             name: "get_weather".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![
                 message::ToolResultContent::text(r#"{"status":"literal"}"#),
                 message::ToolResultContent::json(json!({ "status": "structured" })),
@@ -2573,6 +2575,7 @@ mod tests {
                 call: message::ToolCallId::new_or_mint("call-123"),
                 provider: message::ProviderCallId::new("call-123"),
                 name: "get_weather".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![tool_content],
             });
 
@@ -2614,6 +2617,7 @@ mod tests {
                 call: message::ToolCallId::new_or_mint("call-123"),
                 provider: message::ProviderCallId::new("call-123"),
                 name: "get_weather".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![tool_content],
             });
 
@@ -2632,6 +2636,7 @@ mod tests {
             call: message::ToolCallId::new_or_mint("call-image"),
             provider: message::ProviderCallId::new("call-image"),
             name: "render".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![
                 message::ToolResultContent::image_base64(
                     "first-image",
