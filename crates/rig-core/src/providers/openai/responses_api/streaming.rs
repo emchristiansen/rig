@@ -898,6 +898,10 @@ impl RawChoiceAccumulator {
                 };
                 let mut end = streaming::ToolInputEnd::new(item_id.clone(), on_unparseable);
                 end.name = Some(func.name);
+                // Without this the streaming path would strip a qualifier the
+                // non-streaming decode keeps, so one call would have two
+                // identities depending on how it was received.
+                end.namespace = func.namespace;
                 // The finalized call reports the authoritative wire id even
                 // when assembly keyed on a minted slot identity (the
                 // accumulator honors the override).
@@ -956,6 +960,28 @@ impl RawChoiceAccumulator {
                     immediate.push(end);
                 } else {
                     self.tool_calls.push(end);
+                }
+            }
+            // A custom tool call never fragments here: this client models
+            // neither `response.custom_tool_call_input.delta` nor its `.done`,
+            // so no slot was opened and no assembly is pending. The whole-call
+            // channel is exactly the one for a wire that does not fragment,
+            // and the input travels raw because it is not JSON.
+            Output::CustomToolCall(call) => {
+                self.current_text_item = None;
+                let tool_call = streaming::RawStreamingToolCall::new(
+                    crate::streaming::StreamPartId::wire(call.id.clone()),
+                    call.name,
+                    crate::message::ToolCallArguments::Raw(call.input),
+                )
+                .with_namespace(call.namespace)
+                .with_call_id(call.call_id);
+                let tool_call = streaming::RawStreamingChoice::ToolCall(tool_call);
+
+                if emit_completed_tool_calls_immediately {
+                    immediate.push(tool_call);
+                } else {
+                    self.tool_calls.push(tool_call);
                 }
             }
             Output::Reasoning {
@@ -3710,6 +3736,7 @@ data: {done}
                         .expect("a malformed argument string decodes"),
                     call_id: "call_1".to_string(),
                     name: "add".to_string(),
+                    namespace: None,
                     status: unary_status,
                 },
             ))
@@ -3759,7 +3786,7 @@ data: {done}
         assert_eq!(tool_calls.len(), 1, "one call is delivered: {tool_calls:?}");
         assert_eq!(
             tool_calls[0].function.arguments,
-            json!({"x": 1, "y": 2}),
+            crate::message::ToolCallArguments::Json(json!({"x": 1, "y": 2})),
             "internal whitespace is JSON formatting, not a malformed restatement"
         );
     }
@@ -3802,7 +3829,7 @@ data: {done}
             );
             assert_eq!(
                 tool_calls[0].function.arguments,
-                json!({}),
+                crate::message::ToolCallArguments::Json(json!({})),
                 "a parameterless invocation delivers `{{}}` for {arguments:?}"
             );
         }
@@ -4139,7 +4166,10 @@ data: {done}
             })
             .expect("the call finalizes");
         assert_eq!(call.function.name, "tool_a");
-        assert_eq!(call.function.arguments, serde_json::json!({"x": 1}));
+        assert_eq!(
+            call.function.arguments,
+            crate::message::ToolCallArguments::Json(serde_json::json!({"x": 1}))
+        );
     }
 
     #[tokio::test]
@@ -4216,7 +4246,7 @@ data: {done}
             .filter_map(|content| match content {
                 crate::completion::AssistantContent::ToolCall(call) => Some((
                     call.function.name.clone(),
-                    call.function.arguments.to_string(),
+                    call.function.arguments.to_payload_string(),
                 )),
                 _ => None,
             })
@@ -4293,7 +4323,10 @@ data: {done}
         assert_eq!(calls.len(), 1, "the provider-completed call must survive");
         let call = calls[0];
         assert_eq!(call.function.name, "get_weather");
-        assert_eq!(call.function.arguments, json!({"city": "Paris"}));
+        assert_eq!(
+            call.function.arguments,
+            crate::message::ToolCallArguments::Json(json!({"city": "Paris"}))
+        );
         let provider = call.provider.as_ref().expect("the wire issued ids");
         assert_eq!(provider.call_id, "call_abc");
         assert_eq!(provider.item_id.as_deref(), Some("fc_1"));

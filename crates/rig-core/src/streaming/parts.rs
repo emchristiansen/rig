@@ -483,8 +483,17 @@ impl PartsAccumulator {
                 // (`ensure_open_tool_input` records ""), so an empty name
                 // is no evidence against the restatement — only a
                 // *different* established name vetoes.
+                // Only a JSON payload can restate an assembly buffer: raw input
+                // arrives whole on the completed-item channel and never
+                // fragments, so it has no open assembly to adopt.
                 let restates = (input.name.is_empty() || input.name == tool_call.function.name)
-                    && fragments_covered_by(input.buffer.as_deref(), &tool_call.function.arguments);
+                    && tool_call
+                        .function
+                        .arguments
+                        .as_json()
+                        .is_some_and(|arguments| {
+                            fragments_covered_by(input.buffer.as_deref(), arguments)
+                        });
                 restates.then_some(index)
             });
         let adopted = position.map(|index| {
@@ -744,7 +753,11 @@ impl PartsAccumulator {
         let tool_call = ToolCall {
             id,
             provider,
-            function: ToolFunction { name, arguments },
+            function: ToolFunction {
+                name,
+                namespace: end.namespace,
+                arguments: arguments.into(),
+            },
             signature: end.signature,
             additional_params: end.additional_params,
         };
@@ -959,10 +972,7 @@ mod tests {
     fn call_named(id: &str, name: &str) -> ToolCall {
         ToolCall::from_wire(
             id,
-            crate::message::ToolFunction {
-                name: name.to_owned(),
-                arguments: serde_json::json!({}),
-            },
+            crate::message::ToolFunction::new(name.to_owned(), serde_json::json!({})),
         )
     }
 
@@ -1384,7 +1394,10 @@ mod tests {
             .tool_input_end(end("call_1", UnparseableToolInput::Drop))
             .expect("no error")
             .expect("parameterless calls are preserved");
-        assert_eq!(tool_call.function.arguments, serde_json::json!({}));
+        assert_eq!(
+            tool_call.function.arguments,
+            crate::message::ToolCallArguments::Json(serde_json::json!({}))
+        );
     }
 
     #[test]
@@ -1439,7 +1452,7 @@ mod tests {
         assert_eq!(internal_after, internal);
         assert_eq!(
             tool_call.function.arguments,
-            serde_json::json!({"q": "rust"})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"q": "rust"}))
         );
     }
 
@@ -1618,7 +1631,9 @@ mod tests {
             .expect("call must finalize");
         assert_eq!(
             tool_call.function.arguments,
-            serde_json::json!({"query": "META Platforms news"})
+            crate::message::ToolCallArguments::Json(
+                serde_json::json!({"query": "META Platforms news"})
+            )
         );
     }
 
@@ -1639,11 +1654,11 @@ mod tests {
             .expect("finalizes");
         assert_eq!(
             call_b.function.arguments,
-            serde_json::json!({"zone": "UTC"})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"zone": "UTC"}))
         );
         assert_eq!(
             call_a.function.arguments,
-            serde_json::json!({"location": "Paris"})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"location": "Paris"}))
         );
     }
 
@@ -1673,11 +1688,11 @@ mod tests {
         assert!(second.provider.is_none());
         assert_eq!(
             first.function.arguments,
-            serde_json::json!({"city": "Tokyo"})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"city": "Tokyo"}))
         );
         assert_eq!(
             second.function.arguments,
-            serde_json::json!({"zone": "UTC"})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"zone": "UTC"}))
         );
     }
 
@@ -1786,10 +1801,7 @@ mod tests {
         // streamed fragments.
         let restated = ToolCall::from_wire(
             "call_late",
-            crate::message::ToolFunction {
-                name: "add".to_owned(),
-                arguments: serde_json::json!({"x": 1}),
-            },
+            crate::message::ToolFunction::new("add".to_owned(), serde_json::json!({"x": 1})),
         );
         let adopted =
             accumulator.tool_call(&pid("call_late"), restated, "freshly-minted".to_owned());
@@ -1814,10 +1826,7 @@ mod tests {
         let published = accumulator.tool_args_delta(&pid("tool-0"), "{\"x\":1}");
         let restated = ToolCall::from_wire(
             "call_late",
-            crate::message::ToolFunction {
-                name: "add".to_owned(),
-                arguments: serde_json::json!({"x": 1}),
-            },
+            crate::message::ToolFunction::new("add".to_owned(), serde_json::json!({"x": 1})),
         );
         let adopted =
             accumulator.tool_call(&pid("call_late"), restated, "freshly-minted".to_owned());
@@ -1842,10 +1851,7 @@ mod tests {
         accumulator.tool_args_delta(&pid("tool-0"), "null");
         let restated = ToolCall::from_wire(
             "call_late",
-            crate::message::ToolFunction {
-                name: "add".to_owned(),
-                arguments: serde_json::json!({"x": 1}),
-            },
+            crate::message::ToolFunction::new("add".to_owned(), serde_json::json!({"x": 1})),
         );
         let adopted =
             accumulator.tool_call(&pid("call_late"), restated, "freshly-minted".to_owned());
@@ -1871,10 +1877,10 @@ mod tests {
 
         let unrelated = ToolCall::from_wire(
             "call_other",
-            crate::message::ToolFunction {
-                name: "get_time".to_owned(),
-                arguments: serde_json::json!({"zone": "UTC"}),
-            },
+            crate::message::ToolFunction::new(
+                "get_time".to_owned(),
+                serde_json::json!({"zone": "UTC"}),
+            ),
         );
         let adopted =
             accumulator.tool_call(&pid("call_other"), unrelated, "fresh-internal".to_owned());
@@ -1892,7 +1898,7 @@ mod tests {
         assert_eq!(weather.function.name, "get_weather");
         assert_eq!(
             weather.function.arguments,
-            serde_json::json!({"city": "Paris"})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"city": "Paris"}))
         );
 
         let calls = accumulator
@@ -1913,10 +1919,7 @@ mod tests {
         accumulator.tool_args_delta(&pid("tool-0"), "{\"x\":1}");
         let second_invocation = ToolCall::from_wire(
             "call_other",
-            crate::message::ToolFunction {
-                name: "add".to_owned(),
-                arguments: serde_json::json!({"x": 99}),
-            },
+            crate::message::ToolFunction::new("add".to_owned(), serde_json::json!({"x": 99})),
         );
         let adopted = accumulator.tool_call(
             &pid("call_other"),

@@ -777,7 +777,10 @@ mod tests {
         );
         let call = calls.first().expect("one call");
         assert_eq!(call.function.name, "add");
-        assert_eq!(call.function.arguments, serde_json::json!({"x": 1}));
+        assert_eq!(
+            call.function.arguments,
+            crate::message::ToolCallArguments::Json(serde_json::json!({"x": 1}))
+        );
     }
 
     /// A `step.start` that announces non-empty arguments AND fragments the
@@ -812,7 +815,7 @@ mod tests {
         );
         assert_eq!(
             tool_calls.first().expect("one call").function.arguments,
-            serde_json::json!({"x": 1}),
+            crate::message::ToolCallArguments::Json(serde_json::json!({"x": 1})),
             "streamed fragments are the arguments; the announce payload is not prepended"
         );
     }
@@ -842,7 +845,7 @@ mod tests {
         assert_eq!(tool_calls.len(), 1, "got {items:?}");
         assert_eq!(
             tool_calls.first().expect("one call").function.arguments,
-            serde_json::json!({"x": 7})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"x": 7}))
         );
     }
 
@@ -918,7 +921,7 @@ mod tests {
         assert_eq!(tool_call.function.name, "get_weather");
         assert_eq!(
             tool_call.function.arguments,
-            serde_json::json!({"city": "Paris"}),
+            crate::message::ToolCallArguments::Json(serde_json::json!({"city": "Paris"})),
             "the streamed argument fragments finalize the call"
         );
         assert_eq!(tool_call.id, "fc_1");

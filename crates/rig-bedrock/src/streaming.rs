@@ -1082,15 +1082,15 @@ mod tests {
         assert_eq!(first.id, "call_a");
         assert_eq!(first.function.name, "get_weather");
         assert_eq!(
-            first.function.arguments,
-            serde_json::json!({"location": "Paris"})
+            first.function.arguments.as_json(),
+            Some(&serde_json::json!({"location": "Paris"}))
         );
         let second = calls.get(1).expect("second call");
         assert_eq!(second.id, "call_b");
         assert_eq!(second.function.name, "get_time");
         assert_eq!(
-            second.function.arguments,
-            serde_json::json!({"zone": "UTC"})
+            second.function.arguments.as_json(),
+            Some(&serde_json::json!({"zone": "UTC"}))
         );
     }
 
@@ -1236,8 +1236,8 @@ mod tests {
         assert!(errors.is_empty());
         assert_eq!(calls.len(), 1);
         assert_eq!(
-            calls.first().expect("call").function.arguments,
-            serde_json::json!({})
+            calls.first().expect("call").function.arguments.as_json(),
+            Some(&serde_json::json!({}))
         );
     }
 }

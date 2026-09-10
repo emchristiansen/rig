@@ -1163,7 +1163,9 @@ fn assistant_contents_to_messages(
                         data: signature.clone(),
                     });
                 }
-                tool_calls.push(tool_call.into())
+                tool_calls.push(crate::providers::openai::completion::ToolCall::try_from(
+                    tool_call,
+                )?)
             }
             message::AssistantContent::Reasoning(r) => {
                 if r.content.is_empty() {
@@ -3270,10 +3272,7 @@ mod tests {
     fn test_tool_call_signature_without_params_uses_wire_id_for_encrypted_detail() {
         let tool_call = message::ToolCall::from_wire(
             "call_wire",
-            message::ToolFunction {
-                name: "lookup".to_string(),
-                arguments: json!({}),
-            },
+            message::ToolFunction::new("lookup".to_string(), json!({})),
         )
         .with_signature(Some("sig-data".to_string()));
 
@@ -3302,10 +3301,7 @@ mod tests {
     fn test_tool_call_minimal_params_fall_back_to_wire_id() {
         let tool_call = message::ToolCall::from_wire(
             "call_wire",
-            message::ToolFunction {
-                name: "lookup".to_string(),
-                arguments: json!({}),
-            },
+            message::ToolFunction::new("lookup".to_string(), json!({})),
         )
         .with_signature(Some("sig-data".to_string()))
         // Minimal params carrying only a format: the detail id must

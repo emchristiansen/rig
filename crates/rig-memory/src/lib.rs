@@ -53,7 +53,7 @@ pub use rig_core::memory::{
 };
 
 use rig_core::completion::Message;
-use rig_core::message::UserContent;
+use rig_core::message::{ToolCallArguments, UserContent};
 use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 
 /// A transformation applied to messages loaded from a [`ConversationMemory`].
@@ -388,8 +388,12 @@ impl HeuristicTokenCounter {
                 // `serde_json::Value::to_string` is the canonical compact JSON
                 // encoding and never fails, so we charge tool calls by the
                 // length of their serialised arguments without pulling in a
-                // direct `serde_json` dependency.
-                let args_bytes = call.function.arguments.to_string().len();
+                // direct `serde_json` dependency. A custom tool's raw input is
+                // already its own serialised form and is charged as sent.
+                let args_bytes = match &call.function.arguments {
+                    ToolCallArguments::Json(arguments) => arguments.to_string().len(),
+                    ToolCallArguments::Raw(input) => input.len(),
+                };
                 self.bytes_to_tokens(name_bytes + args_bytes)
             }
             AssistantContent::Image(_) => self.per_attachment_tokens,

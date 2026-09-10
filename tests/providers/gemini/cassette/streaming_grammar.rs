@@ -869,7 +869,7 @@ async fn interactions_same_tool_called_twice_stays_distinct() {
                     "the tool name must never be fabricated into the provider call id"
                 );
                 assert!(
-                    call.function.arguments.is_object(),
+                    call.function.arguments.as_json().is_some_and(|arguments| arguments.is_object()),
                     "each call's arguments must survive uncorrupted, got {:?}",
                     call.function.arguments
                 );
@@ -885,7 +885,7 @@ async fn interactions_same_tool_called_twice_stays_distinct() {
             );
             let argument_sets: std::collections::HashSet<String> = add_calls
                 .iter()
-                .map(|call| call.function.arguments.to_string())
+                .map(|call| call.function.arguments.to_payload_string())
                 .collect();
             assert_eq!(
                 argument_sets,
@@ -1029,10 +1029,10 @@ async fn chat_sourced_history_replays_the_tool_name_not_the_identifier() {
                         // with no provider id for Gemini's wire.
                         id: cross_provider_handle.clone(),
                         provider: None,
-                        function: rig::message::ToolFunction {
-                            name: "add".to_owned(),
-                            arguments: serde_json::json!({"x": 2, "y": 3}),
-                        },
+                        function: rig::message::ToolFunction::new(
+                            "add".to_owned(),
+                            serde_json::json!({"x": 2, "y": 3}),
+                        ),
                         signature: None,
                         additional_params: None,
                     })],

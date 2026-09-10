@@ -1080,14 +1080,14 @@ mod tests {
         assert_eq!(collected_tool_calls[0].function.name, "command");
         assert_eq!(
             collected_tool_calls[0].function.arguments,
-            serde_json::json!({"cmd": "ls"})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"cmd": "ls"}))
         );
 
         assert_eq!(collected_tool_calls[1].id, "call_bbb");
         assert_eq!(collected_tool_calls[1].function.name, "git");
         assert_eq!(
             collected_tool_calls[1].function.arguments,
-            serde_json::json!({"action": "log"})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"action": "log"}))
         );
     }
 
@@ -1130,7 +1130,7 @@ mod tests {
         assert_eq!(collected_tool_calls[0].function.name, "lookup");
         assert_eq!(
             collected_tool_calls[0].function.arguments,
-            serde_json::json!({"id": 1})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"id": 1}))
         );
     }
 
@@ -1179,7 +1179,12 @@ mod tests {
 
         assert_eq!(collected_tool_calls[0].function.name, "web_search");
         // The arguments should be the fully accumulated string, not fragments
-        let args_str = match &collected_tool_calls[0].function.arguments {
+        let args_str = match collected_tool_calls[0]
+            .function
+            .arguments
+            .as_json()
+            .expect("JSON arguments")
+        {
             serde_json::Value::String(s) => s.clone(),
             v => v.to_string(),
         };

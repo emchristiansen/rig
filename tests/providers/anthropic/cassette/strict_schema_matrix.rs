@@ -1108,7 +1108,13 @@ async fn required_and_optional_property_order_schema_is_accepted() {
                 .choice
                 .iter()
                 .find_map(|content| match content {
-                    AssistantContent::ToolCall(tool_call) => Some(&tool_call.function.arguments),
+                    AssistantContent::ToolCall(tool_call) => Some(
+                        tool_call
+                            .function
+                            .arguments
+                            .as_json()
+                            .expect("JSON arguments"),
+                    ),
                     _ => None,
                 })
                 .expect("response should contain a tool call");

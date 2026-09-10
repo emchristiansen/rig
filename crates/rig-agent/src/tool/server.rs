@@ -13,7 +13,7 @@ use crate::{
     completion::{CompletionError, ToolDefinition},
     tool::{
         DynamicTool, PortableDynamicTool, RegisteredTool, Tool, ToolContext, ToolDispatch,
-        ToolResult, ToolSet, dispatch_tool,
+        ToolExecutionError, ToolResult, ToolSet, dispatch_tool,
     },
 };
 use rig_core::vector_store::{
@@ -53,12 +53,34 @@ impl ToolRegistrySnapshot {
     }
 
     /// Dispatch through the exact implementation advertised for this turn.
+    ///
+    /// **A namespaced callable fails closed here.** This registry is keyed by
+    /// bare name and models no namespace, so `a/foo` and `b/foo` would both
+    /// resolve to whichever `foo` happens to be registered — running an
+    /// implementation the model did not name, and doing so after an allow-list
+    /// check that was also made on the bare name. Refusing is the only answer
+    /// the current key can give honestly; routing by namespace would be a new
+    /// capability rather than the carriage this change provides.
     pub(crate) async fn dispatch(
         &self,
         tool_name: &str,
+        namespace: Option<&str>,
         args: &str,
         context: &ToolContext,
     ) -> ToolDispatch {
+        if let Some(namespace) = namespace {
+            return ToolDispatch {
+                result: ToolResult::failed(
+                    ToolExecutionError::not_found(format!(
+                        "tool `{tool_name}` was called in namespace `{namespace}`, which this \
+                         registry does not model"
+                    ))
+                    .with_model_feedback(format!("tool `{namespace}/{tool_name}` not found")),
+                ),
+                context: context.for_dispatch(),
+            };
+        }
+
         let tool = self.tools.get(tool_name).cloned();
         dispatch_tool(tool_name, args.to_string(), tool, context).await
     }
@@ -758,7 +780,7 @@ mod tests {
 
         assert_eq!(snapshot.definitions()[0].description, "first schema");
         let dispatch = snapshot
-            .dispatch(ReplacementTool::NAME, "{}", &ToolContext::new())
+            .dispatch(ReplacementTool::NAME, None, "{}", &ToolContext::new())
             .await;
         assert_eq!(dispatch.result.output().render(), "first implementation");
 
@@ -770,7 +792,7 @@ mod tests {
         let next_snapshot = handle.snapshot_tool_defs(None).await.unwrap();
         assert_eq!(next_snapshot.definitions()[0].description, "second schema");
         let dispatch = next_snapshot
-            .dispatch(ReplacementTool::NAME, "{}", &ToolContext::new())
+            .dispatch(ReplacementTool::NAME, None, "{}", &ToolContext::new())
             .await;
         assert_eq!(dispatch.result.output().render(), "second implementation");
     }

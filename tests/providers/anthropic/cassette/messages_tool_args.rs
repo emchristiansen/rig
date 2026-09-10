@@ -205,8 +205,8 @@ async fn zero_argument_tool_use_nonstreaming() {
                 .expect("response should contain the ping tool call");
             assert_eq!(tool_call.function.name, "ping");
             assert_eq!(
-                tool_call.function.arguments,
-                json!({}),
+                tool_call.function.arguments.as_json(),
+                Some(&json!({})),
                 "zero-argument tool_use should surface empty-object arguments"
             );
         },
@@ -246,7 +246,14 @@ async fn nested_arguments_roundtrip_nonstreaming() {
                             AssistantContent::ToolCall(tool_call)
                                 if tool_call.function.name == PlanTrip::NAME =>
                             {
-                                Some(tool_call.function.arguments.clone())
+                                Some(
+                                    tool_call
+                                        .function
+                                        .arguments
+                                        .as_json()
+                                        .expect("JSON arguments")
+                                        .clone(),
+                                )
                             }
                             _ => None,
                         })
@@ -291,7 +298,13 @@ async fn nested_arguments_streaming() {
                 .iter()
                 .find(|tool_call| tool_call.function.name == PlanTrip::NAME)
                 .expect("stream should emit the plan_trip tool call");
-            assert_expected_plan_trip_arguments(&tool_call.function.arguments);
+            assert_expected_plan_trip_arguments(
+                tool_call
+                    .function
+                    .arguments
+                    .as_json()
+                    .expect("JSON arguments"),
+            );
         },
     )
     .await;
@@ -348,6 +361,8 @@ async fn unicode_arguments_streaming() {
             let message = tool_call
                 .function
                 .arguments
+                .as_json()
+                .expect("JSON arguments")
                 .get("message")
                 .and_then(|value| value.as_str())
                 .expect("echo arguments should contain a message string");

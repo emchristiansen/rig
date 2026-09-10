@@ -65,7 +65,12 @@ pub(super) async fn strict_tool_call_arguments(
         "exactly one strict tool call is expected"
     );
     assert_eq!(tool_calls[0].function.name, tool_name);
-    tool_calls[0].function.arguments.clone()
+    tool_calls[0]
+        .function
+        .arguments
+        .as_json()
+        .expect("JSON arguments")
+        .clone()
 }
 
 #[tokio::test]
@@ -115,8 +120,22 @@ async fn strict_tools_opt_in_roundtrip() {
                 })
                 .expect("strict tool call should be produced");
             assert_eq!(tool_call.function.name, "record_booking");
-            assert_eq!(tool_call.function.arguments["passengers"], json!(2));
-            assert_eq!(tool_call.function.arguments["cabin"], json!("economy"));
+            assert_eq!(
+                tool_call
+                    .function
+                    .arguments
+                    .as_json()
+                    .expect("JSON arguments")["passengers"],
+                json!(2)
+            );
+            assert_eq!(
+                tool_call
+                    .function
+                    .arguments
+                    .as_json()
+                    .expect("JSON arguments")["cabin"],
+                json!("economy")
+            );
         },
     )
     .await;

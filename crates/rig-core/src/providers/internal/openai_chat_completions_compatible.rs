@@ -789,7 +789,7 @@ pub(crate) mod test_support {
         assert_eq!(collected_tool_calls[0].function.name, expected_name);
         assert_eq!(
             collected_tool_calls[0].function.arguments,
-            serde_json::json!({})
+            crate::message::ToolCallArguments::Json(serde_json::json!({}))
         );
     }
 }
@@ -1021,7 +1021,10 @@ mod tests {
         assert_eq!(collected_tool_calls.len(), 2);
         for tc in &collected_tool_calls {
             assert!(
-                tc.function.arguments.is_object(),
+                tc.function
+                    .arguments
+                    .as_json()
+                    .is_some_and(|a| a.is_object()),
                 "tool_use input must be an object, got {:?} for {}",
                 tc.function.arguments,
                 tc.function.name
@@ -1031,7 +1034,10 @@ mod tests {
         // normalized to `{}` (not forwarded as a string, not dropped).
         let evicted = &collected_tool_calls[0];
         assert_eq!(evicted.id, "call_aaa");
-        assert_eq!(evicted.function.arguments, serde_json::json!({}));
+        assert_eq!(
+            evicted.function.arguments,
+            crate::message::ToolCallArguments::Json(serde_json::json!({}))
+        );
     }
 
     #[tokio::test]
@@ -1128,13 +1134,13 @@ mod tests {
         assert_eq!(collected_tool_calls[0].function.name, "search");
         assert_eq!(
             collected_tool_calls[0].function.arguments,
-            serde_json::json!({"query":"one"})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"query":"one"}))
         );
         assert_eq!(collected_tool_calls[1].id, "call_bbb");
         assert_eq!(collected_tool_calls[1].function.name, "search");
         assert_eq!(
             collected_tool_calls[1].function.arguments,
-            serde_json::json!({"query":"two"})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"query":"two"}))
         );
     }
 
@@ -1444,7 +1450,7 @@ mod tests {
         assert_eq!(collected_tool_calls[0].function.name, "ping");
         assert_eq!(
             collected_tool_calls[0].function.arguments,
-            serde_json::json!({"x": 1})
+            crate::message::ToolCallArguments::Json(serde_json::json!({"x": 1}))
         );
         assert!(
             stream.next().await.is_none(),

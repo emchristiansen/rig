@@ -345,10 +345,7 @@ mod tests {
             id: None,
             content: vec![AssistantContent::ToolCall(ToolCall::from_wire(
                 wire_id,
-                ToolFunction {
-                    name: name.to_owned(),
-                    arguments: serde_json::json!({}),
-                },
+                ToolFunction::new(name.to_owned(), serde_json::json!({})),
             ))],
         };
         let result = |wire_id: &str, name: &str| Message::User {
@@ -364,10 +361,7 @@ mod tests {
             content: vec![AssistantContent::ToolCall(ToolCall::from_dual_wire(
                 item_id,
                 call_id,
-                ToolFunction {
-                    name: name.to_owned(),
-                    arguments: serde_json::json!({}),
-                },
+                ToolFunction::new(name.to_owned(), serde_json::json!({})),
             ))],
         };
         let result_dual = |item_id: &str, call_id: &str, name: &str| Message::User {

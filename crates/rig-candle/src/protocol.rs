@@ -138,13 +138,7 @@ fn validate_protocol_inputs(
                                 protocol,
                             )?;
                             validate_protocol_text(
-                                &serde_json::to_string(&call.function.arguments).map_err(
-                                    |error| {
-                                        CandleError::MalformedToolCall(format!(
-                                            "historical arguments cannot be serialized: {error}"
-                                        ))
-                                    },
-                                )?,
+                                &call.function.arguments.to_payload_string(),
                                 "historical tool arguments",
                                 protocol,
                             )?;
@@ -591,9 +585,15 @@ fn render_qwen_message(
                         if call_count > 0 || !rendered.is_empty() {
                             rendered.push('\n');
                         }
+                        let arguments = call
+                            .function
+                            .arguments
+                            .clone()
+                            .into_json_for("the Qwen tool-call envelope")
+                            .map_err(|error| CandleError::MalformedToolCall(error.to_string()))?;
                         let envelope = serde_json::json!({
                             "name": call.function.name,
-                            "arguments": call.function.arguments,
+                            "arguments": arguments,
                         });
                         rendered.push_str(TOOL_CALL_START);
                         rendered.push('\n');
@@ -842,7 +842,7 @@ fn push_text(items: &mut Vec<AssistantContent>, text: &str) {
 #[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use rig_core::completion::{CompletionRequest, Document};
-    use rig_core::message::{Message, ProviderCallId, ToolCallId, ToolChoice};
+    use rig_core::message::{Message, ProviderCallId, ToolCallArguments, ToolCallId, ToolChoice};
 
     use super::*;
 
@@ -1144,11 +1144,9 @@ mod tests {
             panic!("expected a tool call")
         };
         assert!(!call.id.is_empty());
-        assert_eq!(
-            call.function.arguments["options"]["items"],
-            serde_json::json!([1, 2])
-        );
-        assert!(call.function.arguments["optional"].is_null());
+        let arguments = call.function.arguments.as_json().expect("JSON arguments");
+        assert_eq!(arguments["options"]["items"], serde_json::json!([1, 2]));
+        assert!(arguments["optional"].is_null());
     }
 
     #[test]
@@ -1169,9 +1167,16 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].function.arguments, serde_json::json!({}));
         assert_eq!(
-            calls[1].function.arguments["text"],
+            calls[0].function.arguments,
+            ToolCallArguments::Json(serde_json::json!({}))
+        );
+        assert_eq!(
+            calls[1]
+                .function
+                .arguments
+                .as_json()
+                .expect("JSON arguments")["text"],
             serde_json::json!("Grüße 東京 \"quoted\" C:\\tmp")
         );
         assert_eq!(parsed.visible_text, "done");

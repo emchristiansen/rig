@@ -138,6 +138,8 @@ async fn specific_single_function_targets_named_tool() {
                 tool_call
                     .function
                     .arguments
+                    .as_json()
+                    .expect("JSON arguments")
                     .get("x")
                     .and_then(|value| value.as_f64()),
                 Some(9.0),
@@ -148,6 +150,8 @@ async fn specific_single_function_targets_named_tool() {
                 tool_call
                     .function
                     .arguments
+                    .as_json()
+                    .expect("JSON arguments")
                     .get("y")
                     .and_then(|value| value.as_f64()),
                 Some(4.0),

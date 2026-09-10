@@ -755,10 +755,10 @@ async fn raw_stream_complex_tool_call_deltas_have_object_arguments() -> Result<(
                 .iter()
                 .find(|tool_call| tool_call.function.name == InspectManifest::NAME)
                 .ok_or_else(|| anyhow::anyhow!("raw stream should emit inspect_manifest"))?;
-            anyhow::ensure!(tool_call.function.arguments["project"] == "rig-groq");
-            anyhow::ensure!(tool_call.function.arguments["flags"]["critical"] == true);
+            anyhow::ensure!(tool_call.function.arguments.as_json().expect("JSON arguments")["project"] == "rig-groq");
+            anyhow::ensure!(tool_call.function.arguments.as_json().expect("JSON arguments")["flags"]["critical"] == true);
             anyhow::ensure!(
-                tool_call.function.arguments["steps"].as_array().map(Vec::len) == Some(2)
+                tool_call.function.arguments.as_json().expect("JSON arguments")["steps"].as_array().map(Vec::len) == Some(2)
             );
             anyhow::ensure!(
                 observation.events.contains(&"tool_call_delta"),
@@ -841,7 +841,7 @@ async fn tool_choice_auto_required_specific_and_none() -> Result<()> {
                     content,
                     AssistantContent::ToolCall(tool_call)
                         if tool_call.function.name == AlphaSignal::NAME
-                            && tool_call.function.arguments == json!({})
+                            && tool_call.function.arguments.as_json() == Some(&json!({}))
                 )),
                 "auto tool choice should allow lookup_harbor_label"
             );
@@ -860,7 +860,7 @@ async fn tool_choice_auto_required_specific_and_none() -> Result<()> {
                     content,
                     AssistantContent::ToolCall(tool_call)
                         if tool_call.function.name == AlphaSignal::NAME
-                            && tool_call.function.arguments == json!({})
+                            && tool_call.function.arguments.as_json() == Some(&json!({}))
                 )),
                 "required tool choice should force lookup_harbor_label"
             );

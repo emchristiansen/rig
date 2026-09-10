@@ -4610,7 +4610,8 @@ mod migrated_tests {
                         if !tool_call.id.is_empty()
                             && tool_call.provider.is_none()
                             && tool_call.function.name == "default_api"
-                            && tool_call.function.arguments == serde_json::json!({"x": 2, "y": 3})
+                            && tool_call.function.arguments.as_json()
+                                == Some(&serde_json::json!({"x": 2, "y": 3}))
                 ))
         ));
         assert!(matches!(
@@ -4881,7 +4882,8 @@ mod migrated_tests {
                         if !tool_call.id.is_empty()
                             && tool_call.provider.is_none()
                             && tool_call.function.name == "default_api"
-                            && tool_call.function.arguments == serde_json::json!({"x": 2, "y": 3})
+                            && tool_call.function.arguments.as_json()
+                                == Some(&serde_json::json!({"x": 2, "y": 3}))
                 ))
         ));
         assert!(matches!(

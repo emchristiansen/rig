@@ -666,19 +666,129 @@ impl ToolCall {
     }
 }
 
+/// A tool call's payload, closed over the two shapes a provider can send.
+///
+/// Function tools carry parsed JSON. Custom (grammar) tools carry verbatim
+/// bytes that are not JSON, so a single `serde_json::Value` cannot represent
+/// both: spelling raw input as `Value::String` would make it indistinguishable
+/// from a function call whose arguments genuinely are a JSON string.
+///
+/// The representation is serde's default external tagging. An untagged sum
+/// would conflate `Raw(s)` with `Json(Value::String(s))` on the way back, and a
+/// reserved-key discriminator would mean inspecting JSON structure to recover a
+/// protocol type.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub enum ToolCallArguments {
+    /// A function call's parsed arguments. Providers that parse and reserialize
+    /// preserve semantic JSON identity here, not byte identity.
+    Json(serde_json::Value),
+    /// A custom tool's input, preserved byte for byte.
+    Raw(String),
+}
+
+impl ToolCallArguments {
+    /// The parsed arguments, or `None` for raw input.
+    ///
+    /// A wire that can only express JSON arguments calls this and refuses on
+    /// `None`. Coercing raw input into a `Value` here would hand that wire a
+    /// payload the model never sent.
+    pub fn as_json(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Json(arguments) => Some(arguments),
+            Self::Raw(_) => None,
+        }
+    }
+
+    /// The owned parsed arguments, or `None` for raw input.
+    pub fn into_json(self) -> Option<serde_json::Value> {
+        match self {
+            Self::Json(arguments) => Some(arguments),
+            Self::Raw(_) => None,
+        }
+    }
+
+    /// The payload as the string a trace or hook observes: compact JSON for
+    /// [`Json`](Self::Json), and the verbatim bytes for [`Raw`](Self::Raw),
+    /// which are already their own serialized form.
+    pub fn to_payload_string(&self) -> String {
+        match self {
+            Self::Json(arguments) => arguments.to_string(),
+            Self::Raw(input) => input.clone(),
+        }
+    }
+
+    /// The parsed arguments for a wire whose tool-call payload is JSON only.
+    ///
+    /// Raw input reaches such a wire when a custom (grammar) tool call — today
+    /// producible only by the OpenAI Responses surface — is replayed into a
+    /// provider that cannot express one. No JSON value stands for those bytes,
+    /// so this refuses instead of substituting: `Value::String` would present
+    /// the model's raw input as a parsed string argument, and `Value::Null`
+    /// would send the call with arguments the model never wrote.
+    pub fn into_json_for(self, wire: &str) -> Result<serde_json::Value, RawToolInputUnsupported> {
+        self.into_json().ok_or_else(|| RawToolInputUnsupported {
+            wire: wire.to_owned(),
+        })
+    }
+}
+
+/// A custom tool's raw input reached a wire that carries JSON arguments only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawToolInputUnsupported {
+    /// The wire that cannot express raw tool input.
+    pub wire: String,
+}
+
+impl std::fmt::Display for RawToolInputUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} carries JSON tool arguments only, so a custom tool call's raw input cannot be sent on it",
+            self.wire
+        )
+    }
+}
+
+impl std::error::Error for RawToolInputUnsupported {}
+
+impl From<serde_json::Value> for ToolCallArguments {
+    fn from(arguments: serde_json::Value) -> Self {
+        Self::Json(arguments)
+    }
+}
+
 /// Describes a tool function to call with a name and arguments, generally produced by a provider.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolFunction {
     /// Tool/function name to invoke.
     pub name: String,
-    /// JSON arguments for the tool/function.
-    pub arguments: serde_json::Value,
+    /// The callable's namespace as the provider sent it; absent is the default
+    /// namespace.
+    ///
+    /// Carried verbatim from the provider item. Normalizing the absent, empty,
+    /// and `functions` spellings is a comparison-time concern belonging to the
+    /// consumer's namespace policy, and splitting `name` on a separator to
+    /// recover this would be hand-written parsing of protocol identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// Arguments for the tool/function.
+    pub arguments: ToolCallArguments,
 }
 
 impl ToolFunction {
-    /// Create a tool function call payload.
-    pub fn new(name: String, arguments: serde_json::Value) -> Self {
-        Self { name, arguments }
+    /// Create a tool function call payload in the default namespace.
+    pub fn new(name: String, arguments: impl Into<ToolCallArguments>) -> Self {
+        Self {
+            name,
+            namespace: None,
+            arguments: arguments.into(),
+        }
+    }
+
+    /// Attach the namespace the provider qualified this callable with.
+    pub fn with_namespace(mut self, namespace: Option<String>) -> Self {
+        self.namespace = namespace;
+        self
     }
 }
 
@@ -1506,14 +1616,11 @@ impl AssistantContent {
     pub fn tool_call(
         id: impl Into<String>,
         name: impl Into<String>,
-        arguments: serde_json::Value,
+        arguments: impl Into<ToolCallArguments>,
     ) -> Self {
         AssistantContent::ToolCall(ToolCall::from_wire(
             id,
-            ToolFunction {
-                name: name.into(),
-                arguments,
-            },
+            ToolFunction::new(name.into(), arguments),
         ))
     }
 
@@ -1523,15 +1630,28 @@ impl AssistantContent {
         id: impl Into<String>,
         call_id: String,
         name: impl Into<String>,
-        arguments: serde_json::Value,
+        arguments: impl Into<ToolCallArguments>,
     ) -> Self {
         AssistantContent::ToolCall(ToolCall::from_dual_wire(
             id,
             call_id,
-            ToolFunction {
-                name: name.into(),
-                arguments,
-            },
+            ToolFunction::new(name.into(), arguments),
+        ))
+    }
+
+    /// Dual-identifier variant carrying the namespace the provider qualified
+    /// the callable with (OpenAI Responses namespaced and custom tools).
+    pub fn tool_call_with_namespace(
+        id: impl Into<String>,
+        call_id: String,
+        name: impl Into<String>,
+        namespace: Option<String>,
+        arguments: impl Into<ToolCallArguments>,
+    ) -> Self {
+        AssistantContent::ToolCall(ToolCall::from_dual_wire(
+            id,
+            call_id,
+            ToolFunction::new(name.into(), arguments).with_namespace(namespace),
         ))
     }
 
@@ -1948,10 +2068,7 @@ mod tests {
         // nothing in the round trip may invent provider provenance.
         let call = super::ToolCall::new(
             super::ToolCallId::new("minted-handle").expect("non-empty"),
-            super::ToolFunction {
-                name: "add".to_string(),
-                arguments: serde_json::json!({}),
-            },
+            super::ToolFunction::new("add".to_string(), serde_json::json!({})),
         );
 
         let json = serde_json::to_value(&call).expect("serialize");

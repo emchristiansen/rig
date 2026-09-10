@@ -644,7 +644,14 @@ fn assistant_parts(content: &[AssistantContent]) -> Vec<TelemetryPart> {
             AssistantContent::ToolCall(tool_call) => vec![TelemetryPart::ToolCall {
                 id: Some(tool_call.id.as_str().to_owned()),
                 name: tool_call.function.name.clone(),
-                arguments: tool_call.function.arguments.clone(),
+                // Telemetry records what was sent, so raw input is rendered as
+                // the string it is rather than dropped from the span.
+                arguments: match &tool_call.function.arguments {
+                    crate::message::ToolCallArguments::Json(arguments) => arguments.clone(),
+                    crate::message::ToolCallArguments::Raw(input) => {
+                        serde_json::Value::String(input.clone())
+                    }
+                },
             }],
             AssistantContent::Reasoning(reasoning) => reasoning_parts(reasoning),
             AssistantContent::Image(image) => image_part(image).into_iter().collect(),

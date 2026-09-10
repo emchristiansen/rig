@@ -1905,7 +1905,15 @@ pub mod interactions_api_types {
                     let call_id = tool_call.wire_call_id().to_owned();
                     Ok(Self::FunctionCall(FunctionCallContent {
                         name: Some(tool_call.function.name),
-                        arguments: Some(tool_call.function.arguments),
+                        arguments: Some(
+                            tool_call
+                                .function
+                                .arguments
+                                .into_json_for("Gemini functionCall")
+                                .map_err(|error| {
+                                    message::MessageError::ConversionError(error.to_string())
+                                })?,
+                        ),
                         id: Some(call_id),
                     }))
                 }
@@ -2379,10 +2387,7 @@ mod tests {
         use message::{AssistantContent, ToolCall, ToolFunction, ToolResultContent};
 
         let call = |item_id: Option<&str>, call_id: &str, name: &str| {
-            let function = ToolFunction {
-                name: name.to_owned(),
-                arguments: json!({}),
-            };
+            let function = ToolFunction::new(name.to_owned(), json!({}));
             let tool_call = match item_id {
                 Some(item_id) => ToolCall::from_dual_wire(item_id, call_id, function),
                 None => ToolCall::from_wire(call_id, function),

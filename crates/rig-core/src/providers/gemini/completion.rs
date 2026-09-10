@@ -1232,7 +1232,7 @@ pub mod gemini_api_types {
             match content {
                 message::AssistantContent::Text(message::Text { text, .. }) => Ok(text.into()),
                 message::AssistantContent::Image(image) => image_to_part(image),
-                message::AssistantContent::ToolCall(tool_call) => Ok(tool_call.into()),
+                message::AssistantContent::ToolCall(tool_call) => tool_call.try_into(),
                 message::AssistantContent::Reasoning(reasoning) => Ok(Part {
                     thought: Some(true),
                     thought_signature: reasoning.first_signature().map(str::to_owned),
@@ -1243,20 +1243,31 @@ pub mod gemini_api_types {
         }
     }
 
-    impl From<message::ToolCall> for Part {
-        fn from(tool_call: message::ToolCall) -> Self {
-            Self {
+    /// Fallible because Gemini's `functionCall.args` is a JSON object: a custom
+    /// (grammar) tool call's raw input has no representation there, and this
+    /// refuses rather than substituting one.
+    impl TryFrom<message::ToolCall> for Part {
+        type Error = message::MessageError;
+
+        fn try_from(tool_call: message::ToolCall) -> Result<Self, Self::Error> {
+            Ok(Self {
                 thought: Some(false),
                 thought_signature: tool_call.signature,
                 part: PartKind::FunctionCall(FunctionCall {
                     name: tool_call.function.name,
-                    args: tool_call.function.arguments,
+                    args: tool_call
+                        .function
+                        .arguments
+                        .into_json_for("Gemini functionCall")
+                        .map_err(|error| {
+                            message::MessageError::ConversionError(error.to_string())
+                        })?,
                     // Only a provider-issued id may travel back on the wire;
                     // minted correlation handles stay internal.
                     id: tool_call.provider.map(|provider| provider.call_id),
                 }),
                 additional_params: None,
-            }
+            })
         }
     }
 
@@ -1286,13 +1297,21 @@ pub mod gemini_api_types {
         pub id: Option<String>,
     }
 
-    impl From<message::ToolCall> for FunctionCall {
-        fn from(tool_call: message::ToolCall) -> Self {
-            Self {
+    /// Fallible for the same reason [`Part`]'s conversion is: `args` is a JSON
+    /// object with no place for a custom tool's raw input.
+    impl TryFrom<message::ToolCall> for FunctionCall {
+        type Error = message::MessageError;
+
+        fn try_from(tool_call: message::ToolCall) -> Result<Self, Self::Error> {
+            Ok(Self {
                 name: tool_call.function.name,
-                args: tool_call.function.arguments,
+                args: tool_call
+                    .function
+                    .arguments
+                    .into_json_for("Gemini functionCall")
+                    .map_err(|error| message::MessageError::ConversionError(error.to_string()))?,
                 id: tool_call.provider.map(|provider| provider.call_id),
-            }
+            })
         }
     }
 
@@ -3058,10 +3077,7 @@ mod tests {
     fn test_message_conversion_tool_call() {
         let tool_call = message::ToolCall::from_wire(
             "call-123",
-            message::ToolFunction {
-                name: "test_function".to_string(),
-                arguments: json!({"arg1": "value1"}),
-            },
+            message::ToolFunction::new("test_function".to_string(), json!({"arg1": "value1"})),
         );
 
         let msg = message::Message::Assistant {
@@ -3650,10 +3666,7 @@ mod tests {
         // An id-less wire minted the handle (Gemini REST issued no id).
         let call = ToolCall::new(
             ToolCallId::mint(),
-            ToolFunction {
-                name: "lookup".to_string(),
-                arguments: json!({}),
-            },
+            ToolFunction::new("lookup".to_string(), json!({})),
         );
 
         let message = message::Message::User {
@@ -3687,10 +3700,7 @@ mod tests {
                     id: None,
                     content: vec![AssistantContent::ToolCall(ToolCall::from_wire(
                         "toolu_abc",
-                        ToolFunction {
-                            name: "get_weather".to_owned(),
-                            arguments: json!({"city": "Paris"}),
-                        },
+                        ToolFunction::new("get_weather".to_owned(), json!({"city": "Paris"})),
                     ))],
                 },
                 message::Message::User {

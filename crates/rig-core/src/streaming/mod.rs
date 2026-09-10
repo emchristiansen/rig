@@ -204,6 +204,14 @@ pub struct ToolInputEnd {
     pub tool_id: Option<WireId>,
     /// Authoritative tool name from the wire's completed item.
     pub name: Option<String>,
+    /// Authoritative namespace from the wire's completed item, absent for the
+    /// default namespace.
+    ///
+    /// Carried here so a streamed namespaced call reaches the accumulated
+    /// [`ToolCall`](crate::message::ToolCall) with the same qualifier the
+    /// non-streaming decode preserves; without it the two paths would disagree
+    /// about the identity of one call.
+    pub namespace: Option<String>,
     /// Authoritative arguments from the wire's completed item, parsed or not.
     /// `None` when the wire restated nothing and the assembled fragments are
     /// the only evidence.
@@ -240,6 +248,7 @@ impl ToolInputEnd {
             id: id.into(),
             tool_id: None,
             name: None,
+            namespace: None,
             arguments: None,
             call_id: None,
             signature: None,
@@ -774,8 +783,10 @@ pub struct RawStreamingToolCall {
     pub call_id: Option<String>,
     /// Tool/function name.
     pub name: String,
-    /// Parsed tool arguments.
-    pub arguments: serde_json::Value,
+    /// The namespace qualifying the callable, absent for the default one.
+    pub namespace: Option<String>,
+    /// Tool arguments: parsed JSON, or a custom tool's verbatim input.
+    pub arguments: crate::message::ToolCallArguments,
     /// Optional provider signature associated with the tool call.
     pub signature: Option<String>,
     /// Additional provider-specific tool call metadata.
@@ -794,14 +805,19 @@ impl RawStreamingToolCall {
             internal_call_id: crate::id::generate(),
             call_id: None,
             name: String::new(),
-            arguments: serde_json::Value::Null,
+            namespace: None,
+            arguments: crate::message::ToolCallArguments::Json(serde_json::Value::Null),
             signature: None,
             additional_params: None,
         }
     }
 
     /// Create a complete tool call with a generated internal call ID.
-    pub fn new(id: impl Into<StreamPartId>, name: String, arguments: serde_json::Value) -> Self {
+    pub fn new(
+        id: impl Into<StreamPartId>,
+        name: String,
+        arguments: impl Into<crate::message::ToolCallArguments>,
+    ) -> Self {
         let id = id.into();
         // A wire-derived key doubles as the durable id (the common case:
         // providers key by the id the wire issued); minted keys carry none.
@@ -812,10 +828,17 @@ impl RawStreamingToolCall {
             internal_call_id: crate::id::generate(),
             call_id: None,
             name,
-            arguments,
+            namespace: None,
+            arguments: arguments.into(),
             signature: None,
             additional_params: None,
         }
+    }
+
+    /// Attach the namespace the provider qualified this callable with.
+    pub fn with_namespace(mut self, namespace: Option<String>) -> Self {
+        self.namespace = namespace;
+        self
     }
 
     /// Attach a provider-specific call ID.
@@ -853,6 +876,7 @@ impl From<RawStreamingToolCall> for ToolCall {
             provider,
             function: ToolFunction {
                 name: tool_call.name,
+                namespace: tool_call.namespace,
                 arguments: tool_call.arguments,
             },
             signature: tool_call.signature,
@@ -1789,7 +1813,8 @@ mod tests {
                 call_id: None,
                 internal_call_id: "internal_1".to_string(),
                 name: "lookup".to_string(),
-                arguments: serde_json::json!({}),
+                namespace: None,
+                arguments: crate::message::ToolCallArguments::Json(serde_json::json!({})),
                 signature: None,
                 additional_params: None,
             }));

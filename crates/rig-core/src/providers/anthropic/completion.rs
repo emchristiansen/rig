@@ -1099,7 +1099,17 @@ fn anthropic_content_from_assistant_content(
             // exists, else rig's minted handle.
             id: tool_call.wire_call_id().to_owned(),
             name: tool_call.function.name,
-            input: coerce_tool_input(tool_call.function.arguments),
+            // Anthropic's `tool_use.input` is a JSON object. A custom
+            // (grammar) tool call's verbatim input has no representation
+            // there, and neither substituting a string nor dropping the call
+            // is honest, so this refuses.
+            input: coerce_tool_input(
+                tool_call
+                    .function
+                    .arguments
+                    .into_json_for("Anthropic tool_use")
+                    .map_err(|error| MessageError::ConversionError(error.to_string()))?,
+            ),
         }]),
         message::AssistantContent::Reasoning(reasoning) => {
             let mut converted = Vec::new();
@@ -3410,7 +3420,12 @@ mod tests {
                     })) => {
                         assert_eq!(id, "toolu_01A09q90qw90lq917835lq9");
                         assert_eq!(function.name, "get_weather");
-                        assert_eq!(function.arguments, json!({"location": "San Francisco, CA"}));
+                        assert_eq!(
+                            function.arguments,
+                            crate::message::ToolCallArguments::Json(
+                                json!({"location": "San Francisco, CA"})
+                            )
+                        );
                     }
                     _ => panic!("Expected tool call content"),
                 }

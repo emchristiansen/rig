@@ -895,8 +895,8 @@ pub fn assistant_content_to_messages(
         name: None,
         tool_calls: tool_calls
             .into_iter()
-            .map(|tool_call| tool_call.into())
-            .collect::<Vec<_>>(),
+            .map(ToolCall::try_from)
+            .collect::<Result<Vec<_>, _>>()?,
         reasoning_details: Vec::new(),
         images: Vec::new(),
     }])
@@ -914,9 +914,14 @@ impl TryFrom<message::Message> for Vec<Message> {
     }
 }
 
-impl From<message::ToolCall> for ToolCall {
-    fn from(tool_call: message::ToolCall) -> Self {
-        Self {
+/// Fallible because chat completions carries tool arguments as a JSON string:
+/// a custom (grammar) tool call's raw input has no representation there, and
+/// this refuses rather than substituting one.
+impl TryFrom<message::ToolCall> for ToolCall {
+    type Error = message::MessageError;
+
+    fn try_from(tool_call: message::ToolCall) -> Result<Self, Self::Error> {
+        Ok(Self {
             // Keep the assistant echo consistent with the tool-result side:
             // the provider-issued call id when one exists (e.g. a
             // Responses-API history replayed via chat completions), else
@@ -925,9 +930,13 @@ impl From<message::ToolCall> for ToolCall {
             r#type: ToolType::default(),
             function: Function {
                 name: tool_call.function.name,
-                arguments: tool_call.function.arguments,
+                arguments: tool_call
+                    .function
+                    .arguments
+                    .into_json_for("OpenAI chat completions tool arguments")
+                    .map_err(|error| message::MessageError::ConversionError(error.to_string()))?,
             },
-        }
+        })
     }
 }
 
@@ -935,10 +944,7 @@ impl From<ToolCall> for message::ToolCall {
     fn from(tool_call: ToolCall) -> Self {
         message::ToolCall::from_wire(
             tool_call.id,
-            message::ToolFunction {
-                name: tool_call.function.name,
-                arguments: tool_call.function.arguments,
-            },
+            message::ToolFunction::new(tool_call.function.name, tool_call.function.arguments),
         )
     }
 }

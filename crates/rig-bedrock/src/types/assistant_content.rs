@@ -201,7 +201,12 @@ impl RigAssistantContent {
                 // minted handle here would orphan the paired toolResult
                 // whenever the two diverge.
                 let tool_use_id = tool_call.wire_call_id().to_owned();
-                let doc: AwsDocument = tool_call.function.arguments.into();
+                let doc: AwsDocument = tool_call
+                    .function
+                    .arguments
+                    .into_json_for("Bedrock toolUse.input")
+                    .map_err(|error| CompletionError::ProviderError(error.to_string()))?
+                    .into();
                 Ok(Some(aws_bedrock::ContentBlock::ToolUse(
                     aws_bedrock::ToolUseBlock::builder()
                         .tool_use_id(tool_use_id)
@@ -553,14 +558,20 @@ mod tests {
         };
         assert_eq!(first_tool.id, "call_1");
         assert_eq!(first_tool.function.name, "add");
-        assert_eq!(first_tool.function.arguments, json!({"x": 1, "y": 2}));
+        assert_eq!(
+            first_tool.function.arguments.as_json(),
+            Some(&json!({"x": 1, "y": 2}))
+        );
 
         let AssistantContent::ToolCall(second_tool) = &choice[2] else {
             panic!("expected second tool call");
         };
         assert_eq!(second_tool.id, "call_2");
         assert_eq!(second_tool.function.name, "subtract");
-        assert_eq!(second_tool.function.arguments, json!({"x": 4, "y": 3}));
+        assert_eq!(
+            second_tool.function.arguments.as_json(),
+            Some(&json!({"x": 4, "y": 3}))
+        );
     }
 
     #[test]
@@ -571,10 +582,7 @@ mod tests {
         // orphan the pair.
         let tool_call = rig_core::message::ToolCall::new(
             rig_core::message::ToolCallId::new("minted-handle").unwrap(),
-            rig_core::message::ToolFunction {
-                name: "add".into(),
-                arguments: json!({"x": 1}),
-            },
+            rig_core::message::ToolFunction::new("add".into(), json!({"x": 1})),
         )
         .with_provider(rig_core::message::ProviderCallId::new("call_abc").unwrap());
 
@@ -592,10 +600,7 @@ mod tests {
     fn tool_use_echo_falls_back_to_minted_handle_without_provider_id() {
         let tool_call = rig_core::message::ToolCall::new(
             rig_core::message::ToolCallId::new("minted-handle").unwrap(),
-            rig_core::message::ToolFunction {
-                name: "add".into(),
-                arguments: json!({"x": 1}),
-            },
+            rig_core::message::ToolFunction::new("add".into(), json!({"x": 1})),
         );
 
         let block = RigAssistantContent(AssistantContent::ToolCall(tool_call))

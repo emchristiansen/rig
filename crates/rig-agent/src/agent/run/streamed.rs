@@ -45,7 +45,6 @@ use rig_core::message::{
 use crate::{
     agent::prompt_request::{TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER, tool_result_message},
     completion::{CompletionError, Message, Usage},
-    json_utils,
     streaming::{StreamedAssistantContent, ToolCallDeltaContent},
 };
 
@@ -676,9 +675,7 @@ impl StreamedTurnAssembler {
                     return Ok(self.surface_invalid_call(
                         tool_call.clone(),
                         internal_call_id.clone(),
-                        Some(json_utils::serialize_json_value(
-                            &tool_call.function.arguments,
-                        )),
+                        Some(tool_call.function.arguments.to_payload_string()),
                         PendingInvalid::FullCall {
                             tool_call: Box::new(tool_call.clone()),
                             internal_call_id: internal_call_id.clone(),

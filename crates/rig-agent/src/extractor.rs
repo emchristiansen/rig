@@ -713,7 +713,7 @@ mod tests {
             content.as_slice(),
             [AssistantContent::ToolCall(tool_call)]
                 if tool_call.function.name == SUBMIT_TOOL_NAME
-                    && tool_call.function.arguments == json!({"name": "John"})
+                    && tool_call.function.arguments.as_json() == Some(&json!({"name": "John"}))
         ));
     }
 

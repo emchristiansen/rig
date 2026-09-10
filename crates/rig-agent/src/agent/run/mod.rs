@@ -83,7 +83,6 @@ use crate::{
         turn_delivered_no_answer,
     },
     completion::{Message, PromptError, Usage},
-    json_utils,
 };
 
 pub use streamed::{
@@ -686,9 +685,7 @@ impl AgentRun {
             tool_name: tool_call.function.name.clone(),
             tool_call_id: Some(tool_call.id.as_str().to_owned()),
             internal_call_id: None,
-            args: Some(json_utils::serialize_json_value(
-                &tool_call.function.arguments,
-            )),
+            args: Some(tool_call.function.arguments.to_payload_string()),
             available_tools: resolving.executable_tool_names.iter().cloned().collect(),
             allowed_tools: resolving.allowed_tool_names.iter().cloned().collect(),
             tool_choice: self.tool_choice.clone(),
@@ -768,12 +765,28 @@ impl AgentRun {
                         .count();
                     let args = tool_call.function.arguments.clone();
                     let tool_call_id = tool_call.id.clone();
-                    let output = json_utils::serialize_json_value(&args);
+                    // The selection above matches on the bare name alone, so a
+                    // custom (grammar) tool call sharing the output tool's name
+                    // reaches here carrying bytes that are not JSON. Required-
+                    // field validation is defined over a JSON object and cannot
+                    // run on those, and finalizing them anyway would return
+                    // unvalidated raw output as the run's structured answer —
+                    // so this refuses instead. Nothing in the types rules the
+                    // case out, which is why it is a check rather than a
+                    // comment asserting it cannot happen.
+                    let Some(json_args) = args.as_json() else {
+                        return Err(self.cancel_error(format!(
+                            "the `{output_tool_name}` output tool was called with raw \
+                             (non-JSON) input, which cannot be validated against its \
+                             output schema"
+                        )));
+                    };
+                    let output = args.to_payload_string();
 
                     // Validate the output against the schema's required fields and
                     // re-prompt while budget remains, so a model that omits fields
                     // gets a chance to fix it before we finalize best-effort.
-                    let missing = self.missing_required_output_fields(&args);
+                    let missing = self.missing_required_output_fields(json_args);
                     if !missing.is_empty() && self.can_reprompt_for_output() {
                         self.new_messages.push(Message::Assistant {
                             id: message_id,

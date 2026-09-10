@@ -182,7 +182,14 @@ async fn nested_arguments_roundtrip_nonstreaming() {
                             AssistantContent::ToolCall(tool_call)
                                 if tool_call.function.name == PlanTrip::NAME =>
                             {
-                                Some(tool_call.function.arguments.clone())
+                                Some(
+                                    tool_call
+                                        .function
+                                        .arguments
+                                        .as_json()
+                                        .expect("JSON arguments")
+                                        .clone(),
+                                )
                             }
                             _ => None,
                         })
@@ -227,7 +234,13 @@ async fn nested_arguments_streaming() {
                 .iter()
                 .find(|tool_call| tool_call.function.name == PlanTrip::NAME)
                 .expect("stream should emit the plan_trip tool call");
-            assert_expected_plan_trip_arguments(&tool_call.function.arguments);
+            assert_expected_plan_trip_arguments(
+                tool_call
+                    .function
+                    .arguments
+                    .as_json()
+                    .expect("JSON arguments"),
+            );
         },
     )
     .await;
@@ -284,6 +297,8 @@ async fn unicode_arguments_streaming() {
             let message = tool_call
                 .function
                 .arguments
+                .as_json()
+                .expect("JSON arguments")
                 .get("message")
                 .and_then(|value| value.as_str())
                 .expect("echo arguments should contain a message string");
@@ -351,13 +366,20 @@ async fn optional_nullable_argument_omitted_when_not_requested() {
                 tool_call
                     .function
                     .arguments
+                    .as_json()
+                    .expect("JSON arguments")
                     .get("name")
                     .and_then(|value| value.as_str()),
                 Some("deploy"),
                 "required argument should be present: {:?}",
                 tool_call.function.arguments
             );
-            let note = tool_call.function.arguments.get("note");
+            let note = tool_call
+                .function
+                .arguments
+                .as_json()
+                .expect("JSON arguments")
+                .get("note");
             assert!(
                 note.is_none() || note.is_some_and(serde_json::Value::is_null),
                 "optional nullable argument should be omitted or null when not requested, \

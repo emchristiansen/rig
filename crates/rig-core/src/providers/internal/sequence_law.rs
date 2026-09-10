@@ -310,6 +310,7 @@ mod tests {
                 tool_id: None,
                 call_id: None,
                 name: None,
+                namespace: None,
                 arguments: None,
                 signature: None,
                 additional_params: None,

@@ -528,7 +528,7 @@ pub(crate) async fn assert_stream_contains_zero_arg_tool_call_named(
             StreamedAssistantContent::Final(_) => saw_final = true,
             StreamedAssistantContent::ToolCall { tool_call, .. } => {
                 if tool_call.function.name == expected_name {
-                    assert_eq!(tool_call.function.arguments, json!({}));
+                    assert_eq!(tool_call.function.arguments.as_json(), Some(&json!({})));
                     saw_matching_tool_call = true;
                 }
             }
@@ -1017,7 +1017,11 @@ pub(crate) fn assert_raw_stream_tool_call_arguments_are_objects(
 
     for tool_call in &observation.tool_calls {
         assert!(
-            tool_call.function.arguments.is_object(),
+            tool_call
+                .function
+                .arguments
+                .as_json()
+                .is_some_and(|arguments| arguments.is_object()),
             "tool call `{}` must surface object arguments, got {:?}",
             tool_call.function.name,
             tool_call.function.arguments,

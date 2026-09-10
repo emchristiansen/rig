@@ -64,7 +64,10 @@ pub(crate) mod shared_parts {
             // item id Gemini never issued.
             call_id: None,
             name,
-            arguments: args,
+            // Gemini declares no namespaced callables, so its wire carries no
+            // qualifier to preserve.
+            namespace: None,
+            arguments: args.into(),
             signature,
             additional_params: None,
         };

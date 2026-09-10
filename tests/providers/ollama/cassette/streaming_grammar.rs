@@ -212,7 +212,11 @@ async fn parallel_id_less_tool_calls_stay_distinct() {
                     "{name} must keep its daemon-issued call id"
                 );
                 assert!(
-                    streamed.function.arguments.is_object(),
+                    streamed
+                        .function
+                        .arguments
+                        .as_json()
+                        .is_some_and(|arguments| arguments.is_object()),
                     "{name} arguments must assemble into an object, got {:?}",
                     streamed.function.arguments
                 );
@@ -291,14 +295,14 @@ async fn same_tool_called_twice_in_one_turn_stays_distinct() {
                 "the daemon-issued call id must be preserved"
             );
             assert!(
-                call.function.arguments.is_object(),
+                call.function.arguments.as_json().is_some_and(|arguments| arguments.is_object()),
                 "each call's arguments must assemble uncorrupted, got {:?}",
                 call.function.arguments
             );
         }
         let argument_sets: std::collections::HashSet<String> = add_calls
             .iter()
-            .map(|call| call.function.arguments.to_string())
+            .map(|call| call.function.arguments.to_payload_string())
             .collect();
         assert!(
             argument_sets.len() >= 2,
@@ -353,10 +357,10 @@ async fn chat_sourced_history_replays_the_tool_name_not_the_identifier() {
                         id: rig::message::ToolCallId::new("call_abc123")
                             .expect("the chat-sourced identifier is non-empty"),
                         provider: None,
-                        function: rig::message::ToolFunction {
-                            name: "add".to_owned(),
-                            arguments: serde_json::json!({"x": 2, "y": 3}),
-                        },
+                        function: rig::message::ToolFunction::new(
+                            "add".to_owned(),
+                            serde_json::json!({"x": 2, "y": 3}),
+                        ),
                         signature: None,
                         additional_params: None,
                     })],

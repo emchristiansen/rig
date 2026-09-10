@@ -1285,8 +1285,8 @@ impl TryFrom<crate::message::Message> for Vec<Message> {
                     name: None,
                     tool_calls: tool_calls
                         .into_iter()
-                        .map(|tool_call| tool_call.into())
-                        .collect::<Vec<_>>(),
+                        .map(ToolCall::try_from)
+                        .collect::<Result<Vec<_>, _>>()?,
                 }])
             }
         }
@@ -1383,18 +1383,29 @@ impl Message {
 
 // ---------- Additional Message Types ----------
 
-impl From<crate::message::ToolCall> for ToolCall {
-    fn from(tool_call: crate::message::ToolCall) -> Self {
-        Self {
+/// Fallible because Ollama's `function.arguments` is a JSON object: a custom
+/// (grammar) tool call's raw input has no representation there, and this
+/// refuses rather than substituting one.
+impl TryFrom<crate::message::ToolCall> for ToolCall {
+    type Error = crate::message::MessageError;
+
+    fn try_from(tool_call: crate::message::ToolCall) -> Result<Self, Self::Error> {
+        Ok(Self {
             // Never serialized (replay correlates by `tool_name`); the
             // request shape is id-less regardless of what history holds.
             id: None,
             r#type: ToolType::Function,
             function: Function {
                 name: tool_call.function.name,
-                arguments: tool_call.function.arguments,
+                arguments: tool_call
+                    .function
+                    .arguments
+                    .into_json_for("Ollama function.arguments")
+                    .map_err(|error| {
+                        crate::message::MessageError::ConversionError(error.to_string())
+                    })?,
             },
-        }
+        })
     }
 }
 

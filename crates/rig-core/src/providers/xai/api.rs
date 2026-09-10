@@ -438,10 +438,15 @@ impl TryFrom<RigMessage> for Vec<Message> {
                         AssistantContent::ToolCall(tc) => {
                             flush_assistant_text(&mut items, &mut text_parts);
                             let call_id = tc.wire_call_id().to_owned();
+                            let arguments = tc
+                                .function
+                                .arguments
+                                .into_json_for("xAI function_call")
+                                .map_err(|error| CompletionError::RequestError(Box::new(error)))?;
                             items.push(Message::function_call(
                                 call_id,
                                 tc.function.name,
-                                tc.function.arguments.to_string(),
+                                arguments.to_string(),
                             ));
                         }
                         AssistantContent::Reasoning(r) => {

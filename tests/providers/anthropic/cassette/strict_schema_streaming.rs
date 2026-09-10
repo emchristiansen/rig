@@ -77,8 +77,8 @@ async fn assert_model_streaming_tool_call(
     );
     assert_eq!(observation.tool_calls[0].function.name, tool_name);
     assert_eq!(
-        observation.tool_calls[0].function.arguments,
-        expected_arguments
+        observation.tool_calls[0].function.arguments.as_json(),
+        Some(&expected_arguments)
     );
 }
 

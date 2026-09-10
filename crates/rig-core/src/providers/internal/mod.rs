@@ -156,10 +156,7 @@ mod tests {
             id: None,
             content: vec![AssistantContent::ToolCall(ToolCall::from_wire(
                 wire_id,
-                ToolFunction {
-                    name: name.to_owned(),
-                    arguments: serde_json::json!({}),
-                },
+                ToolFunction::new(name.to_owned(), serde_json::json!({})),
             ))],
         }
     }
@@ -237,10 +234,7 @@ mod tests {
     fn a_handle_only_result_resolves_from_an_id_less_call() {
         let id_less = ToolCall::new(
             crate::message::ToolCallId::mint(),
-            ToolFunction {
-                name: "lookup".to_owned(),
-                arguments: serde_json::json!({}),
-            },
+            ToolFunction::new("lookup".to_owned(), serde_json::json!({})),
         );
         let handle = id_less.id.as_str().to_owned();
         let mut history = vec![

@@ -198,10 +198,7 @@ mod tests {
                 AssistantContent::Reasoning(Reasoning::new("tool planning")),
                 AssistantContent::ToolCall(ToolCall::from_wire(
                     "call_1",
-                    ToolFunction {
-                        name: "lookup".to_string(),
-                        arguments: serde_json::json!({}),
-                    },
+                    ToolFunction::new("lookup".to_string(), serde_json::json!({})),
                 )),
             ],
         };

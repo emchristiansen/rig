@@ -340,7 +340,7 @@ mod tests {
                 assert_ne!(id, "add");
                 assert_eq!(provider, &None);
                 assert_eq!(function.name, "add");
-                assert_eq!(function.arguments, args);
+                assert_eq!(function.arguments.as_json(), Some(&args));
             }
             _ => panic!("Expected ToolCall"),
         }

@@ -53,7 +53,7 @@ use super::{
 };
 use rig_core::{
     memory::ConversationMemory,
-    message::{ToolCall, ToolChoice, UserContent},
+    message::{ToolCall, ToolCallArguments, ToolChoice, UserContent},
     telemetry::SpanCombinator,
 };
 
@@ -623,7 +623,7 @@ pub(crate) async fn run_single_tool(
     let tool_name = &tool_call.function.name;
     // `mut` so a tool-call hook can rewrite the arguments the tool
     // runs with (the model's emitted arguments are otherwise used verbatim).
-    let mut args = json_utils::serialize_json_value(&tool_call.function.arguments);
+    let mut args = tool_call.function.arguments.to_payload_string();
 
     let tool_span = tracing::Span::current();
     tool_span.record("gen_ai.tool.name", tool_name);
@@ -669,7 +669,10 @@ pub(crate) async fn run_single_tool(
     // `ToolCallAction::Rewrite` replacement, or a salvaged rewrite) — surfaced in the
     // execution-commit event so a redaction rewrite does not leak. Unused for a skip.
     let mut skipped: Option<ToolResult> = None;
-    let effective_args: serde_json::Value = match action {
+    // Typed rather than `serde_json::Value` so a custom (grammar) tool call's
+    // raw input reaches the tool as the bytes the model wrote. A hook rewrite
+    // is JSON by contract and enters through `ToolCallArguments::Json`.
+    let effective_args: ToolCallArguments = match action {
         ToolCallAction::Stop(reason) => {
             return Err(PromptError::prompt_cancelled(
                 error_history.to_vec(),
@@ -683,7 +686,9 @@ pub(crate) async fn run_single_tool(
             skipped = Some(ToolResult::skipped(reason));
             // A skip runs nothing; its effective args are the salvaged rewrite
             // (if any) so tracing/history stay consistent, though they go unused.
-            salvaged_rewrite.unwrap_or_else(|| tool_call.function.arguments.clone())
+            salvaged_rewrite
+                .map(ToolCallArguments::Json)
+                .unwrap_or_else(|| tool_call.function.arguments.clone())
         }
         ToolCallAction::Rewrite(replacement) => {
             // Proceeding rewrite: re-record the span so the trace, and the
@@ -697,7 +702,7 @@ pub(crate) async fn run_single_tool(
                 tool_name = tool_name,
                 "tool-call arguments rewritten by a hook"
             );
-            replacement
+            ToolCallArguments::Json(replacement)
         }
         ToolCallAction::Run => tool_call.function.arguments.clone(),
     };
@@ -713,7 +718,14 @@ pub(crate) async fn run_single_tool(
             let ToolDispatch {
                 result: exec,
                 context: dispatch_context,
-            } = tool_snapshot.dispatch(tool_name, &args, tool_context).await;
+            } = tool_snapshot
+                .dispatch(
+                    tool_name,
+                    tool_call.function.namespace.as_deref(),
+                    &args,
+                    tool_context,
+                )
+                .await;
             (
                 exec,
                 ToolExecution::Executed(Box::new(effective_tool_call)),
@@ -1615,7 +1627,8 @@ mod migrated_tests {
         server::{ToolServer, ToolServerHandle},
     };
     use rig_core::message::{
-        AssistantContent, ToolCall as MessageToolCall, ToolChoice, ToolFunction, UserContent,
+        AssistantContent, ToolCall as MessageToolCall, ToolCallArguments, ToolChoice, ToolFunction,
+        UserContent,
     };
     use rig_core::vector_store::{
         VectorSearchRequest, VectorStoreError, VectorStoreIndex, request::Filter,
@@ -5782,12 +5795,12 @@ mod migrated_tests {
         }
         assert_eq!(
             model_args,
-            Some(json!({"x": 2, "y": 3})),
+            Some(ToolCallArguments::Json(json!({"x": 2, "y": 3}))),
             "the model tool-call event carries the model's original arguments"
         );
         assert_eq!(
             exec_args,
-            Some(json!({"x": 2, "y": 40})),
+            Some(ToolCallArguments::Json(json!({"x": 2, "y": 40}))),
             "the execution-commit event carries the hook-rewritten (effective) arguments"
         );
     }

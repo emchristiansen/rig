@@ -408,7 +408,13 @@ fn rig_assistant_content_to_grpc_part(
     match content {
         message::AssistantContent::Text(message::Text { text, .. }) => Ok(text_part(text)),
         message::AssistantContent::ToolCall(tool_call) => {
-            let args = json_to_prost_struct(tool_call.function.arguments)?;
+            let args = json_to_prost_struct(
+                tool_call
+                    .function
+                    .arguments
+                    .into_json_for("Gemini gRPC FunctionCall.args")
+                    .map_err(|error| CompletionError::ProviderError(error.to_string()))?,
+            )?;
 
             Ok(proto::Part {
                 thought_signature: decode_optional_base64(tool_call.signature)?,
@@ -1039,10 +1045,7 @@ mod tests {
             id: None,
             content: vec![AssistantContent::ToolCall(ToolCall::from_wire(
                 wire_id,
-                ToolFunction {
-                    name: name.to_owned(),
-                    arguments: serde_json::json!({}),
-                },
+                ToolFunction::new(name.to_owned(), serde_json::json!({})),
             ))],
         };
         let result = |wire_id: &str, name: &str| message::Message::User {

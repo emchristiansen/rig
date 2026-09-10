@@ -657,7 +657,10 @@ async fn incomplete_mid_tool_call_normalizes_to_length() {
             // a truncated tool call must not surface corrupted arguments.
             for call in &run.tool_calls {
                 assert!(
-                    call.function.arguments.is_object(),
+                    call.function
+                        .arguments
+                        .as_json()
+                        .is_some_and(|arguments| arguments.is_object()),
                     "surfaced tool call must carry object arguments, got {:?}",
                     call.function.arguments
                 );
@@ -665,7 +668,10 @@ async fn incomplete_mid_tool_call_normalizes_to_length() {
             for content in run.choice.iter() {
                 if let AssistantContent::ToolCall(call) = content {
                     assert!(
-                        call.function.arguments.is_object(),
+                        call.function
+                            .arguments
+                            .as_json()
+                            .is_some_and(|arguments| arguments.is_object()),
                         "aggregated tool call must carry object arguments, got {:?}",
                         call.function.arguments
                     );

@@ -105,14 +105,25 @@ impl TryFrom<RigMessage> for vertexai::model::Content {
                         }
                         AssistantContent::Image(image) => vertex_assistant_image_part(image),
                         AssistantContent::ToolCall(tool_call) => {
-                            let struct_val = match tool_call.function.arguments {
-                                serde_json::Value::Object(map) => map,
-                                _ => {
-                                    return Err(CompletionError::ProviderError(
-                                        "Expected JSON object for Struct conversion".to_string(),
-                                    ));
-                                }
-                            };
+                            // Vertex `FunctionCall.args` is a Struct, so both a
+                            // non-object JSON value and a custom tool's raw
+                            // input are refused rather than coerced.
+                            let struct_val =
+                                match tool_call.function.arguments.into_json().ok_or_else(|| {
+                                    CompletionError::ProviderError(
+                                        "Vertex FunctionCall.args carries JSON only, so a custom \
+                                         tool call's raw input cannot be sent on it"
+                                            .to_string(),
+                                    )
+                                })? {
+                                    serde_json::Value::Object(map) => map,
+                                    _ => {
+                                        return Err(CompletionError::ProviderError(
+                                            "Expected JSON object for Struct conversion"
+                                                .to_string(),
+                                        ));
+                                    }
+                                };
 
                             let function_call = vertexai::model::FunctionCall::new()
                                 .set_name(tool_call.function.name.clone())

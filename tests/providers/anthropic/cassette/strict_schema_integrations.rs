@@ -35,7 +35,11 @@ fn tool_calls(response: &rig::completion::CompletionResponse) -> Vec<(&str, &Val
         .filter_map(|content| match content {
             AssistantContent::ToolCall(tool_call) => Some((
                 tool_call.function.name.as_str(),
-                &tool_call.function.arguments,
+                tool_call
+                    .function
+                    .arguments
+                    .as_json()
+                    .expect("JSON arguments"),
             )),
             _ => None,
         })

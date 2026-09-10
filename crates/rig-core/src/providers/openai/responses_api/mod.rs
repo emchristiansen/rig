@@ -206,6 +206,8 @@ pub enum InputContent {
     Reasoning(OpenAIReasoning),
     FunctionCall(OutputFunctionCall),
     FunctionCallOutput(ToolResult),
+    CustomToolCall(OutputCustomToolCall),
+    CustomToolCallOutput(CustomToolResult),
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -597,16 +599,33 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                                 }
                                 None => (id.into_string(), String::new()),
                             };
-                            other_items.push(InputItem {
-                                role: None,
-                                input: InputContent::FunctionCall(OutputFunctionCall {
-                                    arguments: function.arguments.into(),
-                                    call_id,
-                                    id: item_id,
-                                    name: function.name,
-                                    status: ToolStatus::Completed,
-                                }),
-                            });
+                            // The payload decides the item kind, so a custom
+                            // call replayed as input goes back as
+                            // `custom_tool_call` rather than as a function call
+                            // whose arguments are a stringified blob.
+                            let input = match function.arguments {
+                                crate::message::ToolCallArguments::Json(arguments) => {
+                                    InputContent::FunctionCall(OutputFunctionCall {
+                                        arguments: arguments.into(),
+                                        call_id,
+                                        id: item_id,
+                                        name: function.name,
+                                        namespace: function.namespace,
+                                        status: ToolStatus::Completed,
+                                    })
+                                }
+                                crate::message::ToolCallArguments::Raw(input) => {
+                                    InputContent::CustomToolCall(OutputCustomToolCall {
+                                        id: item_id,
+                                        call_id,
+                                        name: function.name,
+                                        namespace: function.namespace,
+                                        input,
+                                        status: None,
+                                    })
+                                }
+                            };
+                            other_items.push(InputItem { role: None, input });
                         }
                         crate::message::AssistantContent::Reasoning(reasoning) => {
                             let openai_reasoning = openai_reasoning_from_core(&reasoning)
@@ -2186,6 +2205,7 @@ pub enum Include {
 pub enum Output {
     Message(OutputMessage),
     FunctionCall(OutputFunctionCall),
+    CustomToolCall(OutputCustomToolCall),
     Reasoning {
         id: String,
         summary: Vec<ReasoningSummary>,
@@ -2262,6 +2282,7 @@ impl Serialize for Output {
         let value = match self {
             Output::Message(message) => tagged_output_object("message", message),
             Output::FunctionCall(call) => tagged_output_object("function_call", call),
+            Output::CustomToolCall(call) => tagged_output_object("custom_tool_call", call),
             Output::Reasoning {
                 id,
                 summary,
@@ -2312,6 +2333,12 @@ impl<'de> Deserialize<'de> for Output {
             "function_call" => serde_json::from_value(value)
                 .map(Output::FunctionCall)
                 .map_err(serde::de::Error::custom),
+            // Must precede the catch-all below: omitting this arm is not a
+            // compile error, it silently decodes every custom tool call as
+            // `Unknown` and strips its typed identity.
+            "custom_tool_call" => serde_json::from_value(value)
+                .map(Output::CustomToolCall)
+                .map_err(serde::de::Error::custom),
             "reasoning" => serde_json::from_value::<ReasoningFields>(value)
                 .map(Output::from)
                 .map_err(serde::de::Error::custom),
@@ -2338,11 +2365,12 @@ impl TryFrom<Output> for Vec<completion::AssistantContent> {
                 arguments,
                 call_id,
                 name,
+                namespace,
                 status,
             }) => match arguments {
                 FunctionCallArguments::Complete(arguments) => {
-                    vec![completion::AssistantContent::tool_call_with_call_id(
-                        id, call_id, name, arguments,
+                    vec![completion::AssistantContent::tool_call_with_namespace(
+                        id, call_id, name, namespace, arguments,
                     )]
                 }
                 // `Unparseable` records only that the string failed to parse,
@@ -2373,6 +2401,27 @@ impl TryFrom<Output> for Vec<completion::AssistantContent> {
                     }
                 },
             },
+            // A custom tool's input is not JSON, so it travels as
+            // `ToolCallArguments::Raw` rather than being parsed. Dropping the
+            // call would lose one the provider asserted, and synthesizing JSON
+            // would execute it with input the provider never sent — the two
+            // failures the `Unparseable` arms above already refuse to commit.
+            Output::CustomToolCall(OutputCustomToolCall {
+                id,
+                call_id,
+                name,
+                namespace,
+                input,
+                ..
+            }) => {
+                vec![completion::AssistantContent::tool_call_with_namespace(
+                    id,
+                    call_id,
+                    name,
+                    namespace,
+                    completion::message::ToolCallArguments::Raw(input),
+                )]
+            }
             Output::Reasoning {
                 id,
                 summary,
@@ -2405,7 +2454,49 @@ pub struct OutputFunctionCall {
     pub arguments: FunctionCallArguments,
     pub call_id: String,
     pub name: String,
+    /// The namespace qualifying this callable, absent for the default one.
+    ///
+    /// Present on both directions of the wire because this struct is shared by
+    /// [`Output::FunctionCall`] and [`InputContent::FunctionCall`]; dropping it
+    /// on either side would strip the qualifier before any consumer saw it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     pub status: ToolStatus,
+}
+
+/// An OpenAI Responses API custom (grammar) tool call.
+///
+/// Distinct from [`OutputFunctionCall`] because its payload is `input` —
+/// verbatim bytes that are not JSON — while that struct's
+/// [`FunctionCallArguments::Complete`] asserts a parsed value the provider
+/// never produced here.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct OutputCustomToolCall {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    pub call_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// The model's verbatim input, preserved byte for byte.
+    pub input: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// The result of a custom (grammar) tool call, sent back as input.
+///
+/// Separate from [`ToolResult`] because the custom output wire item carries no
+/// namespace, and a shared struct would offer a member one direction must never
+/// populate.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct CustomToolResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub output: String,
 }
 
 /// A function call's arguments: complete and parsed, or a string that did not
@@ -5688,6 +5779,7 @@ mod tests {
                     .expect("a malformed argument string decodes"),
                 call_id: "call_1".to_string(),
                 name: "add".to_string(),
+                namespace: None,
                 status,
             })
         };

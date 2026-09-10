@@ -50,6 +50,8 @@ async fn strict_tools_opt_in_roundtrip() {
                 tool_call
                     .function
                     .arguments
+                    .as_json()
+                    .expect("JSON arguments")
                     .get("x")
                     .and_then(|value| value.as_f64()),
                 Some(7.0),
@@ -60,6 +62,8 @@ async fn strict_tools_opt_in_roundtrip() {
                 tool_call
                     .function
                     .arguments
+                    .as_json()
+                    .expect("JSON arguments")
                     .get("y")
                     .and_then(|value| value.as_f64()),
                 Some(5.0),

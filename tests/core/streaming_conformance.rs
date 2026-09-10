@@ -432,7 +432,12 @@ mod grammar_guards {
             .collect();
         let shape: Vec<(&str, &serde_json::Value)> = calls
             .iter()
-            .map(|call| (call.function.name.as_str(), &call.function.arguments))
+            .map(|call| {
+                (
+                    call.function.name.as_str(),
+                    call.function.arguments.as_json().expect("JSON arguments"),
+                )
+            })
             .collect();
         assert_eq!(
             shape,
@@ -730,7 +735,14 @@ mod interleaved_constant_id_reasoning {
                 assert_eq!(tool_call.provider, None, "no fabricated provider id");
                 internal_ids.push(internal_call_id.clone());
                 minted_ids.push(tool_call.id.clone());
-                cities.push(tool_call.function.arguments["city"].clone());
+                cities.push(
+                    tool_call
+                        .function
+                        .arguments
+                        .as_json()
+                        .expect("JSON arguments")["city"]
+                        .clone(),
+                );
             }
         }
         assert_eq!(cities, vec![json!("Tokyo"), json!("Paris")]);
@@ -868,7 +880,14 @@ mod interleaved_constant_id_reasoning {
                 );
                 internal_ids.push(internal_call_id.clone());
                 minted_ids.push(tool_call.id.clone());
-                cities.push(tool_call.function.arguments["city"].clone());
+                cities.push(
+                    tool_call
+                        .function
+                        .arguments
+                        .as_json()
+                        .expect("JSON arguments")["city"]
+                        .clone(),
+                );
             }
         }
         assert_eq!(cities, vec![json!("Tokyo"), json!("Paris")]);
