@@ -945,8 +945,11 @@ impl From<completion::ToolDefinition> for ResponsesToolDefinition {
 /// object and serializes that object, while its typed view stays available to
 /// code that inspects or normalizes the request.
 ///
-/// The fidelity is of JSON values, not of bytes: key order and whitespace may
-/// change when the object is serialized again.
+/// A declared tool is preserved except for a transformation the caller asked
+/// for: strict mode sets `strict` and sanitizes `parameters` on a declared
+/// function, and leaves every other member as written. The fidelity is of JSON
+/// values, not of bytes: key order and whitespace may change when the object is
+/// serialized again.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResponsesRequestTool {
     /// A tool rig built from a typed definition.
@@ -1020,19 +1023,29 @@ impl ResponsesRequestTool {
 
     /// Enables strict mode, as [`ResponsesToolDefinition::with_strict`] does.
     ///
-    /// A declared tool is replaced by its rewritten typed form only when strict
-    /// mode actually changes it, which happens for function tools. A hosted tool
-    /// or a namespace is left untouched and keeps its original JSON.
+    /// A declared tool stays a declaration. Strict mode's own transformation,
+    /// `strict: true` and the sanitized `parameters` schema, is written into the
+    /// declared object, and every other member the caller wrote is kept as it was.
+    /// That includes an empty `description` and members the typed view does not
+    /// model. Only a function tool changes; a hosted tool or a namespace comes back
+    /// untouched. Applying it twice changes nothing further.
     pub fn with_strict(self) -> Self {
         match self {
             Self::Defined(definition) => Self::Defined(definition.with_strict()),
-            Self::Declared(declared) => {
+            Self::Declared(mut declared) => {
                 let rewritten = declared.definition.clone().with_strict();
-                if rewritten == declared.definition {
-                    Self::Declared(declared)
-                } else {
-                    Self::Defined(rewritten)
+                if rewritten.strict != declared.definition.strict {
+                    declared
+                        .value
+                        .insert("strict".to_string(), Value::Bool(rewritten.strict));
                 }
+                if rewritten.parameters != declared.definition.parameters {
+                    declared
+                        .value
+                        .insert("parameters".to_string(), rewritten.parameters.clone());
+                }
+                declared.definition = rewritten;
+                Self::Declared(declared)
             }
         }
     }
@@ -4709,12 +4722,27 @@ mod tests {
     }
 
     #[test]
-    fn strict_tools_rewrite_only_declared_functions_and_leave_namespaces_verbatim() {
+    fn strict_tools_apply_only_their_own_transformation_to_declared_tools() {
         let client = crate::providers::openai::Client::new("dummy-key").expect("client");
         let model = ResponsesCompletionModel::new(client, "gpt-4o-mini").with_strict_tools();
 
+        // A declared function carrying members strict mode must not touch: an
+        // empty description, an explicit null and false, and a member the typed
+        // view does not model.
+        let function = json!({
+            "type": "function",
+            "name": "post_to_bus",
+            "description": "",
+            "strict": false,
+            "defer_loading": false,
+            "x_vendor_hint": null,
+            "parameters": {"type": "object", "properties": {"body": {"type": "string"}}}
+        });
+        let mut declared = declared_tools_payload();
+        declared[1] = function.clone();
+
         let mut request = weather_tool_request();
-        request.additional_params = Some(json!({ "tools": declared_tools_payload() }));
+        request.additional_params = Some(json!({ "tools": declared.clone() }));
 
         let req = model
             .create_completion_request(request)
@@ -4724,13 +4752,38 @@ mod tests {
             .as_array()
             .expect("tools serialize as an array");
 
-        // The namespace is not a function, so strict mode has nothing to rewrite
-        // and it keeps its declared JSON.
-        assert_eq!(tools[1], declared_tools_payload()[0]);
-        // The declared function is rewritten exactly as a typed one would be.
-        assert!(matches!(req.tools[2], ResponsesRequestTool::Defined(_)));
-        assert_eq!(tools[2]["strict"], json!(true));
-        assert_eq!(tools[2]["parameters"]["additionalProperties"], json!(false));
+        // The namespace is not a function, so strict mode has nothing to change.
+        assert_eq!(tools[1], declared[0]);
+
+        // The declared function stays a declaration, gains exactly strict mode's
+        // transformation, and keeps every other member it was written with.
+        assert!(matches!(req.tools[2], ResponsesRequestTool::Declared(_)));
+        let rewritten = tools[2].as_object().expect("a declared tool is an object");
+        assert_eq!(rewritten["strict"], json!(true));
+        assert_eq!(
+            rewritten["parameters"]["additionalProperties"],
+            json!(false)
+        );
+        let mut untouched = rewritten.clone();
+        untouched.remove("strict");
+        untouched.remove("parameters");
+        let mut expected = function.as_object().expect("fixture is an object").clone();
+        expected.remove("strict");
+        expected.remove("parameters");
+        assert_eq!(
+            untouched, expected,
+            "strict mode must leave the empty description, the explicit null and \
+             false, and the unmodelled member exactly as declared"
+        );
+
+        // The typed view agrees with what is serialized.
+        let definition = req.tools[2].definition();
+        assert!(definition.strict);
+        assert_eq!(definition.parameters, rewritten["parameters"]);
+
+        // Strict mode is idempotent on a declared tool.
+        let again = req.tools[2].clone().with_strict();
+        assert_eq!(again, req.tools[2]);
     }
 
     #[test]
