@@ -19,40 +19,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent::{
-        AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent,
-        CompletionResponseEvent, HookContext, InvalidToolCallAction, MultiTurnStreamItem,
-        NoToolConfig, ObservationAction, OutputMode, RequestPatch, StreamingError,
-        ToolCall as ToolCallEvent, ToolCallAction, ToolResultAction, ToolResultEvent,
+        AgentBuilder, AgentHook, CompletionCallAction, CompletionCallEvent, DispatchAction,
+        DispatchEvent, HookContext, InvalidToolCallAction, MultiTurnStreamItem, NoToolConfig,
+        OutcomeAction, OutcomeEvent, OutputMode, RequestPatch, StreamingError,
         run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome},
     },
-    completion::{
-        AssistantContent, CompletionError, CompletionModel, Message, Prompt, PromptError,
-        ToolDefinition,
-    },
-    streaming::StreamingPrompt,
+    completion::{AssistantContent, CompletionModel, Message, PromptError, ToolDefinition},
     tool::{Tool, ToolContext},
 };
+use rig_core::error::ProviderError;
 use rig_core::message::{ToolChoice, UserContent};
 
 /// Typed failure from a portable model-conformance scenario.
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
 pub enum ScenarioError {
     /// A buffered agent run failed.
     #[error(transparent)]
     Prompt(#[from] PromptError),
     /// A direct model completion failed.
     #[error(transparent)]
-    Completion(#[from] CompletionError),
+    Completion(#[from] ProviderError),
     /// A streaming agent run failed.
     #[error(transparent)]
     Streaming(#[from] StreamingError),
+    /// A stream item or bus effect failed, as the wire reports it.
+    #[error(transparent)]
+    Report(#[from] rig_core::error::ErrorReport),
     /// Structured content could not be decoded.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     /// Rig's structured extractor failed.
     #[error(transparent)]
-    Extraction(#[from] crate::extractor::ExtractionError),
+    Extraction(#[from] crate::completion::StructuredOutputError),
     /// The model or agent violated the portable behavioral contract.
     #[error("{scenario} conformance failed: {details}")]
     Contract {
@@ -175,7 +173,7 @@ pub fn validate_max_turns_failure(
         ));
     };
     let pending_prompt_retained = matches!(
-        prompt.as_ref(),
+        prompt,
         Message::User { content } if content.iter().next().is_some()
     );
     if *max_turns != expected_max_turns || chat_history.is_empty() || !pending_prompt_retained {
@@ -302,7 +300,7 @@ pub fn validate_extraction_fields(
     let fields_match = first_name.is_some_and(|value| value.eq_ignore_ascii_case("Ada"))
         && last_name.is_some_and(|value| value.eq_ignore_ascii_case("Lovelace"))
         && job.is_some_and(|value| value.to_ascii_lowercase().contains("mathematician"));
-    if !fields_match || !usage.has_values() {
+    if !fields_match || !usage.is_reported() {
         return Err(ScenarioError::contract(
             scenario,
             format!(
@@ -320,9 +318,11 @@ pub struct ScenarioReport {
     pub name: &'static str,
     /// Number of model-invoked tool calls observed by the scenario.
     pub tool_calls: usize,
-    /// Aggregated prompt tokens reported by the model across all turns.
+    /// Aggregated prompt tokens reported by the model across all turns; zero
+    /// when the model reported none.
     pub prompt_tokens: u64,
-    /// Aggregated generated tokens reported by the model across all turns.
+    /// Aggregated generated tokens reported by the model across all turns;
+    /// zero when the model reported none.
     pub generated_tokens: u64,
     /// Number of messages retained in the completed run history.
     pub history_messages: usize,
@@ -345,7 +345,7 @@ const MOTTO_OUTPUT: &str = "steady hands\ncalm waters";
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn tool_result_values(message: &Message) -> Vec<serde_json::Value> {
@@ -375,13 +375,16 @@ fn validate_tool_correlation(
 ) -> Result<(), ScenarioError> {
     let mut calls = Vec::new();
     let mut results = Vec::new();
+    let mut turn = 0usize;
     for message in messages {
         match message {
             Message::Assistant { content, .. } => {
+                turn += 1;
                 calls.extend(content.iter().filter_map(|item| {
                     match item {
                         AssistantContent::ToolCall(call) => Some((
-                            call.id.as_str(),
+                            turn,
+                            &call.id,
                             call.provider
                                 .as_ref()
                                 .map(|provider| provider.call_id.as_str()),
@@ -394,7 +397,8 @@ fn validate_tool_correlation(
                 results.extend(content.iter().filter_map(|item| {
                     match item {
                         UserContent::ToolResult(result) => Some((
-                            result.call.as_str(),
+                            turn,
+                            &result.call,
                             result
                                 .provider
                                 .as_ref()
@@ -413,10 +417,12 @@ fn validate_tool_correlation(
             format!("history has no assistant tool calls: {messages:?}"),
         ));
     }
-    for (id, call_id) in &calls {
+    for (turn, id, call_id) in &calls {
         let matches = results
             .iter()
-            .filter(|(result_id, result_call_id)| result_id == id && call_id == result_call_id)
+            .filter(|(result_turn, result_id, result_call_id)| {
+                result_turn == turn && result_id == id && call_id == result_call_id
+            })
             .count();
         if matches != 1 {
             return Err(ScenarioError::contract(
@@ -546,18 +552,21 @@ struct RewriteArgument {
 }
 
 impl AgentHook for RewriteArgument {
-    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCallEvent<'_>) -> ToolCallAction {
-        if event.tool_name != CountingAdd::NAME {
-            return ToolCallAction::run();
+    async fn on_dispatch(&self, _ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
+        let (Some(name), Some(args)) = (event.tool_name(), event.tool_args()) else {
+            return DispatchAction::proceed();
+        };
+        if name != CountingAdd::NAME {
+            return DispatchAction::proceed();
         }
-        let Ok(mut arguments) = serde_json::from_str::<serde_json::Value>(event.args) else {
-            return ToolCallAction::run();
+        let Ok(mut arguments) = serde_json::from_str::<serde_json::Value>(args) else {
+            return DispatchAction::proceed();
         };
         let Some(object) = arguments.as_object_mut() else {
-            return ToolCallAction::run();
+            return DispatchAction::proceed();
         };
         object.insert(self.key.to_string(), self.value.clone());
-        ToolCallAction::rewrite(arguments)
+        DispatchAction::rewrite_tool_args(event.kind, arguments)
     }
 }
 
@@ -565,11 +574,13 @@ impl AgentHook for RewriteArgument {
 struct ObserveArguments(Arc<Mutex<Vec<serde_json::Value>>>);
 
 impl AgentHook for ObserveArguments {
-    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCallEvent<'_>) -> ToolCallAction {
-        let value = serde_json::from_str(event.args)
-            .unwrap_or_else(|_| serde_json::Value::String(event.args.to_string()));
-        lock_recover(&self.0).push(value);
-        ToolCallAction::run()
+    async fn on_dispatch(&self, _ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
+        if let Some(args) = event.tool_args() {
+            let value = serde_json::from_str(args)
+                .unwrap_or_else(|_| serde_json::Value::String(args.to_string()));
+            lock_recover(&self.0).push(value);
+        }
+        DispatchAction::proceed()
     }
 }
 
@@ -577,15 +588,11 @@ impl AgentHook for ObserveArguments {
 struct ReplaceResult(&'static str);
 
 impl AgentHook for ReplaceResult {
-    async fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        if event.tool_name == CountingAdd::NAME {
-            ToolResultAction::rewrite(self.0)
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        if event.tool_name() == Some(CountingAdd::NAME) {
+            OutcomeAction::rewrite_tool_result(&event, self.0)
         } else {
-            ToolResultAction::keep()
+            OutcomeAction::proceed()
         }
     }
 }
@@ -594,15 +601,15 @@ impl AgentHook for ReplaceResult {
 struct WrapResult;
 
 impl AgentHook for WrapResult {
-    async fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        if event.tool_name == CountingAdd::NAME {
-            ToolResultAction::rewrite(format!("[{}]", event.presentation.render()))
-        } else {
-            ToolResultAction::keep()
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        match (event.tool_name(), event.tool_result()) {
+            (Some(name), Some(result)) if name == CountingAdd::NAME => {
+                OutcomeAction::rewrite_tool_result(
+                    &event,
+                    format!("[{}]", result.output().render()),
+                )
+            }
+            _ => OutcomeAction::proceed(),
         }
     }
 }
@@ -628,15 +635,11 @@ impl AgentHook for FirstTurnPatch {
 struct StopAfterResult(&'static str);
 
 impl AgentHook for StopAfterResult {
-    async fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        if event.tool_name == CountingAdd::NAME {
-            ToolResultAction::stop(self.0)
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        if event.tool_name() == Some(CountingAdd::NAME) {
+            OutcomeAction::stop(self.0)
         } else {
-            ToolResultAction::keep()
+            OutcomeAction::proceed()
         }
     }
 }
@@ -948,8 +951,8 @@ fn report_from_response(
     Ok(ScenarioReport {
         name,
         tool_calls,
-        prompt_tokens: response.usage.input_tokens,
-        generated_tokens: response.usage.output_tokens,
+        prompt_tokens: response.usage.input_tokens.unwrap_or(0),
+        generated_tokens: response.usage.output_tokens.unwrap_or(0),
         history_messages: response.messages.as_ref().map_or(0, Vec::len),
         duration: started.elapsed(),
         response: response.output,
@@ -1014,13 +1017,8 @@ where
         .build();
     let request = agent.prompt(PARALLEL_PROMPT).max_turns(3);
     let response = match tool_concurrency {
-        Some(concurrency) => {
-            request
-                .tool_concurrency(concurrency)
-                .extended_details()
-                .await?
-        }
-        None => request.extended_details().await?,
+        Some(concurrency) => request.tool_concurrency(concurrency).await?,
+        None => request.await?,
     };
     let scenario = if tool_concurrency == Some(1) {
         "parallel_tools_serial_execution"
@@ -1106,7 +1104,6 @@ where
     let response = agent
         .prompt("Call the ping tool, then report the exact marker it returns.")
         .max_turns(2)
-        .extended_details()
         .await?;
     let values = correlated_result_values(SCENARIO, &response)?;
     if calls.load(Ordering::SeqCst) != 1
@@ -1151,7 +1148,6 @@ where
     let response = agent
         .prompt("Call fetch_motto and fetch_config, then summarize both outputs in one sentence.")
         .max_turns(3)
-        .extended_details()
         .await?;
     let values = correlated_result_values(SCENARIO, &response)?;
     let expected_config = serde_json::to_value(ConfigOutput {
@@ -1219,7 +1215,6 @@ where
             "Call store_profile with profile.name exactly `Zoë \\\"Z\\\"`, profile.tags exactly [`rust`, `東京`], mode `careful`, note containing the two lines `line one` and `line two` separated by a newline, and quote exactly `path C:\\\\tmp and \\\"quoted\\\"`. Then confirm it was stored.",
         )
         .max_turns(3)
-        .extended_details()
         .await?;
     let observed = lock_recover(&captured).clone();
     if calls.load(Ordering::SeqCst) != 1 || observed.as_ref() != Some(&expected) {
@@ -1267,17 +1262,19 @@ where
     let mut streamed_usage = None;
     while let Some(item) = stream.next().await {
         match item? {
-            crate::streaming::StreamedAssistantContent::Text(text) => {
-                streamed_text.push_str(&text.text);
+            crate::streaming::StreamEvent::BlockDelta {
+                delta: crate::streaming::Delta::Text { text },
+                ..
+            } => {
+                streamed_text.push_str(&text);
             }
-            crate::streaming::StreamedAssistantContent::Final(response) => {
+            crate::streaming::StreamEvent::Final(response) => {
                 streamed_usage = Some(response.usage);
             }
-            crate::streaming::StreamedAssistantContent::ToolCall { .. }
-            | crate::streaming::StreamedAssistantContent::ToolCallDelta { .. }
-            | crate::streaming::StreamedAssistantContent::Reasoning { .. }
-            | crate::streaming::StreamedAssistantContent::ReasoningDelta { .. }
-            | crate::streaming::StreamedAssistantContent::Unknown(_) => {}
+            crate::streaming::StreamEvent::BlockStart { .. }
+            | crate::streaming::StreamEvent::BlockDelta { .. }
+            | crate::streaming::StreamEvent::BlockEnd { .. }
+            | crate::streaming::StreamEvent::Unknown(_) => {}
         }
     }
     let usage = streamed_usage.ok_or_else(|| {
@@ -1292,8 +1289,8 @@ where
     let streamed_answer = normalize(&streamed_text);
     if !buffered_answer.eq_ignore_ascii_case("Paris")
         || !streamed_answer.eq_ignore_ascii_case("Paris")
-        || !buffered.usage.has_values()
-        || !usage.has_values()
+        || !buffered.usage.is_reported()
+        || !usage.is_reported()
     {
         return Err(ScenarioError::contract(
             SCENARIO,
@@ -1306,8 +1303,8 @@ where
     Ok(ScenarioReport {
         name: SCENARIO,
         tool_calls: 0,
-        prompt_tokens: usage.input_tokens,
-        generated_tokens: usage.output_tokens,
+        prompt_tokens: usage.input_tokens.unwrap_or(0),
+        generated_tokens: usage.output_tokens.unwrap_or(0),
         history_messages: 0,
         duration: started.elapsed(),
         response: streamed_text,
@@ -1327,27 +1324,27 @@ where
         .max_tokens(384)
         .retries(0)
         .build()
-        .extract_with_usage(INPUT)
+        .extract(INPUT)
         .await?;
     validate_extraction_fields(
         SCENARIO,
-        response.data.first_name.as_deref(),
-        response.data.last_name.as_deref(),
-        response.data.job.as_deref(),
+        response.output.first_name.as_deref(),
+        response.output.last_name.as_deref(),
+        response.output.job.as_deref(),
         response.usage,
     )?;
     Ok(ScenarioReport {
         name: SCENARIO,
         tool_calls: 1,
-        prompt_tokens: response.usage.input_tokens,
-        generated_tokens: response.usage.output_tokens,
+        prompt_tokens: response.usage.input_tokens.unwrap_or(0),
+        generated_tokens: response.usage.output_tokens.unwrap_or(0),
         history_messages: 0,
         duration: started.elapsed(),
         response: format!(
             "{} {} — {}",
-            response.data.first_name.as_deref().unwrap_or_default(),
-            response.data.last_name.as_deref().unwrap_or_default(),
-            response.data.job.as_deref().unwrap_or_default()
+            response.output.first_name.as_deref().unwrap_or_default(),
+            response.output.last_name.as_deref().unwrap_or_default(),
+            response.output.job.as_deref().unwrap_or_default()
         ),
     })
 }
@@ -1409,25 +1406,25 @@ where
     struct CaptureTurn(Arc<Mutex<Option<ModelTurn>>>);
 
     impl AgentHook for CaptureTurn {
-        async fn on_completion_response(
-            &self,
-            _ctx: &HookContext,
-            event: CompletionResponseEvent<'_>,
-        ) -> ObservationAction {
+        async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+            let Some(response) = event.completion() else {
+                return OutcomeAction::proceed();
+            };
             *lock_recover(&self.0) = Some(ModelTurn::new(
-                event.message_id.map(str::to_owned),
-                event.content.clone(),
-                event.usage,
+                response.message_id.clone(),
+                response.choice.clone(),
+                response.usage,
                 BTreeSet::new(),
                 BTreeSet::new(),
+                response.raw.clone(),
             ));
-            ObservationAction::stop("captured conformance model turn")
+            OutcomeAction::stop("captured conformance model turn")
         }
     }
 
     let captured = Arc::new(Mutex::new(None));
     let stopped = agent
-        .runner(PROMPT)
+        .prompt(PROMPT)
         .add_hook(CaptureTurn(captured.clone()))
         .run()
         .await;
@@ -1464,6 +1461,7 @@ where
         response.usage,
         executable,
         allowed,
+        response.raw,
     );
 
     let mut fail = restricted_recovery_run(PROMPT, turn.clone(), 0)?;
@@ -1566,8 +1564,8 @@ where
     Ok(ScenarioReport {
         name: SCENARIO,
         tool_calls: emitted,
-        prompt_tokens: turn.usage.input_tokens,
-        generated_tokens: turn.usage.output_tokens,
+        prompt_tokens: turn.usage.input_tokens.unwrap_or(0),
+        generated_tokens: turn.usage.output_tokens.unwrap_or(0),
         history_messages: 2,
         duration: started.elapsed(),
         response: "fail, retry, repair, rejected repair, and skip passed".to_string(),
@@ -1614,7 +1612,6 @@ where
         .add_hook(observed)
         .add_hook(ReplaceResult("portable-redacted"))
         .add_hook(WrapResult)
-        .extended_details()
         .await?;
     let observations = lock_recover(&observed_probe.0).clone();
     validate_rewritten_arguments(
@@ -1748,7 +1745,6 @@ where
         .prompt(
             "Use the repeat_text tool to repeat the word \"banana\" 3 times, then show me the exact result.",
         )
-        .extended_details()
         .await?;
     let response = result.output.clone();
     let tool_calls = calls.load(Ordering::SeqCst);
@@ -1785,7 +1781,6 @@ where
         .prompt(
             "Compute (4 + 6) * 2. First call the add tool, then call the multiply tool on the result. Tell me the final number.",
         )
-        .extended_details()
         .await?;
     let response = result.output.clone();
     let add = add_calls.load(Ordering::SeqCst);
@@ -1817,26 +1812,20 @@ where
         .default_max_turns(4)
         .build();
     let mut stream = agent
-        .stream_prompt("Use add to calculate 17 + 25, then state the final number.")
+        .prompt("Use add to calculate 17 + 25, then state the final number.")
         .max_turns(4)
-        .await;
+        .stream();
     let mut final_response = None;
     let mut final_count = 0_usize;
-    let mut completion_usage = crate::completion::Usage::new();
+    let mut completion_usage = crate::completion::Usage::default();
     let mut streamed_call_ids = Vec::new();
     let mut streamed_result_ids = Vec::new();
     while let Some(item) = stream.next().await {
         match item? {
-            MultiTurnStreamItem::StreamAssistantItem(
-                crate::streaming::StreamedAssistantContent::ToolCall {
-                    internal_call_id, ..
-                },
-            ) => streamed_call_ids.push(internal_call_id),
+            MultiTurnStreamItem::ToolCall { block_id, .. } => streamed_call_ids.push(block_id),
             MultiTurnStreamItem::StreamUserItem(
-                crate::streaming::StreamedUserContent::ToolResult {
-                    internal_call_id, ..
-                },
-            ) => streamed_result_ids.push(internal_call_id),
+                crate::streaming::StreamedUserContent::ToolResult { id, .. },
+            ) => streamed_result_ids.push(id),
             MultiTurnStreamItem::CompletionCall(call) => completion_usage += call.usage,
             MultiTurnStreamItem::FinalResponse(response) => {
                 final_count += 1;
@@ -1889,8 +1878,8 @@ where
     Ok(ScenarioReport {
         name: "streaming_tool",
         tool_calls,
-        prompt_tokens: result.usage.input_tokens,
-        generated_tokens: result.usage.output_tokens,
+        prompt_tokens: result.usage.input_tokens.unwrap_or(0),
+        generated_tokens: result.usage.output_tokens.unwrap_or(0),
         history_messages,
         duration: started.elapsed(),
         response,
@@ -1919,7 +1908,6 @@ where
         .build();
     let result = agent
         .prompt("Use add to calculate 19 + 23. Return answer=42 and a short optional explanation.")
-        .extended_details()
         .await?;
     let response = result.output.clone();
     let parsed: ArithmeticResult = serde_json::from_str(&response)?;
@@ -2027,15 +2015,12 @@ where
         ));
     }
 
+    let usage = none.usage + required.usage + specific.usage;
     Ok(ScenarioReport {
         name: "tool_choice_modes",
         tool_calls: required_calls + specific_calls.len(),
-        prompt_tokens: none.usage.input_tokens
-            + required.usage.input_tokens
-            + specific.usage.input_tokens,
-        generated_tokens: none.usage.output_tokens
-            + required.usage.output_tokens
-            + specific.usage.output_tokens,
+        prompt_tokens: usage.input_tokens.unwrap_or(0),
+        generated_tokens: usage.output_tokens.unwrap_or(0),
         history_messages: 0,
         duration: started.elapsed(),
         response: "none, required, and specific modes passed".to_string(),
@@ -2063,11 +2048,9 @@ where
         .default_max_turns(5)
         .build();
     let mut stream = agent
-        .stream_prompt(
-            "Use add to calculate 19 + 23. Return answer=42 and a short optional explanation.",
-        )
+        .prompt("Use add to calculate 19 + 23. Return answer=42 and a short optional explanation.")
         .max_turns(5)
-        .await;
+        .stream();
     let mut final_response = None;
     let mut final_count = 0_usize;
     while let Some(item) = stream.next().await {
@@ -2106,222 +2089,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        completion::Usage,
-        test_utils::{MockCompletionModel, MockStreamEvent, MockTurn, mock_final},
-    };
-    use rig_core::message::{ToolCall, ToolFunction};
-
-    fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> AssistantContent {
-        AssistantContent::ToolCall(ToolCall::from_wire(
-            id,
-            ToolFunction::new(name.to_string(), arguments),
-        ))
-    }
-
-    fn usage(input: u64, output: u64) -> Usage {
-        Usage {
-            input_tokens: input,
-            output_tokens: output,
-            total_tokens: input + output,
-            ..Usage::new()
-        }
-    }
-
-    fn fixture_contract(condition: bool, details: &str) -> Result<(), ScenarioError> {
-        if condition {
-            Ok(())
-        } else {
-            Err(ScenarioError::contract("test_fixture", details))
-        }
-    }
-
-    #[tokio::test]
-    async fn parallel_contract_validates_batch_and_correlation() -> Result<(), ScenarioError> {
-        let first = MockTurn::from_contents([
-            tool_call("call_add", "add", serde_json::json!({"x": 3, "y": 4})),
-            tool_call(
-                "call_subtract",
-                "subtract",
-                serde_json::json!({"x": 10, "y": 2}),
-            ),
-        ]);
-        let report = parallel_tools(
-            MockCompletionModel::new([first, MockTurn::text("7 and 8")]),
-            |builder| builder,
-            Some(1),
-        )
-        .await?;
-        fixture_contract(report.tool_calls == 2, "parallel tool-call count")?;
-        fixture_contract(report.history_messages >= 4, "parallel history length")?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn zero_argument_and_output_serialization_contracts_pass() -> Result<(), ScenarioError> {
-        let zero = zero_argument_tool(
-            MockCompletionModel::new([
-                MockTurn::tool_call("ping_call", "ping", serde_json::json!({})),
-                MockTurn::text(PING_OUTPUT),
-            ]),
-            |builder| builder,
-        )
-        .await?;
-        fixture_contract(zero.tool_calls == 1, "zero-argument call count")?;
-
-        let first = MockTurn::from_contents([
-            tool_call("motto_call", "fetch_motto", serde_json::json!({})),
-            tool_call("config_call", "fetch_config", serde_json::json!({})),
-        ]);
-        let serialized = tool_output_serialization(
-            MockCompletionModel::new([first, MockTurn::text("summary")]),
-            |builder| builder,
-        )
-        .await?;
-        fixture_contract(serialized.tool_calls == 2, "serialized-output call count")?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn complex_arguments_preserve_nested_unicode_and_escapes() -> Result<(), ScenarioError> {
-        let arguments = serde_json::json!({
-            "profile": {"name": "Zoë \"Z\"", "tags": ["rust", "東京"]},
-            "mode": "careful",
-            "note": "line one\nline two",
-            "quote": "path C:\\tmp and \"quoted\""
-        });
-        let report = complex_tool_arguments(
-            MockCompletionModel::new([
-                MockTurn::tool_call("profile_call", "store_profile", arguments),
-                MockTurn::text("stored"),
-            ]),
-            |builder| builder,
-        )
-        .await?;
-        fixture_contract(report.tool_calls == 1, "complex-argument call count")?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn extraction_contract_requires_fields_and_usage() -> Result<(), ScenarioError> {
-        let report = structured_extraction(MockCompletionModel::new([MockTurn::tool_call(
-            "submit_call",
-            "submit",
-            serde_json::json!({
-                "first_name": "Ada",
-                "last_name": "Lovelace",
-                "job": "mathematician"
-            }),
-        )
-        .with_usage(usage(20, 5))]))
-        .await?;
-        fixture_contract(report.prompt_tokens == 20, "extraction input usage")?;
-        fixture_contract(report.generated_tokens == 5, "extraction output usage")?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn streaming_contract_checks_events_history_and_usage() -> Result<(), ScenarioError> {
-        let model = MockCompletionModel::from_stream_turns([
-            vec![
-                MockStreamEvent::tool_call(
-                    "add_call",
-                    "add",
-                    serde_json::json!({"a": 17, "b": 25}),
-                ),
-                MockStreamEvent::FinalResponse(mock_final(usage(10, 2))),
-            ],
-            vec![
-                MockStreamEvent::text("42"),
-                MockStreamEvent::FinalResponse(mock_final(usage(14, 1))),
-            ],
-        ]);
-        let report = streaming_tool(model, |builder| builder).await?;
-        fixture_contract(report.prompt_tokens == 24, "streaming input usage")?;
-        fixture_contract(report.generated_tokens == 3, "streaming output usage")?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn invalid_recovery_paths_do_not_execute_tools() -> Result<(), ScenarioError> {
-        let report = invalid_tool_recovery(
-            MockCompletionModel::new([MockTurn::tool_call(
-                "invalid-add",
-                "add",
-                serde_json::json!({ "x": 2, "y": 3 }),
-            )]),
-            |builder| builder,
-        )
-        .await?;
-        fixture_contract(report.tool_calls == 1, "recovery source call count")?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn hook_rewrites_chain_and_request_patch_is_turn_local() -> Result<(), ScenarioError> {
-        let report = hook_rewrites_and_request_patch(
-            MockCompletionModel::new([
-                MockTurn::tool_call("hook-add", "add", serde_json::json!({ "x": 1, "y": 1 })),
-                MockTurn::text("[portable-redacted]"),
-            ]),
-            |builder| builder,
-        )
-        .await?;
-        fixture_contract(report.tool_calls == 1, "hook execution count")?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn cancellation_and_max_turn_controls_retain_diagnostics() -> Result<(), ScenarioError> {
-        let report = cancellation_and_max_turns(
-            MockCompletionModel::new([
-                MockTurn::tool_call("cancel-add", "add", serde_json::json!({ "x": 20, "y": 22 })),
-                MockTurn::tool_call("budget-add", "add", serde_json::json!({ "x": 20, "y": 22 })),
-            ]),
-            |builder| builder,
-        )
-        .await?;
-        fixture_contract(report.tool_calls == 2, "run-control execution count")?;
-        Ok(())
-    }
-
-    #[test]
-    fn typed_validators_reject_bad_structured_output_and_protocol_leaks() {
-        let invalid = decode_structured_output::<ConfigOutput>("invalid_json", "not json");
-        assert!(matches!(invalid, Err(ScenarioError::Contract { .. })));
-
-        let messages = vec![Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::text("visible <tool_call>")],
-        }];
-        let hygiene = validate_protocol_hygiene(
-            "protocol_hygiene",
-            "visible <tool_call>",
-            &messages,
-            &["<tool_call>"],
-        );
-        assert!(matches!(hygiene, Err(ScenarioError::Contract { .. })));
-    }
-
-    #[test]
-    fn invalid_tool_diagnostics_require_rejected_call_history() {
-        let history = vec![Message::Assistant {
-            id: None,
-            content: vec![tool_call(
-                "bad_call",
-                "missing",
-                serde_json::json!({"value": 1}),
-            )],
-        }];
-        let error = PromptError::UnknownToolCall {
-            tool_name: "missing".to_string(),
-            available_tools: vec!["add".to_string()],
-            allowed_tools: Vec::new(),
-            chat_history: Box::new(history),
-        };
-        assert!(validate_unknown_tool_failure(&error, "missing", &[]).is_ok());
-        assert!(validate_unknown_tool_failure(&error, "other", &[]).is_err());
-    }
-}
+mod tests;

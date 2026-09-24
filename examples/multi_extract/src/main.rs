@@ -4,11 +4,12 @@
 
 use anyhow::Result;
 use futures::stream::{StreamExt, TryStreamExt};
-use rig::client::ProviderClient;
+use rig::extractor::ExtractorBuilder;
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::future::IntoFuture;
 
 #[derive(Debug, Deserialize, JsonSchema, Serialize)]
 struct Names {
@@ -36,20 +37,18 @@ fn sample_inputs() -> Vec<&'static str> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client = openai::Client::from_env()?;
-    let names_extractor = client
-        .extractor::<Names>(openai::GPT_4O_MINI)
-        .preamble("Extract names from the given text.")
+    let client = OpenAI::from_env()?.bound()?;
+    let model = client.completion(openai::GPT_4O_MINI);
+    let names_extractor = ExtractorBuilder::<Names>::new(model.clone())
+        .append_preamble("Extract names from the given text.")
         .retries(2)
         .build();
-    let topics_extractor = client
-        .extractor::<Topics>(openai::GPT_4O_MINI)
-        .preamble("Extract topics from the given text.")
+    let topics_extractor = ExtractorBuilder::<Topics>::new(model.clone())
+        .append_preamble("Extract topics from the given text.")
         .retries(2)
         .build();
-    let sentiment_extractor = client
-        .extractor::<Sentiment>(openai::GPT_4O_MINI)
-        .preamble("Extract sentiment and confidence from the given text.")
+    let sentiment_extractor = ExtractorBuilder::<Sentiment>::new(model)
+        .append_preamble("Extract sentiment and confidence from the given text.")
         .retries(2)
         .build();
 
@@ -63,16 +62,16 @@ async fn main() -> Result<()> {
             let sentiment_extractor = &sentiment_extractor;
             async move {
                 let (names, topics, sentiment) = futures::try_join!(
-                    names_extractor.extract(text),
-                    topics_extractor.extract(text),
-                    sentiment_extractor.extract(text),
+                    names_extractor.extract(text).into_future(),
+                    topics_extractor.extract(text).into_future(),
+                    sentiment_extractor.extract(text).into_future(),
                 )?;
                 anyhow::Ok(format!(
                     "Extracted names: {}\nExtracted topics: {}\nExtracted sentiment: {} ({})",
-                    names.names.join(", "),
-                    topics.topics.join(", "),
-                    sentiment.sentiment,
-                    sentiment.confidence,
+                    names.output.names.join(", "),
+                    topics.output.topics.join(", "),
+                    sentiment.output.sentiment,
+                    sentiment.output.confidence,
                 ))
             }
         })

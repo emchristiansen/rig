@@ -1,8 +1,8 @@
-use rig_agent::completion::Prompt;
 use rig_agent::prelude::*;
-use rig_core::client::ProviderClient;
 use rig_core::providers;
+use rig_core::providers::openai::OpenAI;
 use rig_derive::rig_tool;
+use rig_reqwest::prelude::*;
 
 /// Add two numbers
 #[rig_tool]
@@ -67,10 +67,7 @@ fn how_many_rs(
     /// The string to search
     s: String,
 ) -> Result<usize, rig_core::tool::ToolExecutionError> {
-    Ok(s.chars()
-        .filter(|c| *c == 'r' || *c == 'R')
-        .collect::<Vec<_>>()
-        .len())
+    Ok(s.chars().filter(|c| *c == 'r' || *c == 'R').count())
 }
 
 /// Sum a list of numbers
@@ -86,7 +83,8 @@ fn sum_numbers(
 async fn main() -> Result<(), anyhow::Error> {
     tracing_subscriber::fmt().pretty().init();
 
-    let calculator_agent = providers::openai::Client::from_env()?
+    let calculator_agent = OpenAI::from_env()?
+        .bound()?
         .agent(providers::openai::GPT_4O)
         .preamble("You are an agent with tools access, always use the tools")
         .max_tokens(1024)
@@ -106,7 +104,7 @@ async fn main() -> Result<(), anyhow::Error> {
         "Add 100 and 200",
     ] {
         println!("User: {prompt}");
-        println!("Agent: {}", calculator_agent.prompt(prompt).await?);
+        println!("Agent: {}", calculator_agent.prompt(prompt).await?.output);
     }
 
     Ok(())

@@ -1,11 +1,11 @@
-//! Demonstrates `stream_chat` with prior conversation history.
+//! Demonstrates a streamed run over prior conversation history.
 //! Requires `OPENAI_API_KEY`.
 //! Run it to see a streamed continuation of an existing exchange.
 
 use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
 
 const PREAMBLE: &str = "You are a comedian here to entertain the user using humour and jokes.";
 const PROMPT: &str = "Entertain me!";
@@ -31,13 +31,14 @@ fn sample_history() -> Vec<Message> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let agent = openai::Client::from_env()?
+    let agent = OpenAI::from_env()?
+        .bound()?
         .agent(openai::GPT_4)
         .preamble(PREAMBLE)
         .build();
 
     let history = sample_history();
-    let mut stream = agent.stream_chat(PROMPT, &history).await;
+    let mut stream = agent.prompt(PROMPT).history(&history).stream();
     let response = collect_stream_final_response(&mut stream).await?;
     println!("{response}");
 

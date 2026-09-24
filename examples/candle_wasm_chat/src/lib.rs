@@ -5,7 +5,6 @@ use std::cell::RefCell;
 use rig::{
     agent::{Agent, AgentBuilder},
     candle::{CandleModel, GgufModelData},
-    completion::Chat,
     message::Message,
 };
 use wasm_bindgen::prelude::*;
@@ -105,10 +104,14 @@ pub async fn chat(message: String) -> Result<String, JsValue> {
     }
 
     let mut state = CHAT_STATE
-        .with(|slot| slot.take())
+        .with(std::cell::RefCell::take)
         .ok_or_else(|| js_error(BrowserModelError::NotInitialized))?;
     trim_history(&mut state.history);
-    let result = state.agent.chat(message, &mut state.history).await;
+    let result = state
+        .agent
+        .chat(message, &mut state.history)
+        .await
+        .map(|response| response.output);
     CHAT_STATE.with(|slot| slot.replace(Some(state)));
     result.map_err(|error| js_error(BrowserModelError::Inference(error.to_string())))
 }

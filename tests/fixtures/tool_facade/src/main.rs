@@ -38,6 +38,10 @@ struct StableContext {
     label: String,
 }
 
+impl rig::tool::ContextValue for StableContext {
+    const KEY: &'static str = "fixture.stable-context.v1";
+}
+
 impl PortableToolEmbedding for StablePortableTool {
     type InitError = Infallible;
     type Context = StableContext;
@@ -65,19 +69,41 @@ fn assert_core_portable<T: rig::core::tool::PortableTool>() {}
 fn assert_namespaced_portable<T: rig::tool::portable::PortableTool>() {}
 fn assert_prelude_portable<T: rig::prelude::PortableTool>() {}
 
+#[cfg(feature = "derive")]
+use rig::tool::ContextValue;
+
+#[cfg(feature = "derive")]
+#[derive(Serialize, Deserialize, ContextValue)]
+#[context(key = "fixture.derived-context.v1")]
+struct DerivedContext(String);
+
 fn main() {
+    #[cfg(feature = "derive")]
+    {
+        let mut derived = rig::tool::ToolContext::new();
+        derived.insert(DerivedContext("derived".into())).unwrap();
+        assert_eq!(derived.require::<DerivedContext>().unwrap().0, "derived");
+    }
+
+    let mut context = rig::tool::ToolContext::new();
+    context
+        .insert(StableContext {
+            label: "facade".into(),
+        })
+        .unwrap();
+    assert_eq!(context.require::<StableContext>().unwrap().label, "facade");
     assert_root_portable::<StablePortableTool>();
     assert_core_portable::<StablePortableTool>();
     assert_namespaced_portable::<StablePortableTool>();
     assert_prelude_portable::<StablePortableTool>();
 
-    let portable_dynamic = rig::tool::PortableDynamicTool::new(
-        "portable_dynamic",
-        "portable dynamic tool",
+    let dynamic = rig::tool::DynamicTool::new(
+        "dynamic",
+        "context-free dynamic tool",
         serde_json::json!({"type": "object"}),
         |arguments| Box::pin(async move { Ok(rig::tool::ToolOutput::json(arguments)) }),
     );
-    let _ = &portable_dynamic;
+    let _ = &dynamic;
 
     // With the classic runtime (default), `rig::tool::Tool` is the *contextual*
     // trait, and a portable tool still registers through the blanket impl.
@@ -118,8 +144,6 @@ fn main() {
         assert_classic_tool::<ContextualTool>();
         assert_classic_tool::<StablePortableTool>();
 
-        let _classic_dynamic = rig::tool::DynamicTool::from_portable(portable_dynamic);
-
         // Regression: `#[rig_tool]` must auto-detect the *fully-qualified* facade
         // path `rig::tool::ToolContext` as runtime context (not a model
         // argument), matching the documented `use rig::tool::{Tool, ToolContext};`
@@ -128,7 +152,7 @@ fn main() {
         // See rig-derive `is_tool_context_type`.
         #[cfg(feature = "derive")]
         {
-            #[rig::tool_macro(description = "echoes using fully-qualified facade context")]
+            #[rig::rig_tool(description = "echoes using fully-qualified facade context")]
             fn facade_qualified_context_tool(
                 context: &mut rig::tool::ToolContext,
                 value: String,

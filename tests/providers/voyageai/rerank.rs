@@ -1,15 +1,17 @@
 //! VoyageAI reranking smoke test.
 
-use rig::client::{ProviderClient, RerankingClient};
-use rig::providers::voyageai;
+use rig::prelude::*;
+use rig::providers::voyageai::{self, wire::VoyageAi};
 use rig::rerank::RerankModel;
 
 #[tokio::test]
 #[ignore = "requires VOYAGE_API_KEY"]
 async fn rerank_smoke() {
-    let client =
-        voyageai::Client::from_env().expect("client should build from VOYAGE_API_KEY env var");
-    let model = client.rerank_model(voyageai::RERANK_2_5);
+    let provider = VoyageAi::from_env()
+        .expect("config should build from VOYAGE_API_KEY env var")
+        .bound()
+        .expect("transport should build");
+    let model = provider.rerank(voyageai::RERANK_2_5);
 
     let response = model
         .rerank(
@@ -34,6 +36,16 @@ async fn rerank_smoke() {
         response.results[0].index == 0,
         "Paris should be the top result"
     );
-    assert!(response.usage.total_tokens > 0, "usage should be positive");
-    assert!(!response.model.is_empty(), "model name should be present");
+    assert!(
+        response.usage.total_tokens.is_some_and(|n| n > 0),
+        "usage should be positive"
+    );
+    assert!(
+        response
+            .model
+            .as_deref()
+            .is_some_and(|model| !model.is_empty()),
+        "model name should be present"
+    );
+    assert_eq!(response.provider, "voyageai");
 }

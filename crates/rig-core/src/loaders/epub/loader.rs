@@ -9,10 +9,6 @@ use super::RawTextProcessor;
 use super::errors::EpubLoaderError;
 use super::text_processors::TextProcessor;
 
-// ================================================================
-// Implementing Loadable trait for loading epubs
-// ================================================================
-
 loadable_trait!(
     Loadable,
     EpubLoaderError,
@@ -32,70 +28,10 @@ impl Loadable for PathBuf {
     }
 }
 
-// ================================================================
-// EpubFileLoader definitions and implementations
-// ================================================================
-
-/// [EpubFileLoader] is a utility for loading epub files from the filesystem using glob patterns or
-///  directory paths. It provides methods to read file contents and handle errors gracefully.
-///
-/// # Errors
-///
-/// This module defines a custom error type [EpubLoaderError] which can represent various errors
-///  that might occur during file loading operations, such as any [FileLoaderError](crate::loaders::file::FileLoaderError) alongside
-///  specific EPUB-related errors.
-///
-/// # Example Usage
-///
-/// ```no_run
-/// use rig_core::loaders::{EpubFileLoader, RawTextProcessor, StripXmlProcessor};
-///
-/// fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     // Create a FileLoader using a glob pattern
-///     let loader = EpubFileLoader::<_, RawTextProcessor>::with_glob("tests/data/*.epub")?;
-///
-///     // Load epub file contents by chapter, ignoring any errors
-///     let contents = loader
-///         .load_with_path()
-///         .ignore_errors()
-///         .by_chapter()
-///         .ignore_errors();
-///
-///     for (path, chapters) in contents {
-///         println!("{}", path.display());
-///         for (idx, chapter) in chapters {
-///             println!("Chapter {} begins", idx);
-///             println!("{}", chapter);
-///             println!("Chapter {} ends", idx);
-///         }
-///     }
-///
-///     // Create a FileLoader using a glob pattern with stripping xml
-///     let loader = EpubFileLoader::<_, StripXmlProcessor>::with_glob("tests/data/*.epub")?;
-///
-///     // Load epub file contents by chapter, ignoring any errors
-///     let contents = loader
-///         .load_with_path()
-///         .ignore_errors()
-///         .by_chapter()
-///         .ignore_errors();
-///
-///     for (path, chapters) in contents {
-///         println!("{}", path.display());
-///         for (idx, chapter) in chapters {
-///             println!("Chapter {} begins", idx);
-///             println!("{}", chapter);
-///             println!("Chapter {} ends", idx);
-///         }
-///     }
-///
-///     Ok(())
-/// }
-/// ```
-///
-/// [EpubFileLoader] uses strict typing between the iterator methods to ensure that transitions
-///  between different implementations of the loaders and it's methods are handled properly by
-///  the compiler.
+/// Iterator pipeline for synchronous EPUB loading and chapter processing.
+/// `P` selects text processing and defaults to [`RawTextProcessor`].
+/// Loading and processing errors are yielded unless filtered; unavailable chapter
+/// text is skipped.
 pub struct EpubFileLoader<'a, T, P = RawTextProcessor> {
     iterator: Box<dyn Iterator<Item = T> + 'a>,
     _processor: PhantomData<P>,
@@ -104,12 +40,7 @@ pub struct EpubFileLoader<'a, T, P = RawTextProcessor> {
 type EpubLoaded = Result<(PathBuf, EpubDoc<BufReader<File>>), EpubLoaderError>;
 
 impl<'a, P> EpubFileLoader<'a, Result<PathBuf, EpubLoaderError>, P> {
-    /// Loads the contents of the epub files within the iterator returned by [EpubFileLoader::with_glob]
-    ///  or [EpubFileLoader::with_dir]. Loaded EPUB documents are raw EPUB instances that can be
-    ///  further processed (by chapter, etc).
-    ///
-    /// # Example
-    /// Load epub files in directory "tests/data/*.epub" and return the loaded documents
+    /// Loads each EPUB during iteration, yielding document-loading errors.
     ///
     /// ```no_run
     /// use rig_core::loaders::{EpubFileLoader, RawTextProcessor};
@@ -118,8 +49,8 @@ impl<'a, P> EpubFileLoader<'a, Result<PathBuf, EpubLoaderError>, P> {
     /// let content = EpubFileLoader::<_, RawTextProcessor>::with_glob("tests/data/*.epub")?.load().into_iter();
     /// for result in content {
     ///     match result {
-    ///         Ok(doc) => println!("{:?}", doc),
-    ///         Err(e) => eprintln!("Error reading epub: {}", e),
+    ///         Ok(doc) => println!("{doc:?}"),
+    ///         Err(e) => eprintln!("Error reading epub: {e}"),
     ///     }
     /// }
     /// # Ok(())
@@ -127,17 +58,12 @@ impl<'a, P> EpubFileLoader<'a, Result<PathBuf, EpubLoaderError>, P> {
     /// ```
     pub fn load(self) -> EpubFileLoader<'a, Result<EpubDoc<BufReader<File>>, EpubLoaderError>, P> {
         EpubFileLoader {
-            iterator: Box::new(self.iterator.map(|res| res.load())),
+            iterator: Box::new(self.iterator.map(Loadable::load)),
             _processor: PhantomData,
         }
     }
 
-    /// Loads the contents of the epub files within the iterator returned by [EpubFileLoader::with_glob]
-    ///  or [EpubFileLoader::with_dir]. Loaded EPUB documents are raw EPUB instances with their path
-    ///  that can be further processed.
-    ///
-    /// # Example
-    /// Load epub files in directory "tests/data/*.epub" and return the loaded documents
+    /// Loads each EPUB paired with its source path, yielding loading errors.
     ///
     /// ```no_run
     /// use rig_core::loaders::{EpubFileLoader, RawTextProcessor};
@@ -146,8 +72,8 @@ impl<'a, P> EpubFileLoader<'a, Result<PathBuf, EpubLoaderError>, P> {
     /// let content = EpubFileLoader::<_, RawTextProcessor>::with_glob("tests/data/*.epub")?.load_with_path().into_iter();
     /// for result in content {
     ///     match result {
-    ///         Ok((path, doc)) => println!("{:?} {:?}", path, doc),
-    ///         Err(e) => eprintln!("Error reading epub: {}", e),
+    ///         Ok((path, doc)) => println!("{path:?} {doc:?}"),
+    ///         Err(e) => eprintln!("Error reading epub: {e}"),
     ///     }
     /// }
     /// # Ok(())
@@ -155,7 +81,7 @@ impl<'a, P> EpubFileLoader<'a, Result<PathBuf, EpubLoaderError>, P> {
     /// ```
     pub fn load_with_path(self) -> EpubFileLoader<'a, EpubLoaded, P> {
         EpubFileLoader {
-            iterator: Box::new(self.iterator.map(|res| res.load_with_path())),
+            iterator: Box::new(self.iterator.map(Loadable::load_with_path)),
             _processor: PhantomData,
         }
     }
@@ -165,11 +91,8 @@ impl<'a, P> EpubFileLoader<'a, Result<PathBuf, EpubLoaderError>, P>
 where
     P: TextProcessor,
 {
-    /// Directly reads the contents of the epub files within the iterator returned by
-    ///  [EpubFileLoader::with_glob] or [EpubFileLoader::with_dir].
-    ///
-    /// # Example
-    /// Read epub files in directory "tests/data/*.epub" and return the contents of the documents.
+    /// Concatenates processed chapters without separators, yielding loading or
+    /// processing errors. Unavailable chapter text is skipped.
     ///
     /// ```no_run
     /// # use rig_core::loaders::{EpubFileLoader, RawTextProcessor};
@@ -177,8 +100,8 @@ where
     /// let content = EpubFileLoader::<_, RawTextProcessor>::with_glob("tests/data/*.epub")?.read().into_iter();
     /// for result in content {
     ///     match result {
-    ///         Ok(content) => println!("{}", content),
-    ///         Err(e) => eprintln!("Error reading epub: {}", e),
+    ///         Ok(content) => println!("{content}"),
+    ///         Err(e) => eprintln!("Error reading epub: {e}"),
     ///     }
     /// }
     /// # Ok(())
@@ -199,12 +122,8 @@ where
         }
     }
 
-    /// Directly reads the contents of the epub files within the iterator returned by
-    ///  [EpubFileLoader::with_glob] or [EpubFileLoader::with_dir] and returns the path along with
-    ///  the content.
-    ///
-    /// # Example
-    /// Read epub files in directory "tests/data/*.epub" and return the content and paths of the documents.
+    /// Pairs each path with concatenated processed chapters, yielding loading
+    /// or processing errors. Unavailable chapter text is skipped.
     ///
     /// ```no_run
     /// # use rig_core::loaders::{EpubFileLoader, RawTextProcessor};
@@ -212,8 +131,8 @@ where
     /// let content = EpubFileLoader::<_, RawTextProcessor>::with_glob("tests/data/*.epub")?.read_with_path().into_iter();
     /// for result in content {
     ///     match result {
-    ///         Ok((path, content)) => println!("{:?} {}", path, content),
-    ///         Err(e) => eprintln!("Error reading epub: {}", e),
+    ///         Ok((path, content)) => println!("{path:?} {content}"),
+    ///         Err(e) => eprintln!("Error reading epub: {e}"),
     ///     }
     /// }
     /// # Ok(())
@@ -241,10 +160,8 @@ impl<'a, P> EpubFileLoader<'a, EpubDoc<BufReader<File>>, P>
 where
     P: TextProcessor + 'a,
 {
-    /// Chunks the chapters of a loaded document by chapter, flattened as a single vector.
-    ///
-    /// # Example
-    /// Load epub files in directory "tests/data/*.epub" and chunk all document into it's chapters.
+    /// Yields processed chapter results across documents in input order,
+    /// skipping unavailable chapter text.
     ///
     /// ```no_run
     /// # use rig_core::loaders::{EpubFileLoader, RawTextProcessor};
@@ -256,8 +173,8 @@ where
     ///     .into_iter();
     /// for result in content {
     ///     match result {
-    ///         Ok(chapter) => println!("{}", chapter),
-    ///         Err(e) => eprintln!("Error reading chapter: {}", e),
+    ///         Ok(chapter) => println!("{chapter}"),
+    ///         Err(e) => eprintln!("Error reading chapter: {e}"),
     ///     }
     /// }
     /// # Ok(())
@@ -273,11 +190,8 @@ where
 
 type ByChapter = (PathBuf, Vec<(usize, Result<String, EpubLoaderError>)>);
 impl<'a, P: TextProcessor> EpubFileLoader<'a, (PathBuf, EpubDoc<BufReader<File>>), P> {
-    /// Chunks the chapters of a loaded document by chapter, processed as a vector of documents by path
-    ///  which each document container an inner vector of chapters by chapter number.
-    ///
-    /// # Example
-    /// Read epub files in directory "tests/data/*.epub" and chunk all documents by path by it's chapters.
+    /// Pairs each path with zero-based indices and chapter-processing results.
+    /// Indices count available chapter texts, not skipped source entries.
     ///
     /// ```no_run
     /// # use rig_core::loaders::{EpubFileLoader, RawTextProcessor};
@@ -290,7 +204,7 @@ impl<'a, P: TextProcessor> EpubFileLoader<'a, (PathBuf, EpubDoc<BufReader<File>>
     ///     .into_iter();
     ///
     /// for result in content {
-    ///     println!("{:?}", result);
+    ///     println!("{result:?}");
     /// }
     /// # Ok(())
     /// # }
@@ -316,11 +230,8 @@ impl<'a, P> EpubFileLoader<'a, ByChapter, P>
 where
     P: TextProcessor,
 {
-    /// Ignores errors in the iterator, returning only successful results. This can be used on any
-    ///  [EpubFileLoader] state of iterator whose items are results.
-    ///
-    /// # Example
-    /// Read files in directory "tests/data/*.epub" and ignore errors from unreadable files.
+    /// Drops failed chapter results, retaining paths and existing chapter indices.
+    /// Documents with no successful chapters remain.
     ///
     /// ```no_run
     /// # use rig_core::loaders::{EpubFileLoader, RawTextProcessor};
@@ -351,10 +262,6 @@ where
 }
 
 loader_scaffold!(EpubFileLoader, EpubLoaderError, dir: all_entries, extra: P);
-
-// ================================================================
-// EpubChapterIterator definitions and implementations
-// ================================================================
 
 struct EpubChapterIterator<P> {
     epub: EpubDoc<BufReader<File>>,
@@ -389,7 +296,7 @@ where
             return None;
         }
 
-        // ignore empty chapters if they exist
+        // Unavailable chapter text is skipped rather than yielded as an error.
         while !self.finished {
             let chapter = self.epub.get_current_str();
 
@@ -410,79 +317,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::loaders::epub::RawTextProcessor;
-    use crate::loaders::test_fixtures::{fixture_glob, fixture_path};
-
-    use super::EpubFileLoader;
-
-    #[test]
-    fn test_epub_loader_with_errors() {
-        let glob = fixture_glob("*.epub");
-        let loader = EpubFileLoader::<_, RawTextProcessor>::with_glob(&glob).unwrap();
-        let actual = loader
-            .load_with_path()
-            .ignore_errors()
-            .by_chapter()
-            .into_iter()
-            .collect::<Vec<_>>();
-
-        assert_eq!(actual.len(), 1);
-
-        let (_, chapters) = &actual[0];
-        assert_eq!(chapters.len(), 3);
-
-        for chapter in chapters {
-            assert!(chapter.1.is_ok());
-        }
-    }
-
-    #[test]
-    fn test_epub_loader_with_ignoring_errors() {
-        let glob = fixture_glob("*.epub");
-        let loader = EpubFileLoader::<_, RawTextProcessor>::with_glob(&glob).unwrap();
-        let actual = loader
-            .load_with_path()
-            .ignore_errors()
-            .by_chapter()
-            .ignore_errors()
-            .into_iter()
-            .collect::<Vec<_>>();
-
-        assert_eq!(actual.len(), 1);
-
-        let (_, chapters) = &actual[0];
-        assert_eq!(chapters.len(), 3);
-    }
-
-    #[test]
-    fn test_single_file() {
-        let glob = fixture_glob("*.epub");
-        let loader = EpubFileLoader::<_, RawTextProcessor>::with_glob(&glob).unwrap();
-
-        let actual = loader
-            .read()
-            .ignore_errors()
-            .into_iter()
-            .collect::<Vec<_>>();
-
-        assert_eq!(actual.len(), 1);
-    }
-
-    #[test]
-    fn test_single_file_with_path() {
-        let glob = fixture_glob("*.epub");
-        let loader = EpubFileLoader::<_, RawTextProcessor>::with_glob(&glob).unwrap();
-
-        let actual = loader
-            .read_with_path()
-            .ignore_errors()
-            .into_iter()
-            .collect::<Vec<_>>();
-
-        assert_eq!(actual.len(), 1);
-
-        let (path, _) = &actual[0];
-        assert_eq!(path, &fixture_path("dummy.epub"));
-    }
-}
+mod tests;

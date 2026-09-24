@@ -5,7 +5,8 @@ use aws_sdk_bedrockruntime::types::{
     CachePointBlock, CachePointType, InferenceConfiguration, SystemContentBlock, Tool,
     ToolConfiguration, ToolInputSchema, ToolSpecification,
 };
-use rig_core::completion::{CompletionError, Message};
+use rig_core::completion::Message;
+use rig_core::error::ProviderError;
 use rig_core::message::{DocumentMediaType, UserContent};
 
 pub struct AwsCompletionRequest {
@@ -13,23 +14,41 @@ pub struct AwsCompletionRequest {
     pub prompt_caching: bool,
 }
 
-fn cache_point_block() -> Result<CachePointBlock, CompletionError> {
+fn cache_point_block() -> Result<CachePointBlock, ProviderError> {
     CachePointBlock::builder()
         .r#type(CachePointType::Default)
         .build()
-        .map_err(|e| CompletionError::RequestError(e.into()))
+        .map_err(|e| ProviderError::Request(e.into()))
 }
 
 impl AwsCompletionRequest {
+    /// A Converse request for `model`, with reasoning another issuer
+    /// produced dropped from the history
+    /// ([`crate::types::assistant_content::reasoning_issuer`]).
+    pub fn for_model(
+        mut inner: rig_core::completion::CompletionRequest,
+        model: &str,
+        prompt_caching: bool,
+    ) -> Self {
+        rig_core::message::retain_replayable_reasoning(
+            &mut inner.chat_history,
+            &[crate::types::assistant_content::reasoning_issuer(model)],
+        );
+        Self {
+            inner,
+            prompt_caching,
+        }
+    }
+
     pub fn additional_params(&self) -> Option<aws_smithy_types::Document> {
         self.inner
             .additional_params
-            .to_owned()
-            .map(|params| params.into())
+            .clone()
+            .map(std::convert::Into::into)
             .map(|doc: AwsDocument| doc.0)
     }
 
-    pub fn inference_config(&self) -> Option<InferenceConfiguration> {
+    pub fn inference_config(&self) -> InferenceConfiguration {
         let mut inference_configuration = InferenceConfiguration::builder();
 
         if let Some(temperature) = &self.inner.temperature {
@@ -42,10 +61,10 @@ impl AwsCompletionRequest {
                 inference_configuration.set_max_tokens(Some(*max_tokens as i32));
         }
 
-        Some(inference_configuration.build())
+        inference_configuration.build()
     }
 
-    pub fn tools_config(&self) -> Result<Option<ToolConfiguration>, CompletionError> {
+    pub fn tools_config(&self) -> Result<Option<ToolConfiguration>, ProviderError> {
         if self.inner.tool_choice == Some(rig_core::message::ToolChoice::None) {
             return Ok(None);
         }
@@ -62,12 +81,11 @@ impl AwsCompletionRequest {
                     .set_input_schema(Some(ToolInputSchema::Json(doc.0)))
                     .build()
                     .map(Tool::ToolSpec)
-                    .map_err(|e| CompletionError::RequestError(e.into()))
+                    .map_err(|e| ProviderError::Request(e.into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
         if !tools.is_empty() {
-            // Convert rig's ToolChoice to AWS Bedrock ToolChoice
             use aws_sdk_bedrockruntime::types as aws_bedrock;
             let tool_choice = self
                 .inner
@@ -89,7 +107,7 @@ impl AwsCompletionRequest {
                                 .build()
                                 .map(aws_bedrock::ToolChoice::Tool)
                                 .map(Some)
-                                .map_err(|e| CompletionError::RequestError(e.into()))
+                                .map_err(|e| ProviderError::Request(e.into()))
                         })
                         .transpose()
                         .map(Option::flatten),
@@ -101,7 +119,7 @@ impl AwsCompletionRequest {
                 .set_tools(Some(tools))
                 .set_tool_choice(tool_choice)
                 .build()
-                .map_err(|e| CompletionError::RequestError(e.into()))?;
+                .map_err(|e| ProviderError::Request(e.into()))?;
 
             Ok(Some(config))
         } else {
@@ -110,7 +128,7 @@ impl AwsCompletionRequest {
     }
 
     /// Maps rig's `output_schema` to Bedrock's `OutputConfig` for structured output.
-    pub fn output_config(&self) -> Result<Option<aws_bedrock::OutputConfig>, CompletionError> {
+    pub fn output_config(&self) -> Result<Option<aws_bedrock::OutputConfig>, ProviderError> {
         let Some(schema) = self.inner.output_schema.as_ref() else {
             return Ok(None);
         };
@@ -120,14 +138,14 @@ impl AwsCompletionRequest {
             .output_schema_name()
             .unwrap_or_else(|| "response_schema".to_string());
 
-        let schema_json = serde_json::to_string(&schema.clone().to_value())
-            .map_err(|e| CompletionError::RequestError(e.into()))?;
+        let schema_json = serde_json::to_string(schema.as_value())
+            .map_err(|e| ProviderError::Request(e.into()))?;
 
         let json_schema_def = aws_bedrock::JsonSchemaDefinition::builder()
             .schema(schema_json)
             .name(schema_name)
             .build()
-            .map_err(|e| CompletionError::RequestError(e.into()))?;
+            .map_err(|e| ProviderError::Request(e.into()))?;
 
         let text_format = aws_bedrock::OutputFormat::builder()
             .r#type(aws_bedrock::OutputFormatType::JsonSchema)
@@ -135,7 +153,7 @@ impl AwsCompletionRequest {
                 json_schema_def,
             ))
             .build()
-            .map_err(|e| CompletionError::RequestError(e.into()))?;
+            .map_err(|e| ProviderError::Request(e.into()))?;
 
         Ok(Some(
             aws_bedrock::OutputConfig::builder()
@@ -144,14 +162,8 @@ impl AwsCompletionRequest {
         ))
     }
 
-    pub fn system_prompt(&self) -> Result<Option<Vec<SystemContentBlock>>, CompletionError> {
+    pub fn system_prompt(&self) -> Result<Option<Vec<SystemContentBlock>>, ProviderError> {
         let mut system_blocks = Vec::new();
-
-        if let Some(system_prompt) = self.inner.preamble.to_owned()
-            && !system_prompt.is_empty()
-        {
-            system_blocks.push(SystemContentBlock::Text(system_prompt));
-        }
 
         for message in self.inner.chat_history.iter() {
             if let Message::System { content } = message
@@ -171,7 +183,9 @@ impl AwsCompletionRequest {
         }
     }
 
-    pub fn messages(&self) -> Result<Vec<aws_bedrock::Message>, CompletionError> {
+    /// Consumes the request: this is the one accessor that needs the chat
+    /// history by value, so call it after the borrowing accessors.
+    pub fn messages(self) -> Result<Vec<aws_bedrock::Message>, ProviderError> {
         let mut full_history: Vec<Message> = Vec::new();
 
         if !self.inner.documents.is_empty() {
@@ -179,7 +193,7 @@ impl AwsCompletionRequest {
                 .inner
                 .documents
                 .iter()
-                .map(|doc| doc.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(" | ");
 
@@ -191,27 +205,6 @@ impl AwsCompletionRequest {
             full_history.push(Message::User { content });
         }
 
-        full_history.extend(
-            self.inner
-                .chat_history
-                .iter()
-                .filter(|message| !matches!(message, Message::System { .. }))
-                .cloned(),
-        );
-
-        let mut messages: Vec<aws_bedrock::Message> = full_history
-            .into_iter()
-            .map(|message| RigMessage(message).try_into())
-            .collect::<Result<Vec<aws_bedrock::Message>, _>>()?;
-
-        // Bedrock rejects cache points placed after reasoning blocks
-        // ("Cache point cannot be inserted after reasoning block"). When the
-        // request carries any reasoning content (round-tripped from a prior
-        // turn), Anthropic's backend treats the trailing cache point as
-        // following reasoning even when the literal previous block is a tool
-        // result. Skip the message-level checkpoint in that case; the
-        // system-prompt cache point still applies and captures the largest
-        // stable prefix.
         let has_reasoning = self.inner.chat_history.iter().any(|message| match message {
             Message::Assistant { content, .. } => content
                 .iter()
@@ -219,17 +212,49 @@ impl AwsCompletionRequest {
             _ => false,
         });
 
+        full_history.extend(
+            self.inner
+                .chat_history
+                .into_iter()
+                .filter(|message| !matches!(message, Message::System { .. })),
+        );
+
+        let tool_ids =
+            rig_core::providers::internal::tool_call_ids::ToolCallIds::new(&full_history)
+                .map_err(|error| ProviderError::Request(Box::new(error)))?;
+        let mut messages = Vec::new();
+        for (position, message) in full_history.into_iter().enumerate() {
+            let mut message: aws_bedrock::Message = RigMessage(message).try_into()?;
+            tool_ids
+                .apply(
+                    position,
+                    message.content.iter_mut().filter_map(|part| match part {
+                        aws_bedrock::ContentBlock::ToolUse(call) => Some(&mut call.tool_use_id),
+                        aws_bedrock::ContentBlock::ToolResult(result) => {
+                            Some(&mut result.tool_use_id)
+                        }
+                        _ => None,
+                    }),
+                )
+                .map_err(|error| ProviderError::Request(Box::new(error)))?;
+            messages.push(message);
+        }
+
+        crate::types::document::disambiguate_document_names(&mut messages);
+
+        // Reasoning anywhere in history prevents a trailing message checkpoint,
+        // even after tool results; the system checkpoint remains valid.
         if self.prompt_caching
             && !has_reasoning
             && let Some(last_msg) = messages.last_mut()
         {
-            let mut content = last_msg.content.clone();
+            let mut content = std::mem::take(&mut last_msg.content);
             content.push(aws_bedrock::ContentBlock::CachePoint(cache_point_block()?));
             *last_msg = aws_bedrock::Message::builder()
                 .role(last_msg.role.clone())
                 .set_content(Some(content))
                 .build()
-                .map_err(|e| CompletionError::RequestError(e.into()))?;
+                .map_err(|e| ProviderError::Request(e.into()))?;
         }
 
         Ok(messages)
@@ -237,479 +262,4 @@ impl AwsCompletionRequest {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use rig_core::completion::{CompletionRequest, ToolDefinition};
-    use rig_core::message::{Message, Text, ToolChoice, UserContent};
-
-    // Helper to create a minimal CompletionRequest for testing
-    fn minimal_request() -> CompletionRequest {
-        CompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: vec![Message::User {
-                content: vec![UserContent::Text(Text::new("test".to_string()))],
-            }],
-            documents: vec![],
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        }
-    }
-
-    fn aws_request(request: CompletionRequest, prompt_caching: bool) -> AwsCompletionRequest {
-        AwsCompletionRequest {
-            inner: request,
-            prompt_caching,
-        }
-    }
-
-    #[test]
-    fn test_tool_choice_auto_conversion() {
-        // Test that rig's ToolChoice::Auto converts to AWS Auto
-        let request = CompletionRequest {
-            model: None,
-            tool_choice: Some(ToolChoice::Auto),
-            tools: vec![ToolDefinition {
-                name: "test_tool".to_string(),
-                description: "A test tool".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-            }],
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let tool_config = aws_request
-            .tools_config()
-            .expect("Should build tool config");
-
-        assert!(tool_config.is_some());
-
-        let config = tool_config.unwrap();
-
-        assert!(config.tool_choice().is_some());
-        assert!(matches!(
-            config.tool_choice().unwrap(),
-            aws_bedrock::ToolChoice::Auto(_)
-        ));
-    }
-
-    #[test]
-    fn test_tool_choice_required_conversion() {
-        // Test that rig's ToolChoice::Required converts to AWS Any
-        let request = CompletionRequest {
-            model: None,
-            tool_choice: Some(ToolChoice::Required),
-            tools: vec![ToolDefinition {
-                name: "test_tool".to_string(),
-                description: "A test tool".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-            }],
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let tool_config = aws_request
-            .tools_config()
-            .expect("Should build tool config");
-
-        assert!(tool_config.is_some());
-        let config = tool_config.unwrap();
-        assert!(config.tool_choice().is_some());
-
-        // Verify it's the Any variant
-        assert!(matches!(
-            config.tool_choice().unwrap(),
-            aws_bedrock::ToolChoice::Any(_)
-        ));
-    }
-
-    #[test]
-    fn test_tool_choice_none_conversion() {
-        // Test that rig's ToolChoice::None disables Bedrock tool configuration entirely.
-        let request = CompletionRequest {
-            model: None,
-            tool_choice: Some(ToolChoice::None),
-            tools: vec![ToolDefinition {
-                name: "test_tool".to_string(),
-                description: "A test tool".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-            }],
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let tool_config = aws_request
-            .tools_config()
-            .expect("Should build tool config");
-
-        assert!(tool_config.is_none());
-    }
-
-    #[test]
-    fn test_tool_choice_specific_conversion() {
-        // Test that rig's ToolChoice::Specific converts to AWS Tool
-        let request = CompletionRequest {
-            model: None,
-            tool_choice: Some(ToolChoice::Specific {
-                function_names: vec!["specific_tool".to_string()],
-            }),
-            tools: vec![ToolDefinition {
-                name: "specific_tool".to_string(),
-                description: "A specific tool".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-            }],
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let tool_config = aws_request
-            .tools_config()
-            .expect("Should build tool config");
-
-        assert!(tool_config.is_some());
-
-        let config = tool_config.unwrap();
-
-        assert!(config.tool_choice().is_some());
-        assert!(matches!(
-            config.tool_choice().unwrap(),
-            aws_bedrock::ToolChoice::Tool(specific) if specific.name() == "specific_tool"
-        ));
-    }
-
-    #[test]
-    fn test_no_tool_choice_when_not_specified() {
-        // Test that when tool_choice is None (not set), it defaults to None in AWS
-        let request = CompletionRequest {
-            model: None,
-            tool_choice: None, // Not set
-            tools: vec![ToolDefinition {
-                name: "test_tool".to_string(),
-                description: "A test tool".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-            }],
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let tool_config = aws_request
-            .tools_config()
-            .expect("Should build tool config");
-
-        assert!(tool_config.is_some());
-        let config = tool_config.unwrap();
-        // When not specified, should be None
-        assert!(config.tool_choice().is_none());
-    }
-
-    #[test]
-    fn test_tool_with_empty_parameters() {
-        // Test that tools with empty parameters (like document_list) work correctly
-        let request = CompletionRequest {
-            model: None,
-            tools: vec![ToolDefinition {
-                name: "document_list".to_string(),
-                description: "Lists all documents".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-            }],
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let tool_config = aws_request
-            .tools_config()
-            .expect("Should build tool config");
-
-        assert!(tool_config.is_some());
-        let config = tool_config.unwrap();
-        assert_eq!(config.tools().len(), 1);
-
-        // Verify the tool was created correctly
-        assert!(
-            matches!(&config.tools()[0], aws_bedrock::Tool::ToolSpec(spec)
-                if spec.name() == "document_list"
-                && spec.description() == Some("Lists all documents")
-                && spec.input_schema().is_some()
-            )
-        );
-    }
-
-    #[test]
-    fn test_tool_with_parameters() {
-        // Test that tools with parameters work correctly
-        let request = CompletionRequest {
-            model: None,
-            tools: vec![ToolDefinition {
-                name: "get_weather".to_string(),
-                description: "Get weather for a location".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "location": {
-                            "type": "string",
-                            "description": "City name"
-                        },
-                        "units": {
-                            "type": "string",
-                            "enum": ["celsius", "fahrenheit"]
-                        }
-                    },
-                    "required": ["location"]
-                }),
-            }],
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let tool_config = aws_request
-            .tools_config()
-            .expect("Should build tool config");
-
-        assert!(tool_config.is_some());
-
-        let config = tool_config.unwrap();
-
-        assert_eq!(config.tools().len(), 1);
-        assert!(
-            matches!(&config.tools()[0], aws_bedrock::Tool::ToolSpec(spec)
-                if spec.name() == "get_weather"
-                && spec.description() == Some("Get weather for a location")
-            )
-        );
-    }
-
-    #[test]
-    fn test_system_prompt_includes_system_history() {
-        let request = CompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: vec![
-                Message::system("History system instruction"),
-                Message::User {
-                    content: vec![UserContent::Text(Text::new("test".to_string()))],
-                },
-            ],
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let system_prompt = aws_request
-            .system_prompt()
-            .expect("system prompt should build")
-            .expect("system prompt should exist");
-
-        assert_eq!(system_prompt.len(), 1);
-        assert_eq!(
-            system_prompt.first(),
-            Some(&aws_bedrock::SystemContentBlock::Text(
-                "History system instruction".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn test_system_prompt_appends_cache_point_when_prompt_caching_enabled() {
-        let request = CompletionRequest {
-            preamble: Some("System prompt".to_string()),
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, true);
-        let system_prompt = aws_request
-            .system_prompt()
-            .expect("system prompt should build")
-            .expect("system prompt should exist");
-
-        assert_eq!(system_prompt.len(), 2);
-        assert_eq!(
-            system_prompt.first(),
-            Some(&aws_bedrock::SystemContentBlock::Text(
-                "System prompt".to_string()
-            ))
-        );
-        assert!(matches!(
-            system_prompt.last(),
-            Some(aws_bedrock::SystemContentBlock::CachePoint(_))
-        ));
-    }
-
-    #[test]
-    fn test_messages_exclude_system_history() {
-        let request = CompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: vec![
-                Message::system("History system instruction"),
-                Message::User {
-                    content: vec![UserContent::Text(Text::new("test".to_string()))],
-                },
-            ],
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let messages = aws_request.messages().expect("messages should convert");
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, aws_bedrock::ConversationRole::User);
-    }
-
-    #[test]
-    fn test_messages_append_cache_point_when_prompt_caching_enabled() {
-        let aws_request = aws_request(minimal_request(), true);
-
-        let messages = aws_request.messages().expect("messages should convert");
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, aws_bedrock::ConversationRole::User);
-        assert_eq!(messages[0].content.len(), 2);
-        assert!(matches!(
-            messages[0].content.last(),
-            Some(aws_bedrock::ContentBlock::CachePoint(_))
-        ));
-    }
-
-    #[test]
-    fn test_messages_skip_cache_point_when_history_contains_reasoning() {
-        // Bedrock's Anthropic backend rejects "Cache point cannot be inserted
-        // after reasoning block" whenever the chat history carries a prior
-        // reasoning turn, even if the literal trailing block is a tool result.
-        // Verify the message-level checkpoint is suppressed in that case.
-        let reasoning =
-            rig_core::message::Reasoning::new_with_signature("thinking", Some("sig".to_string()));
-        let request = CompletionRequest {
-            chat_history: vec![
-                Message::User {
-                    content: vec![UserContent::Text(Text::new("user prompt".to_string()))],
-                },
-                Message::Assistant {
-                    id: None,
-                    content: vec![rig_core::completion::AssistantContent::Reasoning(reasoning)],
-                },
-                Message::User {
-                    content: vec![UserContent::Text(Text::new("follow up".to_string()))],
-                },
-            ],
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, true);
-        let messages = aws_request.messages().expect("messages should convert");
-
-        let last_message = messages.last().expect("messages should not be empty");
-        assert!(
-            !last_message
-                .content
-                .iter()
-                .any(|c| matches!(c, aws_bedrock::ContentBlock::CachePoint(_))),
-            "message-level cache point should be skipped when chat history contains reasoning"
-        );
-
-        // The system-prompt cache point path is independent and unaffected.
-        let system_only = aws_request.system_prompt().expect("system prompt builds");
-        assert!(system_only.is_none() || !system_only.unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_output_config_none_when_no_schema() {
-        let request = minimal_request();
-        let aws_request = aws_request(request, false);
-        assert!(
-            aws_request
-                .output_config()
-                .expect("output config builds")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn test_output_config_with_schema() {
-        let schema: schemars::Schema = serde_json::from_value(serde_json::json!({
-            "type": "object",
-            "title": "WeatherResponse",
-            "properties": {
-                "temperature": { "type": "number" },
-                "unit": { "type": "string", "enum": ["celsius", "fahrenheit"] }
-            },
-            "required": ["temperature", "unit"]
-        }))
-        .expect("valid schema");
-
-        let request = CompletionRequest {
-            output_schema: Some(schema),
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let output_config = aws_request.output_config().expect("output config builds");
-
-        assert!(output_config.is_some());
-        let config = output_config.unwrap();
-        let text_format = config.text_format().expect("text_format should be set");
-        assert_eq!(
-            *text_format.r#type(),
-            aws_bedrock::OutputFormatType::JsonSchema
-        );
-
-        let structure = text_format.structure().expect("structure should be set");
-        let json_schema = structure
-            .as_json_schema()
-            .expect("should be JsonSchema variant");
-        assert_eq!(json_schema.name(), Some("WeatherResponse"));
-
-        let parsed: serde_json::Value =
-            serde_json::from_str(json_schema.schema()).expect("schema should be valid JSON");
-        assert_eq!(parsed["type"], "object");
-        assert!(parsed["properties"]["temperature"].is_object());
-    }
-
-    #[test]
-    fn test_output_config_uses_default_name() {
-        let schema: schemars::Schema = serde_json::from_value(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "result": { "type": "string" }
-            }
-        }))
-        .expect("valid schema");
-
-        let request = CompletionRequest {
-            output_schema: Some(schema),
-            ..minimal_request()
-        };
-
-        let aws_request = aws_request(request, false);
-        let config = aws_request
-            .output_config()
-            .expect("output config builds")
-            .expect("should have config");
-        let text_format = config.text_format().expect("text_format should be set");
-        let structure = text_format.structure().expect("structure should be set");
-        let json_schema = structure
-            .as_json_schema()
-            .expect("should be JsonSchema variant");
-        assert_eq!(json_schema.name(), Some("response_schema"));
-    }
-}
+mod tests;

@@ -1,0 +1,469 @@
+{
+  "header": {
+    "deliveries": [
+      {
+        "batch": 4,
+        "id": 0,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 5,
+        "id": 1,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 8,
+        "id": 2,
+        "kind": {
+          "delivery": "outcome"
+        }
+      }
+    ],
+    "handlers": [
+      {
+        "key": "golden/model:default",
+        "family": {
+          "family": "completion",
+          "model": "default",
+          "capabilities": {
+            "composes_native_output_with_tools": false
+          }
+        }
+      },
+      {
+        "key": "golden/tool:add#0",
+        "family": {
+          "family": "tool",
+          "name": "add",
+          "description": "Add x and y together",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "description": "The first number to add"
+              },
+              "y": {
+                "type": "number",
+                "description": "The second number to add"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          }
+        }
+      }
+    ],
+    "signature": {
+      "golden/model:default": "completion",
+      "golden/tool:add#0": "tool"
+    },
+    "hooks": [],
+    "required": {},
+    "programs": {
+      "golden/run#0": {
+        "required": {
+          "golden/model:default": "completion",
+          "golden/tool:add#0": "tool"
+        },
+        "policy": 6153446861168111771
+      }
+    }
+  },
+  "records": [
+    {
+      "tool_output": null,
+      "id": 0,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a calculator here to help the user perform arithmetic operations. Use the tools provided to answer the user's question.\n\nWhen you have gathered enough information to answer, call the `final_result` tool exactly once with your final answer. Its arguments are the structured result and must satisfy the required schema. Do not return the final answer as plain text."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Use the add tool to add 17 and 25, then return a concise event object for a Rust meetup in Seattle whose summary states the sum."
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "add",
+              "description": "Add x and y together",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "description": "The first number to add"
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "The second number to add"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ]
+              }
+            },
+            {
+              "name": "final_result",
+              "description": "Call this tool exactly once with your final answer when you are done. Its arguments are the structured result and must satisfy the output schema.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "category": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "category",
+                  "summary"
+                ]
+              }
+            }
+          ],
+          "temperature": 0.0,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": false
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "call_406564"
+              },
+              "provider": {
+                "call_id": "call_406564"
+              },
+              "function": {
+                "name": "add",
+                "arguments": {
+                  "x": 17,
+                  "y": 25
+                }
+              },
+              "signature": "EvoDCvcDAWkUfRP2we56wasotSWgimF5xk73VFxgE/DltW030pVex0i0bIQmKNyts4K38gNqUII5vShvwC7KeB02+dKVHOOCrz11ZjVoTvb1MIboXB2fHytx7haKwkyx0EajZ2EZtZcJmsI65qYmUlbilvysAkLIzonr5YM+/Xml8OZqYtOOrWLK4ZolZTHh1UvWhLzdd8ePA1BJdV7ArNjqWr4nMysatG/fOvGD6qzvIE72MFjfOeDzRlbJSf83LfnnkjIB9bPEPT+5xWi941/67nhXLytWDRxeCrkXfw6JPkAcFxJt4iKmq7XDqdvfqaB9ecJwTeIYnQglChkSgGmu7i0iXjmwm/b8Dg9kqo1xNcnKQ3mlOCk6cQhSu5RuNjB0V4oefJ863X3rVJ5/kAjtUS1UaUzWES6uF2Oe1Bsys41FrTLaMea3oJvB3P/qjuM73rWJzDlKG0mCTftpeSNVfKVwtv257YsRGd1zpKrB1k7YeQZg9A4Qv3bfk/hOc4MDpZQqVljFEIQbim7Y/8WypD1UAuarMs8BcxUkjPpkocYgaSLk4gtMIHi4GdDCLZmK4Ja7NwKDLvcCM798rmItmjf6vnaexzVcR3cT05tJU5FwSpQPbjiUJChg5Pcx+QrjpAEWwvi4Nt6PR3hjVdYk1XWWiuk7IMbzpo8=",
+              "additional_params": null
+            }
+          ],
+          "usage": {
+            "input_tokens": 267,
+            "output_tokens": 18,
+            "total_tokens": 406,
+            "reasoning_tokens": 121
+          },
+          "message_id": null,
+          "response_id": "oq2yatOzL9vAqtsPi_GegAk",
+          "finish_reason": "tool_calls",
+          "provider": "gcp.gemini",
+          "model": "gemini-3-flash-preview",
+          "raw": {
+            "candidates": [
+              {
+                "content": {
+                  "parts": [
+                    {
+                      "functionCall": {
+                        "args": {
+                          "x": 17,
+                          "y": 25
+                        },
+                        "id": "call_406564",
+                        "name": "add"
+                      },
+                      "thoughtSignature": "EvoDCvcDAWkUfRP2we56wasotSWgimF5xk73VFxgE/DltW030pVex0i0bIQmKNyts4K38gNqUII5vShvwC7KeB02+dKVHOOCrz11ZjVoTvb1MIboXB2fHytx7haKwkyx0EajZ2EZtZcJmsI65qYmUlbilvysAkLIzonr5YM+/Xml8OZqYtOOrWLK4ZolZTHh1UvWhLzdd8ePA1BJdV7ArNjqWr4nMysatG/fOvGD6qzvIE72MFjfOeDzRlbJSf83LfnnkjIB9bPEPT+5xWi941/67nhXLytWDRxeCrkXfw6JPkAcFxJt4iKmq7XDqdvfqaB9ecJwTeIYnQglChkSgGmu7i0iXjmwm/b8Dg9kqo1xNcnKQ3mlOCk6cQhSu5RuNjB0V4oefJ863X3rVJ5/kAjtUS1UaUzWES6uF2Oe1Bsys41FrTLaMea3oJvB3P/qjuM73rWJzDlKG0mCTftpeSNVfKVwtv257YsRGd1zpKrB1k7YeQZg9A4Qv3bfk/hOc4MDpZQqVljFEIQbim7Y/8WypD1UAuarMs8BcxUkjPpkocYgaSLk4gtMIHi4GdDCLZmK4Ja7NwKDLvcCM798rmItmjf6vnaexzVcR3cT05tJU5FwSpQPbjiUJChg5Pcx+QrjpAEWwvi4Nt6PR3hjVdYk1XWWiuk7IMbzpo8="
+                    }
+                  ],
+                  "role": "model"
+                },
+                "finishMessage": "Model generated function call(s).",
+                "finishReason": "STOP",
+                "index": 0
+              }
+            ],
+            "modelVersion": "gemini-3-flash-preview",
+            "responseId": "oq2yatOzL9vAqtsPi_GegAk",
+            "usageMetadata": {
+              "candidatesTokenCount": 18,
+              "promptTokenCount": 267,
+              "promptTokensDetails": [
+                {
+                  "modality": "TEXT",
+                  "tokenCount": 267
+                }
+              ],
+              "serviceTier": "standard",
+              "thoughtsTokenCount": 121,
+              "totalTokenCount": 406
+            }
+          }
+        }
+      },
+      "scope": "golden/run#0"
+    },
+    {
+      "tool_output": {},
+      "id": 1,
+      "key": "golden/tool:add#0",
+      "kind": {
+        "effect": "tool_call",
+        "name": "add",
+        "args": "{\"x\":17,\"y\":25}"
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "tool_result",
+          "result": {
+            "status": "success",
+            "value": [
+              {
+                "type": "json",
+                "value": 42
+              }
+            ]
+          }
+        }
+      },
+      "scope": "golden/run#0"
+    },
+    {
+      "tool_output": null,
+      "id": 2,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a calculator here to help the user perform arithmetic operations. Use the tools provided to answer the user's question.\n\nWhen you have gathered enough information to answer, call the `final_result` tool exactly once with your final answer. Its arguments are the structured result and must satisfy the required schema. Do not return the final answer as plain text."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Use the add tool to add 17 and 25, then return a concise event object for a Rust meetup in Seattle whose summary states the sum."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_406564"
+                  },
+                  "provider": {
+                    "call_id": "call_406564"
+                  },
+                  "function": {
+                    "name": "add",
+                    "arguments": {
+                      "x": 17,
+                      "y": 25
+                    }
+                  },
+                  "signature": "EvoDCvcDAWkUfRP2we56wasotSWgimF5xk73VFxgE/DltW030pVex0i0bIQmKNyts4K38gNqUII5vShvwC7KeB02+dKVHOOCrz11ZjVoTvb1MIboXB2fHytx7haKwkyx0EajZ2EZtZcJmsI65qYmUlbilvysAkLIzonr5YM+/Xml8OZqYtOOrWLK4ZolZTHh1UvWhLzdd8ePA1BJdV7ArNjqWr4nMysatG/fOvGD6qzvIE72MFjfOeDzRlbJSf83LfnnkjIB9bPEPT+5xWi941/67nhXLytWDRxeCrkXfw6JPkAcFxJt4iKmq7XDqdvfqaB9ecJwTeIYnQglChkSgGmu7i0iXjmwm/b8Dg9kqo1xNcnKQ3mlOCk6cQhSu5RuNjB0V4oefJ863X3rVJ5/kAjtUS1UaUzWES6uF2Oe1Bsys41FrTLaMea3oJvB3P/qjuM73rWJzDlKG0mCTftpeSNVfKVwtv257YsRGd1zpKrB1k7YeQZg9A4Qv3bfk/hOc4MDpZQqVljFEIQbim7Y/8WypD1UAuarMs8BcxUkjPpkocYgaSLk4gtMIHi4GdDCLZmK4Ja7NwKDLvcCM798rmItmjf6vnaexzVcR3cT05tJU5FwSpQPbjiUJChg5Pcx+QrjpAEWwvi4Nt6PR3hjVdYk1XWWiuk7IMbzpo8=",
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call_406564"
+                  },
+                  "provider": {
+                    "call_id": "call_406564"
+                  },
+                  "name": "add",
+                  "content": [
+                    {
+                      "type": "json",
+                      "value": 42
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "add",
+              "description": "Add x and y together",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "description": "The first number to add"
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "The second number to add"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ]
+              }
+            },
+            {
+              "name": "final_result",
+              "description": "Call this tool exactly once with your final answer when you are done. Its arguments are the structured result and must satisfy the output schema.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "category": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "category",
+                  "summary"
+                ]
+              }
+            }
+          ],
+          "temperature": 0.0,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": false
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "call_284221"
+              },
+              "provider": {
+                "call_id": "call_284221"
+              },
+              "function": {
+                "name": "final_result",
+                "arguments": {
+                  "category": "Technology",
+                  "summary": "A Rust meetup in Seattle. The sum of 17 and 25 is 42.",
+                  "title": "Rust Meetup Seattle"
+                }
+              },
+              "signature": "EosGCogGAWkUfROFFddS7cCZZFOrFt5Pigp8slnCozzPtK2LNOk6wD0/o/tz1NE0fqWh/9nqTktWNSbCrm5e98F5ijL8ct+04RvdqM3iI9Z1e87sP3LZfTRK7Xwl/HNsbKyBwNuEG1H4+GpGgqdMYUYauIpfJaQE56eApbK6TgjuIr9T8cwNsYRbfy1jXcjLuzDpjrwtuLaoyr28jqnQoJ8tN5NgskQYk5dfqQ358g6UdMlrnPM8MYPxqK26R+tc70QZEVcjtfIgG8rTypLXedbN8rXBe9wfJA83Mhza4QL3R6lODxJ5rzLGW1Gonu7tXJW06ogaKW09IccEUCzqQoQAkljZQrjjOi1K0iO0dvhO8CW23Au24xSceiWdvXd8mbQTTyHwaQ6jm57Oaqq/MM2Xq96/Qh3vQF3PLZKOILxTDESciBygWTewntmOjjZoOqOYIJuhVUwTK12yasER0zPkx0OkySIdMF7FLKDXHsL4SojIOYKA5eK6M5E9RZKhiDA8gW0awSJAH2m6d7+Rs2WMSPkQi8L2uOLCw7liMKR/hjJi8qpLauPuDjgcMbfK7/DqpfFDXjU4ZQgSCY40QTYfeOIPice4SMkiuO5v+3jNDvn4QkUt30a06OlXFoo/vJa2u/gr4g6ebLlrBVHAMwca85soG1yaUUCfZGVgPCRgCGXBCcL9nMZE4unCyefalVUjlfcJRPT3CLerJBaYFycaYInGSNYvYF++zuQRNAslSyjCqSqK01InDeML+/TzHMOp74eTc+F/uyJW7GEXhYvG/OiFBRhZ46v9HS36tspMQHlHELHEmZkCX/STMCCsjJlBcy9LQaLjb96ybnA2YoNZtdT+e/ALIRS2LSr2euLjkHGPsMnU5zKY1zGu5TwWqtG54MOSekhYIPkRfVKrlbeqQgvsKLeqpABuDHuXSfiaic/eUEvGTguIx2TROe8D/xv7+KJe4hx+j9cFwo0DNovjedFCiWAVV3vyLB1USNZYCKcGxGeFO1Ka6gYIZAyFgnaWYwgV/Wb+Wm+M21o=",
+              "additional_params": null
+            }
+          ],
+          "usage": {
+            "input_tokens": 417,
+            "output_tokens": 51,
+            "total_tokens": 665,
+            "reasoning_tokens": 197
+          },
+          "message_id": null,
+          "response_id": "pK2yarPzBYDpqtsPpOnDsQE",
+          "finish_reason": "tool_calls",
+          "provider": "gcp.gemini",
+          "model": "gemini-3-flash-preview",
+          "raw": {
+            "candidates": [
+              {
+                "content": {
+                  "parts": [
+                    {
+                      "functionCall": {
+                        "args": {
+                          "category": "Technology",
+                          "summary": "A Rust meetup in Seattle. The sum of 17 and 25 is 42.",
+                          "title": "Rust Meetup Seattle"
+                        },
+                        "id": "call_284221",
+                        "name": "final_result"
+                      },
+                      "thoughtSignature": "EosGCogGAWkUfROFFddS7cCZZFOrFt5Pigp8slnCozzPtK2LNOk6wD0/o/tz1NE0fqWh/9nqTktWNSbCrm5e98F5ijL8ct+04RvdqM3iI9Z1e87sP3LZfTRK7Xwl/HNsbKyBwNuEG1H4+GpGgqdMYUYauIpfJaQE56eApbK6TgjuIr9T8cwNsYRbfy1jXcjLuzDpjrwtuLaoyr28jqnQoJ8tN5NgskQYk5dfqQ358g6UdMlrnPM8MYPxqK26R+tc70QZEVcjtfIgG8rTypLXedbN8rXBe9wfJA83Mhza4QL3R6lODxJ5rzLGW1Gonu7tXJW06ogaKW09IccEUCzqQoQAkljZQrjjOi1K0iO0dvhO8CW23Au24xSceiWdvXd8mbQTTyHwaQ6jm57Oaqq/MM2Xq96/Qh3vQF3PLZKOILxTDESciBygWTewntmOjjZoOqOYIJuhVUwTK12yasER0zPkx0OkySIdMF7FLKDXHsL4SojIOYKA5eK6M5E9RZKhiDA8gW0awSJAH2m6d7+Rs2WMSPkQi8L2uOLCw7liMKR/hjJi8qpLauPuDjgcMbfK7/DqpfFDXjU4ZQgSCY40QTYfeOIPice4SMkiuO5v+3jNDvn4QkUt30a06OlXFoo/vJa2u/gr4g6ebLlrBVHAMwca85soG1yaUUCfZGVgPCRgCGXBCcL9nMZE4unCyefalVUjlfcJRPT3CLerJBaYFycaYInGSNYvYF++zuQRNAslSyjCqSqK01InDeML+/TzHMOp74eTc+F/uyJW7GEXhYvG/OiFBRhZ46v9HS36tspMQHlHELHEmZkCX/STMCCsjJlBcy9LQaLjb96ybnA2YoNZtdT+e/ALIRS2LSr2euLjkHGPsMnU5zKY1zGu5TwWqtG54MOSekhYIPkRfVKrlbeqQgvsKLeqpABuDHuXSfiaic/eUEvGTguIx2TROe8D/xv7+KJe4hx+j9cFwo0DNovjedFCiWAVV3vyLB1USNZYCKcGxGeFO1Ka6gYIZAyFgnaWYwgV/Wb+Wm+M21o="
+                    }
+                  ],
+                  "role": "model"
+                },
+                "finishMessage": "Model generated function call(s).",
+                "finishReason": "STOP",
+                "index": 0
+              }
+            ],
+            "modelVersion": "gemini-3-flash-preview",
+            "responseId": "pK2yarPzBYDpqtsPpOnDsQE",
+            "usageMetadata": {
+              "candidatesTokenCount": 51,
+              "promptTokenCount": 417,
+              "promptTokensDetails": [
+                {
+                  "modality": "TEXT",
+                  "tokenCount": 417
+                }
+              ],
+              "serviceTier": "standard",
+              "thoughtsTokenCount": 197,
+              "totalTokenCount": 665
+            }
+          }
+        }
+      },
+      "scope": "golden/run#0"
+    }
+  ]
+}

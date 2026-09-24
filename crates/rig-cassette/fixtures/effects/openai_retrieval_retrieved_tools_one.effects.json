@@ -1,0 +1,631 @@
+{
+  "header": {
+    "run_spec": 13216707040221315529,
+    "handlers": [
+      {
+        "key": "golden/model:default",
+        "family": {
+          "family": "completion",
+          "model": "default",
+          "capabilities": {
+            "composes_native_output_with_tools": true
+          }
+        }
+      },
+      {
+        "key": "golden/tool:add#0",
+        "family": {
+          "family": "tool",
+          "name": "add",
+          "description": "Add x and y together",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "embedding": {
+            "context": null,
+            "embedding_docs": [
+              "Add two numbers together to get their sum"
+            ]
+          }
+        }
+      },
+      {
+        "key": "golden/tool:subtract#1",
+        "family": {
+          "family": "tool",
+          "name": "subtract",
+          "description": "Subtract y from x",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer"
+              },
+              "y": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          "embedding": {
+            "context": null,
+            "embedding_docs": [
+              "Subtract one number from another to get their difference"
+            ]
+          }
+        }
+      },
+      {
+        "key": "golden/retrieve:tools#0",
+        "family": {
+          "family": "retrieve"
+        }
+      }
+    ],
+    "signature": {
+      "golden/model:default": "completion",
+      "golden/retrieve:tools#0": "retrieve",
+      "golden/tool:subtract#1": "tool"
+    },
+    "hooks": [],
+    "required": {
+      "golden/model:default": "completion",
+      "golden/retrieve:tools#0": "retrieve",
+      "golden/tool:add#0": "tool",
+      "golden/tool:subtract#1": "tool"
+    },
+    "bus": {
+      "command_capacity": 16,
+      "stream_capacity": 64,
+      "serial_per_handler": false
+    }
+  },
+  "records": [
+    {
+      "tool_output": null,
+      "id": 1,
+      "key": "golden/retrieve:tools#0",
+      "kind": {
+        "effect": "retrieve",
+        "query": {
+          "query": "top_n_ids",
+          "req": {
+            "query": "Subtract 8 from 50 with the subtract tool, then reply with just the number.",
+            "samples": 1,
+            "threshold": null,
+            "additional_params": null,
+            "filter": null
+          }
+        }
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "documents",
+          "retrieved": "ids",
+          "results": [
+            [
+              0.49076605775338566,
+              "subtract"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "tool_output": null,
+      "id": 2,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a calculator. You must use the provided tools for every arithmetic operation."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Subtract 8 from 50 with the subtract tool, then reply with just the number."
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "subtract",
+              "description": "Subtract y from x",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "integer"
+                  },
+                  "y": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ]
+              }
+            }
+          ],
+          "temperature": 0.0,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": false
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "call_vjC8DKrTMOPloSucDkMkgXum"
+              },
+              "provider": {
+                "call_id": "call_vjC8DKrTMOPloSucDkMkgXum",
+                "item_id": "fc_0595106a4e9eb58f006ab39694062c87d08a6aa103a82ad526"
+              },
+              "function": {
+                "name": "subtract",
+                "arguments": {
+                  "x": 50,
+                  "y": 8
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          ],
+          "usage": {
+            "input_tokens": 78,
+            "output_tokens": 18,
+            "total_tokens": 96,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "message_id": null,
+          "response_id": "resp_0595106a4e9eb58f006ab39693620c87d0be233cc3fa6ae5f0",
+          "provider_request_id": "req_8ff9a02dd4af4fcdb8b8c7038e3708a7",
+          "finish_reason": "tool_calls",
+          "provider": "openai",
+          "model": "gpt-4o-2024-08-06",
+          "raw": {
+            "access_programs": null,
+            "background": false,
+            "billing": {
+              "payer": "developer"
+            },
+            "completed_at": 0,
+            "created_at": 0,
+            "error": null,
+            "frequency_penalty": 0.0,
+            "id": "resp_0595106a4e9eb58f006ab39693620c87d0be233cc3fa6ae5f0",
+            "incomplete_details": null,
+            "instructions": "You are a calculator. You must use the provided tools for every arithmetic operation.",
+            "max_output_tokens": null,
+            "max_tool_calls": null,
+            "metadata": {},
+            "model": "gpt-4o-2024-08-06",
+            "moderation": null,
+            "object": "response",
+            "output": [
+              {
+                "arguments": "{\"x\":50,\"y\":8}",
+                "call_id": "call_vjC8DKrTMOPloSucDkMkgXum",
+                "id": "fc_0595106a4e9eb58f006ab39694062c87d08a6aa103a82ad526",
+                "name": "subtract",
+                "status": "completed",
+                "type": "function_call"
+              }
+            ],
+            "parallel_tool_calls": true,
+            "presence_penalty": 0.0,
+            "previous_response_id": null,
+            "prompt_cache_key": null,
+            "prompt_cache_retention": "in_memory",
+            "reasoning": {
+              "context": null,
+              "effort": null,
+              "summary": null
+            },
+            "safety_identifier": null,
+            "service_tier": "default",
+            "status": "completed",
+            "store": true,
+            "temperature": 0.0,
+            "text": {
+              "format": {
+                "type": "text"
+              },
+              "verbosity": "medium"
+            },
+            "tool_choice": "auto",
+            "tool_usage": {
+              "image_gen": {
+                "input_tokens": 0,
+                "input_tokens_details": {
+                  "image_tokens": 0,
+                  "text_tokens": 0
+                },
+                "output_tokens": 0,
+                "output_tokens_details": {
+                  "image_tokens": 0,
+                  "text_tokens": 0
+                },
+                "total_tokens": 0
+              },
+              "web_search": {
+                "num_requests": 0
+              }
+            },
+            "tools": [
+              {
+                "description": "Subtract y from x",
+                "name": "subtract",
+                "output_schema": null,
+                "parameters": {
+                  "properties": {
+                    "x": {
+                      "type": "integer"
+                    },
+                    "y": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y"
+                  ],
+                  "type": "object"
+                },
+                "strict": false,
+                "type": "function"
+              }
+            ],
+            "top_logprobs": 0,
+            "top_p": 1.0,
+            "truncation": "disabled",
+            "usage": {
+              "input_tokens": 78,
+              "input_tokens_details": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0
+              },
+              "output_tokens": 18,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 96
+            },
+            "user": null
+          }
+        }
+      }
+    },
+    {
+      "tool_output": {},
+      "id": 3,
+      "key": "golden/tool:subtract#1",
+      "kind": {
+        "effect": "tool_call",
+        "name": "subtract",
+        "args": "{\"x\":50,\"y\":8}"
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "tool_result",
+          "result": {
+            "status": "success",
+            "value": [
+              {
+                "type": "json",
+                "value": 42
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "tool_output": null,
+      "id": 4,
+      "key": "golden/retrieve:tools#0",
+      "kind": {
+        "effect": "retrieve",
+        "query": {
+          "query": "top_n_ids",
+          "req": {
+            "query": "Subtract 8 from 50 with the subtract tool, then reply with just the number.",
+            "samples": 1,
+            "threshold": null,
+            "additional_params": null,
+            "filter": null
+          }
+        }
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "documents",
+          "retrieved": "ids",
+          "results": [
+            [
+              0.49076605775338566,
+              "subtract"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "tool_output": null,
+      "id": 5,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a calculator. You must use the provided tools for every arithmetic operation."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Subtract 8 from 50 with the subtract tool, then reply with just the number."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_vjC8DKrTMOPloSucDkMkgXum"
+                  },
+                  "provider": {
+                    "call_id": "call_vjC8DKrTMOPloSucDkMkgXum",
+                    "item_id": "fc_0595106a4e9eb58f006ab39694062c87d08a6aa103a82ad526"
+                  },
+                  "function": {
+                    "name": "subtract",
+                    "arguments": {
+                      "x": 50,
+                      "y": 8
+                    }
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call_vjC8DKrTMOPloSucDkMkgXum"
+                  },
+                  "provider": {
+                    "call_id": "call_vjC8DKrTMOPloSucDkMkgXum",
+                    "item_id": "fc_0595106a4e9eb58f006ab39694062c87d08a6aa103a82ad526"
+                  },
+                  "name": "subtract",
+                  "content": [
+                    {
+                      "type": "json",
+                      "value": 42
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "subtract",
+              "description": "Subtract y from x",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "integer"
+                  },
+                  "y": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ]
+              }
+            }
+          ],
+          "temperature": 0.0,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": false
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "text",
+              "text": "42"
+            }
+          ],
+          "usage": {
+            "input_tokens": 104,
+            "output_tokens": 3,
+            "total_tokens": 107,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "message_id": "msg_0595106a4e9eb58f006ab396954d9887d09f6d3d5703ad3462",
+          "response_id": "resp_0595106a4e9eb58f006ab39694af2087d0af5ed362d8a539c9",
+          "provider_request_id": "req_75a37a9bed954c06ac02df1b4bc2ed86",
+          "finish_reason": "stop",
+          "provider": "openai",
+          "model": "gpt-4o-2024-08-06",
+          "raw": {
+            "access_programs": null,
+            "background": false,
+            "billing": {
+              "payer": "developer"
+            },
+            "completed_at": 0,
+            "created_at": 0,
+            "error": null,
+            "frequency_penalty": 0.0,
+            "id": "resp_0595106a4e9eb58f006ab39694af2087d0af5ed362d8a539c9",
+            "incomplete_details": null,
+            "instructions": "You are a calculator. You must use the provided tools for every arithmetic operation.",
+            "max_output_tokens": null,
+            "max_tool_calls": null,
+            "metadata": {},
+            "model": "gpt-4o-2024-08-06",
+            "moderation": null,
+            "object": "response",
+            "output": [
+              {
+                "content": [
+                  {
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": "42",
+                    "type": "output_text"
+                  }
+                ],
+                "id": "msg_0595106a4e9eb58f006ab396954d9887d09f6d3d5703ad3462",
+                "role": "assistant",
+                "status": "completed",
+                "type": "message"
+              }
+            ],
+            "parallel_tool_calls": true,
+            "presence_penalty": 0.0,
+            "previous_response_id": null,
+            "prompt_cache_key": null,
+            "prompt_cache_retention": "in_memory",
+            "reasoning": {
+              "context": null,
+              "effort": null,
+              "summary": null
+            },
+            "safety_identifier": null,
+            "service_tier": "default",
+            "status": "completed",
+            "store": true,
+            "temperature": 0.0,
+            "text": {
+              "format": {
+                "type": "text"
+              },
+              "verbosity": "medium"
+            },
+            "tool_choice": "auto",
+            "tool_usage": {
+              "image_gen": {
+                "input_tokens": 0,
+                "input_tokens_details": {
+                  "image_tokens": 0,
+                  "text_tokens": 0
+                },
+                "output_tokens": 0,
+                "output_tokens_details": {
+                  "image_tokens": 0,
+                  "text_tokens": 0
+                },
+                "total_tokens": 0
+              },
+              "web_search": {
+                "num_requests": 0
+              }
+            },
+            "tools": [
+              {
+                "description": "Subtract y from x",
+                "name": "subtract",
+                "output_schema": null,
+                "parameters": {
+                  "properties": {
+                    "x": {
+                      "type": "integer"
+                    },
+                    "y": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "x",
+                    "y"
+                  ],
+                  "type": "object"
+                },
+                "strict": false,
+                "type": "function"
+              }
+            ],
+            "top_logprobs": 0,
+            "top_p": 1.0,
+            "truncation": "disabled",
+            "usage": {
+              "input_tokens": 104,
+              "input_tokens_details": {
+                "cache_write_tokens": 0,
+                "cached_tokens": 0
+              },
+              "output_tokens": 3,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 107
+            },
+            "user": null
+          }
+        }
+      }
+    }
+  ]
+}

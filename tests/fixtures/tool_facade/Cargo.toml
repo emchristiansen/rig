@@ -43,10 +43,8 @@ all_root = [
     "rig/audio",
     "rig/image",
     "rig/derive",
-    "rig/discord-bot",
     "rig/pdf",
     "rig/epub",
-    "rig/rayon",
     "rig/rmcp",
     "rig/socks",
     "rig/reqwest",
@@ -58,4 +56,5 @@ all_root = [
     "rig/reqwest-middleware",
     "rig/reqwest-middleware-rustls",
     "rig/reqwest-middleware-native-tls",
+    "rig/typesafeai",
 ]

@@ -1,15 +1,6 @@
-#![allow(
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::unwrap_used,
-    clippy::unreachable
-)]
+#![allow(clippy::expect_used, clippy::panic)]
 
-#[path = "common/reasoning.rs"]
-mod reasoning;
-#[path = "common/support.rs"]
-mod support;
+use rig_test_support::support;
 
 #[path = "providers/xiaomimimo/mod.rs"]
 mod xiaomimimo;

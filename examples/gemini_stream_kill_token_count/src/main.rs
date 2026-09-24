@@ -50,13 +50,16 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use rig::completion::{CompletionError, CompletionModel, Usage};
+use rig::completion::{CompletionModel, Usage};
+use rig::error::ErrorReport;
+use rig::error::ProviderError;
+use rig::message::AssistantContent;
 use rig::prelude::*;
-use rig::providers::gemini;
+use rig::providers::gemini::Gemini;
 use rig::providers::gemini::completion::gemini_api_types::{
     AdditionalParameters, GenerationConfig, ThinkingConfig,
 };
-use rig::streaming::{StreamedAssistantContent, StreamingCompletionResponse};
+use rig::streaming::{BlockClose, Delta, StreamEvent, StreamingCompletionResponse};
 
 const MODEL: &str = "gemini-2.5-flash";
 /// Inject the disruption once this many output chars have streamed, so there is
@@ -108,7 +111,7 @@ impl Disrupt {
 }
 
 impl Stream for Disrupt {
-    type Item = Result<StreamedAssistantContent, CompletionError>;
+    type Item = Result<StreamEvent, ErrorReport>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
@@ -131,9 +134,11 @@ impl Stream for Disrupt {
                     return Poll::Ready(None);
                 }
                 Disruption::TransportError => {
-                    return Poll::Ready(Some(Err(CompletionError::ProviderError(
+                    // The same in-band shape a real transport failure takes:
+                    // the provider's error, mapped to the stream's report.
+                    return Poll::Ready(Some(Err(ErrorReport::from(&ProviderError::Provider(
                         "injected mid-stream transport drop".to_string(),
-                    ))));
+                    )))));
                 }
                 Disruption::Stall => {
                     // Park forever without scheduling a wake: the consumer's
@@ -155,13 +160,21 @@ impl Stream for Disrupt {
 }
 
 /// Length of human-visible text in a stream item (text + reasoning deltas).
-fn visible_len(item: &StreamedAssistantContent) -> usize {
+fn visible_len(item: &StreamEvent) -> usize {
     match item {
-        StreamedAssistantContent::Text(t) => t.text.chars().count(),
-        StreamedAssistantContent::ReasoningDelta { reasoning, .. } => reasoning.chars().count(),
-        StreamedAssistantContent::Reasoning { reasoning: r, .. } => {
-            r.display_text().chars().count()
-        }
+        StreamEvent::BlockDelta {
+            delta: Delta::Text { text },
+            ..
+        } => text.chars().count(),
+        StreamEvent::BlockDelta {
+            delta: Delta::Reasoning { text },
+            ..
+        } => text.chars().count(),
+        StreamEvent::BlockEnd {
+            end: BlockClose::Reasoning { .. },
+            block: Some(AssistantContent::Reasoning(r)),
+            ..
+        } => r.display_text().chars().count(),
         _ => 0,
     }
 }
@@ -194,7 +207,7 @@ async fn drain_with_accounting<S>(
     prompt_text: &str,
 ) -> anyhow::Result<Report>
 where
-    S: Stream<Item = Result<StreamedAssistantContent, CompletionError>> + Unpin,
+    S: Stream<Item = Result<StreamEvent, ErrorReport>> + Unpin,
 {
     let mut output = String::new();
     let mut authoritative: Option<Usage> = None;
@@ -204,7 +217,7 @@ where
         match tokio::time::timeout(READ_TIMEOUT, stream.next()).await {
             // (4) Stall / half-open: no bytes within the read window.
             Err(_elapsed) => {
-                reason = Some(format!("stall: no data within {:?}", READ_TIMEOUT));
+                reason = Some(format!("stall: no data within {READ_TIMEOUT:?}"));
                 break;
             }
             // Stream ended.
@@ -222,21 +235,31 @@ where
                 break;
             }
             Ok(Some(Ok(item))) => match item {
-                StreamedAssistantContent::Text(text) => output.push_str(&text.text),
-                StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                    output.push_str(&reasoning)
+                StreamEvent::BlockDelta {
+                    delta: Delta::Text { text },
+                    ..
+                } => output.push_str(&text),
+                StreamEvent::BlockDelta {
+                    delta: Delta::Reasoning { text },
+                    ..
+                } => {
+                    output.push_str(&text);
                 }
-                StreamedAssistantContent::Reasoning { reasoning: r, .. } => {
-                    output.push_str(&r.display_text())
+                StreamEvent::BlockEnd {
+                    end: BlockClose::Reasoning { .. },
+                    block: Some(AssistantContent::Reasoning(r)),
+                    ..
+                } => {
+                    output.push_str(&r.display_text());
                 }
-                StreamedAssistantContent::Final(resp) => {
+                StreamEvent::Final(resp) => {
                     // Authoritative usage. A premature clean close (shape #3)
                     // never emits a Final at all — the absence of a terminal
                     // record is itself the truncation signal — so reaching this
-                    // arm means the stream completed. Still guard on non-zero
-                    // usage in case the provider reported none.
+                    // arm means the stream completed. Still guard on reported
+                    // usage in case the provider sent none.
                     let usage = resp.usage;
-                    if usage.has_values() {
+                    if usage.is_reported() {
                         authoritative = Some(usage);
                     }
                 }
@@ -253,10 +276,12 @@ where
             let input_tokens = count_tokens(http, api_key, prompt_text).await?;
             let output_tokens = count_tokens(http, api_key, &output).await?;
 
-            let mut usage = Usage::new();
-            usage.input_tokens = input_tokens;
-            usage.output_tokens = output_tokens;
-            usage.total_tokens = input_tokens + output_tokens;
+            let usage = Usage {
+                input_tokens: Some(input_tokens),
+                output_tokens: Some(output_tokens),
+                total_tokens: Some(input_tokens + output_tokens),
+                ..Default::default()
+            };
 
             Outcome::Estimated {
                 usage,
@@ -324,8 +349,8 @@ async fn run_scenario(
     http: &reqwest::Client,
     api_key: &str,
 ) -> anyhow::Result<Report> {
-    let client = gemini::Client::from_env()?;
-    let model = client.completion_model(MODEL);
+    let client = Gemini::from_env()?.bound()?;
+    let model = client.completion(MODEL);
 
     let stream = model
         .completion_request(prompt)
@@ -347,14 +372,21 @@ fn print_report(report: &Report) {
             println!("result: CLEAN — authoritative usage from final chunk");
             println!(
                 "  input={} output={} reasoning={} total={}",
-                usage.input_tokens, usage.output_tokens, usage.reasoning_tokens, usage.total_tokens
+                usage.input_tokens.unwrap_or(0),
+                usage.output_tokens.unwrap_or(0),
+                usage
+                    .reasoning_tokens
+                    .map_or_else(|| "unreported".to_string(), |n| n.to_string()),
+                usage.total_tokens.unwrap_or(0)
             );
         }
         Outcome::Estimated { usage, reason } => {
             println!("result: ESTIMATED via countTokens (cut: {reason})");
             println!(
                 "  input={} output={} total={}  (output is a lower bound; hidden thoughts uncounted)",
-                usage.input_tokens, usage.output_tokens, usage.total_tokens
+                usage.input_tokens.unwrap_or(0),
+                usage.output_tokens.unwrap_or(0),
+                usage.total_tokens.unwrap_or(0)
             );
         }
     }

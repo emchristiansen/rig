@@ -1,0 +1,84 @@
+when:
+  path: /api/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"messages":[{"content":[{"text":"You are a helpful assistant.","type":"text"}],"role":"system"},{"content":"hello","role":"user"}],"model":"deepseek/deepseek-v3.2","provider":{"allow_fallbacks":true,"order":["DeepInfra","DeepSeek","Chutes"]}}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  body: '{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"Hello! 😊 How can I assist you today?","reasoning":null,"refusal":null,"role":"assistant"},"native_finish_reason":"stop"}],"created":0,"id":"gen-1790152512-HkUeNteOjMoD6ipkkjHC","model":"deepseek/deepseek-v3.2","object":"chat.completion","provider":"GMICloud","service_tier":null,"system_fingerprint":null,"usage":{"completion_tokens":11,"completion_tokens_details":{"audio_tokens":0,"image_tokens":0,"reasoning_tokens":0},"cost":5.7024e-6,"cost_details":{"upstream_inference_completions_cost":3.4056e-6,"upstream_inference_cost":5.7024e-6,"upstream_inference_prompt_cost":2.2968e-6},"is_byok":false,"prompt_tokens":11,"prompt_tokens_details":{"audio_tokens":0,"cache_write_tokens":0,"cached_tokens":0,"video_tokens":0},"total_tokens":22}}'
+---
+when:
+  path: /api/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"messages":[{"content":[{"text":"You are a helpful assistant.","type":"text"}],"role":"system"},{"content":"planet","role":"user"}],"model":"deepseek/deepseek-v3.2","provider":{"ignore":["Google Vertex"]}}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  body: '{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"Earth is the third planet from the Sun and the only known celestial body to harbor life. It has a diverse environment with oceans, mountains, and atmosphere that supports a wide variety of ecosystems.","reasoning":null,"refusal":null,"role":"assistant"},"native_finish_reason":"stop"}],"created":0,"id":"gen-1790152514-NhRssW6oSSCJqLaWhhuX","model":"deepseek/deepseek-v3.2","object":"chat.completion","provider":"GMICloud","service_tier":null,"system_fingerprint":null,"usage":{"completion_tokens":38,"completion_tokens_details":{"audio_tokens":0,"image_tokens":0,"reasoning_tokens":0},"cost":0.0000140616,"cost_details":{"upstream_inference_completions_cost":0.0000117648,"upstream_inference_cost":0.0000140616,"upstream_inference_prompt_cost":2.2968e-6},"is_byok":false,"prompt_tokens":11,"prompt_tokens_details":{"audio_tokens":0,"cache_write_tokens":0,"cached_tokens":0,"video_tokens":0},"total_tokens":49}}'
+---
+when:
+  path: /api/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"messages":[{"content":[{"text":"You are a helpful assistant.","type":"text"}],"role":"system"},{"content":"french hello","role":"user"}],"model":"deepseek/deepseek-v3.2","provider":{"sort":"latency"}}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  body: '{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"Bonjour ! 😊\n\n\"Hello\" in French is **\"Bonjour\"** (pronounced \"bon-zhoor\"). \n\nHere are a few other useful greetings:\n- **Salut** – Informal \"Hi\" or \"Bye\"\n- **Bonsoir** – \"Good evening\"\n- **Bonne nuit** – \"Good night\"\n\nIs there anything else you''d like to know about French greetings or phrases?","reasoning":null,"refusal":null,"role":"assistant"},"native_finish_reason":"stop"}],"created":0,"id":"gen-1790152516-7ZeO7cCQydVhwMQdUBcZ","model":"deepseek/deepseek-v3.2","object":"chat.completion","provider":"Friendli","service_tier":null,"system_fingerprint":null,"usage":{"completion_tokens":89,"completion_tokens_details":{"audio_tokens":0,"image_tokens":0,"reasoning_tokens":0},"cost":0.000146,"cost_details":{"upstream_inference_completions_cost":0.0001335,"upstream_inference_cost":0.000146,"upstream_inference_prompt_cost":0.0000125},"is_byok":false,"prompt_tokens":25,"prompt_tokens_details":{"audio_tokens":0,"cache_write_tokens":0,"cached_tokens":0,"video_tokens":0},"total_tokens":114}}'
+---
+when:
+  path: /api/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"messages":[{"content":[{"text":"You are a helpful assistant.","type":"text"}],"role":"system"},{"content":"sky color","role":"user"}],"model":"deepseek/deepseek-v3.2","provider":{"require_parameters":true}}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  body: '{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"The color of the sky changes throughout the day and under different conditions.\n\n**During the day**, the sky typically appears **blue** because sunlight scatters off nitrogen and oxygen molecules in Earth''s atmosphere. This is known as **Rayleigh scattering**, which affects shorter wavelengths (blue and violet light) more than longer ones (red and yellow).\n\n**At sunrise or sunset**, the sky can turn shades of **red, orange, pink, or purple**. This happens because sunlight has to pass through more of the atmosphere, scattering blue light away and letting longer wavelengths dominate.\n\n**At night**, the sky appears **black** because there is no sunlight to scatter, revealing space. With the naked eye, you can see stars, planets, and sometimes the Milky Way as faint bands of light.\n\n**Other conditions:**\n- **Overcast sky** – gray or white due to cloud cover.\n- **Stormy sky** – often dark gray or greenish.\n- **Twilight** – deep blue or purple after sunset or before sunrise.\n- **Phenomena** – auroras can create green, pink, or red displays; pollution or dust can create hazy white, orange, or brown skies.\n\nSo in short: usually blue, but it can be many colors!","reasoning":null,"refusal":null,"role":"assistant"},"native_finish_reason":"stop"}],"created":0,"id":"gen-1790152518-KFBK45GuYVoXQPOIOEtx","model":"deepseek/deepseek-v3.2","object":"chat.completion","provider":"AtlasCloud","service_tier":null,"system_fingerprint":null,"usage":{"completion_tokens":255,"completion_tokens_details":{"audio_tokens":0,"image_tokens":0,"reasoning_tokens":0},"cost":0.00010002,"cost_details":{"upstream_inference_completions_cost":0.0000969,"upstream_inference_cost":0.00010002,"upstream_inference_prompt_cost":3.12e-6},"is_byok":false,"prompt_tokens":12,"prompt_tokens_details":{"audio_tokens":0,"cache_write_tokens":0,"cached_tokens":0,"video_tokens":0},"total_tokens":267}}'
+---
+when:
+  path: /api/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"messages":[{"content":[{"text":"You are a helpful assistant.","type":"text"}],"role":"system"},{"content":"country","role":"user"}],"model":"deepseek/deepseek-v3.2","provider":{"max_price":{"completion":0.5,"prompt":0.3}}}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  body: '{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"There are 195 countries in the world today, recognized by the United Nations. Can you share which country you''re interested in, or if you''re looking for specific information like history, culture, or travel tips? I''d be happy to help!","reasoning":null,"refusal":null,"role":"assistant"},"native_finish_reason":"stop"}],"created":0,"id":"gen-1790152525-kF0UVRrr8gBIaFpb2ygh","model":"deepseek/deepseek-v3.2","object":"chat.completion","provider":"SiliconFlow","service_tier":null,"system_fingerprint":null,"usage":{"completion_tokens":50,"completion_tokens_details":{"audio_tokens":0,"image_tokens":0,"reasoning_tokens":0},"cost":0.000023849,"cost_details":{"upstream_inference_completions_cost":0.000021,"upstream_inference_cost":0.000023849,"upstream_inference_prompt_cost":2.849e-6},"is_byok":false,"prompt_tokens":11,"prompt_tokens_details":{"audio_tokens":0,"cache_write_tokens":0,"cached_tokens":0,"video_tokens":0},"total_tokens":61}}'

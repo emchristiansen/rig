@@ -1,8 +1,7 @@
 //! Hugging Face tools smoke test.
 
-use rig::completion::Prompt;
 use rig::prelude::*;
-use rig::providers::huggingface;
+use rig::providers::openai::wire::{HUGGINGFACE, OpenAI};
 
 use crate::support::{
     Adder, Subtract, TOOLS_PREAMBLE, TOOLS_PROMPT, assert_mentions_expected_number,
@@ -11,8 +10,11 @@ use crate::support::{
 #[tokio::test]
 #[ignore = "requires HUGGINGFACE_API_KEY"]
 async fn tools_smoke() {
-    let client = huggingface::Client::from_env().expect("client should build");
-    let agent = client
+    let provider = OpenAI::from_env_with(&HUGGINGFACE)
+        .expect("config should build from env")
+        .bound()
+        .expect("transport should build");
+    let agent = provider
         .agent("deepseek-ai/DeepSeek-R1-Distill-Qwen-32B")
         .preamble(TOOLS_PREAMBLE)
         .tool(Adder)
@@ -24,5 +26,5 @@ async fn tools_smoke() {
         .await
         .expect("tool prompt should succeed");
 
-    assert_mentions_expected_number(&response, -3);
+    assert_mentions_expected_number(&response.output, -3);
 }

@@ -12,7 +12,8 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use rig::prelude::*;
-use rig::{completion::Prompt, providers, tool::Tool};
+use rig::providers::openai::OpenAI;
+use rig::{providers, tool::Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::Level;
@@ -143,8 +144,8 @@ async fn main() -> Result<(), anyhow::Error> {
         .with(otel_layer)
         .init();
 
-    // Create OpenAI client
-    let openai_client = providers::openai::Client::from_env()?;
+    // Create the OpenAI Responses provider, bound to the bundled transport
+    let openai_client = OpenAI::from_env()?.bound()?;
 
     // Create agent with a single context prompt and two tools
     let calculator_agent = openai_client
@@ -161,7 +162,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     println!(
         "OpenAI Calculator Agent: {}",
-        calculator_agent.prompt("Calculate 2 - 5").await?
+        calculator_agent.prompt("Calculate 2 - 5").await?.output
     );
 
     let _ = provider.shutdown();

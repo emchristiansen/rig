@@ -9,6 +9,52 @@ repository = "https://github.com/0xPlaygrounds/rig"
 # Examples now live in their own packages under `examples/*`; don't auto-discover
 # them as examples of this crate.
 autoexamples = false
+# The published tarball no longer sweeps the provider cassettes: they live with
+# the engine that reads them (`crates/rig-cassette/fixtures/cassettes`), which
+# Cargo skips here because it is its own package.
+#
+# This manifest is both the workspace root and the `rig` facade package, so the
+# package directory is the whole repository and `cargo package` sweeps it: CI
+# workflows, README artwork, the Nix flake, release tooling, `examples/` data
+# and a `tests/` tree that cannot compile from the tarball at all, since its
+# `rig-test-support` dev dependency is path-only and Cargo strips it when
+# publishing. The facade's own source is one file of re-exports.
+#
+# An allowlist, not an exclude list (#2349): "not shipped" is the safe default,
+# so this does not need extending every time the repository grows a directory,
+# and it is the only form that keeps out untracked-but-unignored files - cargo
+# packages whatever happens to be lying next to the manifest at publish time.
+#
+# NOTE: this is [package].include and must stay ABOVE the [workspace] header.
+# Below it, it parses as `workspace.include` and is ignored with only an
+# unused-key warning. The `exclude` further down is [workspace].exclude, which
+# is member discovery - a different key. `include` and `exclude` cannot coexist
+# on [package]: `include` wins and `exclude` goes inert.
+#
+# Patterns need the leading `/`. Cargo's globs are gitignore-style and match at
+# any depth, so an unanchored "README.md" would also pull in
+# `examples/README.md` and `tests/README.md`.
+#
+# LICENSE must be listed explicitly: `license = "MIT"` is an SPDX expression,
+# not `license-file`, so cargo does not add the file on its own.
+#
+# Packaging emits a `warning: ignoring test 'x'` line per test target. Do NOT
+# silence those with `autotests = false`: that stops local discovery too and
+# recreates the "tests run in no CI job" hole in the `default-members` comment
+# below (#2258). `cargo xtask check-packaging` gates the result.
+include = [
+    "/src/**",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/MIGRATING.md",
+    # Referenced by README.md, which registries render from the tarball. The
+    # other five img/ files are referenced by nothing and stay out.
+    "/img/rig-rebranded-logo-white.svg",
+    "/img/rig-rebranded-logo-black.svg",
+    "/img/built-by-playgrounds.svg",
+    "/img/ryzome-bg.png",
+]
 
 [package.metadata.docs.rs]
 all-features = true
@@ -18,7 +64,11 @@ rustdoc-args = ["--cfg", "docsrs"]
 resolver = "3"
 members = [
     "crates/*",
+    "crates/rig-cassette/tests/minimal",
     "examples/*",
+    "xtask",
+    "test-support/service-tests",
+    "test-support/rig-test-support",
 ]
 # The root manifest is itself the `rig` facade package, so without an
 # explicit `default-members` a bare `cargo nextest run` resolved to the
@@ -36,20 +86,39 @@ members = [
 # `cargo test -p rig-core --test macro_hygiene` step. Both are required for
 # this exclusion to stay honest: until the first existed, every test in
 # rig-derive ran nowhere.
+# The nested cassette runner is selected separately by bus-verification and
+# ecs-parity: default-member feature unification defeats its minimal JSON graph.
 default-members = [
     ".",
     "crates/rig-core",
+    "crates/rig-cassette",
     "crates/rig-agent",
+    "crates/rig-ecs",
+    "crates/rig-reqwest",
+    "crates/rig-tungstenite",
+    "crates/rig-typesafeai",
     "crates/rig-bedrock",
     "crates/rig-candle",
     "crates/rig-gemini-grpc",
+    "test-support/service-tests",
+    "test-support/rig-test-support",
 ]
 exclude = [
     "archived",
     # Data/infra dirs under examples/ that are not Cargo packages.
     "examples/documents",
     "examples/otel",
+    # Its own workspace: `serenity` is the only published Discord client and
+    # pins a `rustls` major with four unpatched `rustls-webpki` advisories.
+    # Excluding it keeps that subtree out of the workspace lockfile.
+    "examples/discord_bot",
 ]
+
+[workspace.lints.rust]
+# `--cfg rig_loom` selects the model checker's sync shims (rig-agent's
+# `sync.rs`); a build flag, not a feature, and crate-specific so no
+# dependency reacts to it (`event-listener` reacts to a bare `loom`).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rig_loom)'] }
 
 [workspace.lints.clippy]
 dbg_macro = "forbid"
@@ -65,124 +134,173 @@ unimplemented = "forbid"
 unreachable = "deny"
 unwrap_used = "deny"
 
+# Size and shape heuristics, not correctness: in this tree each one only ever
+# produced a suppression, a box inside a public enum variant, or a type alias
+# that shortened a signature instead of naming a concept.
+large_enum_variant = "allow"
+result_large_err = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+should_implement_trait = "allow"
+
 [profile.release]
 lto = true
 opt-level = "s"
 
 
 [workspace.package]
-version = "0.41.0"
+version = "0.42.0"
 edition = "2024"
 
 [workspace.dependencies]
+# Every requirement below is a FLOOR, not a pin: `tokio = "1"` means `^1`,
+# and a downstream resolves anywhere inside that range — usually to whatever
+# its own lockfile already holds. So each floor is the lowest version rig's
+# own code needs, to the best it can be verified: a bare major (or `0.minor`)
+# where rig uses only long-stable API, and `major.minor[.patch]` only where a
+# feature or API rig relies on first appeared (each such floor says which).
+# Do not raise a floor because a newer release exists — Dependabot is
+# configured (`versioning-strategy: increase-if-necessary`) to move only
+# `Cargo.lock` for in-range releases, and every rig release used to ship the
+# raised floors, forcing downstream users to `cargo update` a dozen crates
+# just to take a point release (#2195). Raise a floor when rig starts using
+# an API the old floor lacks, and say so in the changelog.
+# `scripts/check-dependency-floors.py` (CI: slow.yaml `dependency-floors`)
+# downgrades every direct dependency to its floor and builds the workspace,
+# so a floor that has silently rotted fails there rather than downstream.
+#
 # The `rig` facade is the workspace-root package; examples depend on it via
 # `rig.workspace = true` (add per-example features at the use site).
-rig = { path = ".", version = "0.41.0" }
-rig-agent = { path = "crates/rig-agent", version = "0.41.0" }
-rig-core = { path = "crates/rig-core", version = "0.41.0" }
-anyhow = "1.0.102"
+rig = { path = ".", version = "0.42.0" }
+rig-agent = { path = "crates/rig-agent", version = "0.42.0" }
+rig-reqwest = { path = "crates/rig-reqwest", version = "0.42.0" }
+rig-rmcp = { path = "crates/rig-rmcp", version = "0.42.0" }
+rig-core = { path = "crates/rig-core", version = "0.42.0" }
+rig-cassette = { path = "crates/rig-cassette", version = "0.42.0", default-features = false }
+anyhow = "1"
 arrow-array = "58"
-as-any = "0.3.2"
-assert_fs = "1.1.3"
-async-stream = "0.3.6"
-axum = "0.8.4"
-aws-config = { version = "1.8.5", default-features = false }
-aws-sdk-bedrockruntime = { version = "1.124.0", default-features = false }
-aws-smithy-eventstream = "0.60.18"
-aws-smithy-runtime-api = "1.11.3"
-aws-smithy-types = "1.3.2"
-base64 = "0.22.1"
-bytes = "1.10.1"
-candle-core = "0.11.0"
-candle-nn = "0.11.0"
-candle-transformers = "0.11.0"
+assert_fs = "1"
+async-stream = "0.3"
+axum = "0.8"
+aws-config = { version = "1", default-features = false }
+# 1.124: `OutputConfig`/`ServiceTier`/citations types rig-bedrock maps.
+aws-sdk-bedrockruntime = { version = "1.124", default-features = false }
+aws-smithy-eventstream = "0.60"
+aws-smithy-runtime-api = "1"
+aws-smithy-types = "1"
+base64 = "0.22"
+bytes = "1"
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
 chrono = "0.4"
-convert_case = "0.11.0"
-deranged = "=0.5.8"
-dotenvy = "0.15.7"
-epub = "2.1.4"
-ethers = "2.0.14"
-eventsource-stream = "0.2.3"
-fastembed = { version = "4.9.1", default-features = false }
-fastrand = "2.3.0"
-futures = "0.3.32"
-futures-timer = "3.0.3"
-glob = "0.3.2"
-google-cloud-auth = "1.10"
-google-cloud-aiplatform-v1 = { version = "1.11.0", default-features = false, features = [
+convert_case = "0.11"
+dotenvy = "0.15"
+epub = "2"
+ethers = "2"
+# 4.5: the `hf-hub-*` feature split rig-fastembed forwards.
+fastembed = { version = "4.5", default-features = false }
+fastrand = "2"
+futures = "0.3"
+# Runtime-agnostic executor used by the `agent_no_tokio` example, and the
+# pool rig-ecs runs handler futures on. Bevy 0.19.1: crates.io, never git;
+# the tooling check verifies Bevy sources and declared release floors. Each crate has default
+# features off and only what rig-ecs needs: the `bus` module's three, and
+# `bevy_reflect` / `bevy_asset` behind rig-ecs's `reflect` / `assets`
+# features (the inspector's view of the graph; prompts and tool
+# definitions as assets).
+bevy_tasks = { version = "0.19.1", default-features = false, features = ["multi_threaded"] }
+bevy_platform = { version = "0.19.1", default-features = false }
+bevy_ecs = { version = "0.19.1", default-features = false, features = ["std", "multi_threaded"] }
+bevy_app = { version = "0.19.1", default-features = false, features = ["std"] }
+bevy_reflect = { version = "0.19.1", default-features = false, features = ["std"] }
+bevy_asset = { version = "0.19.1", default-features = false }
+bevy_time = { version = "0.19.1", default-features = false, features = ["std", "bevy_reflect"] }
+bevy_diagnostic = { version = "0.19.1", default-features = false, features = ["std"] }
+futures-timer = "3"
+glob = "0.3"
+google-cloud-auth = "1"
+google-cloud-gax = "1"
+# 1.7: `ThinkingLevel`, `ImageConfig`, `FunctionResponse{Blob,FileData}`.
+google-cloud-aiplatform-v1 = { version = "1.7", default-features = false, features = [
     "prediction-service",
 ] }
-http = "1.3.1"
-httpmock = "0.8.3"
-hyper-util = "0.1.14"
-indexmap = "2.14.0"
-indoc = "2.0.6"
+http = "1"
+httpdate = "1"
+# 0.8.2: `Recording::export_async` (cassette harness).
+httpmock = "0.8.2"
+# 0.1.2: the `service` feature.
+hyper-util = "0.1.2"
+indexmap = "2"
+indoc = "2"
 lancedb = { version = "0.30", default-features = false }
-log = "0.4.27"
-lopdf = { version = "0.44.0", default-features = false, features = ["rayon"] }
-mime = "0.3.17"
-mime_guess = "2.0.5"
-mongodb = "3.7.0"
-nanoid = "0.4"
-neo4rs = "0.8.0"
-opentelemetry = "0.32.0"
-opentelemetry-otlp = "0.32.0"
-opentelemetry_sdk = "0.32.1"
-ordered-float = "5.0.0"
+log = "0.4"
+lopdf = { version = "0.44", default-features = false, features = ["rayon"] }
+mime = "0.3"
+mime_guess = "2"
+# 3.2: 3.0/3.1 no longer build against their own `^3` macro crate.
+mongodb = "3.2"
+neo4rs = "0.8"
+opentelemetry = "0.32"
+opentelemetry-otlp = "0.32"
+opentelemetry_sdk = "0.32"
+ordered-float = "5"
+# 0.4.2: the first release whose `sqlx` feature accepts sqlx 0.9.
 pgvector = "0.4.2"
-pin-project-lite = "0.2.16"
-proc-macro2 = "1.0.95"
-qdrant-client = { version = "1.14.0", default-features = false, features = [
+pin-project-lite = "0.2"
+proc-macro2 = "1"
+# 1.10: the `Qdrant` client, `Payload`, and the query/upsert builders.
+qdrant-client = { version = "1.10", default-features = false, features = [
     "serde",
 ] }
-quick-xml = "0.40.1"
-quote = "1.0.40"
-rayon = "1.10.0"
-redis = "1.2.1"
+quick-xml = "0.41"
+quote = "1"
+redis = "1"
 reqwest = { version = "0.13", default-features = false }
-reqwest-middleware = { version = "0.5.2", default-features = false }
+reqwest-middleware = { version = "0.5", default-features = false }
 reqwest-retry = "0.9"
-rmcp = "2.2.0"
-url = "2.5"
+rmcp = "2"
+url = "2"
 rusqlite = "0.32"
-rustls = "0.23"
-scylla = "1.2.0"
-schemars = "1.0.4"
-serde = "1.0.219"
-serde_yaml = "0.9.34"
-serde_json = "1.0.150"
-safetensors = "0.8.0"
-sha2 = "0.10.9"
-serde_path_to_error = "0.1.17"
+scylla = "1"
+schemars = "1"
+serde = "1"
+serde_yaml = "0.9"
+# 1.0.54: the `float_roundtrip` feature.
+serde_json = "1.0.54"
+safetensors = "0.8"
+sha2 = "0.10"
+serde_path_to_error = "0.1"
 sqlite-vec = "0.1"
-sqlx = "0.9.0"
-surrealdb = "3.0.2"
-syn = "2.0.104"
-serenity = "0.12.4"
-term_size = "0.3.2"
+sqlx = "0.9"
+# 3.2: 3.0/3.1 no longer build against `surrealdb-core ^3` as published.
+surrealdb = "3.2"
+syn = "2"
+term_size = "0.3"
 testcontainers = "0.27"
-textwrap = "0.16.2"
-thiserror = "2.0.12"
-tokio = "1.52.3"
-tokio-rusqlite = { version = "0.6.0", default-features = false }
-tokio-test = "0.4.4"
-tokio-stream = "0.1.17"
-tokio-tungstenite = { version = "0.29.0", default-features = false }
-tokenizers = { version = "0.22.2", default-features = false }
-tonic = "0.14.6"
-tonic-build = "0.14.6"
-tonic-prost = "0.14.5"
-tonic-prost-build = "0.14.6"
-prost = "0.14.3"
-tracing = "0.1.41"
+textwrap = "0.16"
+thiserror = "2"
+tokio = "1"
+tokio-rusqlite = { version = "0.6", default-features = false }
+tokio-test = "0.4"
+tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.29", default-features = false }
+tokenizers = { version = "0.22", default-features = false }
+tonic = "0.14"
+tonic-build = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
+tracing = "0.1"
+# 0.2.5: `Instrumented<S>: Stream` under `futures-03` for futures 0.3 stable.
 tracing-futures = "0.2.5"
-tracing-opentelemetry = "0.33.0"
-tracing-subscriber = "0.3.19"
-uuid = "1.17.0"
-wasm-bindgen-futures = "0.4.54"
-wasm-bindgen = "0.2.118"
-web-time = "1.1.0"
-zerocopy = "0.8.50"
+tracing-opentelemetry = "0.33"
+tracing-subscriber = "0.3"
+uuid = "1"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen = "0.2"
+web-time = "1"
+zerocopy = "0.8"
 
 [workspace.metadata.cargo-autoinherit]
 # Skip cargo-autoinherit for these packages
@@ -192,82 +310,80 @@ exclude-members = ["crates/rig-core", "crates/rig-derive"]
 workspace = true
 
 [dependencies]
-rig-core = { path = "crates/rig-core", version = "0.41.0", default-features = false }
-rig-agent = { path = "crates/rig-agent", version = "0.41.0", optional = true, default-features = false }
-rig-bedrock = { path = "crates/rig-bedrock", version = "0.41.0", optional = true, default-features = false }
-rig-candle = { path = "crates/rig-candle", version = "0.41.0", optional = true, default-features = false }
-rig-fastembed = { path = "crates/rig-fastembed", version = "0.41.0", optional = true, default-features = false }
-rig-gemini-grpc = { path = "crates/rig-gemini-grpc", version = "0.41.0", optional = true, default-features = false }
-rig-helixdb = { path = "crates/rig-helixdb", version = "0.41.0", optional = true, default-features = false }
-rig-lancedb = { path = "crates/rig-lancedb", version = "0.41.0", optional = true, default-features = false }
-lancedb = { workspace = true, optional = true }
-rig-memory = { path = "crates/rig-memory", version = "0.41.0", optional = true, default-features = false }
-rig-derive = { path = "crates/rig-derive", version = "0.41.0", optional = true }
-rig-milvus = { path = "crates/rig-milvus", version = "0.41.0", optional = true, default-features = false }
-rig-mongodb = { path = "crates/rig-mongodb", version = "0.41.0", optional = true, default-features = false }
-rig-neo4j = { path = "crates/rig-neo4j", version = "0.41.0", optional = true, default-features = false }
-rig-postgres = { path = "crates/rig-postgres", version = "0.41.0", optional = true, default-features = false }
-rig-qdrant = { path = "crates/rig-qdrant", version = "0.41.0", optional = true, default-features = false }
-rig-s3vectors = { path = "crates/rig-s3vectors", version = "0.41.0", optional = true, default-features = false }
-rig-scylladb = { path = "crates/rig-scylladb", version = "0.41.0", optional = true, default-features = false }
-rig-sqlite = { path = "crates/rig-sqlite", version = "0.41.0", optional = true, default-features = false }
-rig-surrealdb = { path = "crates/rig-surrealdb", version = "0.41.0", optional = true, default-features = false }
-rig-vectorize = { path = "crates/rig-vectorize", version = "0.41.0", optional = true, default-features = false }
-rig-vertexai = { path = "crates/rig-vertexai", version = "0.41.0", optional = true, default-features = false }
+rig-typesafeai = { path = "crates/rig-typesafeai", version = "0.42.0", optional = true, default-features = false }
+rig-core = { path = "crates/rig-core", version = "0.42.0", default-features = false }
+rig-cassette = { path = "crates/rig-cassette", version = "0.42.0", default-features = false }
+rig-reqwest = { path = "crates/rig-reqwest", version = "0.42.0", optional = true, default-features = false }
+rig-agent = { path = "crates/rig-agent", version = "0.42.0", optional = true, default-features = false }
+rig-rmcp = { path = "crates/rig-rmcp", version = "0.42.0", optional = true }
+rig-bedrock = { path = "crates/rig-bedrock", version = "0.42.0", optional = true, default-features = false }
+rig-candle = { path = "crates/rig-candle", version = "0.42.0", optional = true, default-features = false }
+rig-fastembed = { path = "crates/rig-fastembed", version = "0.42.0", optional = true, default-features = false }
+rig-gemini-grpc = { path = "crates/rig-gemini-grpc", version = "0.42.0", optional = true, default-features = false }
+rig-helixdb = { path = "crates/rig-helixdb", version = "0.42.0", optional = true, default-features = false }
+rig-lancedb = { path = "crates/rig-lancedb", version = "0.42.0", optional = true, default-features = false }
+rig-memory = { path = "crates/rig-memory", version = "0.42.0", optional = true, default-features = false }
+rig-derive = { path = "crates/rig-derive", version = "0.42.0", optional = true }
+rig-milvus = { path = "crates/rig-milvus", version = "0.42.0", optional = true, default-features = false }
+rig-mongodb = { path = "crates/rig-mongodb", version = "0.42.0", optional = true, default-features = false }
+rig-neo4j = { path = "crates/rig-neo4j", version = "0.42.0", optional = true, default-features = false }
+rig-postgres = { path = "crates/rig-postgres", version = "0.42.0", optional = true, default-features = false }
+rig-qdrant = { path = "crates/rig-qdrant", version = "0.42.0", optional = true, default-features = false }
+rig-s3vectors = { path = "crates/rig-s3vectors", version = "0.42.0", optional = true, default-features = false }
+rig-scylladb = { path = "crates/rig-scylladb", version = "0.42.0", optional = true, default-features = false }
+rig-sqlite = { path = "crates/rig-sqlite", version = "0.42.0", optional = true, default-features = false }
+rig-surrealdb = { path = "crates/rig-surrealdb", version = "0.42.0", optional = true, default-features = false }
+rig-vectorize = { path = "crates/rig-vectorize", version = "0.42.0", optional = true, default-features = false }
+rig-vertexai = { path = "crates/rig-vertexai", version = "0.42.0", optional = true, default-features = false }
+
+# The bundled websocket backend is native-only (tungstenite needs a tokio
+# reactor and raises a `compile_error!` on wasm), so it is scoped to non-wasm
+# targets. That is what lets `websocket` mean "the protocol, plus the bundled
+# backend where one exists": on wasm the feature still enables
+# `rig-core/websocket`, so `rig::ws_client` is reachable and a browser backend
+# can be implemented against it — which is the escape hatch the backend's own
+# wasm error message prescribes. Wiring the dependency unconditionally would
+# make that hatch unreachable through the facade.
+#
+# Not `default-features = false`, unlike the other optional companions: the
+# backend's own `default = ["rustls"]` is what guarantees that enabling
+# `websocket` always yields a socket that can do `wss://`. Turning defaults off
+# here would let `--no-default-features --features websocket` compile a
+# TLS-less backend that fails every handshake at runtime.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rig-tungstenite = { path = "crates/rig-tungstenite", version = "0.42.0", optional = true }
 
 [dev-dependencies]
+rig-test-support = { path = "test-support/rig-test-support" }
+bevy_app = { workspace = true }
+bevy_ecs = { workspace = true }
+# The ECS contract matrix (`crates/rig-cassette/tests/common/ecs_matrix.rs`) pins the bus's task pool to one thread, as the cassette crate's world interpreter does.
+bevy_tasks = { workspace = true }
 anyhow = { workspace = true }
-arrow-array = { workspace = true }
 assert_fs = { workspace = true }
-async-stream = { workspace = true }
-aws-config = { workspace = true }
-aws-sdk-bedrockruntime = { workspace = true }
-aws-smithy-eventstream = { workspace = true }
-aws-smithy-runtime-api = { workspace = true }
-aws-smithy-types = { workspace = true }
-rig-core = { path = "crates/rig-core", version = "0.41.0", default-features = false, features = [
+rig-core = { path = "crates/rig-core", version = "0.42.0", default-features = false, features = [
   "test-utils",
 ] }
-rig-agent = { path = "crates/rig-agent", version = "0.41.0", default-features = false, features = [
+rig-agent = { path = "crates/rig-agent", version = "0.42.0", default-features = false, features = [
   "test-utils",
 ] }
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
-tokio-test = { workspace = true }
-redis = { workspace = true, features = ["tokio-comp", "aio", "vector-sets"] }
-serde_path_to_error = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 httpmock = { workspace = true, features = ["record", "proxy"] }
-mongodb = { workspace = true }
-neo4rs = { workspace = true }
-qdrant-client = { workspace = true }
-reqwest-retry = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream"] }
-reqwest-middleware = { workspace = true, features = [
-  "json",
-  "multipart",
-  "charset",
-  "http2",
-  "rustls",
-] }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-sha2 = { workspace = true }
 # float_roundtrip keeps cassette scrubbing idempotent on float-heavy bodies
 # (e.g. embedding vectors): without it, parse→print can oscillate between two
 # representations of the same decimal and the recorded YAML never stabilizes.
-serde_json = { workspace = true, features = ["float_roundtrip"] }
+# Golden logs preserve JSON object insertion order. Declare that requirement
+# directly instead of inheriting it from a database driver's feature graph.
+serde_json = { workspace = true, features = ["float_roundtrip", "preserve_order"] }
 serde_yaml = { workspace = true }
 syn = { workspace = true, features = ["full", "visit"] }
-rusqlite = { workspace = true, features = ["bundled"] }
-sqlite-vec = { workspace = true }
-sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "uuid", "json"] }
-testcontainers = { workspace = true }
-thiserror = { workspace = true }
-tokio-rusqlite = { workspace = true, features = ["bundled"] }
-hyper-util = { workspace = true, features = ["service", "server"] }
 rmcp = { workspace = true, features = [
   "client",
   "macros",
@@ -278,17 +394,12 @@ rmcp = { workspace = true, features = [
   "transport-streamable-http-server",
   "transport-worker",
 ] }
-axum = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
-opentelemetry-otlp = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
-url = { workspace = true }
-
 [features]
-default = ["rig-core/default", "agent", "derive", "rustls"]
-agent = ["dep:rig-agent"]
+typesafeai = ["dep:rig-typesafeai"]
+default = ["rig-core/default", "reqwest", "agent", "derive", "rustls"]
+agent = ["dep:rig-agent", "rig-cassette/agent"]
 test-utils = ["rig-core/test-utils", "rig-agent?/test-utils"]
 # Internal: opt in to the slow nested-`cargo check` facade build tests
 # (`tests/tool_facade_features.rs`). Not in `default`; `--all-features` (CI's
@@ -305,7 +416,7 @@ fastembed-hf-hub = ["dep:rig-fastembed", "rig-fastembed/hf-hub"]
 fastembed-ort-download-binaries = ["dep:rig-fastembed", "rig-fastembed/ort-download-binaries"]
 gemini-grpc = ["dep:rig-gemini-grpc"]
 helixdb = ["dep:rig-helixdb"]
-lancedb = ["dep:rig-lancedb", "dep:lancedb"]
+lancedb = ["dep:rig-lancedb"]
 memory = ["dep:rig-memory"]
 milvus = ["dep:rig-milvus"]
 mongodb = ["dep:rig-mongodb"]
@@ -318,33 +429,55 @@ sqlite = ["dep:rig-sqlite"]
 surrealdb = ["dep:rig-surrealdb"]
 vectorize = ["dep:rig-vectorize"]
 vertexai = ["dep:rig-vertexai"]
-audio = ["rig-core/audio", "rig-agent?/audio"]
-image = ["rig-core/image", "rig-agent?/image"]
+audio = ["rig-core/audio", "rig-agent?/audio", "rig-reqwest?/audio"]
+image = ["rig-core/image", "rig-agent?/image", "rig-reqwest?/image"]
 derive = ["dep:rig-derive", "rig-core/derive", "rig-agent?/derive"]
-discord-bot = ["agent", "rig-agent/discord-bot"]
 pdf = ["rig-core/pdf"]
 epub = ["rig-core/epub"]
-rayon = ["rig-core/rayon"]
-rmcp = ["agent", "rig-agent/rmcp"]
-socks = ["rig-core/socks"]
-reqwest = ["rig-core/reqwest"]
-websocket = ["rig-core/websocket"]
-websocket-rustls = ["rig-core/websocket-rustls"]
-websocket-native-tls = ["rig-core/websocket-native-tls"]
+rmcp = ["dep:rig-rmcp"]
+socks = ["reqwest", "rig-reqwest/socks"]
+reqwest = ["dep:rig-reqwest"]
+# The bundled websocket backend (`rig-tungstenite`) and the provider websocket
+# sessions it drives. Independent of the HTTP transport axis: a session borrows
+# the provider client for its request mapping, so `reqwest` comes along for the
+# client, not for the socket.
+#
+# `websocket` is the API gate — it is what `pub use rig_tungstenite` and the
+# prelude re-export are cfg'd on — and each of the three spellings is usable on
+# its own. `rig-tungstenite`'s own `default = ["rustls"]` applies (see its
+# dependency line), so `websocket` always has a working TLS stack; the
+# `websocket-*-tls` spellings add the workspace-wide TLS feature on top, which
+# is also what wires the backend up for `native-tls`.
+#
+# Additive features cannot express "replace rustls with native-tls": a
+# native-tls-ONLY socket means depending on `rig-tungstenite` directly with
+# `default-features = false, features = ["native-tls"]`. Through the facade,
+# `websocket-native-tls` gets you a working native-tls socket with rustls also
+# compiled in. That trade is deliberate — a build that silently cannot speak
+# `wss://` is worse than one that compiles a TLS stack it does not use.
+websocket = ["reqwest", "dep:rig-tungstenite", "rig-core/websocket"]
+# `dep:rig-tungstenite` above resolves to nothing on wasm, where the dependency
+# is not in the graph: the feature degrades to the protocol alone.
+websocket-rustls = ["websocket", "rustls"]
+websocket-native-tls = ["websocket", "native-tls"]
 rustls = [
-  "rig-core/rustls",
+  "rig-reqwest?/rustls",
+  "rig-tungstenite?/rustls",
   "rig-fastembed?/hf-hub-rustls-tls",
   "rig-helixdb?/rustls",
   "rig-lancedb?/rig-rustls",
   "rig-milvus?/rustls",
+  "rig-vectorize?/rustls",
 ]
 native-tls = [
-  "rig-core/native-tls",
+  "rig-reqwest?/native-tls",
+  "rig-tungstenite?/native-tls",
   "rig-fastembed?/hf-hub-native-tls",
   "rig-helixdb?/native-tls",
   "rig-lancedb?/rig-native-tls",
   "rig-milvus?/native-tls",
+  "rig-vectorize?/native-tls",
 ]
-reqwest-middleware = ["rig-core/reqwest-middleware"]
-reqwest-middleware-rustls = ["rig-core/reqwest-middleware-rustls"]
-reqwest-middleware-native-tls = ["rig-core/reqwest-middleware-native-tls"]
+reqwest-middleware = ["reqwest", "rig-reqwest/reqwest-middleware"]
+reqwest-middleware-rustls = ["reqwest", "rig-reqwest/reqwest-middleware-rustls"]
+reqwest-middleware-native-tls = ["reqwest", "rig-reqwest/reqwest-middleware-native-tls"]

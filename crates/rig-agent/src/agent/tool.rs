@@ -1,8 +1,16 @@
+//! Conversion of agents into dynamically named tools.
+//!
+//! ```
+//! use rig_agent::{Agent, tool::DynamicTool};
+//! fn delegate(agent: Agent) -> DynamicTool {
+//!     agent.into_tool()
+//! }
+//! ```
+
 use std::sync::Arc;
 
 use crate::{
     agent::Agent,
-    completion::Prompt,
     tool::{DynamicTool, ToolExecutionError, ToolOutput},
 };
 use schemars::{JsonSchema, schema_for};
@@ -20,9 +28,9 @@ const DEFAULT_AGENT_TOOL_NAME: &str = "agent_tool";
 impl Agent {
     /// Convert this agent into a runtime-defined tool.
     ///
-    /// The configured agent name becomes the tool name. Unnamed agents use
-    /// `agent_tool`. This explicit conversion keeps runtime identity out of the
-    /// statically named [`Tool`](crate::tool::Tool) trait.
+    /// Uses the configured name or `agent_tool`. The tool accepts a JSON `prompt`
+    /// string and inherits dispatch context. Invalid arguments and failed runs
+    /// become tool execution errors; successful output is returned as text.
     pub fn into_tool(self) -> DynamicTool {
         let name = self
             .config
@@ -38,13 +46,13 @@ impl Agent {
             Agent system prompt: {sysprompt}
             ",
             name = name,
-            description = self.config.description.clone().unwrap_or_default(),
-            sysprompt = self.config.preamble.clone().unwrap_or_default()
+            description = self.config.description.as_deref().unwrap_or_default(),
+            sysprompt = self.config.preamble.as_deref().unwrap_or_default()
         );
         let parameters = json!(schema_for!(AgentToolArgs));
         let agent = Arc::new(self);
 
-        DynamicTool::new(name, description, parameters, move |context, args| {
+        DynamicTool::new_with_context(name, description, parameters, move |context, args| {
             let agent = Arc::clone(&agent);
             let inherited_context = context.for_dispatch();
             Box::pin(async move {
@@ -58,7 +66,7 @@ impl Agent {
                     .prompt(args.prompt)
                     .tool_context(inherited_context)
                     .await
-                    .map(ToolOutput::text)
+                    .map(|response| ToolOutput::text(response.output))
                     .map_err(ToolExecutionError::from_error)
             })
         })
@@ -72,48 +80,4 @@ impl From<Agent> for DynamicTool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::AgentBuilder;
-    use crate::test_utils::{MockCompletionModel, MockContextProbeTool, MockTurn, SessionId};
-    use crate::tool::ToolContext;
-
-    /// A `ToolContext` set on the outer run propagates into a sub-agent
-    /// invoked as a tool, so the inner agent's own tools observe it.
-    #[tokio::test]
-    async fn context_propagates_into_sub_agent() {
-        // Inner agent: calls a context-probing tool, then answers.
-        let probe = MockContextProbeTool::default();
-        let inner_model = MockCompletionModel::new([
-            MockTurn::tool_call("c1", "context_probe", json!({})),
-            MockTurn::text("inner done"),
-        ]);
-        let inner = AgentBuilder::new(inner_model)
-            .name("researcher")
-            .tool(probe.clone())
-            .build();
-
-        // Outer agent: delegates to the inner agent (registered as the
-        // "researcher" tool), then answers.
-        let outer_model = MockCompletionModel::new([
-            MockTurn::tool_call("c2", "researcher", json!({"prompt": "do research"})),
-            MockTurn::text("outer done"),
-        ]);
-        let outer = AgentBuilder::new(outer_model)
-            .dynamic_tool(inner.into_tool())
-            .build();
-
-        let mut context = ToolContext::new();
-        context.insert(SessionId("abc-123".to_string()));
-
-        let out = outer
-            .prompt("start")
-            .tool_context(context)
-            .max_turns(5)
-            .await
-            .expect("run succeeds");
-
-        assert_eq!(out, "outer done");
-        assert_eq!(probe.observed().as_deref(), Some("session:abc-123"));
-    }
-}
+mod tests;

@@ -1,0 +1,373 @@
+{
+  "header": {
+    "run_spec": 17759422913336850263,
+    "handlers": [
+      {
+        "key": "golden/model:default",
+        "family": {
+          "family": "completion",
+          "model": "default",
+          "capabilities": {
+            "composes_native_output_with_tools": true
+          }
+        }
+      }
+    ],
+    "signature": {
+      "golden/model:default": "completion"
+    },
+    "hooks": [],
+    "required": {
+      "golden/model:default": "completion"
+    },
+    "bus": {
+      "command_capacity": 16,
+      "stream_capacity": 64,
+      "serial_per_handler": false
+    }
+  },
+  "records": [
+    {
+      "tool_output": null,
+      "id": 1,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a concise assistant. Answer directly.\n\nRespond with ONLY a single JSON object that conforms to this JSON Schema. Do not include any prose, explanation, or markdown code fences.\n{\"properties\":{\"category\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"}},\"required\":[\"title\",\"category\",\"summary\"],\"type\":\"object\"}"
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Return a concise event object for a local Rust meetup in Seattle."
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [],
+          "temperature": 0.0,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "text",
+              "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"Join local Rust enthusiasts for networking and discussions on Rust programming.\"}"
+            }
+          ],
+          "usage": {
+            "input_tokens": 97,
+            "output_tokens": 27,
+            "total_tokens": 124,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "message_id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "response_id": "resp_051be6577c9430e6006ab395f289cc87d0be6be0726fac40ff",
+          "provider_request_id": "req_e2d2a525378f453cbaf7fe55dfbbfafd",
+          "finish_reason": "stop",
+          "provider": "openai",
+          "model": "gpt-4o-2024-08-06",
+          "raw": {
+            "usage": {
+              "input_tokens": 97,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 27,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 124
+            },
+            "reasoning_metadata": {
+              "context": null,
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "message_id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+            "response_id": "resp_051be6577c9430e6006ab395f289cc87d0be6be0726fac40ff",
+            "model": "gpt-4o-2024-08-06"
+          }
+        }
+      },
+      "events": [
+        {
+          "event": "block_start",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "kind": {
+            "kind": "text"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "{\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "title"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "\":\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "Seattle"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " Rust"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " Meetup"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "\",\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "category"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "\":\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "Technology"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "\",\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "summary"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "\":\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "Join"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " local"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " Rust"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " enthusiasts"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " for"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " networking"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " and"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " discussions"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " on"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " Rust"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": " programming"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": ".\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "delta": {
+            "delta": "text",
+            "text": "}"
+          }
+        },
+        {
+          "event": "block_start",
+          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "kind": {
+            "kind": "message"
+          }
+        },
+        {
+          "event": "final",
+          "usage": {
+            "input_tokens": 97,
+            "output_tokens": 27,
+            "total_tokens": 124,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "finish_reason": "stop",
+          "message_id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "response_id": "resp_051be6577c9430e6006ab395f289cc87d0be6be0726fac40ff",
+          "provider_request_id": "req_e2d2a525378f453cbaf7fe55dfbbfafd",
+          "provider": "openai",
+          "model": "gpt-4o-2024-08-06",
+          "raw": {
+            "usage": {
+              "input_tokens": 97,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 27,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 124
+            },
+            "reasoning_metadata": {
+              "context": null,
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "message_id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+            "response_id": "resp_051be6577c9430e6006ab395f289cc87d0be6be0726fac40ff",
+            "model": "gpt-4o-2024-08-06"
+          }
+        }
+      ]
+    }
+  ]
+}

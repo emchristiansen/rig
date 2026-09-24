@@ -1,0 +1,823 @@
+{
+  "header": {
+    "deliveries": [
+      {
+        "batch": 3,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 22
+        }
+      },
+      {
+        "batch": 4,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 52
+        }
+      },
+      {
+        "batch": 5,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 15
+        }
+      },
+      {
+        "batch": 5,
+        "id": 0,
+        "kind": {
+          "delivery": "outcome"
+        }
+      }
+    ],
+    "handlers": [
+      {
+        "key": "parity/model",
+        "family": {
+          "family": "completion",
+          "model": "parity",
+          "capabilities": {
+            "composes_native_output_with_tools": true
+          }
+        }
+      }
+    ],
+    "signature": {
+      "parity/model": "completion"
+    },
+    "hooks": [],
+    "required": {},
+    "programs": {
+      "parity/run#0": {
+        "required": {
+          "parity/model": "completion"
+        },
+        "policy": 9389392967764371844
+      }
+    }
+  },
+  "records": [
+    {
+      "tool_output": null,
+      "id": 0,
+      "key": "parity/model",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a concise assistant. Answer directly in plain text."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "In one short paragraph, explain what a solar eclipse is."
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [],
+          "temperature": null,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Err": {
+          "kind": "response",
+          "retryable": true,
+          "message": "the stream ended before its terminal record",
+          "code": null,
+          "http_status": null,
+          "refusal": false,
+          "source_chain": []
+        }
+      },
+      "events": [
+        {
+          "event": "block_start",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "kind": {
+            "kind": "text"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": "A"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " solar"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " eclipse"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " occurs"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " when"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " the"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " moon"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " passes"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " between"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " the"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " Earth"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " and"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " the"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " sun"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " blocking"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " all"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " or"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " part"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " of"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " the"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " sun"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": "'s"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " light"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": "."
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " This"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " alignment"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " causes"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " the"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " moon"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " to"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " cast"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " a"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " shadow"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " on"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " Earth"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " creating"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " phenomena"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " such"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " as"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " a"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " partial"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " total"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " or"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " ann"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": "ular"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " eclipse"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " depending"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " on"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " the"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " observer"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": "'s"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " location"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " and"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " the"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " distances"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " between"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " the"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " Earth"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " moon"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " and"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " sun"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": "."
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " During"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " a"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " total"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " solar"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " eclipse"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " the"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " sun"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": "'s"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " corona"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " becomes"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " visible"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " offering"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " a"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " unique"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " astronomical"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": " event"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_077dacab6f1410f2006ab394cc4b8c87d0b5da6a8ca116afc5",
+          "delta": {
+            "delta": "text",
+            "text": "."
+          }
+        }
+      ],
+      "scope": "parity/run#0"
+    }
+  ]
+}

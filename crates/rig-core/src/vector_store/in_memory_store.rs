@@ -1,13 +1,21 @@
-//! In-memory implementation of a vector store.
+//! In-memory vector storage with cosine scoring and optional approximate candidates.
+//!
+//! ```
+//! use rig_core::vector_store::in_memory_store::InMemoryVectorStore;
+//!
+//! let store = InMemoryVectorStore::<String>::builder().build();
+//! assert!(store.is_empty());
+//! ```
 use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap},
 };
 
 use ordered_float::OrderedFloat;
-use serde::{Deserialize, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 use super::{IndexStrategy, VectorStoreError, VectorStoreIndex, request::VectorSearchRequest};
+use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use crate::{
     embeddings::{Embedding, EmbeddingModel, distance::VectorDistance},
     vector_store::request::Filter,
@@ -32,18 +40,7 @@ pub struct InMemoryVectorStore<D: Serialize> {
 }
 
 impl<D: Serialize + Eq> InMemoryVectorStore<D> {
-    /// Create a new builder for configuring an [InMemoryVectorStore].
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// use rig_core::vector_store::InMemoryVectorStore;
-    ///
-    /// let store = InMemoryVectorStore::<String>::builder()
-    ///     .with_lsh()
-    ///     .documents(documents)
-    ///     .build();
-    /// ```
+    /// Creates an empty builder with brute-force search as the default strategy.
     pub fn builder() -> InMemoryVectorStoreBuilder<D> {
         InMemoryVectorStoreBuilder::new()
     }
@@ -53,18 +50,21 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
         embeddings: HashMap<String, (D, Vec<Embedding>)>,
         index_strategy: IndexStrategy,
     ) -> Self {
+        let lsh_params = match &index_strategy {
+            IndexStrategy::LSH {
+                num_tables,
+                num_hyperplanes,
+            } => Some((*num_tables, *num_hyperplanes)),
+            IndexStrategy::BruteForce => None,
+        };
+
         let mut vector_store = Self {
             embeddings,
-            index_strategy: index_strategy.clone(),
+            index_strategy,
             lsh_index: None,
         };
 
-        // Initialize LSH index if needed
-        if let IndexStrategy::LSH {
-            num_tables,
-            num_hyperplanes,
-        } = index_strategy
-        {
+        if let Some((num_tables, num_hyperplanes)) = lsh_params {
             vector_store.initialize_lsh_index(num_tables, num_hyperplanes);
         }
 
@@ -106,11 +106,11 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
         store
     }
 
-    /// Insert a single document, keeping the LSH index (when enabled) in sync.
+    /// Inserts or replaces a document and adds its embeddings to any existing LSH index.
     fn insert_document(&mut self, id: String, doc: D, embeddings: Vec<Embedding>) {
         if let Some(ref mut lsh_index) = self.lsh_index {
             for embedding in embeddings.iter() {
-                lsh_index.insert(id.clone(), &embedding.vec);
+                lsh_index.insert(&id, &embedding.vec);
             }
         }
         self.embeddings.insert(id, (doc, embeddings));
@@ -152,14 +152,8 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
             return Ok(None);
         }
 
-        // Best (highest-similarity) embedding for this document.
-        //
-        // A zero-magnitude embedding yields a NaN similarity, which sorts as the
-        // maximum under `OrderedFloat` and slips past `distance < threshold`
-        // (every comparison with NaN is false). Drop non-finite similarities
-        // *before* selecting the max so a document still ranks by its best
-        // finite embedding; the document is skipped only when it has no finite
-        // similarity at all.
+        // Filter non-finite scores before selecting the maximum so NaN cannot
+        // outrank valid embeddings or bypass the threshold.
         let Some((distance, embed_doc)) = embeddings
             .iter()
             .map(|embedding| {
@@ -174,7 +168,6 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
             return Ok(None);
         };
 
-        // Skip documents below the similarity threshold.
         if threshold.is_some_and(|t| distance.0 < t) {
             return Ok(None);
         }
@@ -204,7 +197,6 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
                 threshold,
             ),
             IndexStrategy::LSH { .. } => {
-                // If we don't have an LSH index yet, fall back to brute force
                 let Some(lsh_index) = self.lsh_index.as_ref() else {
                     tracing::warn!("LSH index not initialized, falling back to brute force search");
                     return self.rank_candidates(
@@ -238,7 +230,6 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
         filter: Option<&Filter<serde_json::Value>>,
         threshold: Option<f64>,
     ) -> Result<EmbeddingRanking<'_, D>, VectorStoreError> {
-        // Sort documents by best embedding distance
         let mut docs = BinaryHeap::new();
 
         for candidate_id in candidate_ids {
@@ -255,7 +246,7 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
 
             docs.push(Reverse(RankingItem(distance, id, doc, embed_doc)));
 
-            // If the heap size exceeds n, pop the least old element.
+            // Evict the worst score, or the greatest id at an equal score.
             if docs.len() > n {
                 docs.pop();
             }
@@ -282,14 +273,12 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
             return;
         }
 
-        // Get the dimension from the first embedding
         let first_embedding = self
             .embeddings
             .values()
             .next()
             .and_then(|(_, embeddings)| embeddings.iter().next())
-            .map(|e| e.vec.len())
-            .unwrap_or(0);
+            .map_or(0, |e| e.vec.len());
 
         if first_embedding == 0 {
             return;
@@ -297,10 +286,9 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
 
         let mut lsh_index = LSHIndex::new(first_embedding, num_tables, num_hyperplanes);
 
-        // Insert all existing embeddings into the LSH index
         for (id, (_, embeddings)) in self.embeddings.iter() {
             for embedding in embeddings.iter() {
-                lsh_index.insert(id.clone(), &embedding.vec);
+                lsh_index.insert(id, &embedding.vec);
             }
         }
 
@@ -308,12 +296,18 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
     }
 
     /// Add documents and their corresponding embeddings to the store.
-    /// Ids are automatically generated have will have the form `"doc{n}"` where `n`
-    /// is the index of the document.
+    /// IDs have the form `"doc{n}"`, starting at the current document count and
+    /// skipping occupied IDs so existing documents are never overwritten.
     pub fn add_documents(&mut self, documents: impl IntoIterator<Item = (D, Vec<Embedding>)>) {
-        let current_index = self.embeddings.len();
-        for (index, (doc, embeddings)) in documents.into_iter().enumerate() {
-            self.insert_document(format!("doc{}", index + current_index), doc, embeddings);
+        let mut index = self.embeddings.len();
+        for (doc, embeddings) in documents {
+            let mut id = format!("doc{index}");
+            while self.embeddings.contains_key(&id) {
+                index += 1;
+                id = format!("doc{index}");
+            }
+            self.insert_document(id, doc, embeddings);
+            index += 1;
         }
     }
 
@@ -344,9 +338,17 @@ impl<D: Serialize + Eq> InMemoryVectorStore<D> {
 #[derive(Eq, PartialEq)]
 struct RankingItem<'a, D: Serialize>(OrderedFloat<f64>, &'a String, &'a D, &'a String);
 
+/// Orders results by descending score and ascending document ID for ties.
+/// Explicit ordering keeps retrieval independent of hash-map iteration order.
+fn ranked<D: Serialize + Eq>(docs: EmbeddingRanking<'_, D>) -> Vec<RankingItem<'_, D>> {
+    let mut items: Vec<RankingItem<'_, D>> = docs.into_iter().map(|Reverse(item)| item).collect();
+    items.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
+    items
+}
+
 impl<D: Serialize + Eq> Ord for RankingItem<'_, D> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.cmp(&other.0)
+        self.0.cmp(&other.0).then_with(|| other.1.cmp(self.1))
     }
 }
 
@@ -359,7 +361,7 @@ impl<D: Serialize + Eq> PartialOrd for RankingItem<'_, D> {
 type EmbeddingRanking<'a, D> = BinaryHeap<Reverse<RankingItem<'a, D>>>;
 
 impl<D: Serialize> InMemoryVectorStore<D> {
-    pub fn index<M: EmbeddingModel>(self, model: M) -> InMemoryVectorIndex<M, D> {
+    pub fn index<M: EmbeddingModel>(self, model: M) -> InMemoryVectorIndex<D, M> {
         InMemoryVectorIndex::new(model, self)
     }
 
@@ -376,14 +378,22 @@ impl<D: Serialize> InMemoryVectorStore<D> {
     }
 }
 
-pub struct InMemoryVectorIndex<M: EmbeddingModel, D: Serialize> {
+/// A vector store paired with a query embedding model. Stored vectors must use
+/// the same embedding space and dimensions as query vectors. Results are ordered
+/// by descending best finite cosine similarity, then ascending document ID.
+pub struct InMemoryVectorIndex<D: Serialize, M> {
     model: M,
     pub store: InMemoryVectorStore<D>,
 }
 
-impl<M: EmbeddingModel, D: Serialize> InMemoryVectorIndex<M, D> {
+impl<D: Serialize, M> InMemoryVectorIndex<D, M> {
     pub fn new(model: M, store: InMemoryVectorStore<D>) -> Self {
         Self { model, store }
+    }
+
+    /// The embedding model used for queries.
+    pub fn model(&self) -> &M {
+        &self.model
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&String, &(D, Vec<Embedding>))> {
@@ -399,12 +409,12 @@ impl<M: EmbeddingModel, D: Serialize> InMemoryVectorIndex<M, D> {
     }
 }
 
-impl<M: EmbeddingModel + Sync, D: Serialize + Sync + Send + Eq> VectorStoreIndex
-    for InMemoryVectorIndex<M, D>
+impl<D: Serialize + WasmCompatSend + WasmCompatSync + Eq, M: EmbeddingModel> VectorStoreIndex
+    for InMemoryVectorIndex<D, M>
 {
     type Filter = Filter<serde_json::Value>;
 
-    async fn top_n<T: for<'a> Deserialize<'a>>(
+    async fn top_n<T: DeserializeOwned>(
         &self,
         req: VectorSearchRequest,
     ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
@@ -417,10 +427,9 @@ impl<M: EmbeddingModel + Sync, D: Serialize + Sync + Send + Eq> VectorStoreIndex
             req.threshold(),
         )?;
 
-        // Return n best
-        docs.into_iter()
-            // The distance should always be between 0 and 1, so distance should be fine to use as an absolute value
-            .map(|Reverse(RankingItem(distance, id, doc, _))| {
+        ranked(docs)
+            .into_iter()
+            .map(|RankingItem(distance, id, doc, _)| {
                 Ok((
                     distance.0,
                     id.clone(),
@@ -446,451 +455,12 @@ impl<M: EmbeddingModel + Sync, D: Serialize + Sync + Send + Eq> VectorStoreIndex
             req.threshold(),
         )?;
 
-        docs.into_iter()
-            .map(|Reverse(RankingItem(distance, id, _, _))| Ok((distance.0, id.clone())))
+        ranked(docs)
+            .into_iter()
+            .map(|RankingItem(distance, id, _, _)| Ok((distance.0, id.clone())))
             .collect::<Result<Vec<_>, _>>()
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::cmp::Reverse;
-
-    use crate::{embeddings::embedding::Embedding, vector_store::IndexStrategy};
-
-    use super::{InMemoryVectorStore, RankingItem};
-
-    #[test]
-    fn test_auto_ids() {
-        let mut vector_store = InMemoryVectorStore::builder()
-            .index_strategy(IndexStrategy::LSH {
-                num_tables: 5,
-                num_hyperplanes: 10,
-            })
-            .documents(vec![
-                (
-                    "glarb-garb",
-                    vec![Embedding {
-                        document: "glarb-garb".to_string(),
-                        vec: vec![0.1, 0.1, 0.5],
-                    }],
-                ),
-                (
-                    "marble-marble",
-                    vec![Embedding {
-                        document: "marble-marble".to_string(),
-                        vec: vec![0.7, -0.3, 0.0],
-                    }],
-                ),
-                (
-                    "flumb-flumb",
-                    vec![Embedding {
-                        document: "flumb-flumb".to_string(),
-                        vec: vec![0.3, 0.7, 0.1],
-                    }],
-                ),
-            ])
-            .build();
-
-        vector_store.add_documents(vec![
-            (
-                "brotato",
-                vec![Embedding {
-                    document: "brotato".to_string(),
-                    vec: vec![0.3, 0.7, 0.1],
-                }],
-            ),
-            (
-                "ping-pong",
-                vec![Embedding {
-                    document: "ping-pong".to_string(),
-                    vec: vec![0.7, -0.3, 0.0],
-                }],
-            ),
-        ]);
-
-        let mut store = vector_store.embeddings.into_iter().collect::<Vec<_>>();
-        store.sort_by_key(|(id, _)| id.clone());
-
-        assert_eq!(
-            store,
-            vec![
-                (
-                    "doc0".to_string(),
-                    (
-                        "glarb-garb",
-                        vec![Embedding {
-                            document: "glarb-garb".to_string(),
-                            vec: vec![0.1, 0.1, 0.5],
-                        }]
-                    )
-                ),
-                (
-                    "doc1".to_string(),
-                    (
-                        "marble-marble",
-                        vec![Embedding {
-                            document: "marble-marble".to_string(),
-                            vec: vec![0.7, -0.3, 0.0],
-                        }]
-                    )
-                ),
-                (
-                    "doc2".to_string(),
-                    (
-                        "flumb-flumb",
-                        vec![Embedding {
-                            document: "flumb-flumb".to_string(),
-                            vec: vec![0.3, 0.7, 0.1],
-                        }]
-                    )
-                ),
-                (
-                    "doc3".to_string(),
-                    (
-                        "brotato",
-                        vec![Embedding {
-                            document: "brotato".to_string(),
-                            vec: vec![0.3, 0.7, 0.1],
-                        }]
-                    )
-                ),
-                (
-                    "doc4".to_string(),
-                    (
-                        "ping-pong",
-                        vec![Embedding {
-                            document: "ping-pong".to_string(),
-                            vec: vec![0.7, -0.3, 0.0],
-                        }]
-                    )
-                )
-            ]
-        );
-    }
-
-    #[test]
-    fn test_single_embedding() {
-        let vector_store = InMemoryVectorStore::builder()
-            .index_strategy(IndexStrategy::LSH {
-                num_tables: 5,
-                num_hyperplanes: 10,
-            })
-            .documents_with_ids(vec![
-                (
-                    "doc1",
-                    "glarb-garb",
-                    vec![Embedding {
-                        document: "glarb-garb".to_string(),
-                        vec: vec![0.1, 0.1, 0.5],
-                    }],
-                ),
-                (
-                    "doc2",
-                    "marble-marble",
-                    vec![Embedding {
-                        document: "marble-marble".to_string(),
-                        vec: vec![0.7, -0.3, 0.0],
-                    }],
-                ),
-                (
-                    "doc3",
-                    "flumb-flumb",
-                    vec![Embedding {
-                        document: "flumb-flumb".to_string(),
-                        vec: vec![0.3, 0.7, 0.1],
-                    }],
-                ),
-            ])
-            .build();
-
-        let ranking = vector_store
-            .vector_search(
-                &Embedding {
-                    document: "glarby-glarble".to_string(),
-                    vec: vec![0.0, 0.1, 0.6],
-                },
-                1,
-                None,
-                None,
-            )
-            .unwrap();
-
-        assert_eq!(
-            ranking
-                .into_iter()
-                .map(|Reverse(RankingItem(distance, id, doc, _))| {
-                    (
-                        distance.0,
-                        id.clone(),
-                        serde_json::from_str(&serde_json::to_string(doc).unwrap()).unwrap(),
-                    )
-                })
-                .collect::<Vec<(_, _, String)>>(),
-            vec![(
-                0.9807965956109156,
-                "doc1".to_string(),
-                "glarb-garb".to_string()
-            )]
-        )
-    }
-
-    #[test]
-    fn test_multiple_embeddings() {
-        let vector_store = InMemoryVectorStore::builder()
-            .index_strategy(IndexStrategy::LSH {
-                num_tables: 5,
-                num_hyperplanes: 10,
-            })
-            .documents_with_ids(vec![
-                (
-                    "doc1",
-                    "glarb-garb",
-                    vec![
-                        Embedding {
-                            document: "glarb-garb".to_string(),
-                            vec: vec![0.1, 0.1, 0.5],
-                        },
-                        Embedding {
-                            document: "don't-choose-me".to_string(),
-                            vec: vec![-0.5, 0.9, 0.1],
-                        },
-                    ],
-                ),
-                (
-                    "doc2",
-                    "marble-marble",
-                    vec![
-                        Embedding {
-                            document: "marble-marble".to_string(),
-                            vec: vec![0.7, -0.3, 0.0],
-                        },
-                        Embedding {
-                            document: "sandwich".to_string(),
-                            vec: vec![0.5, 0.5, -0.7],
-                        },
-                    ],
-                ),
-                (
-                    "doc3",
-                    "flumb-flumb",
-                    vec![
-                        Embedding {
-                            document: "flumb-flumb".to_string(),
-                            vec: vec![0.3, 0.7, 0.1],
-                        },
-                        Embedding {
-                            document: "banana".to_string(),
-                            vec: vec![0.1, -0.5, -0.5],
-                        },
-                    ],
-                ),
-            ])
-            .build();
-
-        let ranking = vector_store
-            .vector_search(
-                &Embedding {
-                    document: "glarby-glarble".to_string(),
-                    vec: vec![0.0, 0.1, 0.6],
-                },
-                1,
-                None,
-                None,
-            )
-            .unwrap();
-
-        assert_eq!(
-            ranking
-                .into_iter()
-                .map(|Reverse(RankingItem(distance, id, doc, _))| {
-                    (
-                        distance.0,
-                        id.clone(),
-                        serde_json::from_str(&serde_json::to_string(doc).unwrap()).unwrap(),
-                    )
-                })
-                .collect::<Vec<(_, _, String)>>(),
-            vec![(
-                0.9807965956109156,
-                "doc1".to_string(),
-                "glarb-garb".to_string()
-            )]
-        )
-    }
-
-    #[tokio::test]
-    async fn top_n_honors_filter_and_threshold() {
-        use crate::test_utils::MockEmbeddingModel;
-        use crate::vector_store::VectorStoreIndex;
-        use crate::vector_store::request::{Filter, SearchFilter, VectorSearchRequest};
-        use serde::Serialize;
-        use serde_json::json;
-
-        // Document payloads carry metadata alongside content, like real backends.
-        #[derive(Clone, Serialize, PartialEq, Eq)]
-        struct Item {
-            category: String,
-            text: String,
-        }
-
-        fn item(category: &str, text: &str) -> Item {
-            Item {
-                category: category.to_string(),
-                text: text.to_string(),
-            }
-        }
-
-        // `MockEmbeddingModel` embeds every query as this fixed 10-dim vector; give
-        // every document the same embedding so all cosine similarities are 1.0 and
-        // only the filter/threshold decide the result set.
-        let vec = vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
-        let embedding = |doc: &str| {
-            vec![Embedding {
-                document: doc.to_string(),
-                vec: vec.clone(),
-            }]
-        };
-
-        let index = InMemoryVectorStore::from_documents_with_ids(vec![
-            ("a", item("fruit", "banana"), embedding("banana")),
-            ("b", item("veg", "carrot"), embedding("carrot")),
-            ("c", item("fruit", "apple"), embedding("apple")),
-        ])
-        .index(MockEmbeddingModel);
-
-        let ids = |req| async {
-            let mut out: Vec<String> = index
-                .top_n_ids(req)
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|(_, id)| id)
-                .collect();
-            out.sort();
-            out
-        };
-
-        // No filter: every document is returned.
-        let all = ids(VectorSearchRequest::builder()
-            .query("q")
-            .samples(10)
-            .build())
-        .await;
-        assert_eq!(all, vec!["a", "b", "c"]);
-
-        // Metadata filter: only documents whose `category` field is `fruit`.
-        let fruit = ids(VectorSearchRequest::builder()
-            .query("q")
-            .samples(10)
-            .filter(Filter::eq("category", json!("fruit")))
-            .build())
-        .await;
-        assert_eq!(fruit, vec!["a", "c"]);
-
-        // Threshold above the maximum similarity (1.0): nothing qualifies.
-        let none = ids(VectorSearchRequest::builder()
-            .query("q")
-            .samples(10)
-            .threshold(2.0)
-            .build())
-        .await;
-        assert!(none.is_empty());
-
-        // Threshold at or below the similarity keeps all matches.
-        let kept = ids(VectorSearchRequest::builder()
-            .query("q")
-            .samples(10)
-            .threshold(0.5)
-            .build())
-        .await;
-        assert_eq!(kept, vec!["a", "b", "c"]);
-    }
-
-    #[tokio::test]
-    async fn top_n_excludes_non_finite_similarity() {
-        use crate::test_utils::MockEmbeddingModel;
-        use crate::vector_store::VectorStoreIndex;
-        use crate::vector_store::request::VectorSearchRequest;
-
-        let embedding = |doc: &str, vec: Vec<f64>| {
-            vec![Embedding {
-                document: doc.to_string(),
-                vec,
-            }]
-        };
-
-        // The zero-magnitude embedding produces a NaN cosine similarity, which
-        // sorts as the maximum under OrderedFloat. It must not rank first (or
-        // appear at all), even with no threshold set.
-        let index = InMemoryVectorStore::from_documents_with_ids(vec![
-            (
-                "good",
-                "good".to_string(),
-                embedding(
-                    "good",
-                    vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-                ),
-            ),
-            (
-                "degenerate",
-                "degenerate".to_string(),
-                embedding("degenerate", vec![0.0; 10]),
-            ),
-        ])
-        .index(MockEmbeddingModel);
-
-        let ids: Vec<String> = index
-            .top_n_ids(
-                VectorSearchRequest::builder()
-                    .query("q")
-                    .samples(10)
-                    .build(),
-            )
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|(_, id)| id)
-            .collect();
-        assert_eq!(ids, vec!["good".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn top_n_ranks_document_by_best_finite_embedding() {
-        use crate::test_utils::MockEmbeddingModel;
-        use crate::vector_store::VectorStoreIndex;
-        use crate::vector_store::request::VectorSearchRequest;
-
-        // A document that owns both a strong finite embedding and a degenerate
-        // zero-magnitude (NaN) one must still be returned, ranked by the finite
-        // embedding — not dropped because NaN sorts as the OrderedFloat maximum.
-        let index = InMemoryVectorStore::from_documents_with_ids(vec![(
-            "mixed",
-            "mixed".to_string(),
-            vec![
-                Embedding {
-                    document: "good-chunk".to_string(),
-                    vec: vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-                },
-                Embedding {
-                    document: "empty-chunk".to_string(),
-                    vec: vec![0.0; 10],
-                },
-            ],
-        )])
-        .index(MockEmbeddingModel);
-
-        let results = index
-            .top_n_ids(
-                VectorSearchRequest::builder()
-                    .query("q")
-                    .samples(10)
-                    .build(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1, "mixed");
-        assert!(results[0].0.is_finite());
-    }
-}
+mod tests;

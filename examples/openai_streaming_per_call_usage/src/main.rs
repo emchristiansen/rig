@@ -24,8 +24,8 @@ use futures::StreamExt;
 use rig::agent::MultiTurnStreamItem;
 use rig::completion::Usage;
 use rig::prelude::*;
-use rig::providers::openai;
-use rig::streaming::{StreamedAssistantContent, StreamingPrompt};
+use rig::providers::openai::{self, Route, wire::OpenAI};
+use rig::streaming::{Delta, StreamEvent};
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -81,7 +81,9 @@ impl Tool for ProjectStatusTool {
 fn print_usage(label: &str, usage: Usage) {
     println!(
         "{label}: input_tokens={}, output_tokens={}, total_tokens={}",
-        usage.input_tokens, usage.output_tokens, usage.total_tokens
+        usage.input_tokens.unwrap_or(0),
+        usage.output_tokens.unwrap_or(0),
+        usage.total_tokens.unwrap_or(0)
     );
 }
 
@@ -89,7 +91,11 @@ fn print_usage(label: &str, usage: Usage) {
 async fn main() -> Result<()> {
     let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| openai::GPT_4O_MINI.to_string());
 
-    let agent = openai::CompletionsClient::from_env()?
+    // Chat Completions: the route every OpenAI-compatible server speaks,
+    // chosen once on the configuration.
+    let agent = OpenAI::from_env()?
+        .with_route(Route::Chat)
+        .bound()?
         .agent(model)
         .preamble(
             "You are a concise release assistant. The user will ask about an \
@@ -102,26 +108,26 @@ async fn main() -> Result<()> {
         .build();
 
     let mut stream = agent
-        .stream_prompt("Check ticket RIG-usage-42 and summarize the result in one sentence.")
+        .prompt("Check ticket RIG-usage-42 and summarize the result in one sentence.")
         .max_turns(4)
-        .await;
+        .stream();
 
     let mut final_response = None;
     let mut printed_streamed_text = false;
 
     while let Some(item) = stream.next().await {
         match item? {
-            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
-                print!("{}", text.text);
+            MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockDelta {
+                delta: Delta::Text { text },
+                ..
+            }) => {
+                print!("{text}");
                 io::stdout().flush()?;
                 printed_streamed_text = true;
             }
             // The tool call the *model emitted* (reported when the turn commits,
             // whether or not rig goes on to execute it).
-            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
-                tool_call,
-                ..
-            }) => {
+            MultiTurnStreamItem::ToolCall { tool_call, .. } => {
                 println!("\n\nmodel requested tool: {}", tool_call.function.name);
             }
             // Rig executed and atomically committed this tool call after its
@@ -137,9 +143,9 @@ async fn main() -> Result<()> {
                     println!();
                     printed_streamed_text = false;
                 }
-                // Zero-valued usage is Usage's documented sentinel for
-                // "the provider reported no usage metrics".
-                if completion_call.usage.has_values() {
+                // A `Usage` with every counter `None` means the provider
+                // reported no usage metrics.
+                if completion_call.usage.is_reported() {
                     print_usage(
                         &format!("completion call {} usage", completion_call.call_index),
                         completion_call.usage,
@@ -165,9 +171,12 @@ async fn main() -> Result<()> {
 
     if let Some(final_completion_call) = response.completion_calls().last().cloned() {
         let usage = final_completion_call.usage;
-        if usage.has_values() {
+        if usage.is_reported() {
             print_usage("final completion call usage", usage);
-            println!("final prompt/context token length: {}", usage.input_tokens);
+            println!(
+                "final prompt/context token length: {}",
+                usage.input_tokens.unwrap_or(0)
+            );
         } else {
             println!("final completion call usage: not reported");
         }

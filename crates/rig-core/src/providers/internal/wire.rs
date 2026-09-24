@@ -1,13 +1,12 @@
-//! Decode-then-validate classification for JSON stream wire frames.
+//! Classifies stream frames as known, unknown, or corrupt before interpretation.
+//! Known discriminators require typed decoding; invalid known payloads must not
+//! become ignorable unknown events.
 //!
-//! Each streaming wire family classifies every frame through exactly one of
-//! the functions below before acting on it, so the parse policy is stated once
-//! per family instead of being re-derived from serde failure modes at each
-//! call site. The classification is a hand-written tag dispatch, never an
-//! untagged serde fallback: a trailing `#[serde(untagged)]` variant on an
-//! internally-tagged enum swallows a known tag with an invalid payload
-//! (`rig-2257-code-review-findings-34ee8ba5.md` P2), which would silently
-//! demote a data-level defect to an ignorable unknown event.
+//! ```
+//! use rig_core::providers::internal::wire::{classify_untyped_line, WireEvent};
+//! let event = classify_untyped_line::<serde_json::Value>(b"{}");
+//! assert!(matches!(event, WireEvent::Known(_)));
+//! ```
 
 /// One classified wire frame.
 #[derive(Debug)]
@@ -15,20 +14,16 @@ pub enum WireEvent<T> {
     /// The frame carries a discriminator this client models and its payload
     /// decoded fully.
     Known(T),
-    /// Valid JSON whose discriminator this client does not model. Policy
-    /// (owned by the stream driver, never per adapter): warn — structural
-    /// metadata only, so payloads never leak into logs — and skip, for
-    /// forward compatibility.
+    /// Valid JSON not recognized by this classifier.
+    /// Drivers log structural metadata only and skip interpretation.
     Unknown {
         /// The unmodeled discriminator value.
         event_type: String,
-        /// The full frame payload, for the driver's raw passthrough channel
-        /// (never for its warn log — and its Debug is redacted by type).
+        /// Full payload for raw passthrough, never warning logs. Debug is redacted.
         value: crate::streaming::UnknownPayload,
     },
-    /// Not valid JSON, or a modeled discriminator whose payload failed the
-    /// typed decode — a data-level defect in a known event, which must never
-    /// be demoted to `Unknown`.
+    /// Invalid JSON or a recognized frame that failed typed decoding.
+    /// Must not be demoted to `Unknown`.
     Corrupt(serde_json::Error),
 }
 
@@ -47,17 +42,10 @@ impl<T> WireEvent<T> {
     }
 }
 
-/// Classify one frame of a tag-discriminated JSON wire (OpenAI Responses SSE,
-/// Cohere SSE, and Anthropic use `type`; Gemini Interactions uses
-/// `event_type`).
-///
-/// Dispatch on the envelope's `tag` field: a value outside
-/// `is_known_event_type` is `Unknown`; a modeled value — or a missing tag,
-/// which no modeled event omits — must pass the full typed decode, and a
-/// failure there is `Corrupt`, not `Unknown`. A frame carrying the tag key
-/// more than once is `Corrupt` outright: `serde_json::Value` keeps only the
-/// last occurrence, so without the rejection a defective known frame could
-/// masquerade as a skippable unknown one.
+/// Classify JSON by its top-level `tag` string.
+/// Unknown strings and non-object JSON produce `Unknown`. Known, missing, or
+/// nonstring tags require typed decoding. Invalid JSON, duplicate tags, and
+/// failed typed decoding produce `Corrupt`.
 pub fn classify_tagged_frame<T>(
     data: &str,
     tag: &str,
@@ -79,16 +67,12 @@ where
                 _ => decode_known(data),
             }
         }
-        // Valid JSON that is not an object (a gateway keep-alive `null`, a
-        // bare array or scalar) cannot be a modeled event: it is Unknown
-        // (warn-and-skip), never routed into the typed decode where its
-        // guaranteed failure would read as Corrupt and error the stream.
+        // Non-object keep-alives must not become fatal typed-decode failures.
         DiscriminatorScan::NotObject => unknown_with_value(data, String::new()),
     }
 }
 
-/// Build the `Unknown` cold path: the raw channel carries the full payload,
-/// parsed lazily here — the hot Known path never pays for it.
+/// Parse the payload for raw passthrough after classifying a frame as unknown.
 fn unknown_with_value<T>(data: &str, event_type: String) -> WireEvent<T> {
     match serde_json::from_str::<serde_json::Value>(data) {
         Ok(value) => WireEvent::Unknown {
@@ -118,9 +102,7 @@ where
     };
     let found = match scanned {
         DiscriminatorScan::Object(found) => found,
-        // Same policy as `classify_tagged_frame`: non-object valid JSON is
-        // unrecognizable, so it is Unknown (warn-and-skip) — a keep-alive
-        // `null` must not become a fatal Corrupt via a doomed typed decode.
+        // Non-object JSON is unrecognized rather than corrupt.
         DiscriminatorScan::NotObject => return unknown_with_value(data, String::new()),
     };
     let object_value = found.first().and_then(|key| key.string_value.as_deref());
@@ -134,20 +116,14 @@ where
     decode_known(data)
 }
 
-/// Classify one frame of an untagged JSON wire recognized by payload keys
-/// (Gemini `streamGenerateContent`).
-///
-/// The wire has no discriminator, so recognizability substitutes — the same
-/// policy as [`classify_chat_completions_frame`]: a frame carrying any of
-/// `marker_keys` at top level is the wire's chunk shape and must pass the
-/// full typed decode (failure is `Corrupt`); valid JSON carrying none of them
-/// is `Unknown`.
+/// Classify JSON by the presence of any top-level `marker_keys`.
+/// Recognized frames require typed decoding; failures produce `Corrupt`.
+/// Valid JSON without markers produces `Unknown`. Duplicate markers are allowed.
 pub fn classify_marker_keyed_frame<T>(data: &str, marker_keys: &[&str]) -> WireEvent<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    // Markers are presence checks, not discriminators — historically
-    // duplicate-tolerant, so the scan does not reject duplicates here.
+    // Presence markers permit duplicates because their values do not select a type.
     let scanned = match scan_discriminators(data, marker_keys, false) {
         Ok(scanned) => scanned,
         Err(error) => return WireEvent::Corrupt(error),
@@ -200,28 +176,19 @@ where
 pub enum TypedEvent<T> {
     /// A variant this client models.
     Modeled(T),
-    /// The SDK's own unknown-variant signal — aws-sdk's non-exhaustive
-    /// `Unknown` union variant, a prost oneof decoding to `None`.
+    /// An unrecognized variant reported by the transport SDK.
     Unrecognized {
         /// Discriminator for the driver's warn log.
         event_type: String,
-        /// Debug rendering of the frame, for the driver's warn log.
+        /// Frame detail retained for raw passthrough, not warning logs.
         detail: String,
     },
-    /// The SDK reported a decode failure for a modeled event — a data-level
-    /// defect in a known event.
+    /// SDK decode failure for a modeled event.
     Malformed(String),
 }
 
-/// Classify one event of a typed-transport wire (bedrock's Converse event
-/// stream, gemini-grpc, candle's in-process generation).
-///
-/// The transport SDK already deserialized the frame, so the byte-level decode
-/// step collapses and only the triage remains: modeled variants are `Known`;
-/// the SDK's non-exhaustive/unrecognized variants are `Unknown`; an SDK
-/// decode error for a modeled event is `Corrupt` — the same known-tag
-/// strictness as the JSON classifiers, so a typed transport earns no policy
-/// exemption.
+/// Map modeled SDK events to `Known`, unrecognized events to `Unknown`, and
+/// malformed events to `Corrupt`. Unknown detail is retained for raw passthrough.
 pub fn classify_typed_event<T>(event: TypedEvent<T>) -> WireEvent<T> {
     match event {
         TypedEvent::Modeled(event) => WireEvent::Known(event),
@@ -235,17 +202,10 @@ pub fn classify_typed_event<T>(event: TypedEvent<T>) -> WireEvent<T> {
     }
 }
 
-/// Classify a frame with a one-shot salvage step for `Corrupt` results.
-///
-/// Some replayed (buffered) wire bodies verifiably omit envelope bookkeeping
-/// fields the typed decode requires (ChatGPT's unary Responses bodies). This
-/// wrapper keeps that salvage inside the classify layer: when `classify`
-/// reports `Corrupt`, `repair` may produce an amended frame that is classified
-/// once more through the SAME interpreter. A frame `repair` cannot amend
-/// (`None`) maps to `Corrupt(on_unrepairable(original_error))`; a repaired
-/// frame that still fails maps to `Corrupt(on_still_corrupt())` — it is
-/// defective in its data, not its envelope. `Known` and `Unknown` results
-/// pass through untouched, so no policy is decided here.
+/// Retry classification once after repairing a `Corrupt` frame.
+/// Initial `Known` and `Unknown` results pass through. No repair returns
+/// `on_unrepairable`'s error; repaired frames must classify as `Known` or return
+/// `on_still_corrupt`'s error.
 pub fn classify_with_repair<T>(
     data: &str,
     classify: impl Fn(&str) -> WireEvent<T>,
@@ -270,30 +230,29 @@ pub fn classify_with_repair<T>(
     }
 }
 
-/// Reject a top-level object that carries any discriminator key more than
-/// once.
-///
-/// `serde_json::Value` retains only the last occurrence of a duplicate key,
-/// so a frame like `{"type":"text.delta","type":"future.event",...}` would
-/// otherwise dispatch on the *last* value and demote a defective known frame
-/// to a skippable `Unknown` — violating the classifier invariant that a
-/// data-level defect in a known event is always `Corrupt`. This re-scans the
-/// raw text with a streaming visitor that sees every key occurrence.
-/// `value` (the already-parsed frame) gates the scan to top-level objects.
-/// What one streaming pass learned about a frame's discriminator keys.
-///
-/// This is the fused form of "parse to `Value` for the discriminator lookup"
-/// and "scan for duplicate discriminator keys": one tokenization pass over
-/// the raw text yields both, so the hot path (Known frames) runs exactly two
-/// passes — this scan plus the typed decode, the irreducible minimum. The
-/// `Unknown` cold path lazily parses the `Value` it must carry anyway.
+/// Try `then` only when `first` returns `Corrupt`.
+/// Return `then`'s known event or corrupt error. If `then` returns `Unknown`,
+/// preserve `first`'s error. Initial `Known` and `Unknown` results pass through.
+pub fn classify_or<T>(
+    data: &str,
+    first: impl Fn(&str) -> WireEvent<T>,
+    then: impl Fn(&str) -> WireEvent<T>,
+) -> WireEvent<T> {
+    match first(data) {
+        WireEvent::Corrupt(first_error) => match then(data) {
+            WireEvent::Known(event) => WireEvent::Known(event),
+            WireEvent::Corrupt(error) => WireEvent::Corrupt(error),
+            WireEvent::Unknown { .. } => WireEvent::Corrupt(first_error),
+        },
+        event => event,
+    }
+}
+
+/// Discriminator presence and first string values collected in one JSON scan.
 enum DiscriminatorScan {
-    /// Top-level object: per requested key, whether it was present and its
-    /// string value when it had one (first occurrence; a duplicate is an
-    /// error before this is returned).
+    /// Presence and first string value for each requested top-level key.
     Object(Vec<KeyScan>),
-    /// Not a JSON object — no top-level keys exist; classification falls
-    /// through to the typed decode.
+    /// Valid non-object JSON with no top-level keys.
     NotObject,
 }
 
@@ -358,7 +317,6 @@ fn scan_discriminators(
             Ok(DiscriminatorScan::Object(found))
         }
 
-        // Every non-map shape falls through to the typed decode downstream.
         fn visit_bool<E>(self, _: bool) -> Result<DiscriminatorScan, E> {
             Ok(DiscriminatorScan::NotObject)
         }
@@ -469,256 +427,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{WireEvent, classify_chat_completions_frame, classify_tagged_frame};
-
-    #[derive(Debug, serde::Deserialize)]
-    #[serde(tag = "type")]
-    enum TestEvent {
-        #[serde(rename = "text.delta")]
-        TextDelta { delta: String },
-    }
-
-    fn known(event_type: &str) -> bool {
-        event_type == "text.delta"
-    }
-
-    #[derive(Debug, serde::Deserialize)]
-    struct TestChunk {
-        #[allow(dead_code)]
-        choices: Vec<serde_json::Value>,
-    }
-
-    #[test]
-    fn tagged_known_frame_decodes() {
-        let event = classify_tagged_frame::<TestEvent>(
-            r#"{"type":"text.delta","delta":"hi"}"#,
-            "type",
-            known,
-        );
-        assert!(matches!(event, WireEvent::Known(TestEvent::TextDelta { delta }) if delta == "hi"));
-    }
-
-    #[test]
-    fn tagged_unknown_type_is_unknown() {
-        let event = classify_tagged_frame::<TestEvent>(r#"{"type":"future.event"}"#, "type", known);
-        assert!(matches!(
-            event,
-            WireEvent::Unknown { event_type, .. } if event_type == "future.event"
-        ));
-    }
-
-    #[test]
-    fn tagged_invalid_json_is_corrupt() {
-        let event = classify_tagged_frame::<TestEvent>("{not json", "type", known);
-        assert!(matches!(event, WireEvent::Corrupt(_)));
-    }
-
-    #[test]
-    fn tagged_known_type_with_defective_payload_is_corrupt() {
-        let event = classify_tagged_frame::<TestEvent>(
-            r#"{"type":"text.delta","delta":42}"#,
-            "type",
-            known,
-        );
-        assert!(matches!(event, WireEvent::Corrupt(_)));
-    }
-
-    #[test]
-    fn tagged_typeless_frame_is_corrupt() {
-        let event = classify_tagged_frame::<TestEvent>("{}", "type", known);
-        assert!(matches!(event, WireEvent::Corrupt(_)));
-    }
-
-    /// #2258 review probe: `serde_json::Value` keeps the last duplicate key,
-    /// so without the duplicate-discriminator rejection this frame would
-    /// dispatch on `future.event` and demote a defective known frame to a
-    /// skippable `Unknown`.
-    #[test]
-    fn tagged_duplicate_discriminator_is_corrupt() {
-        let event = classify_tagged_frame::<TestEvent>(
-            r#"{"type":"text.delta","type":"future.event","delta":"hi"}"#,
-            "type",
-            known,
-        );
-        assert!(matches!(event, WireEvent::Corrupt(_)));
-    }
-
-    /// #2258 review probe (second-pass extension): the chat classifier's
-    /// `object` recognizability key is equally spoofable via duplication.
-    #[test]
-    fn chat_duplicate_object_discriminator_is_corrupt() {
-        let event = classify_chat_completions_frame::<TestChunk>(
-            r#"{"object":"chat.completion.chunk","object":"future.thing","data":1}"#,
-        );
-        assert!(matches!(event, WireEvent::Corrupt(_)));
-    }
-
-    #[test]
-    fn chat_duplicate_choices_key_is_corrupt() {
-        let event = classify_chat_completions_frame::<TestChunk>(r#"{"choices":[],"choices":42}"#);
-        assert!(matches!(event, WireEvent::Corrupt(_)));
-    }
-
-    #[test]
-    fn tagged_duplicate_non_discriminator_key_still_classifies() {
-        // Only discriminator duplication is rejected by the scanner; other
-        // duplicate keys stay with the typed decode's own policy (an ignored
-        // key duplicated is harmless).
-        let event = classify_tagged_frame::<TestEvent>(
-            r#"{"type":"text.delta","ignored":1,"ignored":2,"delta":"hi"}"#,
-            "type",
-            known,
-        );
-        assert!(matches!(event, WireEvent::Known(TestEvent::TextDelta { delta }) if delta == "hi"));
-    }
-
-    #[test]
-    fn chat_recognizable_chunk_decodes() {
-        let event = classify_chat_completions_frame::<TestChunk>(r#"{"choices":[]}"#);
-        assert!(matches!(event, WireEvent::Known(_)));
-    }
-
-    #[test]
-    fn chat_unrecognizable_json_is_unknown() {
-        let event = classify_chat_completions_frame::<TestChunk>(r#"{"object":"ping"}"#);
-        assert!(matches!(
-            event,
-            WireEvent::Unknown { event_type, .. } if event_type == "ping"
-        ));
-    }
-
-    #[test]
-    fn chat_recognizable_chunk_with_defective_payload_is_corrupt() {
-        let event = classify_chat_completions_frame::<TestChunk>(r#"{"choices":42}"#);
-        assert!(matches!(event, WireEvent::Corrupt(_)));
-    }
-
-    #[test]
-    fn chat_invalid_json_is_corrupt() {
-        let event = classify_chat_completions_frame::<TestChunk>("{not json");
-        assert!(matches!(event, WireEvent::Corrupt(_)));
-    }
-
-    /// Valid JSON that is not an object — a gateway keep-alive `null`, a
-    /// bare array or scalar — is Unknown (warn-and-skip) on every
-    /// classifier, never routed into a typed decode whose guaranteed
-    /// failure would fatal the stream as Corrupt (#2258 B5).
-    #[test]
-    fn non_object_json_is_unknown_never_corrupt() {
-        for frame in ["null", "[]", "42", r#""ping""#] {
-            let event = classify_chat_completions_frame::<TestChunk>(frame);
-            assert!(
-                matches!(event, WireEvent::Unknown { .. }),
-                "chat classifier must skip {frame}, got {event:?}"
-            );
-            let event = classify_tagged_frame::<TestEvent>(frame, "type", known);
-            assert!(
-                matches!(event, WireEvent::Unknown { .. }),
-                "tagged classifier must skip {frame}, got {event:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn tagged_dispatch_honors_a_non_type_tag_name() {
-        #[derive(Debug, serde::Deserialize)]
-        #[serde(tag = "event_type")]
-        enum EventTypeTagged {
-            #[serde(rename = "step.delta")]
-            StepDelta { delta: String },
-        }
-
-        let event = classify_tagged_frame::<EventTypeTagged>(
-            r#"{"event_type":"step.delta","delta":"hi"}"#,
-            "event_type",
-            |event_type| event_type == "step.delta",
-        );
-        assert!(matches!(
-            event,
-            WireEvent::Known(EventTypeTagged::StepDelta { delta }) if delta == "hi"
-        ));
-
-        let event = classify_tagged_frame::<EventTypeTagged>(
-            r#"{"event_type":"future.event"}"#,
-            "event_type",
-            |event_type| event_type == "step.delta",
-        );
-        assert!(matches!(
-            event,
-            WireEvent::Unknown { event_type, .. } if event_type == "future.event"
-        ));
-    }
-
-    #[test]
-    fn marker_keyed_recognizable_chunk_decodes() {
-        let event = super::classify_marker_keyed_frame::<TestChunk>(
-            r#"{"choices":[]}"#,
-            &["choices", "usage"],
-        );
-        assert!(matches!(event, WireEvent::Known(_)));
-    }
-
-    #[test]
-    fn marker_keyed_unrecognizable_json_is_unknown() {
-        let event = super::classify_marker_keyed_frame::<TestChunk>(
-            r#"{"noise":true,"other":1}"#,
-            &["choices", "usage"],
-        );
-        assert!(matches!(
-            event,
-            WireEvent::Unknown { event_type, .. } if event_type == "noise,other"
-        ));
-    }
-
-    #[test]
-    fn marker_keyed_recognizable_chunk_with_defective_payload_is_corrupt() {
-        let event =
-            super::classify_marker_keyed_frame::<TestChunk>(r#"{"choices":42}"#, &["choices"]);
-        assert!(matches!(event, WireEvent::Corrupt(_)));
-    }
-
-    #[test]
-    fn marker_keyed_invalid_json_is_corrupt() {
-        let event = super::classify_marker_keyed_frame::<TestChunk>("{not json", &["choices"]);
-        assert!(matches!(event, WireEvent::Corrupt(_)));
-    }
-
-    #[test]
-    fn typed_event_triage_maps_onto_the_shared_policy() {
-        // Modeled variants pass through as Known.
-        let event = super::classify_typed_event(super::TypedEvent::Modeled(7u8));
-        assert!(matches!(event, WireEvent::Known(7)));
-
-        // The SDK's unknown-variant signal (aws-sdk `Unknown`, prost oneof
-        // `None`) is Unknown, carrying the debug payload for the warn log.
-        let event = super::classify_typed_event::<u8>(super::TypedEvent::Unrecognized {
-            event_type: "unknown".to_string(),
-            detail: "FutureEvent".to_string(),
-        });
-        assert!(matches!(
-            event,
-            WireEvent::Unknown { event_type, value }
-                if event_type == "unknown" && value.value() == &serde_json::Value::String("FutureEvent".into())
-        ));
-
-        // An SDK decode error for a modeled event is Corrupt, never Unknown.
-        let event =
-            super::classify_typed_event::<u8>(super::TypedEvent::Malformed("bad frame".into()));
-        assert!(
-            matches!(event, WireEvent::Corrupt(error) if error.to_string().contains("bad frame"))
-        );
-    }
-
-    #[test]
-    fn untyped_line_is_known_or_corrupt() {
-        assert!(matches!(
-            super::classify_untyped_line::<TestChunk>(br#"{"choices":[]}"#),
-            WireEvent::Known(_)
-        ));
-        assert!(matches!(
-            super::classify_untyped_line::<TestChunk>(b"{not json"),
-            WireEvent::Corrupt(_)
-        ));
-    }
-}
+mod tests;

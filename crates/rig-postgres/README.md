@@ -100,9 +100,9 @@ pub struct Product {
 Example usage
 
 ```rust
-    // Create OpenAI client
-    let openai_client = rig::providers::openai::Client::from_env();
-    let model = openai_client.embedding_model(rig::providers::openai::TEXT_EMBEDDING_3_SMALL);
+    // Bind OpenAI's embeddings wire to the bundled transport
+    let openai = rig::providers::openai::wire::OpenAI::from_env()?.bound()?;
+    let model = openai.embedding(rig::providers::openai::TEXT_EMBEDDING_3_SMALL, None);
 
     // connect to Postgres
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL not set");
@@ -127,7 +127,11 @@ Example usage
     vector_store.insert_documents(documents).await?;
 
     // retrieve embeddings
-    let results = vector_store.top_n::<Product>("Which phones have more than 16Gb and support 5G", 50).await?
+    let req = VectorSearchRequest::builder()
+        .query("Which phones have more than 16Gb and support 5G")
+        .samples(50)
+        .build();
+    let results = vector_store.top_n::<Product>(req).await?;
 
     ...
 

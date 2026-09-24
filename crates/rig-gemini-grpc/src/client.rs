@@ -1,4 +1,4 @@
-use rig_core::prelude::*;
+use rig_core::driver::CompletionProvider;
 use std::fmt::Debug;
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
@@ -9,9 +9,6 @@ use super::GenerativeServiceClient;
 use crate::completion::CompletionModel;
 use crate::embedding::EmbeddingModel;
 
-// ================================================================
-// Google Gemini gRPC Client
-// ================================================================
 const GEMINI_GRPC_ENDPOINT: &str = "https://generativelanguage.googleapis.com";
 
 /// User agent identifier for API tracking
@@ -32,7 +29,7 @@ impl Debug for Client {
     }
 }
 
-// Interceptor to add API key and client identification to metadata
+/// Adds API-key and client-identification metadata to outgoing requests.
 #[derive(Clone)]
 pub struct ApiKeyInterceptor {
     api_key: MetadataValue<tonic::metadata::Ascii>,
@@ -88,43 +85,61 @@ impl Client {
     }
 }
 
-impl ProviderClient for Client {
-    type Input = String;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
-
+impl Client {
     /// Create a new Google Gemini gRPC client from the `GEMINI_API_KEY` environment variable.
-    fn from_env() -> Result<Self, Self::Error> {
+    ///
+    /// Returns environment, TLS, or connection errors.
+    ///
+    /// # Panics
+    /// Panics outside a Tokio runtime or inside a current-thread runtime.
+    pub fn from_env() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let api_key = std::env::var("GEMINI_API_KEY")?;
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(Self::new(api_key))
         })
     }
 
-    fn from_val(input: Self::Input) -> Result<Self, Self::Error> {
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(Self::new(input)))
+    /// Connects using an explicit API key. Returns TLS or connection errors.
+    ///
+    /// # Panics
+    /// Panics outside a Tokio runtime or inside a current-thread runtime.
+    pub fn from_val(api_key: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(Self::new(api_key))
+        })
     }
 }
 
-impl CompletionClient for Client {
-    type CompletionModel = CompletionModel;
+impl CompletionProvider for Client {
+    type Model = CompletionModel;
 
-    fn completion_model(&self, model: impl Into<String>) -> Self::CompletionModel {
+    fn completion(&self, model: impl Into<String>) -> Self::Model {
         CompletionModel::new(self.clone(), model)
     }
 }
 
-impl EmbeddingsClient for Client {
-    type EmbeddingModel = EmbeddingModel;
-
-    fn embedding_model(&self, model: impl Into<String>) -> Self::EmbeddingModel {
-        EmbeddingModel::new(self.clone(), model, None)
+impl Client {
+    /// This provider's embedding model for `model`, at `ndims` dimensions
+    /// when the caller named one rather than taking the model's default.
+    pub fn embedding(&self, model: impl Into<String>, ndims: Option<usize>) -> EmbeddingModel {
+        EmbeddingModel::new(self.clone(), model, ndims)
     }
 
-    fn embedding_model_with_ndims(
+    /// An embedding builder over this provider's `model`.
+    pub fn embeddings<D: rig_core::Embed>(
+        &self,
+        model: impl Into<String>,
+    ) -> rig_core::embeddings::EmbeddingsBuilder<EmbeddingModel, D> {
+        rig_core::embeddings::EmbeddingsBuilder::new(self.embedding(model, None))
+    }
+
+    /// An embedding builder over this provider's `model` at `ndims`
+    /// dimensions.
+    pub fn embeddings_with_ndims<D: rig_core::Embed>(
         &self,
         model: impl Into<String>,
         ndims: usize,
-    ) -> Self::EmbeddingModel {
-        EmbeddingModel::new(self.clone(), model, Some(ndims))
+    ) -> rig_core::embeddings::EmbeddingsBuilder<EmbeddingModel, D> {
+        rig_core::embeddings::EmbeddingsBuilder::new(self.embedding(model, Some(ndims)))
     }
 }

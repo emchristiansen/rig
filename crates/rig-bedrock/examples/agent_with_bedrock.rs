@@ -1,6 +1,7 @@
-use rig_agent::{agent::AgentBuilder, completion::Prompt, prelude::*};
+use rig_agent::{agent::AgentBuilder, prelude::*};
 use rig_bedrock::{client::Client, completion::AMAZON_NOVA_LITE};
-use rig_core::{client::ProviderClient, loaders::FileLoader};
+use rig_core::driver::CompletionProvider;
+use rig_core::loaders::FileLoader;
 use tracing::info;
 
 mod common;
@@ -43,7 +44,7 @@ async fn basic() -> Result<(), anyhow::Error> {
         .preamble("Answer with json format only")
         .build();
 
-    let response = agent.prompt("Describe solar system").await?;
+    let response = agent.prompt("Describe solar system").await?.output;
     info!("{}", response);
 
     Ok(())
@@ -59,14 +60,14 @@ async fn tools() -> Result<(), anyhow::Error> {
 
     info!(
         "Calculator Agent: add 400 and 20\nResult: {}",
-        calculator_agent.prompt("add 400 and 20").await?
+        calculator_agent.prompt("add 400 and 20").await?.output
     );
 
     Ok(())
 }
 
 async fn context() -> Result<(), anyhow::Error> {
-    let model = client()?.completion_model(AMAZON_NOVA_LITE);
+    let model = client()?.completion(AMAZON_NOVA_LITE);
 
     // Create an agent with multiple context documents
     let agent = AgentBuilder::new(model)
@@ -77,7 +78,10 @@ async fn context() -> Result<(), anyhow::Error> {
         .build();
 
     // Prompt the agent and print the response
-    let response = agent.prompt("What does \"glarb-glarb\" mean?").await?;
+    let response = agent
+        .prompt("What does \"glarb-glarb\" mean?")
+        .await?
+        .output;
 
     info!("What does \"glarb-glarb\" mean?\n{}", response);
 
@@ -89,7 +93,7 @@ async fn context() -> Result<(), anyhow::Error> {
 /// This example loads in all the rust examples from the rig-core crate and uses them as\\
 ///  context for the agent
 async fn loaders() -> Result<(), anyhow::Error> {
-    let model = client()?.completion_model(AMAZON_NOVA_LITE);
+    let model = client()?.completion(AMAZON_NOVA_LITE);
 
     // Load in all the rust examples
     let examples = FileLoader::with_glob("examples/*.rs")?
@@ -108,7 +112,8 @@ async fn loaders() -> Result<(), anyhow::Error> {
     // Prompt the agent and print the response
     let response = agent
         .prompt("Which rust example is best suited for the operation 1 + 2")
-        .await?;
+        .await?
+        .output;
 
     info!("{}", response);
 

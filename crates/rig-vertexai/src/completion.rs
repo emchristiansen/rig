@@ -1,12 +1,21 @@
-//! All supported models: <https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/gemini>
+//! Unary Vertex AI completions and model identifiers. Streaming is unsupported.
+//!
+//! ```no_run
+//! use rig_vertexai::{Client, completion::{CompletionModel, GEMINI_2_5_FLASH}};
+//!
+//! # async fn example() -> Result<(), rig_vertexai::client::VertexAiClientError> {
+//! let model = CompletionModel::new(Client::from_env()?, GEMINI_2_5_FLASH);
+//! # Ok(())
+//! # }
+//! ```
 
 use super::Client;
-use crate::types::{
-    completion_request::VertexCompletionRequest, completion_response::VertexGenerateContentOutput,
-};
+use crate::types::completion_request::VertexCompletionRequest;
+pub use crate::types::completion_response::VertexGenerateContentOutput;
 use rig_core::completion::{
-    CompletionError, CompletionModel as CompletionModelTrait, CompletionRequest, CompletionResponse,
+    CompletionModel as CompletionModelTrait, CompletionRequest, CompletionResponse,
 };
+use rig_core::error::ProviderError;
 use rig_core::streaming::StreamingCompletionResponse;
 
 /// `gemini-1.5-pro`
@@ -58,15 +67,13 @@ impl CompletionModel {
 }
 
 impl CompletionModel {
-    /// Execute a completion and return Vertex AI's own wire response.
-    ///
-    /// This is the escape hatch for fields rig does not normalize;
-    /// [`CompletionModelTrait::completion`] calls it and maps the result, so
-    /// there is exactly one RPC either way.
+    /// Executes one completion RPC and returns provider-native output.
+    /// Returns request-conversion, client-initialization, or RPC errors.
+    /// The output type also deserializes from [`CompletionResponse::raw`].
     pub async fn raw_completion(
         &self,
         request: CompletionRequest,
-    ) -> Result<VertexGenerateContentOutput, CompletionError> {
+    ) -> Result<VertexGenerateContentOutput, ProviderError> {
         tracing::debug!(
             target: "rig_core::vertexai",
             "Vertex AI completion request: {request:?}"
@@ -74,18 +81,18 @@ impl CompletionModel {
 
         let vertex_request = VertexCompletionRequest(request);
 
-        let contents = vertex_request.contents()?;
         let generation_config = vertex_request.generation_config()?;
         let system_instruction = vertex_request.system_instruction();
         let tools = vertex_request.tools();
         let tool_config = vertex_request.tool_config();
+        let contents = vertex_request.contents()?;
         let model_path = self.model_path();
 
         let mut request_builder = self
             .client
-            .get_inner()
+            .inner()
             .await
-            .map_err(|error| CompletionError::ProviderError(error.to_string()))?
+            .map_err(|error| ProviderError::Provider(error.to_string()))?
             .generate_content()
             .set_model(&model_path)
             .set_contents(contents);
@@ -106,7 +113,10 @@ impl CompletionModel {
             request_builder = request_builder.set_tool_config(tool_config);
         }
 
-        let response = request_builder.send().await.map_err(rpc_error)?;
+        let response = request_builder
+            .send()
+            .await
+            .map_err(|error| rpc_error(&error))?;
 
         tracing::debug!(
             target: "rig_core::vertexai",
@@ -115,22 +125,10 @@ impl CompletionModel {
 
         Ok(VertexGenerateContentOutput(response))
     }
-
-    /// Vertex AI streaming is not implemented in this integration.
-    ///
-    /// Present for parity with the other providers' escape hatches so callers
-    /// get the same error from the raw and normalized paths.
-    pub async fn raw_stream(
-        &self,
-        _request: CompletionRequest,
-    ) -> Result<rig_core::streaming::RawStreamingResult<VertexGenerateContentOutput>, CompletionError>
-    {
-        Err(streaming_unsupported())
-    }
 }
 
-fn streaming_unsupported() -> CompletionError {
-    CompletionError::ProviderError(
+fn streaming_unsupported() -> ProviderError {
+    ProviderError::Provider(
         "Streaming is not supported for Vertex AI in this integration".to_string(),
     )
 }
@@ -139,53 +137,44 @@ impl CompletionModelTrait for CompletionModel {
     async fn completion(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionResponse, CompletionError> {
+    ) -> Result<CompletionResponse, ProviderError> {
         self.raw_completion(request).await?.try_into()
     }
 
     async fn stream(
         &self,
         _request: CompletionRequest,
-    ) -> Result<StreamingCompletionResponse, CompletionError> {
+    ) -> Result<StreamingCompletionResponse, ProviderError> {
         Err(streaming_unsupported())
     }
 }
 
-/// Map a failed `send()` RPC into a [`CompletionError`] that preserves the
-/// provider's gRPC error text verbatim.
-///
-/// Vertex AI uses a non-HTTP (gRPC/SDK) transport, so there is no
-/// [`http::StatusCode`] to attach; the error body is preserved via
-/// [`CompletionError::from_provider_body`] (`status: None`) rather than a
-/// Rig-prefixed [`CompletionError::ProviderError`] diagnostic. (The
-/// `get_inner()` client-init failure stays a `ProviderError` because it is a
-/// Rig-side setup failure, not a provider response.)
-///
-/// Note: the SDK does not distinguish a server-returned gRPC error from a
-/// transport/connection failure, so a pure connection error is also preserved
-/// here (`status: None`) rather than gated out as a Rig diagnostic the way
-/// Bedrock's typed service errors are.
-fn rpc_error(error: impl std::fmt::Display) -> CompletionError {
-    CompletionError::from_provider_body(error.to_string())
+/// Preserves SDK error display text, HTTP status, RPC code, and retry hints.
+/// Transport errors also use the provider-body representation.
+fn rpc_error(error: &google_cloud_aiplatform_v1::Error) -> ProviderError {
+    let status = error
+        .http_status_code()
+        .and_then(|code| rig_core::http_client::StatusCode::from_u16(code).ok());
+    let code = error.status().map(|status| status.code.name());
+    // SDK transport classifications supply retry hints when no RPC code exists.
+    let transient = code.map(transient_rpc_code).or_else(|| {
+        (error.is_transport() || error.is_io() || error.is_timeout() || error.is_connect())
+            .then_some(true)
+    });
+    ProviderError::from_provider_body(error.to_string())
+        .with_provider_status(status)
+        .with_provider_code(code.map(str::to_owned))
+        .with_transient(transient)
+}
+
+/// Recognizes transient RPC codes; unlisted codes are non-transient.
+fn transient_rpc_code(code: &str) -> bool {
+    matches!(
+        code,
+        "UNAVAILABLE" | "RESOURCE_EXHAUSTED" | "DEADLINE_EXCEEDED" | "ABORTED"
+    )
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
-mod tests {
-    use super::*;
-
-    // The `send()` RPC error type comes from the `google-cloud-aiplatform-v1`
-    // SDK and is not trivially constructible, so `rpc_error` is generic over
-    // `impl Display` and we pin it here with a representative error string of
-    // its parameter type. This guards against a revert to `ProviderError`,
-    // which would surface the body as `None`.
-    #[test]
-    fn rpc_error_preserves_raw_text_without_http_status() {
-        let raw = "status: Unavailable, message: \"the service is currently unavailable\"";
-
-        let err = rpc_error(raw);
-
-        assert_eq!(err.provider_response_body(), Some(raw));
-        assert_eq!(err.provider_response_status(), None);
-    }
-}
+#[allow(clippy::expect_used)]
+mod tests;

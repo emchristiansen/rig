@@ -22,13 +22,13 @@
 
 use anyhow::Result;
 use rig::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, CompletionResponseEvent, HookContext,
-    ObservationAction, RequestPatch,
+    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, OutcomeAction, OutcomeEvent,
+    RequestPatch,
 };
-use rig::completion::{Document, Message, Prompt};
+use rig::completion::{Document, Message};
 use rig::message::UserContent;
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
 
 // ---------------------------------------------------------------------------
 // Hook 1: LoggingHook — observe-only. Reads run-scoped identity from the context.
@@ -64,19 +64,18 @@ impl AgentHook for LoggingHook {
         CompletionCallAction::continue_run()
     }
 
-    async fn on_completion_response(
-        &self,
-        ctx: &HookContext,
-        event: CompletionResponseEvent<'_>,
-    ) -> ObservationAction {
-        println!(
-            "[run {}] received response (usage: {:?}, message_id: {:?}): {:?}",
-            ctx.run_id(),
-            event.usage,
-            event.message_id,
-            event.content
-        );
-        ObservationAction::continue_run()
+    async fn on_outcome(&self, ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        // `on_outcome` fires for every effect family; only report completions.
+        if let Some(response) = event.completion() {
+            println!(
+                "[run {}] received response (usage: {:?}, message_id: {:?}): {:?}",
+                ctx.run_id(),
+                response.usage,
+                response.message_id,
+                response.choice
+            );
+        }
+        OutcomeAction::proceed()
     }
 }
 
@@ -151,7 +150,8 @@ impl AgentHook for TurnCounterHook {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let agent = openai::Client::from_env()?
+    let agent = OpenAI::from_env()?
+        .bound()?
         .agent(openai::GPT_4O)
         .preamble("You are a comedian here to entertain the user using humour and jokes.")
         .build();
@@ -166,7 +166,8 @@ async fn main() -> Result<()> {
         .add_hook(ContextHook)
         .add_hook(SamplingHook)
         .add_hook(TurnCounterHook)
-        .await?;
+        .await?
+        .output;
 
     println!("\nFinal response:\n{response}");
 

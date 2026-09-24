@@ -5,11 +5,9 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use crate::error::ProviderError;
 use crate::{
-    completion::{
-        AssistantContent, CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-        Usage,
-    },
+    completion::{AssistantContent, CompletionModel, CompletionRequest, CompletionResponse, Usage},
     message::{ToolCall, ToolFunction},
     streaming::StreamingCompletionResponse,
 };
@@ -17,7 +15,7 @@ use crate::{
 use super::streaming::{MOCK_PROVIDER, MockStreamEvent};
 
 /// Scripted error returned by [`MockCompletionModel`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MockError {
     /// Provider error.
     Provider(String),
@@ -38,22 +36,25 @@ impl MockError {
         Self::Request(message.into())
     }
 
-    pub(crate) fn into_completion_error(self) -> CompletionError {
+    pub(crate) fn into_completion_error(self) -> ProviderError {
         match self {
-            Self::Provider(message) => CompletionError::ProviderError(message),
-            Self::Request(message) => CompletionError::RequestError(message.into()),
-            Self::ProviderResponse(response) => CompletionError::ProviderResponse(response),
+            Self::Provider(message) => ProviderError::Provider(message),
+            Self::Request(message) => ProviderError::Request(message.into()),
+            Self::ProviderResponse(response) => ProviderError::ProviderResponse(response),
         }
     }
 }
 
 /// A scripted non-streaming mock completion turn.
-#[derive(Clone, Debug)]
+///
+/// A turn is data: a script serializes, so a scripted model can be written
+/// to a fixture and read back (see [`MockCompletionModel::script`]).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MockTurn {
     response: Result<MockTurnResponse, MockError>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct MockTurnResponse {
     choice: Vec<AssistantContent>,
     usage: Usage,
@@ -61,6 +62,23 @@ struct MockTurnResponse {
     response_id: Option<String>,
     provider_request_id: Option<String>,
     finish_reason: Option<crate::completion::FinishReason>,
+    /// A scripted provider document, when the test supplies one; otherwise
+    /// the turn itself, serialized, is the mock's document. Absent from the
+    /// serialized turn when unscripted, so that document never nests
+    /// itself; a scripted one survives a serde round trip of the script.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_scripted_raw"
+    )]
+    raw: Option<serde_json::Value>,
+}
+
+fn deserialize_scripted_raw<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    // Only a missing field means unscripted; explicit JSON null is a document.
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 impl MockTurn {
@@ -116,11 +134,12 @@ impl MockTurn {
         Self {
             response: Ok(MockTurnResponse {
                 choice: vec![content],
-                usage: Usage::new(),
+                usage: Usage::default(),
                 message_id: None,
                 response_id: None,
                 provider_request_id: None,
                 finish_reason: None,
+                raw: None,
             }),
         }
     }
@@ -133,11 +152,12 @@ impl MockTurn {
         Self {
             response: Ok(MockTurnResponse {
                 choice: content.into_iter().collect(),
-                usage: Usage::new(),
+                usage: Usage::default(),
                 message_id: None,
                 response_id: None,
                 provider_request_id: None,
                 finish_reason: None,
+                raw: None,
             }),
         }
     }
@@ -201,10 +221,41 @@ impl MockTurn {
         self
     }
 
-    fn into_completion_response(self) -> Result<CompletionResponse, CompletionError> {
+    /// Script the provider's own response for this turn — what a real seam
+    /// would serialize from its raw type. Attached to the response as-is, so
+    /// agent tests can prove the payload reaches every observer of the turn
+    /// without a live provider. A turn without a scripted payload carries
+    /// the scripted turn itself, serialized — the mock's own document, the
+    /// same capture every real adapter performs — so a scripted value in a
+    /// test is distinguishable from the mock's default by content.
+    pub fn with_raw(mut self, raw: serde_json::Value) -> Self {
+        if let Ok(response) = &mut self.response {
+            response.raw = Some(raw);
+        }
+        self
+    }
+
+    /// The provider document the mock attaches to this turn's response: the
+    /// scripted payload when one was supplied, otherwise the turn itself,
+    /// serialized. Public so a test can state the expected `raw` of a
+    /// recorded call without repeating the mock's serialization. An error
+    /// turn has no document.
+    pub fn raw(&self) -> Result<serde_json::Value, ProviderError> {
+        let response = self
+            .response
+            .as_ref()
+            .map_err(|error| error.clone().into_completion_error())?;
+        match &response.raw {
+            Some(raw) => Ok(raw.clone()),
+            None => Ok(serde_json::to_value(response)?),
+        }
+    }
+
+    fn into_completion_response(self) -> Result<CompletionResponse, ProviderError> {
+        let raw = self.raw()?;
         let response = self.response.map_err(MockError::into_completion_error)?;
         Ok(
-            CompletionResponse::new(response.choice, response.usage, MOCK_PROVIDER)
+            CompletionResponse::new(response.choice, response.usage, MOCK_PROVIDER, raw)
                 .with_optional_message_id(response.message_id)
                 .with_optional_response_id(response.response_id)
                 .with_optional_provider_request_id(response.provider_request_id)
@@ -213,17 +264,19 @@ impl MockTurn {
     }
 }
 
+type MockInvocation = (CompletionRequest, Option<crate::observe::AdapterContext>);
+
 #[derive(Default)]
 struct MockCompletionModelState {
     turns: Mutex<VecDeque<MockTurn>>,
     stream_turns: Mutex<VecDeque<Vec<MockStreamEvent>>>,
-    requests: Mutex<Vec<CompletionRequest>>,
+    requests: Mutex<Vec<MockInvocation>>,
 }
 
 /// A cloneable scripted [`CompletionModel`] for tests.
 ///
 /// Each completion or stream call consumes exactly one scripted turn. If no turn
-/// is available, the model returns [`CompletionError::ProviderError`] with a
+/// is available, the model returns [`ProviderError::Provider`] with a
 /// clear message instead of repeating previous responses.
 #[derive(Clone, Default)]
 pub struct MockCompletionModel {
@@ -272,7 +325,18 @@ impl MockCompletionModel {
 
     /// Return cloned requests received by this model.
     pub fn requests(&self) -> Vec<CompletionRequest> {
-        self.requests_guard().clone()
+        self.requests_guard()
+            .iter()
+            .map(|(request, _)| request.clone())
+            .collect()
+    }
+
+    /// Return invocation contexts in the same order as the captured requests.
+    pub fn contexts(&self) -> Vec<Option<crate::observe::AdapterContext>> {
+        self.requests_guard()
+            .iter()
+            .map(|(_, context)| context.clone())
+            .collect()
     }
 
     /// Return the number of requests received by this model.
@@ -280,8 +344,23 @@ impl MockCompletionModel {
         self.requests_guard().len()
     }
 
-    fn record_request(&self, request: CompletionRequest) {
-        self.requests_guard().push(request);
+    /// The non-streaming turns not yet consumed, in order — the read-back
+    /// half of the script, so a script is serde in and serde out.
+    pub fn script(&self) -> Vec<MockTurn> {
+        self.turns_guard().iter().cloned().collect()
+    }
+
+    /// The streaming turns not yet consumed, in order.
+    pub fn stream_script(&self) -> Vec<Vec<MockStreamEvent>> {
+        self.stream_turns_guard().iter().cloned().collect()
+    }
+
+    fn record_request(
+        &self,
+        request: CompletionRequest,
+        context: Option<crate::observe::AdapterContext>,
+    ) {
+        self.requests_guard().push((request, context));
     }
 
     fn next_turn(&self) -> Option<MockTurn> {
@@ -306,7 +385,7 @@ impl MockCompletionModel {
         }
     }
 
-    fn requests_guard(&self) -> MutexGuard<'_, Vec<CompletionRequest>> {
+    fn requests_guard(&self) -> MutexGuard<'_, Vec<MockInvocation>> {
         match self.state.requests.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -318,10 +397,25 @@ impl CompletionModel for MockCompletionModel {
     async fn completion(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionResponse, CompletionError> {
-        self.record_request(request);
+    ) -> Result<crate::completion::CompletionResponse, ProviderError> {
+        self.completion_with_context(request, None).await
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<crate::streaming::StreamingCompletionResponse, ProviderError> {
+        self.stream_with_context(request, None).await
+    }
+
+    async fn completion_with_context(
+        &self,
+        request: CompletionRequest,
+        context: Option<crate::observe::AdapterContext>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        self.record_request(request, context);
         let Some(turn) = self.next_turn() else {
-            return Err(CompletionError::ProviderError(
+            return Err(ProviderError::Provider(
                 "mock completion model has no scripted completion turn".to_string(),
             ));
         };
@@ -329,187 +423,42 @@ impl CompletionModel for MockCompletionModel {
         turn.into_completion_response()
     }
 
-    async fn stream(
+    async fn stream_with_context(
         &self,
         request: CompletionRequest,
-    ) -> Result<StreamingCompletionResponse, CompletionError> {
-        self.record_request(request);
+        context: Option<crate::observe::AdapterContext>,
+    ) -> Result<StreamingCompletionResponse, ProviderError> {
+        self.record_request(request, context);
         let Some(events) = self.next_stream_turn() else {
-            return Err(CompletionError::ProviderError(
+            return Err(ProviderError::Provider(
                 "mock completion model has no scripted streaming turn".to_string(),
             ));
         };
 
+        // Scripted events go through the same `AdapterOutput` helper every
+        // real adapter uses, so the mock speaks exactly the wire grammar —
+        // and the same `Stop` -> `ToolCalls` reconciliation callers see in
+        // production runs in `StreamingCompletionResponse` for both.
         let stream = async_stream::stream! {
+            let mut out = crate::operation::AdapterOutput::new();
+            // An id-less scripted tool call mints per stream, like a wire
+            // that carries no ids (`tool-0`, `tool-1`, …).
+            let mut tool_ids = crate::streaming::SyntheticIds::tool();
             for event in events {
-                yield event.into_raw_choice();
+                if let Err(error) = event.emit(&mut out, &mut tool_ids) {
+                    out.error(error);
+                }
+                for item in out.drain() {
+                    yield item;
+                }
             }
         };
-        // Scripted terminals go through `normalize_stream` like every real
-        // provider's, so the mock observes the same `Stop` -> `ToolCalls`
-        // reconciliation callers see in production.
-        let stream = crate::streaming::normalize_stream(Box::pin(stream), Ok);
-        Ok(StreamingCompletionResponse::stream(MOCK_PROVIDER, stream))
+        Ok(StreamingCompletionResponse::stream(
+            MOCK_PROVIDER,
+            Box::pin(stream),
+        ))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        message::Message,
-        streaming::{StreamedAssistantContent, ToolCallDeltaContent},
-    };
-    use futures::StreamExt;
-
-    fn request(prompt: &str) -> CompletionRequest {
-        CompletionRequest {
-            model: None,
-            preamble: None,
-            chat_history: vec![Message::user(prompt)],
-            documents: Vec::new(),
-            tools: Vec::new(),
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        }
-    }
-
-    #[tokio::test]
-    async fn completion_consumes_scripted_turns_and_records_requests() {
-        let model = MockCompletionModel::new([
-            MockTurn::text("first").with_message_id("msg_1"),
-            MockTurn::tool_call("tool_1", "calculator", serde_json::json!({"x": 1}))
-                .with_call_id("call_1"),
-        ]);
-
-        let first = model
-            .completion(request("hello"))
-            .await
-            .expect("first scripted turn should succeed");
-        assert_eq!(first.message_id.as_deref(), Some("msg_1"));
-        assert!(matches!(
-            first.choice.first(),
-            Some(AssistantContent::Text(text)) if text.text == "first"
-        ));
-
-        let second = model
-            .completion(request("use a tool"))
-            .await
-            .expect("second scripted turn should succeed");
-        assert!(matches!(
-            second.choice.first(),
-            Some(AssistantContent::ToolCall(tool_call))
-                if tool_call.id == "tool_1"
-                    && tool_call
-                        .provider
-                        .as_ref()
-                        .is_some_and(|provider| provider.call_id == "call_1")
-        ));
-
-        assert_eq!(model.request_count(), 2);
-        assert_eq!(model.requests().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn missing_completion_turn_returns_provider_error() {
-        let model = MockCompletionModel::default();
-
-        let err = model
-            .completion(request("hello"))
-            .await
-            .expect_err("missing turn should error");
-
-        assert!(matches!(
-            err,
-            CompletionError::ProviderError(message)
-                if message.contains("no scripted completion turn")
-        ));
-    }
-
-    #[tokio::test]
-    async fn stream_yields_scripted_events_and_records_requests() {
-        let model = MockCompletionModel::from_stream_turns([[
-            MockStreamEvent::message_id("msg_stream"),
-            MockStreamEvent::text("hel"),
-            MockStreamEvent::text("lo"),
-            MockStreamEvent::tool_call_name_delta("tool_1", "calculator"),
-            MockStreamEvent::tool_call_arguments_delta("tool_1", "{\"x\":1}"),
-            MockStreamEvent::tool_call("tool_1", "calculator", serde_json::json!({"x": 1}))
-                .with_call_id("call_1"),
-            MockStreamEvent::final_response_with_total_tokens(7),
-        ]]);
-
-        let mut stream = model
-            .stream(request("stream"))
-            .await
-            .expect("stream should be created");
-
-        let mut text = String::new();
-        let mut saw_name_delta = false;
-        let mut saw_arguments_delta = false;
-        let mut saw_tool_call = false;
-        let mut saw_final = false;
-
-        while let Some(item) = stream.next().await {
-            match item.expect("stream event should succeed") {
-                StreamedAssistantContent::Text(chunk) => text.push_str(&chunk.text),
-                StreamedAssistantContent::ToolCallDelta { content, .. } => match content {
-                    ToolCallDeltaContent::Name(name) => {
-                        saw_name_delta = name == "calculator";
-                    }
-                    ToolCallDeltaContent::Delta(arguments) => {
-                        saw_arguments_delta = arguments == "{\"x\":1}";
-                    }
-                },
-                StreamedAssistantContent::ToolCall { tool_call, .. } => {
-                    saw_tool_call = tool_call
-                        .provider
-                        .as_ref()
-                        .is_some_and(|provider| provider.call_id == "call_1");
-                }
-                StreamedAssistantContent::Final(response) => {
-                    saw_final = matches!(
-                        response.usage,
-                        Usage {
-                            total_tokens: 7,
-                            ..
-                        }
-                    );
-                }
-                _ => {}
-            }
-        }
-
-        assert_eq!(text, "hello");
-        assert!(saw_name_delta);
-        assert!(saw_arguments_delta);
-        assert!(saw_tool_call);
-        assert!(saw_final);
-        assert_eq!(stream.message_id.as_deref(), Some("msg_stream"));
-        assert_eq!(model.request_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn stream_error_event_is_returned() {
-        let model = MockCompletionModel::from_stream_turns([[MockStreamEvent::error("boom")]]);
-        let mut stream = model
-            .stream(request("stream"))
-            .await
-            .expect("stream should be created");
-
-        let err = stream
-            .next()
-            .await
-            .expect("stream should yield one event")
-            .expect_err("scripted event should error");
-
-        assert!(matches!(
-            err,
-            CompletionError::ProviderError(message) if message == "boom"
-        ));
-    }
-}
+mod tests;

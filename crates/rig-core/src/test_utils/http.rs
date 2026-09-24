@@ -15,6 +15,50 @@ use crate::{
     wasm_compat::WasmCompatSend,
 };
 
+/// The reply a double gives on a surface it does not script: the request
+/// reached a transport that has no answer for it.
+fn not_implemented() -> http_client::Error {
+    http_client::Error::non_success_with_details(
+        http::StatusCode::NOT_IMPLEMENTED,
+        http::HeaderMap::new(),
+        String::new(),
+    )
+}
+
+/// The unary half of a streaming-only double.
+///
+/// Four doubles below script `send_streaming` and nothing else; that they
+/// have no unary surface is one fact about streaming-only doubles, so it is
+/// written here once and each impl states it by name.
+macro_rules! no_unary_surface {
+    () => {
+        fn send<T, U>(
+            &self,
+            _req: Request<T>,
+        ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+        + WasmCompatSend
+        + 'static
+        where
+            T: Into<Bytes> + WasmCompatSend,
+            U: From<Bytes> + WasmCompatSend + 'static,
+        {
+            future::ready(Err(not_implemented()))
+        }
+
+        fn send_multipart<U>(
+            &self,
+            _req: Request<MultipartForm>,
+        ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+        + WasmCompatSend
+        + 'static
+        where
+            U: From<Bytes> + WasmCompatSend + 'static,
+        {
+            future::ready(Err(not_implemented()))
+        }
+    };
+}
+
 /// Request data captured by [`RecordingHttpClient`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedHttpRequest {
@@ -29,13 +73,20 @@ pub struct CapturedHttpRequest {
 /// Response scripted for [`RecordingHttpClient`].
 #[derive(Clone, Debug)]
 pub enum MockHttpResponse {
-    /// Return this body with a successful HTTP status.
+    /// Return this body with a successful HTTP status and no headers.
     Success(Bytes),
-    /// Return a status-code error with the given body text.
-    Error(http::StatusCode, String),
+    /// Return this body with a successful HTTP status and these headers —
+    /// the reply whose `Content-Type` decides how it may be framed.
+    SuccessWithHeaders(Bytes, http::HeaderMap),
     /// Return an HTTP response with the given (typically non-success) status
     /// and body, instead of a transport-level error.
     ErrorResponse(http::StatusCode, Bytes),
+    /// Return a status-code error that preserved the failed response's
+    /// headers, exactly as the bundled reqwest transport does (rig#2210).
+    ErrorWithHeaders(http::StatusCode, String, http::HeaderMap),
+    /// Return an HTTP response with the given (typically non-success) status,
+    /// body, and response headers, instead of a transport-level error.
+    ErrorResponseWithHeaders(http::StatusCode, Bytes, http::HeaderMap),
 }
 
 impl MockHttpResponse {
@@ -44,9 +95,31 @@ impl MockHttpResponse {
         Self::Success(body.into())
     }
 
-    /// Create an error response with a status code and message.
+    /// Create a successful response carrying `content_type`.
+    pub fn success_typed(body: impl Into<Bytes>, content_type: &'static str) -> Self {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static(content_type),
+        );
+        Self::SuccessWithHeaders(body.into(), headers)
+    }
+
+    /// Create a transport-level status error whose reply carried no headers
+    /// of interest: the same shape as [`Self::error_with_headers`] with an
+    /// empty map, since a rejection always comes with its headers.
     pub fn error(status: http::StatusCode, message: impl Into<String>) -> Self {
-        Self::Error(status, message.into())
+        Self::error_with_headers(status, message, http::HeaderMap::new())
+    }
+
+    /// Create a transport-level status error that preserved the failed
+    /// response's headers, as the bundled reqwest transport does.
+    pub fn error_with_headers(
+        status: http::StatusCode,
+        message: impl Into<String>,
+        headers: http::HeaderMap,
+    ) -> Self {
+        Self::ErrorWithHeaders(status, message.into(), headers)
     }
 }
 
@@ -93,6 +166,39 @@ impl RecordingHttpClient {
         }
     }
 
+    /// Create a client whose transport reports a non-success status *and*
+    /// preserves the failed response's headers, as the bundled reqwest client
+    /// does (rig#2210).
+    pub fn with_error_headers(
+        status: http::StatusCode,
+        message: impl Into<String>,
+        headers: http::HeaderMap,
+    ) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            response: Arc::new(Mutex::new(MockHttpResponse::error_with_headers(
+                status, message, headers,
+            ))),
+        }
+    }
+
+    /// Create a client that hands back a non-success HTTP response carrying
+    /// `headers`, instead of a transport-level error.
+    pub fn with_error_response_headers(
+        status: http::StatusCode,
+        body: impl Into<Bytes>,
+        headers: http::HeaderMap,
+    ) -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            response: Arc::new(Mutex::new(MockHttpResponse::ErrorResponseWithHeaders(
+                status,
+                body.into(),
+                headers,
+            ))),
+        }
+    }
+
     /// Return the requests captured so far.
     pub fn requests(&self) -> Vec<CapturedHttpRequest> {
         self.requests_guard().clone()
@@ -128,20 +234,31 @@ impl RecordingHttpClient {
     where
         U: From<Bytes> + WasmCompatSend + 'static,
     {
-        let (status, response_body) = match response {
-            MockHttpResponse::Success(response_body) => (http::StatusCode::OK, response_body),
-            MockHttpResponse::Error(status, message) => {
-                return Err(http_client::Error::InvalidStatusCodeWithMessage(
-                    status, message,
-                ));
+        let (status, response_body, response_headers) = match response {
+            MockHttpResponse::Success(response_body) => (http::StatusCode::OK, response_body, None),
+            MockHttpResponse::SuccessWithHeaders(response_body, headers) => {
+                (http::StatusCode::OK, response_body, Some(headers))
             }
-            MockHttpResponse::ErrorResponse(status, response_body) => (status, response_body),
+            MockHttpResponse::ErrorWithHeaders(status, body, headers) => {
+                return Err(http_client::Error::InvalidStatusCodeWithDetails {
+                    status,
+                    body,
+                    headers,
+                });
+            }
+            MockHttpResponse::ErrorResponse(status, response_body) => (status, response_body, None),
+            MockHttpResponse::ErrorResponseWithHeaders(status, response_body, headers) => {
+                (status, response_body, Some(headers))
+            }
         };
         let body: LazyBody<U> = Box::pin(async move { Ok(U::from(response_body)) });
-        Response::builder()
-            .status(status)
-            .body(body)
-            .map_err(http_client::Error::Protocol)
+        let mut builder = Response::builder().status(status);
+        if let Some(headers) = response_headers
+            && let Some(slot) = builder.headers_mut()
+        {
+            *slot = headers;
+        }
+        builder.body(body).map_err(http_client::Error::Protocol)
     }
 }
 
@@ -183,9 +300,7 @@ impl HttpClientExt for RecordingHttpClient {
     where
         T: Into<Bytes> + WasmCompatSend,
     {
-        future::ready(Err(http_client::Error::InvalidStatusCode(
-            http::StatusCode::NOT_IMPLEMENTED,
-        )))
+        future::ready(Err(not_implemented()))
     }
 }
 
@@ -257,9 +372,7 @@ impl HttpClientExt for SequencedHttpClient {
         async move {
             match response {
                 Some(response) => RecordingHttpClient::build_unary_response(response),
-                None => Err(http_client::Error::InvalidStatusCode(
-                    http::StatusCode::NOT_IMPLEMENTED,
-                )),
+                None => Err(not_implemented()),
             }
         }
     }
@@ -278,9 +391,7 @@ impl HttpClientExt for SequencedHttpClient {
         async move {
             match response {
                 Some(response) => RecordingHttpClient::build_unary_response(response),
-                None => Err(http_client::Error::InvalidStatusCode(
-                    http::StatusCode::NOT_IMPLEMENTED,
-                )),
+                None => Err(not_implemented()),
             }
         }
     }
@@ -292,9 +403,7 @@ impl HttpClientExt for SequencedHttpClient {
     where
         T: Into<Bytes> + WasmCompatSend,
     {
-        future::ready(Err(http_client::Error::InvalidStatusCode(
-            http::StatusCode::NOT_IMPLEMENTED,
-        )))
+        future::ready(Err(not_implemented()))
     }
 }
 
@@ -308,30 +417,7 @@ pub struct MockStreamingClient {
 }
 
 impl HttpClientExt for MockStreamingClient {
-    fn send<T, U>(
-        &self,
-        _req: Request<T>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
-    where
-        T: Into<Bytes> + WasmCompatSend,
-        U: From<Bytes> + WasmCompatSend + 'static,
-    {
-        future::ready(Err(http_client::Error::InvalidStatusCode(
-            http::StatusCode::NOT_IMPLEMENTED,
-        )))
-    }
-
-    fn send_multipart<U>(
-        &self,
-        _req: Request<MultipartForm>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
-    where
-        U: From<Bytes> + WasmCompatSend + 'static,
-    {
-        future::ready(Err(http_client::Error::InvalidStatusCode(
-            http::StatusCode::NOT_IMPLEMENTED,
-        )))
-    }
+    no_unary_surface!();
 
     fn send_streaming<T>(
         &self,
@@ -344,7 +430,7 @@ impl HttpClientExt for MockStreamingClient {
         async move {
             let byte_stream =
                 futures::stream::iter(vec![Ok::<Bytes, http_client::Error>(sse_bytes)]);
-            let boxed_stream: http_client::sse::BoxedStream = Box::pin(byte_stream);
+            let boxed_stream: http_client::BoxedStream = Box::pin(byte_stream);
 
             Response::builder()
                 .status(http::StatusCode::OK)
@@ -382,30 +468,7 @@ impl Default for HttpErrorStreamingClient {
 }
 
 impl HttpClientExt for HttpErrorStreamingClient {
-    fn send<T, U>(
-        &self,
-        _req: Request<T>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
-    where
-        T: Into<Bytes> + WasmCompatSend,
-        U: From<Bytes> + WasmCompatSend + 'static,
-    {
-        future::ready(Err(http_client::Error::InvalidStatusCode(
-            http::StatusCode::NOT_IMPLEMENTED,
-        )))
-    }
-
-    fn send_multipart<U>(
-        &self,
-        _req: Request<MultipartForm>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
-    where
-        U: From<Bytes> + WasmCompatSend + 'static,
-    {
-        future::ready(Err(http_client::Error::InvalidStatusCode(
-            http::StatusCode::NOT_IMPLEMENTED,
-        )))
-    }
+    no_unary_surface!();
 
     fn send_streaming<T>(
         &self,
@@ -417,9 +480,47 @@ impl HttpClientExt for HttpErrorStreamingClient {
         let status = self.status;
         let body = self.body.clone();
         async move {
-            Err(http_client::Error::InvalidStatusCodeWithMessage(
-                status, body,
+            Err(http_client::Error::non_success_with_details(
+                status,
+                http::HeaderMap::new(),
+                body,
             ))
+        }
+    }
+}
+
+/// An [`HttpClientExt`] whose `send_streaming` hands a non-success reply back
+/// as an `Ok` response — the fourth non-success cell: a custom transport that
+/// does not reject on status, so the driver must.
+#[derive(Debug, Clone)]
+pub struct NonSuccessStreamingClient {
+    pub status: http::StatusCode,
+    pub headers: http::HeaderMap,
+    pub body: Bytes,
+}
+
+impl HttpClientExt for NonSuccessStreamingClient {
+    no_unary_surface!();
+
+    fn send_streaming<T>(
+        &self,
+        _req: Request<T>,
+    ) -> impl Future<Output = http_client::Result<StreamingResponse>> + WasmCompatSend
+    where
+        T: Into<Bytes> + WasmCompatSend,
+    {
+        let status = self.status;
+        let headers = self.headers.clone();
+        let body = self.body.clone();
+        async move {
+            let byte_stream = futures::stream::iter(vec![Ok::<Bytes, http_client::Error>(body)]);
+            let boxed_stream: http_client::BoxedStream = Box::pin(byte_stream);
+            let mut response = Response::builder()
+                .status(status)
+                .body(boxed_stream)
+                .map_err(http_client::Error::Protocol)?;
+            *response.headers_mut() = headers;
+            Ok(response)
         }
     }
 }
@@ -441,30 +542,7 @@ impl SequencedStreamingHttpClient {
 }
 
 impl HttpClientExt for SequencedStreamingHttpClient {
-    fn send<T, U>(
-        &self,
-        _req: Request<T>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
-    where
-        T: Into<Bytes> + WasmCompatSend,
-        U: From<Bytes> + WasmCompatSend + 'static,
-    {
-        future::ready(Err(http_client::Error::InvalidStatusCode(
-            http::StatusCode::NOT_IMPLEMENTED,
-        )))
-    }
-
-    fn send_multipart<U>(
-        &self,
-        _req: Request<MultipartForm>,
-    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
-    where
-        U: From<Bytes> + WasmCompatSend + 'static,
-    {
-        future::ready(Err(http_client::Error::InvalidStatusCode(
-            http::StatusCode::NOT_IMPLEMENTED,
-        )))
-    }
+    no_unary_surface!();
 
     fn send_streaming<T>(
         &self,
@@ -480,14 +558,15 @@ impl HttpClientExt for SequencedStreamingHttpClient {
 
         async move {
             let Some(chunks) = chunks else {
-                return Err(http_client::Error::InvalidStatusCodeWithMessage(
+                return Err(http_client::Error::non_success_with_details(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
+                    http::HeaderMap::new(),
                     "streaming chunks should only be consumed once".to_string(),
                 ));
             };
 
             let byte_stream = futures::stream::iter(chunks);
-            let boxed_stream: http_client::sse::BoxedStream = Box::pin(byte_stream);
+            let boxed_stream: http_client::BoxedStream = Box::pin(byte_stream);
 
             Response::builder()
                 .status(http::StatusCode::OK)

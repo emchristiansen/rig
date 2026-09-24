@@ -1,6 +1,5 @@
-use rig_agent::{agent::stream_to_stdout, prelude::*, streaming::StreamingPrompt};
+use rig_agent::{agent::stream_to_stdout, prelude::*};
 use rig_bedrock::{client::Client, completion::AMAZON_NOVA_LITE};
-use rig_core::client::ProviderClient;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -13,8 +12,8 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // Stream the response and print chunks as they arrive
     let mut stream = agent
-        .stream_prompt("When and where and what type is the next solar eclipse?")
-        .await;
+        .prompt("When and where and what type is the next solar eclipse?")
+        .stream();
 
     let _ = stream_to_stdout(&mut stream).await?;
 

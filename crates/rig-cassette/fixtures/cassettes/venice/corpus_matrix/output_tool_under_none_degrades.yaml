@@ -1,0 +1,16 @@
+when:
+  path: /api/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"messages":[{"content":[{"text":"You are a concise assistant. Answer directly.","type":"text"}],"role":"system"},{"content":"Return a concise event object for a local Rust meetup in Seattle.","role":"user"}],"model":"mistral-small-3-2-24b-instruct","response_format":{"json_schema":{"name":"response_schema","schema":{"additionalProperties":false,"properties":{"category":{"type":"string"},"summary":{"type":"string"},"title":{"type":"string"}},"required":["title","category","summary"],"type":"object"},"strict":true},"type":"json_schema"},"temperature":0.0}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json; charset=utf-8
+  body: '{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"{\n  \"title\": \"Seattle Rust Meetup\",\n  \"category\": \"Tech\",\n  \"summary\": \"Monthly gathering for Rust enthusiasts in Seattle to discuss projects, learn, and network. All skill levels welcome. Pizza and drinks provided. Bring a laptop if you want to code along. Topics may include Rust 2026 updates, async programming, and web assembly. Organized by local Rustaceans. Free to attend, but RSVP required for headcount. Held at a local tech co-working space in downtown Seattle. Occurs on the fourth Tuesday of every month, 6:30 PM to 9:00 PM. Check Meetup.com for exact dates and location details. Follow @SeattleRust on Twitter for updates.\"\n}","name":null,"reasoning_content":null,"role":"assistant","tool_calls":[]}}],"cost":{"diem":0,"usd":0.00013221875},"created":0,"id":"chatcmpl-R4Pi3ODcWRQhy51IEVvtXaEB","model":"mistral-small-3-2-24b-instruct","object":"chat.completion","service_tier":"default","usage":{"completion_tokens":161,"prompt_tokens":981,"total_tokens":1142},"venice_parameters":{"disable_thinking":false,"enable_e2ee":true,"enable_web_citations":false,"enable_web_scraping":false,"enable_web_search":"off","enable_x_search":false,"include_search_results_in_stream":false,"include_venice_system_prompt":true,"return_search_results_as_documents":false,"strip_thinking_response":false,"web_search_citations":[]}}'

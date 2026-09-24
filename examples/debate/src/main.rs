@@ -2,9 +2,11 @@ use anyhow::Result;
 use rig::prelude::*;
 use rig::{
     agent::Agent,
-    completion::Prompt,
     message::Message,
-    providers::{cohere, openai},
+    providers::{
+        cohere::{self, Cohere},
+        openai::{self, OpenAI},
+    },
 };
 
 struct Debater {
@@ -18,8 +20,8 @@ impl Debater {
             .with_max_level(tracing::Level::INFO)
             .with_target(false)
             .init();
-        let openai_client = openai::Client::from_env()?;
-        let cohere_client = cohere::Client::from_env()?;
+        let openai_client = OpenAI::from_env()?.bound()?;
+        let cohere_client = Cohere::from_env()?.bound()?;
 
         Ok(Self {
             gpt_4: openai_client
@@ -47,7 +49,6 @@ impl Debater {
                 .gpt_4
                 .prompt(prompt_a.as_str())
                 .history(&history_a)
-                .extended_details()
                 .await?;
             // Extract updated history for next iteration
             history_a = resp_a
@@ -60,7 +61,6 @@ impl Debater {
                 .coral
                 .prompt(resp_a.output.as_str())
                 .history(&history_b)
-                .extended_details()
                 .await?;
             // Extract updated history for next iteration
             history_b = resp_b
@@ -69,7 +69,7 @@ impl Debater {
                 .unwrap_or_default();
             println!("Coral:\n{}", resp_b.output);
             println!("================================================================");
-            last_resp_b = Some(resp_b.output)
+            last_resp_b = Some(resp_b.output);
         }
         Ok(())
     }
