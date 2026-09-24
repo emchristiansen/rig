@@ -622,6 +622,7 @@
                     "call_id": "call_K71eN6BKPEwMAQvwiXmLlZsq"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -639,6 +640,7 @@
                     "call_id": "call_r97tyGos2bVCmcYJhe71LpTn"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

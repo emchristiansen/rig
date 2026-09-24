@@ -112,11 +112,23 @@ pub fn discover_streamed_invalid_calls(
                     id,
                     delta: Delta::ToolName { name },
                 } => (id, name, false),
+                // A namespaced call is never published as an invalid name:
+                // judging it by its bare name would erase the qualifier.
+                // `read_turn` refuses it whole. Custom-call ends fall through
+                // to the catch-all for the same reason.
+                StreamEvent::BlockEnd {
+                    block: Some(AssistantContent::ToolCall(call)),
+                    ..
+                } if call.function.namespace.is_some() => continue,
                 StreamEvent::BlockEnd {
                     id,
                     block: Some(AssistantContent::ToolCall(call)),
                     ..
                 } => (id, &call.function.name, true),
+                StreamEvent::BlockEnd {
+                    end: rig_core::streaming::BlockClose::ToolCall(end),
+                    ..
+                } if end.namespace.is_some() => continue,
                 StreamEvent::BlockEnd {
                     id,
                     end: rig_core::streaming::BlockClose::ToolCall(end),

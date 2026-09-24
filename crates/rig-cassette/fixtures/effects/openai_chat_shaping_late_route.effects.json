@@ -290,6 +290,7 @@
                     "call_id": "call_tEUw5C2Nufn1VR0RwWuZ3WKi"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

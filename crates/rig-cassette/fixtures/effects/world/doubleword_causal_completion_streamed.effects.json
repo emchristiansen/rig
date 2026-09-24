@@ -542,6 +542,7 @@
                     "call_id": "call_e0f5342e68af417fbeb6ece2"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

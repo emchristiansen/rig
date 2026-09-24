@@ -35,6 +35,7 @@ fn full_request_preserves_typed_tool_pairs_across_turns() {
         ToolCallId::minted(0),
         ToolFunction {
             name: "test".into(),
+            namespace: None,
             arguments: serde_json::json!({}),
         },
     );

@@ -284,6 +284,7 @@
                     "call_id": "call_603687af85fa46428acc4e4a"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

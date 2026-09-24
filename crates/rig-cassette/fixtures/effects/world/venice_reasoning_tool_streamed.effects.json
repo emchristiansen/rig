@@ -2429,6 +2429,7 @@
                     "call_id": "chatcmpl-tool-860b566f9f15b4d3"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -272,6 +272,7 @@
                     "call_id": "call_00_N07BVaSTe0ORSXUCvT6m4597"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -158,6 +158,9 @@ impl TryFrom<AwsConverseOutput> for completion::CompletionResponse {
 
 pub struct RigAssistantContent(pub AssistantContent);
 
+/// Wire name for the shared JSON-only tool-call refusal.
+const BEDROCK_CONVERSE_WIRE: &str = "Bedrock Converse";
+
 impl TryFrom<ContentBlock> for RigAssistantContent {
     type Error = ProviderError;
 
@@ -207,6 +210,10 @@ impl RigAssistantContent {
         match self.0 {
             AssistantContent::Text(text) => Ok(Some(aws_bedrock::ContentBlock::Text(text.text))),
             AssistantContent::ToolCall(tool_call) => {
+                // `toolUse` has `name` and document `input`, and no namespace.
+                tool_call
+                    .for_json_only_wire(BEDROCK_CONVERSE_WIRE)
+                    .map_err(|refusal| ProviderError::Request(refusal.into()))?;
                 // Calls and results must use the same provider-issued identity,
                 // not a potentially different local assembly handle.
                 let tool_use_id = tool_call.wire_call_id().into_owned();
@@ -220,6 +227,11 @@ impl RigAssistantContent {
                         .map_err(|e| ProviderError::Provider(e.to_string()))?,
                 )))
             }
+            // `toolUse.input` is a JSON document; a custom call's raw input has
+            // no representation on this wire.
+            AssistantContent::CustomToolCall(call) => Err(ProviderError::Request(
+                call.refused_by_json_only_wire(BEDROCK_CONVERSE_WIRE).into(),
+            )),
             AssistantContent::Reasoning(mut reasoning) => {
                 // Only Redacted payloads represent base64-encoded Converse bytes.
                 // Drop Encrypted payloads rather than reinterpret foreign ciphertext.

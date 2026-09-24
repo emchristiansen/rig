@@ -434,6 +434,7 @@
                     "call_id": "call_ae4a8882739244aab23a0494"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

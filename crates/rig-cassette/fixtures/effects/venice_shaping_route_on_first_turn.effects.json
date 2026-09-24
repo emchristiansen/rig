@@ -296,6 +296,7 @@
                     "call_id": "VF0eZ6NE3"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

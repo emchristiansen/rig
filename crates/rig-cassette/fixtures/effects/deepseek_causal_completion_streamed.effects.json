@@ -518,6 +518,7 @@
                     "call_id": "call_00_AhIRnBq4bGyDQaUTsu528361"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

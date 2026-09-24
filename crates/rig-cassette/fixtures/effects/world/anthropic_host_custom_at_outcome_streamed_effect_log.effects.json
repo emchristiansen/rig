@@ -473,6 +473,7 @@
                     "call_id": "toolu_01HZdTep4tVA9wWWYNdJVhiG"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

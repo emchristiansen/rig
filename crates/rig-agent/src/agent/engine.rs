@@ -1096,6 +1096,19 @@ impl TurnSource for StreamingTurnSource {
                                 pending_final = item_slot.take();
                             }
                         }
+                        StreamedTurnEvent::UndispatchableToolCall(refused) => {
+                            let partial = assembler.partial_turn(
+                                stream.message_id.clone(),
+                                stream.reasoning_issuer(),
+                            );
+                            // Nothing of the call was authorized, dispatched or
+                            // shown to a hook; the run fails naming it.
+                            drop(stream);
+                            yield Err(StreamingError::Prompt(
+                                run.refuse_streamed_undispatchable(&partial, refused),
+                            ));
+                            return;
+                        }
                         StreamedTurnEvent::InvalidToolCall(invalid) => {
                             let partial = assembler.partial_turn(
                                 stream.message_id.clone(),
@@ -1711,6 +1724,16 @@ pub(crate) async fn run_single_tool(
     block_id: &BlockId,
     error_history: &[Message],
 ) -> Result<ToolCallOutcome, PromptError> {
+    // The effect, its hooks and the catalog lookup below are keyed by the bare
+    // name: a namespaced call is refused before any of them. (A custom call is
+    // a different content variant and never reaches this function, so its raw
+    // input can never meet the `Value::String` fallback below.)
+    if let Err(call) = tool_call.name_dispatchable() {
+        return Err(PromptError::UndispatchableToolCall {
+            call,
+            chat_history: error_history.to_vec(),
+        });
+    }
     let tool_context = &runner.tool_context;
     let record_content = runner.config.record_telemetry_content;
     let tool_name = &tool_call.function.name;
@@ -1770,6 +1793,8 @@ pub(crate) async fn run_single_tool(
     let execution = if !executed {
         ToolExecution::Skipped
     } else {
+        // Only a function call's (possibly hook-patched) JSON argument text
+        // reaches this fallback; see the namespace/custom refusal above.
         let mut effective_tool_call = tool_call.clone();
         effective_tool_call.function.arguments = serde_json::from_str(&effective_args)
             .unwrap_or_else(|_| serde_json::Value::String(effective_args.clone()));

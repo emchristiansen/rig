@@ -38,11 +38,11 @@ fn sse(frame: &serde_json::Value) -> conformance::WireInput {
     conformance::WireInput::Bytes(bytes::Bytes::from(format!("data: {frame}\n\n")))
 }
 
-/// xAI relays the OpenAI Responses SSE wire with
-/// `ResponsesProviderExt::EMITS_COMPLETE_TOOL_CALLS_IMMEDIATELY` set (completed
-/// tool calls are emitted the moment their done item arrives instead of
-/// buffering until the terminal). The wire frames are the shared Responses
-/// fixture's; only the pipeline under test differs.
+/// xAI relays the OpenAI Responses SSE wire through
+/// `ResponsesStreamOptions::strict_with_immediate_tool_calls` (completed tool
+/// calls are emitted the moment their done item arrives instead of buffering
+/// until the terminal). The wire frames are the shared Responses fixture's;
+/// only the pipeline under test differs.
 mod xai {
     use super::*;
     use rig_core::completion::CompletionModel as _;
@@ -328,12 +328,7 @@ mod grammar_guards {
         use rig_core::completion::FinishReason;
         use rig_core::message::AssistantContent;
 
-        // The merged crate keeps the fork's strict default, so a terminal
-        // `response.incomplete` is a per-request opt-in rather than the
-        // unconditional tolerance `U` had. This contract's fixture *is* that
-        // shape, so it opts in; every other OpenAI conformance scenario keeps
-        // the strict `driver()` and so still measures the default.
-        let driver = openai_responses::driver_tolerating_incomplete();
+        let driver = openai_responses::driver();
         let drained = driver
             .drive(conformance::ok_chunks(
                 openai_responses::incomplete_mid_tool_call_frames(),
@@ -427,12 +422,7 @@ mod grammar_guards {
             .collect();
         let shape: Vec<(&str, &serde_json::Value)> = calls
             .iter()
-            .map(|call| {
-                (
-                    call.function.name.as_str(),
-                    call.function.arguments.as_json().expect("JSON arguments"),
-                )
-            })
+            .map(|call| (call.function.name.as_str(), &call.function.arguments))
             .collect();
         assert_eq!(
             shape,
@@ -728,14 +718,7 @@ mod interleaved_constant_id_reasoning {
                 assert_eq!(tool_call.provider, None, "no fabricated provider id");
                 internal_ids.push(block_id.clone());
                 minted_ids.push(tool_call.id.clone());
-                cities.push(
-                    tool_call
-                        .function
-                        .arguments
-                        .as_json()
-                        .expect("JSON arguments")["city"]
-                        .clone(),
-                );
+                cities.push(tool_call.function.arguments["city"].clone());
             }
         }
         assert_eq!(cities, vec![json!("Tokyo"), json!("Paris")]);
@@ -874,14 +857,7 @@ mod interleaved_constant_id_reasoning {
                 );
                 internal_ids.push(block_id.clone());
                 minted_ids.push(tool_call.id.clone());
-                cities.push(
-                    tool_call
-                        .function
-                        .arguments
-                        .as_json()
-                        .expect("JSON arguments")["city"]
-                        .clone(),
-                );
+                cities.push(tool_call.function.arguments["city"].clone());
             }
         }
         assert_eq!(cities, vec![json!("Tokyo"), json!("Paris")]);

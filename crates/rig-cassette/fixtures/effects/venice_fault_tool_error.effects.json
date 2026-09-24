@@ -286,6 +286,7 @@
                     "call_id": "85lPiqbH4"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

@@ -505,6 +505,7 @@
                     "call_id": "call_HlbL3YvzHa4aHg3rpP0AXmZz"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

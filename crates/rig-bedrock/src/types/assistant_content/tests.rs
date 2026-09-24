@@ -178,6 +178,7 @@ fn tool_use_echo_prefers_provider_call_id_like_the_result_leg() {
         rig_core::message::ToolCallId::new("minted-handle").unwrap(),
         rig_core::message::ToolFunction {
             name: "add".into(),
+            namespace: None,
             arguments: json!({"x": 1}),
         },
     )
@@ -199,6 +200,7 @@ fn tool_use_echo_falls_back_to_minted_handle_without_provider_id() {
         rig_core::message::ToolCallId::new("minted-handle").unwrap(),
         rig_core::message::ToolFunction {
             name: "add".into(),
+            namespace: None,
             arguments: json!({"x": 1}),
         },
     );
@@ -839,4 +841,47 @@ fn decoded_bedrock_reasoning_records_the_models_issuer_and_replays_to_it() {
         2,
         "the next Claude turn replays both reasoning blocks"
     );
+}
+
+/// One namespaced function call and one custom call (whose input parses as
+/// JSON): the two shapes every JSON-only wire refuses by name.
+fn unrepresentable_calls() -> [(rig_core::message::AssistantContent, &'static str); 2] {
+    use rig_core::message::AssistantContent;
+    [
+        (
+            AssistantContent::tool_call_with_namespace(
+                "fc_1",
+                "call_1".to_owned(),
+                "add",
+                Some("math".to_owned()),
+                serde_json::json!({"x": 1}),
+            ),
+            "cannot represent tool namespaces, so call `add` qualified by namespace `math`",
+        ),
+        (
+            AssistantContent::custom_tool_call(
+                "ctc_1",
+                "call_2",
+                "apply_patch",
+                None,
+                r#"{"x": 1}"#,
+            ),
+            "carries JSON tool arguments only, so custom tool call `apply_patch`",
+        ),
+    ]
+}
+
+#[test]
+fn converse_refuses_namespaced_and_custom_calls() {
+    for (content, refusal) in unrepresentable_calls() {
+        let error = RigAssistantContent(content)
+            .into_content_block()
+            .expect_err("refused, not dropped");
+        let rig_core::error::ProviderError::Request(reason) = &error else {
+            panic!("a request refusal, got {error:?}");
+        };
+        let reason = reason.to_string();
+        assert!(reason.starts_with("Bedrock Converse "), "{reason}");
+        assert!(reason.contains(refusal), "{reason}");
+    }
 }

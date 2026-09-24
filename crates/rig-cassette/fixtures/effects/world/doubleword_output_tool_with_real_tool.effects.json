@@ -332,6 +332,7 @@
                     "call_id": "call_242dd7cefafc4421b2ed396a"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

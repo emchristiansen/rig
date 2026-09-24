@@ -481,6 +481,7 @@
                     "call_id": "call_207040"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -498,6 +499,7 @@
                     "call_id": "call_207045"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

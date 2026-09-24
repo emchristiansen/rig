@@ -493,7 +493,22 @@ enum TelemetryPart {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         name: String,
+        /// The provider's namespace qualifier, verbatim, when the call had one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
         arguments: serde_json::Value,
+    },
+    /// A custom tool call: `input` is the model's verbatim text, recorded as
+    /// the string it is. A distinct part type rather than a `tool_call` whose
+    /// `arguments` is a JSON string, so a trace never presents raw input as a
+    /// parsed argument.
+    CustomToolCall {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+        input: String,
     },
     ToolCallResponse {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -636,14 +651,14 @@ fn assistant_parts(content: &[AssistantContent]) -> Vec<TelemetryPart> {
             AssistantContent::ToolCall(tool_call) => vec![TelemetryPart::ToolCall {
                 id: Some(tool_call.id.to_string()),
                 name: tool_call.function.name.clone(),
-                // Telemetry records what was sent, so raw input is rendered as
-                // the string it is rather than dropped from the span.
-                arguments: match &tool_call.function.arguments {
-                    crate::message::ToolCallArguments::Json(arguments) => arguments.clone(),
-                    crate::message::ToolCallArguments::Raw(input) => {
-                        serde_json::Value::String(input.clone())
-                    }
-                },
+                namespace: tool_call.function.namespace.clone(),
+                arguments: tool_call.function.arguments.clone(),
+            }],
+            AssistantContent::CustomToolCall(call) => vec![TelemetryPart::CustomToolCall {
+                id: Some(call.id.to_string()),
+                name: call.name.clone(),
+                namespace: call.namespace.clone(),
+                input: call.input.clone(),
             }],
             AssistantContent::Reasoning(reasoning) => reasoning_parts(reasoning),
             AssistantContent::Image(image) => image_part(image).into_iter().collect(),
@@ -674,10 +689,12 @@ fn input_messages(messages: &[Message]) -> Vec<TelemetryChatMessage> {
 }
 
 fn output_messages(content: &[AssistantContent]) -> Vec<TelemetryOutputMessage> {
-    let finish_reason = if content
-        .iter()
-        .any(|content| matches!(content, AssistantContent::ToolCall(_)))
-    {
+    let finish_reason = if content.iter().any(|content| {
+        matches!(
+            content,
+            AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_)
+        )
+    }) {
         "tool_call"
     } else {
         // Rig's normalized assistant content does not retain provider finish

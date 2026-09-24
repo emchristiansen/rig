@@ -328,6 +328,7 @@
                     "call_id": "call_198208"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

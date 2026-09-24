@@ -288,6 +288,7 @@
                     "call_id": "call-1"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

@@ -727,6 +727,14 @@ pub enum Failure {
     /// The conversation could not be loaded: the run fails at the memory
     /// record, before any completion.
     Memory(ErrorReport),
+    /// The model emitted a tool call that name-keyed dispatch cannot run
+    /// without erasing what it is: a namespaced call or a custom (raw-input)
+    /// call. Refused when the turn is read, before tool authorization, effect
+    /// construction, or any invalid-call judgment sees it.
+    UndispatchableToolCall {
+        /// The refused call.
+        call: rig_core::message::UndispatchableToolCall,
+    },
 }
 
 /// The run's answer.

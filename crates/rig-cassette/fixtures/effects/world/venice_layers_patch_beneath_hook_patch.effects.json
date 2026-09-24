@@ -310,6 +310,7 @@
                     "call_id": "BE38CenXh"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

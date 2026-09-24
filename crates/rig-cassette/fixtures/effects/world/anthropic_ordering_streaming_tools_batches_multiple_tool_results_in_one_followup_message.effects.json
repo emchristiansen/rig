@@ -593,6 +593,7 @@
                     "call_id": "toolu_01MHLYT7zypiuTypkUdfyUyM"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -610,6 +611,7 @@
                     "call_id": "toolu_01SnN3e5PCX2Nt8KLSqZcrcX"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

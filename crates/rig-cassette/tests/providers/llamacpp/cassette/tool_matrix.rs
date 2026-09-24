@@ -710,6 +710,7 @@ async fn a_tool_result_carrying_text_reaches_the_model() {
                             call: ToolCallId::new_or_minted("call_text", 0),
                             provider: ProviderCallId::new("call_text"),
                             name: "lookup".to_string(),
+                            answers: rig_core::message::AnsweredToolCall::Function,
                             content: vec![ToolResultContent::text("the codeword is heliotrope")],
                         })],
                     })
@@ -772,6 +773,7 @@ async fn a_tool_result_carrying_json_reaches_the_model() {
                             call: ToolCallId::new_or_minted("call_json", 0),
                             provider: ProviderCallId::new("call_json"),
                             name: "lookup".to_string(),
+                            answers: rig_core::message::AnsweredToolCall::Function,
                             content: vec![ToolResultContent::text(
                                 json!({ "codeword": "heliotrope", "confidence": 0.99 }).to_string(),
                             )],

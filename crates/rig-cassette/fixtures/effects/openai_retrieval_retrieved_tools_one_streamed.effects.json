@@ -518,6 +518,7 @@
                     "item_id": "fc_06d2eb07f6220f2a006ab396943e4487d0bd62df28bc958fa0"
                   },
                   "name": "subtract",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

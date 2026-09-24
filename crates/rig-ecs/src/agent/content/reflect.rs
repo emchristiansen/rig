@@ -13,6 +13,10 @@ crate::reflect::opaque_reflect! {
     struct TextPartReflect(message::Text): PartialEq;
     /// Reflected shared transport value `message::ToolCall`.
     struct ToolCallPartReflect(message::ToolCall): PartialEq;
+    /// Reflected shared transport value `message::CustomToolCall`.
+    struct CustomToolCallPartReflect(message::CustomToolCall): PartialEq;
+    /// Reflected shared transport value `message::AnsweredToolCall`.
+    enum AnsweredToolCallReflect(message::AnsweredToolCall): PartialEq;
     /// Reflected shared transport value `message::Reasoning`.
     struct ReasoningPartReflect(message::Reasoning): PartialEq;
     /// Reflected shared transport value `serde_json::Value`.

@@ -640,6 +640,7 @@
                     "call_id": "call_00_fkvEZ57qqR4YRa7bRAxj9853"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

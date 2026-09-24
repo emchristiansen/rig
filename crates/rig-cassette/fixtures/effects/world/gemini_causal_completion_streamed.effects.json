@@ -467,6 +467,7 @@
                     "call_id": "call_152760"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

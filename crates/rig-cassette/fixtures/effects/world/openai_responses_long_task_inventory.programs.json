@@ -613,7 +613,8 @@
                 "call_id": "call_3A5VnyZgU9nI0I0TRP7C5ocE",
                 "item_id": "fc_047afa2a97ee8a44006ab2b92dcc5c87d09d450d24f39a6e28"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -954,7 +955,8 @@
                 "call_id": "call_NToA1ZTbDs5a8MPRTiEtXKCt",
                 "item_id": "fc_047afa2a97ee8a44006ab2b92eed3087d0950971878bfb109f"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -1291,7 +1293,8 @@
                 "call_id": "call_Czka0KC1WU2838TxFShpLud4",
                 "item_id": "fc_047afa2a97ee8a44006ab2b92feeac87d0a5208445b8da138d"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -1628,7 +1631,8 @@
                 "call_id": "call_HcMoKd5r0nl1vhv7M4Ng81Vj",
                 "item_id": "fc_047afa2a97ee8a44006ab2b930d32887d0b6197f7382708fba"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -1965,7 +1969,8 @@
                 "call_id": "call_3uQB5XskT5bKywPTfM2kJXH3",
                 "item_id": "fc_047afa2a97ee8a44006ab2b931f4e487d0a7c3bee989ef80cb"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -2302,7 +2307,8 @@
                 "call_id": "call_URCHb1VgXO3RDsmWrh8u1z6G",
                 "item_id": "fc_047afa2a97ee8a44006ab2b9330ae087d0a92496fe02a13745"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -2639,7 +2645,8 @@
                 "call_id": "call_6GzlBm1cDmNxqU65jNrmNkil",
                 "item_id": "fc_047afa2a97ee8a44006ab2b934148887d0a3a178233a235915"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3533,7 +3540,8 @@
                 "call_id": "call_PMibbSB3BAyASapiDVYXRU39",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936570487d0b538f97af91e5d8c"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3559,7 +3567,8 @@
                 "call_id": "call_j17sFydeJ0nI4ISZwWakBOzZ",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936571487d09fad0585b0d5970b"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3585,7 +3594,8 @@
                 "call_id": "call_k1cdr6i70ZvePDyygvPFvw9p",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936571887d09829283939eb9df7"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3611,7 +3621,8 @@
                 "call_id": "call_P5cvXGzP9AjE9SySaln2mrEa",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936572087d0a93e60d1b16432f5"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3637,7 +3648,8 @@
                 "call_id": "call_gY8JRuVSRnDquDWJmDwGOszU",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936572c87d0a5d7382b37a9efa8"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3663,7 +3675,8 @@
                 "call_id": "call_SXju5IV0XiQDMjBjI0w5u0CP",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936573487d08515d5f5cd780522"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3995,7 +4008,8 @@
                 "call_id": "call_8Ll6XDFOIRLpFvBdqhHRJ0Xm",
                 "item_id": "fc_047afa2a97ee8a44006ab2b937530087d0afc29f5553ba53ec"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -4305,7 +4319,8 @@
                 "call_id": "call_3A5VnyZgU9nI0I0TRP7C5ocE",
                 "item_id": "fc_047afa2a97ee8a44006ab2b92dcc5c87d09d450d24f39a6e28"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4373,7 +4388,8 @@
                 "call_id": "call_NToA1ZTbDs5a8MPRTiEtXKCt",
                 "item_id": "fc_047afa2a97ee8a44006ab2b92eed3087d0950971878bfb109f"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4437,7 +4453,8 @@
                 "call_id": "call_Czka0KC1WU2838TxFShpLud4",
                 "item_id": "fc_047afa2a97ee8a44006ab2b92feeac87d0a5208445b8da138d"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4501,7 +4518,8 @@
                 "call_id": "call_HcMoKd5r0nl1vhv7M4Ng81Vj",
                 "item_id": "fc_047afa2a97ee8a44006ab2b930d32887d0b6197f7382708fba"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4565,7 +4583,8 @@
                 "call_id": "call_3uQB5XskT5bKywPTfM2kJXH3",
                 "item_id": "fc_047afa2a97ee8a44006ab2b931f4e487d0a7c3bee989ef80cb"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4629,7 +4648,8 @@
                 "call_id": "call_URCHb1VgXO3RDsmWrh8u1z6G",
                 "item_id": "fc_047afa2a97ee8a44006ab2b9330ae087d0a92496fe02a13745"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4693,7 +4713,8 @@
                 "call_id": "call_6GzlBm1cDmNxqU65jNrmNkil",
                 "item_id": "fc_047afa2a97ee8a44006ab2b934148887d0a3a178233a235915"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4882,7 +4903,8 @@
                 "call_id": "call_PMibbSB3BAyASapiDVYXRU39",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936570487d0b538f97af91e5d8c"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4907,7 +4929,8 @@
                 "call_id": "call_j17sFydeJ0nI4ISZwWakBOzZ",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936571487d09fad0585b0d5970b"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4932,7 +4955,8 @@
                 "call_id": "call_k1cdr6i70ZvePDyygvPFvw9p",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936571887d09829283939eb9df7"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4957,7 +4981,8 @@
                 "call_id": "call_P5cvXGzP9AjE9SySaln2mrEa",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936572087d0a93e60d1b16432f5"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4982,7 +5007,8 @@
                 "call_id": "call_gY8JRuVSRnDquDWJmDwGOszU",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936572c87d0a5d7382b37a9efa8"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -5007,7 +5033,8 @@
                 "call_id": "call_SXju5IV0XiQDMjBjI0w5u0CP",
                 "item_id": "fc_047afa2a97ee8a44006ab2b936573487d08515d5f5cd780522"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -5068,7 +5095,8 @@
                 "call_id": "call_8Ll6XDFOIRLpFvBdqhHRJ0Xm",
                 "item_id": "fc_047afa2a97ee8a44006ab2b937530087d0afc29f5553ba53ec"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },

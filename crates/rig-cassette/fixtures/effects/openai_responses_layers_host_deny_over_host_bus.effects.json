@@ -352,6 +352,7 @@
                     "item_id": "fc_0199e0d8dae3ff37006ab2b31e1ea887d0ac3f883bf9b112e0"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

@@ -367,6 +367,7 @@
                     "call_id": "toolu_01BJ9r2UfGrVt2QLHFkTpsgx"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

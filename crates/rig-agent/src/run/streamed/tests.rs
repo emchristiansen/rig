@@ -1902,6 +1902,7 @@ fn finish_carries_images_after_the_calls_when_regrouping() {
         .map(|content| match content {
             AssistantContent::Text(_) => "text",
             AssistantContent::ToolCall(_) => "call",
+            AssistantContent::CustomToolCall(_) => "custom_call",
             AssistantContent::Image(_) => "image",
             AssistantContent::Reasoning(_) => "reasoning",
         })
@@ -1958,4 +1959,74 @@ fn streamed_reasoning_records_the_stream_issuer() {
             .iter()
             .all(|issuer| issuer.as_deref() == Some("anthropic"))
     );
+}
+
+/// A completed namespaced or custom call is refused as its block ends —
+/// even when the bare name was validated by its name delta and a custom
+/// call's input parses as JSON — and never becomes a pending call or an
+/// invalid-call resolution.
+#[test]
+fn completed_namespaced_and_custom_calls_are_refused_at_their_end() {
+    use rig_core::message::UndispatchableToolCall;
+    use rig_core::streaming::CustomToolCallEnd;
+
+    let mut namespaced = assembler();
+    namespaced
+        .ingest(&name_delta("tc1", "add"))
+        .expect("allowed name");
+    let call = tool_call("tc1", "add").with_namespace(Some("math".to_owned()));
+    let events = namespaced
+        .ingest(&completed_tool_call(call.clone(), iid_for("tc1")))
+        .expect("ingest");
+    let [StreamedTurnEvent::UndispatchableToolCall(refused)] = events.as_slice() else {
+        panic!("expected one refusal, got {events:?}");
+    };
+    assert!(matches!(
+        &refused.call,
+        UndispatchableToolCall::Namespaced { namespace, .. } if namespace == "math"
+    ));
+    assert_eq!(refused.content, AssistantContent::ToolCall(call));
+
+    let mut custom = assembler();
+    let content = AssistantContent::custom_tool_call("ctc_1", "call_1", "add", None, r#"{"x":1}"#);
+    let events = custom
+        .ingest(&StreamEvent::BlockEnd {
+            id: iid_for("ctc_1"),
+            end: BlockClose::CustomToolCall(CustomToolCallEnd::new("add", r#"{"x":1}"#)),
+            block: Some(content.clone()),
+        })
+        .expect("ingest");
+    let [StreamedTurnEvent::UndispatchableToolCall(refused)] = events.as_slice() else {
+        panic!("expected one refusal, got {events:?}");
+    };
+    assert!(matches!(&refused.call, UndispatchableToolCall::Custom { name, .. } if name == "add"));
+    assert_eq!(refused.content, content);
+
+    // A repeated custom end carries no finalized block and refuses nothing twice.
+    assert!(
+        custom
+            .ingest(&StreamEvent::BlockEnd {
+                id: iid_for("ctc_1"),
+                end: BlockClose::CustomToolCall(CustomToolCallEnd::new("add", "x")),
+                block: None,
+            })
+            .expect("ingest")
+            .is_empty()
+    );
+
+    // The driver's failure carries the refused call as the turn's last part.
+    let mut run = AgentRun::new("go");
+    let AgentRunStep::CallModel { .. } = run.next_step().expect("step") else {
+        panic!("expected CallModel");
+    };
+    let partial = custom.partial_turn(None, None);
+    let PromptError::UndispatchableToolCall { chat_history, .. } =
+        run.refuse_streamed_undispatchable(&partial, refused.clone())
+    else {
+        panic!("expected UndispatchableToolCall");
+    };
+    let Some(Message::Assistant { content: last, .. }) = chat_history.last() else {
+        panic!("the refused turn ends the history");
+    };
+    assert_eq!(last.last(), Some(&content));
 }

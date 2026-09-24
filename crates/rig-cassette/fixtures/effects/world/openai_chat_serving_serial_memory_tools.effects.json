@@ -345,6 +345,7 @@
                     "call_id": "call_IqjLJOzxqcpfbqzlBcDziKAJ"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -505,6 +506,7 @@
                     "call_id": "call_IqjLJOzxqcpfbqzlBcDziKAJ"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -288,6 +288,7 @@
                     "call_id": "call_7472c63032aa4818889364ee"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

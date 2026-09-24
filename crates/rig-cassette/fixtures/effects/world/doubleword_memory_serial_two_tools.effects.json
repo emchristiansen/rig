@@ -636,6 +636,7 @@
                     "call_id": "call_5da55878294a4a1d995b2bbc"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -653,6 +654,7 @@
                     "call_id": "call_56f6ae1067714e16b7defcfb"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -975,6 +977,7 @@
                     "call_id": "call_5da55878294a4a1d995b2bbc"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -992,6 +995,7 @@
                     "call_id": "call_56f6ae1067714e16b7defcfb"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

@@ -697,6 +697,7 @@
                     "call_id": "call_HDYkYDL26jk9fAECudjPQKay"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -714,6 +715,7 @@
                     "call_id": "call_FGsPJw4RkpuEAuTHVD858oNj"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -731,6 +733,7 @@
                     "call_id": "call_ZO3fczpMsxxpkB7OA5oS6IRu"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -748,6 +751,7 @@
                     "call_id": "call_mUIWpLeRn1XHUhLM62wvIzt9"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1048,6 +1052,7 @@
                     "call_id": "call_HDYkYDL26jk9fAECudjPQKay"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1065,6 +1070,7 @@
                     "call_id": "call_FGsPJw4RkpuEAuTHVD858oNj"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1082,6 +1088,7 @@
                     "call_id": "call_ZO3fczpMsxxpkB7OA5oS6IRu"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1099,6 +1106,7 @@
                     "call_id": "call_mUIWpLeRn1XHUhLM62wvIzt9"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1143,6 +1151,7 @@
                     "call_id": "call_3wXNEsu1IQOCO1lDXD1BNIeR"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1446,6 +1455,7 @@
                     "call_id": "call_HDYkYDL26jk9fAECudjPQKay"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1463,6 +1473,7 @@
                     "call_id": "call_FGsPJw4RkpuEAuTHVD858oNj"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1480,6 +1491,7 @@
                     "call_id": "call_ZO3fczpMsxxpkB7OA5oS6IRu"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1497,6 +1509,7 @@
                     "call_id": "call_mUIWpLeRn1XHUhLM62wvIzt9"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1541,6 +1554,7 @@
                     "call_id": "call_3wXNEsu1IQOCO1lDXD1BNIeR"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1588,6 +1602,7 @@
                     "call_id": "call_pPBHmPQXB2uwzD9teyMUrMAj"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1888,6 +1903,7 @@
                     "call_id": "call_HDYkYDL26jk9fAECudjPQKay"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1905,6 +1921,7 @@
                     "call_id": "call_FGsPJw4RkpuEAuTHVD858oNj"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1922,6 +1939,7 @@
                     "call_id": "call_ZO3fczpMsxxpkB7OA5oS6IRu"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1939,6 +1957,7 @@
                     "call_id": "call_mUIWpLeRn1XHUhLM62wvIzt9"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1983,6 +2002,7 @@
                     "call_id": "call_3wXNEsu1IQOCO1lDXD1BNIeR"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2030,6 +2050,7 @@
                     "call_id": "call_pPBHmPQXB2uwzD9teyMUrMAj"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2074,6 +2095,7 @@
                     "call_id": "call_NolrgKp5Tsnj6X9VfKfF4gUP"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2377,6 +2399,7 @@
                     "call_id": "call_HDYkYDL26jk9fAECudjPQKay"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2394,6 +2417,7 @@
                     "call_id": "call_FGsPJw4RkpuEAuTHVD858oNj"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2411,6 +2435,7 @@
                     "call_id": "call_ZO3fczpMsxxpkB7OA5oS6IRu"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2428,6 +2453,7 @@
                     "call_id": "call_mUIWpLeRn1XHUhLM62wvIzt9"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2472,6 +2498,7 @@
                     "call_id": "call_3wXNEsu1IQOCO1lDXD1BNIeR"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2519,6 +2546,7 @@
                     "call_id": "call_pPBHmPQXB2uwzD9teyMUrMAj"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2563,6 +2591,7 @@
                     "call_id": "call_NolrgKp5Tsnj6X9VfKfF4gUP"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2610,6 +2639,7 @@
                     "call_id": "call_MQ9xj8LuzsdWZxwdL6E6SmD4"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2910,6 +2940,7 @@
                     "call_id": "call_HDYkYDL26jk9fAECudjPQKay"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2927,6 +2958,7 @@
                     "call_id": "call_FGsPJw4RkpuEAuTHVD858oNj"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2944,6 +2976,7 @@
                     "call_id": "call_ZO3fczpMsxxpkB7OA5oS6IRu"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2961,6 +2994,7 @@
                     "call_id": "call_mUIWpLeRn1XHUhLM62wvIzt9"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3005,6 +3039,7 @@
                     "call_id": "call_3wXNEsu1IQOCO1lDXD1BNIeR"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3052,6 +3087,7 @@
                     "call_id": "call_pPBHmPQXB2uwzD9teyMUrMAj"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3096,6 +3132,7 @@
                     "call_id": "call_NolrgKp5Tsnj6X9VfKfF4gUP"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3143,6 +3180,7 @@
                     "call_id": "call_MQ9xj8LuzsdWZxwdL6E6SmD4"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3187,6 +3225,7 @@
                     "call_id": "call_U3tPXT0ET6hyeaV98KuIGeg6"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

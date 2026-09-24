@@ -349,6 +349,7 @@
                     "call_id": "VYt6Etj8d"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -514,6 +515,7 @@
                     "call_id": "VYt6Etj8d"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

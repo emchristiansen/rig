@@ -32,7 +32,8 @@ use rig_core::error::ProviderError;
 use rig_core::streaming::BlockId;
 
 use rig_core::message::{
-    AssistantContent, ToolCall, ToolChoice, ToolResult, ToolResultContent, UserContent,
+    AssistantContent, ToolCall, ToolChoice, ToolResult, ToolResultContent, UndispatchableToolCall,
+    UserContent, first_undispatchable_call,
 };
 
 use rig_core::completion::{Message, ResponseIdentity, Usage};
@@ -53,8 +54,8 @@ use transcript::{
 };
 
 pub use streamed::{
-    PartialStreamedTurn, StreamedInvalidToolCall, StreamedResolution, StreamedTurn,
-    StreamedTurnAssembler, StreamedTurnEvent,
+    PartialStreamedTurn, RefusedStreamedCall, StreamedInvalidToolCall, StreamedResolution,
+    StreamedTurn, StreamedTurnAssembler, StreamedTurnEvent,
 };
 
 /// Build an unknown-tool error with advertised names and diagnostic history.
@@ -323,9 +324,12 @@ fn pending_invalid_call(resolving: &ResolvingState) -> Option<&ToolCall> {
 }
 
 fn has_tool_calls(items: &[AssistantContent]) -> bool {
-    items
-        .iter()
-        .any(|item| matches!(item, AssistantContent::ToolCall(_)))
+    items.iter().any(|item| {
+        matches!(
+            item,
+            AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_)
+        )
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -757,9 +761,7 @@ impl AgentRun {
         &mut self,
         choice: Vec<AssistantContent>,
     ) -> Result<(), PromptError> {
-        let replacement_has_tool_calls = choice
-            .iter()
-            .any(|item| matches!(item, AssistantContent::ToolCall(_)));
+        let replacement_has_tool_calls = has_tool_calls(&choice);
         let parked_has_tool_calls = match &self.state {
             RunState::AwaitingAdvance(turn) => turn.has_tool_calls,
             _ => {
@@ -979,7 +981,12 @@ impl AgentRun {
                     // cannot contain unanswered calls.
                     let mut final_items: Vec<AssistantContent> = items
                         .iter()
-                        .filter(|item| !matches!(item, AssistantContent::ToolCall(_)))
+                        .filter(|item| {
+                            !matches!(
+                                item,
+                                AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_)
+                            )
+                        })
                         .cloned()
                         .collect();
                     final_items.push(AssistantContent::text(output.clone()));
@@ -1121,6 +1128,13 @@ impl AgentRun {
             turn.finish_reason,
             turn.raw,
         );
+
+        // Name-keyed authorization, invalid-call recovery, dispatch hooks and
+        // `EffectKind::ToolCall { name, args }` all erase a namespace and a
+        // custom call's kind, so such a call is refused before any of them.
+        if let Some(call) = first_undispatchable_call(&turn.choice) {
+            return Err(self.refuse_undispatchable(turn.message_id, turn.choice, call));
+        }
 
         let items: Vec<AssistantContent> = turn.choice.clone();
         let has_tool_calls = has_tool_calls(&items);
@@ -1607,6 +1621,7 @@ impl AgentRun {
                     call: invalid.tool_call.id.clone(),
                     provider: invalid.tool_call.provider.clone(),
                     name: invalid.tool_call.function.name.clone(),
+                    answers: invalid.tool_call.answered_by(),
                     content: vec![ToolResultContent::text(reason.as_str())],
                 };
                 self.abandon_streamed_turn(
@@ -1682,6 +1697,10 @@ impl AgentRun {
             ));
         }
 
+        if let Some(call) = first_undispatchable_call(&turn.choice) {
+            return Err(self.refuse_undispatchable(turn.message_id, turn.choice, call));
+        }
+
         let has_tool_calls = has_tool_calls(&turn.choice);
 
         for item in &turn.choice {
@@ -1741,6 +1760,52 @@ impl AgentRun {
             content: resolving.original_choice.clone(),
         });
         build_full_history(self.chat_history.as_deref(), diagnostic_messages)
+    }
+
+    /// Fail the run on a tool call name-keyed dispatch cannot run (see
+    /// [`rig_core::message::name_dispatchable_call`]). The diagnostic history
+    /// carries the refused turn.
+    fn refuse_undispatchable(
+        &mut self,
+        message_id: Option<String>,
+        choice: Vec<AssistantContent>,
+        call: UndispatchableToolCall,
+    ) -> PromptError {
+        let mut diagnostic_messages = self.new_messages.clone();
+        diagnostic_messages.push(Message::Assistant {
+            id: message_id,
+            content: choice,
+        });
+        self.state = RunState::Failed;
+        PromptError::UndispatchableToolCall {
+            call,
+            chat_history: build_full_history(self.chat_history.as_deref(), diagnostic_messages),
+        }
+    }
+
+    /// The failure for a tool call a streamed turn refused mid-stream
+    /// ([`StreamedTurnEvent::UndispatchableToolCall`]): the run fails with the
+    /// partial turn, ending in the refused call, as diagnostic history.
+    pub fn refuse_streamed_undispatchable(
+        &mut self,
+        partial: &PartialStreamedTurn,
+        refused: RefusedStreamedCall,
+    ) -> PromptError {
+        let mut messages = self.new_messages.clone();
+        let mut content = match partial.assistant_message(None) {
+            Some(Message::Assistant { content, .. }) => content,
+            _ => Vec::new(),
+        };
+        content.push(refused.content);
+        messages.push(Message::Assistant {
+            id: partial.message_id.clone(),
+            content,
+        });
+        self.state = RunState::Failed;
+        PromptError::UndispatchableToolCall {
+            call: refused.call,
+            chat_history: build_full_history(self.chat_history.as_deref(), messages),
+        }
     }
 
     fn protocol_violation(&self, reason: &str) -> PromptError {

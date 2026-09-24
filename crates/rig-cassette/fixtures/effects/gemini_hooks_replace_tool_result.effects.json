@@ -273,6 +273,7 @@
                     "call_id": "call_334399"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

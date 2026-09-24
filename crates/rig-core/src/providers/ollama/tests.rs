@@ -1480,6 +1480,7 @@ fn daemon_issued_call_ids_replay_and_minted_handles_do_not() {
             provider,
             function: ToolFunction {
                 name: "add".to_owned(),
+                namespace: None,
                 arguments: serde_json::json!({"x": 1}),
             },
             signature: None,
@@ -1491,6 +1492,7 @@ fn daemon_issued_call_ids_replay_and_minted_handles_do_not() {
             call: ToolCallId::new("handle").expect("non-empty"),
             provider,
             name: "add".to_owned(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::text("2")],
         })],
     };
@@ -1510,4 +1512,12 @@ fn daemon_issued_call_ids_replay_and_minted_handles_do_not() {
     let tool = serde_json::to_value(&tool[0]).expect("serializes");
     assert!(assistant["tool_calls"][0].get("id").is_none());
     assert!(tool.get("tool_call_id").is_none());
+}
+
+#[test]
+fn ollama_chat_refuses_namespaced_and_custom_calls() {
+    for (turn, kind) in crate::message::unrepresentable_turns() {
+        let error = Vec::<Message>::try_from(turn).expect_err("refused, not dropped");
+        crate::message::assert_message_refused(&error, kind, OLLAMA_CHAT_WIRE);
+    }
 }

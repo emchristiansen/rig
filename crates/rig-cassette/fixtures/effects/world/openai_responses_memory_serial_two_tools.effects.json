@@ -740,6 +740,7 @@
                     "item_id": "fc_05879b5f00b60697006ab2b356d0ac87d09a188cbd71f9ce72"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -758,6 +759,7 @@
                     "item_id": "fc_05879b5f00b60697006ab2b356d0bc87d082922ac6e2afc61f"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1137,6 +1139,7 @@
                     "item_id": "fc_05879b5f00b60697006ab2b356d0ac87d09a188cbd71f9ce72"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1155,6 +1158,7 @@
                     "item_id": "fc_05879b5f00b60697006ab2b356d0bc87d082922ac6e2afc61f"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

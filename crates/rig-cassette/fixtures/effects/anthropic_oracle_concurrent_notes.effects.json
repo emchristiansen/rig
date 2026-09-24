@@ -384,6 +384,7 @@
                     "call_id": "toolu_01Db6dAQpsRG1DKvGDrCktXT"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -401,6 +402,7 @@
                     "call_id": "toolu_014JF9ojGfYhs3ggLHmikDeH"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

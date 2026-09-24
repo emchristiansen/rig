@@ -42,6 +42,7 @@ fn history(text: &str) -> Vec<MessageParts> {
                 call: rig_core::message::ToolCallId::new("c1").unwrap(),
                 provider: None,
                 name: "probe".to_owned(),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content: vec![
                     ToolResultContent::text(text),
                     ToolResultContent::Json {

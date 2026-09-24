@@ -312,6 +312,7 @@
                     "call_id": "chatcmpl-tool-b08eb180bbf6f33b"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

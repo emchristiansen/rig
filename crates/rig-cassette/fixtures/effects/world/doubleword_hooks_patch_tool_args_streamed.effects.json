@@ -426,6 +426,7 @@
                     "call_id": "call_da13de3a85724b40afdbff41"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -850,6 +850,13 @@ pub fn user_content_to_messages(
     Ok(messages)
 }
 
+/// The wire name the shared JSON-only tool-call refusal reports for every
+/// OpenAI-compatible Chat Completions dialect. The `tool_calls[].function`
+/// member has `name` and a JSON-string `arguments`, and no namespace or
+/// custom-input member, so a namespaced call and a custom call are both
+/// refused ([`message::json_only_wire_tool_call`]).
+pub(crate) const CHAT_COMPLETIONS_WIRE: &str = "OpenAI-compatible Chat Completions";
+
 /// Convert assistant content into at most one message, rejecting images.
 /// When `reasoning_details` is true, preserve structured reasoning parts and
 /// signatures; otherwise use display text. Return no message when text, calls,
@@ -870,6 +877,9 @@ pub fn assistant_content_to_messages(
         match content {
             message::AssistantContent::Text(text) => text_content.push(text),
             message::AssistantContent::ToolCall(tool_call) => tool_calls.push(tool_call),
+            message::AssistantContent::CustomToolCall(call) => {
+                return Err(call.refused_by_json_only_wire(CHAT_COMPLETIONS_WIRE).into());
+            }
             // Structured replay preserves signatures and encrypted payloads.
             message::AssistantContent::Reasoning(reasoning)
                 if reasoning_details && !reasoning.content.is_empty() =>
@@ -949,8 +959,8 @@ pub fn assistant_content_to_messages(
         name: None,
         tool_calls: tool_calls
             .into_iter()
-            .map(std::convert::Into::into)
-            .collect::<Vec<_>>(),
+            .map(ToolCall::try_from)
+            .collect::<Result<Vec<_>, _>>()?,
         reasoning_details: details,
     }])
 }
@@ -1032,9 +1042,14 @@ fn message_with_tool_ids(
     Ok(converted)
 }
 
-impl From<message::ToolCall> for ToolCall {
-    fn from(tool_call: message::ToolCall) -> Self {
-        Self {
+/// Refuses a namespaced call: the Chat Completions `function` member has no
+/// namespace, and sending the bare name would call a different tool.
+impl TryFrom<message::ToolCall> for ToolCall {
+    type Error = message::UnrepresentableToolCall;
+
+    fn try_from(tool_call: message::ToolCall) -> Result<Self, Self::Error> {
+        tool_call.for_json_only_wire(CHAT_COMPLETIONS_WIRE)?;
+        Ok(Self {
             // Use the same wire-handle selection as tool-result conversion.
             id: tool_call.wire_call_id().into_owned(),
             r#type: ToolType::default(),
@@ -1042,7 +1057,7 @@ impl From<message::ToolCall> for ToolCall {
                 name: tool_call.function.name,
                 arguments: tool_call.function.arguments,
             },
-        }
+        })
     }
 }
 

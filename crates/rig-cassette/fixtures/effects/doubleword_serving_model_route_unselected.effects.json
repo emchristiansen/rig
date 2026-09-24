@@ -295,6 +295,7 @@
                     "call_id": "call_ec0de81eb41f4cefb5f19059"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

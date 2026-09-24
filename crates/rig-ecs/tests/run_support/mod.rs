@@ -192,6 +192,7 @@ pub fn texts(request: &CompletionRequest) -> Vec<String> {
                     .filter_map(|part| match part {
                         AssistantContent::Text(text) => Some(text.text.clone()),
                         AssistantContent::ToolCall(_)
+                        | AssistantContent::CustomToolCall(_)
                         | AssistantContent::Reasoning(_)
                         | AssistantContent::Image(_) => None,
                     })

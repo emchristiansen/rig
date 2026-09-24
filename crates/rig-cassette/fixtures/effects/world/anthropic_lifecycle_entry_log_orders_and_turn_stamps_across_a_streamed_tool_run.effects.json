@@ -420,6 +420,7 @@
                     "call_id": "toolu_01CpRefFG6QwS6bWahs4ZCtT"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

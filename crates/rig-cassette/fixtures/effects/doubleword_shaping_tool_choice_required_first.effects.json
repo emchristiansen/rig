@@ -286,6 +286,7 @@
                     "call_id": "call_be4cf4662ccf413698f637d1"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

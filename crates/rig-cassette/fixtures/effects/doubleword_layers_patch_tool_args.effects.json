@@ -289,6 +289,7 @@
                     "call_id": "call_e2bd5225ec0f461693f63428"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

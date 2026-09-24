@@ -1443,6 +1443,7 @@
                     "call_id": "call_ea77dbfa169343d99fcf1c60"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

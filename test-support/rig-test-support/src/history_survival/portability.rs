@@ -149,6 +149,7 @@ impl Source {
                     call: call.id.clone(),
                     provider: call.provider.clone(),
                     name: call.function.name.clone(),
+                    answers: call.answered_by(),
                     content: vec![ToolResultContent::text(weather_report(&city))],
                 })
             })

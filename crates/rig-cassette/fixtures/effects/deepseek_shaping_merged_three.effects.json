@@ -279,6 +279,7 @@
                     "call_id": "call_00_eQel8wNoZzp344UQDKD49067"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

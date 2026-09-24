@@ -372,6 +372,7 @@
                     "call_id": "4ktxJd0Ry"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

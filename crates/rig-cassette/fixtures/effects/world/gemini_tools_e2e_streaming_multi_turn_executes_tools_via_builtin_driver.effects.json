@@ -422,6 +422,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "subtract",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -689,6 +690,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "subtract",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -730,6 +732,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

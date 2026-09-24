@@ -380,6 +380,7 @@
                     "item_id": "fc_0f931b3803307777006ab2b295bf7887d0a22ae9ce9696dc20"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

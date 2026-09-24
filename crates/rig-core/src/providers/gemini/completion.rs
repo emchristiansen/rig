@@ -810,10 +810,12 @@ pub mod gemini_api_types {
                     part: PartKind::Text(text),
                     additional_params: None,
                 }),
+                // One result shape on this wire: `answers` selects nothing.
                 message::UserContent::ToolResult(message::ToolResult {
                     call: _,
                     provider,
                     name,
+                    answers: _,
                     content,
                 }) => {
                     let function_name = name;
@@ -1058,7 +1060,12 @@ pub mod gemini_api_types {
                     })
                 }
                 message::AssistantContent::Image(image) => image_to_part(image),
-                message::AssistantContent::ToolCall(tool_call) => Ok(tool_call.into()),
+                message::AssistantContent::ToolCall(tool_call) => Ok(Part::try_from(tool_call)?),
+                // `functionCall.args` is a JSON object; a custom call's raw
+                // input has no representation on this wire.
+                message::AssistantContent::CustomToolCall(call) => {
+                    Err(call.refused_by_json_only_wire(GEMINI_WIRE).into())
+                }
                 message::AssistantContent::Reasoning(reasoning) => Ok(Part {
                     thought: Some(true),
                     thought_signature: reasoning.first_signature().map(str::to_owned),
@@ -1069,20 +1076,21 @@ pub mod gemini_api_types {
         }
     }
 
-    impl From<message::ToolCall> for Part {
-        fn from(tool_call: message::ToolCall) -> Self {
-            Self {
+    /// Wire name for the shared JSON-only tool-call refusal.
+    pub(crate) const GEMINI_WIRE: &str = "Gemini generateContent";
+
+    /// Refuses a namespaced call: `functionCall` has no namespace member.
+    impl TryFrom<message::ToolCall> for Part {
+        type Error = message::UnrepresentableToolCall;
+
+        fn try_from(tool_call: message::ToolCall) -> Result<Self, Self::Error> {
+            let signature = tool_call.signature.clone();
+            Ok(Self {
                 thought: Some(false),
-                thought_signature: tool_call.signature,
-                part: PartKind::FunctionCall(FunctionCall {
-                    name: tool_call.function.name,
-                    args: tool_call.function.arguments,
-                    // Only a provider-issued id may travel back on the wire;
-                    // minted correlation handles stay internal.
-                    id: tool_call.provider.map(|provider| provider.call_id),
-                }),
+                thought_signature: signature,
+                part: PartKind::FunctionCall(FunctionCall::try_from(tool_call)?),
                 additional_params: None,
-            }
+            })
         }
     }
 
@@ -1111,13 +1119,19 @@ pub mod gemini_api_types {
         pub id: Option<String>,
     }
 
-    impl From<message::ToolCall> for FunctionCall {
-        fn from(tool_call: message::ToolCall) -> Self {
-            Self {
+    /// Refuses a namespaced call: `functionCall` has no namespace member.
+    impl TryFrom<message::ToolCall> for FunctionCall {
+        type Error = message::UnrepresentableToolCall;
+
+        fn try_from(tool_call: message::ToolCall) -> Result<Self, Self::Error> {
+            tool_call.for_json_only_wire(GEMINI_WIRE)?;
+            Ok(Self {
                 name: tool_call.function.name,
                 args: tool_call.function.arguments,
+                // Only a provider-issued id may travel back on the wire;
+                // minted correlation handles stay internal.
                 id: tool_call.provider.map(|provider| provider.call_id),
-            }
+            })
         }
     }
 

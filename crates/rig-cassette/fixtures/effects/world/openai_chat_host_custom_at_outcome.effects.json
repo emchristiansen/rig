@@ -340,6 +340,7 @@
                     "call_id": "call_eP4KEydcxQ8RcFuXZWdq74e5"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

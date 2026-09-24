@@ -1257,3 +1257,41 @@ fn record_token_usage_records_reported_zero_and_skips_absent_counters() {
     assert_eq!(fields.get("gen_ai.usage.reasoning_tokens"), Some(0));
     assert_eq!(fields.get("gen_ai.usage.output_tokens"), None);
 }
+
+/// A custom call is recorded as its own part with its raw input as the string
+/// it is; a namespace is recorded beside the name, never dropped.
+#[test]
+fn custom_and_namespaced_calls_render_truthfully() {
+    let output = vec![
+        AssistantContent::tool_call_with_namespace(
+            "fc_1",
+            "call_1".to_owned(),
+            "add",
+            Some("math".to_owned()),
+            json!({"x": 1}),
+        ),
+        AssistantContent::custom_tool_call("ctc_2", "call_2", "apply_patch", None, r#"{"x": 1}"#),
+    ];
+    assert_eq!(
+        serde_json::to_value(output_messages(&output)).expect("serialize"),
+        json!([{
+            "role": "assistant",
+            "parts": [
+                {
+                    "type": "tool_call",
+                    "id": "explicit:call_1",
+                    "name": "add",
+                    "namespace": "math",
+                    "arguments": {"x": 1}
+                },
+                {
+                    "type": "custom_tool_call",
+                    "id": "explicit:call_2",
+                    "name": "apply_patch",
+                    "input": "{\"x\": 1}"
+                }
+            ],
+            "finish_reason": "tool_call"
+        }])
+    );
+}

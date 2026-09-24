@@ -342,6 +342,7 @@
                     "call_id": "tooluse_REDACTED_1"
                   },
                   "name": "subtract",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

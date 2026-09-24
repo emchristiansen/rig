@@ -248,3 +248,57 @@ fn turn_snapshot_and_old_execution_dependency_survive_fresh_world() {
         "new policy must not drop an in-flight snapshot dependency"
     );
 }
+
+/// A namespaced call and a custom call cannot be dispatched by name without
+/// erasing what they are, so the run fails naming the call before the tool
+/// runs or any invalid-call judgment sees it — even though the bare name
+/// `add` is granted and the custom input parses as valid `add` arguments.
+#[test]
+fn namespaced_and_custom_calls_fail_the_run_before_dispatch() {
+    use rig_core::message::UndispatchableToolCall;
+    let arguments = serde_json::json!({"x": 2, "y": 3});
+    let namespaced = AssistantContent::tool_call_with_namespace(
+        "fc_1",
+        "c".to_owned(),
+        "add",
+        Some("math".to_owned()),
+        arguments.clone(),
+    );
+    let custom =
+        AssistantContent::custom_tool_call("ctc_1", "c", "add", None, arguments.to_string());
+    for content in [namespaced, custom] {
+        let mut app = app();
+        let (model, requests) = Scripted::new("model", vec![vec![content.clone()]]);
+        let model = register(&mut app, "model", model);
+        let tool = Adder::new("adder");
+        let peak = tool.peak.clone();
+        let tool = register(&mut app, "adder", tool);
+        let agent = spawn_agent(app.world_mut(), "test", model);
+        app.world_mut().spawn((Grant(tool), ChildOf(agent)));
+        let run = app.world_mut().spawn_run(agent, &[], "add", false, Some(2));
+        tick_until(&mut app, "the undispatchable call fails the run", |world| {
+            world.get::<Failed>(run).is_some()
+        });
+        let Some(Failed(Failure::UndispatchableToolCall { call })) = app.world().get::<Failed>(run)
+        else {
+            panic!(
+                "expected UndispatchableToolCall for {content:?}, got {:?}",
+                app.world().get::<Failed>(run)
+            );
+        };
+        match (&content, call) {
+            (
+                AssistantContent::ToolCall(_),
+                UndispatchableToolCall::Namespaced {
+                    name, namespace, ..
+                },
+            ) => assert_eq!((name.as_str(), namespace.as_str()), ("add", "math")),
+            (AssistantContent::CustomToolCall(_), UndispatchableToolCall::Custom { name, .. }) => {
+                assert_eq!(name, "add");
+            }
+            (content, call) => panic!("wrong refusal {call:?} for {content:?}"),
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 0, "the tool never ran");
+        assert_eq!(requests.lock().expect("requests").len(), 1);
+    }
+}

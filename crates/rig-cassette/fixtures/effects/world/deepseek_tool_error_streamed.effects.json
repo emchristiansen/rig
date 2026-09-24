@@ -719,6 +719,7 @@
                     "call_id": "call_00_hjq0Yw52ST1jSHJGMHCN8577"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

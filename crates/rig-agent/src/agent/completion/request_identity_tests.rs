@@ -222,6 +222,7 @@ const GOLDEN: &str = r#"
       {
         "content": [
           {
+            "answers": "function",
             "call": {
               "id": "tc1",
               "origin": "explicit"
@@ -344,6 +345,7 @@ const GOLDEN: &str = r#"
       {
         "content": [
           {
+            "answers": "function",
             "call": {
               "id": "tc1",
               "origin": "explicit"

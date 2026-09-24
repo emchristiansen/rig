@@ -326,6 +326,7 @@
                     "call_id": "call_128624"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

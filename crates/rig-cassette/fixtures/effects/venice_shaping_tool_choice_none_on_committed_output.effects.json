@@ -307,6 +307,7 @@
                     "call_id": "QB6KaaCSs"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -497,6 +498,7 @@
                     "call_id": "QB6KaaCSs"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

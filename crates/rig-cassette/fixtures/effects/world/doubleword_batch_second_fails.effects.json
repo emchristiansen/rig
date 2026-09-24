@@ -650,6 +650,7 @@
                     "call_id": "call_7ae078410b5249eea6b86568"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -667,6 +668,7 @@
                     "call_id": "call_d519a11aefe343b786a0157d"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

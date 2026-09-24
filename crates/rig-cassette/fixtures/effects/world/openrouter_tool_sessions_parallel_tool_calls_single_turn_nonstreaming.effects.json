@@ -382,6 +382,7 @@
                     "call_id": "call_iQcZJOsBb7eb834rq0hyuJEI"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -399,6 +400,7 @@
                     "call_id": "call_B2tEwlopa4FIVqJtadPwpzQL"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

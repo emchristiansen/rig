@@ -481,6 +481,7 @@
                     "item_id": "fc_0831eba541b42c3d006ab2b2e8272887d094edeb5e4484fcdd"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -357,6 +357,7 @@
                     "call_id": "call_9c5d468761b646c58c5806f5"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

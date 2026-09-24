@@ -228,6 +228,7 @@
                     "call_id": "call-1"
                   },
                   "name": "multiply",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -389,6 +390,7 @@
                     "call_id": "call-1"
                   },
                   "name": "multiply",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -436,6 +438,7 @@
                     "call_id": "call-2"
                   },
                   "name": "divide",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -621,6 +624,7 @@
                     "call_id": "call-1"
                   },
                   "name": "multiply",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -668,6 +672,7 @@
                     "call_id": "call-2"
                   },
                   "name": "divide",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -715,6 +720,7 @@
                     "call_id": "call-3"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

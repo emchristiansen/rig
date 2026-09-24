@@ -443,6 +443,7 @@
                     "call_id": "call_GoUFnDKoMnkSFZt0T85zfDp9"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -689,6 +690,7 @@
                     "call_id": "call_GoUFnDKoMnkSFZt0T85zfDp9"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -735,6 +737,7 @@
                     "call_id": "call_JTCdHjpRxK2ls5GQ0pv6R5Zd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -981,6 +984,7 @@
                     "call_id": "call_GoUFnDKoMnkSFZt0T85zfDp9"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1027,6 +1031,7 @@
                     "call_id": "call_JTCdHjpRxK2ls5GQ0pv6R5Zd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1073,6 +1078,7 @@
                     "call_id": "call_HTe2fUE1uk8pf2STMPrxcOvB"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1319,6 +1325,7 @@
                     "call_id": "call_GoUFnDKoMnkSFZt0T85zfDp9"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1365,6 +1372,7 @@
                     "call_id": "call_JTCdHjpRxK2ls5GQ0pv6R5Zd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1411,6 +1419,7 @@
                     "call_id": "call_HTe2fUE1uk8pf2STMPrxcOvB"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1457,6 +1466,7 @@
                     "call_id": "call_wv0cNNX7sQkSnPtaqbVYohyT"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1701,6 +1711,7 @@
                     "call_id": "call_GoUFnDKoMnkSFZt0T85zfDp9"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1747,6 +1758,7 @@
                     "call_id": "call_JTCdHjpRxK2ls5GQ0pv6R5Zd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1793,6 +1805,7 @@
                     "call_id": "call_HTe2fUE1uk8pf2STMPrxcOvB"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1839,6 +1852,7 @@
                     "call_id": "call_wv0cNNX7sQkSnPtaqbVYohyT"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1883,6 +1897,7 @@
                     "call_id": "call_QMIovzytPnQjhAGSpxhLq3Lv"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

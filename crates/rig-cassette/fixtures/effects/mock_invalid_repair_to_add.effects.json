@@ -252,6 +252,7 @@
                     "call_id": "call-1"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

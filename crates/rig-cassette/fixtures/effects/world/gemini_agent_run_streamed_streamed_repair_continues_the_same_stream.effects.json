@@ -407,6 +407,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "sum",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

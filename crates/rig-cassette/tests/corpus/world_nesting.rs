@@ -159,6 +159,7 @@ fn finish_lookup(
                     .filter_map(|content| match content {
                         AssistantContent::Text(text) => Some(text.text.trim().to_owned()),
                         AssistantContent::ToolCall(_)
+                        | AssistantContent::CustomToolCall(_)
                         | AssistantContent::Reasoning(_)
                         | AssistantContent::Image(_) => None,
                     })

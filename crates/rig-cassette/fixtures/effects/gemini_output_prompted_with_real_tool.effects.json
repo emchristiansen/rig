@@ -271,6 +271,7 @@
                     "call_id": "call_391688"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

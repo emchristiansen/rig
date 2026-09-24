@@ -679,6 +679,13 @@ fn emit_parsed_items(
                 }
                 emit(GenerationEvent::ToolCall { id, end })?;
             }
+            // The local parsers only produce function calls.
+            AssistantContent::CustomToolCall(_) => {
+                return Err(CandleError::Inference(
+                    "the local output parser produced a custom tool call, which it never emits"
+                        .into(),
+                ));
+            }
             AssistantContent::Reasoning(reasoning) => {
                 // Whole reasoning blocks share an identity without replacing
                 // accumulated deltas because local generation emits no reasoning deltas.

@@ -276,6 +276,7 @@
                     "call_id": "call_b8dcae2aa6f6492caaac8c95"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

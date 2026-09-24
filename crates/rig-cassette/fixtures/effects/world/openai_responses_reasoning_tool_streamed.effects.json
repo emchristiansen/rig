@@ -600,6 +600,7 @@
                     "item_id": "fc_0b4ccd6880bda668006ab2b4cd77cc87d090a5d24fed508fd7"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

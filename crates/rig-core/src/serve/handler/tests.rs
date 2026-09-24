@@ -691,3 +691,43 @@ fn a_streamed_reply_folded_to_an_outcome_records_its_reasoning_issuer() {
         .collect();
     assert_eq!(issuers, ["anthropic"]);
 }
+
+/// Re-emitting a unary reply as stream events and folding them back keeps a
+/// namespaced call's namespace and a custom call whole.
+#[test]
+fn re_emitted_namespaced_and_custom_calls_fold_back_unchanged() {
+    use crate::message::AssistantContent;
+
+    let choice = vec![
+        AssistantContent::tool_call_with_namespace(
+            "fc_1",
+            "call_1".to_owned(),
+            "add",
+            Some("math".to_owned()),
+            serde_json::json!({"x": 1}),
+        ),
+        AssistantContent::custom_tool_call(
+            "ctc_2",
+            "call_2",
+            "apply_patch",
+            Some("repo".to_owned()),
+            r#"{"x": 1}"#,
+        ),
+    ];
+    let mut tap = StreamTap::new();
+    let mut outcome = None;
+    for item in events_from_response(&CompletionResponse::new(
+        choice.clone(),
+        Default::default(),
+        "openai",
+        serde_json::Value::Null,
+    )) {
+        if let Some(folded) = tap.observe(&item) {
+            outcome = Some(folded);
+        }
+    }
+    let Some(Ok(Outcome::Completion(response))) = outcome else {
+        panic!("a completion outcome");
+    };
+    assert_eq!(response.choice, choice);
+}

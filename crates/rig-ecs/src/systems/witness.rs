@@ -115,6 +115,9 @@ pub fn ending_of(failure: &Failure) -> Reason {
             "memory",
             format!("{}: {}", report.kind.code(), report.message),
         ),
+        Failure::UndispatchableToolCall { call } => {
+            Reason::with_detail("undispatchable_tool_call", call.to_string())
+        }
     }
 }
 

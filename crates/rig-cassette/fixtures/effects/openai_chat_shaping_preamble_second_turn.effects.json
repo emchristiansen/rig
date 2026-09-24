@@ -280,6 +280,7 @@
                     "call_id": "call_M6lrGSshxhRhS2bRmi77UYi1"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

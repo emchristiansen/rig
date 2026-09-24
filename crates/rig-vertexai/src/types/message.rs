@@ -8,6 +8,9 @@ use rig_core::message::{
 };
 use std::collections::HashSet;
 
+/// Wire name for the shared JSON-only tool-call refusal.
+const VERTEX_AI_WIRE: &str = "Vertex AI generateContent";
+
 pub struct RigMessage(pub Message);
 
 impl TryFrom<RigMessage> for vertexai::model::Content {
@@ -119,7 +122,16 @@ impl TryFrom<RigMessage> for vertexai::model::Content {
                             Ok(part)
                         }
                         AssistantContent::Image(image) => vertex_assistant_image_part(image),
+                        // `functionCall.args` is a struct; a custom call's raw
+                        // input has no representation on this wire.
+                        AssistantContent::CustomToolCall(call) => Err(ProviderError::Request(
+                            call.refused_by_json_only_wire(VERTEX_AI_WIRE).into(),
+                        )),
                         AssistantContent::ToolCall(tool_call) => {
+                            // `functionCall` has no namespace member.
+                            tool_call
+                                .for_json_only_wire(VERTEX_AI_WIRE)
+                                .map_err(|refusal| ProviderError::Request(refusal.into()))?;
                             let serde_json::Value::Object(struct_val) =
                                 tool_call.function.arguments
                             else {

@@ -21,7 +21,7 @@ use crate::error::ProviderError;
 use crate::message::{AssistantContent, ToolResult};
 pub use accumulator::BlockAccumulator;
 pub use block_id::{BlockId, MintKind, SyntheticIds, non_empty_id};
-pub use event::{BlockClose, BlockKind, Delta, StreamEvent, ToolCallEnd};
+pub use event::{BlockClose, BlockKind, CustomToolCallEnd, Delta, StreamEvent, ToolCallEnd};
 use futures::Stream;
 use futures::stream::{AbortHandle, Abortable};
 use futures::task::AtomicWaker;

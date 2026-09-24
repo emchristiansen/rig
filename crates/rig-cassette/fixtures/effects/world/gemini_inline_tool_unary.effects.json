@@ -316,6 +316,7 @@
                     "call_id": "call_240744"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

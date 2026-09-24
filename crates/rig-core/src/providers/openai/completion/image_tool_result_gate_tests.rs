@@ -30,6 +30,7 @@ fn params(
                     call: message::ToolCallId::new_or_minted("call_1", 0),
                     provider: message::ProviderCallId::new("call_1"),
                     name: "view_file".to_string(),
+                    answers: crate::message::AnsweredToolCall::Function,
                     content,
                 })],
             }],

@@ -318,6 +318,7 @@
                     "call_id": "RecB0IHZY"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

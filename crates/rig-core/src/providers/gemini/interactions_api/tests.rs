@@ -61,6 +61,7 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() {
     let call = |item_id: Option<&str>, call_id: &str, name: &str| {
         let function = ToolFunction {
             name: name.to_owned(),
+            namespace: None,
             arguments: json!({}),
         };
         let tool_call = match item_id {
@@ -175,6 +176,7 @@ fn test_tool_result_without_provider_id_sends_minted_call_id() {
         call: call.clone(),
         provider: None,
         name: "get_weather".to_string(),
+        answers: crate::message::AnsweredToolCall::Function,
         content: vec![message::ToolResultContent::text("ok")],
     });
 
@@ -192,6 +194,7 @@ fn test_tool_result_preserves_text_and_json_types() {
         call: message::ToolCallId::new_or_minted("call-123", 0),
         provider: message::ProviderCallId::new("call-123"),
         name: "get_weather".to_string(),
+        answers: crate::message::AnsweredToolCall::Function,
         content: vec![
             message::ToolResultContent::text(r#"{"status":"literal"}"#),
             message::ToolResultContent::json(json!({ "status": "structured" })),
@@ -257,6 +260,7 @@ fn test_tool_result_text_and_json_singletons_remain_scalar() {
             call: message::ToolCallId::new_or_minted("call-123", 0),
             provider: message::ProviderCallId::new("call-123"),
             name: "get_weather".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![tool_content],
         });
 
@@ -289,6 +293,7 @@ fn test_tool_result_rich_singletons_use_tagged_content() {
             call: message::ToolCallId::new_or_minted("call-123", 0),
             provider: message::ProviderCallId::new("call-123"),
             name: "get_weather".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![tool_content],
         });
 
@@ -307,6 +312,7 @@ fn test_tool_result_images_and_text_serialize_as_ordered_tagged_content() {
         call: message::ToolCallId::new_or_minted("call-image", 0),
         provider: message::ProviderCallId::new("call-image"),
         name: "render".to_string(),
+        answers: crate::message::AnsweredToolCall::Function,
         content: vec![
             message::ToolResultContent::image_base64(
                 "first-image",
@@ -1233,6 +1239,7 @@ fn shape(response: &crate::completion::CompletionResponse) -> (Vec<&'static str>
             message::AssistantContent::Text(_) => "text",
             message::AssistantContent::Reasoning(_) => "reasoning",
             message::AssistantContent::ToolCall(_) => "tool_call",
+            message::AssistantContent::CustomToolCall(_) => "custom_tool_call",
             message::AssistantContent::Image(_) => "image",
         })
         .collect();
@@ -1450,4 +1457,18 @@ async fn a_polled_interaction_folds_its_steps_and_keeps_the_document() {
         "status: {:?}",
         interaction.status
     );
+}
+
+#[test]
+fn interactions_refuses_namespaced_and_custom_calls() {
+    for (turn, kind) in crate::message::unrepresentable_turns() {
+        let message::Message::Assistant { content, .. } = turn else {
+            unreachable!()
+        };
+        for item in content {
+            let error =
+                interactions_api_types::Content::try_from(item).expect_err("refused, not dropped");
+            crate::message::assert_message_refused(&error, kind, "Gemini Interactions");
+        }
+    }
 }

@@ -326,6 +326,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

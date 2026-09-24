@@ -35,6 +35,11 @@ pub enum ContentPart {
     Document(DocumentPart),
     /// A tool call with correlation IDs, arguments, signature and metadata.
     ToolCall(#[reflect(remote = super::reflect::ToolCallPartReflect)] message::ToolCall),
+    /// A custom tool call: correlation IDs, name, namespace and verbatim input.
+    /// Held as history; the runtime never dispatches one.
+    CustomToolCall(
+        #[reflect(remote = super::reflect::CustomToolCallPartReflect)] message::CustomToolCall,
+    ),
     /// Ordered reasoning with IDs, signatures and opaque provider data.
     Reasoning(#[reflect(remote = super::reflect::ReasoningPartReflect)] message::Reasoning),
     /// A tool result whose children must be Text, Image or Json parts.
@@ -47,6 +52,9 @@ pub enum ContentPart {
         provider: Option<message::ProviderCallId>,
         /// Executed tool name, including hook repairs.
         name: String,
+        /// Which kind of call the result answers.
+        #[reflect(remote = super::reflect::AnsweredToolCallReflect)]
+        answers: message::AnsweredToolCall,
     },
     /// Structured JSON under a tool result; never implicitly parsed from text.
     Json(#[reflect(remote = super::reflect::JsonPartReflect)] serde_json::Value),
@@ -255,6 +263,7 @@ fn user(
                 call: value.call,
                 provider: value.provider,
                 name: value.name,
+                answers: value.answers,
             }
         }
     };
@@ -284,6 +293,9 @@ fn prepare(
                         AssistantContent::Text(value) => ContentPart::Text(value),
                         AssistantContent::Image(value) => ContentPart::Image(image(assets, value)?),
                         AssistantContent::ToolCall(value) => ContentPart::ToolCall(value),
+                        AssistantContent::CustomToolCall(value) => {
+                            ContentPart::CustomToolCall(value)
+                        }
                         AssistantContent::Reasoning(value) => ContentPart::Reasoning(value),
                     };
                     Ok((part, Vec::new()))
@@ -432,10 +444,12 @@ fn to_user<'a>(
             call,
             provider,
             name,
+            answers,
         } => UserContent::ToolResult(message::ToolResult {
             call,
             provider,
             name,
+            answers,
             content: ordered(get, entity)?
                 .into_iter()
                 .map(|child| read_edited_part(get, child, true, edits))
@@ -601,6 +615,9 @@ fn read_message_from<'a>(
                             AssistantContent::Image(read_image(assets, &value)?)
                         }
                         ContentPart::ToolCall(value) => AssistantContent::ToolCall(value),
+                        ContentPart::CustomToolCall(value) => {
+                            AssistantContent::CustomToolCall(value)
+                        }
                         ContentPart::Reasoning(value) => AssistantContent::Reasoning(value),
                         _ => return Err(ContentError::Shape),
                     })

@@ -465,6 +465,7 @@
                     "call_id": "call_95302"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -482,6 +483,7 @@
                     "call_id": "call_95303"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

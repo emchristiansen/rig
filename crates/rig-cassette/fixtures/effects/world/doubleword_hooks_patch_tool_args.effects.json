@@ -309,6 +309,7 @@
                     "call_id": "call_787e1ba78efd4bd295e83c3c"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -482,3 +482,11 @@ fn full_request_preserves_typed_tool_pairs_across_turns() {
         assert_adapter_pairs(serde_json::to_value(wire).unwrap());
     }
 }
+
+#[test]
+fn cohere_chat_refuses_namespaced_and_custom_calls() {
+    for (turn, kind) in crate::message::unrepresentable_turns() {
+        let error = Vec::<Message>::try_from(turn).expect_err("refused, not dropped");
+        crate::message::assert_message_refused(&error, kind, COHERE_CHAT_WIRE);
+    }
+}

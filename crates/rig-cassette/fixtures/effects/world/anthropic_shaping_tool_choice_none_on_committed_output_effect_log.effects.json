@@ -336,6 +336,7 @@
                     "call_id": "toolu_01SwUZAHGBE1nBUw2Gps22zV"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -519,6 +520,7 @@
                     "call_id": "toolu_01SwUZAHGBE1nBUw2Gps22zV"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

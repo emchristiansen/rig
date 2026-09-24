@@ -782,6 +782,9 @@ fn coerce_tool_input(input: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Wire name for the shared JSON-only tool-call refusal.
+const ANTHROPIC_MESSAGES_WIRE: &str = "Anthropic Messages";
+
 fn anthropic_content_from_assistant_content(
     content: message::AssistantContent,
 ) -> Result<Vec<Content>, MessageError> {
@@ -797,13 +800,22 @@ fn anthropic_content_from_assistant_content(
         message::AssistantContent::Image(_) => Err(MessageError::ConversionError(
             "Anthropic currently doesn't support images.".to_string(),
         )),
-        message::AssistantContent::ToolCall(tool_call) => Ok(vec![Content::ToolUse {
-            // The wire requires a non-empty id: the provider-issued one when it
-            // exists, else rig's minted handle.
-            id: tool_call.wire_call_id().into_owned(),
-            name: tool_call.function.name,
-            input: coerce_tool_input(tool_call.function.arguments),
-        }]),
+        message::AssistantContent::ToolCall(tool_call) => {
+            // `tool_use` has `name` and object `input` and no namespace member.
+            tool_call.for_json_only_wire(ANTHROPIC_MESSAGES_WIRE)?;
+            Ok(vec![Content::ToolUse {
+                // The wire requires a non-empty id: the provider-issued one when it
+                // exists, else rig's minted handle.
+                id: tool_call.wire_call_id().into_owned(),
+                name: tool_call.function.name,
+                input: coerce_tool_input(tool_call.function.arguments),
+            }])
+        }
+        // `tool_use.input` is a JSON object; a custom call's raw input has no
+        // representation on this wire.
+        message::AssistantContent::CustomToolCall(call) => Err(call
+            .refused_by_json_only_wire(ANTHROPIC_MESSAGES_WIRE)
+            .into()),
         message::AssistantContent::Reasoning(reasoning) => {
             let mut converted = Vec::new();
             for block in reasoning.content {

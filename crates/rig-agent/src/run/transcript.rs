@@ -7,7 +7,7 @@
 //! assert_eq!(history.len(), 1);
 //! ```
 
-use rig_core::message::{AssistantContent, Message, ToolCallId, non_empty};
+use rig_core::message::{AssistantContent, Message, ToolCallId, UserContent, non_empty};
 pub use rig_core::transcript::{
     TranscriptError, tool_result_message, tool_result_output, validate_canonical,
 };
@@ -60,6 +60,16 @@ pub fn invalid_tool_retry_user_message(
                 tool_call.function.name.clone(),
                 TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER.to_string(),
             )),
+            // A custom peer is answered by a result of its own kind, so the
+            // turn stays paired on wires that distinguish the two.
+            AssistantContent::CustomToolCall(call) => {
+                Some(UserContent::tool_result_for_custom_call(
+                    call,
+                    vec![rig_core::message::ToolResultContent::text(
+                        TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER,
+                    )],
+                ))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();

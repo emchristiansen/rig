@@ -296,6 +296,7 @@
                     "call_id": "c2F5iramm"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

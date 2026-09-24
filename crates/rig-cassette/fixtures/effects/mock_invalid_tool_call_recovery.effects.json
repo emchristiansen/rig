@@ -228,6 +228,7 @@
                     "call_id": "call-1"
                   },
                   "name": "multiply",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -413,6 +414,7 @@
                     "call_id": "call-1"
                   },
                   "name": "multiply",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -460,6 +462,7 @@
                     "call_id": "call-2"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

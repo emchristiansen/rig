@@ -467,6 +467,17 @@ pub fn invalid_peer_results(
                     text::TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER.to_owned()
                 },
             )),
+            // A custom call delivered before the invalid one is a peer like
+            // any other, answered by a result of its own kind so the turn
+            // stays paired. It is never the invalid call itself.
+            AssistantContent::CustomToolCall(call) => {
+                Some(UserContent::tool_result_for_custom_call(
+                    call,
+                    vec![rig_core::message::ToolResultContent::text(
+                        text::TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER,
+                    )],
+                ))
+            }
             AssistantContent::Text(_)
             | AssistantContent::Reasoning(_)
             | AssistantContent::Image(_) => None,
@@ -577,7 +588,8 @@ pub fn partial_turn_at(
                 }
                 kept.push(part.clone());
             }
-            AssistantContent::Text(_)
+            AssistantContent::CustomToolCall(_)
+            | AssistantContent::Text(_)
             | AssistantContent::Reasoning(_)
             | AssistantContent::Image(_) => kept.push(part.clone()),
         }
@@ -603,7 +615,8 @@ pub fn answer_text(content: &[AssistantContent]) -> String {
             AssistantContent::Text(text) => Some(text.text.as_str()),
             AssistantContent::Reasoning(_)
             | AssistantContent::Image(_)
-            | AssistantContent::ToolCall(_) => None,
+            | AssistantContent::ToolCall(_)
+            | AssistantContent::CustomToolCall(_) => None,
         })
         .collect()
 }

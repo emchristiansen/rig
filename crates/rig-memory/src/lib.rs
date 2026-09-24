@@ -333,9 +333,16 @@ impl HeuristicTokenCounter {
                 self.bytes_to_tokens(reasoning.display_text().len())
             }
             AssistantContent::ToolCall(call) => {
-                let name_bytes = call.function.name.len();
+                let name_bytes = call.function.name.len()
+                    + call.function.namespace.as_ref().map_or(0, String::len);
                 let args_bytes = call.function.arguments.to_string().len();
                 self.bytes_to_tokens(name_bytes + args_bytes)
+            }
+            // A custom tool's input is verbatim text, already its own
+            // serialized form: it is charged by its byte length as sent.
+            AssistantContent::CustomToolCall(call) => {
+                let name_bytes = call.name.len() + call.namespace.as_ref().map_or(0, String::len);
+                self.bytes_to_tokens(name_bytes + call.input.len())
             }
             AssistantContent::Image(_) => self.per_attachment_tokens,
         }
@@ -1189,6 +1196,9 @@ fn render_message_line(msg: &Message) -> String {
                 AssistantContent::Text(text) => Cow::Borrowed(text.text.as_str()),
                 AssistantContent::ToolCall(call) => {
                     Cow::Owned(format!("[tool call: {}]", call.function.name))
+                }
+                AssistantContent::CustomToolCall(call) => {
+                    Cow::Owned(format!("[custom tool call: {}]", call.name))
                 }
                 _ => Cow::Borrowed("[reasoning]"),
             })),

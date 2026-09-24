@@ -306,6 +306,7 @@
                     "call_id": "call_CkpcNq46mluiWKpgLWvDyfID"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

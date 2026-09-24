@@ -301,6 +301,7 @@ fn nested_text_edits_preserve_annotations_and_structured_siblings() {
             call: ToolCallId::new("call").unwrap(),
             provider: None,
             name: "tool".into(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![
                 ToolResultContent::Text(text.clone()),
                 ToolResultContent::Json {
@@ -335,6 +336,7 @@ fn nested_text_edits_preserve_annotations_and_structured_siblings() {
             call: ToolCallId::new("call").unwrap(),
             provider: None,
             name: "tool".into(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![
                 ToolResultContent::Text(changed),
                 ToolResultContent::Json {

@@ -666,6 +666,7 @@
                     "item_id": "fc_0dd460aaf73c6856006ab396a05df887d09ce0241dc70fbf9f"
                   },
                   "name": "subtract",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

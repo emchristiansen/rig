@@ -245,6 +245,7 @@
                     "call_id": "call_00_fOmReohWbmX5qFXGdIay7155"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

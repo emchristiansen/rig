@@ -271,6 +271,7 @@
                     "call_id": "call_6GZnEIRdJB8K2UhVclRBBFCk"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -484,6 +485,7 @@
                     "call_id": "call_6GZnEIRdJB8K2UhVclRBBFCk"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -534,6 +536,7 @@
                     "call_id": "call_KLbEauam4OmzoCFDXufZsdzm"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -747,6 +750,7 @@
                     "call_id": "call_6GZnEIRdJB8K2UhVclRBBFCk"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -797,6 +801,7 @@
                     "call_id": "call_KLbEauam4OmzoCFDXufZsdzm"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -847,6 +852,7 @@
                     "call_id": "call_d7rIpwWouKNE5bIOOOTnPfhu"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1060,6 +1066,7 @@
                     "call_id": "call_6GZnEIRdJB8K2UhVclRBBFCk"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1110,6 +1117,7 @@
                     "call_id": "call_KLbEauam4OmzoCFDXufZsdzm"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1160,6 +1168,7 @@
                     "call_id": "call_d7rIpwWouKNE5bIOOOTnPfhu"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1210,6 +1219,7 @@
                     "call_id": "call_GfVYDHmhNKTKVnHbunR7KTJn"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

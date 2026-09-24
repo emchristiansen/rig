@@ -307,6 +307,7 @@
                     "call_id": "lc27WeO8H"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

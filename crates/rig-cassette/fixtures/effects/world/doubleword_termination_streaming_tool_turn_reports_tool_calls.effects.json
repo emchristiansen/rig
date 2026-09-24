@@ -466,6 +466,7 @@
                     "call_id": "chatcmpl-tool-a5d5de59cd0a6912"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

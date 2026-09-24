@@ -507,6 +507,7 @@
                     "call_id": "call_OlqhEti3FNQ2EsgwA6md2lrf"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -524,6 +525,7 @@
                     "call_id": "call_jNNvfxFbKcDf5ufp38jFuIOt"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

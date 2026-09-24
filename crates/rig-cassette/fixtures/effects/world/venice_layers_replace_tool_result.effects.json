@@ -310,6 +310,7 @@
                     "call_id": "Lp35FBx56"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

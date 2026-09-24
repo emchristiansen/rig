@@ -354,6 +354,7 @@
                     "call_id": "call-2"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

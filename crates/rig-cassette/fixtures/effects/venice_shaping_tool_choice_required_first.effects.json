@@ -284,6 +284,7 @@
                     "call_id": "yIT0UHXzY"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -272,6 +272,7 @@
                     "call_id": "call-1"
                   },
                   "name": "multiply",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

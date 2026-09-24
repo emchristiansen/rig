@@ -371,6 +371,7 @@
                     "call_id": "call_84285"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

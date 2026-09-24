@@ -456,6 +456,7 @@
                     "item_id": "fc_b2efd026-bb0f-964c-886c-adc24c1cb8dd_0"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -474,6 +475,7 @@
                     "item_id": "fc_b2efd026-bb0f-964c-886c-adc24c1cb8dd_1"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

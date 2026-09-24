@@ -429,6 +429,7 @@
                     "call_id": "call_7oUqlO9yVQJWH4uBgZQ2HJtb"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -446,6 +447,7 @@
                     "call_id": "call_XT898kyUaBL7XJJVXR1khJ3z"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

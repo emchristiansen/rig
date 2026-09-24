@@ -259,13 +259,9 @@ async fn consume_workspace_like_stream(
             MultiTurnStreamItem::ToolCall { tool_call, .. } => {
                 observation.events.push("tool_call");
                 observation.tool_calls.push(tool_call.function.name.clone());
-                let arguments = tool_call
-                    .function
-                    .arguments
-                    .as_json()
-                    .ok_or_else(|| "the tool call carried raw input, not JSON".to_string())?;
                 let execution: JavaScriptProgram =
-                    serde_json::from_value(arguments.clone()).map_err(|error| error.to_string())?;
+                    serde_json::from_value(tool_call.function.arguments.clone())
+                        .map_err(|error| error.to_string())?;
                 observation.executions.push(execution);
             }
             MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockDelta {

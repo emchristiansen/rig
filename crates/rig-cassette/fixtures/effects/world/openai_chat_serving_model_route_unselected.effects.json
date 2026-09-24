@@ -314,6 +314,7 @@
                     "call_id": "call_baXBSXH3CxGzN7jdjim7gGO9"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

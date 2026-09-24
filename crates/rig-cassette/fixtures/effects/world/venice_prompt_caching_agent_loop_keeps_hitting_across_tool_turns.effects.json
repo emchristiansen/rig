@@ -417,6 +417,7 @@
                     "call_id": "chatcmpl-tool-a9818439d95dcc14"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -434,6 +435,7 @@
                     "call_id": "chatcmpl-tool-b8c6dc5573232886"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

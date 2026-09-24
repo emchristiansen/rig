@@ -459,6 +459,7 @@
                     "call_id": "call_00_1O9LrfZvBDKRtlS7IOIE8445"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -476,6 +477,7 @@
                     "call_id": "call_01_J5vg1Hn0dOi1YnZai4zr7254"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -493,6 +495,7 @@
                     "call_id": "call_02_dXOcxQ2hsIqEhKuMH4Pd0795"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

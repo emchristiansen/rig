@@ -303,6 +303,7 @@
                     "call_id": "call_hxyFgx1opW1QtRc66gw02J6x"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

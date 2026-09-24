@@ -243,6 +243,7 @@ fn create_grpc_request_sends_the_executed_name_not_an_identifier() {
             wire_id,
             ToolFunction {
                 name: name.to_owned(),
+                namespace: None,
                 arguments: serde_json::json!({}),
             },
         ))],
@@ -252,6 +253,7 @@ fn create_grpc_request_sends_the_executed_name_not_an_identifier() {
             call: ToolCallId::new_or_minted(wire_id, 0),
             provider: ProviderCallId::new(wire_id),
             name: name.to_owned(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::text("out")],
         })],
     };
@@ -716,4 +718,48 @@ fn an_unflattenable_tool_schema_is_a_request_failure() {
     let error = tool_parameters_to_proto_schema(&parameters).expect_err("schema must not convert");
     assert!(matches!(error, ProviderError::Request(_)), "{error:?}");
     assert_eq!(error.to_string(), "RequestError: $defs must be an object");
+}
+
+/// One namespaced function call and one custom call (whose input parses as
+/// JSON): the two shapes every JSON-only wire refuses by name.
+fn unrepresentable_calls() -> [(rig_core::message::AssistantContent, &'static str); 2] {
+    use rig_core::message::AssistantContent;
+    [
+        (
+            AssistantContent::tool_call_with_namespace(
+                "fc_1",
+                "call_1".to_owned(),
+                "add",
+                Some("math".to_owned()),
+                serde_json::json!({"x": 1}),
+            ),
+            "cannot represent tool namespaces, so call `add` qualified by namespace `math`",
+        ),
+        (
+            AssistantContent::custom_tool_call(
+                "ctc_1",
+                "call_2",
+                "apply_patch",
+                None,
+                r#"{"x": 1}"#,
+            ),
+            "carries JSON tool arguments only, so custom tool call `apply_patch`",
+        ),
+    ]
+}
+
+#[test]
+fn grpc_refuses_namespaced_and_custom_calls() {
+    for (content, refusal) in unrepresentable_calls() {
+        let error = rig_assistant_content_to_grpc_part(content).expect_err("refused, not dropped");
+        let ProviderError::Request(reason) = &error else {
+            panic!("a request refusal, got {error:?}");
+        };
+        let reason = reason.to_string();
+        assert!(
+            reason.starts_with("Gemini gRPC generateContent "),
+            "{reason}"
+        );
+        assert!(reason.contains(refusal), "{reason}");
+    }
 }

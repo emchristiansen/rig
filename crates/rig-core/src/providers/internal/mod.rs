@@ -27,17 +27,35 @@ pub mod wire;
 /// disambiguate multiple matches; ambiguous or missing matches remain unchanged.
 /// This helper is available to companion serializers but is not a stable public API.
 pub fn resolve_empty_tool_result_names(history: &mut [crate::message::Message]) {
-    use crate::message::{AssistantContent, Message, ToolCall, UserContent};
+    use crate::message::{AssistantContent, Message, ProviderCallId, ToolCallId, UserContent};
+
+    /// An outstanding call of either kind: what a result is matched against.
+    struct PendingCall {
+        id: ToolCallId,
+        provider: Option<ProviderCallId>,
+        name: String,
+    }
 
     // IDs are completion-local. Resolve only against preceding outstanding
     // calls, never a future turn that happens to reuse the same generated key.
-    let mut pending: Vec<ToolCall> = Vec::new();
+    let mut pending: Vec<PendingCall> = Vec::new();
     for message in history {
         match message {
             Message::Assistant { content, .. } => {
                 pending.extend(content.iter().filter_map(|item| match item {
-                    AssistantContent::ToolCall(call) => Some(call.clone()),
-                    _ => None,
+                    AssistantContent::ToolCall(call) => Some(PendingCall {
+                        id: call.id.clone(),
+                        provider: call.provider.clone(),
+                        name: call.function.name.clone(),
+                    }),
+                    AssistantContent::CustomToolCall(call) => Some(PendingCall {
+                        id: call.id.clone(),
+                        provider: call.provider.clone(),
+                        name: call.name.clone(),
+                    }),
+                    AssistantContent::Text(_)
+                    | AssistantContent::Reasoning(_)
+                    | AssistantContent::Image(_) => None,
                 }));
             }
             Message::User { content } => {
@@ -77,13 +95,13 @@ pub fn resolve_empty_tool_result_names(history: &mut [crate::message::Message]) 
                         candidates.retain(|index| {
                             pending
                                 .get(*index)
-                                .is_some_and(|call| call.function.name == result.name)
+                                .is_some_and(|call| call.name == result.name)
                         });
                     }
                     if let [index] = candidates.as_slice() {
                         let call = pending.remove(*index);
                         if result.name.is_empty() {
-                            result.name = call.function.name;
+                            result.name = call.name;
                         }
                     }
                 }

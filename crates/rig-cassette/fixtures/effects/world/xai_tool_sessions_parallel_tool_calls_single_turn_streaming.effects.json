@@ -766,6 +766,7 @@
                     "item_id": "fc_e5ce863f-4d6c-9a7a-bb96-3628f1b6c113_0"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -784,6 +785,7 @@
                     "item_id": "fc_e5ce863f-4d6c-9a7a-bb96-3628f1b6c113_1"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

@@ -458,6 +458,7 @@
                     "call_id": "call_1561a07f2a8241c083b96d26"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -475,6 +476,7 @@
                     "call_id": "call_082cc7fa9bba42afad2ca173"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

@@ -3664,6 +3664,7 @@ fn request_reserves_raw_server_tool_handles_without_rewriting_them() {
         message::ToolCallId::new("srvtoolu_real").unwrap(),
         message::ToolFunction {
             name: "local".into(),
+            namespace: None,
             arguments: json!({}),
         },
     );
@@ -3712,4 +3713,12 @@ fn request_reserves_raw_server_tool_handles_without_rewriting_them() {
     );
     assert_eq!(content[1], serde_json::to_value(raw_call).unwrap());
     assert_eq!(content[2], serde_json::to_value(raw_result).unwrap());
+}
+
+#[test]
+fn messages_refuses_namespaced_and_custom_calls() {
+    for (turn, kind) in crate::message::unrepresentable_turns() {
+        let error = Message::try_from(turn).expect_err("refused, not dropped");
+        crate::message::assert_message_refused(&error, kind, ANTHROPIC_MESSAGES_WIRE);
+    }
 }

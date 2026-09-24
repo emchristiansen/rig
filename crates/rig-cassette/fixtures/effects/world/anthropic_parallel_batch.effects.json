@@ -457,6 +457,7 @@
                     "call_id": "toolu_01XwL6vwqwrpTEDYJDjtUHXi"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -474,6 +475,7 @@
                     "call_id": "toolu_01Gfsdsqd8CE5y5VCuGFvuAn"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -491,6 +493,7 @@
                     "call_id": "toolu_01H6ZTyJRiGq6WMrFoyGU4dd"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

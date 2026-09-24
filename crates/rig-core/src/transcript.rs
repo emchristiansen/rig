@@ -7,10 +7,11 @@
 //! # Ok::<(), rig_core::transcript::TranscriptError>(())
 //! ```
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use crate::message::{
-    AssistantContent, Message, ProviderCallId, ToolCallId, ToolResultContent, UserContent,
+    AnsweredToolCall, AssistantContent, Message, ProviderCallId, ToolCallId, ToolResultContent,
+    UserContent,
 };
 use crate::tool::ToolOutput;
 
@@ -42,15 +43,35 @@ pub enum TranscriptError {
         /// The orphan result's call id.
         call_id: ToolCallId,
     },
+    /// A tool result states that it answers a different kind of call than the
+    /// call it pairs with (e.g. a function result for a custom call), so a
+    /// wire with more than one result shape would emit the wrong item.
+    #[error(
+        "tool result `{call_id}` at index {index} answers a {answers:?} call, but the call it pairs with is a {call:?} call"
+    )]
+    MispairedToolResult {
+        /// Index of the user message carrying the result.
+        index: usize,
+        /// The result's call id.
+        call_id: ToolCallId,
+        /// The kind of the call the result pairs with.
+        call: AnsweredToolCall,
+        /// The kind the result states it answers.
+        answers: AnsweredToolCall,
+    },
 }
 
-/// Rejects consecutive assistant messages, unanswered tool-call IDs, and results
-/// without a pending call. Each pending ID must be answered once in the next user
-/// message, before another assistant message or the end of history.
+/// Rejects consecutive assistant messages, unanswered tool-call IDs, results
+/// without a pending call, and results whose [`ToolResult::answers`] kind
+/// differs from the kind of the call they pair with. Each pending ID must be
+/// answered once in the next user message, before another assistant message or
+/// the end of history.
+///
+/// [`ToolResult::answers`]: crate::message::ToolResult::answers
 /// System messages reset the consecutive-assistant check but retain pending calls.
 /// Duplicate call IDs are treated as one pending ID.
 pub fn validate_canonical(messages: &[Message]) -> Result<(), TranscriptError> {
-    let mut prev_assistant_calls: Option<BTreeSet<ToolCallId>> = None;
+    let mut prev_assistant_calls: Option<BTreeMap<ToolCallId, AnsweredToolCall>> = None;
     let mut prev_was_assistant = false;
     for (index, message) in messages.iter().enumerate() {
         match message {
@@ -60,20 +81,25 @@ pub fn validate_canonical(messages: &[Message]) -> Result<(), TranscriptError> {
                 }
                 if let Some(call_id) = prev_assistant_calls
                     .take()
-                    .and_then(|pending| pending.into_iter().next())
+                    .and_then(|pending| pending.into_keys().next())
                 {
                     return Err(TranscriptError::UnansweredToolCall {
                         index: index - 1,
                         call_id,
                     });
                 }
-                let calls: BTreeSet<ToolCallId> = content
-                    .iter()
-                    .filter_map(|c| match c {
-                        AssistantContent::ToolCall(call) => Some(call.id.clone()),
-                        _ => None,
-                    })
-                    .collect();
+                let mut calls: BTreeMap<ToolCallId, AnsweredToolCall> = BTreeMap::new();
+                for item in content {
+                    let (id, kind) = match item {
+                        AssistantContent::ToolCall(call) => (&call.id, call.answered_by()),
+                        AssistantContent::CustomToolCall(call) => (&call.id, call.answered_by()),
+                        AssistantContent::Text(_)
+                        | AssistantContent::Reasoning(_)
+                        | AssistantContent::Image(_) => continue,
+                    };
+                    // Duplicate IDs are one pending ID; the first call's kind binds.
+                    calls.entry(id.clone()).or_insert(kind);
+                }
                 prev_assistant_calls = (!calls.is_empty()).then_some(calls);
                 prev_was_assistant = true;
             }
@@ -82,12 +108,26 @@ pub fn validate_canonical(messages: &[Message]) -> Result<(), TranscriptError> {
                 for item in content.iter() {
                     if let UserContent::ToolResult(result) = item {
                         let id = result.call.clone();
-                        if !pending.remove(&id) {
-                            return Err(TranscriptError::OrphanToolResult { index, call_id: id });
+                        match pending.remove(&id) {
+                            None => {
+                                return Err(TranscriptError::OrphanToolResult {
+                                    index,
+                                    call_id: id,
+                                });
+                            }
+                            Some(call) if call != result.answers => {
+                                return Err(TranscriptError::MispairedToolResult {
+                                    index,
+                                    call_id: id,
+                                    call,
+                                    answers: result.answers,
+                                });
+                            }
+                            Some(_) => {}
                         }
                     }
                 }
-                if let Some(call_id) = pending.into_iter().next() {
+                if let Some(call_id) = pending.into_keys().next() {
                     return Err(TranscriptError::UnansweredToolCall {
                         index: index.saturating_sub(1),
                         call_id,
@@ -100,7 +140,7 @@ pub fn validate_canonical(messages: &[Message]) -> Result<(), TranscriptError> {
             }
         }
     }
-    if let Some(call_id) = prev_assistant_calls.and_then(|pending| pending.into_iter().next()) {
+    if let Some(call_id) = prev_assistant_calls.and_then(|pending| pending.into_keys().next()) {
         return Err(TranscriptError::UnansweredToolCall {
             index: messages.len().saturating_sub(1),
             call_id,
@@ -119,7 +159,8 @@ fn tool_result_with(
     UserContent::tool_result_for(call, provider, name, content)
 }
 
-/// Shape a canonical real tool output as a tool result without reparsing text.
+/// Shape a canonical real tool output as a tool result answering a function
+/// call, without reparsing text. A rig tool is a function tool.
 pub fn tool_result_output(
     call: ToolCallId,
     provider: Option<ProviderCallId>,
@@ -129,9 +170,9 @@ pub fn tool_result_output(
     tool_result_with(call, provider, name, output.into_content())
 }
 
-/// Constructs a synthetic tool result containing verbatim text, such as recovery
-/// feedback or a skip reason. JSON-shaped text is not reinterpreted as structured
-/// or multimodal output.
+/// Constructs a synthetic tool result answering a function call, containing
+/// verbatim text such as recovery feedback or a skip reason. JSON-shaped text is
+/// not reinterpreted as structured or multimodal output.
 pub fn tool_result_message(
     call: ToolCallId,
     provider: Option<ProviderCallId>,

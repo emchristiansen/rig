@@ -98,6 +98,7 @@ mod message_content_validation {
                     call: ToolCallId::new_or_minted("call_1", 0),
                     provider: None,
                     name: "lookup".to_owned(),
+                    answers: crate::message::AnsweredToolCall::Function,
                     content: Vec::<ToolResultContent>::new(),
                 })],
             },
@@ -123,6 +124,7 @@ mod message_content_validation {
                 call: ToolCallId::new_or_minted("call_1", 0),
                 provider: None,
                 name: "lookup".to_owned(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::text("")],
             })],
         }]);

@@ -379,6 +379,7 @@
                     "call_id": "call_9bca907a7dd94cb2a11965b1"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

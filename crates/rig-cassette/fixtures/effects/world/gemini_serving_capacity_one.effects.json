@@ -379,6 +379,7 @@
                     "call_id": "call_303690"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -396,6 +397,7 @@
                     "call_id": "call_303694"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

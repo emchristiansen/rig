@@ -428,6 +428,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -442,6 +443,7 @@
                     "id": "minted:tool:1"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -456,6 +458,7 @@
                     "id": "minted:tool:2"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

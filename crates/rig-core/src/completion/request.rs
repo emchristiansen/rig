@@ -259,10 +259,12 @@ impl CompletionResponse {
 
     /// Sets or clears the finish reason, reconciling a present reason with the choice.
     pub fn with_optional_finish_reason(mut self, finish_reason: Option<FinishReason>) -> Self {
-        let has_tool_call = self
-            .choice
-            .iter()
-            .any(|content| matches!(content, AssistantContent::ToolCall(_)));
+        let has_tool_call = self.choice.iter().any(|content| {
+            matches!(
+                content,
+                AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_)
+            )
+        });
         self.finish_reason =
             finish_reason.map(|reason| reason.reconcile_with_output(has_tool_call));
         self

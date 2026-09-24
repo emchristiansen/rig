@@ -276,6 +276,7 @@
                     "call_id": "call_219205"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -239,6 +239,11 @@ pub enum StreamedTurnEvent {
         /// The (possibly repaired) name or argument delta.
         delta: Delta,
     },
+    /// The model emitted a tool call that name-keyed dispatch cannot run: a
+    /// namespaced call or a custom call. Refused as it completes, before
+    /// name authorization or invalid-call recovery; the driver fails the run
+    /// through `AgentRun::refuse_streamed_undispatchable`.
+    UndispatchableToolCall(RefusedStreamedCall),
     /// The model emitted an unknown or disallowed tool call. Resolve it via
     /// `AgentRun::resolve_streamed_invalid_tool_call`,
     /// then apply the outcome with
@@ -264,6 +269,17 @@ pub enum StreamedTurnEvent {
         /// so the call carries this attempt's payload.
         raw: serde_json::Value,
     },
+}
+
+/// A completed streamed call refused by
+/// [`rig_core::message::name_dispatchable_call`]: the refusal, and the call
+/// as the stream delivered it for diagnostic history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefusedStreamedCall {
+    /// Why the call cannot be dispatched.
+    pub call: rig_core::message::UndispatchableToolCall,
+    /// The refused call, verbatim.
+    pub content: AssistantContent,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -719,6 +735,31 @@ impl StreamedTurnAssembler {
                 }
                 Ok(vec![StreamedTurnEvent::EmitIngested])
             }
+            // A custom call is never dispatchable: refused whole, even when
+            // its input parses as JSON. A repeated end finalizes nothing.
+            StreamEvent::BlockEnd {
+                id: block_id,
+                end: BlockClose::CustomToolCall(_),
+                block,
+            } => {
+                self.delta_states.remove(block_id);
+                Ok(block
+                    .as_ref()
+                    .and_then(Self::refuse_undispatchable)
+                    .into_iter()
+                    .collect())
+            }
+            // A namespaced function call is refused before the name-keyed
+            // allowed-set check and before invalid-call recovery could expose
+            // it by its bare name.
+            StreamEvent::BlockEnd {
+                id: block_id,
+                end: BlockClose::ToolCall(_),
+                block: Some(block),
+            } if Self::refuse_undispatchable(block).is_some() => {
+                self.delta_states.remove(block_id);
+                Ok(Self::refuse_undispatchable(block).into_iter().collect())
+            }
             StreamEvent::BlockEnd {
                 id: block_id,
                 end: BlockClose::ToolCall(_),
@@ -984,7 +1025,9 @@ impl StreamedTurnAssembler {
             .iter()
             .filter(|content| match content {
                 AssistantContent::ToolCall(call) => !ignored.contains(&call.id),
-                AssistantContent::Text(_)
+                // Refused at its block end; a finished turn never holds one.
+                AssistantContent::CustomToolCall(_)
+                | AssistantContent::Text(_)
                 | AssistantContent::Reasoning(_)
                 | AssistantContent::Image(_) => true,
             })
@@ -1004,6 +1047,19 @@ impl StreamedTurnAssembler {
             block_ids,
             finish_reason: self.finish_reason.take(),
         }
+    }
+
+    /// The refusal event for a completed call name-keyed dispatch cannot run,
+    /// or `None` for a dispatchable call or non-call content.
+    fn refuse_undispatchable(block: &AssistantContent) -> Option<StreamedTurnEvent> {
+        rig_core::message::name_dispatchable_call(block)
+            .err()
+            .map(|call| {
+                StreamedTurnEvent::UndispatchableToolCall(RefusedStreamedCall {
+                    call,
+                    content: block.clone(),
+                })
+            })
     }
 
     /// Park resolution on `pending` and surface the rejected call to the
@@ -1038,10 +1094,10 @@ impl StreamedTurnAssembler {
         let tool_call = ToolCall {
             id: detail.id.clone(),
             provider: detail.provider.clone(),
-            function: rig_core::message::ToolFunction {
-                name: detail.name.clone(),
-                arguments: serde_json::Value::Null,
-            },
+            function: rig_core::message::ToolFunction::new(
+                detail.name.clone(),
+                serde_json::Value::Null,
+            ),
             signature: None,
             additional_params: None,
         };

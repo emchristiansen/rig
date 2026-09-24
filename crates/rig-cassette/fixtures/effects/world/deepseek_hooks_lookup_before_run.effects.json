@@ -327,6 +327,7 @@
                     "call_id": "call_00_EAuFDVIttPq7vrV09hD58725"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

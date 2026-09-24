@@ -456,6 +456,7 @@
                     "item_id": "fc_0f8ac8a3e3e95776006ab2b2d0b5ac87d09cace4f8921d9f72"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

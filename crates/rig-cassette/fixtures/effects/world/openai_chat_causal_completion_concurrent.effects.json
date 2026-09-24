@@ -401,6 +401,7 @@
                     "call_id": "call_wI1akQxIqqcuEFnCfDQ0OjV4"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

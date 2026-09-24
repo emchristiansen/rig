@@ -140,6 +140,13 @@ pub enum BlockClose {
     /// fragments, or the end's authoritative payload, into a completed
     /// call.
     ToolCall(ToolCallEnd),
+    /// A custom tool call arrived whole (the OpenAI Responses
+    /// `custom_tool_call` item at `response.output_item.done`): the
+    /// accumulator records it as [`AssistantContent::CustomToolCall`].
+    ///
+    /// Its input is authoritative and verbatim; any function-argument
+    /// fragments assembled under the same key are superseded, never parsed.
+    CustomToolCall(CustomToolCallEnd),
 }
 
 /// The end of a streamed tool call's input.
@@ -160,6 +167,11 @@ pub struct ToolCallEnd {
     /// Authoritative tool name from the wire's completed item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The namespace the wire's completed item qualified the callable with,
+    /// verbatim; `None` when it sent none. Only wires that can express a
+    /// namespace (OpenAI Responses) ever set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     /// Authoritative parsed arguments from the wire's completed item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<serde_json::Value>,
@@ -184,6 +196,7 @@ impl ToolCallEnd {
             durable_id: None,
             tool_id: None,
             name: None,
+            namespace: None,
             arguments: None,
             call_id: None,
             signature: None,
@@ -219,6 +232,13 @@ impl ToolCallEnd {
         self
     }
 
+    /// Attach (or clear) the namespace the completed item qualified the
+    /// callable with.
+    pub fn with_namespace(mut self, namespace: Option<String>) -> Self {
+        self.namespace = namespace;
+        self
+    }
+
     /// Attach or clear a provider signature.
     pub fn with_signature(mut self, signature: Option<String>) -> Self {
         self.signature = signature;
@@ -228,6 +248,69 @@ impl ToolCallEnd {
     /// Attach provider-specific metadata.
     pub fn with_additional_params(mut self, additional_params: Option<serde_json::Value>) -> Self {
         self.additional_params = additional_params;
+        self
+    }
+}
+
+/// A custom tool call, complete as the wire delivered it.
+///
+/// Custom calls carry verbatim input rather than JSON arguments, so there is
+/// no fragment assembly and no unparseable-input policy: the end is the call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustomToolCallEnd {
+    /// An already assigned local correlation handle, when re-emitting a
+    /// completed response; see [`ToolCallEnd::durable_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_id: Option<crate::message::ToolCallId>,
+    /// Provider-issued output-item id. Represent absence as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
+    /// Provider call-correlation id (OpenAI Responses `call_id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// The custom tool's name.
+    pub name: String,
+    /// The namespace qualifying the callable, verbatim; `None` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// The model's verbatim input.
+    pub input: String,
+}
+
+impl CustomToolCallEnd {
+    /// A completed custom call with its name and verbatim input.
+    pub fn new(name: impl Into<String>, input: impl Into<String>) -> Self {
+        Self {
+            durable_id: None,
+            tool_id: None,
+            call_id: None,
+            name: name.into(),
+            namespace: None,
+            input: input.into(),
+        }
+    }
+
+    /// Preserve an existing local correlation handle through stream folding.
+    pub fn with_durable_id(mut self, id: crate::message::ToolCallId) -> Self {
+        self.durable_id = Some(id);
+        self
+    }
+
+    /// Attach the provider output-item id (empty means absent).
+    pub fn with_tool_id(mut self, tool_id: impl Into<String>) -> Self {
+        self.tool_id = super::non_empty_id(tool_id);
+        self
+    }
+
+    /// Attach the provider call-correlation id (empty means absent).
+    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
+        self.call_id = super::non_empty_id(call_id);
+        self
+    }
+
+    /// Attach (or clear) the namespace qualifying the callable.
+    pub fn with_namespace(mut self, namespace: Option<String>) -> Self {
+        self.namespace = namespace;
         self
     }
 }
@@ -272,6 +355,7 @@ const _: fn() = || {
     assert_wire::<Delta>();
     assert_wire::<BlockClose>();
     assert_wire::<ToolCallEnd>();
+    assert_wire::<CustomToolCallEnd>();
     assert_wire::<StreamFinal>();
     assert_wire::<UnknownPayload>();
 };

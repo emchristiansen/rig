@@ -421,6 +421,7 @@
                     "call_id": "call_ti967z8GhT4SLItOgOC4pTH9"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -438,6 +439,7 @@
                     "call_id": "call_mXzcWgCOMnzJKR4RYQ8BRPMc"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -455,6 +457,7 @@
                     "call_id": "call_FXahta53lp5ejbXNC7Ad0yvz"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

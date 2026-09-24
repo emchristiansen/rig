@@ -535,6 +535,7 @@
                     "item_id": "fc_051e0403c537b955006ab3966af30c87d0a12efa93d4ef308c"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -553,6 +554,7 @@
                     "item_id": "fc_051e0403c537b955006ab3966af31c87d08fddb9550f60b89f"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -571,6 +573,7 @@
                     "item_id": "fc_051e0403c537b955006ab3966af32887d085724ead18d49117"
                   },
                   "name": "checkpoint_batch",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

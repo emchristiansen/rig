@@ -287,6 +287,7 @@
                     "call_id": "LQK7xhPM7"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

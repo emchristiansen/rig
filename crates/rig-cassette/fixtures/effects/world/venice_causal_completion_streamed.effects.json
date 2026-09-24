@@ -494,6 +494,7 @@
                     "call_id": "8BxQ4Yb0L"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

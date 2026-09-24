@@ -363,6 +363,7 @@
                     "call_id": "call_oxPuKrws4HbZt0NArT6NwaZB"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

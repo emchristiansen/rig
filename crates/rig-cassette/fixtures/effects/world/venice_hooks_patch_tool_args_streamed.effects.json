@@ -408,6 +408,7 @@
                     "call_id": "T4ijcfncM"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

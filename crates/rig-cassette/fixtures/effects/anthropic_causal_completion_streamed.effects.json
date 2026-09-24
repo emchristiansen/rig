@@ -456,6 +456,7 @@
                     "call_id": "toolu_01SPgxpjTY3oRQGp8rp3TUkw"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

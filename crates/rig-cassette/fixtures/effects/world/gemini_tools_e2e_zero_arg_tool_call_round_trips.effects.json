@@ -253,6 +253,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "ping",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

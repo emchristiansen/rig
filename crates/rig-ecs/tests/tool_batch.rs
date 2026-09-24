@@ -775,6 +775,7 @@ fn repair_keeps_same_spelling_identity_namespaces_distinct() {
                     "peer_add"
                 }
                 .into(),
+                namespace: None,
                 arguments: serde_json::json!({"x": 2, "y": 3}),
             },
         );
@@ -787,6 +788,7 @@ fn repair_keeps_same_spelling_identity_namespaces_distinct() {
                     "multiply"
                 }
                 .into(),
+                namespace: None,
                 arguments: serde_json::json!({"x": 4, "y": 5}),
             },
         );
@@ -939,6 +941,7 @@ fn retry_feedback_targets_only_the_invalid_identity_namespace() {
             ToolCallId::minted(0),
             ToolFunction {
                 name: if generated_invalid { "multiply" } else { "add" }.into(),
+                namespace: None,
                 arguments: serde_json::json!({"x":2,"y":3}),
             },
         );
@@ -946,6 +949,7 @@ fn retry_feedback_targets_only_the_invalid_identity_namespace() {
             generated.id.wire_hint(),
             ToolFunction {
                 name: if generated_invalid { "add" } else { "multiply" }.into(),
+                namespace: None,
                 arguments: serde_json::json!({"x":4,"y":5}),
             },
         );

@@ -409,6 +409,7 @@
                     "call_id": "call_ajXNZCkvfH6NEVFnW997WNyB"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

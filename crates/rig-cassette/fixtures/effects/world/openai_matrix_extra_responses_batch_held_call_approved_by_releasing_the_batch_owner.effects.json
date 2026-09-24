@@ -430,6 +430,7 @@
                     "item_id": "fc_079dcea8e316ced8006ab2b3a7ef6887d080c4e961072af3ce"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -448,6 +449,7 @@
                     "item_id": "fc_079dcea8e316ced8006ab2b3a7ef7c87d094de82a71fe9df08"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

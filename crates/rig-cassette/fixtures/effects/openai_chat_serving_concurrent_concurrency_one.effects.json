@@ -306,6 +306,7 @@
                     "call_id": "call_pd6jkXupDESiGd3axRZDY0uN"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -323,6 +324,7 @@
                     "call_id": "call_qHKm1tN4yFMsim3GDweovm1Q"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

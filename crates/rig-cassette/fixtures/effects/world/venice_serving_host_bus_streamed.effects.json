@@ -400,6 +400,7 @@
                     "call_id": "a1XLn6pcM"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

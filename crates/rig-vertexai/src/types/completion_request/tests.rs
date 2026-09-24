@@ -36,6 +36,7 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() {
             wire_id,
             ToolFunction {
                 name: name.to_owned(),
+                namespace: None,
                 arguments: serde_json::json!({}),
             },
         ))],
@@ -45,6 +46,7 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() {
             call: ToolCallId::new_or_minted(wire_id, 0),
             provider: ProviderCallId::new(wire_id),
             name: name.to_owned(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::text("out")],
         })],
     };
@@ -55,6 +57,7 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() {
             call_id,
             ToolFunction {
                 name: name.to_owned(),
+                namespace: None,
                 arguments: serde_json::json!({}),
             },
         ))],
@@ -64,6 +67,7 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() {
             call: ToolCallId::new_or_minted(call_id, 0),
             provider: ProviderCallId::new(call_id).map(|provider| provider.with_item_id(item_id)),
             name: name.to_owned(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::text("out")],
         })],
     };

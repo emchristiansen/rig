@@ -422,6 +422,7 @@
                     "call_id": "call_PgwAIIcyndAGhnCWXD2OIOGe"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -770,6 +771,7 @@
                     "call_id": "call_PgwAIIcyndAGhnCWXD2OIOGe"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -852,6 +854,7 @@
                     "call_id": "call_20qKD8FubdpRaWWyGiW9KCXa"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -869,6 +872,7 @@
                     "call_id": "call_VD4gRvT8WStB8ARvXi1b6eLZ"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -886,6 +890,7 @@
                     "call_id": "call_Qy9cHxb6hMeyeehwtlv8opH6"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

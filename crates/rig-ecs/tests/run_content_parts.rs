@@ -79,6 +79,7 @@ fn all_user_kinds_nested_results_and_metadata_round_trip() {
                         .with_item_id("item-1"),
                 ),
                 name: "read".into(),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content: vec![
                     ToolResultContent::Text(text),
                     ToolResultContent::Image(image),
@@ -253,6 +254,7 @@ fn leaf_children_and_nested_results_are_rejected_even_when_removed() {
                 call: ToolCallId::new("call").unwrap(),
                 provider: None,
                 name: "tool".into(),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::text("child")],
             })],
         });

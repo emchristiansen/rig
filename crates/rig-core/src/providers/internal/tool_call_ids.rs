@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::message::{AssistantContent, Message, ToolCall, UserContent};
+use crate::message::{AssistantContent, Message, ToolCallId, UserContent};
 
 /// A transcript cannot be correlated unambiguously on a required-ID wire.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -52,8 +52,10 @@ pub struct ToolCallIds {
     ids: BTreeMap<(usize, usize), String>,
 }
 
+/// One call occurrence, function or custom: both kinds carry a result that
+/// must pair with them, so both take part in planning.
 struct Occurrence<'a> {
-    call: &'a ToolCall,
+    id: &'a ToolCallId,
     position: (usize, usize),
     result: Option<(usize, usize)>,
     provider: Option<String>,
@@ -83,19 +85,23 @@ impl ToolCallIds {
             match entry {
                 Message::Assistant { content, .. } => {
                     for (content, part) in content.iter().enumerate() {
-                        let AssistantContent::ToolCall(call) = part else {
-                            continue;
+                        let (id, provider) = match part {
+                            AssistantContent::ToolCall(call) => (&call.id, &call.provider),
+                            AssistantContent::CustomToolCall(call) => (&call.id, &call.provider),
+                            AssistantContent::Text(_)
+                            | AssistantContent::Reasoning(_)
+                            | AssistantContent::Image(_) => continue,
                         };
-                        let provider = call.provider.as_ref().map(|id| id.call_id.clone());
+                        let provider = provider.as_ref().map(|id| id.call_id.clone());
                         if occurrences.iter().any(|previous| {
                             previous.result.is_none()
-                                && (previous.call.id == call.id
+                                && (previous.id == id
                                     || (provider.is_some() && previous.provider == provider))
                         }) {
                             return Err(ToolCallIdError::Ambiguous { message, content });
                         }
                         occurrences.push(Occurrence {
-                            call,
+                            id,
                             position: (message, content),
                             result: None,
                             provider,
@@ -111,9 +117,7 @@ impl ToolCallIds {
                         let local: Vec<_> = occurrences
                             .iter()
                             .enumerate()
-                            .filter(|(_, call)| {
-                                call.result.is_none() && call.call.id == result.call
-                            })
+                            .filter(|(_, call)| call.result.is_none() && *call.id == result.call)
                             .map(|(index, _)| index)
                             .collect();
                         let wire: Vec<_> = occurrences
@@ -152,12 +156,12 @@ impl ToolCallIds {
                                 call.provider = provider.cloned();
                             }
                             call.result = Some((message, content));
-                            answered_local.insert(call.call.id.clone());
+                            answered_local.insert(call.id.clone());
                             answered_local.insert(result.call.clone());
                         } else {
                             if occurrences.iter().any(|call| {
                                 call.result.is_some()
-                                    && (call.call.id == result.call
+                                    && (*call.id == result.call
                                         || (provider.is_some()
                                             && call.provider.as_ref() == provider))
                             }) || orphans.iter().any(|(local, wire)| {
@@ -203,7 +207,7 @@ impl ToolCallIds {
             let id = if let Some(provider) = call.provider {
                 provider
             } else {
-                let hint = call.call.id.wire_hint().into_owned();
+                let hint = call.id.wire_hint().into_owned();
                 if !hint.is_empty() && used.insert(hint.clone()) {
                     hint
                 } else {

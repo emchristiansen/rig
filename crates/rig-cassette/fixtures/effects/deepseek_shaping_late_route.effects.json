@@ -313,6 +313,7 @@
                     "call_id": "call_00_r2q2IHQ0F6QhIcQff61v9795"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -294,6 +294,7 @@
                     "call_id": "toolu_01KnkqRz1kZdBpVvPdxbDzgP"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

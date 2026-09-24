@@ -101,6 +101,10 @@ pub enum CandleError {
     /// A message contains content that the selected text-only prompt renderer cannot represent.
     #[error("unsupported prompt content: {0}")]
     UnsupportedPromptContent(&'static str),
+    /// A historical tool call the local prompt formats cannot express: a
+    /// namespaced call or a custom call. The shared JSON-only wire refusal.
+    #[error(transparent)]
+    UnrepresentableToolCall(#[from] rig_core::message::UnrepresentableToolCall),
     /// Caller-controlled content contains a delimiter reserved by the selected chat template.
     #[error("{field} contains reserved protocol marker `{marker}`")]
     ReservedProtocolMarker {
@@ -218,7 +222,12 @@ pub enum CandleError {
 
 impl From<CandleError> for ProviderError {
     fn from(error: CandleError) -> Self {
-        ProviderError::Provider(error.to_string())
+        match error {
+            // A request the local prompt format cannot express, refused
+            // before any inference: a request failure, as on every other wire.
+            CandleError::UnrepresentableToolCall(refusal) => ProviderError::Request(refusal.into()),
+            error => ProviderError::Provider(error.to_string()),
+        }
     }
 }
 

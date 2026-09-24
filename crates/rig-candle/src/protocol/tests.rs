@@ -588,3 +588,61 @@ fn id_less_tool_call_envelopes_mint_distinct_handles_by_position() {
         ]
     );
 }
+
+/// One namespaced function call and one custom call (whose input parses as
+/// JSON): the two shapes every JSON-only wire refuses by name.
+fn unrepresentable_calls() -> [(rig_core::message::AssistantContent, &'static str); 2] {
+    use rig_core::message::AssistantContent;
+    [
+        (
+            AssistantContent::tool_call_with_namespace(
+                "fc_1",
+                "call_1".to_owned(),
+                "add",
+                Some("math".to_owned()),
+                serde_json::json!({"x": 1}),
+            ),
+            "cannot represent tool namespaces, so call `add` qualified by namespace `math`",
+        ),
+        (
+            AssistantContent::custom_tool_call(
+                "ctc_1",
+                "call_2",
+                "apply_patch",
+                None,
+                r#"{"x": 1}"#,
+            ),
+            "carries JSON tool arguments only, so custom tool call `apply_patch`",
+        ),
+    ]
+}
+
+#[test]
+fn every_prompt_format_refuses_namespaced_and_custom_calls() {
+    for protocol in [
+        ConversationProtocol::Llama3,
+        ConversationProtocol::SmolLm2,
+        ConversationProtocol::Qwen3,
+    ] {
+        for (content, refusal) in unrepresentable_calls() {
+            let request = request(vec![
+                Message::user("go"),
+                Message::Assistant {
+                    id: None,
+                    content: vec![content],
+                },
+            ]);
+            let error = render_prompt(&request, protocol).expect_err("refused, not dropped");
+            assert!(
+                matches!(error, CandleError::UnrepresentableToolCall(_)),
+                "{protocol:?}: {error:?}"
+            );
+            assert!(error.to_string().contains(refusal), "{error}");
+            let provider = rig_core::error::ProviderError::from(error);
+            assert!(
+                matches!(provider, rig_core::error::ProviderError::Request(_)),
+                "a request failure in the shared vocabulary: {provider:?}"
+            );
+        }
+    }
+}

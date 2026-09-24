@@ -364,6 +364,7 @@
                     "call_id": "call_00_RVBqFIY9SoOm1eV4apwe8568"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -607,6 +608,7 @@
                     "call_id": "call_00_RVBqFIY9SoOm1eV4apwe8568"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -653,6 +655,7 @@
                     "call_id": "call_00_psT9fOiGzEemGVRKWcCp1002"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

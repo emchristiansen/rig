@@ -562,6 +562,19 @@ impl AdapterOutput {
         self.tool_end(id, end);
     }
 
+    /// A custom tool call the wire delivered whole (OpenAI Responses
+    /// `custom_tool_call`): a tool-call start, if the block is unseen, and its
+    /// [`BlockClose::CustomToolCall`] end. The accumulator yields
+    /// [`crate::message::AssistantContent::CustomToolCall`] for it.
+    pub fn custom_tool_call(&mut self, id: BlockId, end: crate::streaming::CustomToolCallEnd) {
+        self.open_if_unseen(&id, BlockKind::ToolCall);
+        self.push(Ok(StreamEvent::BlockEnd {
+            id,
+            end: BlockClose::CustomToolCall(end),
+            block: None,
+        }));
+    }
+
     /// Open the reasoning block `id` (a no-op when already open).
     pub fn reasoning_start(&mut self, id: &BlockId, provider_id: Option<String>) {
         self.open_if_unseen(id, BlockKind::Reasoning { provider_id });

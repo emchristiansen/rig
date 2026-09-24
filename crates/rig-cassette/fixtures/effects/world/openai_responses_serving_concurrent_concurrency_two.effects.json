@@ -542,6 +542,7 @@
                     "item_id": "fc_0aea2f51bb019162006ab2b3b03f5c87d0aa35cb22e575678d"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -560,6 +561,7 @@
                     "item_id": "fc_0aea2f51bb019162006ab2b3b03f7887d0be542f567b08ccc5"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

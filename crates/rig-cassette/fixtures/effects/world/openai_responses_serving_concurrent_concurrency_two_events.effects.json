@@ -682,6 +682,7 @@
                     "item_id": "fc_08222f8fb1f447cc006ab2b3b84ed487d0bc37a631e5358460"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -700,6 +701,7 @@
                     "item_id": "fc_08222f8fb1f447cc006ab2b3b84ee487d085c3d21d47f35b47"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

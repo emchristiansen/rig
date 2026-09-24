@@ -402,6 +402,7 @@
                     "item_id": "fc_048705364a766814006ab2b3630ee087d09fe84df79e4745da"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

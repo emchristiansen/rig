@@ -436,6 +436,7 @@
                     "call_id": "toolu_01EVxu9UfcJoLZU66p5wP294"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

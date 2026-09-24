@@ -699,6 +699,7 @@
                     "call_id": "call_00_C6W8PxUhD9Rza6ykq6FM3341"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -422,6 +422,7 @@
                     "call_id": "call_00_ADi2NKg7kcahUqM1fxqv8350"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

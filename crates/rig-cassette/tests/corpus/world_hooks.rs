@@ -602,6 +602,7 @@ fn judge_turn(
             .filter_map(|part| match part {
                 AssistantContent::Text(text) => Some(text.text.as_str()),
                 AssistantContent::ToolCall(_)
+                | AssistantContent::CustomToolCall(_)
                 | AssistantContent::Reasoning(_)
                 | AssistantContent::Image(_) => None,
             })

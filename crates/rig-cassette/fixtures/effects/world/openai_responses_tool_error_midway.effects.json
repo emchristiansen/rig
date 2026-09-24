@@ -642,6 +642,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1002,6 +1003,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1050,6 +1052,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968d633887d0958e97adfb441521"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1410,6 +1413,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1458,6 +1462,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968d633887d0958e97adfb441521"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1506,6 +1511,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968e539087d09e5185b45a9208cd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1866,6 +1872,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1914,6 +1921,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968d633887d0958e97adfb441521"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1962,6 +1970,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968e539087d09e5185b45a9208cd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2010,6 +2019,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968f692087d0bec85bdac224db10"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2376,6 +2386,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2424,6 +2435,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968d633887d0958e97adfb441521"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2472,6 +2484,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968e539087d09e5185b45a9208cd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2520,6 +2533,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968f692087d0bec85bdac224db10"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2566,6 +2580,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969051c487d09b2a3aaacd7ffaaf"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2924,6 +2939,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2972,6 +2988,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968d633887d0958e97adfb441521"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3020,6 +3037,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968e539087d09e5185b45a9208cd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3068,6 +3086,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968f692087d0bec85bdac224db10"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3114,6 +3133,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969051c487d09b2a3aaacd7ffaaf"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3160,6 +3180,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396915b4087d080567139984f1439"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3521,6 +3542,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3569,6 +3591,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968d633887d0958e97adfb441521"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3617,6 +3640,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968e539087d09e5185b45a9208cd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3665,6 +3689,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968f692087d0bec85bdac224db10"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3711,6 +3736,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969051c487d09b2a3aaacd7ffaaf"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3757,6 +3783,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396915b4087d080567139984f1439"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3806,6 +3833,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396926c2887d099c1a346a8b929bd"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4164,6 +4192,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4212,6 +4241,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968d633887d0958e97adfb441521"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4260,6 +4290,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968e539087d09e5185b45a9208cd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4308,6 +4339,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968f692087d0bec85bdac224db10"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4354,6 +4386,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969051c487d09b2a3aaacd7ffaaf"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4400,6 +4433,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396915b4087d080567139984f1439"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4449,6 +4483,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396926c2887d099c1a346a8b929bd"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4495,6 +4530,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969434a087d0985a44f2b367fec5"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4855,6 +4891,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4903,6 +4940,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968d633887d0958e97adfb441521"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4951,6 +4989,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968e539087d09e5185b45a9208cd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4999,6 +5038,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968f692087d0bec85bdac224db10"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5045,6 +5085,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969051c487d09b2a3aaacd7ffaaf"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5091,6 +5132,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396915b4087d080567139984f1439"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5140,6 +5182,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396926c2887d099c1a346a8b929bd"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5186,6 +5229,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969434a087d0985a44f2b367fec5"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5234,6 +5278,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab39696074487d0bc9ceb0d75354c9a"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5595,6 +5640,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5643,6 +5689,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968d633887d0958e97adfb441521"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5691,6 +5738,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968e539087d09e5185b45a9208cd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5739,6 +5787,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968f692087d0bec85bdac224db10"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5785,6 +5834,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969051c487d09b2a3aaacd7ffaaf"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5831,6 +5881,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396915b4087d080567139984f1439"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5880,6 +5931,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396926c2887d099c1a346a8b929bd"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5926,6 +5978,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969434a087d0985a44f2b367fec5"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -5974,6 +6027,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab39696074487d0bc9ceb0d75354c9a"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6023,6 +6077,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396970de887d0a854bf38afb54935"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6381,6 +6436,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968c8df487d08ab7b4f3ac385a5c"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6429,6 +6485,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968d633887d0958e97adfb441521"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6477,6 +6534,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968e539087d09e5185b45a9208cd"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6525,6 +6583,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3968f692087d0bec85bdac224db10"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6571,6 +6630,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969051c487d09b2a3aaacd7ffaaf"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6617,6 +6677,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396915b4087d080567139984f1439"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6666,6 +6727,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396926c2887d099c1a346a8b929bd"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6712,6 +6774,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab3969434a087d0985a44f2b367fec5"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6760,6 +6823,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab39696074487d0bc9ceb0d75354c9a"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6809,6 +6873,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab396970de887d0a854bf38afb54935"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -6855,6 +6920,7 @@
                     "item_id": "fc_0a2dbc89ab6fe62c006ab39698499c87d08820681dd754fef3"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

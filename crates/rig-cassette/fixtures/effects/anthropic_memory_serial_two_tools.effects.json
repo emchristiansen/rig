@@ -507,6 +507,7 @@
                     "call_id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -524,6 +525,7 @@
                     "call_id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -765,6 +767,7 @@
                     "call_id": "toolu_01XYUUZFSMWu3jg7ZYJtJKWz"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -782,6 +785,7 @@
                     "call_id": "toolu_013rnof6hh7fkkE6Yw6uTKBi"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

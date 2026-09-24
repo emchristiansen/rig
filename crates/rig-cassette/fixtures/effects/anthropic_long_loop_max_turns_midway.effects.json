@@ -360,6 +360,7 @@
                     "call_id": "toolu_01SrncL8NmfADzbSvLQPmVfw"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -605,6 +606,7 @@
                     "call_id": "toolu_01SrncL8NmfADzbSvLQPmVfw"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -655,6 +657,7 @@
                     "call_id": "toolu_01DNAN9B7vVpiqPhdU6LwuWf"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

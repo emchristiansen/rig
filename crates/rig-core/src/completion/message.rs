@@ -80,6 +80,7 @@ pub fn turn_delivered_no_answer(choice: &[AssistantContent]) -> bool {
         // Real text is an answer; an empty block delivers nothing.
         AssistantContent::Text(text) => !text.text.is_empty(),
         AssistantContent::ToolCall(_) => true,
+        AssistantContent::CustomToolCall(_) => true,
         AssistantContent::Image(_) => true,
         // The one exclusion: scratch work, not an answer.
         AssistantContent::Reasoning(_) => false,
@@ -93,7 +94,9 @@ pub fn canonical_streamed_choice(choice: Vec<AssistantContent>) -> Vec<Assistant
     let regroup = choice.iter().any(|part| {
         matches!(
             part,
-            AssistantContent::Reasoning(_) | AssistantContent::ToolCall(_)
+            AssistantContent::Reasoning(_)
+                | AssistantContent::ToolCall(_)
+                | AssistantContent::CustomToolCall(_)
         )
     });
     if !regroup {
@@ -107,7 +110,9 @@ pub fn canonical_streamed_choice(choice: Vec<AssistantContent>) -> Vec<Assistant
         match part {
             AssistantContent::Reasoning(block) => reasoning.push(block),
             AssistantContent::Text(_) => text.push(part),
-            AssistantContent::ToolCall(_) => calls.push(part),
+            AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => {
+                calls.push(part);
+            }
             AssistantContent::Image(_) => images.push(part),
         }
     }
@@ -140,8 +145,16 @@ pub enum UserContent {
 pub enum AssistantContent {
     /// Plain assistant text.
     Text(Text),
-    /// Tool call requested by the assistant.
+    /// Function tool call requested by the assistant: JSON arguments.
     ToolCall(ToolCall),
+    /// Custom tool call requested by the assistant: verbatim, non-JSON input
+    /// (the OpenAI Responses `custom_tool_call` item). Serialized with the
+    /// `"type": "customtoolcall"` tag.
+    ///
+    /// A distinct variant rather than a kind of [`ToolFunction::arguments`],
+    /// so raw input can never be read as JSON arguments and a JSON value can
+    /// never be mistaken for raw input.
+    CustomToolCall(CustomToolCall),
     /// Structured reasoning emitted by the assistant.
     Reasoning(Reasoning),
     /// Image content emitted by the assistant.
@@ -331,6 +344,31 @@ impl Reasoning {
     }
 }
 
+/// Which kind of tool call a [`ToolResult`] answers.
+///
+/// A wire offering more than one result item shape chooses between them by
+/// this value. The OpenAI Responses wire pairs `custom_tool_call` only with
+/// `custom_tool_call_output`, so a result answering a [`CustomToolCall`] sent
+/// back as a function output leaves that call unanswered and the turn
+/// unpaired. Wires with a single result shape read nothing from it.
+///
+/// No `Default`, and no serde default on [`ToolResult::answers`], deliberately:
+/// defaulting to `Function` would make the mispairing this type prevents the
+/// silent outcome of forgetting to state a kind. Where the answered call is in
+/// hand, derive the kind from it ([`ToolCall::answered_by`],
+/// [`CustomToolCall::answered_by`]); a site that does not hold the call states
+/// it through [`UserContent::tool_result_answering`].
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AnsweredToolCall {
+    /// Answers a function call ([`AssistantContent::ToolCall`]), whose
+    /// arguments were JSON.
+    Function,
+    /// Answers a custom tool call ([`AssistantContent::CustomToolCall`]),
+    /// whose input was verbatim text.
+    Custom,
+}
+
 /// Tool result content containing information about a tool call and it's resulting content.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolResult {
@@ -342,6 +380,11 @@ pub struct ToolResult {
     /// Executed tool name, which may differ from the model-requested name after
     /// hook repair. Required for provider replay independently of call identity.
     pub name: String,
+    /// Which kind of call this answers, and therefore which result item a wire
+    /// carrying more than one shape must emit for it. Required on
+    /// deserialization: a result that does not say what it answers is
+    /// rejected rather than guessed.
+    pub answers: AnsweredToolCall,
     /// One or more content items produced by the tool.
     pub content: Vec<ToolResultContent>,
 }
@@ -668,22 +711,26 @@ pub struct ToolCall {
 
 /// Assign deterministic completion-local handles to id-less provider calls.
 ///
-/// A missing handle uses its tool-call position. Generated and explicit handles
+/// A missing handle uses its tool-call position, counting function and custom
+/// calls alike so no two id-less calls share one. Generated and explicit handles
 /// occupy separate namespaces, so a later explicit provider string never forces
 /// renumbering. Provider metadata and the existing explicit-duplicate policy are
 /// preserved. Use only at inbound provider boundaries, not on application
 /// messages with chosen local IDs or already-published streaming identities.
 pub fn normalize_missing_tool_call_ids(content: &mut [AssistantContent]) {
-    for (position, call) in content
+    for (position, (id, provider)) in content
         .iter_mut()
         .filter_map(|item| match item {
-            AssistantContent::ToolCall(call) => Some(call),
-            _ => None,
+            AssistantContent::ToolCall(call) => Some((&mut call.id, &call.provider)),
+            AssistantContent::CustomToolCall(call) => Some((&mut call.id, &call.provider)),
+            AssistantContent::Text(_)
+            | AssistantContent::Reasoning(_)
+            | AssistantContent::Image(_) => None,
         })
         .enumerate()
     {
-        if call.provider.is_none() {
-            call.id = ToolCallId::minted(position as u64);
+        if provider.is_none() {
+            *id = ToolCallId::minted(position as u64);
         }
     }
 }
@@ -773,6 +820,138 @@ impl ToolCall {
         self.additional_params = additional_params;
         self
     }
+
+    /// Attach (or clear) the namespace the provider qualified this call with.
+    pub fn with_namespace(mut self, namespace: Option<String>) -> Self {
+        self.function.namespace = namespace;
+        self
+    }
+
+    /// The result kind that answers this call: always [`AnsweredToolCall::Function`].
+    pub fn answered_by(&self) -> AnsweredToolCall {
+        AnsweredToolCall::Function
+    }
+
+    /// This call as name-keyed dispatch may run it: unchanged when it carries
+    /// no namespace, otherwise [`UndispatchableToolCall::Namespaced`]. The
+    /// function-call half of [`name_dispatchable_call`].
+    pub fn name_dispatchable(&self) -> Result<&Self, UndispatchableToolCall> {
+        match &self.function.namespace {
+            None => Ok(self),
+            Some(namespace) => Err(UndispatchableToolCall::Namespaced {
+                id: self.id.clone(),
+                name: self.function.name.clone(),
+                namespace: namespace.clone(),
+            }),
+        }
+    }
+
+    /// This call as a wire that has no namespace concept may encode it: the
+    /// call unchanged when it carries no namespace, otherwise
+    /// [`UnrepresentableToolCall::Namespace`].
+    ///
+    /// Every JSON-only provider wire applies this one rule on encode. `Some`
+    /// is refused whatever it spells — including `""` and `"functions"` —
+    /// because no such wire here has evidence that it treats any spelling as
+    /// its default namespace; a wire that gains such evidence documents it
+    /// and applies it locally instead of calling this.
+    pub fn for_json_only_wire(&self, wire: &'static str) -> Result<&Self, UnrepresentableToolCall> {
+        match &self.function.namespace {
+            None => Ok(self),
+            Some(namespace) => Err(UnrepresentableToolCall::Namespace {
+                wire,
+                name: self.function.name.clone(),
+                namespace: namespace.clone(),
+            }),
+        }
+    }
+}
+
+/// The one encode rule for a wire whose tool calls carry JSON arguments and
+/// no namespace: pass a function call without a namespace through, refuse a
+/// namespaced call and every [`CustomToolCall`], and ignore content that is
+/// not a tool call.
+///
+/// Returns the function call to encode, `None` for non-call content.
+pub fn json_only_wire_tool_call<'a>(
+    wire: &'static str,
+    content: &'a AssistantContent,
+) -> Result<Option<&'a ToolCall>, UnrepresentableToolCall> {
+    match content {
+        AssistantContent::ToolCall(call) => call.for_json_only_wire(wire).map(Some),
+        AssistantContent::CustomToolCall(call) => Err(call.refused_by_json_only_wire(wire)),
+        AssistantContent::Text(_) | AssistantContent::Reasoning(_) | AssistantContent::Image(_) => {
+            Ok(None)
+        }
+    }
+}
+
+/// A model-emitted tool call that name-keyed dispatch cannot run without
+/// erasing what it is.
+///
+/// Rig's agent loop and ECS runtime authorize, dispatch
+/// (`EffectKind::ToolCall { name, args }`), and expose calls to hooks by tool
+/// name and JSON argument text alone. A namespaced call dispatched by its bare
+/// name would run a different tool than the one the model called, and a
+/// custom call's raw input is not JSON arguments — even when its text happens
+/// to parse as JSON. Both runtimes refuse such a call through
+/// [`name_dispatchable_call`] before authorization, effect construction, or
+/// any hook sees it.
+#[derive(Clone, Debug, PartialEq, Eq, Error, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UndispatchableToolCall {
+    /// A function call qualified by a namespace.
+    #[error(
+        "tool call `{name}` is qualified by namespace `{namespace}`, which name-keyed tool dispatch cannot honor"
+    )]
+    Namespaced {
+        /// The call's correlation handle.
+        id: ToolCallId,
+        /// The callable's name.
+        name: String,
+        /// The namespace, verbatim.
+        namespace: String,
+    },
+    /// A custom tool call, whose input is raw text rather than JSON arguments.
+    #[error(
+        "custom tool call `{name}` carries raw input, which JSON-argument tool dispatch cannot run"
+    )]
+    Custom {
+        /// The call's correlation handle.
+        id: ToolCallId,
+        /// The custom tool's name.
+        name: String,
+        /// The namespace, verbatim, when the call had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+}
+
+/// The one dispatch rule for runtimes that run tools by name with JSON
+/// arguments: an unqualified function call is dispatchable; a namespaced call
+/// and every custom call are refused ([`UndispatchableToolCall`]); content that
+/// is not a tool call yields `None`.
+pub fn name_dispatchable_call(
+    content: &AssistantContent,
+) -> Result<Option<&ToolCall>, UndispatchableToolCall> {
+    match content {
+        AssistantContent::ToolCall(call) => call.name_dispatchable().map(Some),
+        AssistantContent::CustomToolCall(call) => Err(UndispatchableToolCall::Custom {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            namespace: call.namespace.clone(),
+        }),
+        AssistantContent::Text(_) | AssistantContent::Reasoning(_) | AssistantContent::Image(_) => {
+            Ok(None)
+        }
+    }
+}
+
+/// The first call in `content` that [`name_dispatchable_call`] refuses, if any.
+pub fn first_undispatchable_call(content: &[AssistantContent]) -> Option<UndispatchableToolCall> {
+    content
+        .iter()
+        .find_map(|item| name_dispatchable_call(item).err())
 }
 
 /// Describes a tool function to call with a name and arguments, generally produced by a provider.
@@ -780,15 +959,146 @@ impl ToolCall {
 pub struct ToolFunction {
     /// Tool/function name to invoke.
     pub name: String,
+    /// The namespace the provider qualified this callable with, verbatim;
+    /// `None` when the provider sent none. Omitted from serialization when
+    /// absent.
+    ///
+    /// Carried exactly as the provider item spelled it. No spelling (`""`,
+    /// `"functions"`) is normalized to absence here: whether a destination
+    /// treats one as its default namespace is that destination's evidence to
+    /// supply, and a wire that cannot represent a namespace refuses the call
+    /// ([`ToolCall::for_json_only_wire`]) rather than dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     /// JSON arguments for the tool/function.
     pub arguments: serde_json::Value,
 }
 
 impl ToolFunction {
-    /// Create a tool function call payload.
+    /// Create a tool function call payload with no namespace.
     pub fn new(name: String, arguments: serde_json::Value) -> Self {
-        Self { name, arguments }
+        Self {
+            name,
+            namespace: None,
+            arguments,
+        }
     }
+
+    /// Attach (or clear) the namespace the provider qualified this callable with.
+    pub fn with_namespace(mut self, namespace: Option<String>) -> Self {
+        self.namespace = namespace;
+        self
+    }
+}
+
+/// A custom tool call: a named callable whose input is verbatim text rather
+/// than JSON arguments (the OpenAI Responses `custom_tool_call` item, e.g. a
+/// grammar-constrained tool).
+///
+/// Held in [`AssistantContent::CustomToolCall`]. The input is preserved byte
+/// for byte and is never parsed, even when it happens to be valid JSON: text
+/// that parses is still not a function call's arguments.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct CustomToolCall {
+    /// Rig's correlation handle, as on [`ToolCall::id`].
+    pub id: ToolCallId,
+    /// Provider-issued replay identifiers (`call_id`, and the output-item id
+    /// on dual-identifier wires), or `None` when none were supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderCallId>,
+    /// Tool name to invoke.
+    pub name: String,
+    /// The namespace the provider qualified this callable with, verbatim;
+    /// omitted from serialization when absent. See [`ToolFunction::namespace`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// The model's verbatim input.
+    pub input: String,
+}
+
+impl CustomToolCall {
+    /// The dual-identifier provider boundary (OpenAI Responses): `item_id` is
+    /// the output-item handle (`ctc_…`), `call_id` the correlator (`call_…`).
+    /// The correlator drives rig's id; an empty `call_id` records no provider
+    /// identity and mints at index zero.
+    pub fn from_dual_wire(
+        item_id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        namespace: Option<String>,
+        input: impl Into<String>,
+    ) -> Self {
+        let provider =
+            ProviderCallId::new(call_id).map(|provider| provider.with_item_id(item_id.into()));
+        Self {
+            id: ToolCallId::for_provider_or(provider.as_ref(), ToolCallId::minted(0)),
+            provider,
+            name: name.into(),
+            namespace,
+            input: input.into(),
+        }
+    }
+
+    /// The result kind that answers this call: always [`AnsweredToolCall::Custom`].
+    pub fn answered_by(&self) -> AnsweredToolCall {
+        AnsweredToolCall::Custom
+    }
+
+    /// A non-empty candidate for a required wire call-ID slot; see
+    /// [`ToolCall::wire_call_id`].
+    pub fn wire_call_id(&self) -> std::borrow::Cow<'_, str> {
+        self.provider.as_ref().map_or_else(
+            || self.id.wire_hint(),
+            |provider| std::borrow::Cow::Borrowed(provider.call_id.as_str()),
+        )
+    }
+
+    /// The refusal a wire whose tool calls carry JSON arguments only returns
+    /// for this call. See [`UnrepresentableToolCall::CustomCall`].
+    pub fn refused_by_json_only_wire(&self, wire: &'static str) -> UnrepresentableToolCall {
+        UnrepresentableToolCall::CustomCall {
+            wire,
+            name: self.name.clone(),
+        }
+    }
+}
+
+/// A tool call reached a destination wire that cannot represent it.
+///
+/// The shared refusal every JSON-only provider wire applies on encode, so no
+/// wire drops a call (which would orphan its result), wraps raw input as a
+/// JSON string, or silently strips a namespace. Converts into
+/// [`MessageError`], [`crate::error::EncodeError`], and therefore
+/// [`ProviderError::Request`].
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum UnrepresentableToolCall {
+    /// A [`CustomToolCall`] was replayed to a wire whose tool calls carry JSON
+    /// arguments only. No JSON value stands for the raw input: a JSON string
+    /// would present it as a parsed argument, and dropping the call would
+    /// leave its result unanswered.
+    #[error(
+        "{wire} carries JSON tool arguments only, so custom tool call `{name}` and its raw input cannot be sent on it"
+    )]
+    CustomCall {
+        /// The destination wire.
+        wire: &'static str,
+        /// The custom tool's name.
+        name: String,
+    },
+    /// A namespace-qualified call was replayed to a wire that has no way to
+    /// express the qualifier. Sending the bare name would call a different
+    /// tool than the one the model called.
+    #[error(
+        "{wire} cannot represent tool namespaces, so call `{name}` qualified by namespace `{namespace}` cannot be sent on it"
+    )]
+    Namespace {
+        /// The destination wire.
+        wire: &'static str,
+        /// The callable's name.
+        name: String,
+        /// The namespace the wire cannot express, verbatim.
+        namespace: String,
+    },
 }
 
 /// Nonempty JSON object of provider-specific content metadata, serialized as
@@ -1463,12 +1773,17 @@ impl UserContent {
             call: ToolCallId::new_or_minted(call, 0),
             provider: None,
             name: name.into(),
+            // A rig `Tool` is a function tool: this constructor answers a
+            // function call. A custom call's result is built through
+            // `tool_result_answering` or `tool_result_for_custom_call`.
+            answers: AnsweredToolCall::Function,
             content,
         })
     }
 
-    /// Creates a result from a provider-issued ID. An empty ID records no
-    /// provider identity and generates a local handle at index zero.
+    /// Creates a result answering a function call from a provider-issued ID.
+    /// An empty ID records no provider identity and generates a local handle
+    /// at index zero.
     pub fn tool_result_from_wire(
         wire_id: impl Into<String>,
         name: impl Into<String>,
@@ -1479,34 +1794,92 @@ impl UserContent {
         Self::tool_result_for(call, provider, name, content)
     }
 
-    /// Creates a result using the executed call's identity and provider metadata.
-    /// `name` identifies the executed tool, including any hook-repaired name.
+    /// Creates a result answering a function call, using the executed call's
+    /// identity and provider metadata. `name` identifies the executed tool,
+    /// including any hook-repaired name.
     pub fn tool_result_for(
         call: ToolCallId,
         provider: Option<ProviderCallId>,
         name: impl Into<String>,
         content: Vec<ToolResultContent>,
     ) -> Self {
+        Self::tool_result_for_answering(call, provider, name, AnsweredToolCall::Function, content)
+    }
+
+    /// [`Self::tool_result_for`] stating which kind of call it answers, for a
+    /// site that holds the answered call's identity but not the call itself.
+    pub fn tool_result_for_answering(
+        call: ToolCallId,
+        provider: Option<ProviderCallId>,
+        name: impl Into<String>,
+        answers: AnsweredToolCall,
+        content: Vec<ToolResultContent>,
+    ) -> Self {
         UserContent::ToolResult(ToolResult {
             call,
             provider,
             name: name.into(),
+            answers,
             content,
         })
     }
 
-    /// Tool result content for a dual-identifier wire (OpenAI Responses):
-    /// `item_id` is the output-item handle (`fc_…`), `call_id` the
-    /// correlator (`call_…`). Empty ids record no provider id and mint.
+    /// Creates the result answering `call`, copying its identity and provider
+    /// metadata; the answered kind is derived from the call.
+    pub fn tool_result_for_call(call: &ToolCall, content: Vec<ToolResultContent>) -> Self {
+        Self::tool_result_for_answering(
+            call.id.clone(),
+            call.provider.clone(),
+            call.function.name.clone(),
+            call.answered_by(),
+            content,
+        )
+    }
+
+    /// Creates the result answering a custom tool `call`, copying its identity
+    /// and provider metadata; the answered kind is derived from the call.
+    pub fn tool_result_for_custom_call(
+        call: &CustomToolCall,
+        content: Vec<ToolResultContent>,
+    ) -> Self {
+        Self::tool_result_for_answering(
+            call.id.clone(),
+            call.provider.clone(),
+            call.name.clone(),
+            call.answered_by(),
+            content,
+        )
+    }
+
+    /// Tool result content answering a function call on a dual-identifier
+    /// wire (OpenAI Responses): `item_id` is the output-item handle (`fc_…`),
+    /// `call_id` the correlator (`call_…`). Empty ids record no provider id
+    /// and mint.
     pub fn tool_result_with_call_id(
         item_id: impl Into<String>,
         call_id: impl Into<String>,
         name: impl Into<String>,
         content: Vec<ToolResultContent>,
     ) -> Self {
+        Self::tool_result_answering(item_id, call_id, name, AnsweredToolCall::Function, content)
+    }
+
+    /// Dual-identifier result that states which kind of call it answers.
+    ///
+    /// The form a relay uses when it rebuilds a turn from its own records and
+    /// the answered call may have been a custom tool rather than a function:
+    /// the provider pairs `custom_tool_call` only with
+    /// `custom_tool_call_output`, so the kind must be stated, not guessed.
+    pub fn tool_result_answering(
+        item_id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        answers: AnsweredToolCall,
+        content: Vec<ToolResultContent>,
+    ) -> Self {
         let provider = ProviderCallId::new(call_id).map(|provider| provider.with_item_id(item_id));
         let call = ToolCallId::for_provider_or(provider.as_ref(), ToolCallId::minted(0));
-        Self::tool_result_for(call, provider, name, content)
+        Self::tool_result_for_answering(call, provider, name, answers, content)
     }
 }
 
@@ -1530,10 +1903,7 @@ impl AssistantContent {
     ) -> Self {
         AssistantContent::ToolCall(ToolCall::from_wire(
             id,
-            ToolFunction {
-                name: name.into(),
-                arguments,
-            },
+            ToolFunction::new(name.into(), arguments),
         ))
     }
 
@@ -1545,13 +1915,37 @@ impl AssistantContent {
         name: impl Into<String>,
         arguments: serde_json::Value,
     ) -> Self {
+        Self::tool_call_with_namespace(id, call_id, name, None, arguments)
+    }
+
+    /// Dual-identifier function call carrying the namespace the provider
+    /// qualified the callable with (OpenAI Responses namespaced tools).
+    pub fn tool_call_with_namespace(
+        id: impl Into<String>,
+        call_id: String,
+        name: impl Into<String>,
+        namespace: Option<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
         AssistantContent::ToolCall(ToolCall::from_dual_wire(
             id,
             call_id,
-            ToolFunction {
-                name: name.into(),
-                arguments,
-            },
+            ToolFunction::new(name.into(), arguments).with_namespace(namespace),
+        ))
+    }
+
+    /// Dual-identifier custom tool call (OpenAI Responses `custom_tool_call`):
+    /// `id` is the output-item handle, `call_id` the correlator, and `input`
+    /// the model's verbatim input.
+    pub fn custom_tool_call(
+        id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        namespace: Option<String>,
+        input: impl Into<String>,
+    ) -> Self {
+        AssistantContent::CustomToolCall(CustomToolCall::from_dual_wire(
+            id, call_id, name, namespace, input,
         ))
     }
 
@@ -1753,6 +2147,7 @@ single_content_message_from!(User {
 
 single_content_message_from!(Assistant {
     ToolCall => ToolCall,
+    CustomToolCall => CustomToolCall,
 });
 
 impl FromStr for Text {
@@ -1815,11 +2210,82 @@ pub enum ToolChoice {
 pub enum MessageError {
     #[error("Message conversion error: {0}")]
     ConversionError(String),
+    /// A tool call the destination wire cannot represent.
+    #[error(transparent)]
+    UnrepresentableToolCall(#[from] UnrepresentableToolCall),
 }
 
 impl From<MessageError> for ProviderError {
     fn from(error: MessageError) -> Self {
         ProviderError::Request(error.into())
+    }
+}
+
+/// Assistant turns every JSON-only wire must refuse, for the per-wire
+/// refusal tests: one namespaced function call, one custom call.
+#[cfg(test)]
+pub(crate) fn unrepresentable_turns() -> [(Message, &'static str); 2] {
+    [
+        (
+            Message::Assistant {
+                id: None,
+                content: vec![AssistantContent::tool_call_with_namespace(
+                    "fc_1",
+                    "call_1".to_owned(),
+                    "add",
+                    Some("math".to_owned()),
+                    serde_json::json!({"x": 1}),
+                )],
+            },
+            "namespace",
+        ),
+        (
+            Message::Assistant {
+                id: None,
+                content: vec![AssistantContent::custom_tool_call(
+                    "ctc_1",
+                    "call_2",
+                    "apply_patch",
+                    None,
+                    r#"{"x": 1}"#,
+                )],
+            },
+            "custom",
+        ),
+    ]
+}
+
+/// Assert `refusal` is the shared JSON-only refusal of the `kind` turn from
+/// [`unrepresentable_turns`] on `wire`.
+#[cfg(test)]
+pub(crate) fn assert_refused(refusal: &UnrepresentableToolCall, kind: &str, wire: &str) {
+    match (kind, refusal) {
+        (
+            "namespace",
+            UnrepresentableToolCall::Namespace {
+                wire: got,
+                name,
+                namespace,
+            },
+        ) => {
+            assert_eq!(
+                (*got, name.as_str(), namespace.as_str()),
+                (wire, "add", "math")
+            );
+        }
+        ("custom", UnrepresentableToolCall::CustomCall { wire: got, name }) => {
+            assert_eq!((*got, name.as_str()), (wire, "apply_patch"));
+        }
+        _ => panic!("expected the {kind} refusal on {wire}, got {refusal:?}"),
+    }
+}
+
+/// [`assert_refused`] through a [`MessageError`].
+#[cfg(test)]
+pub(crate) fn assert_message_refused(error: &MessageError, kind: &str, wire: &str) {
+    match error {
+        MessageError::UnrepresentableToolCall(refusal) => assert_refused(refusal, kind, wire),
+        other => panic!("expected the {kind} refusal on {wire}, got {other:?}"),
     }
 }
 

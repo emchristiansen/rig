@@ -330,6 +330,7 @@
                     "call_id": "call_8651c7e51a2f4ad29f4cf483"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

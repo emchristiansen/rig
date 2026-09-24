@@ -579,6 +579,7 @@
                     "call_id": "call_iiTnAv9V9Vu4XrWngs1I9hjg"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

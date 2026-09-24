@@ -405,6 +405,7 @@
                     "call_id": "call_4S28UlyrmSCjWFCOoEfZgs68"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

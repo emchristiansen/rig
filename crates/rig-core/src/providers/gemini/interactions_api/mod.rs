@@ -1645,6 +1645,9 @@ pub mod interactions_api_types {
         }
     }
 
+    /// Wire name for the shared JSON-only tool-call refusal.
+    const INTERACTIONS_WIRE: &str = "Gemini Interactions";
+
     impl TryFrom<message::AssistantContent> for Content {
         type Error = message::MessageError;
 
@@ -1657,12 +1660,19 @@ pub mod interactions_api_types {
                     }))
                 }
                 message::AssistantContent::ToolCall(tool_call) => {
+                    // `function_call` has no namespace member.
+                    tool_call.for_json_only_wire(INTERACTIONS_WIRE)?;
                     let call_id = tool_call.wire_call_id().into_owned();
                     Ok(Self::FunctionCall(FunctionCallContent {
                         name: Some(tool_call.function.name),
                         arguments: Some(tool_call.function.arguments),
                         id: Some(call_id),
                     }))
+                }
+                // `function_call.arguments` is a JSON object; a custom call's
+                // raw input has no representation on this wire.
+                message::AssistantContent::CustomToolCall(call) => {
+                    Err(call.refused_by_json_only_wire(INTERACTIONS_WIRE).into())
                 }
                 message::AssistantContent::Reasoning(message::Reasoning { content, .. }) => {
                     // Preserve signature-only thoughts without empty summary items,

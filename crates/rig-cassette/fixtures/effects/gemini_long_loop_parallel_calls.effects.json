@@ -541,6 +541,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -555,6 +556,7 @@
                     "id": "minted:tool:1"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -569,6 +571,7 @@
                     "id": "minted:tool:2"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -583,6 +586,7 @@
                     "id": "minted:tool:3"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -851,6 +855,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -865,6 +870,7 @@
                     "id": "minted:tool:1"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -879,6 +885,7 @@
                     "id": "minted:tool:2"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -893,6 +900,7 @@
                     "id": "minted:tool:3"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -931,6 +939,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1205,6 +1214,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1219,6 +1229,7 @@
                     "id": "minted:tool:1"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1233,6 +1244,7 @@
                     "id": "minted:tool:2"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1247,6 +1259,7 @@
                     "id": "minted:tool:3"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1285,6 +1298,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1326,6 +1340,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1594,6 +1609,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1608,6 +1624,7 @@
                     "id": "minted:tool:1"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1622,6 +1639,7 @@
                     "id": "minted:tool:2"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1636,6 +1654,7 @@
                     "id": "minted:tool:3"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1674,6 +1693,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1715,6 +1735,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1753,6 +1774,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2027,6 +2049,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2041,6 +2064,7 @@
                     "id": "minted:tool:1"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2055,6 +2079,7 @@
                     "id": "minted:tool:2"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2069,6 +2094,7 @@
                     "id": "minted:tool:3"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2107,6 +2133,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2148,6 +2175,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2186,6 +2214,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2227,6 +2256,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2495,6 +2525,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2509,6 +2540,7 @@
                     "id": "minted:tool:1"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2523,6 +2555,7 @@
                     "id": "minted:tool:2"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2537,6 +2570,7 @@
                     "id": "minted:tool:3"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2575,6 +2609,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2616,6 +2651,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2654,6 +2690,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2695,6 +2732,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "write_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2733,6 +2771,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "run_tests",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

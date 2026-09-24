@@ -298,6 +298,7 @@
                     "call_id": "call_131307"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -457,6 +458,7 @@
                     "call_id": "call_131307"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

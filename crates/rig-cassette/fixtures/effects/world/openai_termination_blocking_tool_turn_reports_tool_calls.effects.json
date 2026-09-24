@@ -304,6 +304,7 @@
                     "call_id": "call_knpveKB7kGhWznXpDnXtzY9V"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

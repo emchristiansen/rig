@@ -407,6 +407,7 @@
                     "item_id": "fc_063e4e0521f2bc83006ab396a04fb887d0928c1f7258c0fe8a"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

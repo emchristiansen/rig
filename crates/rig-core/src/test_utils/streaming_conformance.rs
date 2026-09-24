@@ -1629,6 +1629,7 @@ fn assert_reasoning_tool_reasoning(
             AssistantContent::ToolCall(tool_call) => {
                 format!("tool:{}", tool_call.function.name)
             }
+            AssistantContent::CustomToolCall(call) => format!("custom_tool:{}", call.name),
             AssistantContent::Text(text) => format!("text:{}", text.text),
             AssistantContent::Image(_) => "image".to_string(),
         })

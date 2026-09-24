@@ -303,6 +303,7 @@
                     "call_id": "call_00_3IjyF2vp762rFkvIcqMg5719"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -483,6 +484,7 @@
                     "call_id": "call_00_3IjyF2vp762rFkvIcqMg5719"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

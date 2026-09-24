@@ -199,7 +199,8 @@ fn a_run_saved_mid_turn_resumes_to_the_same_request_and_answer() {
                 rig_core::message::AssistantContent::ToolCall(call) => {
                     Some(call.function.arguments.to_string())
                 }
-                rig_core::message::AssistantContent::Text(_)
+                rig_core::message::AssistantContent::CustomToolCall(_)
+                | rig_core::message::AssistantContent::Text(_)
                 | rig_core::message::AssistantContent::Reasoning(_)
                 | rig_core::message::AssistantContent::Image(_) => None,
             })

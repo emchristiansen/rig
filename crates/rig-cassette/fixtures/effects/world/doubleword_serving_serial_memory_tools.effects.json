@@ -351,6 +351,7 @@
                     "call_id": "call_e28c175111834c45bacecb8a"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -518,6 +519,7 @@
                     "call_id": "call_e28c175111834c45bacecb8a"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

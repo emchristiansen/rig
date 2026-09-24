@@ -233,6 +233,7 @@ fn test_user_tool_result_message_conversion() {
         call: ToolCallId::minted(0),
         provider: None,
         name: "add".to_string(),
+        answers: rig_core::message::AnsweredToolCall::Function,
         content: vec![ToolResultContent::Text(Text::new("8".to_string()))],
     };
 
@@ -269,6 +270,7 @@ fn structured_tool_result_stays_structured_at_the_vertex_boundary() {
             call: ToolCallId::minted(0),
             provider: None,
             name: "lookup".to_string(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::json(value.clone())],
         })],
     };
@@ -296,6 +298,7 @@ fn image_tool_result_maps_to_native_function_response_part() {
             call: ToolCallId::minted(0),
             provider: None,
             name: "inspect".to_string(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::image_base64(
                 BASE64.encode(&raw),
                 Some(ImageMediaType::PNG),
@@ -337,6 +340,7 @@ fn mixed_tool_result_preserves_structured_and_media_order() {
             call: ToolCallId::minted(0),
             provider: None,
             name: "inspect".to_string(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content,
         })],
     };
@@ -404,6 +408,7 @@ fn tool_result_image_refs_avoid_names_reserved_by_structured_json() {
             call: ToolCallId::minted(0),
             provider: None,
             name: "inspect".to_string(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content,
         })],
     };
@@ -440,6 +445,7 @@ fn unsupported_tool_result_image_media_type_is_rejected_locally() {
             call: ToolCallId::minted(0),
             provider: None,
             name: "inspect".to_string(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::image_raw(
                 vec![1, 2, 3],
                 Some(ImageMediaType::GIF),
@@ -454,4 +460,50 @@ fn unsupported_tool_result_image_media_type_is_rejected_locally() {
         error.to_string().contains("expected JPEG, PNG, or WEBP"),
         "unexpected conversion error: {error}"
     );
+}
+
+/// One namespaced function call and one custom call (whose input parses as
+/// JSON): the two shapes every JSON-only wire refuses by name.
+fn unrepresentable_calls() -> [(rig_core::message::AssistantContent, &'static str); 2] {
+    use rig_core::message::AssistantContent;
+    [
+        (
+            AssistantContent::tool_call_with_namespace(
+                "fc_1",
+                "call_1".to_owned(),
+                "add",
+                Some("math".to_owned()),
+                serde_json::json!({"x": 1}),
+            ),
+            "cannot represent tool namespaces, so call `add` qualified by namespace `math`",
+        ),
+        (
+            AssistantContent::custom_tool_call(
+                "ctc_1",
+                "call_2",
+                "apply_patch",
+                None,
+                r#"{"x": 1}"#,
+            ),
+            "carries JSON tool arguments only, so custom tool call `apply_patch`",
+        ),
+    ]
+}
+
+#[test]
+fn vertex_refuses_namespaced_and_custom_calls() {
+    for (content, refusal) in unrepresentable_calls() {
+        let message = Message::Assistant {
+            id: None,
+            content: vec![content],
+        };
+        let error = vertexai::model::Content::try_from(RigMessage(message))
+            .expect_err("refused, not dropped");
+        let ProviderError::Request(reason) = &error else {
+            panic!("a request refusal, got {error:?}");
+        };
+        let reason = reason.to_string();
+        assert!(reason.starts_with("Vertex AI generateContent "), "{reason}");
+        assert!(reason.contains(refusal), "{reason}");
+    }
 }

@@ -339,6 +339,7 @@
                     "call_id": "call_410b33107373434cbea5f9c5"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -555,6 +556,7 @@
                     "call_id": "call_410b33107373434cbea5f9c5"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -601,6 +603,7 @@
                     "call_id": "call_85766726112a4080a34e0ce4"
                   },
                   "name": "final_result",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

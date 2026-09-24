@@ -451,6 +451,7 @@
                     "item_id": "fc_0d11a33c203a075d006ab2b394faac87d089ebb921002d4944"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

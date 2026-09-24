@@ -277,6 +277,7 @@ async fn a_very_long_tool_output_survives_the_round_trip() {
                                 call: ToolCallId::new_or_minted("call_long", 0),
                                 provider: ProviderCallId::new("call_long"),
                                 name: "dump".to_string(),
+                                answers: rig_core::message::AnsweredToolCall::Function,
                                 content: vec![ToolResultContent::text(long_output)],
                             })],
                         })

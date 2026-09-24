@@ -346,6 +346,7 @@
                     "call_id": "toolu_01UM56fJxTxTtSdMakoaBMK9"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

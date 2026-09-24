@@ -505,6 +505,7 @@
                     "item_id": "fc_033c484c5bd1d6aa006ab2b3049b8487d0aa73a6e8f50b68da"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

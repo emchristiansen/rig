@@ -348,6 +348,7 @@
                     "call_id": "call_4b2d0abaa8dc4dbeb51b2e50"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

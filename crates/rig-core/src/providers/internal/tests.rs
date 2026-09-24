@@ -9,6 +9,7 @@ fn call(wire_id: &str, name: &str) -> Message {
             wire_id,
             ToolFunction {
                 name: name.to_owned(),
+                namespace: None,
                 arguments: serde_json::json!({}),
             },
         ))],
@@ -90,6 +91,7 @@ fn a_handle_only_result_resolves_from_an_id_less_call() {
         crate::message::ToolCallId::minted(0),
         ToolFunction {
             name: "lookup".to_owned(),
+            namespace: None,
             arguments: serde_json::json!({}),
         },
     );
@@ -104,6 +106,7 @@ fn a_handle_only_result_resolves_from_an_id_less_call() {
                 call: handle,
                 provider: None,
                 name: String::new(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::text("out")],
             })],
         },
@@ -117,6 +120,7 @@ fn local_call(id: crate::message::ToolCallId, name: &str) -> AssistantContent {
         id,
         ToolFunction {
             name: name.into(),
+            namespace: None,
             arguments: serde_json::json!({}),
         },
     ))
@@ -127,6 +131,7 @@ fn local_result(id: crate::message::ToolCallId, name: &str) -> UserContent {
         call: id,
         provider: None,
         name: name.into(),
+        answers: crate::message::AnsweredToolCall::Function,
         content: vec![ToolResultContent::text("out")],
     })
 }
@@ -222,4 +227,34 @@ fn name_resolution_retains_outstanding_calls_across_assistant_text() {
     ];
     super::resolve_empty_tool_result_names(&mut history);
     assert_eq!(result_names(&history), ["lookup"]);
+}
+
+/// An empty result name resolves from a preceding custom call, too.
+#[test]
+fn empty_result_names_resolve_from_custom_calls() {
+    use crate::message::{AssistantContent, CustomToolCall, Message, UserContent};
+    let custom = CustomToolCall::from_dual_wire("ctc_1", "call_1", "apply_patch", None, "raw");
+    let mut history = vec![
+        Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::CustomToolCall(custom.clone())],
+        },
+        Message::User {
+            content: vec![UserContent::tool_result_answering(
+                "ctc_1",
+                "call_1",
+                "",
+                crate::message::AnsweredToolCall::Custom,
+                vec![],
+            )],
+        },
+    ];
+    super::resolve_empty_tool_result_names(&mut history);
+    let Message::User { content } = &history[1] else {
+        unreachable!()
+    };
+    let UserContent::ToolResult(result) = &content[0] else {
+        unreachable!()
+    };
+    assert_eq!(result.name, "apply_patch");
 }

@@ -295,6 +295,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "lookup_codeword",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -483,6 +484,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "lookup_codeword",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -523,6 +525,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "lookup_codeword",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

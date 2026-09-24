@@ -384,6 +384,7 @@
                     "call_id": "call_00_oQqcbNIZKYPiEHGJDEzF9385"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

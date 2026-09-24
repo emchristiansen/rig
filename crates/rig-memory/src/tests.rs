@@ -30,6 +30,7 @@ fn tool_result_msg() -> Message {
             call: ToolCallId::new_or_minted("call_1", 0),
             provider: None,
             name: "t".into(),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::text("ok")],
         })],
     }
@@ -1913,5 +1914,27 @@ async fn template_compactor_caps_summary_with_multiline_header() {
         text.len(),
         cap,
         overhead,
+    );
+}
+
+/// A custom call is charged by the bytes it sends: its name and its verbatim
+/// input, exactly like text of the same length.
+#[test]
+fn heuristic_counter_charges_a_custom_call_by_its_raw_input_bytes() {
+    let counter = HeuristicTokenCounter::default();
+    let custom = Message::Assistant {
+        id: None,
+        content: vec![AssistantContent::custom_tool_call(
+            "ctc_1",
+            "call_1",
+            "abc",
+            None,
+            "0123456789abc",
+        )],
+    };
+    // "abc" + 13 input bytes = 16 bytes.
+    assert_eq!(
+        counter.count(&custom),
+        counter.count(&Message::assistant("0123456789abcdef"))
     );
 }

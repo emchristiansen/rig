@@ -407,6 +407,7 @@
                     "call_id": "call_MSWAJxTAnOcMqVUm9wUjMHMi"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

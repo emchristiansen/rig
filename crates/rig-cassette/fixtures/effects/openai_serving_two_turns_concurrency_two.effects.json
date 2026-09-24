@@ -420,6 +420,7 @@
                     "item_id": "fc_0166b22c3cb2a055006ab39696e4fc87d0821d4b1b445bab35"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -746,6 +747,7 @@
                     "item_id": "fc_0166b22c3cb2a055006ab39696e4fc87d0821d4b1b445bab35"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -795,6 +797,7 @@
                     "item_id": "fc_0166b22c3cb2a055006ab396980dd887d0b699245b36c73e32"
                   },
                   "name": "subtract",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -405,6 +405,7 @@
                     "item_id": "fc_01a9d40755727882006ab2b3341aac87d0a45c848a4ed616a5"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

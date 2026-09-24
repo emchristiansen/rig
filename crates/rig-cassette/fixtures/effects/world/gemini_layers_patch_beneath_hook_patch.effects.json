@@ -299,6 +299,7 @@
                     "call_id": "call_139886"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

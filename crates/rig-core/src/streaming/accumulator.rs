@@ -16,10 +16,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{ErrorDetail, ErrorKind, ErrorReport, MalformedToolInput};
-use crate::message::{AssistantContent, Reasoning, ReasoningContent, ToolCall, ToolFunction};
+use crate::message::{
+    AssistantContent, CustomToolCall, Reasoning, ReasoningContent, ToolCall, ToolFunction,
+};
 use crate::streaming::UnparseableToolInput;
 use crate::streaming::block_id::BlockId;
-use crate::streaming::event::{BlockClose, BlockKind, Delta, StreamEvent, ToolCallEnd};
+use crate::streaming::event::{
+    BlockClose, BlockKind, CustomToolCallEnd, Delta, StreamEvent, ToolCallEnd,
+};
 
 /// Accumulates the streamed parts of one assistant choice, in arrival order.
 ///
@@ -132,6 +136,9 @@ impl BlockAccumulator {
                 BlockClose::ToolCall(end) => Ok(self
                     .tool_end(id, end.clone())?
                     .map(|(id, call)| (id, AssistantContent::ToolCall(call)))),
+                BlockClose::CustomToolCall(end) => Ok(self
+                    .custom_tool_end(id, end.clone())
+                    .map(|(id, call)| (id, AssistantContent::CustomToolCall(call)))),
             },
             StreamEvent::Final(_) | StreamEvent::Unknown(_) => Ok(None),
         }
@@ -518,6 +525,7 @@ impl BlockAccumulator {
             )
         });
 
+        let namespace = end.namespace;
         let arguments = match end.arguments {
             // The wire's completed item is authoritative over assembly.
             Some(arguments) => arguments,
@@ -589,7 +597,7 @@ impl BlockAccumulator {
         let tool_call = ToolCall {
             id: durable_id,
             provider,
-            function: ToolFunction { name, arguments },
+            function: ToolFunction::new(name, arguments).with_namespace(namespace),
             signature: end.signature,
             additional_params: end.additional_params,
         };
@@ -598,6 +606,67 @@ impl BlockAccumulator {
         self.finished_tools.insert(published.clone());
         self.push_tool_call(tool_call.clone());
         Ok(Some((published, tool_call)))
+    }
+
+    /// Records a custom tool call that arrived whole. Returns the publication
+    /// key and call, or `None` for a repeated end or a nameless call.
+    ///
+    /// Custom input is verbatim, so nothing is parsed and no unparseable-input
+    /// policy applies. Function-argument fragments opened under the same key
+    /// are superseded by the authoritative input, never merged into it.
+    fn custom_tool_end(
+        &mut self,
+        id: &BlockId,
+        end: CustomToolCallEnd,
+    ) -> Option<(BlockId, CustomToolCall)> {
+        let position = self
+            .open_tool_inputs
+            .iter()
+            .position(|input| input.id == *id);
+        if position.is_none() && self.finished_tools.contains(id) {
+            tracing::debug!("ignoring a repeated end for a finished custom tool call");
+            return None;
+        }
+        let open = position.map(|index| self.open_tool_inputs.remove(index));
+        // The end finalizes the key whether or not it yields a call.
+        self.finished_tools.insert(id.clone());
+        let CustomToolCallEnd {
+            durable_id,
+            tool_id,
+            call_id,
+            name,
+            namespace,
+            input,
+        } = end;
+        // Empty end names must not erase a name established by a start.
+        let name = if name.is_empty() {
+            open.map(|input| input.name).unwrap_or_default()
+        } else {
+            name
+        };
+        if name.is_empty() {
+            tracing::debug!("dropping a nameless custom tool call");
+            return None;
+        }
+        let wire_tool_id = tool_id.or_else(|| id.wire_str().map(str::to_owned));
+        let provider = crate::message::ProviderCallId::from_optional_wire(call_id, wire_tool_id);
+        let id_for_call = durable_id.unwrap_or_else(|| {
+            crate::message::ToolCallId::for_provider_or(
+                provider.as_ref(),
+                crate::message::ToolCallId::from_block(id),
+            )
+        });
+        let call = CustomToolCall {
+            id: id_for_call,
+            provider,
+            name,
+            namespace,
+            input,
+        };
+        self.saw_tool_call = true;
+        self.parts
+            .push(AssistantContent::CustomToolCall(call.clone()));
+        Some((id.clone(), call))
     }
 
     /// Index of the open call for `id`, opening one if none exists.
@@ -657,6 +726,7 @@ impl BlockAccumulator {
                 !(text.text.is_empty() && text.additional_params.is_none())
             }
             AssistantContent::ToolCall(_)
+            | AssistantContent::CustomToolCall(_)
             | AssistantContent::Reasoning(_)
             | AssistantContent::Image(_) => true,
         }

@@ -386,6 +386,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -613,6 +614,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "list_files",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -653,6 +655,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "read_file",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

@@ -247,6 +247,7 @@
                     "call_id": "call_00_hyentIA1CdQu5rrtSPL48718"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

@@ -317,6 +317,7 @@
                     "call_id": "call_DsBwThkIQ6a0ZxsO7JSygJtR"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -535,6 +536,7 @@
                     "call_id": "call_DsBwThkIQ6a0ZxsO7JSygJtR"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -581,6 +583,7 @@
                     "call_id": "call_sIdyoZraHkvAO9ZXCfIMSNc9"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

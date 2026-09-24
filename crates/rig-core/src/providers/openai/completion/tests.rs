@@ -98,6 +98,7 @@ fn request_with_multi_block_tool_result() -> CoreCompletionRequest {
         call: message::ToolCallId::new_or_minted("call-id", 0),
         provider: message::ProviderCallId::new("call-id"),
         name: "tool".to_string(),
+        answers: crate::message::AnsweredToolCall::Function,
         content: vec![
             message::ToolResultContent::text("first"),
             message::ToolResultContent::text("second"),
@@ -309,6 +310,7 @@ fn multiple_tool_result_blocks_convert_to_distinct_content_parts() {
         call: message::ToolCallId::new_or_minted("call-id", 0),
         name: "tool".to_string(),
         provider: message::ProviderCallId::new("call-id"),
+        answers: crate::message::AnsweredToolCall::Function,
         content: vec![
             message::ToolResultContent::text("first"),
             message::ToolResultContent::json(serde_json::json!({
@@ -1803,6 +1805,7 @@ fn request_plans_tool_ids_across_namespaces_turns_and_split_user_content() {
         provider: None,
         function: ToolFunction {
             name: "test".into(),
+            namespace: None,
             arguments: serde_json::json!({}),
         },
         signature: None,
@@ -1912,4 +1915,12 @@ fn additional_params_override_typed_fields_on_the_wire() {
     let body = request_body(&request, false).expect("body should serialize");
     assert_eq!(body["temperature"], 0.9, "{body}");
     assert_eq!(body["top_p"], 0.5, "{body}");
+}
+
+#[test]
+fn chat_completions_refuses_namespaced_and_custom_calls() {
+    for (turn, kind) in crate::message::unrepresentable_turns() {
+        let error = Vec::<Message>::try_from(turn).expect_err("refused, not dropped");
+        crate::message::assert_message_refused(&error, kind, CHAT_COMPLETIONS_WIRE);
+    }
 }

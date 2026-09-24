@@ -593,6 +593,7 @@
                     "call_id": "call_00_JtentndhW6eDmCtCYiY21262"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -428,6 +428,7 @@
                     "call_id": "lF1k4i4gW"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

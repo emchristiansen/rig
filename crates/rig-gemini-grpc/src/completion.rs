@@ -406,6 +406,10 @@ fn rig_assistant_content_to_grpc_part(
             ..text_part(text.text)
         }),
         message::AssistantContent::ToolCall(tool_call) => {
+            // `FunctionCall` has `name` and struct `args`, and no namespace.
+            tool_call
+                .for_json_only_wire(GEMINI_GRPC_WIRE)
+                .map_err(|refusal| ProviderError::Request(refusal.into()))?;
             let args = json_to_prost_struct(tool_call.function.arguments)?;
 
             Ok(proto::Part {
@@ -432,11 +436,19 @@ fn rig_assistant_content_to_grpc_part(
             )?,
             part_metadata: None,
         }),
+        // `FunctionCall.args` is a struct; a custom call's raw input has no
+        // representation on this wire.
+        message::AssistantContent::CustomToolCall(call) => Err(ProviderError::Request(
+            call.refused_by_json_only_wire(GEMINI_GRPC_WIRE).into(),
+        )),
         _ => Err(ProviderError::Request(
             "Unsupported assistant content type".into(),
         )),
     }
 }
+
+/// Wire name for the shared JSON-only tool-call refusal.
+const GEMINI_GRPC_WIRE: &str = "Gemini gRPC generateContent";
 
 impl TryFrom<GenerateContentResponse> for completion::CompletionResponse {
     type Error = ProviderError;

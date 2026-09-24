@@ -628,6 +628,7 @@
                     "call_id": "toolu_01AiN7DdKdwtWCabD6ULdR9g"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -965,6 +966,7 @@
                     "call_id": "toolu_01AiN7DdKdwtWCabD6ULdR9g"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1019,6 +1021,7 @@
                     "call_id": "toolu_01H22SxTAbgsAyKCb3eMBYr2"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1364,6 +1367,7 @@
                     "call_id": "toolu_01AiN7DdKdwtWCabD6ULdR9g"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1418,6 +1422,7 @@
                     "call_id": "toolu_01H22SxTAbgsAyKCb3eMBYr2"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1472,6 +1477,7 @@
                     "call_id": "toolu_01DY5FicrpihRneDHwuAoLvb"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1801,6 +1807,7 @@
                     "call_id": "toolu_01AiN7DdKdwtWCabD6ULdR9g"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1855,6 +1862,7 @@
                     "call_id": "toolu_01H22SxTAbgsAyKCb3eMBYr2"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1909,6 +1917,7 @@
                     "call_id": "toolu_01DY5FicrpihRneDHwuAoLvb"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -1963,6 +1972,7 @@
                     "call_id": "toolu_01EfZqgSpZvPywVe1a5UJJQ3"
                   },
                   "name": "checkpoint_step",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

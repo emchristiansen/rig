@@ -282,6 +282,7 @@
                     "call_id": "call_00_A597c6UkHbxbojQsiUyT6037"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

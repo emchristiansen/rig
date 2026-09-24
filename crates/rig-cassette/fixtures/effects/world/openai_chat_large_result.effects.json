@@ -274,6 +274,7 @@
                     "call_id": "call_1MzS7ssOPxRFoLJ3b1Tbt0eB"
                   },
                   "name": "checkpoint_large",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

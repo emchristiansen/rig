@@ -308,6 +308,7 @@
                     "call_id": "yxzL7QZtV"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

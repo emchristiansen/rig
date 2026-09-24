@@ -393,6 +393,7 @@
                     "call_id": "call_54208"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

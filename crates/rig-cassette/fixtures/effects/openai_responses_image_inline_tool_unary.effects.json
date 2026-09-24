@@ -393,6 +393,7 @@
                     "item_id": "fc_0a7152a755bbd7f7006ab2b4645aa087d09bbea2fe2a948bbe"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

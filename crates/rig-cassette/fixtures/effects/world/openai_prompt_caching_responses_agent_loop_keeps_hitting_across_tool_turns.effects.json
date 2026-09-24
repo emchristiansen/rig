@@ -435,6 +435,7 @@
                     "item_id": "fc_0503a7b952dd8323006ab2ba99a58c87d0b90eaac490ff4085"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -453,6 +454,7 @@
                     "item_id": "fc_0503a7b952dd8323006ab2ba99a5a487d08aedffda27bf8e9e"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

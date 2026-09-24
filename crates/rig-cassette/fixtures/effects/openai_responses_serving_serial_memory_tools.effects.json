@@ -404,6 +404,7 @@
                     "item_id": "fc_0a7aad439c0a6659006ab2b3d4986087d0be98570db7d34421"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -659,6 +660,7 @@
                     "item_id": "fc_0a7aad439c0a6659006ab2b3d4986087d0be98570db7d34421"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

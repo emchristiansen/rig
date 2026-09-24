@@ -421,6 +421,7 @@
                     "call_id": "call_accYzAPS2jsA9nVCcKM4jKBp"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

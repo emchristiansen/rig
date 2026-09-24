@@ -274,6 +274,7 @@
                     "call_id": "call_84610"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

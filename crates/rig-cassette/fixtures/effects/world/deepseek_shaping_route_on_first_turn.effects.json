@@ -338,6 +338,7 @@
                     "call_id": "call_00_NtN5I3xPqFjeezHrbNEd9030"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -307,6 +307,7 @@
                     "call_id": "toolu_01JymV3VoERZLkz5t9qVkicm"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -515,6 +516,7 @@
                     "call_id": "toolu_01JymV3VoERZLkz5t9qVkicm"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -565,6 +567,7 @@
                     "call_id": "toolu_01T8uhrGsLd4xhjjhZb3XoYq"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

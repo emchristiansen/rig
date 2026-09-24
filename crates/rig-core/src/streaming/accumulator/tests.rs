@@ -195,7 +195,8 @@ fn tool_end(
         })?
         .and_then(|(_, block)| match block {
             AssistantContent::ToolCall(call) => Some(call),
-            AssistantContent::Text(_)
+            AssistantContent::CustomToolCall(_)
+            | AssistantContent::Text(_)
             | AssistantContent::Reasoning(_)
             | AssistantContent::Image(_) => None,
         }))
@@ -1516,4 +1517,79 @@ fn an_id_less_tool_call_is_named_by_its_block_deterministically() {
         finalize(),
         "the same wire mints the same handle"
     );
+}
+
+/// A custom call arrives whole and finalizes as the custom content variant,
+/// superseding (never parsing) anything assembled under its key.
+#[test]
+fn a_custom_close_yields_a_custom_call() {
+    use crate::streaming::CustomToolCallEnd;
+    let mut accumulator = BlockAccumulator::new();
+    let id = BlockId::wire("ctc_1");
+    accumulator
+        .apply(&StreamEvent::BlockStart {
+            id: id.clone(),
+            kind: BlockKind::ToolCall,
+        })
+        .expect("start");
+    let end = CustomToolCallEnd::new("apply_patch", r#"{"x": 1}"#)
+        .with_tool_id("ctc_1")
+        .with_call_id("call_1")
+        .with_namespace(Some("repo".to_owned()));
+    let published = accumulator
+        .apply(&StreamEvent::BlockEnd {
+            id: id.clone(),
+            end: BlockClose::CustomToolCall(end.clone()),
+            block: None,
+        })
+        .expect("a custom close never fails")
+        .expect("it finalizes a call");
+    let AssistantContent::CustomToolCall(call) = &published.1 else {
+        panic!("expected a custom call, got {:?}", published.1);
+    };
+    assert_eq!(published.0, id);
+    assert_eq!(call.name, "apply_patch");
+    assert_eq!(call.namespace.as_deref(), Some("repo"));
+    assert_eq!(call.input, r#"{"x": 1}"#, "verbatim, even though it parses");
+    let provider = call.provider.as_ref().expect("provider ids");
+    assert_eq!(
+        (provider.call_id.as_str(), provider.item_id.as_deref()),
+        ("call_1", Some("ctc_1"))
+    );
+    assert_eq!(call.id, ToolCallId::new("call_1").expect("non-empty"));
+    assert!(accumulator.saw_tool_call());
+    // A repeated end finalizes nothing and cannot duplicate the call.
+    assert_eq!(
+        accumulator
+            .apply(&StreamEvent::BlockEnd {
+                id,
+                end: BlockClose::CustomToolCall(end),
+                block: None,
+            })
+            .expect("repeat"),
+        None
+    );
+    assert_eq!(accumulator.finish(), vec![published.1]);
+}
+
+/// A completed function call keeps the namespace its end carried.
+#[test]
+fn a_tool_end_carries_its_namespace_onto_the_call() {
+    let mut accumulator = BlockAccumulator::new();
+    let end = ToolCallEnd::whole("add", serde_json::json!({"x": 1}))
+        .with_call_id("call_1")
+        .with_namespace(Some("math".to_owned()));
+    let (_, block) = accumulator
+        .apply(&StreamEvent::BlockEnd {
+            id: BlockId::wire("fc_1"),
+            end: BlockClose::ToolCall(end),
+            block: None,
+        })
+        .expect("apply")
+        .expect("a call");
+    let AssistantContent::ToolCall(call) = block else {
+        panic!("a function call");
+    };
+    assert_eq!(call.function.namespace.as_deref(), Some("math"));
+    assert_eq!(call.function.arguments, serde_json::json!({"x": 1}));
 }

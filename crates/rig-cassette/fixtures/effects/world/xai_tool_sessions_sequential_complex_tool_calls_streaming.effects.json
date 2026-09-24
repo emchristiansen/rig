@@ -1090,6 +1090,7 @@
                     "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
                   },
                   "name": "ping_empty",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1586,6 +1587,7 @@
                     "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
                   },
                   "name": "ping_empty",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1660,6 +1662,7 @@
                     "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
                   },
                   "name": "inspect_manifest",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2051,6 +2054,7 @@
                     "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
                   },
                   "name": "ping_empty",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2125,6 +2129,7 @@
                     "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
                   },
                   "name": "inspect_manifest",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2179,6 +2184,7 @@
                     "item_id": "fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0"
                   },
                   "name": "join_labels",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2552,6 +2558,7 @@
                     "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
                   },
                   "name": "ping_empty",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2626,6 +2633,7 @@
                     "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
                   },
                   "name": "inspect_manifest",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2680,6 +2688,7 @@
                     "item_id": "fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0"
                   },
                   "name": "join_labels",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2728,6 +2737,7 @@
                     "item_id": "fc_88072a89-fca1-93f5-8620-e986d0bdaa2b_0"
                   },
                   "name": "escape_echo",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

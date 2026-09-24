@@ -297,6 +297,7 @@
                     "call_id": "call_00_CI3ShWp51AmpbgmLDmqe1759"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -447,6 +448,7 @@
                     "call_id": "call_00_CI3ShWp51AmpbgmLDmqe1759"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

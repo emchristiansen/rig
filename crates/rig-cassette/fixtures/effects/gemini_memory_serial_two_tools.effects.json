@@ -427,6 +427,7 @@
                     "call_id": "call_205931"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -444,6 +445,7 @@
                     "call_id": "call_205933"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -683,6 +685,7 @@
                     "call_id": "call_205931"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -700,6 +703,7 @@
                     "call_id": "call_205933"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

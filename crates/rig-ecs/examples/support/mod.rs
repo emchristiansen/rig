@@ -95,7 +95,9 @@ impl Serve for Scripted {
                                     return;
                                 }
                             }
-                            AssistantContent::Reasoning(_) | AssistantContent::Image(_) => {}
+                            AssistantContent::CustomToolCall(_)
+                            | AssistantContent::Reasoning(_)
+                            | AssistantContent::Image(_) => {}
                         }
                     }
                     let _ = writer

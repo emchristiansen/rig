@@ -34,6 +34,7 @@ fn image_tool_result() -> ToolResult {
         call: ToolCallId::new_or_minted("call_1", 0),
         provider: ProviderCallId::new("call_1"),
         name: "view_file".to_string(),
+        answers: rig_core::message::AnsweredToolCall::Function,
         content: vec![ToolResultContent::image_base64(
             MAGENTA_PNG_BASE64,
             Some(ImageMediaType::PNG),

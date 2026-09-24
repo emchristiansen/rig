@@ -311,6 +311,7 @@
                     "call_id": "7lfbGES1o"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

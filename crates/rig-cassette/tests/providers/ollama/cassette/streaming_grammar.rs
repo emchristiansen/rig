@@ -366,6 +366,7 @@ async fn chat_sourced_history_replays_the_tool_name_not_the_identifier() {
                         provider: None,
                         function: rig::message::ToolFunction {
                             name: "add".to_owned(),
+                            namespace: None,
                             arguments: serde_json::json!({"x": 2, "y": 3}),
                         },
                         signature: None,
@@ -379,6 +380,7 @@ async fn chat_sourced_history_replays_the_tool_name_not_the_identifier() {
                                 .expect("the chat-sourced identifier is non-empty"),
                             provider: None,
                             name: "add".to_owned(),
+                            answers: rig_core::message::AnsweredToolCall::Function,
                             content: vec![rig::message::ToolResultContent::text("5")],
                         },
                     )],

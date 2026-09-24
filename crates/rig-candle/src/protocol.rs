@@ -147,6 +147,9 @@ fn validate_protocol_inputs(
                                 protocol,
                             )?;
                         }
+                        AssistantContent::CustomToolCall(call) => {
+                            return Err(call.refused_by_json_only_wire(CANDLE_WIRE).into());
+                        }
                         AssistantContent::Image(_) => {}
                     }
                 }
@@ -206,7 +209,19 @@ pub(crate) fn parse_assistant(
     }
 }
 
+/// Wire name for the shared JSON-only tool-call refusal.
+const CANDLE_WIRE: &str = "Candle local prompt";
+
 fn validate_common_request(request: &CompletionRequest) -> Result<(), CandleError> {
+    // Every prompt format renders tool calls as a name and JSON arguments,
+    // with no namespace and no raw-input form.
+    for message in request.chat_history.iter() {
+        if let Message::Assistant { content, .. } = message {
+            for item in content {
+                rig_core::message::json_only_wire_tool_call(CANDLE_WIRE, item)?;
+            }
+        }
+    }
     if let Some(model) = &request.model {
         return Err(CandleError::UnsupportedFeature(format!(
             "model override `{model}`; byte-loaded models do not support request-time model selection"
@@ -422,7 +437,7 @@ fn render_plain_message(message: &Message) -> Result<(&'static str, String), Can
             for item in content.iter() {
                 match item {
                     AssistantContent::Text(text) => parts.push(text.text.clone()),
-                    AssistantContent::ToolCall(_) => {
+                    AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => {
                         return Err(CandleError::UnsupportedPromptContent("tool calls"));
                     }
                     AssistantContent::Reasoning(_) => {
@@ -606,6 +621,9 @@ fn render_qwen_message(
                         rendered.push('\n');
                         rendered.push_str(TOOL_CALL_END);
                         call_count += 1;
+                    }
+                    AssistantContent::CustomToolCall(call) => {
+                        return Err(call.refused_by_json_only_wire(CANDLE_WIRE).into());
                     }
                     AssistantContent::Image(_) => {
                         return Err(CandleError::UnsupportedPromptContent(

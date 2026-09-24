@@ -269,6 +269,7 @@
                     "call_id": "call_00_StCLzlo01h5XaTWqJfbH8557"
                   },
                   "name": "checkpoint_large",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

@@ -333,6 +333,7 @@
                     "item_id": "fc_006b10b0a79c15a8006ab2b3cfa5a887d086b17b6653649d21"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -351,6 +352,7 @@
                     "item_id": "fc_006b10b0a79c15a8006ab2b3cfa5b887d0b307007056fb3b89"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

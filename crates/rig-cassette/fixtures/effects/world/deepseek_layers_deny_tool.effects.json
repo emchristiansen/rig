@@ -265,6 +265,7 @@
                     "call_id": "call_00_CswM7OQGRMhYhkFAXShl8206"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

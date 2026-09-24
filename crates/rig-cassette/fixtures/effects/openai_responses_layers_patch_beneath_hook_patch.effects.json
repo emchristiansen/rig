@@ -383,6 +383,7 @@
                     "item_id": "fc_0afd915763dc6689006ab2b32ad9c487d0ba722957372d5aae"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

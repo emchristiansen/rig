@@ -277,6 +277,7 @@
                     "call_id": "Lcjivt26N"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

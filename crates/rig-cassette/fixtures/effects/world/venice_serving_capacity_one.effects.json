@@ -476,6 +476,7 @@
                     "call_id": "EKLYBqyrB"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -493,6 +494,7 @@
                     "call_id": "oG41Cc6wN"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

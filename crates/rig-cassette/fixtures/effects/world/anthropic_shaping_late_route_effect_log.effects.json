@@ -304,6 +304,7 @@
                     "call_id": "toolu_01UZWEmSYAa1GUyHYMB7mqZf"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -510,6 +510,7 @@
                     "call_id": "call_XWTPT9uTS7O56N7lMoH5PB3h"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

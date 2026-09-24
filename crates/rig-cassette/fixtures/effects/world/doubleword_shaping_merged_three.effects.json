@@ -314,6 +314,7 @@
                     "call_id": "call_ef0aa5ac6e15411db140c843"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

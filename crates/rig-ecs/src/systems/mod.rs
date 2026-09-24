@@ -282,11 +282,15 @@ pub struct TurnRead {
 }
 
 impl TurnRead {
-    /// The turn's tool calls, in order.
+    /// The turn's tool calls, in order. `read_turn` admits a turn only once
+    /// [`rig_core::message::first_undispatchable_call`] found none, so every
+    /// call here is an unqualified function call; a custom call yields
+    /// nothing because it can never reach a read turn.
     fn calls(&self) -> impl Iterator<Item = &rig_core::completion::message::ToolCall> {
         self.content.iter().filter_map(|part| match part {
             AssistantContent::ToolCall(call) => Some(call),
-            AssistantContent::Text(_)
+            AssistantContent::CustomToolCall(_)
+            | AssistantContent::Text(_)
             | AssistantContent::Reasoning(_)
             | AssistantContent::Image(_) => None,
         })
@@ -1977,6 +1981,7 @@ pub fn land_batch(
                     Some(call.function.arguments.to_string())
                 }
                 AssistantContent::ToolCall(_)
+                | AssistantContent::CustomToolCall(_)
                 | AssistantContent::Text(_)
                 | AssistantContent::Reasoning(_)
                 | AssistantContent::Image(_) => None,
@@ -2158,7 +2163,10 @@ fn edited_content(
             Resolution::Ignore => {
                 content.retain(|part| match part {
                     AssistantContent::ToolCall(tool_call) => tool_call.id != call.id,
-                    AssistantContent::Text(_)
+                    // Invalid calls are function calls: a custom call is
+                    // refused before judgment and never has one.
+                    AssistantContent::CustomToolCall(_)
+                    | AssistantContent::Text(_)
                     | AssistantContent::Reasoning(_)
                     | AssistantContent::Image(_) => true,
                 });
@@ -2464,6 +2472,17 @@ pub fn read_turn(
             commands.entity(run).end(Failed(Failure::Provider(report)));
             continue;
         }
+        // Name-keyed authorization, invalid-call judgment, and
+        // `EffectKind::ToolCall { name, args }` all erase a namespace and a
+        // custom call's kind, so such a call is refused here, before any of
+        // them sees it. A custom call is refused even when its input parses
+        // as JSON.
+        if let Some(call) = rig_core::message::first_undispatchable_call(&outs.content) {
+            commands
+                .entity(run)
+                .end(Failed(Failure::UndispatchableToolCall { call }));
+            continue;
+        }
         let access = access.get(turn).ok();
         let granted = granted_tools(turn, &children, &adverts, &bound, access);
         let allowed = access.and_then(|access| access.allowed.as_ref());
@@ -2696,6 +2715,7 @@ fn reprompt_for(
                         call: call.id.clone(),
                         provider: call.provider.clone(),
                         name: name.to_owned(),
+                        answers: call.answered_by(),
                         content: vec![ToolResultContent::text(feedback)],
                     },
                 )],

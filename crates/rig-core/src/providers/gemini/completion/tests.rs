@@ -744,6 +744,7 @@ fn test_message_conversion_tool_call() {
         "call-123",
         message::ToolFunction {
             name: "test_function".to_string(),
+            namespace: None,
             arguments: json!({"arg1": "value1"}),
         },
     );
@@ -1027,6 +1028,7 @@ fn test_tool_result_with_image_content() {
         call: message::ToolCallId::new_or_minted("call-123", 0),
         provider: message::ProviderCallId::new("call-123"),
         name: "test_tool".to_string(),
+        answers: crate::message::AnsweredToolCall::Function,
         content: vec![
             ToolResultContent::Text(message::Text::new(r#"{"status": "success"}"#.to_string())),
             ToolResultContent::Image(Image {
@@ -1092,6 +1094,7 @@ fn mixed_inline_images_and_text_keep_text_response_and_ordered_parts() {
             call: message::ToolCallId::minted(0),
             provider: None,
             name: "ordered_tool".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![
                 ToolResultContent::image_base64("first-image", Some(ImageMediaType::PNG), None),
                 ToolResultContent::text("between-images"),
@@ -1134,6 +1137,7 @@ fn mixed_inline_image_and_json_keep_structured_value_and_media_part() {
             call: message::ToolCallId::minted(0),
             provider: None,
             name: "ordered_tool".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![
                 ToolResultContent::json(json!({ "status": "ok" })),
                 ToolResultContent::image_base64("image-data", Some(ImageMediaType::PNG), None),
@@ -1169,6 +1173,7 @@ fn mixed_url_image_and_response_value_is_rejected() {
             call: message::ToolCallId::minted(0),
             provider: None,
             name: "url_tool".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![
                 ToolResultContent::Image(Image {
                     data: DocumentSourceKind::Url("https://example.com/image.png".to_string()),
@@ -1206,6 +1211,7 @@ fn tool_result_rejects_unsupported_image_media_types() {
                 call: message::ToolCallId::minted(0),
                 provider: None,
                 name: "image_tool".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::image_base64(
                     "image-data",
                     Some(media_type),
@@ -1234,6 +1240,7 @@ fn structured_json_refs_remain_literal_with_unreferenced_image_parts() {
             call: message::ToolCallId::minted(0),
             provider: None,
             name: "collision_tool".to_string(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![
                 ToolResultContent::json(json!({
                     "literal": {
@@ -1292,6 +1299,7 @@ fn tool_result_literal_text_and_structured_json_remain_distinct() {
                 call: message::ToolCallId::minted(0),
                 provider: None,
                 name: "test_tool".to_string(),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![tool_content],
             })],
         };
@@ -1317,6 +1325,7 @@ fn echoed_minted_handle_never_reaches_the_function_response_id() {
         ToolCallId::minted(0),
         ToolFunction {
             name: "lookup".to_string(),
+            namespace: None,
             arguments: json!({}),
         },
     );
@@ -1326,6 +1335,7 @@ fn echoed_minted_handle_never_reaches_the_function_response_id() {
             call: call.id.clone(),
             provider: None,
             name: "lookup".into(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::text("out")],
         })],
     };
@@ -1354,6 +1364,7 @@ fn ingested_nameless_results_resolve_their_name_at_request_assembly() {
                     "toolu_abc",
                     ToolFunction {
                         name: "get_weather".to_owned(),
+                        namespace: None,
                         arguments: json!({"city": "Paris"}),
                     },
                 ))],
@@ -1514,6 +1525,7 @@ fn test_tool_result_with_url_image_is_rejected() {
         call: message::ToolCallId::minted(0),
         provider: None,
         name: "screenshot_tool".to_string(),
+        answers: crate::message::AnsweredToolCall::Function,
         content: vec![ToolResultContent::Image(Image {
             data: DocumentSourceKind::Url("https://example.com/image.png".to_string()),
             media_type: Some(ImageMediaType::PNG),
@@ -2188,4 +2200,13 @@ fn a_history_with_a_signature_only_reasoning_block_still_replays() {
         })
         .collect();
     assert_eq!(signed, [(true, "c2lnbmVk")]);
+}
+
+#[test]
+fn generate_content_refuses_namespaced_and_custom_calls() {
+    use crate::providers::gemini::completion::gemini_api_types::{Content, GEMINI_WIRE};
+    for (turn, kind) in crate::message::unrepresentable_turns() {
+        let error = Content::try_from(turn).expect_err("refused, not dropped");
+        crate::message::assert_message_refused(&error, kind, GEMINI_WIRE);
+    }
 }

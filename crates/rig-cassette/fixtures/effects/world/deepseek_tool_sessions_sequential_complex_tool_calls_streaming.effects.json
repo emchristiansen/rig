@@ -1473,6 +1473,7 @@
                     "call_id": "call_00_bmo2zZEtW3w3PTSIOkj28131"
                   },
                   "name": "ping_empty",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2508,6 +2509,7 @@
                     "call_id": "call_00_bmo2zZEtW3w3PTSIOkj28131"
                   },
                   "name": "ping_empty",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -2569,6 +2571,7 @@
                     "call_id": "call_00_XbrbgtpXFosAc80D1syS7097"
                   },
                   "name": "inspect_manifest",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3202,6 +3205,7 @@
                     "call_id": "call_00_bmo2zZEtW3w3PTSIOkj28131"
                   },
                   "name": "ping_empty",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3263,6 +3267,7 @@
                     "call_id": "call_00_XbrbgtpXFosAc80D1syS7097"
                   },
                   "name": "inspect_manifest",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3315,6 +3320,7 @@
                     "call_id": "call_00_w1cFjOcPcmOzRQA5Qlgj4816"
                   },
                   "name": "join_labels",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3864,6 +3870,7 @@
                     "call_id": "call_00_bmo2zZEtW3w3PTSIOkj28131"
                   },
                   "name": "ping_empty",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3925,6 +3932,7 @@
                     "call_id": "call_00_XbrbgtpXFosAc80D1syS7097"
                   },
                   "name": "inspect_manifest",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -3977,6 +3985,7 @@
                     "call_id": "call_00_w1cFjOcPcmOzRQA5Qlgj4816"
                   },
                   "name": "join_labels",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -4023,6 +4032,7 @@
                     "call_id": "call_00_IGYqgr3hksYwYwtGdchZ5861"
                   },
                   "name": "escape_echo",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

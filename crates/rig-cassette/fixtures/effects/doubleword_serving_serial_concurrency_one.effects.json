@@ -313,6 +313,7 @@
                     "call_id": "call_669beb5b4c8f443b8807c14f"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -330,6 +331,7 @@
                     "call_id": "call_288cafa840594b2d9c9938d6"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

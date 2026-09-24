@@ -322,6 +322,7 @@
                     "call_id": "toolu_01UUAPHWA7wWPDrx8zYvHxru"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

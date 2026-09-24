@@ -368,6 +368,7 @@
                     "call_id": "call_8PinSjrrDIVIDxv76YjyMoKG"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -385,6 +386,7 @@
                     "call_id": "call_49gA98gNFV747tugnHxbNJdK"
                   },
                   "name": "lookup_cache_policy",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

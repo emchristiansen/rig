@@ -355,6 +355,7 @@
                     "call_id": "call_253646"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

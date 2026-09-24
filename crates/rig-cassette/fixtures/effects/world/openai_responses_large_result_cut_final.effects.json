@@ -331,6 +331,7 @@
                     "item_id": "fc_0d89c97b8630415c006ab39668515c87d0bf35e59f1635f1a2"
                   },
                   "name": "checkpoint_large",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

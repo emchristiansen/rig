@@ -259,6 +259,7 @@
                     "call_id": "call_c6bb0b5dc3164acfa1ad392f"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

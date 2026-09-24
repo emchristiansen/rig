@@ -266,6 +266,7 @@
                     "call_id": "call_267116"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

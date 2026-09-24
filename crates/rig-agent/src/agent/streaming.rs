@@ -233,7 +233,9 @@ pub(crate) fn finalize_streamed_choice(
         .filter(|item| {
             !matches!(
                 item,
-                AssistantContent::ToolCall(_) | AssistantContent::Text(_)
+                AssistantContent::ToolCall(_)
+                    | AssistantContent::CustomToolCall(_)
+                    | AssistantContent::Text(_)
             )
         })
         .cloned()

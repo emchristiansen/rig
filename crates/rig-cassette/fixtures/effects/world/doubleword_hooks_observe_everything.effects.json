@@ -351,6 +351,7 @@
                     "call_id": "call_88087036eabe44e3a002aa5f"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -518,6 +519,7 @@
                     "call_id": "call_88087036eabe44e3a002aa5f"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

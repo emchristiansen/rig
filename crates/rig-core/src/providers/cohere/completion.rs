@@ -22,6 +22,9 @@ use serde::{Deserialize, Serialize};
 /// telemetry spans for this provider.
 pub(crate) const PROVIDER_NAME: &str = "cohere";
 
+/// Wire name for the shared JSON-only tool-call refusal.
+const COHERE_CHAT_WIRE: &str = "Cohere Chat";
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CompletionResponse {
     pub id: String,
@@ -356,15 +359,18 @@ impl TryFrom<message::Message> for Vec<Message> {
                         message::AssistantContent::Text(message::Text { text, .. }) => {
                             text_content.push(AssistantContent::Text { text });
                         }
-                        message::AssistantContent::ToolCall(message::ToolCall {
-                            id,
-                            provider,
-                            function:
-                                message::ToolFunction {
-                                    name, arguments, ..
-                                },
-                            ..
-                        }) => {
+                        message::AssistantContent::ToolCall(tool_call) => {
+                            // Cohere's `tool_calls[].function` has no namespace member.
+                            tool_call.for_json_only_wire(COHERE_CHAT_WIRE)?;
+                            let message::ToolCall {
+                                id,
+                                provider,
+                                function:
+                                    message::ToolFunction {
+                                        name, arguments, ..
+                                    },
+                                ..
+                            } = tool_call;
                             tool_calls.push(ToolCall {
                                 id: Some(match provider {
                                     Some(provider) => provider.call_id,
@@ -376,6 +382,9 @@ impl TryFrom<message::Message> for Vec<Message> {
                                     arguments: serde_json::to_value(arguments).unwrap_or_default(),
                                 }),
                             });
+                        }
+                        message::AssistantContent::CustomToolCall(call) => {
+                            return Err(call.refused_by_json_only_wire(COHERE_CHAT_WIRE).into());
                         }
                         message::AssistantContent::Reasoning(reasoning) => {
                             let thinking = reasoning.display_text();

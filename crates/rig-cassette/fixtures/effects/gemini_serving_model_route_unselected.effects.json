@@ -282,6 +282,7 @@
                     "call_id": "call_379777"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

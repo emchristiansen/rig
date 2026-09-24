@@ -731,6 +731,9 @@ impl TryFrom<crate::message::Message> for Vec<Message> {
                         crate::message::AssistantContent::ToolCall(tool_call) => {
                             tool_calls.push(tool_call);
                         }
+                        crate::message::AssistantContent::CustomToolCall(call) => {
+                            return Err(call.refused_by_json_only_wire(OLLAMA_CHAT_WIRE).into());
+                        }
                         crate::message::AssistantContent::Reasoning(reasoning) => {
                             let display = reasoning.display_text();
                             if !display.is_empty() {
@@ -752,8 +755,8 @@ impl TryFrom<crate::message::Message> for Vec<Message> {
                     name: None,
                     tool_calls: tool_calls
                         .into_iter()
-                        .map(std::convert::Into::into)
-                        .collect::<Vec<_>>(),
+                        .map(ToolCall::try_from)
+                        .collect::<Result<Vec<_>, _>>()?,
                 }])
             }
         }
@@ -771,16 +774,24 @@ impl Message {
     }
 }
 
-impl From<crate::message::ToolCall> for ToolCall {
-    fn from(tool_call: crate::message::ToolCall) -> Self {
-        Self {
+/// Wire name for the shared JSON-only tool-call refusal.
+const OLLAMA_CHAT_WIRE: &str = "Ollama Chat";
+
+/// Refuses a namespaced call: Ollama's `tool_calls[].function` has no
+/// namespace member.
+impl TryFrom<crate::message::ToolCall> for ToolCall {
+    type Error = crate::message::UnrepresentableToolCall;
+
+    fn try_from(tool_call: crate::message::ToolCall) -> Result<Self, Self::Error> {
+        tool_call.for_json_only_wire(OLLAMA_CHAT_WIRE)?;
+        Ok(Self {
             id: tool_call.provider.map(|provider| provider.call_id),
             r#type: ToolType::Function,
             function: Function {
                 name: tool_call.function.name,
                 arguments: tool_call.function.arguments,
             },
-        }
+        })
     }
 }
 

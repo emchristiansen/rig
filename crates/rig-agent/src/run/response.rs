@@ -311,6 +311,19 @@ pub enum PromptError {
         /// Canonical history available at failure.
         chat_history: Vec<Message>,
     },
+
+    /// The model emitted a tool call that name-keyed dispatch cannot run
+    /// without erasing what it is: a namespaced call or a custom (raw-input)
+    /// call. Refused before tool authorization, invalid-call recovery,
+    /// dispatch hooks, or execution see it.
+    #[error("UndispatchableToolCall: {call}")]
+    UndispatchableToolCall {
+        /// The refused call.
+        call: rig_core::message::UndispatchableToolCall,
+        /// Canonical history available at failure, including the turn that
+        /// carried the call.
+        chat_history: Vec<Message>,
+    },
 }
 
 /// Forward provider response accessors through wrapped errors and optional reports.

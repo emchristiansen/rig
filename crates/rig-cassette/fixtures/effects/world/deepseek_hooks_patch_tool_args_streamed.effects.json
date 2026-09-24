@@ -524,6 +524,7 @@
                     "call_id": "call_00_cohQbNRa5q0pdN8XNCJ39397"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

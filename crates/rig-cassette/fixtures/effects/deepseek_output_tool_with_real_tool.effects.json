@@ -301,6 +301,7 @@
                     "call_id": "call_00_nM5VttTDXRe5CtzYnBhn6816"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

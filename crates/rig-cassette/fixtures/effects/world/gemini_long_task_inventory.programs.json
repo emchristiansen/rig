@@ -521,7 +521,8 @@
               "provider": {
                 "call_id": "call_619641"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -763,7 +764,8 @@
               "provider": {
                 "call_id": "call_754123"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -1001,7 +1003,8 @@
               "provider": {
                 "call_id": "call_537261"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -1239,7 +1242,8 @@
               "provider": {
                 "call_id": "call_612583"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -1477,7 +1481,8 @@
               "provider": {
                 "call_id": "call_469728"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -1715,7 +1720,8 @@
               "provider": {
                 "call_id": "call_531596"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -1953,7 +1959,8 @@
               "provider": {
                 "call_id": "call_451867"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -2299,7 +2306,8 @@
               "provider": {
                 "call_id": "call_417435"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -2324,7 +2332,8 @@
               "provider": {
                 "call_id": "call_417436"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -2667,7 +2676,8 @@
               "provider": {
                 "call_id": "call_464011"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -2692,7 +2702,8 @@
               "provider": {
                 "call_id": "call_464012"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3035,7 +3046,8 @@
               "provider": {
                 "call_id": "call_386313"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3060,7 +3072,8 @@
               "provider": {
                 "call_id": "call_386314"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3293,7 +3306,8 @@
               "provider": {
                 "call_id": "call_556749"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           },
           "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
@@ -3507,7 +3521,8 @@
               "provider": {
                 "call_id": "call_619641"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -3573,7 +3588,8 @@
               "provider": {
                 "call_id": "call_754123"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -3635,7 +3651,8 @@
               "provider": {
                 "call_id": "call_537261"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -3697,7 +3714,8 @@
               "provider": {
                 "call_id": "call_612583"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -3759,7 +3777,8 @@
               "provider": {
                 "call_id": "call_469728"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -3821,7 +3840,8 @@
               "provider": {
                 "call_id": "call_531596"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -3883,7 +3903,8 @@
               "provider": {
                 "call_id": "call_451867"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -3969,7 +3990,8 @@
               "provider": {
                 "call_id": "call_417435"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -3993,7 +4015,8 @@
               "provider": {
                 "call_id": "call_417436"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4076,7 +4099,8 @@
               "provider": {
                 "call_id": "call_464011"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4100,7 +4124,8 @@
               "provider": {
                 "call_id": "call_464012"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4183,7 +4208,8 @@
               "provider": {
                 "call_id": "call_386313"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4207,7 +4233,8 @@
               "provider": {
                 "call_id": "call_386314"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },
@@ -4266,7 +4293,8 @@
               "provider": {
                 "call_id": "call_556749"
               },
-              "name": "task_operation"
+              "name": "task_operation",
+              "answers": "function"
             }
           }
         },

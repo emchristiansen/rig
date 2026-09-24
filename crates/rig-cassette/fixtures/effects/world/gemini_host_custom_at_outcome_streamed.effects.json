@@ -400,6 +400,7 @@
                     "call_id": "call_179915"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

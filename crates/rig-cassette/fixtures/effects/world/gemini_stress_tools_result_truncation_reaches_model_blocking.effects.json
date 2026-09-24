@@ -253,6 +253,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "fetch_motto",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

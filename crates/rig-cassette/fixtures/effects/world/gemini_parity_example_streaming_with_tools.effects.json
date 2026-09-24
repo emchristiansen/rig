@@ -409,6 +409,7 @@
                     "id": "minted:tool:0"
                   },
                   "name": "subtract",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

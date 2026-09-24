@@ -679,6 +679,7 @@
                     "call_id": "m8kZaPsdW"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

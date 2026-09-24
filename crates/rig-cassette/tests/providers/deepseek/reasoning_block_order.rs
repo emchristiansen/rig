@@ -79,6 +79,7 @@ fn block_kinds(choice: &[AssistantContent]) -> Vec<&'static str> {
         .map(|content| match content {
             AssistantContent::Text(_) => "text",
             AssistantContent::ToolCall(_) => "tool_call",
+            AssistantContent::CustomToolCall(_) => "custom_tool_call",
             AssistantContent::Reasoning(_) => "reasoning",
             AssistantContent::Image(_) => "image",
         })

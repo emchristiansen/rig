@@ -80,6 +80,9 @@ async fn run_streamed_turn(
                     }
                 }
                 StreamedTurnEvent::EmitToolCallDelta { .. } => {}
+                StreamedTurnEvent::UndispatchableToolCall(refused) => {
+                    panic!("Gemini emits no namespaced or custom calls: {refused:?}")
+                }
                 StreamedTurnEvent::Completed {
                     usage,
                     finish_reason,

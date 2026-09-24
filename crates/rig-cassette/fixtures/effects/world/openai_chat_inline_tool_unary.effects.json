@@ -319,6 +319,7 @@
                     "call_id": "call_680QeirzBDrXeifgqQyucX33"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

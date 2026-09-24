@@ -693,6 +693,7 @@
                     "call_id": "call_00_tWiUhOU8PtkPqj0aQlzS3204"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -710,6 +711,7 @@
                     "call_id": "call_01_iNlcVf9Ox8w0VOTzQVTF0614"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1046,6 +1048,7 @@
                     "call_id": "call_00_tWiUhOU8PtkPqj0aQlzS3204"
                   },
                   "name": "lookup_harbor_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",
@@ -1063,6 +1066,7 @@
                     "call_id": "call_01_iNlcVf9Ox8w0VOTzQVTF0614"
                   },
                   "name": "lookup_orchard_label",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

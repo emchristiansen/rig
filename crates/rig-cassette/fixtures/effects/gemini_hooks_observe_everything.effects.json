@@ -300,6 +300,7 @@
                     "call_id": "call_268615"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -459,6 +460,7 @@
                     "call_id": "call_268615"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",

@@ -396,6 +396,7 @@
                     "call_id": "call_d344dec1864846f18b0e8f0e"
                   },
                   "name": "lookup",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

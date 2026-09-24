@@ -406,6 +406,7 @@
                     "item_id": "fc_06b75b825321ff00006ab2b338d9e887d0b4e17f56459b9195"
                   },
                   "name": "add",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "text",

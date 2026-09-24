@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
                         continue;
                     }
                     let name = &call.tool_call.function.name;
-                    let args = call.tool_call.function.arguments.to_payload_string();
+                    let args = call.tool_call.function.arguments.to_string();
                     println!("→ executing {name}({args})");
                     let mut context = rig::tool::ToolContext::new();
                     let result = local_tools.execute(name, args, &mut context).await;

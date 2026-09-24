@@ -1792,3 +1792,81 @@ fn a_truncated_reasoning_only_turn_commits_nothing() {
         run.new_messages
     );
 }
+
+/// Name-keyed dispatch cannot honor a namespace or run a custom call's raw
+/// input, so both are refused as the turn arrives: before the allowed-set
+/// check (the bare name `add` IS allowed here), invalid-call recovery, or
+/// any tool step.
+#[test]
+fn namespaced_and_custom_calls_are_refused_before_any_tool_step() {
+    use rig_core::message::UndispatchableToolCall;
+    let namespaced = AssistantContent::ToolCall(
+        ToolCall::from_wire(
+            "call_1",
+            ToolFunction::new("add".to_string(), json!({"x": 1})),
+        )
+        .with_namespace(Some("math".to_owned())),
+    );
+    // Custom input that parses as JSON — and would be valid `add` arguments —
+    // is refused all the same.
+    let custom = AssistantContent::custom_tool_call("ctc_1", "call_2", "add", None, r#"{"x": 1}"#);
+    for (content, streamed) in [
+        (namespaced.clone(), false),
+        (custom.clone(), false),
+        (namespaced, true),
+        (custom, true),
+    ] {
+        let mut run = AgentRun::new("call something");
+        expect_call_model(&mut run);
+        let turn = ModelTurn::new(
+            None,
+            vec![AssistantContent::text("calling"), content.clone()],
+            Usage::default(),
+            tool_names(&["add"]),
+            tool_names(&["add"]),
+            hand_raw(),
+        );
+        let err = if streamed {
+            run.record_streamed_completion_call(
+                Usage::default(),
+                ResponseIdentity::default(),
+                None,
+                hand_raw(),
+            )
+            .expect("record");
+            run.streamed_turn(StreamedTurn {
+                message_id: None,
+                choice: turn.choice,
+                executable_tool_names: turn.executable_tool_names,
+                allowed_tool_names: turn.allowed_tool_names,
+                block_ids: Vec::new(),
+                finish_reason: None,
+            })
+            .expect_err("refused")
+        } else {
+            run.model_response(turn).expect_err("refused")
+        };
+        let PromptError::UndispatchableToolCall { call, chat_history } = err else {
+            panic!("expected UndispatchableToolCall, got {err:?}");
+        };
+        match (&content, &call) {
+            (
+                AssistantContent::ToolCall(_),
+                UndispatchableToolCall::Namespaced {
+                    name, namespace, ..
+                },
+            ) => {
+                assert_eq!((name.as_str(), namespace.as_str()), ("add", "math"));
+            }
+            (AssistantContent::CustomToolCall(_), UndispatchableToolCall::Custom { name, .. }) => {
+                assert_eq!(name, "add");
+            }
+            _ => panic!("wrong refusal {call:?} for {content:?}"),
+        }
+        let Some(Message::Assistant { content: last, .. }) = chat_history.last() else {
+            panic!("the diagnostic history ends in the refused turn");
+        };
+        assert!(last.contains(&content));
+        assert!(run.next_step().is_err(), "the run is terminal");
+    }
+}

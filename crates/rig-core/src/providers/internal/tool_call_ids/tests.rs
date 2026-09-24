@@ -2,7 +2,7 @@
 //! from a live provider. Adapter request-boundary tests cover use of this sidecar.
 
 use super::*;
-use crate::message::{ProviderCallId, ToolCallId, ToolFunction, ToolResult};
+use crate::message::{ProviderCallId, ToolCall, ToolCallId, ToolFunction, ToolResult};
 
 fn call(id: ToolCallId, provider: Option<&str>) -> Message {
     Message::Assistant {
@@ -12,6 +12,7 @@ fn call(id: ToolCallId, provider: Option<&str>) -> Message {
             provider: provider.and_then(ProviderCallId::new),
             function: ToolFunction {
                 name: "test".into(),
+                namespace: None,
                 arguments: serde_json::json!({}),
             },
             signature: None,
@@ -26,6 +27,7 @@ fn result(id: ToolCallId, provider: Option<&str>) -> Message {
             call: id,
             provider: provider.and_then(ProviderCallId::new),
             name: "possibly_repaired".into(),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![],
         })],
     }
@@ -155,6 +157,7 @@ fn wire_slot_assignment_is_atomic_and_uses_original_content_order() {
                 "first",
                 ToolFunction {
                     name: "test".into(),
+                    namespace: None,
                     arguments: serde_json::json!({}),
                 },
             )),
@@ -163,6 +166,7 @@ fn wire_slot_assignment_is_atomic_and_uses_original_content_order() {
                 "second",
                 ToolFunction {
                     name: "test".into(),
+                    namespace: None,
                     arguments: serde_json::json!({}),
                 },
             )),
@@ -353,4 +357,23 @@ fn stale_result_alias_cannot_consume_later_provider_id_reuse() {
         ToolCallIds::new(&history),
         Err(ToolCallIdError::DuplicateResult { .. })
     ));
+}
+
+/// Custom calls take part in planning like function calls: their results
+/// pair with them and share their wire handle.
+#[test]
+fn custom_calls_pair_with_their_results() {
+    let custom = crate::message::CustomToolCall::from_dual_wire("", "", "patch", None, "raw");
+    let history = vec![
+        Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::CustomToolCall(custom.clone())],
+        },
+        Message::User {
+            content: vec![UserContent::tool_result_for_custom_call(&custom, vec![])],
+        },
+    ];
+    let ids = ToolCallIds::new(&history).expect("plans");
+    let call = ids.get(0, 0).expect("the call has a handle");
+    assert_eq!(ids.get(1, 0), Some(call), "the result shares it");
 }
