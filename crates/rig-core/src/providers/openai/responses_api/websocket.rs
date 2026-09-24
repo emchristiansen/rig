@@ -1989,6 +1989,89 @@ mod tests {
         assert!(failed.to_string().contains("failed response"));
     }
 
+    /// A tool declared through `additional_params["tools"]` reaches the
+    /// `response.create` frame as the same JSON values the caller wrote: the empty
+    /// namespace description and the explicit `strict: false` both survive. A
+    /// Responses-lite client declares exactly such a namespace, and a provider that
+    /// requires `description` refuses the frame if it is dropped.
+    #[tokio::test]
+    async fn a_declared_tool_reaches_the_response_create_frame_as_written() {
+        let declared = json!([
+            {
+                "type": "namespace",
+                "name": "functions",
+                "description": "",
+                "tools": [{
+                    "type": "function",
+                    "name": "exec_command",
+                    "description": "",
+                    "strict": false,
+                    "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+                }]
+            },
+            {
+                "type": "function",
+                "name": "post_to_bus",
+                "description": "",
+                "strict": false,
+                "parameters": {"type": "object", "properties": {"body": {"type": "string"}}}
+            }
+        ]);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let (frame_tx, frame_rx) = tokio::sync::oneshot::channel::<serde_json::Value>();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("server should accept");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("server should upgrade websocket");
+            let request = socket
+                .next()
+                .await
+                .expect("request should exist")
+                .expect("request should be valid");
+            let payload = request.into_text().expect("request should be text");
+            let frame: serde_json::Value =
+                serde_json::from_str(&payload).expect("frame should be JSON");
+            frame_tx.send(frame).expect("frame should be delivered");
+        });
+
+        let base_url = format!("http://{address}/v1");
+        let client = crate::providers::openai::Client::builder()
+            .api_key("test-key")
+            .base_url(&base_url)
+            .build()
+            .expect("client should build");
+        let model = client.completion_model("gpt-4o");
+        let mut session = client
+            .responses_websocket("gpt-4o")
+            .await
+            .expect("session should connect");
+
+        session
+            .send(
+                model
+                    .completion_request("hello")
+                    .additional_params(json!({ "tools": declared.clone() }))
+                    .build(),
+            )
+            .await
+            .expect("request should send");
+
+        let frame = frame_rx.await.expect("server should capture the frame");
+        assert_eq!(frame["type"], json!("response.create"));
+        assert_eq!(
+            frame["tools"], declared,
+            "the frame must carry the declared tools as the same JSON values"
+        );
+
+        server.await.expect("server task should finish");
+    }
+
     #[tokio::test]
     async fn incomplete_turn_keeps_streamed_partial_output() {
         let listener = TcpListener::bind("127.0.0.1:0")

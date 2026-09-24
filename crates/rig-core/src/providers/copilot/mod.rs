@@ -755,7 +755,7 @@ where
         request.tools = request
             .tools
             .into_iter()
-            .map(responses_api::ResponsesToolDefinition::with_strict)
+            .map(responses_api::ResponsesRequestTool::with_strict)
             .collect();
         Ok(request)
     }

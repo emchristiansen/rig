@@ -66,8 +66,13 @@ pub struct CompletionRequest {
     tool_choice: Option<ToolChoice>,
     /// The tools you want to use. This supports both function tools and hosted tools
     /// such as `web_search`, `file_search`, and `computer_use`.
+    ///
+    /// Tools rig builds from typed definitions come first, then any tools declared
+    /// verbatim through `additional_params["tools"]`, then the model's default tools.
+    /// A declared tool is serialized as the JSON object the caller wrote; see
+    /// [`ResponsesRequestTool`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<ResponsesToolDefinition>,
+    pub tools: Vec<ResponsesRequestTool>,
     /// Additional parameters
     #[serde(flatten)]
     pub additional_parameters: AdditionalParameters,
@@ -93,7 +98,7 @@ impl CompletionRequest {
     /// to the request. These tools are executed by OpenAI's infrastructure, not by Rig's
     /// agent loop.
     pub fn with_tool(mut self, tool: impl Into<ResponsesToolDefinition>) -> Self {
-        self.tools.push(tool.into());
+        self.tools.push(ResponsesRequestTool::Defined(tool.into()));
         self
     }
 
@@ -104,7 +109,11 @@ impl CompletionRequest {
         I: IntoIterator<Item = Tool>,
         Tool: Into<ResponsesToolDefinition>,
     {
-        self.tools.extend(tools.into_iter().map(Into::into));
+        self.tools.extend(
+            tools
+                .into_iter()
+                .map(|tool| ResponsesRequestTool::Defined(tool.into())),
+        );
         self
     }
 }
@@ -909,10 +918,6 @@ impl ResponsesToolDefinition {
         self.config.insert(key.into(), value);
         self
     }
-
-    fn normalize(self) -> Self {
-        self.with_strict()
-    }
 }
 
 impl From<completion::ToolDefinition> for ResponsesToolDefinition {
@@ -924,6 +929,148 @@ impl From<completion::ToolDefinition> for ResponsesToolDefinition {
         } = value;
 
         Self::function(name, description, parameters)
+    }
+}
+
+/// One entry of a Responses request's `tools` array.
+///
+/// Rig builds most tools from typed [`ResponsesToolDefinition`]s, and those
+/// serialize exactly as they always have. A tool supplied through
+/// `additional_params["tools"]` is different: it is the caller's own declaration,
+/// and the provider must receive the JSON values the caller wrote. Round-tripping
+/// it through [`ResponsesToolDefinition`] loses members that type omits when they
+/// are empty or false. An explicit `"description": ""` on a namespace or
+/// `"strict": false` on a function disappears, and a provider that requires the
+/// member then refuses the request. So a declared tool keeps its original JSON
+/// object and serializes that object, while its typed view stays available to
+/// code that inspects or normalizes the request.
+///
+/// The fidelity is of JSON values, not of bytes: key order and whitespace may
+/// change when the object is serialized again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponsesRequestTool {
+    /// A tool rig built from a typed definition.
+    Defined(ResponsesToolDefinition),
+    /// A tool declared verbatim through `additional_params["tools"]`.
+    Declared(DeclaredResponsesTool),
+}
+
+/// A caller-declared tool: the JSON object as written, and its typed view.
+///
+/// Both are fixed at construction and cannot be changed independently, so the
+/// object that is serialized is always the one the typed view was parsed from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredResponsesTool {
+    value: Map<String, Value>,
+    definition: ResponsesToolDefinition,
+}
+
+impl DeclaredResponsesTool {
+    /// Parse one declared tool, keeping the object it came from.
+    ///
+    /// The typed parse still runs, so a declaration that is not a tool object is
+    /// refused as it was before: a non-object, a missing `type`, or a member of
+    /// the wrong JSON type.
+    pub fn from_value(value: Value) -> Result<Self, serde_json::Error> {
+        let Value::Object(object) = value else {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "a Responses tool declaration must be a JSON object",
+            ));
+        };
+        let definition =
+            serde_json::from_value::<ResponsesToolDefinition>(Value::Object(object.clone()))?;
+        Ok(Self {
+            value: object,
+            definition,
+        })
+    }
+
+    /// The JSON object the caller declared, which is what gets serialized.
+    pub fn value(&self) -> &Map<String, Value> {
+        &self.value
+    }
+
+    /// The typed view of the declaration.
+    pub fn definition(&self) -> &ResponsesToolDefinition {
+        &self.definition
+    }
+}
+
+/// The tools declared in `additional_params["tools"]`, each kept as written.
+fn declared_tools(raw: Value) -> Result<Vec<ResponsesRequestTool>, serde_json::Error> {
+    let Value::Array(items) = raw else {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            "`tools` must be a JSON array of tool declarations",
+        ));
+    };
+    items
+        .into_iter()
+        .map(|item| DeclaredResponsesTool::from_value(item).map(ResponsesRequestTool::Declared))
+        .collect()
+}
+
+impl ResponsesRequestTool {
+    /// The typed view of this tool, whichever way it was supplied.
+    pub fn definition(&self) -> &ResponsesToolDefinition {
+        match self {
+            Self::Defined(definition) => definition,
+            Self::Declared(declared) => &declared.definition,
+        }
+    }
+
+    /// Enables strict mode, as [`ResponsesToolDefinition::with_strict`] does.
+    ///
+    /// A declared tool is replaced by its rewritten typed form only when strict
+    /// mode actually changes it, which happens for function tools. A hosted tool
+    /// or a namespace is left untouched and keeps its original JSON.
+    pub fn with_strict(self) -> Self {
+        match self {
+            Self::Defined(definition) => Self::Defined(definition.with_strict()),
+            Self::Declared(declared) => {
+                let rewritten = declared.definition.clone().with_strict();
+                if rewritten == declared.definition {
+                    Self::Declared(declared)
+                } else {
+                    Self::Defined(rewritten)
+                }
+            }
+        }
+    }
+
+    fn normalize(self) -> Self {
+        self.with_strict()
+    }
+}
+
+impl From<ResponsesToolDefinition> for ResponsesRequestTool {
+    fn from(definition: ResponsesToolDefinition) -> Self {
+        Self::Defined(definition)
+    }
+}
+
+impl Serialize for ResponsesRequestTool {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Defined(definition) => definition.serialize(serializer),
+            Self::Declared(declared) => declared.value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ResponsesRequestTool {
+    /// A deserialized request's tools are the JSON a caller wrote, so each one is
+    /// kept as a declaration rather than re-derived from its typed view.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        DeclaredResponsesTool::from_value(value)
+            .map(Self::Declared)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1370,12 +1517,17 @@ pub trait ResponsesProviderExt {
             request,
             system_instructions_placement,
         })?;
-        request.tools.extend(default_tools.iter().cloned());
+        request.tools.extend(
+            default_tools
+                .iter()
+                .cloned()
+                .map(ResponsesRequestTool::Defined),
+        );
         if strict_tools {
             request.tools = request
                 .tools
                 .into_iter()
-                .map(ResponsesToolDefinition::normalize)
+                .map(ResponsesRequestTool::normalize)
                 .collect();
         }
         if stream {
@@ -1504,10 +1656,8 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
         let mut additional_tools = Vec::new();
         if let Some(additional_params_map) = additional_params_payload.as_object_mut() {
             if let Some(raw_tools) = additional_params_map.remove("tools") {
-                additional_tools = serde_json::from_value::<Vec<ResponsesToolDefinition>>(
-                    raw_tools,
-                )
-                .map_err(|err| {
+                // Declared tools keep their JSON objects; see `ResponsesRequestTool`.
+                additional_tools = declared_tools(raw_tools).map_err(|err| {
                     CompletionError::RequestError(
                         format!(
                             "Invalid OpenAI Responses tools payload in additional_params: {err}"
@@ -1554,10 +1704,11 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
         }
 
         let tool_choice = req.tool_choice.map(ToolChoice::try_from).transpose()?;
-        let mut tools: Vec<ResponsesToolDefinition> = req
+        let mut tools: Vec<ResponsesRequestTool> = req
             .tools
             .into_iter()
             .map(ResponsesToolDefinition::from)
+            .map(ResponsesRequestTool::Defined)
             .collect();
         tools.append(&mut additional_tools);
 
@@ -1659,13 +1810,18 @@ where
             request: completion_request,
             system_instructions_placement: self.system_instructions_placement,
         })?;
-        req.tools.extend(self.tools.clone());
+        req.tools.extend(
+            self.tools
+                .iter()
+                .cloned()
+                .map(ResponsesRequestTool::Defined),
+        );
 
         if self.strict_tools {
             req.tools = req
                 .tools
                 .into_iter()
-                .map(ResponsesToolDefinition::normalize)
+                .map(ResponsesRequestTool::normalize)
                 .collect();
         }
 
@@ -4402,7 +4558,7 @@ mod tests {
         let req = CompletionRequest::try_from(("gpt-4o-mini".to_string(), weather_tool_request()))
             .expect("request should convert");
 
-        let tool = &req.tools[0];
+        let tool = req.tools[0].definition();
         assert!(!tool.strict);
         assert_eq!(tool.parameters["required"], json!(["location"]));
         assert!(tool.parameters.get("additionalProperties").is_none());
@@ -4437,7 +4593,7 @@ mod tests {
             .expect("request should convert");
 
         assert_eq!(req.tools.len(), 3);
-        for tool in &req.tools {
+        for tool in req.tools.iter().map(ResponsesRequestTool::definition) {
             assert!(tool.strict, "{} should be strict", tool.name);
             assert_eq!(tool.parameters["additionalProperties"], json!(false));
         }
@@ -4464,7 +4620,7 @@ mod tests {
             .expect("request should convert");
 
         assert_eq!(req.tools.len(), 3);
-        for tool in &req.tools {
+        for tool in req.tools.iter().map(ResponsesRequestTool::definition) {
             assert!(!tool.strict, "{} should not be strict", tool.name);
             assert!(tool.parameters.get("additionalProperties").is_none());
         }
@@ -4485,11 +4641,138 @@ mod tests {
             .create_completion_request(weather_tool_request())
             .expect("request should convert");
 
-        assert!(!req.tools[0].strict);
-        assert!(req.tools[1].strict);
+        assert!(!req.tools[0].definition().strict);
+        assert!(req.tools[1].definition().strict);
         assert_eq!(
-            req.tools[1].parameters["additionalProperties"],
+            req.tools[1].definition().parameters["additionalProperties"],
             json!(false)
+        );
+    }
+
+    /// The declarations a Responses-lite client sends: a namespace whose
+    /// description is the empty string, with a function member, and a top-level
+    /// function whose `strict` is an explicit `false` and whose description is
+    /// empty.
+    fn declared_tools_payload() -> Value {
+        json!([
+            {
+                "type": "namespace",
+                "name": "functions",
+                "description": "",
+                "tools": [{
+                    "type": "function",
+                    "name": "exec_command",
+                    "description": "",
+                    "strict": false,
+                    "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+                }]
+            },
+            {
+                "type": "function",
+                "name": "post_to_bus",
+                "description": "",
+                "strict": false,
+                "parameters": {"type": "object", "properties": {"body": {"type": "string"}}}
+            }
+        ])
+    }
+
+    #[test]
+    fn declared_tools_reach_the_http_body_as_the_caller_wrote_them() {
+        let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-4o-mini")
+            .with_tool(weather_tool_definition());
+
+        let mut request = weather_tool_request();
+        request.additional_params = Some(json!({ "tools": declared_tools_payload() }));
+
+        let req = model
+            .create_completion_request(request)
+            .expect("request should convert");
+        let body = serde_json::to_value(&req).expect("request should serialize");
+        let tools = body["tools"]
+            .as_array()
+            .expect("tools serialize as an array");
+
+        // Typed request tools first, then the declarations, then model defaults.
+        assert_eq!(tools.len(), 4);
+        assert_eq!(tools[0]["name"], json!("get_weather"));
+        assert_eq!(
+            Value::Array(tools[1..3].to_vec()),
+            declared_tools_payload(),
+            "declared tools must reach the provider as the same JSON values, including \
+             the empty descriptions and the explicit `strict: false`"
+        );
+        assert_eq!(tools[3]["name"], json!("get_weather"));
+        // A typed tool still serializes as it always has: no empty members.
+        assert!(tools[0].get("strict").is_none());
+    }
+
+    #[test]
+    fn strict_tools_rewrite_only_declared_functions_and_leave_namespaces_verbatim() {
+        let client = crate::providers::openai::Client::new("dummy-key").expect("client");
+        let model = ResponsesCompletionModel::new(client, "gpt-4o-mini").with_strict_tools();
+
+        let mut request = weather_tool_request();
+        request.additional_params = Some(json!({ "tools": declared_tools_payload() }));
+
+        let req = model
+            .create_completion_request(request)
+            .expect("request should convert");
+        let body = serde_json::to_value(&req).expect("request should serialize");
+        let tools = body["tools"]
+            .as_array()
+            .expect("tools serialize as an array");
+
+        // The namespace is not a function, so strict mode has nothing to rewrite
+        // and it keeps its declared JSON.
+        assert_eq!(tools[1], declared_tools_payload()[0]);
+        // The declared function is rewritten exactly as a typed one would be.
+        assert!(matches!(req.tools[2], ResponsesRequestTool::Defined(_)));
+        assert_eq!(tools[2]["strict"], json!(true));
+        assert_eq!(tools[2]["parameters"]["additionalProperties"], json!(false));
+    }
+
+    #[test]
+    fn a_malformed_tools_payload_is_still_refused() {
+        for payload in [
+            json!({"type": "function"}),
+            json!(["not a tool object"]),
+            json!([{"name": "missing_type"}]),
+        ] {
+            let mut request = weather_tool_request();
+            request.additional_params = Some(json!({ "tools": payload.clone() }));
+            let err = CompletionRequest::try_from(("gpt-4o-mini".to_string(), request))
+                .expect_err("a malformed tools payload must be refused");
+            assert!(
+                err.to_string()
+                    .contains("Invalid OpenAI Responses tools payload in additional_params"),
+                "{payload}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tools_array_survives_a_serialize_deserialize_round_trip() {
+        let mut request = weather_tool_request();
+        request.additional_params = Some(json!({ "tools": declared_tools_payload() }));
+        let req = CompletionRequest::try_from(("gpt-4o-mini".to_string(), request))
+            .expect("request should convert");
+
+        // The whole request does not round-trip (its `input` items are
+        // serialize-only), so the property is asserted on the `tools` array: a
+        // deserialized tool is kept as the JSON it was, and writes back unchanged.
+        let tools = serde_json::to_value(&req.tools).expect("tools should serialize");
+        let reparsed: Vec<ResponsesRequestTool> =
+            serde_json::from_value(tools.clone()).expect("tools should deserialize");
+        assert!(
+            reparsed
+                .iter()
+                .all(|tool| matches!(tool, ResponsesRequestTool::Declared(_)))
+        );
+        assert_eq!(
+            serde_json::to_value(&reparsed).expect("tools should serialize"),
+            tools
         );
     }
 
