@@ -505,26 +505,14 @@ impl StreamedTurnAssembler {
                 .into_iter()
                 .map(AssistantContent::Reasoning)
                 // Text and provider items, in the order the provider sent them.
-                .chain(
-                    provider_choice
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, content)| matches!(content, AssistantContent::ProviderItem(_)))
-                        .map(|(index, content)| (index, content.clone()))
-                        .chain(
-                            provider_choice
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(index, content)| {
-                                    assistant_text_items_from_choice(std::slice::from_ref(content))
-                                        .into_iter()
-                                        .next()
-                                        .map(|text| (index, text))
-                                }),
-                        )
-                        .collect::<std::collections::BTreeMap<_, _>>()
-                        .into_values(),
-                )
+                .chain(provider_choice.iter().filter_map(|content| {
+                    match content {
+                        AssistantContent::ProviderItem(_) => Some(content.clone()),
+                        other => assistant_text_items_from_choice(std::slice::from_ref(other))
+                            .into_iter()
+                            .next(),
+                    }
+                }))
                 .chain(
                     pending_tool_calls
                         .into_iter()
