@@ -2,23 +2,23 @@
   "header": {
     "deliveries": [
       {
-        "batch": 2,
-        "id": 0,
-        "kind": {
-          "delivery": "stream",
-          "items": 21
-        }
-      },
-      {
         "batch": 3,
         "id": 0,
         "kind": {
           "delivery": "stream",
-          "items": 1
+          "items": 17
         }
       },
       {
-        "batch": 3,
+        "batch": 4,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 5
+        }
+      },
+      {
+        "batch": 4,
         "id": 0,
         "kind": {
           "delivery": "outcome"
@@ -102,7 +102,12 @@
             },
             {
               "type": "text",
-              "text": "A glarb-glarb is an ancient farming tool from the planet Jiro."
+              "text": "A glarb-glarb is an ancient farming tool from the planet Jiro.",
+              "additional_params": {
+                "openai_responses": {
+                  "refusal": true
+                }
+              }
             }
           ],
           "usage": {
@@ -181,14 +186,19 @@
         },
         {
           "event": "block_start",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "kind": {
-            "kind": "text"
+            "kind": "text",
+            "additional_params": {
+              "openai_responses": {
+                "refusal": true
+              }
+            }
           }
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": "A"
@@ -196,7 +206,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": " gl"
@@ -204,7 +214,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": "arb"
@@ -212,7 +222,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": "-g"
@@ -220,7 +230,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": "lar"
@@ -228,7 +238,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": "b"
@@ -236,7 +246,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": " is"
@@ -244,7 +254,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": " an"
@@ -252,7 +262,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": " ancient"
@@ -260,7 +270,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": " farming"
@@ -268,7 +278,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": " tool"
@@ -276,7 +286,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": " from"
@@ -284,7 +294,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": " the"
@@ -292,7 +302,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": " planet"
@@ -300,7 +310,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": " J"
@@ -308,7 +318,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": "iro"
@@ -316,7 +326,7 @@
         },
         {
           "event": "block_delta",
-          "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "id": "minted:refusal:0",
           "delta": {
             "delta": "text",
             "text": "."
