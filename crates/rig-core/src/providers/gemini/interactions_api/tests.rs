@@ -1241,6 +1241,7 @@ fn shape(response: &crate::completion::CompletionResponse) -> (Vec<&'static str>
             message::AssistantContent::ToolCall(_) => "tool_call",
             message::AssistantContent::CustomToolCall(_) => "custom_tool_call",
             message::AssistantContent::Image(_) => "image",
+            message::AssistantContent::ProviderItem(_) => "provider_item",
         })
         .collect();
     let signature = response.choice.iter().find_map(|item| match item {

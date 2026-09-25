@@ -1905,6 +1905,7 @@ fn finish_carries_images_after_the_calls_when_regrouping() {
             AssistantContent::CustomToolCall(_) => "custom_call",
             AssistantContent::Image(_) => "image",
             AssistantContent::Reasoning(_) => "reasoning",
+            AssistantContent::ProviderItem(_) => "provider_item",
         })
         .collect();
     assert_eq!(kinds, ["text", "call", "image"], "{:?}", turn.choice);
@@ -2029,4 +2030,30 @@ fn completed_namespaced_and_custom_calls_are_refused_at_their_end() {
         panic!("the refused turn ends the history");
     };
     assert_eq!(last.last(), Some(&content));
+}
+
+/// A turn rebuilt around its reasoning or tool calls keeps the provider's
+/// opaque items, in their order relative to its text: none is dropped.
+#[test]
+fn a_rebuilt_turn_keeps_provider_items_in_their_order_with_the_text() {
+    let item = rig_core::message::ProviderItem::new(json!({"type": "web_search_call"}), "openai");
+    let provider_choice = vec![
+        AssistantContent::Text(Text::from("before")),
+        AssistantContent::ProviderItem(item.clone()),
+        AssistantContent::Text(Text::from("after")),
+    ];
+    let choice = StreamedTurnAssembler::canonical_choice_with(
+        Vec::new(),
+        vec![rig_core::message::Reasoning::new("think")],
+        &provider_choice,
+    );
+    assert_eq!(
+        choice,
+        vec![
+            AssistantContent::Reasoning(rig_core::message::Reasoning::new("think")),
+            AssistantContent::Text(Text::from("before")),
+            AssistantContent::ProviderItem(item),
+            AssistantContent::Text(Text::from("after")),
+        ]
+    );
 }

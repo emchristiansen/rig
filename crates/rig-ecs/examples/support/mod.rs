@@ -97,7 +97,8 @@ impl Serve for Scripted {
                             }
                             AssistantContent::CustomToolCall(_)
                             | AssistantContent::Reasoning(_)
-                            | AssistantContent::Image(_) => {}
+                            | AssistantContent::Image(_)
+                            | AssistantContent::ProviderItem(_) => {}
                         }
                     }
                     let _ = writer

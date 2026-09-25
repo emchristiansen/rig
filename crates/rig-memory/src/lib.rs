@@ -340,6 +340,11 @@ impl HeuristicTokenCounter {
             }
             // A custom tool's input is verbatim text, already its own
             // serialized form: it is charged by its byte length as sent.
+            // An opaque provider item is replayed as its JSON: charged by
+            // that serialized length.
+            AssistantContent::ProviderItem(item) => {
+                self.bytes_to_tokens(item.item.to_string().len())
+            }
             AssistantContent::CustomToolCall(call) => {
                 let name_bytes = call.name.len() + call.namespace.as_ref().map_or(0, String::len);
                 self.bytes_to_tokens(name_bytes + call.input.len())

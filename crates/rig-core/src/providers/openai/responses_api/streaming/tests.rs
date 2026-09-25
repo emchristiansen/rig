@@ -3373,3 +3373,93 @@ fn an_id_less_text_delta_after_a_message_done_never_extends_a_refusal() {
         [("No".to_string(), true), ("Hello".to_string(), false)]
     );
 }
+
+/// Opaque output items (a compaction and an unmodeled hosted-tool item) join
+/// the answer as provider items, in order, and fold alike whether the reply
+/// is unary or streamed. A stream carries them as provider-item blocks, not
+/// as `StreamEvent::Unknown`, and an item without an id is keyed by its
+/// output index.
+#[test]
+fn opaque_output_items_join_the_answer_alike_unary_and_streamed() {
+    let compaction = json!({"type": "compaction", "id": "cmp_1", "encrypted_content": "opaque"});
+    let hosted =
+        json!({"type": "web_search_call", "status": "completed", "action": {"query": "rig"}});
+    let message = json!({
+        "type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+        "content": [{"type": "output_text", "text": "hi", "annotations": []}]
+    });
+    let items = [compaction.clone(), hosted.clone(), message];
+
+    let outputs: Vec<crate::providers::openai::responses_api::Output> =
+        serde_json::from_value(serde_json::Value::Array(items.to_vec()))
+            .expect("the output decodes");
+    let unary = super::super::tests::folded_choice(outputs);
+
+    // The message streams its text as a real reply does: a delta, then its
+    // done item.
+    let text_delta = json!({
+        "type": "response.output_text.delta", "item_id": "msg_1", "output_index": 2,
+        "content_index": 0, "sequence_number": 3, "delta": "hi"
+    });
+    let body: String = items
+        .iter()
+        .enumerate()
+        .flat_map(|(index, item)| {
+            let done = json!({
+                "type": "response.output_item.done",
+                "output_index": index,
+                "sequence_number": index + 1,
+                "item": item
+            });
+            if index == 2 {
+                vec![text_delta.clone(), done]
+            } else {
+                vec![done]
+            }
+        })
+        .chain(std::iter::once(json!({
+            "type": "response.completed",
+            "sequence_number": 9,
+            "response": sample_response(ResponseStatus::Completed),
+        })))
+        .map(|event| format!("data: {event}\n\n"))
+        .collect();
+    let decoded = stream_events_from_sse_body("openai", &body, None).expect("the body decodes");
+    assert!(
+        !decoded
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Unknown(_))),
+        "opaque items are provider-item blocks, not unknown events"
+    );
+    assert!(decoded.iter().any(|event| matches!(
+        event,
+        StreamEvent::BlockStart { id, kind: BlockKind::ProviderItem }
+            if *id == crate::streaming::MintKind::Output.for_wire_index(1)
+    )));
+    let streamed = folded_stream_events(
+        "openai",
+        decoded,
+        &sample_response(ResponseStatus::Completed),
+    )
+    .expect("the stream folds")
+    .choice;
+
+    assert_eq!(unary, streamed);
+    let items: Vec<&crate::message::ProviderItem> = streamed
+        .iter()
+        .filter_map(|part| match part {
+            AssistantContent::ProviderItem(item) => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].item, compaction);
+    assert_eq!(items[1].item, hosted);
+    for item in items {
+        assert_eq!(
+            item.provider.as_deref(),
+            Some("openai"),
+            "stamped with its issuer"
+        );
+    }
+}

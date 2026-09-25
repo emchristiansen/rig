@@ -492,8 +492,9 @@ impl StreamedTurnAssembler {
             })
     }
 
-    /// Combine accepted calls and reasoning with provider text and images in
-    /// canonical order. Without calls or reasoning, preserve the provider choice.
+    /// Combine accepted calls and reasoning with provider text, provider items
+    /// and images in canonical order. Without calls or reasoning, preserve the
+    /// provider choice.
     fn canonical_choice_with(
         pending_tool_calls: Vec<(ToolCall, BlockId)>,
         reasoning: Vec<Reasoning>,
@@ -503,7 +504,27 @@ impl StreamedTurnAssembler {
             let parts = reasoning
                 .into_iter()
                 .map(AssistantContent::Reasoning)
-                .chain(assistant_text_items_from_choice(provider_choice))
+                // Text and provider items, in the order the provider sent them.
+                .chain(
+                    provider_choice
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, content)| matches!(content, AssistantContent::ProviderItem(_)))
+                        .map(|(index, content)| (index, content.clone()))
+                        .chain(
+                            provider_choice
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, content)| {
+                                    assistant_text_items_from_choice(std::slice::from_ref(content))
+                                        .into_iter()
+                                        .next()
+                                        .map(|text| (index, text))
+                                }),
+                        )
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                        .into_values(),
+                )
                 .chain(
                     pending_tool_calls
                         .into_iter()
@@ -642,8 +663,13 @@ impl StreamedTurnAssembler {
                 Ok(vec![StreamedTurnEvent::EmitIngested])
             }
             // The driver and provider aggregate retain message identity and text metadata.
+            // A provider item's blocks too: the aggregate records the item.
             StreamEvent::BlockStart {
-                kind: BlockKind::Message | BlockKind::Text { .. } | BlockKind::ToolCall,
+                kind:
+                    BlockKind::Message
+                    | BlockKind::Text { .. }
+                    | BlockKind::ToolCall
+                    | BlockKind::ProviderItem,
                 ..
             }
             | StreamEvent::BlockDelta {
@@ -651,7 +677,7 @@ impl StreamedTurnAssembler {
                 ..
             }
             | StreamEvent::BlockEnd {
-                end: BlockClose::Text,
+                end: BlockClose::Text | BlockClose::ProviderItem(_),
                 ..
             } => Ok(vec![StreamedTurnEvent::EmitIngested]),
             StreamEvent::BlockStart {
@@ -1029,7 +1055,8 @@ impl StreamedTurnAssembler {
                 AssistantContent::CustomToolCall(_)
                 | AssistantContent::Text(_)
                 | AssistantContent::Reasoning(_)
-                | AssistantContent::Image(_) => true,
+                | AssistantContent::Image(_)
+                | AssistantContent::ProviderItem(_) => true,
             })
             .cloned()
             .collect();

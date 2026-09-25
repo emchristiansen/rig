@@ -232,6 +232,11 @@ impl RigAssistantContent {
             AssistantContent::CustomToolCall(call) => Err(ProviderError::Request(
                 call.refused_by_json_only_wire(BEDROCK_CONVERSE_WIRE).into(),
             )),
+            // An opaque provider item has no representation on this wire.
+            AssistantContent::ProviderItem(item) => Err(ProviderError::Request(
+                rig_core::message::UnreplayableProviderItem::new(BEDROCK_CONVERSE_WIRE, &item)
+                    .into(),
+            )),
             AssistantContent::Reasoning(mut reasoning) => {
                 // Only Redacted payloads represent base64-encoded Converse bytes.
                 // Drop Encrypted payloads rather than reinterpret foreign ciphertext.

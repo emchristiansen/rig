@@ -480,7 +480,8 @@ pub fn invalid_peer_results(
             }
             AssistantContent::Text(_)
             | AssistantContent::Reasoning(_)
-            | AssistantContent::Image(_) => None,
+            | AssistantContent::Image(_)
+            | AssistantContent::ProviderItem(_) => None,
         })
         .collect();
     MessageParts::User { content: parts }
@@ -591,7 +592,8 @@ pub fn partial_turn_at(
             AssistantContent::CustomToolCall(_)
             | AssistantContent::Text(_)
             | AssistantContent::Reasoning(_)
-            | AssistantContent::Image(_) => kept.push(part.clone()),
+            | AssistantContent::Image(_)
+            | AssistantContent::ProviderItem(_) => kept.push(part.clone()),
         }
     }
     (kept, invalid_id.clone())
@@ -616,7 +618,8 @@ pub fn answer_text(content: &[AssistantContent]) -> String {
             AssistantContent::Reasoning(_)
             | AssistantContent::Image(_)
             | AssistantContent::ToolCall(_)
-            | AssistantContent::CustomToolCall(_) => None,
+            | AssistantContent::CustomToolCall(_)
+            | AssistantContent::ProviderItem(_) => None,
         })
         .collect()
 }

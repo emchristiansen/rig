@@ -105,6 +105,9 @@ pub enum CandleError {
     /// namespaced call or a custom call. The shared JSON-only wire refusal.
     #[error(transparent)]
     UnrepresentableToolCall(#[from] rig_core::message::UnrepresentableToolCall),
+    /// A provider item in history, which a local model cannot replay.
+    #[error(transparent)]
+    UnreplayableProviderItem(#[from] rig_core::message::UnreplayableProviderItem),
     /// Caller-controlled content contains a delimiter reserved by the selected chat template.
     #[error("{field} contains reserved protocol marker `{marker}`")]
     ReservedProtocolMarker {

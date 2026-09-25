@@ -198,7 +198,8 @@ fn tool_end(
             AssistantContent::CustomToolCall(_)
             | AssistantContent::Text(_)
             | AssistantContent::Reasoning(_)
-            | AssistantContent::Image(_) => None,
+            | AssistantContent::Image(_)
+            | AssistantContent::ProviderItem(_) => None,
         }))
 }
 
