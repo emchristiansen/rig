@@ -182,3 +182,58 @@ fn lifecycle_bookkeeping_is_not_boundary_content() {
         },
     ]]);
 }
+
+#[test]
+fn declared_indexed_reasoning_interleaves_across_batch_drains() {
+    let mut laws = super::SequenceLaws::default();
+    let mut out = AdapterOutput::new();
+    let key = BlockId::minted(MintKind::Reasoning, 0);
+    out.declare_indexed_reasoning(&key);
+    out.reasoning_delta(&key, None, "indexed");
+    laws.check_batch(&out);
+    out.drain().for_each(drop);
+    out.push(Ok(text("visible")));
+    laws.check_batch(&out);
+    out.drain().for_each(drop);
+    out.reasoning_end(key, None, None, true);
+    laws.check_batch(&out);
+}
+
+#[test]
+#[should_panic(expected = "sequence-law violation (boundary)")]
+fn indexed_declaration_does_not_exempt_another_minted_key() {
+    let mut laws = super::SequenceLaws::default();
+    let mut out = AdapterOutput::new();
+    let declared = BlockId::minted(MintKind::Reasoning, 1);
+    out.declare_indexed_reasoning(&declared);
+    out.reasoning_delta(&declared, None, "indexed");
+    out.push(Ok(minted_delta()));
+    laws.check_batch(&out);
+    out.drain().for_each(drop);
+    out.push(Ok(text("visible")));
+    laws.check_batch(&out);
+}
+
+#[test]
+#[should_panic(expected = "sequence-law violation (boundary)")]
+fn indexed_declaration_is_not_retroactive() {
+    let mut laws = super::SequenceLaws::default();
+    let mut out = AdapterOutput::new();
+    out.push(Ok(minted_delta()));
+    laws.check_batch(&out);
+    out.drain().for_each(drop);
+    out.declare_indexed_reasoning(&BlockId::minted(MintKind::Reasoning, 0));
+    out.push(Ok(text("visible")));
+    laws.check_batch(&out);
+}
+
+#[test]
+#[should_panic(expected = "sequence-law violation (boundary)")]
+fn indexed_declaration_cannot_retroactively_exempt_the_current_batch() {
+    let mut laws = super::SequenceLaws::default();
+    let mut out = AdapterOutput::new();
+    out.push(Ok(minted_delta()));
+    out.declare_indexed_reasoning(&BlockId::minted(MintKind::Reasoning, 0));
+    out.push(Ok(text("visible")));
+    laws.check_batch(&out);
+}

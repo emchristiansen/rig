@@ -234,6 +234,63 @@ fn gemini_interactions_policy_requires_api_key_header() {
     assert!(required_headers_present(policy, &request.headers));
 }
 
+/// A request whose credential a credential source stamped at send time
+/// reaches the recorder exactly as a statically encoded one does, as ordinary
+/// request headers, and the recorder keeps neither the token nor the account
+/// it names: only allow-listed request headers are recorded.
+#[tokio::test]
+async fn direct_recorder_keeps_no_credential_a_source_stamped() {
+    let policy =
+        CassettePolicy::for_scenario("chatgpt", "agent/completion_smoke", ReplayMatching::Ordered);
+    let interactions = Arc::new(Mutex::new(Vec::new()));
+    let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
+    let recorder = DirectRecorder {
+        interactions: interactions.clone(),
+        policy,
+        ledger: Arc::new(relay::LedgerTarget {
+            path: ledger_dir.path().join("ledger.jsonl"),
+            provider: "chatgpt".to_owned(),
+            scenario: "agent/completion_smoke".to_owned(),
+            origin: "https://chatgpt.com".to_owned(),
+        }),
+    };
+
+    recorder
+        .record_http_interaction(
+            DirectHttpRequest {
+                method: "POST",
+                uri: "https://chatgpt.com/backend-api/codex/responses",
+                headers: [
+                    ("authorization", "Bearer source-token-rotated"),
+                    ("chatgpt-account-id", "source-account"),
+                    ("content-type", "application/json"),
+                ],
+                body: br#"{"ok":true}"#,
+            },
+            DirectHttpResponse {
+                status: 200,
+                headers: [("content-type", "application/json")],
+                body: br#"{"ok":true}"#,
+            },
+        )
+        .await;
+
+    let interactions = interactions.lock().await;
+    let interaction = interactions
+        .first()
+        .expect("interaction should be recorded");
+    let recorded: Vec<&str> = interaction
+        .when
+        .header
+        .iter()
+        .map(|header| header.name.as_str())
+        .collect();
+    assert_eq!(recorded, vec!["content-type"]);
+    let rendered = format!("{interaction:?}");
+    assert!(!rendered.contains("source-token-rotated"), "{rendered}");
+    assert!(!rendered.contains("source-account"), "{rendered}");
+}
+
 #[tokio::test]
 async fn direct_recorder_omits_sigv4_headers() {
     let policy =
@@ -1025,4 +1082,108 @@ then:
         cassette,
         "scrubbing is idempotent"
     );
+}
+
+/// A source that always supplies `source-secret-token` for `source-account`.
+struct FixedSource;
+
+impl rig_core::wire::CredentialSource for FixedSource {
+    fn current(
+        &self,
+    ) -> rig_core::wasm_compat::WasmBoxedFuture<
+        '_,
+        Result<rig_core::wire::Credential, rig_core::wire::CredentialSourceError>,
+    > {
+        Box::pin(async {
+            Ok(rig_core::wire::Credential::new("source-secret-token")
+                .with_account_id("source-account"))
+        })
+    }
+}
+
+/// End to end through the driver: a credential a source stamps at send time
+/// reaches the upstream, and the recording made of that exchange keeps
+/// neither its token nor either account.
+#[tokio::test]
+async fn a_source_credential_sent_through_the_driver_is_never_recorded() {
+    const CHAT_REPLY: &str = r#"{"id":"chatcmpl-1","object":"chat.completion","created":0,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+    let received = Arc::new(std::sync::Mutex::new(Vec::<axum::http::HeaderMap>::new()));
+    let seen = received.clone();
+    let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+        let seen = seen.clone();
+        async move {
+            seen.lock().expect("unpoisoned").push(headers);
+            (
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                CHAT_REPLY,
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a local port");
+    let address = listener.local_addr().expect("its address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let policy =
+        CassettePolicy::for_scenario("openai", "agent/completion_smoke", ReplayMatching::Ordered);
+    let interactions = Arc::new(Mutex::new(Vec::new()));
+    let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
+    let recorder = DirectRecorder {
+        interactions: interactions.clone(),
+        policy,
+        ledger: Arc::new(relay::LedgerTarget {
+            path: ledger_dir.path().join("ledger.jsonl"),
+            provider: "openai".to_owned(),
+            scenario: "agent/completion_smoke".to_owned(),
+            origin: format!("http://{address}"),
+        }),
+    };
+    let provider = rig_core::providers::openai::OpenAI::new("static-key")
+        .with_base_url(format!("http://{address}/v1"))
+        .with_account_id("static-account")
+        .with_credential_source(FixedSource);
+    let response = {
+        use rig_core::completion::CompletionModel as _;
+        rig_core::driver::Bound::new(
+            provider.chat("gpt-4o"),
+            DirectRecordingHttpClient::new(Some(recorder)),
+        )
+        .completion(rig_core::completion::CompletionRequest {
+            model: None,
+            chat_history: vec![rig_core::message::Message::user("hi")],
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        })
+        .await
+    };
+    response.expect("the local upstream answers");
+
+    let received = received.lock().expect("unpoisoned").clone();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0]["authorization"], "Bearer source-secret-token");
+    assert_eq!(received[0]["chatgpt-account-id"], "source-account");
+
+    let interactions = interactions.lock().await;
+    assert_eq!(interactions.len(), 1, "the exchange was recorded");
+    let rendered = format!("{:?}", *interactions);
+    for secret in [
+        "source-secret-token",
+        "source-account",
+        "static-key",
+        "static-account",
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "{secret} was recorded: {rendered}"
+        );
+    }
 }

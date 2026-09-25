@@ -1652,6 +1652,7 @@ pub mod interactions_api_types {
         type Error = message::MessageError;
 
         fn try_from(content: message::AssistantContent) -> Result<Self, Self::Error> {
+            crate::providers::internal::refuse_opaque_responses_part(&content, INTERACTIONS_WIRE)?;
             match content {
                 message::AssistantContent::Text(message::Text { text, .. }) => {
                     Ok(Self::Text(TextContent {
@@ -1679,18 +1680,30 @@ pub mod interactions_api_types {
                     // which the API rejects.
                     let signature = content.iter().find_map(|part| match part {
                         message::ReasoningContent::Text { signature, .. } => signature.clone(),
-                        message::ReasoningContent::Summary(_)
+                        message::ReasoningContent::OpaqueSummary(_)
+                        | message::ReasoningContent::OpaqueContent(_)
+                        | message::ReasoningContent::Summary(_)
                         | message::ReasoningContent::Encrypted(_)
                         | message::ReasoningContent::Redacted { .. } => None,
                     });
                     let summary: Vec<ThoughtSummaryContent> = content
                         .into_iter()
-                        .map(|part| match part {
-                            message::ReasoningContent::Text { text, .. }
-                            | message::ReasoningContent::Summary(text)
-                            | message::ReasoningContent::Encrypted(text) => text,
-                            message::ReasoningContent::Redacted { data } => data,
+                        .map(|part| {
+                            Ok(match part {
+                                message::ReasoningContent::OpaqueSummary(_)
+                                | message::ReasoningContent::OpaqueContent(_) => {
+                                    return Err(message::UnrepresentableOpaqueContent::new(
+                                        INTERACTIONS_WIRE,
+                                    ));
+                                }
+                                message::ReasoningContent::Text { text, .. }
+                                | message::ReasoningContent::Summary(text)
+                                | message::ReasoningContent::Encrypted(text) => text,
+                                message::ReasoningContent::Redacted { data } => data,
+                            })
                         })
+                        .collect::<Result<Vec<_>, message::UnrepresentableOpaqueContent>>()?
+                        .into_iter()
                         .filter(|text| !text.is_empty())
                         .map(|text| {
                             ThoughtSummaryContent::Text(TextContent {

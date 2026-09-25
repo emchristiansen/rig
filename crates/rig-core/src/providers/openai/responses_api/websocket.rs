@@ -117,18 +117,60 @@ enum ResponsesWebSocketClientEventKind {
 }
 
 /// A protocol error event emitted by OpenAI WebSocket mode.
+///
+/// The Codex backend wraps HTTP-shaped failures in this event: a top-level
+/// `status` (also spelled `status_code`), the `error` object, and a
+/// `headers` map that carries its `x-codex-*` rate-limit values. Every field
+/// but the tag is optional, and unmodelled top-level fields are kept in
+/// `extra`, so the event is carried whole rather than trimmed to a message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponsesWebSocketErrorEvent {
     /// The event type.
     #[serde(rename = "type")]
     pub kind: ResponsesWebSocketErrorEventKind,
-    /// The provider error payload.
+    /// The HTTP status the provider reports for this failure, when it does.
+    /// A number no HTTP status can be refuses the event as malformed.
+    #[serde(
+        default,
+        alias = "status_code",
+        deserialize_with = "http_status",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub status: Option<u16>,
+    /// The provider error payload; empty when the event carries none,
+    /// whether the field is missing or explicitly `null`.
+    #[serde(
+        default,
+        deserialize_with = "crate::json_utils::null_or_default",
+        skip_serializing_if = "ResponsesWebSocketErrorPayload::is_empty"
+    )]
     pub error: ResponsesWebSocketErrorPayload,
+    /// Response headers the provider reports with this failure, when it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Map<String, Value>>,
+    /// Any other top-level fields supplied by the provider.
+    #[serde(flatten, default)]
+    pub extra: Map<String, Value>,
 }
 
 impl std::fmt::Display for ResponsesWebSocketErrorEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.error.fmt(f)
+    }
+}
+
+/// An error event's reported status: absent or `null` is none, and a number
+/// is kept only when it is a valid HTTP status. Anything else is a malformed
+/// known field, refused with a typed decode error rather than read as none.
+fn http_status<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<u16>::deserialize(deserializer)? {
+        Some(status) if http::StatusCode::from_u16(status).is_err() => Err(
+            serde::de::Error::custom(format!("`{status}` is not an HTTP status")),
+        ),
+        status => Ok(status),
     }
 }
 
@@ -153,6 +195,13 @@ pub struct ResponsesWebSocketErrorPayload {
     pub extra: Map<String, Value>,
 }
 
+impl ResponsesWebSocketErrorPayload {
+    /// Whether the payload carries nothing: no code, no message, no extras.
+    pub fn is_empty(&self) -> bool {
+        self.code.is_none() && self.message.is_none() && self.extra.is_empty()
+    }
+}
+
 impl std::fmt::Display for ResponsesWebSocketErrorPayload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (&self.code, &self.message) {
@@ -171,25 +220,130 @@ pub struct ResponsesWebSocketDoneEvent {
     #[serde(rename = "type")]
     pub kind: ResponsesWebSocketDoneEventKind,
     /// The provider payload for the finished response.
-    pub response: Value,
+    pub response: ResponsesWebSocketDoneResponse,
+}
+
+/// A validated WebSocket terminal object, including supported sparse replies.
+/// Every modeled structural field is checked when present. Unknown fields and
+/// optional echoed metadata retain the full response decoder's leniency.
+#[derive(Debug, Clone)]
+pub struct ResponsesWebSocketDoneResponse {
+    raw: Map<String, Value>,
+    id: String,
+    status: ResponseStatus,
+    full: Option<Box<CompletionResponse>>,
+}
+
+impl ResponsesWebSocketDoneResponse {
+    /// The complete provider object, including fields the client does not model.
+    #[must_use]
+    pub fn as_object(&self) -> &Map<String, Value> {
+        &self.raw
+    }
+
+    /// The provider's response identifier.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The provider's status, including future string values.
+    #[must_use]
+    pub fn status(&self) -> &ResponseStatus {
+        &self.status
+    }
+}
+
+impl Serialize for ResponsesWebSocketDoneResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.raw.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ResponsesWebSocketDoneResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Map::<String, Value>::deserialize(deserializer)?;
+        let id = serde_json::from_value(
+            raw.get("id")
+                .cloned()
+                .ok_or_else(|| <D::Error as serde::de::Error>::missing_field("id"))?,
+        )
+        .map_err(serde::de::Error::custom)?;
+        let status = serde_json::from_value(
+            raw.get("status")
+                .cloned()
+                .ok_or_else(|| <D::Error as serde::de::Error>::missing_field("status"))?,
+        )
+        .map_err(serde::de::Error::custom)?;
+
+        // These are CompletionResponseWire's structural fields and exact types;
+        // metadata and its deliberately permissive reasoning echo stay raw.
+        validate_done_field::<super::ResponseObject>(&raw, "object")
+            .and_then(|()| validate_done_field::<u64>(&raw, "created_at"))
+            .and_then(|()| validate_done_field::<String>(&raw, "model"))
+            .and_then(|()| validate_done_field::<Option<super::ResponseError>>(&raw, "error"))
+            .and_then(|()| {
+                validate_done_field::<Option<super::IncompleteDetailsReason>>(
+                    &raw,
+                    "incomplete_details",
+                )
+            })
+            .and_then(|()| validate_done_field::<Option<String>>(&raw, "instructions"))
+            .and_then(|()| validate_done_field::<Option<u64>>(&raw, "max_output_tokens"))
+            .and_then(|()| validate_done_field::<Option<super::ResponsesUsage>>(&raw, "usage"))
+            .and_then(|()| validate_done_field::<Vec<super::Output>>(&raw, "output"))
+            .and_then(|()| {
+                validate_done_field::<Vec<super::ResponsesToolDefinition>>(&raw, "tools")
+            })
+            .map_err(serde::de::Error::custom)?;
+
+        let full = if ["id", "object", "created_at", "status", "model"]
+            .iter()
+            .all(|key| raw.contains_key(*key))
+        {
+            Some(Box::new(
+                serde_json::from_value(Value::Object(raw.clone()))
+                    .map_err(serde::de::Error::custom)?,
+            ))
+        } else {
+            None
+        };
+        Ok(Self {
+            raw,
+            id,
+            status,
+            full,
+        })
+    }
+}
+
+fn validate_done_field<T: serde::de::DeserializeOwned>(
+    raw: &Map<String, Value>,
+    field: &str,
+) -> Result<(), serde_json::Error> {
+    if let Some(value) = raw.get(field) {
+        serde_json::from_value::<T>(value.clone()).map_err(|error| {
+            <serde_json::Error as serde::de::Error>::custom(format!(
+                "response.done.response.{field}: {error}"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 impl ResponsesWebSocketDoneEvent {
     /// Returns the response ID if the payload includes one.
     #[must_use]
     pub fn response_id(&self) -> Option<&str> {
-        self.response.get("id").and_then(Value::as_str)
+        Some(self.response.id())
     }
 
-    fn status(&self) -> Option<ResponseStatus> {
-        self.response
-            .get("status")
-            .cloned()
-            .and_then(|status| serde_json::from_value(status).ok())
+    fn status(&self) -> &ResponseStatus {
+        self.response.status()
     }
 
     fn as_completion_response(&self) -> Option<CompletionResponse> {
-        serde_json::from_value(self.response.clone()).ok()
+        self.response.full.as_deref().cloned()
     }
 }
 
@@ -575,7 +729,8 @@ impl ResponsesWebSocketSession {
     where
         W: WebSocketClientExt,
     {
-        let request = websocket_request(&wire)?;
+        let mut request = websocket_request(&wire)?;
+        authorize_handshake(&wire, &mut request).await?;
         let socket = connect(backend, request, connect_timeout).await?;
         Ok(Self::from_connection(wire, socket, event_timeout))
     }
@@ -634,7 +789,7 @@ impl ResponsesWebSocketSession {
         options: ResponsesWebSocketCreateOptions,
     ) -> Result<(), ProviderError> {
         self.ensure_can_send()?;
-        let request = self.prepare_request(completion_request, Chaining::Automatic)?;
+        let request = self.prepare_request(completion_request, Chaining::Automatic, None)?;
         let frame = encode_frame(&request, options.generate, |_| Ok(()))?;
         self.send_encoded(request, frame).await
     }
@@ -954,11 +1109,14 @@ impl ResponsesWebSocketSession {
         &self,
         completion_request: crate::completion::CompletionRequest,
         chaining: Chaining,
+        identity: Option<&super::codex_identity::CodexIdentity>,
     ) -> Result<crate::providers::openai::responses_api::CompletionRequest, ProviderError> {
         // Direct session requests bypass builder validation.
         completion_request.validate_message_content()?;
 
-        let mut request = self.wire.responses_request(completion_request, false)?;
+        let mut request = self
+            .wire
+            .responses_request(completion_request, false, identity)?;
 
         // WebSocket mode is always event-driven, so these HTTP/SSE-specific flags
         // are ignored by the provider and only add noise to the payload.
@@ -1060,9 +1218,9 @@ impl ResponsesWebSocketSession {
                 }
                 ResponsesWebSocketEvent::Error(error) => {
                     // Genuine provider error event: preserve the serialized payload
-                    // (code + message + any extra fields) so provider_response_json()
-                    // parses it, matching the response.failed path. No HTTP status on
-                    // the websocket stream, so status: None.
+                    // (status, code, message, headers and any extra fields) so
+                    // provider_response_json() parses it, matching the
+                    // response.failed path. A status the event reports is kept.
                     return Err(provider_error_from_event(&error));
                 }
                 // Unknown frames retain their raw payload through decoder passthrough.
@@ -1108,29 +1266,25 @@ impl ResponsesWebSocketSession {
             ResponsesWebSocketEvent::Done(done) => {
                 let response_id = done.response_id().map(str::to_owned);
                 let ending = match done.status() {
-                    Some(ResponseStatus::Completed) => {
+                    ResponseStatus::Completed => {
                         if let Some(response_id) = &response_id {
                             self.previous_response_id = Some(response_id.clone());
                         }
                         TurnEnding::Completed { response_id }
                     }
-                    Some(ResponseStatus::Incomplete) => {
+                    ResponseStatus::Incomplete => {
                         if let Some(response_id) = &response_id {
                             self.previous_response_id = Some(response_id.clone());
                         }
                         TurnEnding::Incomplete { response_id }
                     }
-                    Some(
-                        ResponseStatus::Failed
-                        | ResponseStatus::Cancelled
-                        | ResponseStatus::Other(_),
-                    ) => {
+                    ResponseStatus::Failed
+                    | ResponseStatus::Cancelled
+                    | ResponseStatus::Other(_) => {
                         self.previous_response_id = None;
                         TurnEnding::NotCompleted
                     }
-                    Some(ResponseStatus::InProgress | ResponseStatus::Queued) | None => {
-                        TurnEnding::NotCompleted
-                    }
+                    ResponseStatus::InProgress | ResponseStatus::Queued => TurnEnding::NotCompleted,
                 };
                 self.pending_done_response_id = None;
                 ending
@@ -1287,6 +1441,7 @@ fn fold_events(
         raw: serde_json::to_value(response)?,
         // The websocket carries no reply headers past the handshake.
         provider_request_id: None,
+        response_headers: crate::completion::ProviderResponseHeaders::new(),
     })
 }
 
@@ -1320,12 +1475,40 @@ fn response_error_message(fallback: &str) -> String {
     format!("OpenAI websocket returned a {fallback}")
 }
 
-/// Preserve an error event as reserialized provider JSON without an HTTP status.
-/// Fall back to its display text if serialization fails.
+/// Preserve an error event as reserialized provider JSON. When the event
+/// reports an HTTP status, the error carries it, with the event's headers, so
+/// it classifies by status as the same failure over HTTP would; otherwise it
+/// has none. Fall back to its display text if serialization fails.
 fn provider_error_from_event(error: &ResponsesWebSocketErrorEvent) -> ProviderError {
-    ProviderError::from_provider_body(
-        serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()),
-    )
+    let body = serde_json::to_string(&error).unwrap_or_else(|_| error.to_string());
+    match error
+        .status
+        .and_then(|status| http::StatusCode::from_u16(status).ok())
+    {
+        Some(status) => ProviderError::from_http_response(status, body)
+            .with_response_headers(error.headers.as_ref().map(header_map_from_json)),
+        None => ProviderError::from_provider_body(body),
+    }
+}
+
+/// Converts an error event's JSON `headers` map to an HTTP header map. String
+/// values are taken as-is and scalars by their JSON text. An entry that is not
+/// a valid header name or value is left out of the map; it is still present
+/// in the preserved body, which keeps the whole event.
+fn header_map_from_json(headers: &Map<String, Value>) -> http::HeaderMap {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            Some((
+                http::HeaderName::from_bytes(name.as_bytes()).ok()?,
+                http::HeaderValue::from_str(&text).ok()?,
+            ))
+        })
+        .collect()
 }
 
 /// Decode WebSocket error and done events or delegate to Responses classification.
@@ -1408,6 +1591,22 @@ fn websocket_request(wire: &Responses) -> Result<http_client::Request<NoBody>, E
     request.body(NoBody).map_err(|error| {
         EncodeError::request(format!("Failed to build OpenAI websocket request: {error}"))
     })
+}
+
+/// Stamp the wire's send-time credential onto a handshake about to be sent,
+/// when the wire reads one from a credential source. The one authorization
+/// step of every managed websocket connect, plain and Codex alike: the source
+/// is read once, before anything reaches the backend, a failing source
+/// refuses the connect, and the open connection keeps the credential it was
+/// opened with, so a rotation takes effect at the next connect.
+pub(super) async fn authorize_handshake(
+    wire: &Responses,
+    request: &mut http_client::Request<NoBody>,
+) -> Result<(), ProviderError> {
+    if let Some(stamp) = wire.provider.credential_stamp() {
+        stamp.authorize(request.headers_mut()).await?;
+    }
+    Ok(())
 }
 
 /// Open a connection for `request` over `backend`, mapping a rejected upgrade

@@ -731,3 +731,44 @@ fn re_emitted_namespaced_and_custom_calls_fold_back_unchanged() {
     };
     assert_eq!(response.choice, choice);
 }
+
+/// A completion's captured success-reply headers survive both serving
+/// conversions: into the stream's terminal record, and folded back from it.
+#[test]
+fn captured_response_headers_survive_both_serving_conversions() {
+    let headers: crate::completion::ProviderResponseHeaders = [
+        ("x-codex-credits-balance", "10, 20"),
+        ("x-codex-primary-used-percent", "12.5"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    .collect();
+    let response = CompletionResponse::new(
+        vec![crate::message::AssistantContent::text("hi")],
+        Default::default(),
+        "test",
+        serde_json::json!({}),
+    )
+    .with_provider_response_headers(headers.clone());
+
+    let events = block_on(
+        Reply::Outcome(Ok(Outcome::Completion(response)))
+            .into_stream()
+            .collect::<Vec<_>>(),
+    );
+    let terminal = events
+        .iter()
+        .find_map(|item| match item {
+            Ok(StreamEvent::Final(terminal)) => Some(terminal.clone()),
+            _ => None,
+        })
+        .expect("the stream ends with a terminal record");
+    assert_eq!(terminal.provider_response_headers, headers);
+
+    let folded = block_on(Reply::Stream(Box::pin(futures::stream::iter(events))).into_outcome())
+        .expect("the stream folds");
+    let Outcome::Completion(folded) = folded else {
+        panic!("expected a completion, got {folded:?}");
+    };
+    assert_eq!(folded.provider_response_headers, headers);
+}

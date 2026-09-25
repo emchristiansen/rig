@@ -64,6 +64,7 @@ pub const PROVIDER_NAME: &str = "chatgpt";
 pub const DIALECT: Dialect = Dialect {
     base_url_env: Some("CHATGPT_API_BASE"),
     request_id_header: Some("x-request-id"),
+    response_header_prefix: Some("x-codex-"),
     quirks: Quirks {
         completion_route: Route::Responses,
         output_cap: OutputCap::OpenAiReasoningFamilies,

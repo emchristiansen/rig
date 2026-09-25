@@ -54,7 +54,8 @@ impl Operation for Completion {
         Some(StreamEvent::Unknown(payload))
     }
 
-    /// Reasoning another wire issued is omitted; see
+    /// Known-only reasoning another wire issued is omitted; opaque parts reach
+    /// the encoder for explicit refusal. See
     /// [`crate::message::retain_replayable_reasoning`].
     fn scope_to_wire(request: &mut Self::Request, issuers: &[&str]) {
         crate::message::retain_replayable_reasoning(&mut request.chat_history, issuers);
@@ -70,6 +71,18 @@ impl Operation for Completion {
             && terminal.provider_request_id.is_none()
         {
             terminal.provider_request_id = request_id.clone();
+        }
+    }
+
+    fn stamp_response_headers(
+        event: &mut Self::Event,
+        headers: &crate::completion::ProviderResponseHeaders,
+    ) {
+        // As with the request id, the terminal's own headers win.
+        if let StreamEvent::Final(terminal) = event
+            && terminal.provider_response_headers.is_empty()
+        {
+            terminal.provider_response_headers = headers.clone();
         }
     }
 
@@ -188,9 +201,14 @@ impl Fold<Completion> for CompletionFold {
             &issuer,
             reply.raw,
         );
-        // The terminal's own id wins; the reply headers only fill a gap.
-        if response.provider_request_id.is_none() {
-            Ok(response.with_optional_provider_request_id(reply.provider_request_id))
+        // The terminal's own metadata wins; the reply headers only fill a gap.
+        let response = if response.provider_request_id.is_none() {
+            response.with_optional_provider_request_id(reply.provider_request_id)
+        } else {
+            response
+        };
+        if response.provider_response_headers.is_empty() {
+            Ok(response.with_provider_response_headers(reply.response_headers))
         } else {
             Ok(response)
         }
@@ -224,9 +242,32 @@ pub struct AdapterOutput {
     /// Blocks a start was emitted for (or that a delta opened leniently),
     /// so a delta never precedes its block's start on the wire we emit.
     opened: std::collections::HashSet<BlockId>,
+    /// Explicitly indexed reasoning assemblies may interleave other content.
+    /// This decoder declaration is local bookkeeping, never an event field.
+    indexed_reasoning: std::collections::HashSet<BlockId>,
 }
 
 impl AdapterOutput {
+    /// Declare a bounded wire slot before its first reasoning start or delta.
+    /// The declaration survives batch drains for the lifetime of this stream.
+    pub(crate) fn declare_indexed_reasoning(&mut self, id: &BlockId) {
+        // A late declaration cannot excuse a boundary-less block already
+        // emitted in this batch (including raw deltas without a start).
+        if self.opened.contains(id)
+            || self.items.iter().any(|item| {
+                matches!(item, Ok(event)
+                if event.block_id() == Some(id) && Self::is_reasoning_event(event))
+            })
+        {
+            return;
+        }
+        self.indexed_reasoning.insert(id.clone());
+    }
+
+    pub(crate) fn is_indexed_reasoning(&self, id: &BlockId) -> bool {
+        self.indexed_reasoning.contains(id)
+    }
+
     /// An empty output buffer.
     pub fn new() -> Self {
         Self::default()

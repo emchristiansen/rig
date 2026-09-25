@@ -1,7 +1,9 @@
 use super::*;
 use crate::completion::{AssistantContent, FinishReason, Message};
+use crate::message;
 use crate::providers::chatgpt;
 use crate::providers::openai::OpenAI;
+use crate::providers::openai::responses_api::openapi_schema::{self, Schema};
 use crate::providers::openai::responses_api::websocket::test_connection::Script;
 use crate::providers::openai::responses_api::{
     CompletionResponse, IncompleteDetailsReason, InputItem, OutputTokensDetails, ResponseObject,
@@ -47,6 +49,39 @@ fn delta(text: &str) -> InputDelta {
     let items = Vec::<InputItem>::try_from(Message::user(text))
         .expect("a user message converts into input items");
     InputDelta::new(items).expect("the delta carries an item")
+}
+
+fn image_message(text: &str) -> Message {
+    Message::User {
+        content: vec![
+            message::UserContent::text(text),
+            message::UserContent::Image(message::Image {
+                data: message::DocumentSourceKind::Url("https://example.test/image.png".to_owned()),
+                media_type: None,
+                detail: Some(message::ImageDetail::High),
+                additional_params: None,
+            }),
+        ],
+    }
+}
+
+fn image_request(text: &str) -> completion::CompletionRequest {
+    completion::CompletionRequest {
+        chat_history: vec![image_message(text)],
+        ..user_request(text)
+    }
+}
+
+fn image_delta(text: &str) -> InputDelta {
+    let items = Vec::<InputItem>::try_from(image_message(text))
+        .expect("a user image message converts into input items");
+    InputDelta::new(items).expect("the image delta carries an item")
+}
+
+fn is_string_map(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|map| map.values().all(serde_json::Value::is_string))
 }
 
 fn response(response_id: &str, status: ResponseStatus) -> CompletionResponse {
@@ -146,14 +181,40 @@ fn refusal(error: &ProviderError) -> IncrementalSendRefused {
 
 // --- identity ---------------------------------------------------------------
 
-/// The handshake is exactly the Codex set: the wire's credential, the account,
-/// the dashed identity headers, the correlation header and the beta opt-in —
-/// nothing else (the backend adds the websocket handshake headers itself).
+/// The caller identity a wire's HTTP requests carry: its `originator` and
+/// `user-agent` header values.
+fn http_caller_identity(wire: &Responses) -> (String, String) {
+    let request = wire
+        .provider
+        .headers(http::Request::get("https://example.invalid/"))
+        .body(())
+        .expect("builds");
+    let value = |name: &str| {
+        request.headers()[name]
+            .to_str()
+            .expect("ascii header")
+            .to_owned()
+    };
+    (value("originator"), value("user-agent"))
+}
+
+/// The handshake is exactly the Codex set: the wire's credential, its caller
+/// identity (the same `originator` and `user-agent` its HTTP requests carry),
+/// the account, the dashed identity headers, the correlation header and the
+/// beta opt-in — nothing else (the backend adds the websocket handshake
+/// headers itself). Strict, so a header added to the HTTP set later cannot
+/// reach the handshake unnoticed.
 #[test]
 fn the_handshake_carries_exactly_the_codex_identity_headers() {
     let identity = CodexIdentity::generate();
+    let wire = codex_wire();
+    let (originator, user_agent) = http_caller_identity(&wire);
+    assert_eq!(
+        originator, "rig",
+        "the ChatGPT dialect's default originator"
+    );
     let request = identity
-        .handshake_request(&codex_wire())
+        .handshake_request(&wire)
         .expect("handshake request should build");
 
     assert_eq!(request.method(), http::Method::GET);
@@ -176,6 +237,8 @@ fn the_handshake_carries_exactly_the_codex_identity_headers() {
     let mut expected = vec![
         ("authorization".to_owned(), format!("Bearer {ACCESS_TOKEN}")),
         ("chatgpt-account-id".to_owned(), ACCOUNT_ID.to_owned()),
+        ("originator".to_owned(), originator),
+        ("user-agent".to_owned(), user_agent),
         (
             "openai-beta".to_owned(),
             "responses_websockets=2026-02-06".to_owned(),
@@ -189,6 +252,26 @@ fn the_handshake_carries_exactly_the_codex_identity_headers() {
     ];
     expected.sort();
     assert_eq!(headers, expected);
+}
+
+/// An originator set on the wire reaches the handshake exactly as it reaches
+/// the wire's HTTP requests, with the default user agent naming it.
+#[test]
+fn the_handshake_carries_the_wire_s_configured_originator() {
+    let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_originator("muninn")
+        .responses(chatgpt::GPT_5_3_CODEX);
+    let (originator, user_agent) = http_caller_identity(&wire);
+    assert_eq!(originator, "muninn");
+    assert!(
+        user_agent.ends_with("; muninn)"),
+        "the default user agent names the originator, got {user_agent}"
+    );
+    let request = CodexIdentity::generate()
+        .handshake_request(&wire)
+        .expect("handshake request should build");
+    assert_eq!(request.headers()["originator"], originator.as_str());
+    assert_eq!(request.headers()["user-agent"], user_agent.as_str());
 }
 
 #[test]
@@ -333,6 +416,7 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
     let frames = script.sent_json();
     assert_eq!(frames.len(), 2, "one frame per turn: {frames:?}");
     for frame in &frames {
+        openapi_schema::assert_valid(Schema::WebSocketResponseCreate, frame);
         assert_eq!(frame["type"], "response.create");
         assert_eq!(frame["store"], json!(false), "store is stated: {frame}");
         for unset in ["top_p", "temperature", "max_output_tokens"] {
@@ -360,6 +444,116 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
         json!(["reasoning.encrypted_content"]),
         "the encrypted-reasoning include rides alongside reasoning"
     );
+    let mut bad_envelope = frames[0].clone();
+    bad_envelope["type"] = json!("response.update");
+    openapi_schema::assert_invalid(Schema::WebSocketResponseCreate, &bad_envelope);
+}
+
+/// Lite full sends carry one deterministic prefix and the per-frame marker;
+/// incremental sends carry the marker and delta only.
+#[tokio::test]
+async fn responses_lite_marks_every_frame_and_prefixes_only_full_sends() {
+    let identity =
+        CodexIdentity::from_ids("session-derived", "thread-derived").expect("header-safe ids");
+    let wire = codex_wire()
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite");
+    let script = Script::new()
+        .turn([completed("resp_1")])
+        .turn([completed("resp_2")]);
+    let mut session =
+        CodexWebSocketSession::from_connection(wire, identity.clone(), script.connection(), None)
+            .expect("the ChatGPT dialect speaks the Codex contract");
+
+    session
+        .completion(image_request("ROOT_LITE_MARKER"))
+        .await
+        .expect("the Lite root completes");
+    session
+        .send_incremental(image_delta("DELTA_LITE_MARKER"))
+        .await
+        .expect("the Lite delta sends");
+    finish_turn(&mut session).await;
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    for frame in &frames {
+        openapi_schema::assert_valid(Schema::LiteWebSocketResponseCreate, frame);
+        assert_eq!(
+            frame["client_metadata"][super::super::super::responses_lite::WS_METADATA_KEY],
+            "true"
+        );
+        assert_eq!(frame["client_metadata"]["session_id"], "session-derived");
+        assert_eq!(frame["client_metadata"]["thread_id"], "thread-derived");
+        assert_eq!(frame["prompt_cache_key"], "thread-derived");
+        assert!(is_string_map(&frame["client_metadata"]));
+        // Lite created `reasoning`, so the shared include rule follows it.
+        assert_eq!(frame["include"], json!(["reasoning.encrypted_content"]));
+    }
+
+    let root_input = frames[0]["input"]
+        .as_array()
+        .expect("root input is an array");
+    assert_eq!(root_input[0]["type"], "additional_tools");
+    assert_eq!(
+        root_input[1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        serde_json::json!(["model.base_instructions"])
+    );
+    assert_eq!(
+        root_input[0]["id"],
+        "at_59200608-af63-522d-81da-6eac30781e45"
+    );
+    assert!(
+        serde_json::to_string(&frames[0]["input"])
+            .expect("root input serializes")
+            .contains("ROOT_LITE_MARKER")
+    );
+    assert!(frames[0].get("tools").is_none());
+    assert!(frames[0].get("instructions").is_none());
+
+    let delta_input = serde_json::to_string(&frames[1]["input"]).expect("delta input serializes");
+    assert!(delta_input.contains("DELTA_LITE_MARKER"));
+    assert!(!delta_input.contains("ROOT_LITE_MARKER"));
+    assert!(!delta_input.contains("additional_tools"));
+    assert_eq!(frames[1]["previous_response_id"], "resp_1");
+    assert!(root_input[2]["content"][1].get("detail").is_none());
+    assert!(frames[1]["input"][0]["content"][1].get("detail").is_none());
+
+    let mut bad_marker = frames[1].clone();
+    bad_marker["client_metadata"][super::super::super::responses_lite::WS_METADATA_KEY] =
+        json!(true);
+    assert!(
+        !is_string_map(&bad_marker["client_metadata"]),
+        "the public schema leaves client_metadata open, so Rig pins its string-map extension"
+    );
+}
+
+/// The generic WebSocket session has no selected Codex identity and therefore
+/// cannot send a Lite wire, even when public-field construction enabled it.
+#[tokio::test]
+async fn generic_websocket_refuses_responses_lite_without_a_selected_identity() {
+    use crate::providers::openai::responses_api::responses_lite::ResponsesLiteError;
+
+    let script = Script::new();
+    let mut session = ResponsesWebSocketSession::from_connection(
+        codex_wire()
+            .with_responses_lite()
+            .expect("the ChatGPT dialect supports Lite"),
+        script.connection(),
+        None,
+    );
+    let error = session
+        .send(user_request("must refuse"))
+        .await
+        .expect_err("generic WebSocket Lite has no selected identity");
+    let ProviderError::Request(reason) = error else {
+        panic!("a Lite refusal is a request error");
+    };
+    assert!(matches!(
+        reason.downcast_ref::<ResponsesLiteError>(),
+        Some(ResponsesLiteError::ResponsesLiteRequiresIdentity)
+    ));
+    assert!(script.sent().is_empty());
 }
 
 /// A caller-set `top_p` (and likewise `temperature`) is refused by name on the
@@ -440,6 +634,9 @@ async fn an_incremental_send_chains_the_tip_and_reuses_the_captured_envelope() {
     assert_eq!(session.previous_response_id(), Some("resp_3"));
 
     let frames = script.sent_json();
+    for frame in &frames {
+        openapi_schema::assert_valid(Schema::WebSocketResponseCreate, frame);
+    }
     let root = frames[0].as_object().expect("root frame is an object");
     for (index, expected_tip, marker) in [
         (1, "resp_1", "FIRST_DELTA_MARKER"),
@@ -553,6 +750,48 @@ async fn an_incremental_send_after_a_failed_turn_is_refused() {
         .send_incremental(delta("SECOND_DELTA"))
         .await
         .expect_err("a failed turn leaves no tip");
+    assert_eq!(
+        refusal(&error),
+        IncrementalSendRefused::LastTurnNotCompleted
+    );
+    assert_eq!(script.sent().len(), 2);
+}
+
+/// A Codex-wrapped error event that reports an HTTP status still ends the turn
+/// without a tip: the status it now carries changes nothing about incremental
+/// eligibility, so the next delta is refused by name.
+#[tokio::test]
+async fn an_incremental_send_after_a_status_bearing_error_event_is_refused() {
+    let wrapped_error = json!({
+        "type": "error",
+        "status": 429,
+        "error": {"type": "usage_limit_reached", "message": "The usage limit has been reached"},
+        "headers": {"x-codex-primary-used-percent": "100.0"}
+    })
+    .to_string();
+    let script = Script::new()
+        .turn([completed("resp_1")])
+        .turn([wrapped_error]);
+    let mut session = session_over(&script);
+
+    session
+        .completion(user_request("ROOT"))
+        .await
+        .expect("root turn should complete");
+    session
+        .send_incremental(delta("FIRST_DELTA"))
+        .await
+        .expect("incremental turn should send");
+    let ResponsesWebSocketEvent::Error(event) = finish_turn(&mut session).await else {
+        panic!("the wrapped error ends the turn");
+    };
+    assert_eq!(event.status, Some(429));
+    assert_eq!(session.previous_response_id(), None);
+
+    let error = session
+        .send_incremental(delta("SECOND_DELTA"))
+        .await
+        .expect_err("an error terminal leaves no tip");
     assert_eq!(
         refusal(&error),
         IncrementalSendRefused::LastTurnNotCompleted
@@ -817,4 +1056,180 @@ async fn a_declared_namespace_reaches_the_codex_frame_verbatim_under_strict_mode
     assert_eq!(frames.len(), 1, "one frame for the turn: {frames:?}");
     assert_eq!(frames[0]["type"], "response.create");
     assert_eq!(frames[0]["tools"], json!([namespace]));
+}
+
+// --- credential source ------------------------------------------------------
+
+/// A websocket backend that records each handshake it is asked to open and
+/// answers with a scripted connection.
+#[derive(Clone, Default)]
+struct HandshakeRecorder {
+    handshakes: std::sync::Arc<std::sync::Mutex<Vec<http::HeaderMap>>>,
+}
+
+impl crate::ws_client::WebSocketClientExt for HandshakeRecorder {
+    fn connect(
+        &self,
+        request: crate::http_client::Request<crate::http_client::NoBody>,
+        _options: crate::ws_client::ConnectOptions,
+    ) -> impl std::future::Future<
+        Output = crate::http_client::Result<crate::ws_client::BoxedWebSocketConnection>,
+    > + crate::wasm_compat::WasmCompatSend {
+        self.handshakes
+            .lock()
+            .expect("unpoisoned")
+            .push(request.headers().clone());
+        let connection = Script::new().connection();
+        async move { Ok(connection) }
+    }
+}
+
+/// A source that counts its reads and always supplies the same credential.
+#[derive(Clone, Default)]
+struct CountingSource {
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::wire::CredentialSource for CountingSource {
+    fn current(
+        &self,
+    ) -> crate::wasm_compat::WasmBoxedFuture<
+        '_,
+        Result<crate::wire::Credential, crate::wire::CredentialSourceError>,
+    > {
+        let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        Box::pin(async move {
+            Ok(crate::wire::Credential::new(format!("source-token-{read}"))
+                .with_account_id("source-account"))
+        })
+    }
+}
+
+/// Each session connect reads the credential source once, and the handshake
+/// carries what it supplied in place of the static key and account; the open
+/// connection keeps it, so a second session reads again.
+#[tokio::test]
+async fn each_connect_reads_the_credential_source_once() {
+    let source = CountingSource::default();
+    let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_account_id(ACCOUNT_ID)
+        .with_credential_source(source.clone())
+        .responses(chatgpt::GPT_5_3_CODEX);
+    let backend = HandshakeRecorder::default();
+
+    for _ in 0..2 {
+        CodexWebSocketSessionBuilder::new(wire.clone())
+            .expect("the ChatGPT dialect speaks the Codex contract")
+            .connect_with(&backend)
+            .await
+            .expect("the scripted connection opens");
+    }
+
+    assert_eq!(source.reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let handshakes = backend.handshakes.lock().expect("unpoisoned").clone();
+    for (index, handshake) in handshakes.iter().enumerate() {
+        assert_eq!(
+            handshake["authorization"],
+            format!("Bearer source-token-{}", index + 1).as_str()
+        );
+        assert_eq!(handshake["chatgpt-account-id"], "source-account");
+        assert_eq!(handshake.get_all("authorization").iter().count(), 1);
+    }
+}
+
+// --- caller-derived identity -------------------------------------------------
+
+/// A caller-derived identity reaches the websocket verbatim: the handshake
+/// headers when the wire names it, and every frame's cache key and metadata.
+#[tokio::test]
+async fn a_caller_derived_identity_names_the_handshake_and_every_frame() {
+    let identity =
+        CodexIdentity::from_ids("session-derived", "thread-derived").expect("header-safe ids");
+    let wire = codex_wire()
+        .with_codex_identity(identity.clone())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+
+    let backend = HandshakeRecorder::default();
+    let session = CodexWebSocketSessionBuilder::new(wire.clone())
+        .expect("the ChatGPT dialect speaks the Codex contract")
+        .connect_with(&backend)
+        .await
+        .expect("the scripted connection opens");
+    assert_eq!(
+        session.identity(),
+        &identity,
+        "the wire's identity is the session's"
+    );
+    let handshake = backend.handshakes.lock().expect("unpoisoned")[0].clone();
+    assert_eq!(handshake["session-id"], "session-derived");
+    assert_eq!(handshake["thread-id"], "thread-derived");
+    assert_eq!(handshake["x-client-request-id"], "thread-derived");
+
+    let script = Script::new().turn([completed("resp_1")]);
+    let mut session =
+        CodexWebSocketSession::from_connection(wire, identity, script.connection(), None)
+            .expect("the ChatGPT dialect speaks the Codex contract");
+    session
+        .send(user_request("hello"))
+        .await
+        .expect("send should succeed");
+    let frame = &script.sent_json()[0];
+    assert_eq!(frame["prompt_cache_key"], "thread-derived");
+    assert_eq!(
+        frame["client_metadata"],
+        json!({"session_id": "session-derived", "thread_id": "thread-derived"})
+    );
+}
+
+/// `with_identity` overrides the wire's identity for this session only: the
+/// handshake and the session carry the override, while the wire's own HTTP
+/// requests keep the wire's identity.
+#[tokio::test]
+async fn with_identity_overrides_the_wire_identity_for_the_session_only() {
+    let on_wire = CodexIdentity::from_ids("session-wire", "thread-wire").expect("header-safe ids");
+    let override_identity =
+        CodexIdentity::from_ids("session-override", "thread-override").expect("header-safe ids");
+    let wire = codex_wire()
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite")
+        .with_codex_identity(on_wire)
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    let backend = HandshakeRecorder::default();
+
+    let session = CodexWebSocketSessionBuilder::new(wire.clone())
+        .expect("the ChatGPT dialect speaks the Codex contract")
+        .with_identity(override_identity.clone())
+        .connect_with(&backend)
+        .await
+        .expect("the scripted connection opens");
+
+    assert_eq!(session.identity(), &override_identity);
+    let handshakes = backend.handshakes.lock().expect("unpoisoned").clone();
+    assert_eq!(handshakes.len(), 1);
+    assert_eq!(handshakes[0]["session-id"], "session-override");
+    assert_eq!(handshakes[0]["thread-id"], "thread-override");
+    assert_eq!(handshakes[0]["x-client-request-id"], "thread-override");
+
+    let mut encoded =
+        crate::wire::Wire::encode(&wire, user_request("hello"), crate::wire::Mode::Streaming)
+            .expect("the request encodes");
+    let http = encoded.requests.remove(0);
+    assert_eq!(http.headers()["session-id"], "session-wire");
+    assert_eq!(http.headers()["thread-id"], "thread-wire");
+
+    let script = Script::new();
+    let mut overridden =
+        CodexWebSocketSession::from_connection(wire, override_identity, script.connection(), None)
+            .expect("the ChatGPT dialect speaks the Codex contract");
+    overridden
+        .send(user_request("hello"))
+        .await
+        .expect("the Lite frame sends");
+    let frame = &script.sent_json()[0];
+    assert_eq!(frame["prompt_cache_key"], "thread-override");
+    assert_eq!(frame["client_metadata"]["thread_id"], "thread-override");
+    assert_eq!(
+        frame["input"][0]["id"], "at_aad78629-f8ea-5abe-86e7-dfc600ba4940",
+        "the prefix namespace must use the wrapper-selected identity"
+    );
 }

@@ -108,6 +108,7 @@ fn a_recorded_reply_folds_into_the_batchs_vectors_in_input_order() {
             provider: PROVIDER_NAME.to_owned(),
             raw: serde_json::Value::Null,
             provider_request_id: None,
+            response_headers: Default::default(),
         },
     )
     .expect("the fold produces a response");

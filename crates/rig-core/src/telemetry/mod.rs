@@ -585,6 +585,11 @@ fn reasoning_parts(reasoning: &Reasoning) -> Vec<TelemetryPart> {
         .iter()
         .map(|content| {
             let content = match content {
+                ReasoningContent::OpaqueSummary(value) | ReasoningContent::OpaqueContent(value) => {
+                    return TelemetryPart::Reasoning {
+                        content: value.to_string(),
+                    };
+                }
                 ReasoningContent::Text { text, .. } | ReasoningContent::Summary(text) => text,
                 ReasoningContent::Encrypted(content) => content,
                 ReasoningContent::Redacted { data } => data,

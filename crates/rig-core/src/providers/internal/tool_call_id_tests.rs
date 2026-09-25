@@ -35,6 +35,7 @@ fn fold_document<W: Wire<Op = Completion>>(wire: &W, body: &Value) -> Completion
             provider: wire.name().to_owned(),
             raw: serde_json::from_str(&body).unwrap_or(Value::Null),
             provider_request_id: None,
+            response_headers: Default::default(),
         },
     )
     .expect("the fold produces a response")

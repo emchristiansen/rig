@@ -9,6 +9,7 @@ use crate::completion::{CompletionModel, CompletionRequest};
 use crate::driver::Bound;
 use crate::message::{self, Message};
 use crate::providers::chatgpt::DIALECT as CHATGPT;
+use crate::providers::openai::responses_api::openapi_schema::{self, Schema};
 use crate::providers::xai::DIALECT as XAI;
 use crate::test_utils::{MockStreamingClient, RecordingHttpClient};
 use crate::wire::{Body, Mode};
@@ -235,6 +236,30 @@ fn turn(chat_history: Vec<Message>) -> CompletionRequest {
         chat_history,
         ..prompt()
     }
+}
+
+fn image_message(text: &str) -> Message {
+    Message::User {
+        content: vec![
+            message::UserContent::text(text),
+            message::UserContent::Image(message::Image {
+                data: message::DocumentSourceKind::Url("https://example.test/image.png".to_owned()),
+                media_type: None,
+                detail: None,
+                additional_params: None,
+            }),
+        ],
+    }
+}
+
+fn assert_string_map(value: &serde_json::Value, field: &str) {
+    let values = value
+        .as_object()
+        .unwrap_or_else(|| panic!("{field} must be an object: {value}"));
+    assert!(
+        values.values().all(serde_json::Value::is_string),
+        "every {field} value must be a string: {value}"
+    );
 }
 
 fn chatgpt() -> Responses {
@@ -954,4 +979,383 @@ fn the_codex_lane_sends_a_declared_namespace_verbatim_under_strict_mode() {
     let tools = sent_tools(&wire, request);
 
     assert_eq!(tools, vec![responses_lite_namespace()]);
+}
+
+// ── the Codex conversation identity on HTTP ──────────────────────────────
+
+fn derived_identity() -> super::super::codex_identity::CodexIdentity {
+    super::super::codex_identity::CodexIdentity::from_ids("session-derived", "thread-derived")
+        .expect("header-safe ids")
+}
+
+fn encoded_request(wire: &Responses, mode: Mode) -> http::Request<Body> {
+    let mut encoded = wire.encode(prompt(), mode).expect("the request encodes");
+    encoded.requests.remove(0)
+}
+
+fn header_names(request: &http::Request<Body>) -> Vec<&str> {
+    let mut names: Vec<&str> = request
+        .headers()
+        .keys()
+        .map(http::HeaderName::as_str)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// With a Codex identity, every HTTP request, unary or streamed, names the
+/// conversation with the caller's ids, exactly as given: dashed `session-id`
+/// and `thread-id`, `x-client-request-id`, and the body's `prompt_cache_key`
+/// and `client_metadata`. The per-request `session_id` is gone, and two
+/// requests carry the same identity.
+#[test]
+fn a_codex_identity_names_every_http_request_with_the_callers_ids() {
+    let wire = chatgpt()
+        .with_codex_identity(derived_identity())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    for mode in [Mode::Unary, Mode::Streaming, Mode::Unary] {
+        let request = encoded_request(&wire, mode);
+        assert_eq!(
+            header_names(&request),
+            [
+                "authorization",
+                "content-type",
+                "originator",
+                "session-id",
+                "thread-id",
+                "user-agent",
+                "x-client-request-id"
+            ],
+            "{mode:?}"
+        );
+        assert_eq!(request.headers()["session-id"], "session-derived");
+        assert_eq!(request.headers()["thread-id"], "thread-derived");
+        assert_eq!(request.headers()["x-client-request-id"], "thread-derived");
+        let Body::Bytes(body) = request.body() else {
+            panic!("a Responses body is bytes");
+        };
+        let body: serde_json::Value = serde_json::from_slice(body).expect("the body is JSON");
+        assert_eq!(body["prompt_cache_key"], "thread-derived");
+        assert_eq!(
+            body["client_metadata"],
+            serde_json::json!({"session_id": "session-derived", "thread_id": "thread-derived"})
+        );
+    }
+}
+
+/// Lite is opt-in: Standard mode retains the existing top-level tools shape
+/// and does not add the internal HTTP marker.
+#[test]
+fn standard_request_shape_keeps_the_existing_codex_wire_body() {
+    let namespace = responses_lite_namespace();
+    let encoded = encoded_request(&chatgpt(), Mode::Unary);
+    assert!(
+        encoded
+            .headers()
+            .get(super::super::responses_lite::HTTP_HEADER)
+            .is_none()
+    );
+    let tools = sent_tools(
+        &chatgpt(),
+        turn_declaring(serde_json::json!([namespace.clone()])),
+    );
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0]["name"], "lookup");
+    assert_eq!(tools[1], namespace);
+}
+
+#[test]
+fn exact_standard_http_create_response_satisfies_the_named_public_schema_view() {
+    let wire = chatgpt()
+        .with_codex_identity(derived_identity())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    let mut request = turn_declaring(serde_json::json!([responses_lite_namespace()]));
+    request.chat_history = vec![image_message("describe")];
+    let body = encoded_body_of(&wire, request, Mode::Streaming);
+
+    openapi_schema::assert_valid(Schema::HttpCreateResponse, &body);
+    assert_string_map(&body["client_metadata"], "client_metadata");
+
+    let mut bad_role = body.clone();
+    bad_role["input"][0]["role"] = serde_json::json!("tool");
+    openapi_schema::assert_invalid(Schema::HttpCreateResponse, &bad_role);
+    let mut bad_content = body.clone();
+    bad_content["input"][0]["content"] = serde_json::json!(42);
+    openapi_schema::assert_invalid(Schema::HttpCreateResponse, &bad_content);
+    let mut bad_tools = body.clone();
+    bad_tools["tools"][0]["name"] = serde_json::json!(42);
+    openapi_schema::assert_invalid(Schema::HttpCreateResponse, &bad_tools);
+    let mut bad_image = body;
+    let image = bad_image["input"]
+        .as_array_mut()
+        .expect("input is an array")
+        .iter_mut()
+        .flat_map(|item| item["content"].as_array_mut().into_iter().flatten())
+        .find(|content| content["type"] == "input_image")
+        .expect("the emitted request carries its image");
+    image["detail"] = serde_json::json!("maximum");
+    openapi_schema::assert_invalid(Schema::HttpCreateResponse, &bad_image);
+}
+
+/// HTTP Lite uses the wire identity for its deterministic prefix, carries the
+/// marker only as an HTTP header, and removes top-level tools/instructions.
+#[test]
+fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
+    let wire = OpenAI::with_key(&CHATGPT, "test-token")
+        .with_instructions("provider base")
+        .responses("gpt-5.4")
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite")
+        .with_codex_identity(derived_identity())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    let mut encoded = wire
+        .encode(
+            turn(vec![Message::system("caller base"), image_message("hello")]),
+            Mode::Streaming,
+        )
+        .expect("the Lite request encodes");
+    let request = encoded.requests.remove(0);
+
+    assert_eq!(
+        request.headers()[super::super::responses_lite::HTTP_HEADER],
+        "true"
+    );
+    let Body::Bytes(body) = request.body() else {
+        panic!("a Responses body is bytes");
+    };
+    let body: serde_json::Value = serde_json::from_slice(body).expect("the body is JSON");
+    assert_eq!(body["input"][0]["type"], "additional_tools");
+    assert_eq!(body["input"][0]["role"], "developer");
+    assert_eq!(body["input"][1]["type"], "message");
+    assert_eq!(body["input"][1]["role"], "developer");
+    assert_eq!(
+        body["input"][1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        serde_json::json!(["model.base_instructions"])
+    );
+    assert_eq!(
+        body["input"][1]["content"][0]["text"],
+        "provider base\n\ncaller base"
+    );
+    assert_eq!(
+        body["input"][1]["id"], "msg_3333557a-9135-5aeb-b8f2-d31c4d718f4b",
+        "the developer id hashes the exact merged instruction bytes"
+    );
+    assert!(body.get("tools").is_none());
+    assert!(body.get("instructions").is_none());
+    assert_eq!(body["parallel_tool_calls"], false);
+    assert_eq!(body["tool_choice"], "auto");
+    assert_eq!(body["reasoning"]["context"], "all_turns");
+    // Lite created `reasoning`, so the shared include rule follows it.
+    assert_eq!(
+        body["include"],
+        serde_json::json!(["reasoning.encrypted_content"])
+    );
+    assert_eq!(body["client_metadata"]["thread_id"], "thread-derived");
+    assert!(body["input"][2]["content"][1].get("detail").is_none());
+    openapi_schema::assert_valid(Schema::LiteHttpCreateResponse, &body);
+    assert_string_map(&body["client_metadata"], "client_metadata");
+
+    #[cfg(feature = "websocket")]
+    {
+        let handshake = derived_identity()
+            .handshake_request(&wire)
+            .expect("the handshake builds");
+        assert!(
+            handshake
+                .headers()
+                .get(super::super::responses_lite::HTTP_HEADER)
+                .is_none(),
+            "the HTTP Lite header must not reach the websocket handshake"
+        );
+    }
+}
+
+fn lite_refusal(error: EncodeError) -> super::super::responses_lite::ResponsesLiteError {
+    let crate::error::ProviderError::Request(reason) = crate::error::ProviderError::from(error)
+    else {
+        panic!("a Lite encode refusal is a request error");
+    };
+    reason
+        .downcast::<super::super::responses_lite::ResponsesLiteError>()
+        .map(|error| *error)
+        .unwrap_or_else(|reason| panic!("expected a named Lite refusal, got {reason}"))
+}
+
+/// Builder validation rejects non-Codex selection, while encode-time
+/// validation catches serde/public-field construction and missing identity.
+#[test]
+fn responses_lite_selection_is_revalidated_at_encode_time() {
+    use super::super::responses_lite::{CodexRequestShape, ResponsesLiteError};
+
+    assert!(matches!(
+        openai().with_responses_lite(),
+        Err(ResponsesLiteError::ResponsesLiteRequiresCodex { dialect: "openai" })
+    ));
+
+    let mut by_field = openai();
+    by_field.codex_request_shape = CodexRequestShape::ResponsesLite;
+    let mut serialized = serde_json::to_value(openai()).expect("the wire serializes");
+    serialized["codex_request_shape"] = serde_json::json!("responses_lite");
+    let by_serde: Responses = serde_json::from_value(serialized).expect("the wire deserializes");
+    for wire in [by_field, by_serde] {
+        let error = wire
+            .encode(prompt(), Mode::Unary)
+            .expect_err("a non-Codex Lite wire is refused");
+        assert!(matches!(
+            lite_refusal(error),
+            ResponsesLiteError::ResponsesLiteRequiresCodex { dialect: "openai" }
+        ));
+    }
+
+    let missing_identity = chatgpt()
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite")
+        .encode(prompt(), Mode::Unary)
+        .expect_err("HTTP Lite needs a stable identity");
+    assert!(matches!(
+        lite_refusal(missing_identity),
+        ResponsesLiteError::ResponsesLiteRequiresIdentity
+    ));
+
+    let input_system = chatgpt()
+        .with_system_instructions_as_messages()
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite")
+        .with_codex_identity(derived_identity())
+        .expect("the ChatGPT dialect speaks the Codex contract")
+        .encode(prompt(), Mode::Unary)
+        .expect_err("Lite refuses InputSystemMessages");
+    assert!(matches!(
+        lite_refusal(input_system),
+        ResponsesLiteError::InputSystemMessages
+    ));
+}
+
+/// Without an identity the ChatGPT dialect keeps sending a fresh
+/// `session_id` per request and no dashed identity.
+#[test]
+fn without_a_codex_identity_each_request_keeps_its_own_session_id() {
+    let first = encoded_request(&chatgpt(), Mode::Unary);
+    let second = encoded_request(&chatgpt(), Mode::Unary);
+    assert!(first.headers().get("session-id").is_none());
+    assert!(first.headers().get("thread-id").is_none());
+    assert_ne!(
+        first.headers()["session_id"],
+        second.headers()["session_id"]
+    );
+}
+
+/// A websocket handshake and an HTTP request carrying one identity name the
+/// conversation with the same three headers.
+#[cfg(feature = "websocket")]
+#[test]
+fn http_and_the_websocket_handshake_carry_one_identity_alike() {
+    let identity = derived_identity();
+    let wire = chatgpt()
+        .with_codex_identity(identity.clone())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    let http = encoded_request(&wire, Mode::Streaming);
+    let handshake = identity
+        .handshake_request(&wire)
+        .expect("the handshake builds");
+    for name in ["session-id", "thread-id", "x-client-request-id"] {
+        assert_eq!(http.headers()[name], handshake.headers()[name], "{name}");
+    }
+}
+
+#[test]
+fn a_codex_identity_is_refused_on_a_wire_that_does_not_speak_the_codex_contract() {
+    let error = openai()
+        .with_codex_identity(derived_identity())
+        .expect_err("the OpenAI dialect is not Codex");
+    assert_eq!(error.dialect, "openai");
+}
+
+/// Caller-derived ids are sent verbatim, so an id no header can carry, or an
+/// empty one, is refused by name, both when built and when deserialized.
+#[test]
+fn a_codex_identity_refuses_ids_no_header_can_carry() {
+    use super::super::codex_identity::CodexIdentity;
+    let empty = CodexIdentity::from_ids("", "thread").expect_err("empty");
+    assert_eq!(empty.field, "session_id");
+    let broken = CodexIdentity::from_ids("session", "line\nbreak").expect_err("not header-safe");
+    assert_eq!(broken.field, "thread_id");
+
+    let identity = derived_identity();
+    let json = serde_json::to_value(&identity).expect("serializes");
+    assert_eq!(
+        json,
+        serde_json::json!({"session_id": "session-derived", "thread_id": "thread-derived"})
+    );
+    assert_eq!(
+        serde_json::from_value::<CodexIdentity>(json).expect("deserializes"),
+        identity
+    );
+    assert!(
+        serde_json::from_value::<CodexIdentity>(
+            serde_json::json!({"session_id": "", "thread_id": "t"})
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<CodexIdentity>(
+            serde_json::json!({"session_id": "s", "thread_id": "line\nbreak"})
+        )
+        .is_err(),
+        "an id no header can carry is refused on the way in, too"
+    );
+}
+
+/// An identity that reaches a non-Codex wire other than through
+/// `with_codex_identity`, by field assignment or by serde, is refused by name
+/// when the request is encoded, so nothing is stamped or sent.
+#[test]
+fn a_codex_identity_on_a_non_codex_wire_is_refused_when_encoding() {
+    use super::super::codex_identity::NotACodexWire;
+    let mut by_field = openai();
+    by_field.codex_identity = Some(derived_identity());
+    let mut json = serde_json::to_value(openai()).expect("serializes");
+    json["codex_identity"] = serde_json::to_value(derived_identity()).expect("serializes");
+    let by_serde: Responses = serde_json::from_value(json).expect("deserializes");
+
+    for wire in [by_field, by_serde] {
+        let Err(error) = wire.encode(prompt(), Mode::Unary) else {
+            panic!("an OpenAI wire does not speak the Codex contract");
+        };
+        let crate::error::ProviderError::Request(reason) = crate::error::ProviderError::from(error)
+        else {
+            panic!("an encode refusal is a request error");
+        };
+        assert_eq!(
+            reason.downcast_ref::<NotACodexWire>(),
+            Some(&NotACodexWire { dialect: "openai" })
+        );
+    }
+}
+
+/// Over HTTP, as over the websocket, a request's own cache key and metadata
+/// keys are kept; the identity fills only what is missing.
+#[test]
+fn a_callers_own_cache_key_and_metadata_are_kept_over_http() {
+    let wire = chatgpt()
+        .with_codex_identity(derived_identity())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    let mut request = prompt();
+    request.additional_params = Some(serde_json::json!({
+        "prompt_cache_key": "caller-key",
+        "client_metadata": {"session_id": "caller-session"},
+    }));
+    let mut encoded = wire
+        .encode(request, Mode::Unary)
+        .expect("the request encodes");
+    let request = encoded.requests.remove(0);
+    let Body::Bytes(body) = request.body() else {
+        panic!("a Responses body is bytes");
+    };
+    let body: serde_json::Value = serde_json::from_slice(body).expect("the body is JSON");
+    assert_eq!(body["prompt_cache_key"], "caller-key");
+    assert_eq!(
+        body["client_metadata"],
+        serde_json::json!({"session_id": "caller-session", "thread_id": "thread-derived"})
+    );
 }

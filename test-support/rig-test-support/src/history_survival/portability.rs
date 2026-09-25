@@ -55,6 +55,7 @@ where
         provider: wire.name().to_owned(),
         raw,
         provider_request_id: None,
+        response_headers: Default::default(),
     })
 }
 

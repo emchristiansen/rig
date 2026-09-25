@@ -22,6 +22,29 @@ pub mod tool_call_bridge;
 pub mod tool_call_ids;
 pub mod wire;
 
+/// Refuse opaque Responses parts before an unsupported wire converts them to text.
+#[doc(hidden)]
+pub fn refuse_opaque_responses_part(
+    part: &crate::message::AssistantContent,
+    wire: &'static str,
+) -> Result<(), crate::message::UnrepresentableOpaqueContent> {
+    let opaque = match part {
+        crate::message::AssistantContent::Text(text) => {
+            crate::providers::openai::responses_api::opaque_message_part(
+                text.additional_params.as_ref(),
+            )
+            .is_some()
+        }
+        crate::message::AssistantContent::Reasoning(reasoning) => reasoning.has_opaque_parts(),
+        _ => false,
+    };
+    if opaque {
+        Err(crate::message::UnrepresentableOpaqueContent::new(wire))
+    } else {
+        Ok(())
+    }
+}
+
 /// Fill empty tool-result names from preceding unmatched calls.
 /// Match local correlation handles before provider identifiers. Existing names
 /// disambiguate multiple matches; ambiguous or missing matches remain unchanged.
@@ -200,6 +223,35 @@ pub(crate) fn request_id_from_headers(
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     })
+}
+
+/// The headers of a reply whose lowercase name starts with `prefix`, as
+/// [`crate::completion::ProviderResponseHeaders`]: a header repeated in the
+/// reply is joined with `", "` in arrival order (RFC 9110, section 5.3), and
+/// a value is kept exactly unless it is not valid UTF-8, which alone is
+/// converted lossily. `None` captures nothing.
+pub(crate) fn captured_response_headers(
+    headers: &http::HeaderMap,
+    prefix: Option<&str>,
+) -> crate::completion::ProviderResponseHeaders {
+    let Some(prefix) = prefix else {
+        return crate::completion::ProviderResponseHeaders::new();
+    };
+    headers
+        .keys()
+        .filter(|name| name.as_str().starts_with(prefix))
+        .map(|name| {
+            let values: Vec<String> = headers
+                .get_all(name)
+                .iter()
+                .map(|value| match String::from_utf8(value.as_bytes().to_vec()) {
+                    Ok(value) => value,
+                    Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+                })
+                .collect();
+            (name.as_str().to_owned(), values.join(", "))
+        })
+        .collect()
 }
 
 /// Append `pairs` to `path` as a percent-encoded query string.
