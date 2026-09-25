@@ -5663,6 +5663,61 @@ fn a_reasoning_items_waiting_part_moves_to_its_own_slot() {
 }
 
 #[test]
+fn another_items_waiting_part_leaves_a_snapshots_own_position_free() {
+    // Only msg_z's unknown part waits at msg_1's position 1; it can never
+    // bind to msg_1, so msg_1's position counts as empty and its done takes
+    // over the id-less slot it restates exactly, instead of duplicating it.
+    let unknown = json!({"type":"future_part","payload":[9]});
+    let (choice, events) = fold_driven(&[
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"sequence_number":0,"delta":"Hello"}),
+        json!({"type":"response.content_part.added","item_id":"msg_z","output_index":1,"content_index":0,"sequence_number":1,"part":unknown}),
+        json!({"type":"response.output_item.done","output_index":1,"sequence_number":2,"item":message_item("msg_1", json!([{"type":"output_text","text":"Hello"}]))}),
+        completed_with_output(json!([
+            message_item("msg_1", json!([{"type":"output_text","text":"Hello"}])),
+            message_item("msg_z", json!([unknown]))
+        ])),
+    ]);
+    assert_eq!(folded_texts(&choice), ["Hello", ""]);
+    assert_eq!(opaque_texts(&choice), [&unknown]);
+    assert!(unknown_payloads(&events).is_empty(), "{events:?}");
+}
+
+#[test]
+fn a_reasoning_snapshot_never_overwrites_its_own_waiting_part() {
+    // rs_1's unknown part waits at repaired (0, 0); rs_1's snapshot at
+    // position 1 then states text at content 0. The part would move there
+    // when rs_1 establishes its slot, so the snapshot contradicts it and
+    // refuses rather than silently replacing it.
+    let unknown = json!({"type":"future_part","payload":[4]});
+    let snapshot = json!({"type":"reasoning","id":"rs_1","summary":[],"content":[{"type":"reasoning_text","text":"r"}]});
+    let waiting = json!({"type":"response.content_part.added","item_id":"rs_1","output_index":0,"content_index":0,"sequence_number":0,"part":unknown});
+    let terminal = completed_with_output(json!([
+        json!({"type":"reasoning","id":"rs_0","summary":[]}),
+        snapshot.clone()
+    ]));
+    for (label, frames) in [
+        (
+            "output_item.done",
+            vec![
+                waiting.clone(),
+                json!({"type":"response.output_item.done","output_index":1,"sequence_number":1,"item":snapshot}),
+                terminal.clone(),
+            ],
+        ),
+        ("terminal", vec![waiting.clone(), terminal.clone()]),
+    ] {
+        let (_, errors) = driven_frames(&frames);
+        assert_eq!(errors.len(), 1, "{label}: {errors:?}");
+        assert!(
+            errors[0]
+                .to_string()
+                .contains("conflicting Responses content part kind"),
+            "{label}: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn known_issue_an_added_position_duplicates_repaired_id_less_text() {
     // Known issue: an empty `added` binds msg_1 to position 1, so the
     // terminal's exact restatement never takes over the slot that repaired
