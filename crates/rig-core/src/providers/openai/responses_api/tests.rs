@@ -3505,3 +3505,13 @@ fn summed_cached_token_counts_are_known_only_when_every_part_is() {
     assert_eq!((known + absent).cached_tokens, None);
     assert_eq!((absent + known).cached_tokens, None);
 }
+
+#[test]
+fn an_unknown_reasoning_summary_supplies_no_text() {
+    let known: ReasoningSummary =
+        serde_json::from_value(serde_json::json!({"type":"summary_text","text":"known"})).unwrap();
+    let unknown: ReasoningSummary =
+        serde_json::from_value(serde_json::json!({"type":"future_summary","list":[1]})).unwrap();
+    assert_eq!(known.text(), Some("known"));
+    assert_eq!(unknown.text(), None);
+}

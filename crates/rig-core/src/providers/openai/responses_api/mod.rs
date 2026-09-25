@@ -664,6 +664,16 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                             text,
                             additional_params,
                         }) => {
+                            // The marker replays its raw part verbatim, so text
+                            // beside it would silently not replay.
+                            if !text.is_empty()
+                                && opaque_message_part(additional_params.as_ref()).is_some()
+                            {
+                                return Err(EncodeError::request(
+                                    "an opaque Responses message part carries non-empty text: the \
+                                     raw part replays verbatim, so the text cannot be sent",
+                                ));
+                            }
                             let Some(message) =
                                 assistant_text_replay_message(id.clone(), text, additional_params)
                             else {
@@ -1698,15 +1708,7 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
                 },
             )?
         };
-        if additional_parameters.reasoning.is_some() {
-            let include = additional_parameters.include.get_or_insert_with(Vec::new);
-            if !include
-                .iter()
-                .any(|item| matches!(item, Include::ReasoningEncryptedContent))
-            {
-                include.push(Include::ReasoningEncryptedContent);
-            }
-        }
+        additional_parameters.request_reasoning_ciphertext();
 
         // Apply output_schema as structured output if not already configured via additional_params
         if additional_parameters.text.is_none()
@@ -1982,6 +1984,23 @@ pub struct AdditionalParameters {
     /// cache identity here). Empty by default and omitted when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub client_metadata: BTreeMap<String, String>,
+}
+
+impl AdditionalParameters {
+    /// Request encrypted reasoning whenever reasoning is configured, without
+    /// duplicating the include: the rule every dialect shares. A later shaping
+    /// step that creates `reasoning` applies it again.
+    pub(crate) fn request_reasoning_ciphertext(&mut self) {
+        if self.reasoning.is_some() {
+            let include = self.include.get_or_insert_with(Vec::new);
+            if !include
+                .iter()
+                .any(|item| matches!(item, Include::ReasoningEncryptedContent))
+            {
+                include.push(Include::ReasoningEncryptedContent);
+            }
+        }
+    }
 }
 
 fn deserialize_metadata<'de, D>(

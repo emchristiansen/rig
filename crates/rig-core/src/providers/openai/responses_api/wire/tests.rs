@@ -1145,6 +1145,11 @@ fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
     assert_eq!(body["parallel_tool_calls"], false);
     assert_eq!(body["tool_choice"], "auto");
     assert_eq!(body["reasoning"]["context"], "all_turns");
+    // Lite created `reasoning`, so the shared include rule follows it.
+    assert_eq!(
+        body["include"],
+        serde_json::json!(["reasoning.encrypted_content"])
+    );
     assert_eq!(body["client_metadata"]["thread_id"], "thread-derived");
     assert!(body["input"][2]["content"][1].get("detail").is_none());
     openapi_schema::assert_valid(Schema::LiteHttpCreateResponse, &body);

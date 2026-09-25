@@ -487,6 +487,8 @@ async fn responses_lite_marks_every_frame_and_prefixes_only_full_sends() {
         assert_eq!(frame["client_metadata"]["thread_id"], "thread-derived");
         assert_eq!(frame["prompt_cache_key"], "thread-derived");
         assert!(is_string_map(&frame["client_metadata"]));
+        // Lite created `reasoning`, so the shared include rule follows it.
+        assert_eq!(frame["include"], json!(["reasoning.encrypted_content"]));
     }
 
     let root_input = frames[0]["input"]

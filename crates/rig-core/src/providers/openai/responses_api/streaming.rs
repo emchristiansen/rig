@@ -374,6 +374,14 @@ pub struct RawChoiceAccumulator {
     /// replay requests of streamed turns byte-identical. Unary and
     /// terminal-only messages keep their phase.
     delta_message_slots: std::collections::HashSet<u64>,
+    /// The output slot each message id owns: the position where the id was
+    /// first seen, or, for a completed snapshot of an unseen id, the slot its
+    /// id-less deltas filled. A frame whose envelope lost its `output_index`
+    /// still reaches the message it belongs to.
+    message_slot_by_id: std::collections::HashMap<String, u64>,
+    /// Slots whose text arrived by deltas carrying no item id, not yet owned
+    /// by any message id.
+    unattributed_message_slots: std::collections::BTreeSet<u64>,
 }
 
 /// The item kind that owns a slot's content parts.
@@ -406,16 +414,41 @@ fn part_kind_name(opaque: bool) -> &'static str {
 /// replacement or merge policy exists between an opaque part and known text.
 fn conflicting_part_kind(
     output_index: u64,
-    content_index: u64,
+    array: &str,
+    index: u64,
     stored_opaque: bool,
     incoming_opaque: bool,
 ) -> ProviderError {
     ProviderError::Response(format!(
-        "conflicting Responses content part kind at output {output_index}, content \
-         {content_index}: stored {} part restated as {}",
+        "conflicting Responses content part kind at output {output_index}, {array} \
+         {index}: stored {} part restated as {}",
         part_kind_name(stored_opaque),
         part_kind_name(incoming_opaque),
     ))
+}
+
+/// A reasoning part stated inside an item already evidenced as a message.
+fn conflicting_parent_kind(output_index: u64, content_index: u64) -> ProviderError {
+    ProviderError::Response(format!(
+        "conflicting Responses parent kind at output {output_index}, content \
+         {content_index}: a reasoning_text part in a message"
+    ))
+}
+
+/// Which reasoning array a part belongs to.
+#[derive(Clone, Copy)]
+enum ReasoningArray {
+    Summary,
+    Content,
+}
+
+impl ReasoningArray {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Content => "content",
+        }
+    }
 }
 
 /// Full output-text snapshots use citation suffixes when possible. A changed
@@ -520,6 +553,9 @@ impl ReasoningParts {
         encrypted: Option<String>,
         signature: Option<String>,
     ) {
+        // An empty string is no ciphertext, so it never claims authority.
+        let encrypted = encrypted.filter(|value| !value.is_empty());
+        let signature = signature.filter(|value| !value.is_empty());
         // Empty restatements never erase already delivered content.
         self.summary.extend(
             summary
@@ -598,6 +634,8 @@ impl RawChoiceAccumulator {
             undecided_parts: Default::default(),
             refusal: None,
             delta_message_slots: Default::default(),
+            message_slot_by_id: Default::default(),
+            unattributed_message_slots: Default::default(),
         }
     }
 
@@ -618,6 +656,138 @@ impl RawChoiceAccumulator {
                 values.into_iter().map(move |value| (content_index, value))
             })
             .collect()
+    }
+
+    /// The slot a message event addresses. An id keeps the slot it first
+    /// owned. An unseen id owns its own position, except that a completed
+    /// snapshot (`done` or terminal) of an unseen id whose own slot holds no
+    /// message content takes over a slot that id-less deltas filled: that is
+    /// the same message restated. An `output_item.added` never aliases.
+    fn message_slot(&mut self, output_index: u64, item_id: Option<&str>, snapshot: bool) -> u64 {
+        let Some(id) = item_id.filter(|id| !id.is_empty()) else {
+            return output_index;
+        };
+        if let Some(slot) = self.message_slot_by_id.get(id) {
+            return *slot;
+        }
+        let own_slot_empty = self
+            .message_parts
+            .range((output_index, 0)..=(output_index, u64::MAX))
+            .next()
+            .is_none();
+        let slot = if snapshot && own_slot_empty {
+            self.unattributed_message_slots
+                .first()
+                .copied()
+                .unwrap_or(output_index)
+        } else {
+            output_index
+        };
+        self.unattributed_message_slots.remove(&slot);
+        self.message_slot_by_id.insert(id.to_owned(), slot);
+        slot
+    }
+
+    /// The slot an id-bearing event refers to, without claiming one: an unknown
+    /// part may belong to reasoning, so only a known message id redirects it.
+    fn known_message_slot(&self, output_index: u64, item_id: Option<&str>) -> u64 {
+        item_id
+            .and_then(|id| self.message_slot_by_id.get(id))
+            .copied()
+            .unwrap_or(output_index)
+    }
+
+    /// The stored kind a message part would contradict: a published part, or
+    /// an unknown part still waiting for its parent (always opaque).
+    fn message_kind_conflict(
+        &self,
+        slot: u64,
+        content_index: u64,
+        incoming_opaque: bool,
+    ) -> Option<ProviderError> {
+        let stored_opaque = self
+            .message_parts
+            .get(&(slot, content_index))
+            .map(MessagePart::is_opaque)
+            .or_else(|| {
+                self.undecided_parts
+                    .contains_key(&(slot, content_index))
+                    .then_some(true)
+            })?;
+        (stored_opaque != incoming_opaque).then(|| {
+            conflicting_part_kind(
+                slot,
+                "content",
+                content_index,
+                stored_opaque,
+                incoming_opaque,
+            )
+        })
+    }
+
+    /// The stored kind a reasoning part would contradict, counting unknown
+    /// parts still waiting for their parent as stored content.
+    fn reasoning_kind_conflict(
+        &self,
+        output_index: u64,
+        array: ReasoningArray,
+        index: u64,
+        incoming_opaque: bool,
+    ) -> Option<ProviderError> {
+        let parts = self.reasoning_parts.get(&output_index);
+        let stored_opaque = match array {
+            ReasoningArray::Summary => parts
+                .and_then(|parts| parts.summary.get(&index))
+                .map(|part| matches!(part, ReasoningSummary::Unknown(_))),
+            ReasoningArray::Content => parts
+                .and_then(|parts| parts.content.get(&index))
+                .map(|part| matches!(part, ReasoningTextContent::Unknown(_)))
+                .or_else(|| {
+                    self.undecided_parts
+                        .contains_key(&(output_index, index))
+                        .then_some(true)
+                }),
+        }?;
+        (stored_opaque != incoming_opaque).then(|| {
+            conflicting_part_kind(
+                output_index,
+                array.name(),
+                index,
+                stored_opaque,
+                incoming_opaque,
+            )
+        })
+    }
+
+    /// Refuse a reasoning snapshot that restates any stored part as the
+    /// other kind, before any of it is absorbed.
+    fn reasoning_snapshot_conflict(
+        &self,
+        output_index: u64,
+        summary: &[ReasoningSummary],
+        content: &[ReasoningTextContent],
+    ) -> Option<ProviderError> {
+        summary
+            .iter()
+            .enumerate()
+            .find_map(|(index, part)| {
+                self.reasoning_kind_conflict(
+                    output_index,
+                    ReasoningArray::Summary,
+                    index as u64,
+                    matches!(part, ReasoningSummary::Unknown(_)),
+                )
+            })
+            .or_else(|| {
+                content.iter().enumerate().find_map(|(index, part)| {
+                    self.reasoning_kind_conflict(
+                        output_index,
+                        ReasoningArray::Content,
+                        index as u64,
+                        matches!(part, ReasoningTextContent::Unknown(_)),
+                    )
+                })
+            })
     }
 
     /// Record message evidence for the slot and publish any unknown parts that
@@ -683,21 +853,23 @@ impl RawChoiceAccumulator {
         refusal: bool,
         out: &mut AdapterOutput,
     ) {
-        self.bind_message(output_index, item_id, out);
-        self.delta_message_slots.insert(output_index);
-        if self
-            .message_parts
-            .get(&(output_index, content_index))
-            .is_some_and(MessagePart::is_opaque)
+        if item_id.is_none_or(str::is_empty)
+            && !self
+                .message_slot_by_id
+                .values()
+                .any(|slot| *slot == output_index)
         {
-            self.refusal = Some(conflicting_part_kind(
-                output_index,
-                content_index,
-                true,
-                false,
-            ));
+            self.unattributed_message_slots.insert(output_index);
+        }
+        let output_index = self.message_slot(output_index, item_id, false);
+        // Refuse before any state changes, as a snapshot would: known text
+        // cannot join a published or waiting opaque part.
+        if let Some(error) = self.message_kind_conflict(output_index, content_index, false) {
+            self.refusal = Some(error);
             return;
         }
+        self.bind_message(output_index, item_id, out);
+        self.delta_message_slots.insert(output_index);
         let part = self.message_part(output_index, content_index, item_id, refusal);
         let marker = (refusal && !part.refusal_marked)
             .then(super::refusal_marker)
@@ -741,6 +913,7 @@ impl RawChoiceAccumulator {
         {
             self.refusal = Some(conflicting_part_kind(
                 output_index,
+                "content",
                 content_index,
                 stored_opaque,
                 incoming_opaque,
@@ -812,8 +985,26 @@ impl RawChoiceAccumulator {
         &mut self,
         output_index: u64,
         message: &super::OutputMessage,
+        snapshot: bool,
         out: &mut AdapterOutput,
     ) {
+        let output_index = self.message_slot(output_index, Some(&message.id), snapshot);
+        // A contradicted part refuses the whole snapshot before any of it lands.
+        if let Some(error) = message
+            .content
+            .iter()
+            .enumerate()
+            .find_map(|(index, content)| {
+                self.message_kind_conflict(
+                    output_index,
+                    index as u64,
+                    matches!(content, super::AssistantContent::Unknown(_)),
+                )
+            })
+        {
+            self.refusal = Some(error);
+            return;
+        }
         self.bind_message(output_index, Some(&message.id), out);
         // Only a message no delta delivered takes its snapshot phase.
         let phase = message
@@ -837,9 +1028,12 @@ impl RawChoiceAccumulator {
 
     fn merge_terminal_body_text(&mut self, response: &CompletionResponse, out: &mut AdapterOutput) {
         for (output_index, item) in response.output.iter().enumerate() {
+            if self.refusal.is_some() {
+                return;
+            }
             match item {
                 Output::Message(message) => {
-                    self.publish_message_text(output_index as u64, message, out)
+                    self.publish_message_text(output_index as u64, message, true, out)
                 }
                 Output::Reasoning { .. } => out.in_source_order(
                     crate::streaming::SourceOrder::new(output_index as u64, 0),
@@ -1019,7 +1213,7 @@ impl RawChoiceAccumulator {
                     item: Output::Message(message),
                     ..
                 }) => {
-                    self.publish_message_text(output_index, &message, out);
+                    self.publish_message_text(output_index, &message, false, out);
                 }
                 ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
                     item:
@@ -1033,6 +1227,12 @@ impl RawChoiceAccumulator {
                         },
                     ..
                 }) => {
+                    if let Some(error) =
+                        self.reasoning_snapshot_conflict(output_index, &summary, &content)
+                    {
+                        self.refusal = Some(error);
+                        return;
+                    }
                     let parts = self.reasoning_parts(output_index, Some(&id), out);
                     parts.absorb(summary, content, encrypted_content, signature);
                 }
@@ -1063,6 +1263,15 @@ impl RawChoiceAccumulator {
                 ItemChunkKind::ContentPartAdded(chunk) | ItemChunkKind::ContentPartDone(chunk) => {
                     match chunk.part {
                         ContentPartChunkPart::SummaryText { text } => {
+                            if let Some(error) = self.reasoning_kind_conflict(
+                                output_index,
+                                ReasoningArray::Summary,
+                                chunk.content_index,
+                                false,
+                            ) {
+                                self.refusal = Some(error);
+                                return;
+                            }
                             self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
                                 .summary
                                 .insert(
@@ -1070,12 +1279,54 @@ impl RawChoiceAccumulator {
                                     ReasoningSummary::SummaryText { text },
                                 );
                         }
+                        // Known reasoning content: its deltas append to it and its
+                        // done event completes it, as with `reasoning_text.done`.
+                        ContentPartChunkPart::ReasoningText { text } => {
+                            // A documented reasoning part never joins a message.
+                            let message_slot =
+                                self.known_message_slot(output_index, outer_item_id.as_deref());
+                            if [output_index, message_slot].iter().any(|slot| {
+                                self.parent_kinds.get(slot) == Some(&PartParent::Message)
+                            }) {
+                                self.refusal = Some(conflicting_parent_kind(
+                                    output_index,
+                                    chunk.content_index,
+                                ));
+                                return;
+                            }
+                            if let Some(error) = self.reasoning_kind_conflict(
+                                output_index,
+                                ReasoningArray::Content,
+                                chunk.content_index,
+                                false,
+                            ) {
+                                self.refusal = Some(error);
+                                return;
+                            }
+                            self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
+                                .content
+                                .insert(
+                                    chunk.content_index,
+                                    ReasoningTextContent::ReasoningText { text },
+                                );
+                        }
                         // An unknown part names no parent kind. It joins the slot's
                         // established item, or waits for evidence of one; the item
                         // ID's spelling is not that evidence.
                         ContentPartChunkPart::Unknown(value) => {
+                            let output_index =
+                                self.known_message_slot(output_index, outer_item_id.as_deref());
                             match self.parent_kinds.get(&output_index) {
                                 Some(PartParent::Reasoning) => {
+                                    if let Some(error) = self.reasoning_kind_conflict(
+                                        output_index,
+                                        ReasoningArray::Content,
+                                        chunk.content_index,
+                                        true,
+                                    ) {
+                                        self.refusal = Some(error);
+                                        return;
+                                    }
                                     self.reasoning_parts(
                                         output_index,
                                         outer_item_id.as_deref(),
@@ -1117,8 +1368,17 @@ impl RawChoiceAccumulator {
                                     super::AssistantContent::Refusal { refusal }
                                 }
                                 ContentPartChunkPart::Unknown(_)
-                                | ContentPartChunkPart::SummaryText { .. } => return,
+                                | ContentPartChunkPart::SummaryText { .. }
+                                | ContentPartChunkPart::ReasoningText { .. } => return,
                             };
+                            let output_index =
+                                self.message_slot(output_index, outer_item_id.as_deref(), false);
+                            if let Some(error) =
+                                self.message_kind_conflict(output_index, chunk.content_index, false)
+                            {
+                                self.refusal = Some(error);
+                                return;
+                            }
                             self.bind_message(output_index, outer_item_id.as_deref(), out);
                             if self.refusal.is_some() {
                                 return;
@@ -1136,6 +1396,15 @@ impl RawChoiceAccumulator {
                 }
                 ItemChunkKind::ReasoningSummaryPartAdded(chunk)
                 | ItemChunkKind::ReasoningSummaryPartDone(chunk) => {
+                    if let Some(error) = self.reasoning_kind_conflict(
+                        output_index,
+                        ReasoningArray::Summary,
+                        chunk.summary_index,
+                        matches!(chunk.part, ReasoningSummary::Unknown(_)),
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
                     self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
                         .summary
                         .insert(chunk.summary_index, chunk.part);
@@ -1145,6 +1414,15 @@ impl RawChoiceAccumulator {
                     summary_index,
                     ..
                 }) => {
+                    if let Some(error) = self.reasoning_kind_conflict(
+                        output_index,
+                        ReasoningArray::Summary,
+                        summary_index,
+                        false,
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
                     self.active_message_part = None;
                     let parts = self.reasoning_parts(output_index, outer_item_id.as_deref(), out);
                     if let ReasoningSummary::SummaryText { text } = parts
@@ -1170,6 +1448,15 @@ impl RawChoiceAccumulator {
                     content_index,
                     ..
                 }) => {
+                    if let Some(error) = self.reasoning_kind_conflict(
+                        output_index,
+                        ReasoningArray::Content,
+                        content_index.unwrap_or(0),
+                        false,
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
                     self.active_message_part = None;
                     let parts = self.reasoning_parts(output_index, outer_item_id.as_deref(), out);
                     if let ReasoningTextContent::ReasoningText { text } = parts
@@ -1191,6 +1478,15 @@ impl RawChoiceAccumulator {
                     );
                 }
                 ItemChunkKind::ReasoningSummaryTextDone(chunk) => {
+                    if let Some(error) = self.reasoning_kind_conflict(
+                        output_index,
+                        ReasoningArray::Summary,
+                        chunk.summary_index,
+                        false,
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
                     self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
                         .summary
                         .insert(
@@ -1199,6 +1495,15 @@ impl RawChoiceAccumulator {
                         );
                 }
                 ItemChunkKind::ReasoningTextDone(chunk) => {
+                    if let Some(error) = self.reasoning_kind_conflict(
+                        output_index,
+                        ReasoningArray::Content,
+                        chunk.content_index,
+                        false,
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
                     self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
                         .content
                         .insert(
@@ -1451,6 +1756,12 @@ impl RawChoiceAccumulator {
                 if self.finished_reasoning.contains(&output_index) {
                     return;
                 }
+                if let Some(error) =
+                    self.reasoning_snapshot_conflict(output_index, &summary, &content)
+                {
+                    self.refusal = Some(error);
+                    return;
+                }
                 let had_slot = self.reasoning_slots.contains_key(&output_index);
                 let nonempty = !summary.is_empty()
                     || !content.is_empty()
@@ -1469,7 +1780,7 @@ impl RawChoiceAccumulator {
                 }
             }
             Output::Message(message) => {
-                self.publish_message_text(output_index, &message, out);
+                self.publish_message_text(output_index, &message, true, out);
                 // A message item with no id starts no block: there is
                 // nothing to key it on.
                 if let Some(id) = crate::streaming::non_empty_id(message.id) {
@@ -2062,13 +2373,18 @@ pub enum ContentPartChunkPart {
     SummaryText {
         text: String,
     },
+    /// Reasoning content, announced by `response.content_part.*` on some
+    /// gateways before its `response.reasoning_text.*` deltas.
+    ReasoningText {
+        text: String,
+    },
     /// Unmodeled content part retained verbatim in neutral opaque metadata.
     #[serde(untagged)]
     Unknown(serde_json::Value),
 }
 
-/// Decode known tags only with a string text field; preserve unknown or absent tags.
-/// Nonstring tags return an error. Duplicate keys use the last value retained by
+/// Decode known tags only with a string text field and preserve unknown tags.
+/// Absent and nonstring tags return an error. Duplicate keys use the last value retained by
 /// `serde_json::Value`.
 impl<'de> Deserialize<'de> for ContentPartChunkPart {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -2104,12 +2420,17 @@ impl<'de> Deserialize<'de> for ContentPartChunkPart {
                 "summary_text" => Ok(Self::SummaryText {
                     text: text_field("summary_text")?,
                 }),
+                "reasoning_text" => Ok(Self::ReasoningText {
+                    text: text_field("reasoning_text")?,
+                }),
                 _ => Ok(Self::Unknown(value)),
             },
             Some(_) => Err(serde::de::Error::custom(
                 "content part `type` must be a string",
             )),
-            None => Ok(Self::Unknown(value)),
+            None => Err(serde::de::Error::custom(
+                "a Responses content part needs a string `type` tag",
+            )),
         }
     }
 }

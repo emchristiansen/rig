@@ -103,7 +103,7 @@ impl TryFrom<RigMessage> for vertexai::model::Content {
                     .map(|assistant_content| {
                         rig_core::providers::internal::refuse_opaque_responses_part(
                             &assistant_content,
-                            "Vertex AI",
+                            VERTEX_AI_WIRE,
                         )
                         .map_err(|error| ProviderError::Request(error.into()))?;
                         match assistant_content {
