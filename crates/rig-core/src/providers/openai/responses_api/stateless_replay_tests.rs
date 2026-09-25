@@ -284,8 +284,11 @@ fn provider_items_replay_verbatim_as_their_own_input_items() {
 /// one item, and a history from before provider items still decodes.
 #[test]
 fn a_history_with_a_provider_item_has_a_stable_serialized_form() {
+    // The item is the provider's own JSON object, whose key order follows
+    // `serde_json/preserve_order` (the workspace build enables it); write its
+    // keys already sorted so one golden holds in either build.
     let history = assistant_with(vec![message::ProviderItem::new(
-        json!({"type": "web_search_call", "id": "ws_1"}),
+        json!({"id": "ws_1", "type": "web_search_call"}),
         "openai",
     )]);
     assert_eq!(
