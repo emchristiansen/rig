@@ -247,9 +247,10 @@ pub(crate) fn stamp_websocket_marker(
 /// `tools` alone, so the fold discards caller data in three cases: members
 /// other than those four on a `functions` namespace; every description but
 /// the last non-blank one; and a namespace whose fold holds no functions,
-/// which is removed. An envelope selected by type and name whose
-/// `description` is not a string, or whose `tools` is not an array, is
-/// refused rather than dropped.
+/// which is removed. An envelope selected by type and name is refused rather
+/// than dropped when its `description` is present but not a string, or its
+/// `tools` is absent or not an array; an absent `description` counts as
+/// blank.
 fn fold_tools(tools: Vec<Value>) -> Result<Vec<Value>, ResponsesLiteError> {
     let mut functions = Vec::new();
     let mut description = String::new();
