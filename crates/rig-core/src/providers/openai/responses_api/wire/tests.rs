@@ -1132,7 +1132,9 @@ fn a_callers_own_cache_key_and_metadata_are_kept_over_http() {
         "prompt_cache_key": "caller-key",
         "client_metadata": {"session_id": "caller-session"},
     }));
-    let mut encoded = wire.encode(request, Mode::Unary).expect("the request encodes");
+    let mut encoded = wire
+        .encode(request, Mode::Unary)
+        .expect("the request encodes");
     let request = encoded.requests.remove(0);
     let Body::Bytes(body) = request.body() else {
         panic!("a Responses body is bytes");

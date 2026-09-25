@@ -1059,8 +1059,9 @@ async fn with_identity_overrides_the_wire_identity_for_the_session_only() {
     assert_eq!(handshakes[0]["thread-id"], "thread-override");
     assert_eq!(handshakes[0]["x-client-request-id"], "thread-override");
 
-    let mut encoded = crate::wire::Wire::encode(&wire, user_request("hello"), crate::wire::Mode::Streaming)
-        .expect("the request encodes");
+    let mut encoded =
+        crate::wire::Wire::encode(&wire, user_request("hello"), crate::wire::Mode::Streaming)
+            .expect("the request encodes");
     let http = encoded.requests.remove(0);
     assert_eq!(http.headers()["session-id"], "session-wire");
     assert_eq!(http.headers()["thread-id"], "thread-wire");
