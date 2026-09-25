@@ -750,7 +750,13 @@ impl RawChoiceAccumulator {
     }
 
     /// Whether `restatement` states every message part stored at `slot`
-    /// exactly (for one completed part, the part at its own index).
+    /// exactly. A `Part` speaks only for its own index, so it restates a slot
+    /// whose part at that index it equals, whatever the slot's other parts. An
+    /// `Item` must restate every stored part; parts it states beyond them are
+    /// late parts of the same message, the accepted late-part case. The gate
+    /// prefers a duplicate to a false merge: id-less deltas that a snapshot
+    /// cannot match exactly (a shifted position, or two messages concatenated
+    /// at one repaired position) are published again at their own positions.
     fn restates(&self, slot: u64, restatement: Restatement<'_>) -> bool {
         let mut stored = self
             .message_parts
@@ -794,8 +800,13 @@ impl RawChoiceAccumulator {
             return *slot;
         }
         let own = (output_index, 0)..=(output_index, u64::MAX);
+        // A waiting part another item's event named does not occupy this
+        // item's position.
         let own_slot_empty = self.message_parts.range(own.clone()).next().is_none()
-            && self.undecided_parts.range(own).next().is_none();
+            && !self
+                .undecided_parts
+                .range(own)
+                .any(|(_, parts)| parts.iter().any(|part| part.binds_to(Some(id))));
         let slot = own_slot_empty
             .then(|| {
                 self.unattributed_message_slots
@@ -820,21 +831,51 @@ impl RawChoiceAccumulator {
             .unwrap_or(output_index)
     }
 
+    /// Whether an unknown part waiting at `key` would bind to the item
+    /// `item_id` names: only such a part is stored content for that item.
+    fn waiting_binds(&self, key: (u64, u64), item_id: Option<&str>) -> bool {
+        self.undecided_parts
+            .get(&key)
+            .is_some_and(|parts| parts.iter().any(|part| part.binds_to(item_id)))
+    }
+
+    /// Whether a part `item_id`'s events left waiting at another position,
+    /// at `content_index`, moves to the reasoning slot about to be
+    /// established at `output_index` (see [`Self::reasoning_parts`]).
+    fn waiting_moves_to_reasoning(
+        &self,
+        output_index: u64,
+        item_id: Option<&str>,
+        content_index: u64,
+    ) -> bool {
+        let Some(id) = item_id.filter(|id| !id.is_empty()) else {
+            return false;
+        };
+        !self.reasoning_parts.contains_key(&output_index)
+            && self.undecided_parts.iter().any(|((index, at), parts)| {
+                *index != output_index
+                    && *at == content_index
+                    && parts.iter().any(|part| part.item_id.as_deref() == Some(id))
+            })
+    }
+
     /// The stored kind a message part would contradict: a published part, or
-    /// an unknown part still waiting for its parent (always opaque).
+    /// an unknown part still waiting that would bind to this item (always
+    /// opaque). A part another item's event named never binds here, so it
+    /// never blocks this item.
     fn message_kind_conflict(
         &self,
         slot: u64,
         content_index: u64,
         incoming_opaque: bool,
+        item_id: Option<&str>,
     ) -> Option<ProviderError> {
         let stored_opaque = self
             .message_parts
             .get(&(slot, content_index))
             .map(MessagePart::is_opaque)
             .or_else(|| {
-                self.undecided_parts
-                    .contains_key(&(slot, content_index))
+                self.waiting_binds((slot, content_index), item_id)
                     .then_some(true)
             })?;
         (stored_opaque != incoming_opaque).then(|| {
@@ -849,10 +890,11 @@ impl RawChoiceAccumulator {
     }
 
     /// The stored kind a reasoning part would contradict, counting unknown
-    /// parts still waiting for their parent as stored content.
+    /// parts still waiting that would bind to this item as stored content.
     fn reasoning_kind_conflict(
         &self,
         output_index: u64,
+        item_id: Option<&str>,
         array: ReasoningArray,
         index: u64,
         incoming_opaque: bool,
@@ -866,9 +908,9 @@ impl RawChoiceAccumulator {
                 .and_then(|parts| parts.content.get(&index))
                 .map(|part| matches!(part, ReasoningTextContent::Unknown(_)))
                 .or_else(|| {
-                    self.undecided_parts
-                        .contains_key(&(output_index, index))
-                        .then_some(true)
+                    (self.waiting_binds((output_index, index), item_id)
+                        || self.waiting_moves_to_reasoning(output_index, item_id, index))
+                    .then_some(true)
                 }),
         }?;
         (stored_opaque != incoming_opaque).then(|| {
@@ -887,6 +929,7 @@ impl RawChoiceAccumulator {
     fn reasoning_snapshot_conflict(
         &self,
         output_index: u64,
+        item_id: Option<&str>,
         summary: &[ReasoningSummary],
         content: &[ReasoningTextContent],
     ) -> Option<ProviderError> {
@@ -896,6 +939,7 @@ impl RawChoiceAccumulator {
             .find_map(|(index, part)| {
                 self.reasoning_kind_conflict(
                     output_index,
+                    item_id,
                     ReasoningArray::Summary,
                     index as u64,
                     matches!(part, ReasoningSummary::Unknown(_)),
@@ -905,6 +949,7 @@ impl RawChoiceAccumulator {
                 content.iter().enumerate().find_map(|(index, part)| {
                     self.reasoning_kind_conflict(
                         output_index,
+                        item_id,
                         ReasoningArray::Content,
                         index as u64,
                         matches!(part, ReasoningTextContent::Unknown(_)),
@@ -987,7 +1032,8 @@ impl RawChoiceAccumulator {
         let output_index = self.message_slot(output_index, item_id, Restatement::None);
         // Refuse before any state changes, as a snapshot would: known text
         // cannot join a published or waiting opaque part.
-        if let Some(error) = self.message_kind_conflict(output_index, content_index, false) {
+        if let Some(error) = self.message_kind_conflict(output_index, content_index, false, item_id)
+        {
             self.refusal = Some(error);
             return;
         }
@@ -1127,6 +1173,7 @@ impl RawChoiceAccumulator {
                     output_index,
                     index as u64,
                     matches!(content, super::AssistantContent::Unknown(_)),
+                    Some(&message.id),
                 )
             })
         {
@@ -1202,6 +1249,13 @@ impl RawChoiceAccumulator {
         self.parent_kinds
             .entry(output_index)
             .or_insert(PartParent::Reasoning);
+        // A reasoning id establishing its slot claims the parts its events
+        // left waiting at another position, as a message id does.
+        if let Some(id) = item_id.filter(|id| !id.is_empty())
+            && !self.reasoning_parts.contains_key(&output_index)
+        {
+            self.rekey_undecided(id, output_index);
+        }
         let undecided = self.take_undecided(output_index, item_id);
         let parts = self.reasoning_parts.entry(output_index).or_default();
         for (content_index, value) in undecided {
@@ -1367,9 +1421,12 @@ impl RawChoiceAccumulator {
                         },
                     ..
                 }) => {
-                    if let Some(error) =
-                        self.reasoning_snapshot_conflict(output_index, &summary, &content)
-                    {
+                    if let Some(error) = self.reasoning_snapshot_conflict(
+                        output_index,
+                        Some(&id),
+                        &summary,
+                        &content,
+                    ) {
                         self.refusal = Some(error);
                         return;
                     }
@@ -1405,6 +1462,7 @@ impl RawChoiceAccumulator {
                         ContentPartChunkPart::SummaryText { text } => {
                             if let Some(error) = self.reasoning_kind_conflict(
                                 output_index,
+                                outer_item_id.as_deref(),
                                 ReasoningArray::Summary,
                                 chunk.content_index,
                                 false,
@@ -1436,6 +1494,7 @@ impl RawChoiceAccumulator {
                             }
                             if let Some(error) = self.reasoning_kind_conflict(
                                 output_index,
+                                outer_item_id.as_deref(),
                                 ReasoningArray::Content,
                                 chunk.content_index,
                                 false,
@@ -1460,6 +1519,7 @@ impl RawChoiceAccumulator {
                                 Some(PartParent::Reasoning) => {
                                     if let Some(error) = self.reasoning_kind_conflict(
                                         output_index,
+                                        outer_item_id.as_deref(),
                                         ReasoningArray::Content,
                                         chunk.content_index,
                                         true,
@@ -1525,9 +1585,12 @@ impl RawChoiceAccumulator {
                                 outer_item_id.as_deref(),
                                 restatement,
                             );
-                            if let Some(error) =
-                                self.message_kind_conflict(output_index, chunk.content_index, false)
-                            {
+                            if let Some(error) = self.message_kind_conflict(
+                                output_index,
+                                chunk.content_index,
+                                false,
+                                outer_item_id.as_deref(),
+                            ) {
                                 self.refusal = Some(error);
                                 return;
                             }
@@ -1550,6 +1613,7 @@ impl RawChoiceAccumulator {
                 | ItemChunkKind::ReasoningSummaryPartDone(chunk) => {
                     if let Some(error) = self.reasoning_kind_conflict(
                         output_index,
+                        outer_item_id.as_deref(),
                         ReasoningArray::Summary,
                         chunk.summary_index,
                         matches!(chunk.part, ReasoningSummary::Unknown(_)),
@@ -1568,6 +1632,7 @@ impl RawChoiceAccumulator {
                 }) => {
                     if let Some(error) = self.reasoning_kind_conflict(
                         output_index,
+                        outer_item_id.as_deref(),
                         ReasoningArray::Summary,
                         summary_index,
                         false,
@@ -1603,6 +1668,7 @@ impl RawChoiceAccumulator {
                 }) => {
                     if let Some(error) = self.reasoning_kind_conflict(
                         output_index,
+                        outer_item_id.as_deref(),
                         ReasoningArray::Content,
                         content_index.unwrap_or(0),
                         false,
@@ -1634,6 +1700,7 @@ impl RawChoiceAccumulator {
                 ItemChunkKind::ReasoningSummaryTextDone(chunk) => {
                     if let Some(error) = self.reasoning_kind_conflict(
                         output_index,
+                        outer_item_id.as_deref(),
                         ReasoningArray::Summary,
                         chunk.summary_index,
                         false,
@@ -1651,6 +1718,7 @@ impl RawChoiceAccumulator {
                 ItemChunkKind::ReasoningTextDone(chunk) => {
                     if let Some(error) = self.reasoning_kind_conflict(
                         output_index,
+                        outer_item_id.as_deref(),
                         ReasoningArray::Content,
                         chunk.content_index,
                         false,
@@ -1911,7 +1979,7 @@ impl RawChoiceAccumulator {
                     return;
                 }
                 if let Some(error) =
-                    self.reasoning_snapshot_conflict(output_index, &summary, &content)
+                    self.reasoning_snapshot_conflict(output_index, Some(&id), &summary, &content)
                 {
                     self.refusal = Some(error);
                     return;

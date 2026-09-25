@@ -325,13 +325,72 @@ fn malformed_functions_namespace_is_refused_instead_of_discarded() {
             "type": "namespace",
             "name": "functions",
             "description": "kept if valid",
-            "sentinel": "must not vanish"
+            "sentinel": "refused with its envelope, never dropped silently"
         }))],
     );
 
     assert!(matches!(
         shape_request(&mut request, &identity("thread-a")),
         Err(ResponsesLiteError::MalformedFunctionsNamespace { field: "tools" })
+    ));
+}
+
+#[test]
+fn a_valid_functions_namespace_loses_its_extra_members_when_folded() {
+    let tools = vec![declared(serde_json::json!({
+        "type": "namespace",
+        "name": "functions",
+        "description": "kept",
+        "sentinel": "dropped by the fold",
+        "tools": [{"type": "function", "name": "only"}]
+    }))];
+
+    let body = shaped_json(None, tools, "thread-a");
+    let folded = body["input"][0]["tools"]
+        .as_array()
+        .expect("additional tools are an array");
+    assert_eq!(folded.len(), 1);
+    assert_eq!(folded[0]["description"], "kept");
+    assert_eq!(folded[0]["tools"][0]["name"], "only");
+    assert!(folded[0].get("sentinel").is_none(), "{folded:?}");
+}
+
+#[test]
+fn a_functions_namespace_that_folds_no_functions_is_removed() {
+    let tools = vec![
+        declared(serde_json::json!({"type": "web_search"})),
+        declared(serde_json::json!({
+            "type": "namespace",
+            "name": "functions",
+            "description": "empty",
+            "tools": []
+        })),
+    ];
+
+    let body = shaped_json(None, tools, "thread-a");
+    let folded = body["input"][0]["tools"]
+        .as_array()
+        .expect("additional tools are an array");
+    assert_eq!(folded.len(), 1, "{folded:?}");
+    assert_eq!(folded[0]["type"], "web_search");
+}
+
+#[test]
+fn a_functions_namespace_with_a_non_string_description_is_refused() {
+    // The typed declared-tool constructor already refuses this shape, so the
+    // fold's own refusal is a second line; pin it on the fold directly.
+    let namespace = serde_json::json!({
+        "type": "namespace",
+        "name": "functions",
+        "description": 7,
+        "tools": [{"type": "function", "name": "only"}]
+    });
+    assert!(DeclaredResponsesTool::from_value(namespace.clone()).is_err());
+    assert!(matches!(
+        super::fold_tools(vec![namespace]),
+        Err(ResponsesLiteError::MalformedFunctionsNamespace {
+            field: "description"
+        })
     ));
 }
 
