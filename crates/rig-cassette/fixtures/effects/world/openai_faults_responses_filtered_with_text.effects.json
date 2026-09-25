@@ -6,7 +6,7 @@
         "id": 0,
         "kind": {
           "delivery": "stream",
-          "items": 20
+          "items": 19
         }
       },
       {
@@ -14,7 +14,7 @@
         "id": 0,
         "kind": {
           "delivery": "stream",
-          "items": 2
+          "items": 3
         }
       },
       {
@@ -150,6 +150,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_00b0f43c455ec3c1006ab2b3df54f887d0a03a62160fe38a32",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_00b0f43c455ec3c1006ab2b3df54f887d0a03a62160fe38a32"
@@ -158,6 +162,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -301,6 +309,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_00b0f43c455ec3c1006ab2b3e0784087d0880914ecfd7efc61",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

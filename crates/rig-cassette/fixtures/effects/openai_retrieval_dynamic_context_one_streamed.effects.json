@@ -156,6 +156,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_0bf33752a712306f006ab3969230f887d0a15aa2f4cc507474",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -347,6 +351,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_0bf33752a712306f006ab3969230f887d0a15aa2f4cc507474",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

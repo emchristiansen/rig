@@ -774,12 +774,13 @@ fn grpc_refuses_provider_items_by_name_for_known_and_unknown_issuers() {
         });
         let error = rig_assistant_content_to_grpc_part(content)
             .expect_err("provider items have no representation on this wire");
-        let ProviderError::Request(inner) = error else {
-            panic!("expected a request refusal, got {error:?}");
-        };
-        let refusal = inner
-            .downcast_ref::<message::UnreplayableProviderItem>()
-            .expect("the refusal retains its shared concrete type");
+        let refusal = match &error {
+            ProviderError::Request(inner) => {
+                inner.downcast_ref::<message::UnreplayableProviderItem>()
+            }
+            _ => None,
+        }
+        .expect("a request refusal that retains its shared concrete type");
         assert_eq!(refusal.wire, GEMINI_GRPC_WIRE);
         assert_eq!(refusal.issuer.as_deref(), issuer);
         assert_eq!(refusal.item_type.as_deref(), Some("web_search_call"));

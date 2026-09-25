@@ -2,11 +2,19 @@
   "header": {
     "deliveries": [
       {
-        "batch": 5,
+        "batch": 32,
         "id": 0,
         "kind": {
           "delivery": "stream",
-          "items": 2
+          "items": 1
+        }
+      },
+      {
+        "batch": 34,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
         }
       }
     ],
@@ -85,6 +93,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_07a8c3da1c500a56006ab395f3221c87d0aea2ac87f7b88fa3",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }

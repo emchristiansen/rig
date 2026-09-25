@@ -150,6 +150,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }
