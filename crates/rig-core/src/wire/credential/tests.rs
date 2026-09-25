@@ -93,16 +93,18 @@ fn an_empty_optional_bearer_sends_no_credential_header() {
         account: None,
     };
     let mut headers = encoded_headers();
+    headers.insert("api-key", http::HeaderValue::from_static("caller-set"));
     placement
         .apply(&mut headers, &Credential::new(""))
         .expect("nothing to write");
     assert_eq!(
         written(&headers),
         pairs(&[
+            ("api-key", "caller-set"),
             ("chatgpt-account-id", "static-account"),
             ("x-unrelated", "kept"),
         ]),
-        "no account header is named, so the encoded one is left alone"
+        "only Authorization is named, so the account and caller api-key are kept"
     );
 
     let mut headers = encoded_headers();
