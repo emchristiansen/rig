@@ -13,8 +13,9 @@
 //! | no `struct`/`enum` parameter bounded by `HttpClientExt` or defaulted to `BoxedHttpClient` | the transport parameter returning |
 //! | no consumer-trait impl | a second way to be a model |
 //!
-//! `openai/responses_api/websocket.rs` is exempt because a session spans many
-//! turns over one connection rather than a single exchange. The credential
+//! `openai/responses_api/websocket.rs` and its Codex session,
+//! `openai/responses_api/websocket/codex.rs`, are exempt because a session
+//! spans many turns over one connection rather than a single exchange. The credential
 //! exchanges named in [`CREDENTIAL_EXCHANGES`] are exempt from the `async` rules
 //! only.
 //!
@@ -30,12 +31,18 @@ use quote::ToTokens;
 use syn::visit::{self, Visit};
 use syn::{Expr, File, ImplItemFn, ItemEnum, ItemFn, ItemImpl, ItemStruct};
 
-/// Files holding a session rather than a request/response exchange, currently
-/// only the Responses websocket.
+/// Files holding a session rather than a request/response exchange: the
+/// Responses websocket, and the Codex session over that same connection.
 ///
 /// A session is exempt from the transport rule as well as the `async` ones
 /// because it owns the socket it runs over.
-const SESSION_EXCEPTIONS: &[&str] = &["openai/responses_api/websocket.rs"];
+const SESSION_EXCEPTIONS: &[&str] = &[
+    "openai/responses_api/websocket.rs",
+    // The Codex dialect's session: it opens the same Responses websocket with
+    // the Codex identity and handshake, then sends, streams, keeps alive, and
+    // closes over it turn after turn, as `websocket.rs` does.
+    "openai/responses_api/websocket/codex.rs",
+];
 
 /// Files performing credential exchanges, which poll device flows, refresh
 /// tokens, and share caches, and so produce the secrets wires carry.
