@@ -3905,11 +3905,15 @@ fn unknown_payloads(events: &[StreamEvent]) -> Vec<serde_json::Value> {
 #[test]
 fn an_unknown_part_before_parent_evidence_joins_the_item_that_evidence_names() {
     let unknown = json!({"type":"future_part","payload":{"list":[1]}});
-    // The part event's item ID spells like reasoning; only typed evidence binds.
+    // The item ID spells like reasoning for both parents; only typed evidence
+    // binds the kind. The evidence items once carried other ids (msg_opaque,
+    // rs_opaque); since round-2 H5 a waiting part binds only to the item its
+    // event named, so the part event and its item agree here, as in an honest
+    // stream. A part naming another item is pinned separately
+    // (a_waiting_part_whose_item_never_arrives_leaves_raw).
     let part = json!({"type":"response.content_part.added","item_id":"rs_spelling_only","output_index":0,"content_index":0,"sequence_number":0,"part":unknown});
-    let message = |content| opaque_message_fixture(content);
-    let reasoning =
-        |content| json!({"type":"reasoning","id":"rs_opaque","summary":[],"content":content});
+    let message = |content| json!({"type":"message","id":"rs_spelling_only","role":"assistant","status":"completed","content":content});
+    let reasoning = |content| json!({"type":"reasoning","id":"rs_spelling_only","summary":[],"content":content});
     for parent in ["message", "reasoning"] {
         let item = |content| {
             if parent == "message" {
@@ -4299,6 +4303,61 @@ fn an_empty_done_after_reasoning_deltas_keeps_the_streamed_reasoning() {
     assert_eq!(reasoning.display_text(), "known");
 }
 
+#[test]
+fn an_opened_reasoning_block_closes_exactly_once_whatever_its_restatements() {
+    // Deltas open the block; empty restatements keep it eligible for its one
+    // close, which carries the streamed text, on every flush path.
+    let empty = json!({"type":"reasoning","id":"rs_deltas","summary":[],"content":[]});
+    let delta = json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_deltas","output_index":0,"summary_index":0,"sequence_number":0,"delta":"known"});
+    let done = json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":empty});
+    let mut failed_response = sample_response(ResponseStatus::Failed);
+    failed_response.error = Some(ResponseError {
+        code: Some("server_error".to_string()),
+        message: "boom".to_string(),
+    });
+    let failed = json!({"type":"response.failed","sequence_number":2,"response":failed_response});
+    let closes = |events: &[StreamEvent]| -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::BlockEnd {
+                    id,
+                    end: BlockClose::Reasoning { reasoning, .. },
+                    ..
+                } => {
+                    assert_eq!(*id, BlockId::wire("rs_deltas".to_owned()));
+                    Some(
+                        reasoning
+                            .as_ref()
+                            .map(|reasoning| reasoning.display_text())
+                            .unwrap_or_default(),
+                    )
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    for (path, frames) in [
+        (
+            "terminal",
+            vec![
+                delta.clone(),
+                done.clone(),
+                completed_with_output(json!([empty])),
+            ],
+        ),
+        ("partial eof", vec![delta.clone(), done.clone()]),
+        ("deltas only, eof", vec![delta.clone()]),
+        (
+            "error flush",
+            vec![delta.clone(), done.clone(), failed.clone()],
+        ),
+    ] {
+        let (events, _) = driven_frames(&frames);
+        assert_eq!(closes(&events), ["known"], "{path}: {events:?}");
+    }
+}
+
 fn message_item(id: &str, content: serde_json::Value) -> serde_json::Value {
     json!({"type":"message","id":id,"role":"assistant","status":"completed","content":content})
 }
@@ -4506,10 +4565,14 @@ fn known_text_over_a_waiting_opaque_part_is_refused_before_binding() {
 
 #[test]
 fn a_content_part_without_a_type_tag_is_a_malformed_frame() {
-    let (_, errors) = driven_frames(&[
+    let (events, errors) = driven_frames(&[
         json!({"type":"response.content_part.added","item_id":"msg_t","output_index":0,"content_index":0,"sequence_number":0,"part":{"text":"x"}}),
     ]);
-    assert!(!errors.is_empty());
+    assert!(
+        matches!(errors.as_slice(), [ProviderError::Json(_)]),
+        "{errors:?}"
+    );
+    assert!(unknown_payloads(&events).is_empty(), "{events:?}");
 }
 
 #[test]
@@ -4518,12 +4581,20 @@ fn responses_replay_refuses_text_beside_an_opaque_marker() {
         json!({"type":"future_part","payload":[1]}),
     ));
     text.text = "replacement".into();
-    let result: Result<Vec<super::super::InputItem>, _> = crate::message::Message::Assistant {
-        id: Some("msg_opaque".into()),
-        content: vec![AssistantContent::Text(text)],
+    for id in [Some("msg_opaque".to_owned()), None] {
+        let result: Result<Vec<super::super::InputItem>, _> = crate::message::Message::Assistant {
+            id: id.clone(),
+            content: vec![AssistantContent::Text(text.clone())],
+        }
+        .try_into();
+        let error = result.expect_err("text beside an opaque marker cannot replay");
+        assert!(
+            error
+                .to_string()
+                .contains("an opaque Responses message part carries non-empty text"),
+            "id={id:?}: {error}"
+        );
     }
-    .try_into();
-    assert!(result.is_err());
 }
 
 #[test]
@@ -4583,4 +4654,242 @@ fn a_reasoning_text_part_inside_a_message_is_refused() {
             ..
         }
     )));
+}
+
+fn reasoning_items(choice: &[AssistantContent]) -> Vec<&crate::message::Reasoning> {
+    choice
+        .iter()
+        .filter_map(|part| match part {
+            AssistantContent::Reasoning(reasoning) => Some(reasoning),
+            _ => None,
+        })
+        .collect()
+}
+
+fn fold_driven(frames: &[serde_json::Value]) -> (Vec<AssistantContent>, Vec<StreamEvent>) {
+    let (events, errors) = driven_frames(frames);
+    assert!(errors.is_empty(), "{errors:?}");
+    let folded = folded_stream_events(
+        "openai",
+        events.clone(),
+        &sample_response(ResponseStatus::Completed),
+    )
+    .unwrap();
+    (folded.choice, events)
+}
+
+#[test]
+fn a_done_only_second_message_keeps_its_own_text() {
+    // Id-less deltas fill slot 0; a different message arrives only as its
+    // done at slot 1. It does not restate slot 0, so it keeps its position.
+    let (choice, _) = fold_driven(&[
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"sequence_number":0,"delta":"A"}),
+        json!({"type":"response.output_item.done","output_index":1,"sequence_number":1,"item":message_item("msg_b", json!([{"type":"output_text","text":"B"}]))}),
+        completed_with_output(json!([
+            message_item("msg_a", json!([{"type":"output_text","text":"A"}])),
+            message_item("msg_b", json!([{"type":"output_text","text":"B"}]))
+        ])),
+    ]);
+    assert_eq!(folded_texts(&choice), ["A", "B"]);
+}
+
+#[test]
+fn a_done_only_message_extending_streamed_text_is_a_different_message() {
+    // Only an exact restatement takes over an id-less slot: "Yes, and more"
+    // is not "Yes" restated.
+    let (choice, _) = fold_driven(&[
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"sequence_number":0,"delta":"Yes"}),
+        json!({"type":"response.output_item.done","output_index":1,"sequence_number":1,"item":message_item("msg_b", json!([{"type":"output_text","text":"Yes, and more"}]))}),
+        completed_with_output(json!([
+            message_item("msg_a", json!([{"type":"output_text","text":"Yes"}])),
+            message_item(
+                "msg_b",
+                json!([{"type":"output_text","text":"Yes, and more"}])
+            )
+        ])),
+    ]);
+    assert_eq!(folded_texts(&choice), ["Yes", "Yes, and more"]);
+}
+
+#[test]
+fn a_done_only_refusal_never_reopens_an_id_less_refusal() {
+    let (choice, events) = fold_driven(&[
+        json!({"type":"response.refusal.delta","output_index":0,"content_index":0,"sequence_number":0,"delta":"no"}),
+        json!({"type":"response.output_item.done","output_index":1,"sequence_number":1,"item":message_item("msg_b", json!([{"type":"refusal","refusal":"other"}]))}),
+        completed_with_output(json!([
+            message_item("msg_a", json!([{"type":"refusal","refusal":"no"}])),
+            message_item("msg_b", json!([{"type":"refusal","refusal":"other"}]))
+        ])),
+    ]);
+    assert_eq!(folded_texts(&choice), ["no", "other"]);
+    // Every refusal block carries its marker from its start.
+    for event in &events {
+        if let StreamEvent::BlockStart {
+            kind: BlockKind::Text { additional_params },
+            ..
+        } = event
+        {
+            assert!(additional_params.is_some(), "{events:?}");
+        }
+    }
+}
+
+#[test]
+fn a_content_part_done_restating_an_id_less_slot_does_not_repeat_its_text() {
+    let (choice, _) = fold_driven(&[
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"sequence_number":0,"delta":"Hello"}),
+        json!({"type":"response.content_part.done","item_id":"msg_1","output_index":1,"content_index":0,"sequence_number":1,"part":{"type":"output_text","text":"Hello","annotations":[]}}),
+        completed_with_output(json!([
+            json!({"type":"reasoning","id":"rs_1","summary":[]}),
+            message_item("msg_1", json!([{"type":"output_text","text":"Hello"}]))
+        ])),
+    ]);
+    assert_eq!(folded_texts(&choice), ["Hello"]);
+}
+
+#[test]
+fn a_content_part_added_never_takes_over_an_id_less_slot() {
+    let (choice, _) = fold_driven(&[
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"sequence_number":0,"delta":"Hello"}),
+        json!({"type":"response.content_part.added","item_id":"msg_1","output_index":1,"content_index":0,"sequence_number":1,"part":{"type":"output_text","text":"Hello","annotations":[]}}),
+    ]);
+    assert_eq!(folded_texts(&choice), ["Hello", "Hello"]);
+}
+
+#[test]
+fn a_terminal_refusal_still_closes_later_reasoning() {
+    let (events, errors) = driven_frames(&[
+        json!({"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"sequence_number":0,"delta":"Hi"}),
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":1,"summary_index":0,"sequence_number":1,"delta":"think"}),
+        completed_with_output(json!([
+            message_item("msg_1", json!([{"type":"future_part","payload":[1]}])),
+            json!({"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"think"}]})
+        ])),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0]
+            .to_string()
+            .contains("conflicting Responses content part kind at output 0"),
+        "{errors:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            StreamEvent::BlockEnd {
+                id,
+                end: BlockClose::Reasoning { .. },
+                ..
+            } if *id == BlockId::wire("rs_1".to_owned())
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn an_empty_signature_is_no_more_content_than_empty_ciphertext() {
+    let done_with = |field: &str| {
+        let mut item = json!({"type":"reasoning","id":"rs_1","summary":[]});
+        item[field] = json!("");
+        driven_frames(&[
+            json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"sequence_number":0,"delta":"t"}),
+            json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":item}),
+        ])
+    };
+    let signature = done_with("signature");
+    let ciphertext = done_with("encrypted_content");
+    assert!(signature.1.is_empty() && ciphertext.1.is_empty());
+    assert_eq!(format!("{:?}", signature.0), format!("{:?}", ciphertext.0));
+}
+
+#[test]
+fn a_waiting_part_binds_only_to_the_item_its_event_named() {
+    // Repair puts msg_1's unknown part at slot 0, where the terminal's
+    // reasoning sits; the part belongs to msg_1 alone.
+    let unknown = json!({"type":"future_part","payload":[1]});
+    let (choice, events) = fold_driven(&[
+        json!({"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":0,"sequence_number":0,"part":unknown}),
+        completed_with_output(json!([
+            json!({"type":"reasoning","id":"rs_1","summary":[]}),
+            message_item("msg_1", json!([unknown]))
+        ])),
+    ]);
+    let reasoning = reasoning_items(&choice);
+    assert_eq!(reasoning.len(), 1, "{choice:?}");
+    assert!(reasoning[0].content.is_empty(), "{choice:?}");
+    let opaque: Vec<_> = choice
+        .iter()
+        .filter_map(|part| match part {
+            AssistantContent::Text(text) => {
+                super::super::opaque_message_part(text.additional_params.as_ref())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opaque, [&unknown]);
+    assert!(unknown_payloads(&events).is_empty(), "{events:?}");
+}
+
+#[test]
+fn a_waiting_part_whose_item_never_arrives_leaves_raw() {
+    let unknown = json!({"type":"future_part","payload":[2]});
+    let (choice, events) = fold_driven(&[
+        json!({"type":"response.content_part.added","item_id":"msg_z","output_index":0,"content_index":0,"sequence_number":0,"part":unknown}),
+        completed_with_output(json!([
+            json!({"type":"reasoning","id":"rs_1","summary":[]})
+        ])),
+    ]);
+    assert!(
+        reasoning_items(&choice)
+            .iter()
+            .all(|reasoning| reasoning.content.is_empty()),
+        "{choice:?}"
+    );
+    assert_eq!(unknown_payloads(&events), vec![unknown]);
+}
+
+#[test]
+fn distinct_waiting_observations_bind_to_reasoning_last_writer_wins() {
+    let first = json!({"type":"future_part","payload":[1]});
+    let second = json!({"type":"future_part","payload":[2]});
+    let (choice, events) = fold_driven(&[
+        json!({"type":"response.content_part.added","output_index":0,"content_index":0,"sequence_number":0,"part":first}),
+        json!({"type":"response.content_part.done","output_index":0,"content_index":0,"sequence_number":1,"part":second}),
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_1","output_index":0,"summary_index":0,"sequence_number":2,"delta":"t"}),
+        completed_with_output(json!([
+            json!({"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"t"}]})
+        ])),
+    ]);
+    let reasoning = reasoning_items(&choice);
+    assert_eq!(reasoning.len(), 1, "{choice:?}");
+    let opaque: Vec<_> = reasoning[0]
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            ReasoningContent::OpaqueContent(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opaque, [&second], "{choice:?}");
+    assert!(unknown_payloads(&events).is_empty(), "{events:?}");
+}
+
+#[test]
+fn reasoning_text_added_text_reaches_the_assembly_not_the_live_deltas() {
+    // As with summary parts, a content_part.added carrying text contributes
+    // to the assembled reasoning, not to the live delta channel.
+    let (_, events) = fold_driven(&[
+        json!({"type":"response.output_item.added","output_index":0,"sequence_number":0,"item":{"type":"reasoning","id":"rs_x","summary":[]}}),
+        json!({"type":"response.content_part.added","item_id":"rs_x","output_index":0,"content_index":0,"sequence_number":1,"part":{"type":"reasoning_text","text":"x"}}),
+    ]);
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            StreamEvent::BlockDelta {
+                delta: Delta::Reasoning { .. },
+                ..
+            }
+        )),
+        "{events:?}"
+    );
 }

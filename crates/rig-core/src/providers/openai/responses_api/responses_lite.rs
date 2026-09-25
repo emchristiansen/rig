@@ -238,11 +238,18 @@ pub(crate) fn stamp_websocket_marker(
     Ok(())
 }
 
-/// Fold only the verified namespace envelope. Its `type`, `name`,
-/// `description`, and `tools` members are rebuilt; nested function/custom
-/// values remain exact JSON values, while every non-function top-level value
-/// passes through unchanged. An envelope selected by type and name must be
-/// structurally valid so the transform cannot silently discard caller data.
+/// Fold every top-level function/custom tool and every `functions` namespace
+/// into one `functions` namespace at the position of the first. Nested
+/// function/custom values remain exact JSON values, and every other top-level
+/// value passes through unchanged.
+///
+/// The folded envelope is rebuilt from `type`, `name`, `description`, and
+/// `tools` alone, so the fold discards caller data in three cases: members
+/// other than those four on a `functions` namespace; every description but
+/// the last non-blank one; and a namespace whose fold holds no functions,
+/// which is removed. An envelope selected by type and name whose
+/// `description` is not a string, or whose `tools` is not an array, is
+/// refused rather than dropped.
 fn fold_tools(tools: Vec<Value>) -> Result<Vec<Value>, ResponsesLiteError> {
     let mut functions = Vec::new();
     let mut description = String::new();
