@@ -461,10 +461,11 @@ impl HttpClientExt for CapturingStreamingClient {
     where
         T: Into<Bytes> + WasmCompatSend,
     {
-        self.requests
-            .lock()
-            .expect("the capture lock is never poisoned")
-            .push(req.headers().clone());
+        match self.requests.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+        .push(req.headers().clone());
         let sse_bytes = self.sse_bytes.clone();
         async move {
             let byte_stream =

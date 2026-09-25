@@ -1031,3 +1031,37 @@ async fn a_caller_derived_identity_names_the_handshake_and_every_frame() {
         json!({"session_id": "session-derived", "thread_id": "thread-derived"})
     );
 }
+
+/// `with_identity` overrides the wire's identity for this session only: the
+/// handshake and the session carry the override, while the wire's own HTTP
+/// requests keep the wire's identity.
+#[tokio::test]
+async fn with_identity_overrides_the_wire_identity_for_the_session_only() {
+    let on_wire = CodexIdentity::from_ids("session-wire", "thread-wire").expect("header-safe ids");
+    let override_identity =
+        CodexIdentity::from_ids("session-override", "thread-override").expect("header-safe ids");
+    let wire = codex_wire()
+        .with_codex_identity(on_wire)
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    let backend = HandshakeRecorder::default();
+
+    let session = CodexWebSocketSessionBuilder::new(wire.clone())
+        .expect("the ChatGPT dialect speaks the Codex contract")
+        .with_identity(override_identity.clone())
+        .connect_with(&backend)
+        .await
+        .expect("the scripted connection opens");
+
+    assert_eq!(session.identity(), &override_identity);
+    let handshakes = backend.handshakes.lock().expect("unpoisoned").clone();
+    assert_eq!(handshakes.len(), 1);
+    assert_eq!(handshakes[0]["session-id"], "session-override");
+    assert_eq!(handshakes[0]["thread-id"], "thread-override");
+    assert_eq!(handshakes[0]["x-client-request-id"], "thread-override");
+
+    let mut encoded = crate::wire::Wire::encode(&wire, user_request("hello"), crate::wire::Mode::Streaming)
+        .expect("the request encodes");
+    let http = encoded.requests.remove(0);
+    assert_eq!(http.headers()["session-id"], "session-wire");
+    assert_eq!(http.headers()["thread-id"], "thread-wire");
+}

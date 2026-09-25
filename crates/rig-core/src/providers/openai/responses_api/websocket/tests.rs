@@ -265,6 +265,62 @@ fn a_codex_wrapped_error_event_keeps_its_status_and_headers() {
     assert_eq!(body["headers"]["x-codex-primary-window-minutes"], 15);
 }
 
+/// A header the typed map cannot carry, a name with a space or a value with
+/// a control character, is left out of the error's headers but kept in the
+/// preserved body, which carries the whole event.
+#[test]
+fn an_error_event_header_no_header_map_can_carry_stays_in_the_body_only() {
+    let payload = json!({
+        "type": "error",
+        "status": 429,
+        "headers": {
+            "not a header name": "kept-in-body",
+            "x-control-value": "line\nbreak",
+            "x-codex-primary-used-percent": "100.0"
+        }
+    })
+    .to_string();
+    let Some(ResponsesWebSocketEvent::Error(event)) =
+        parse_server_event(&payload).expect("the event parses")
+    else {
+        panic!("a wrapped error decodes as an error event");
+    };
+    let err = provider_error_from_event(&event);
+    let headers = err
+        .provider_response_headers()
+        .expect("the event's headers are attached");
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers["x-codex-primary-used-percent"], "100.0");
+    let body = err
+        .provider_response_json()
+        .expect("preserved body should be valid JSON")
+        .expect("provider response body should be present");
+    assert_eq!(body["headers"]["not a header name"], "kept-in-body");
+    assert_eq!(body["headers"]["x-control-value"], "line\nbreak");
+}
+
+/// A reported status that no HTTP status can be is a malformed known field:
+/// the event is refused with a typed decode error rather than read as an
+/// error without a status.
+#[test]
+fn an_error_event_with_an_impossible_status_is_refused() {
+    for (field, status) in [("status", 0), ("status", 1000), ("status_code", 42)] {
+        let payload = json!({"type": "error", field: status}).to_string();
+        let error = parse_server_event(&payload).expect_err("not an HTTP status");
+        assert!(
+            error.to_string().contains("is not an HTTP status"),
+            "{field}={status}: {error}"
+        );
+    }
+    let payload = json!({"type": "error", "status": null}).to_string();
+    let Some(ResponsesWebSocketEvent::Error(event)) =
+        parse_server_event(&payload).expect("a null status is no status")
+    else {
+        panic!("an error event with a null status decodes");
+    };
+    assert_eq!(event.status, None);
+}
+
 /// The `status_code` spelling is read as the status, an event without an
 /// `error` object still decodes, and unmodelled top-level fields are kept
 /// rather than dropped.

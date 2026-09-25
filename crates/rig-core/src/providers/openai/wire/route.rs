@@ -178,8 +178,8 @@ impl Wire for OpenAiWire {
     type Op = Completion;
     type Decoder = OpenAiDecoder;
 
-    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
-        on_route!(self, wire => wire.authorizer())
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        on_route!(self, wire => wire.credential_stamp())
     }
 
     fn name(&self) -> &str {

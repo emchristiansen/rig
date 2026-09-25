@@ -371,16 +371,16 @@ where
     // Preserve every page document so batched replies do not lose earlier data.
     let mut documents: Vec<serde_json::Value> = Vec::new();
     let mut pending: std::collections::VecDeque<http::Request<Body>> = requests.into();
-    let authorizer = wire.authorizer();
+    let credential_stamp = wire.credential_stamp();
     // Replies read in this call, which is what MAX_CONTINUATION_PAGES bounds.
     let mut pages: usize = 0;
     while let Some(mut http_request) = pending.pop_front() {
         // Every page is its own send attempt, so it reads the credential
         // afresh; a refusal sends nothing.
-        if let Some(authorizer) = &authorizer {
+        if let Some(stamp) = &credential_stamp {
             let route = http_request.uri().path().to_owned();
             tracing::Instrument::instrument(
-                authorizer.authorize(http_request.headers_mut()),
+                stamp.authorize(http_request.headers_mut()),
                 span.clone(),
             )
             .await
@@ -598,7 +598,7 @@ where
     let http_request = byte_request(http_request)?;
 
     let http = http.clone();
-    let authorizer = wire.authorizer();
+    let credential_stamp = wire.credential_stamp();
     // Read here for the same reason: a refusal reports the route the way
     // the unary path does.
     let wire_name = wire.name().to_owned();
@@ -615,8 +615,8 @@ where
         // The one send attempt reads the credential when it is first
         // polled; a refusal sends nothing and is the stream's only item.
         let mut http_request = http_request;
-        if let Some(authorizer) = &authorizer
-            && let Err(error) = authorizer.authorize(http_request.headers_mut()).await
+        if let Some(stamp) = &credential_stamp
+            && let Err(error) = stamp.authorize(http_request.headers_mut()).await
         {
             driver.fail(<W::Op as Operation>::with_route(error, &wire_name, &request_path));
             for item in driver.drain() {
