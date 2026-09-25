@@ -2574,7 +2574,8 @@ pub enum OutputRole {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum Message {
-    /// A Responses Lite base-instruction item.
+    /// A developer message, including the typed Responses Lite
+    /// base-instruction form.
     Developer {
         /// A stable item id derived from the thread and instruction bytes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2582,6 +2583,9 @@ pub enum Message {
         /// Instruction text represented as Responses input content.
         #[serde(deserialize_with = "string_or_vec")]
         content: Vec<SystemContent>,
+        /// An optional caller-supplied message name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
         /// The internal marker identifying model base instructions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
@@ -2952,6 +2956,10 @@ impl FromStr for UserContent {
 }
 
 #[cfg(test)]
+mod openapi_schema;
+#[cfg(test)]
 mod stateless_replay_tests;
+#[cfg(test)]
+mod streaming_conformance;
 #[cfg(test)]
 mod tests;

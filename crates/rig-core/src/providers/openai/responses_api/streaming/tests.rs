@@ -27,6 +27,31 @@ use futures::StreamExt;
 use serde_json::{self, json};
 
 #[test]
+fn known_event_cannot_fall_back_to_a_whole_response() {
+    let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict());
+    let mut body = json!({
+        "id":"resp_1", "object":"response", "created_at":0,
+        "status":"completed", "model":"gpt-test"
+    });
+    assert!(matches!(
+        decoder.classify_payload(&body.to_string()),
+        WireEvent::Known(super::ResponsesEvent::Whole(_))
+    ));
+    body["type"] = json!("response.completed");
+    assert!(matches!(
+        decoder.classify_payload(&body.to_string()),
+        WireEvent::Corrupt(_)
+    ));
+    // Even a duplicate discriminator must not make body decoding rescue the
+    // event's invalid envelope.
+    let duplicate = format!("{{\"type\":\"future.event\",{}", &body.to_string()[1..]);
+    assert!(matches!(
+        decoder.classify_payload(&duplicate),
+        WireEvent::Corrupt(_)
+    ));
+}
+
+#[test]
 fn classify_known_event_decodes() {
     let frame = json!({
         "type": "response.output_text.delta",

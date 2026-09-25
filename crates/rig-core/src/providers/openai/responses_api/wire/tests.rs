@@ -9,6 +9,7 @@ use crate::completion::{CompletionModel, CompletionRequest};
 use crate::driver::Bound;
 use crate::message::{self, Message};
 use crate::providers::chatgpt::DIALECT as CHATGPT;
+use crate::providers::openai::responses_api::openapi_schema::{self, Schema};
 use crate::providers::xai::DIALECT as XAI;
 use crate::test_utils::{MockStreamingClient, RecordingHttpClient};
 use crate::wire::{Body, Mode};
@@ -235,6 +236,30 @@ fn turn(chat_history: Vec<Message>) -> CompletionRequest {
         chat_history,
         ..prompt()
     }
+}
+
+fn image_message(text: &str) -> Message {
+    Message::User {
+        content: vec![
+            message::UserContent::text(text),
+            message::UserContent::Image(message::Image {
+                data: message::DocumentSourceKind::Url("https://example.test/image.png".to_owned()),
+                media_type: None,
+                detail: None,
+                additional_params: None,
+            }),
+        ],
+    }
+}
+
+fn assert_string_map(value: &serde_json::Value, field: &str) {
+    let values = value
+        .as_object()
+        .unwrap_or_else(|| panic!("{field} must be an object: {value}"));
+    assert!(
+        values.values().all(serde_json::Value::is_string),
+        "every {field} value must be a string: {value}"
+    );
 }
 
 fn chatgpt() -> Responses {
@@ -1039,6 +1064,39 @@ fn standard_request_shape_keeps_the_existing_codex_wire_body() {
     assert_eq!(tools[1], namespace);
 }
 
+#[test]
+fn exact_standard_http_create_response_satisfies_the_named_public_schema_view() {
+    let wire = chatgpt()
+        .with_codex_identity(derived_identity())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    let mut request = turn_declaring(serde_json::json!([responses_lite_namespace()]));
+    request.chat_history = vec![image_message("describe")];
+    let body = encoded_body_of(&wire, request, Mode::Streaming);
+
+    openapi_schema::assert_valid(Schema::HttpCreateResponse, &body);
+    assert_string_map(&body["client_metadata"], "client_metadata");
+
+    let mut bad_role = body.clone();
+    bad_role["input"][0]["role"] = serde_json::json!("tool");
+    openapi_schema::assert_invalid(Schema::HttpCreateResponse, &bad_role);
+    let mut bad_content = body.clone();
+    bad_content["input"][0]["content"] = serde_json::json!(42);
+    openapi_schema::assert_invalid(Schema::HttpCreateResponse, &bad_content);
+    let mut bad_tools = body.clone();
+    bad_tools["tools"][0]["name"] = serde_json::json!(42);
+    openapi_schema::assert_invalid(Schema::HttpCreateResponse, &bad_tools);
+    let mut bad_image = body;
+    let image = bad_image["input"]
+        .as_array_mut()
+        .expect("input is an array")
+        .iter_mut()
+        .flat_map(|item| item["content"].as_array_mut().into_iter().flatten())
+        .find(|content| content["type"] == "input_image")
+        .expect("the emitted request carries its image");
+    image["detail"] = serde_json::json!("maximum");
+    openapi_schema::assert_invalid(Schema::HttpCreateResponse, &bad_image);
+}
+
 /// HTTP Lite uses the wire identity for its deterministic prefix, carries the
 /// marker only as an HTTP header, and removes top-level tools/instructions.
 #[test]
@@ -1052,7 +1110,7 @@ fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
         .expect("the ChatGPT dialect speaks the Codex contract");
     let mut encoded = wire
         .encode(
-            turn(vec![Message::system("caller base"), Message::user("hello")]),
+            turn(vec![Message::system("caller base"), image_message("hello")]),
             Mode::Streaming,
         )
         .expect("the Lite request encodes");
@@ -1084,6 +1142,9 @@ fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
     assert_eq!(body["tool_choice"], "auto");
     assert_eq!(body["reasoning"]["context"], "all_turns");
     assert_eq!(body["client_metadata"]["thread_id"], "thread-derived");
+    assert!(body["input"][2]["content"][1].get("detail").is_none());
+    openapi_schema::assert_valid(Schema::LiteHttpCreateResponse, &body);
+    assert_string_map(&body["client_metadata"], "client_metadata");
 
     #[cfg(feature = "websocket")]
     {

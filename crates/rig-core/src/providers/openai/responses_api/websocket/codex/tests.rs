@@ -1,7 +1,9 @@
 use super::*;
 use crate::completion::{AssistantContent, FinishReason, Message};
+use crate::message;
 use crate::providers::chatgpt;
 use crate::providers::openai::OpenAI;
+use crate::providers::openai::responses_api::openapi_schema::{self, Schema};
 use crate::providers::openai::responses_api::websocket::test_connection::Script;
 use crate::providers::openai::responses_api::{
     CompletionResponse, IncompleteDetailsReason, InputItem, OutputTokensDetails, ResponseObject,
@@ -47,6 +49,39 @@ fn delta(text: &str) -> InputDelta {
     let items = Vec::<InputItem>::try_from(Message::user(text))
         .expect("a user message converts into input items");
     InputDelta::new(items).expect("the delta carries an item")
+}
+
+fn image_message(text: &str) -> Message {
+    Message::User {
+        content: vec![
+            message::UserContent::text(text),
+            message::UserContent::Image(message::Image {
+                data: message::DocumentSourceKind::Url("https://example.test/image.png".to_owned()),
+                media_type: None,
+                detail: Some(message::ImageDetail::High),
+                additional_params: None,
+            }),
+        ],
+    }
+}
+
+fn image_request(text: &str) -> completion::CompletionRequest {
+    completion::CompletionRequest {
+        chat_history: vec![image_message(text)],
+        ..user_request(text)
+    }
+}
+
+fn image_delta(text: &str) -> InputDelta {
+    let items = Vec::<InputItem>::try_from(image_message(text))
+        .expect("a user image message converts into input items");
+    InputDelta::new(items).expect("the image delta carries an item")
+}
+
+fn is_string_map(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|map| map.values().all(serde_json::Value::is_string))
 }
 
 fn response(response_id: &str, status: ResponseStatus) -> CompletionResponse {
@@ -381,6 +416,7 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
     let frames = script.sent_json();
     assert_eq!(frames.len(), 2, "one frame per turn: {frames:?}");
     for frame in &frames {
+        openapi_schema::assert_valid(Schema::WebSocketResponseCreate, frame);
         assert_eq!(frame["type"], "response.create");
         assert_eq!(frame["store"], json!(false), "store is stated: {frame}");
         for unset in ["top_p", "temperature", "max_output_tokens"] {
@@ -408,6 +444,9 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
         json!(["reasoning.encrypted_content"]),
         "the encrypted-reasoning include rides alongside reasoning"
     );
+    let mut bad_envelope = frames[0].clone();
+    bad_envelope["type"] = json!("response.update");
+    openapi_schema::assert_invalid(Schema::WebSocketResponseCreate, &bad_envelope);
 }
 
 /// Lite full sends carry one deterministic prefix and the per-frame marker;
@@ -427,11 +466,11 @@ async fn responses_lite_marks_every_frame_and_prefixes_only_full_sends() {
             .expect("the ChatGPT dialect speaks the Codex contract");
 
     session
-        .completion(user_request("ROOT_LITE_MARKER"))
+        .completion(image_request("ROOT_LITE_MARKER"))
         .await
         .expect("the Lite root completes");
     session
-        .send_incremental(delta("DELTA_LITE_MARKER"))
+        .send_incremental(image_delta("DELTA_LITE_MARKER"))
         .await
         .expect("the Lite delta sends");
     finish_turn(&mut session).await;
@@ -439,6 +478,7 @@ async fn responses_lite_marks_every_frame_and_prefixes_only_full_sends() {
     let frames = script.sent_json();
     assert_eq!(frames.len(), 2);
     for frame in &frames {
+        openapi_schema::assert_valid(Schema::LiteWebSocketResponseCreate, frame);
         assert_eq!(
             frame["client_metadata"][super::super::super::responses_lite::WS_METADATA_KEY],
             "true"
@@ -446,6 +486,7 @@ async fn responses_lite_marks_every_frame_and_prefixes_only_full_sends() {
         assert_eq!(frame["client_metadata"]["session_id"], "session-derived");
         assert_eq!(frame["client_metadata"]["thread_id"], "thread-derived");
         assert_eq!(frame["prompt_cache_key"], "thread-derived");
+        assert!(is_string_map(&frame["client_metadata"]));
     }
 
     let root_input = frames[0]["input"]
@@ -469,6 +510,16 @@ async fn responses_lite_marks_every_frame_and_prefixes_only_full_sends() {
     assert!(!delta_input.contains("ROOT_LITE_MARKER"));
     assert!(!delta_input.contains("additional_tools"));
     assert_eq!(frames[1]["previous_response_id"], "resp_1");
+    assert!(root_input[2]["content"][1].get("detail").is_none());
+    assert!(frames[1]["input"][0]["content"][1].get("detail").is_none());
+
+    let mut bad_marker = frames[1].clone();
+    bad_marker["client_metadata"][super::super::super::responses_lite::WS_METADATA_KEY] =
+        json!(true);
+    assert!(
+        !is_string_map(&bad_marker["client_metadata"]),
+        "the public schema leaves client_metadata open, so Rig pins its string-map extension"
+    );
 }
 
 /// The generic WebSocket session has no selected Codex identity and therefore
@@ -577,6 +628,9 @@ async fn an_incremental_send_chains_the_tip_and_reuses_the_captured_envelope() {
     assert_eq!(session.previous_response_id(), Some("resp_3"));
 
     let frames = script.sent_json();
+    for frame in &frames {
+        openapi_schema::assert_valid(Schema::WebSocketResponseCreate, frame);
+    }
     let root = frames[0].as_object().expect("root frame is an object");
     for (index, expected_tip, marker) in [
         (1, "resp_1", "FIRST_DELTA_MARKER"),

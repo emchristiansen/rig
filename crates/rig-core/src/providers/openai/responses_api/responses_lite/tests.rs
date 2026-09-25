@@ -2,6 +2,7 @@ use crate::message::ImageDetail;
 
 use super::*;
 use crate::providers::openai::completion::ToolChoice as OpenAIToolChoice;
+use crate::providers::openai::responses_api::openapi_schema::{self, Schema};
 use crate::providers::openai::responses_api::{
     AdditionalParameters, DeclaredResponsesTool, ReasoningSummaryLevel, ResponsesRequestTool,
     ResponsesToolDefinition, ToolResult, ToolStatus,
@@ -121,6 +122,26 @@ fn plain_developer_message_keeps_its_standard_mode_wire_shape() {
 }
 
 #[test]
+fn named_developer_message_keeps_its_name_when_typed_and_reencoded() {
+    let value = serde_json::json!({
+        "role": "developer",
+        "content": "ordinary developer instruction",
+        "name": "policy"
+    });
+    let decoded: Message =
+        serde_json::from_value(value).expect("the named developer message decodes");
+
+    assert_eq!(
+        serde_json::to_value(decoded).expect("the named developer message reencodes"),
+        serde_json::json!({
+            "role": "developer",
+            "content": [{"type":"input_text","text":"ordinary developer instruction"}],
+            "name": "policy"
+        })
+    );
+}
+
+#[test]
 fn non_message_input_keeps_accepting_an_explicit_null_role() {
     let value = serde_json::json!({
         "type": "function_call",
@@ -165,6 +186,80 @@ fn generated_lite_prefix_round_trips_without_accepting_a_conflicting_role() {
         serde_json::from_value::<CompletionRequest>(conflicting).is_err(),
         "an additional_tools prefix cannot silently normalize a conflicting role"
     );
+}
+
+#[test]
+fn public_input_item_ambiguity_and_the_named_validation_view_are_pinned() {
+    let message = serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "hello"}]
+    });
+
+    openapi_schema::assert_valid(Schema::EasyInputMessage, &message);
+    openapi_schema::assert_valid(Schema::Item, &message);
+    openapi_schema::assert_invalid(Schema::PublicInputItem, &message);
+    openapi_schema::assert_valid(Schema::InputItemView, &message);
+
+    let mut bad_role = message.clone();
+    bad_role["role"] = serde_json::json!("tool");
+    openapi_schema::assert_invalid(Schema::InputItemView, &bad_role);
+    let mut bad_content = message;
+    bad_content["content"] = serde_json::json!(42);
+    openapi_schema::assert_invalid(Schema::InputItemView, &bad_content);
+}
+
+#[test]
+fn lite_additional_tools_satisfies_the_unmodified_public_component_and_union() {
+    let shaped = shaped_json(
+        None,
+        vec![
+            ResponsesToolDefinition::function(
+                "lookup",
+                "Lookup a value",
+                serde_json::json!({"type":"object","properties":{},"required":[]}),
+            )
+            .into(),
+        ],
+        "thread-a",
+    );
+    let additional_tools = &shaped["input"][0];
+
+    openapi_schema::assert_valid(Schema::AdditionalToolsItem, additional_tools);
+    openapi_schema::assert_valid(Schema::PublicInputItem, additional_tools);
+    openapi_schema::assert_valid(Schema::LiteInputItemView, additional_tools);
+
+    let mut bad_role = additional_tools.clone();
+    bad_role["role"] = serde_json::json!("user");
+    openapi_schema::assert_invalid(Schema::AdditionalToolsItem, &bad_role);
+    openapi_schema::assert_invalid(Schema::LiteInputItemView, &bad_role);
+
+    let mut bad_tools = additional_tools.clone();
+    bad_tools["tools"] = serde_json::json!([{"type":"function","name":42}]);
+    openapi_schema::assert_invalid(Schema::AdditionalToolsItem, &bad_tools);
+    openapi_schema::assert_invalid(Schema::LiteInputItemView, &bad_tools);
+}
+
+#[test]
+fn lite_image_view_relaxes_only_the_required_detail_member() {
+    let image = serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": [{
+            "type": "input_image",
+            "image_url": "https://example.test/image.png"
+        }]
+    });
+    openapi_schema::assert_invalid(Schema::InputItemView, &image);
+    openapi_schema::assert_valid(Schema::LiteInputItemView, &image);
+
+    let mut with_detail = image.clone();
+    with_detail["content"][0]["detail"] = serde_json::json!("high");
+    openapi_schema::assert_valid(Schema::InputItemView, &with_detail);
+
+    let mut bad_detail = image;
+    bad_detail["content"][0]["detail"] = serde_json::json!("maximum");
+    openapi_schema::assert_invalid(Schema::LiteInputItemView, &bad_detail);
 }
 
 fn declared(value: Value) -> ResponsesRequestTool {

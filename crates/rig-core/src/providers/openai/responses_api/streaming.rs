@@ -1180,14 +1180,24 @@ impl ResponsesDecoder {
         self
     }
 
-    /// Recognize sentinels and error events, then try stream, whole-body, and
-    /// error-envelope classifiers in order. Fall through only on corrupt results.
+    /// Recognize sentinels and tagged events before considering an untagged
+    /// whole response or error envelope.
     fn classify_payload(&self, data: &str) -> WireEvent<ResponsesEvent> {
         if data.trim() == "[DONE]" {
             return WireEvent::Known(ResponsesEvent::Sentinel);
         }
         if is_error_event(data) {
             return WireEvent::Known(ResponsesEvent::Failure(data.to_owned()));
+        }
+        // A discriminator selects the event contract. Its decode failure must
+        // not be rescued by unrelated whole-response fields on the same object.
+        if serde_json::from_str::<serde_json::Value>(data)
+            .is_ok_and(|value| value.get("type").is_some())
+        {
+            return classify_responses_frame(data).map(|chunk| ResponsesEvent::Frame {
+                raw: data.to_owned(),
+                chunk,
+            });
         }
         let body = |data: &str| {
             wire::classify_marker_keyed_frame::<CompletionResponse>(data, WHOLE_BODY_MARKERS)

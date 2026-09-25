@@ -21,7 +21,9 @@ use uuid::Uuid;
 
 use crate::providers::openai::wire::ResponsesContract;
 
-use super::codex_identity::{CLIENT_METADATA_FIELD, CodexIdentity};
+#[cfg(feature = "websocket")]
+use super::codex_identity::CLIENT_METADATA_FIELD;
+use super::codex_identity::CodexIdentity;
 use super::{
     CompletionRequest, DeveloperRole, InputContent, InputItem,
     InternalChatMessageMetadataPassthrough, Message, Reasoning, ReasoningContext, SystemContent,
@@ -105,6 +107,7 @@ pub enum ResponsesLiteError {
 }
 
 pub(crate) const HTTP_HEADER: &str = "x-openai-internal-codex-responses-lite";
+#[cfg(feature = "websocket")]
 pub(crate) const WS_METADATA_KEY: &str = "ws_request_header_x_openai_internal_codex_responses_lite";
 
 pub(crate) fn validate_codex(
@@ -199,6 +202,7 @@ pub(crate) fn shape_request(
             input: InputContent::Message(Message::Developer {
                 id: Some(format!("msg_{message_id}")),
                 content: vec![SystemContent::InputText { text: instructions }],
+                name: None,
                 internal_chat_message_metadata_passthrough: Some(
                     InternalChatMessageMetadataPassthrough::base_instructions(),
                 ),
@@ -213,10 +217,12 @@ pub(crate) fn shape_request(
 
 /// Remove image detail from a Lite incremental delta without rebuilding its
 /// stable full-request prefix.
+#[cfg(feature = "websocket")]
 pub(crate) fn shape_delta(input: &mut [InputItem]) {
     normalize_image_details(input);
 }
 
+#[cfg(feature = "websocket")]
 pub(crate) fn stamp_websocket_marker(
     body: &mut Map<String, Value>,
 ) -> Result<(), crate::error::EncodeError> {
