@@ -66,6 +66,7 @@ impl SequenceLaws {
                 StreamEvent::BlockStart {
                     id,
                     kind: BlockKind::Reasoning { .. },
+                    ..
                 }
                 | StreamEvent::BlockDelta {
                     id,

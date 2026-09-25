@@ -362,6 +362,7 @@ fn finish_orders_reasoning_text_then_tool_calls() {
     let mut asm = assembler();
     asm.ingest(&StreamEvent::BlockStart {
         id: BlockId::wire("corr_1"),
+        source_order: None,
         kind: BlockKind::Reasoning {
             provider_id: Some("rs_1".to_string()),
         },
@@ -408,6 +409,7 @@ fn reasoning_delta_events(
     if let Some(provider_id) = provider_id {
         events.push(StreamEvent::BlockStart {
             id: BlockId::wire(correlator),
+            source_order: None,
             kind: BlockKind::Reasoning {
                 provider_id: Some(provider_id.to_string()),
             },
@@ -1753,6 +1755,7 @@ fn a_completed_key_takes_precedence_over_another_keys_pending_provider_id() {
             reasoning_close(Some(Reasoning::new("A").with_id("rs".into())), None),
             StreamEvent::BlockStart {
                 id: BlockId::wire("other"),
+                source_order: None,
                 kind: BlockKind::Reasoning {
                     provider_id: Some("rs".into()),
                 },

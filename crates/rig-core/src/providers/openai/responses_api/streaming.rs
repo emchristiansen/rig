@@ -295,9 +295,15 @@ impl ResponsesStreamOptions {
 /// A tool call the wire delivered whole, buffered to the terminal.
 enum BufferedCall {
     /// A function call, finalized by the shared accumulator.
-    Function(ToolCallEnd),
+    Function {
+        source_order: crate::streaming::SourceOrder,
+        end: ToolCallEnd,
+    },
     /// A custom call: complete as delivered, with verbatim input.
-    Custom(CustomToolCallEnd),
+    Custom {
+        source_order: crate::streaming::SourceOrder,
+        end: CustomToolCallEnd,
+    },
 }
 
 #[doc(hidden)]
@@ -512,18 +518,23 @@ impl RawChoiceAccumulator {
             self.note_text_delta(output_index, Some(&message.id));
         }
         for (content_index, content) in message.content.iter().cloned().enumerate() {
-            // A refusal part gets its own block, as its deltas would have.
-            if matches!(content, super::AssistantContent::Refusal { .. }) {
-                self.start_refusal_part(output_index, content_index as u64, out);
-            } else {
-                self.start_text_item(Some(&message.id), out);
-            }
-            let mut text = super::text_block(content);
-            super::stamp_phase(&mut text, message.phase.as_deref());
-            out.text(text.text);
-            if let Some(additional_params) = text.additional_params {
-                out.text_meta(additional_params);
-            }
+            out.in_source_order(
+                crate::streaming::SourceOrder::new(output_index, content_index as u64),
+                |out| {
+                    // A refusal part gets its own block, as its deltas would have.
+                    if matches!(content, super::AssistantContent::Refusal { .. }) {
+                        self.start_refusal_part(output_index, content_index as u64, out);
+                    } else {
+                        self.start_text_item(Some(&message.id), out);
+                    }
+                    let mut text = super::text_block(content);
+                    super::stamp_phase(&mut text, message.phase.as_deref());
+                    out.text(text.text);
+                    if let Some(additional_params) = text.additional_params {
+                        out.text_meta(additional_params);
+                    }
+                },
+            );
         }
     }
 
@@ -578,98 +589,117 @@ impl RawChoiceAccumulator {
             data: item,
         } = chunk;
 
-        match item {
-            ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
-                item: Output::FunctionCall(func),
-                ..
-            }) => {
-                // A function-call item interleaving a message item closes the
-                // open text block; forget it so a later delta for that message
-                // re-emits its text `BlockStart` and reactivates its block
-                // downstream.
-                self.current_text_item = None;
-                self.leave_refusal_block(out);
-                // Without call_id, mint an assembly key so the item ID cannot become
-                // a fabricated tool-result correlator.
-                let wire_id = (!func.call_id.is_empty()).then_some(func.id.as_str());
-                let key = self
-                    .tool_slots
-                    .open(output_index, wire_id, Some(&func.name))
-                    .key()
-                    .to_owned();
-                if !func.call_id.is_empty() {
-                    self.pending_call_ids
-                        .insert(output_index, func.call_id.clone());
+        out.in_source_order(
+            crate::streaming::SourceOrder::new(output_index, 0),
+            |out| match item {
+                ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
+                    item: Output::FunctionCall(func),
+                    ..
+                }) => {
+                    // A function-call item interleaving a message item closes the
+                    // open text block; forget it so a later delta for that message
+                    // re-emits its text `BlockStart` and reactivates its block
+                    // downstream.
+                    self.current_text_item = None;
+                    self.leave_refusal_block(out);
+                    // Without call_id, mint an assembly key so the item ID cannot become
+                    // a fabricated tool-result correlator.
+                    let wire_id = (!func.call_id.is_empty()).then_some(func.id.as_str());
+                    let key = self
+                        .tool_slots
+                        .open(output_index, wire_id, Some(&func.name))
+                        .key()
+                        .to_owned();
+                    if !func.call_id.is_empty() {
+                        self.pending_call_ids
+                            .insert(output_index, func.call_id.clone());
+                    }
+                    if let Some(namespace) = func.namespace {
+                        self.pending_namespaces.insert(output_index, namespace);
+                    }
+                    out.tool_name(&key, func.name);
                 }
-                if let Some(namespace) = func.namespace {
-                    self.pending_namespaces.insert(output_index, namespace);
+                ItemChunkKind::OutputItemDone(message) => {
+                    // Any completed item ends the block it carried; a text delta
+                    // arriving afterwards belongs to a (re)opened block.
+                    self.current_text_item = None;
+                    self.leave_refusal_block(out);
+                    self.push_output_item_done(
+                        message.item,
+                        output_index,
+                        out,
+                        options.emits_completed_tool_calls_immediately(),
+                    );
                 }
-                out.tool_name(&key, func.name);
-            }
-            ItemChunkKind::OutputItemDone(message) => {
-                // Any completed item ends the block it carried; a text delta
-                // arriving afterwards belongs to a (re)opened block.
-                self.current_text_item = None;
-                self.leave_refusal_block(out);
-                self.push_output_item_done(
-                    message.item,
-                    output_index,
-                    out,
-                    options.emits_completed_tool_calls_immediately(),
-                );
-            }
-            // Output text (re)opens the item's text block before its fragment.
-            ItemChunkKind::OutputTextDelta(DeltaTextChunk { delta, .. }) => {
-                self.start_text_item(outer_item_id.as_deref(), out);
-                self.note_text_delta(output_index, outer_item_id.as_deref());
-                out.text(delta);
-            }
-            // A refusal is visible text of the same item, but it goes to its
-            // own block, marked as a refusal, keyed by the part it belongs to.
-            ItemChunkKind::RefusalDelta(DeltaTextChunk {
-                delta,
-                content_index,
-                ..
-            }) => {
-                self.start_refusal_part(output_index, content_index, out);
-                self.note_text_delta(output_index, outer_item_id.as_deref());
-                out.text(delta);
-            }
-            // Summary and raw-reasoning deltas differ only in which wire
-            // event carries them; both are fragments of the output item's
-            // reasoning block and accumulate under its slot identity.
-            ItemChunkKind::ReasoningSummaryTextDelta(SummaryTextDeltaChunk { delta, .. })
-            | ItemChunkKind::ReasoningTextDelta(DeltaTextChunkWithItemId { delta, .. }) => {
-                // A later text delta must reactivate its message block after interleaved reasoning.
-                self.current_text_item = None;
-                self.leave_refusal_block(out);
-                let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref());
-                out.reasoning_delta(
-                    &id,
-                    outer_item_id
-                        .clone()
-                        .and_then(crate::streaming::non_empty_id),
+                // Output text (re)opens the item's text block before its fragment.
+                ItemChunkKind::OutputTextDelta(DeltaTextChunk {
                     delta,
-                );
-            }
-            ItemChunkKind::FunctionCallArgsDelta(delta) => {
-                // Tool output interleaving text is a block boundary too.
-                self.current_text_item = None;
-                self.leave_refusal_block(out);
-                // Establish identity before done arrives; late IDs must not move buffered fragments.
-                let slot = self
-                    .tool_slots
-                    .open(output_index, outer_item_id.as_deref(), None);
-                slot.saw_arguments_delta = true;
-                let key = slot.key().clone();
-                self.argument_fragments
-                    .entry(output_index)
-                    .or_default()
-                    .push(&delta.delta);
-                out.tool_arguments(&key, delta.delta);
-            }
-            _ => {}
-        }
+                    content_index,
+                    ..
+                }) => {
+                    out.in_source_order(
+                        crate::streaming::SourceOrder::new(output_index, content_index),
+                        |out| {
+                            self.start_text_item(outer_item_id.as_deref(), out);
+                            self.note_text_delta(output_index, outer_item_id.as_deref());
+                            out.text(delta);
+                        },
+                    );
+                }
+                // A refusal is visible text of the same item, but it goes to its
+                // own block, marked as a refusal, keyed by the part it belongs to.
+                ItemChunkKind::RefusalDelta(DeltaTextChunk {
+                    delta,
+                    content_index,
+                    ..
+                }) => {
+                    out.in_source_order(
+                        crate::streaming::SourceOrder::new(output_index, content_index),
+                        |out| {
+                            self.start_refusal_part(output_index, content_index, out);
+                            self.note_text_delta(output_index, outer_item_id.as_deref());
+                            out.text(delta);
+                        },
+                    );
+                }
+                // Summary and raw-reasoning deltas differ only in which wire
+                // event carries them; both are fragments of the output item's
+                // reasoning block and accumulate under its slot identity.
+                ItemChunkKind::ReasoningSummaryTextDelta(SummaryTextDeltaChunk {
+                    delta, ..
+                })
+                | ItemChunkKind::ReasoningTextDelta(DeltaTextChunkWithItemId { delta, .. }) => {
+                    // A later text delta must reactivate its message block after interleaved reasoning.
+                    self.current_text_item = None;
+                    self.leave_refusal_block(out);
+                    let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref());
+                    out.reasoning_delta(
+                        &id,
+                        outer_item_id
+                            .clone()
+                            .and_then(crate::streaming::non_empty_id),
+                        delta,
+                    );
+                }
+                ItemChunkKind::FunctionCallArgsDelta(delta) => {
+                    // Tool output interleaving text is a block boundary too.
+                    self.current_text_item = None;
+                    self.leave_refusal_block(out);
+                    // Establish identity before done arrives; late IDs must not move buffered fragments.
+                    let slot = self
+                        .tool_slots
+                        .open(output_index, outer_item_id.as_deref(), None);
+                    slot.saw_arguments_delta = true;
+                    let key = slot.key().clone();
+                    self.argument_fragments
+                        .entry(output_index)
+                        .or_default()
+                        .push(&delta.delta);
+                    out.tool_arguments(&key, delta.delta);
+                }
+                _ => {}
+            },
+        );
     }
 
     #[doc(hidden)]
@@ -699,8 +729,13 @@ impl RawChoiceAccumulator {
                     let mut end = slot.end(UnparseableToolInput::Drop);
                     end.call_id = self.pending_call_ids.remove(&index);
                     end.namespace = self.pending_namespaces.remove(&index);
-                    self.tool_calls
-                        .push((slot.key().clone(), BufferedCall::Function(end)));
+                    self.tool_calls.push((
+                        slot.key().clone(),
+                        BufferedCall::Function {
+                            source_order: crate::streaming::SourceOrder::new(index, 0),
+                            end,
+                        },
+                    ));
                 }
                 // The terminal event is the only place the stream learns how the
                 // turn ended, which model answered, and which assistant message
@@ -827,7 +862,13 @@ impl RawChoiceAccumulator {
                 if emit_completed_tool_calls_immediately {
                     out.tool_end(item_id, end);
                 } else {
-                    self.tool_calls.push((item_id, BufferedCall::Function(end)));
+                    self.tool_calls.push((
+                        item_id,
+                        BufferedCall::Function {
+                            source_order: crate::streaming::SourceOrder::new(output_index, 0),
+                            end,
+                        },
+                    ));
                 }
             }
             // A custom call never fragments here: this client models no
@@ -854,7 +895,13 @@ impl RawChoiceAccumulator {
                 if emit_completed_tool_calls_immediately {
                     out.custom_tool_call(key, end);
                 } else {
-                    self.tool_calls.push((key, BufferedCall::Custom(end)));
+                    self.tool_calls.push((
+                        key,
+                        BufferedCall::Custom {
+                            source_order: crate::streaming::SourceOrder::new(output_index, 0),
+                            end,
+                        },
+                    ));
                 }
             }
             Output::Reasoning {
@@ -971,7 +1018,9 @@ impl RawChoiceAccumulator {
                 self.publish_message_text(output_index, message, out);
             }
             // Immediate publication preserves output order when the fold registers parts.
-            self.push_output_item_done(item, output_index, out, true);
+            out.in_source_order(crate::streaming::SourceOrder::new(output_index, 0), |out| {
+                self.push_output_item_done(item, output_index, out, true)
+            });
         }
 
         // `response.completed` and `response.incomplete` are the wire's two
@@ -997,8 +1046,12 @@ impl RawChoiceAccumulator {
     pub fn flush_tool_calls(&mut self, out: &mut AdapterOutput) {
         for (id, call) in std::mem::take(&mut self.tool_calls) {
             match call {
-                BufferedCall::Function(end) => out.tool_end(id, end),
-                BufferedCall::Custom(end) => out.custom_tool_call(id, end),
+                BufferedCall::Function { source_order, end } => {
+                    out.in_source_order(source_order, |out| out.tool_end(id, end));
+                }
+                BufferedCall::Custom { source_order, end } => {
+                    out.in_source_order(source_order, |out| out.custom_tool_call(id, end));
+                }
             }
         }
     }

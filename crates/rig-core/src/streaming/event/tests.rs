@@ -6,10 +6,12 @@ fn every_event_round_trips_through_serde() {
     let events = vec![
         StreamEvent::BlockStart {
             id: BlockId::wire("msg_1"),
+            source_order: None,
             kind: BlockKind::Message,
         },
         StreamEvent::BlockStart {
             id: BlockId::minted(MintKind::Text, 0),
+            source_order: None,
             kind: BlockKind::Text {
                 additional_params: AdditionalParams::from_entries([("k", serde_json::json!(1))]),
             },
@@ -23,6 +25,7 @@ fn every_event_round_trips_through_serde() {
         },
         StreamEvent::BlockStart {
             id: BlockId::wire("call_1"),
+            source_order: Some(SourceOrder::new(3, 1)),
             kind: BlockKind::ToolCall,
         },
         StreamEvent::BlockDelta {
@@ -77,6 +80,21 @@ fn every_event_round_trips_through_serde() {
         let back: StreamEvent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, event, "{json}");
     }
+}
+
+#[test]
+fn legacy_block_starts_decode_without_source_order() {
+    let event: StreamEvent = serde_json::from_str(
+        r#"{"event":"block_start","id":"wire:t","kind":{"kind":"tool_call"}}"#,
+    )
+    .expect("legacy start");
+    assert!(matches!(
+        event,
+        StreamEvent::BlockStart {
+            source_order: None,
+            ..
+        }
+    ));
 }
 
 #[test]

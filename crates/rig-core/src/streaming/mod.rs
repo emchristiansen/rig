@@ -22,7 +22,9 @@ use crate::message::{AssistantContent, ToolResult};
 pub use accumulator::BlockAccumulator;
 pub(crate) use accumulator::append_tool_input_fragment;
 pub use block_id::{BlockId, MintKind, SyntheticIds, non_empty_id};
-pub use event::{BlockClose, BlockKind, CustomToolCallEnd, Delta, StreamEvent, ToolCallEnd};
+pub use event::{
+    BlockClose, BlockKind, CustomToolCallEnd, Delta, SourceOrder, StreamEvent, ToolCallEnd,
+};
 use futures::Stream;
 use futures::stream::{AbortHandle, Abortable};
 use futures::task::AtomicWaker;
@@ -59,6 +61,7 @@ pub(crate) fn absorb(step: FoldStep<'_>, event: StreamEvent) -> Absorbed {
     match event {
         StreamEvent::BlockStart {
             id,
+            source_order,
             kind: BlockKind::Message,
         } => {
             // The wire announced the assistant message's own id; it
@@ -68,6 +71,7 @@ pub(crate) fn absorb(step: FoldStep<'_>, event: StreamEvent) -> Absorbed {
             }
             Absorbed::Yield(StreamEvent::BlockStart {
                 id,
+                source_order,
                 kind: BlockKind::Message,
             })
         }

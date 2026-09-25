@@ -2,7 +2,7 @@ use super::*;
 use crate::error::{ErrorDetail, ErrorKind, ErrorReport};
 use crate::message::AdditionalParams;
 use crate::message::ToolCallId;
-use crate::streaming::{MintKind, non_empty_id};
+use crate::streaming::{MintKind, SourceOrder, non_empty_id};
 
 /// Test-side key syntax: legacy minted renderings decode to minted
 /// keys; anything else is wire-derived.
@@ -91,6 +91,7 @@ fn text_start(
     accumulator
         .apply(&StreamEvent::BlockStart {
             id: pid(id),
+            source_order: None,
             kind: BlockKind::Text { additional_params },
         })
         .expect("text starts never fail");
@@ -115,6 +116,7 @@ fn reasoning_delta(accumulator: &mut BlockAccumulator, id: &str, text: &str) {
         accumulator
             .apply(&StreamEvent::BlockStart {
                 id: key.clone(),
+                source_order: None,
                 kind: BlockKind::Reasoning {
                     provider_id: wid(id),
                 },
@@ -1305,6 +1307,7 @@ fn scripted_turn() -> Vec<StreamEvent> {
     vec![
         StreamEvent::BlockStart {
             id: pid("text-0"),
+            source_order: None,
             kind: BlockKind::Text {
                 additional_params: None,
             },
@@ -1313,6 +1316,7 @@ fn scripted_turn() -> Vec<StreamEvent> {
         StreamEvent::text(pid("text-0"), "world"),
         StreamEvent::BlockStart {
             id: pid("call_1"),
+            source_order: None,
             kind: BlockKind::ToolCall,
         },
         StreamEvent::BlockDelta {
@@ -1334,6 +1338,7 @@ fn scripted_turn() -> Vec<StreamEvent> {
         },
         StreamEvent::BlockStart {
             id: pid("rs_1"),
+            source_order: None,
             kind: BlockKind::Reasoning {
                 provider_id: wid("rs_1"),
             },
@@ -1479,6 +1484,7 @@ fn an_id_less_tool_call_is_named_by_its_block_deterministically() {
         accumulator
             .apply(&StreamEvent::BlockStart {
                 id: id.clone(),
+                source_order: None,
                 kind: BlockKind::ToolCall,
             })
             .expect("start");
@@ -1530,6 +1536,7 @@ fn a_custom_close_yields_a_custom_call() {
     accumulator
         .apply(&StreamEvent::BlockStart {
             id: id.clone(),
+            source_order: None,
             kind: BlockKind::ToolCall,
         })
         .expect("start");
@@ -1593,4 +1600,167 @@ fn a_tool_end_carries_its_namespace_onto_the_call() {
     };
     assert_eq!(call.function.namespace.as_deref(), Some("math"));
     assert_eq!(call.function.arguments, serde_json::json!({"x": 1}));
+}
+
+fn ordered_text(
+    accumulator: &mut BlockAccumulator,
+    id: &str,
+    source_order: SourceOrder,
+    value: &str,
+) {
+    accumulator
+        .apply(&StreamEvent::BlockStart {
+            id: pid(id),
+            source_order: Some(source_order),
+            kind: BlockKind::Text {
+                additional_params: None,
+            },
+        })
+        .expect("ordered text start");
+    text(accumulator, id, value);
+}
+
+fn part_labels(parts: &[AssistantContent]) -> Vec<&str> {
+    parts
+        .iter()
+        .map(|part| match part {
+            AssistantContent::Text(text) => text.text.as_str(),
+            AssistantContent::ToolCall(call) => call.function.name.as_str(),
+            _ => "other",
+        })
+        .collect()
+}
+
+#[test]
+fn unordered_tools_keep_completion_arrival_order() {
+    let mut accumulator = BlockAccumulator::new();
+    let id = pid("tool-arrival");
+    accumulator
+        .apply(&StreamEvent::BlockStart {
+            id: id.clone(),
+            source_order: None,
+            kind: BlockKind::ToolCall,
+        })
+        .expect("tool start");
+    text(&mut accumulator, "text-arrival", "text");
+    accumulator
+        .apply(&StreamEvent::BlockEnd {
+            id,
+            end: BlockClose::ToolCall(ToolCallEnd::whole("tool", serde_json::json!({}))),
+            block: None,
+        })
+        .expect("tool end");
+
+    assert_eq!(part_labels(&accumulator.finish()), ["text", "tool"]);
+}
+
+#[test]
+fn ordered_tool_reservation_survives_late_completion() {
+    let mut accumulator = BlockAccumulator::new();
+    let id = pid("tool-ordered");
+    accumulator
+        .apply(&StreamEvent::BlockStart {
+            id: id.clone(),
+            source_order: Some(SourceOrder::new(0, 0)),
+            kind: BlockKind::ToolCall,
+        })
+        .expect("tool start");
+    ordered_text(
+        &mut accumulator,
+        "text-ordered",
+        SourceOrder::new(1, 0),
+        "text",
+    );
+    accumulator
+        .apply(&StreamEvent::BlockEnd {
+            id,
+            end: BlockClose::ToolCall(ToolCallEnd::whole("tool", serde_json::json!({}))),
+            block: None,
+        })
+        .expect("tool end");
+
+    assert_eq!(part_labels(&accumulator.finish()), ["tool", "text"]);
+}
+
+#[test]
+fn ordered_adopted_tool_uses_the_authoritative_end_reservation() {
+    let mut accumulator = BlockAccumulator::new();
+    let published = pid("tool-0");
+    accumulator
+        .apply(&StreamEvent::BlockStart {
+            id: published.clone(),
+            source_order: None,
+            kind: BlockKind::ToolCall,
+        })
+        .expect("unattributed assembly start");
+    tool_name_delta(&mut accumulator, "tool-0", "tool");
+    tool_args_delta(&mut accumulator, "tool-0", "{}");
+
+    let completed = pid("fc_done");
+    // Model an authoritative completion whose coordinate was reserved under
+    // its late wire identity without opening a second assembly. A public
+    // ToolCall start intentionally opens that identity and therefore is not
+    // an adoption candidate.
+    accumulator.reserve(&completed, Some(SourceOrder::new(0, 0)));
+    ordered_text(
+        &mut accumulator,
+        "text-after-adopted",
+        SourceOrder::new(1, 0),
+        "text",
+    );
+    let (published_id, _) = accumulator
+        .apply(&StreamEvent::BlockEnd {
+            id: completed,
+            end: BlockClose::ToolCall(ToolCallEnd::whole("tool", serde_json::json!({}))),
+            block: None,
+        })
+        .expect("tool end")
+        .expect("the assembly is adopted");
+
+    assert_eq!(published_id, published);
+    assert_eq!(part_labels(&accumulator.finish()), ["tool", "text"]);
+}
+
+#[test]
+fn ordered_slots_sort_around_fixed_unordered_slots() {
+    let mut accumulator = BlockAccumulator::new();
+    text(&mut accumulator, "fixed-a", "fixed-a");
+    ordered_text(
+        &mut accumulator,
+        "ordered-high",
+        SourceOrder::new(2, 0),
+        "ordered-high",
+    );
+    text(&mut accumulator, "fixed-b", "fixed-b");
+    ordered_text(
+        &mut accumulator,
+        "ordered-low",
+        SourceOrder::new(1, 0),
+        "ordered-low",
+    );
+
+    assert_eq!(
+        part_labels(&accumulator.finish()),
+        ["fixed-a", "ordered-low", "fixed-b", "ordered-high"]
+    );
+}
+
+#[test]
+fn unfinished_ordered_reservations_are_absent() {
+    let mut accumulator = BlockAccumulator::new();
+    accumulator
+        .apply(&StreamEvent::BlockStart {
+            id: pid("unfinished-tool"),
+            source_order: Some(SourceOrder::new(0, 0)),
+            kind: BlockKind::ToolCall,
+        })
+        .expect("tool start");
+    ordered_text(
+        &mut accumulator,
+        "survivor",
+        SourceOrder::new(1, 0),
+        "survivor",
+    );
+
+    assert_eq!(part_labels(&accumulator.finish()), ["survivor"]);
 }

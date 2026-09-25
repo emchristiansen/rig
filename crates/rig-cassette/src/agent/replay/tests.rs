@@ -1197,6 +1197,7 @@ async fn kept_events_replay_a_fold_error_as_the_items_that_produced_it() {
     let items = vec![
         Ok(StreamEvent::BlockStart {
             id: call(),
+            source_order: None,
             kind: BlockKind::ToolCall,
         }),
         Ok(StreamEvent::BlockDelta {

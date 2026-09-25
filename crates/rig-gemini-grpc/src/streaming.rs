@@ -170,6 +170,7 @@ impl GrpcAdapter {
                     tool_events: vec![
                         streaming::StreamEvent::BlockStart {
                             id: key.clone(),
+                            source_order: None,
                             kind: streaming::BlockKind::ToolCall,
                         },
                         streaming::StreamEvent::BlockEnd {

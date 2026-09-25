@@ -221,6 +221,8 @@ impl Fold<Completion> for CompletionFold {
 #[derive(Debug, Default)]
 pub struct AdapterOutput {
     items: Vec<Result<StreamEvent, ProviderError>>,
+    /// Provider position copied onto starts emitted while this context is active.
+    source_order: Option<crate::streaming::SourceOrder>,
     /// Minter for text blocks opened by a bare text delta.
     text_ids: Option<SyntheticIds>,
     /// The block receiving bare text deltas and metadata, until a boundary
@@ -241,6 +243,10 @@ pub struct AdapterOutput {
     /// Blocks a start was emitted for (or that a delta opened leniently),
     /// so a delta never precedes its block's start on the wire we emit.
     opened: std::collections::HashSet<BlockId>,
+    /// Coordinated starts already emitted. Their position is one provider
+    /// slot even after closure, so a repeated late end must not synthesize a
+    /// second start for the same identity and position.
+    positioned: std::collections::HashSet<(BlockId, crate::streaming::SourceOrder)>,
 }
 
 impl AdapterOutput {
@@ -257,6 +263,21 @@ impl AdapterOutput {
             self_closing: true,
             ..Self::default()
         }
+    }
+
+    /// Run one adapter action under a provider source-order coordinate.
+    ///
+    /// Helpers that open blocks copy the coordinate onto the start. Nested
+    /// calls restore the outer coordinate when they return.
+    pub(crate) fn in_source_order<R>(
+        &mut self,
+        source_order: crate::streaming::SourceOrder,
+        action: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous = self.source_order.replace(source_order);
+        let result = action(self);
+        self.source_order = previous;
+        result
     }
 
     /// Push one event verbatim. A block this output opened itself for a
@@ -344,6 +365,13 @@ impl AdapterOutput {
             match event {
                 StreamEvent::BlockStart { .. } => {
                     self.opened.insert(id.clone());
+                    if let StreamEvent::BlockStart {
+                        source_order: Some(source_order),
+                        ..
+                    } = event
+                    {
+                        self.positioned.insert((id.clone(), *source_order));
+                    }
                 }
                 StreamEvent::BlockEnd { .. } => {
                     self.opened.remove(id);
@@ -407,6 +435,23 @@ impl AdapterOutput {
         if !self.opened.contains(id) {
             self.push(Ok(StreamEvent::BlockStart {
                 id: id.clone(),
+                source_order: self.source_order,
+                kind,
+            }));
+        }
+    }
+
+    /// Open a whole-block completion unless this exact coordinated entity was
+    /// already announced. Deltas use `open_if_unseen` so they can explicitly
+    /// reopen a completed identity; a repeated late end cannot do that alone.
+    fn open_completion_if_unseen(&mut self, id: &BlockId, kind: BlockKind) {
+        let positioned = self
+            .source_order
+            .is_some_and(|source_order| self.positioned.contains(&(id.clone(), source_order)));
+        if !self.opened.contains(id) && !positioned {
+            self.push(Ok(StreamEvent::BlockStart {
+                id: id.clone(),
+                source_order: self.source_order,
                 kind,
             }));
         }
@@ -434,6 +479,7 @@ impl AdapterOutput {
                     .mint();
                 self.push(Ok(StreamEvent::BlockStart {
                     id: id.clone(),
+                    source_order: self.source_order,
                     kind: BlockKind::Reasoning { provider_id: None },
                 }));
                 self.active_reasoning = Some(id.clone());
@@ -491,6 +537,7 @@ impl AdapterOutput {
     ) {
         self.push(Ok(StreamEvent::BlockStart {
             id: id.clone(),
+            source_order: self.source_order,
             kind: BlockKind::Text { additional_params },
         }));
         self.active_text = Some(id);
@@ -528,6 +575,7 @@ impl AdapterOutput {
         let id = self.text_ids.get_or_insert_with(SyntheticIds::text).mint();
         self.push(Ok(StreamEvent::BlockStart {
             id: id.clone(),
+            source_order: self.source_order,
             kind: BlockKind::Text {
                 additional_params: None,
             },
@@ -565,7 +613,7 @@ impl AdapterOutput {
     /// End the call `id`: the accumulator finalizes the assembled fragments
     /// (or `end`'s authoritative payload) into a completed call.
     pub fn tool_end(&mut self, id: BlockId, end: ToolCallEnd) {
-        self.open_if_unseen(&id, BlockKind::ToolCall);
+        self.open_completion_if_unseen(&id, BlockKind::ToolCall);
         self.push(Ok(StreamEvent::BlockEnd {
             id,
             end: BlockClose::ToolCall(end),
@@ -584,7 +632,7 @@ impl AdapterOutput {
     /// [`BlockClose::CustomToolCall`] end. The accumulator yields
     /// [`crate::message::AssistantContent::CustomToolCall`] for it.
     pub fn custom_tool_call(&mut self, id: BlockId, end: crate::streaming::CustomToolCallEnd) {
-        self.open_if_unseen(&id, BlockKind::ToolCall);
+        self.open_completion_if_unseen(&id, BlockKind::ToolCall);
         self.push(Ok(StreamEvent::BlockEnd {
             id,
             end: BlockClose::CustomToolCall(end),
@@ -595,7 +643,7 @@ impl AdapterOutput {
     /// An opaque provider output item, whole: opens its block and closes it
     /// with the item, which the fold records in stream order.
     pub fn provider_item(&mut self, id: BlockId, item: crate::message::ProviderItem) {
-        self.open_if_unseen(&id, BlockKind::ProviderItem);
+        self.open_completion_if_unseen(&id, BlockKind::ProviderItem);
         self.push(Ok(StreamEvent::BlockEnd {
             id,
             end: BlockClose::ProviderItem(item),
@@ -686,6 +734,7 @@ impl AdapterOutput {
     pub fn message_id(&mut self, id: impl Into<String>) {
         self.push(Ok(StreamEvent::BlockStart {
             id: BlockId::wire(id),
+            source_order: self.source_order,
             kind: BlockKind::Message,
         }));
     }

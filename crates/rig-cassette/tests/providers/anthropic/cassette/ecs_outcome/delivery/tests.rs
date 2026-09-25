@@ -37,6 +37,7 @@ fn items() -> Vec<Result<StreamEvent, ErrorReport>> {
     vec![
         Ok(StreamEvent::BlockStart {
             id: id.clone(),
+            source_order: None,
             kind: BlockKind::ToolCall,
         }),
         Err(ErrorReport::new(ErrorKind::Provider, "preserved error")),
@@ -104,6 +105,7 @@ async fn text_boundary_pauses_before_polling_and_release_preserves_every_item() 
     expected.extend([
         Ok(StreamEvent::BlockStart {
             id: id.clone(),
+            source_order: None,
             kind: BlockKind::Text {
                 additional_params: None,
             },

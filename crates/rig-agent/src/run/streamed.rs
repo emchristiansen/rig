@@ -671,6 +671,7 @@ impl StreamedTurnAssembler {
             StreamEvent::BlockStart {
                 id,
                 kind: BlockKind::Reasoning { provider_id },
+                ..
             } => {
                 let pending = self.reasoning_parts.iter_mut().find(|part| {
                     part.matches_key(id) && matches!(part.state, ReasoningPartState::Pending(_))

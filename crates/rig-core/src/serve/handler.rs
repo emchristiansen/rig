@@ -362,6 +362,7 @@ impl StreamTap {
                 if let StreamEvent::BlockStart {
                     id,
                     kind: crate::streaming::BlockKind::Message,
+                    ..
                 } = event
                     && let Some(wire) = id.wire_str()
                 {

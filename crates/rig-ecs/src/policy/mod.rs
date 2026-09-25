@@ -518,6 +518,7 @@ pub fn partial_turn_at(
             StreamEvent::BlockStart {
                 id,
                 kind: BlockKind::ToolCall,
+                ..
             } => blocks.push(Block {
                 id: id.clone(),
                 arguments: String::new(),

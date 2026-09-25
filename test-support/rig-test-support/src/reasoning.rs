@@ -168,6 +168,7 @@ pub async fn run_reasoning_delta_hook_streaming<M>(
                     BlockKind::Reasoning {
                         provider_id: Some(provider_id),
                     },
+                ..
             }) => {
                 block_provider_ids.insert(id.to_string(), provider_id);
             }
