@@ -741,6 +741,10 @@ impl RawChoiceAccumulator {
     /// prefers a duplicate to a false merge: id-less deltas that a snapshot
     /// cannot match exactly (a shifted position, or two messages concatenated
     /// at one repaired position) are published again at their own positions.
+    /// In the shifted case, a snapshot whose metadata differs from the id-less
+    /// text it restates has that metadata published on a separate empty text
+    /// part rather than on its own text, and the restated text is duplicated.
+    /// No two messages' text ever merges.
     fn restates(&self, slot: u64, restatement: Restatement<'_>) -> bool {
         let mut stored = self
             .message_parts
@@ -1217,6 +1221,9 @@ impl RawChoiceAccumulator {
         // Reasoning evidence binds the slot: unknown parts that waited for it
         // are reasoning content. Distinct observations of one content index
         // bind last-writer-wins, as a known parent's history keeps its last.
+        // Across positions, ties follow re-key order, not wire order: a part
+        // moved from another position lands after those already here, so the
+        // moved part wins.
         self.parent_kinds
             .entry(output_index)
             .or_insert(PartParent::Reasoning);
