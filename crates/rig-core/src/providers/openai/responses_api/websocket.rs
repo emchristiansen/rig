@@ -135,9 +135,11 @@ pub struct ResponsesWebSocketErrorEvent {
         skip_serializing_if = "Option::is_none"
     )]
     pub status: Option<u16>,
-    /// The provider error payload; empty when the event carries none.
+    /// The provider error payload; empty when the event carries none,
+    /// whether the field is missing or explicitly `null`.
     #[serde(
         default,
+        deserialize_with = "crate::json_utils::null_or_default",
         skip_serializing_if = "ResponsesWebSocketErrorPayload::is_empty"
     )]
     pub error: ResponsesWebSocketErrorPayload,

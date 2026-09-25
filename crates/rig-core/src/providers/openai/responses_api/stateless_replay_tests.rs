@@ -182,3 +182,70 @@ fn a_refusal_part_stays_distinct_in_history_and_replays_as_a_refusal() {
         ])
     );
 }
+
+/// A provider's own `refusal` sibling on an `output_text` part is wire data,
+/// not rig's refusal marker: the part stays output text in history and
+/// replays with that field verbatim, whatever its value.
+#[test]
+fn a_provider_refusal_field_on_output_text_is_not_the_refusal_marker() {
+    for value in [json!(true), json!("partial")] {
+        let part = json!({"type": "output_text", "text": "ok", "refusal": value});
+        let output: Output = serde_json::from_value(json!({
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [part.clone()]
+        }))
+        .expect("the message decodes");
+        let content = super::tests::folded_choice(vec![output]);
+        let [completion::AssistantContent::Text(text)] = content.as_slice() else {
+            panic!("expected one text block, got {content:?}");
+        };
+        assert!(
+            !is_refusal(text.additional_params.as_ref()),
+            "a `refusal: {value}` sibling marked the block"
+        );
+
+        let history = completion::Message::Assistant {
+            id: Some("msg_1".to_string()),
+            content,
+        };
+        let items = Vec::<InputItem>::try_from(history).expect("history converts");
+        let wire = serde_json::to_value(&items).expect("items serialize");
+        assert_eq!(wire[0]["content"], json!([part]), "for `refusal: {value}`");
+    }
+}
+
+/// A refusal in a message with a `phase` keeps its marker when the phase is
+/// stamped on its block, and replays as the refusal part it came from, with
+/// the phase back on the assistant item.
+#[test]
+fn a_refusal_in_a_phased_message_replays_as_a_refusal() {
+    let output = Output::Message(OutputMessage {
+        id: "msg_1".to_string(),
+        role: OutputRole::Assistant,
+        status: ResponseStatus::Completed,
+        content: vec![AssistantContent::Refusal {
+            refusal: "I can't help with that.".to_string(),
+        }],
+        phase: Some("final_answer".to_string()),
+    });
+    let content = super::tests::folded_choice(vec![output]);
+    let [completion::AssistantContent::Text(text)] = content.as_slice() else {
+        panic!("expected one text block, got {content:?}");
+    };
+    assert!(is_refusal(text.additional_params.as_ref()));
+
+    let history = completion::Message::Assistant {
+        id: Some("msg_1".to_string()),
+        content,
+    };
+    let items = Vec::<InputItem>::try_from(history).expect("history converts");
+    let wire = serde_json::to_value(&items).expect("items serialize");
+    assert_eq!(
+        wire[0]["content"],
+        json!([{"type": "refusal", "refusal": "I can't help with that."}])
+    );
+    assert_eq!(wire[0]["phase"], "final_answer");
+}

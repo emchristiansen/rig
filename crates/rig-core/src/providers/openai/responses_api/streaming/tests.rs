@@ -3305,3 +3305,70 @@ fn refusal_parts_stream_into_their_own_marked_blocks() {
         ]
     );
 }
+
+/// A message item's `done` ends a refusal part's block even though the event
+/// it emits leaves anonymous text open: an id-less output-text delta after it
+/// opens a text block of its own instead of extending the refusal.
+#[test]
+fn an_id_less_text_delta_after_a_message_done_never_extends_a_refusal() {
+    let events = [
+        json!({
+            "type": "response.refusal.delta",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "sequence_number": 1,
+            "delta": "No"
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "sequence_number": 2,
+            "item": {
+                "type": "message",
+                "id": "msg_1",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{ "type": "refusal", "refusal": "No" }]
+            }
+        }),
+        json!({
+            "type": "response.output_text.delta",
+            "output_index": 1,
+            "content_index": 0,
+            "sequence_number": 3,
+            "delta": "Hello"
+        }),
+        json!({
+            "type": "response.completed",
+            "sequence_number": 4,
+            "response": sample_response(ResponseStatus::Completed),
+        }),
+    ];
+    let body: String = events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect();
+    let decoded = stream_events_from_sse_body("openai", &body, None).expect("the body decodes");
+    let response = folded_stream_events(
+        "openai",
+        decoded,
+        &sample_response(ResponseStatus::Completed),
+    )
+    .expect("the stream folds");
+    let parts: Vec<(String, bool)> = response
+        .choice
+        .iter()
+        .map(|part| match part {
+            AssistantContent::Text(text) => (
+                text.text.clone(),
+                super::super::is_refusal(text.additional_params.as_ref()),
+            ),
+            other => panic!("expected text blocks, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        parts,
+        [("No".to_string(), true), ("Hello".to_string(), false)]
+    );
+}

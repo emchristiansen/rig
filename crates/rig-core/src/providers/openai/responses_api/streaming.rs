@@ -414,11 +414,25 @@ impl RawChoiceAccumulator {
             && self.current_text_item.as_deref() != Some(item_id)
         {
             self.current_text_item = Some(item_id.to_string());
-            self.active_refusal_block = None;
+            self.leave_refusal_block(out);
             out.text_start(BlockId::wire(item_id.to_string()), None);
-        } else if self.active_refusal_block.take().is_some() {
+        } else {
             // Output text must not extend a refusal part's block: close it,
             // so the next bare delta opens a text block of its own.
+            self.leave_refusal_block(out);
+        }
+    }
+
+    /// Forget the active refusal part, closing its block downstream too.
+    ///
+    /// Every place that drops refusal state goes through here, so a bare text
+    /// delta can never land in a refusal block the bridge no longer tracks.
+    /// A block boundary that emits no closing event of its own — a message
+    /// item's `done`, whose message-id event leaves anonymous text open —
+    /// would otherwise leave the refusal block active for the next id-less
+    /// output-text delta.
+    fn leave_refusal_block(&mut self, out: &mut AdapterOutput) {
+        if self.active_refusal_block.take().is_some() {
             out.end_active_text();
         }
     }
@@ -574,7 +588,7 @@ impl RawChoiceAccumulator {
                 // re-emits its text `BlockStart` and reactivates its block
                 // downstream.
                 self.current_text_item = None;
-                self.active_refusal_block = None;
+                self.leave_refusal_block(out);
                 // Without call_id, mint an assembly key so the item ID cannot become
                 // a fabricated tool-result correlator.
                 let wire_id = (!func.call_id.is_empty()).then_some(func.id.as_str());
@@ -596,7 +610,7 @@ impl RawChoiceAccumulator {
                 // Any completed item ends the block it carried; a text delta
                 // arriving afterwards belongs to a (re)opened block.
                 self.current_text_item = None;
-                self.active_refusal_block = None;
+                self.leave_refusal_block(out);
                 self.push_output_item_done(
                     message.item,
                     output_index,
@@ -628,7 +642,7 @@ impl RawChoiceAccumulator {
             | ItemChunkKind::ReasoningTextDelta(DeltaTextChunkWithItemId { delta, .. }) => {
                 // A later text delta must reactivate its message block after interleaved reasoning.
                 self.current_text_item = None;
-                self.active_refusal_block = None;
+                self.leave_refusal_block(out);
                 let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref());
                 out.reasoning_delta(
                     &id,
@@ -641,7 +655,7 @@ impl RawChoiceAccumulator {
             ItemChunkKind::FunctionCallArgsDelta(delta) => {
                 // Tool output interleaving text is a block boundary too.
                 self.current_text_item = None;
-                self.active_refusal_block = None;
+                self.leave_refusal_block(out);
                 // Establish identity before done arrives; late IDs must not move buffered fragments.
                 let slot = self
                     .tool_slots
@@ -822,7 +836,7 @@ impl RawChoiceAccumulator {
             // parsed, because it is not JSON arguments.
             Output::CustomToolCall(call) => {
                 self.current_text_item = None;
-                self.active_refusal_block = None;
+                self.leave_refusal_block(out);
                 // Mirror the function-call identity rule: an item id keys the
                 // block only as half of a correlated pair; otherwise mint from
                 // the bridge's one counter.

@@ -2378,35 +2378,60 @@ fn mocked_second_turn_request_omits_unreplayable_reasoning() {
     assert_eq!(assistant_items[0]["content"][0]["text"], "final answer");
 }
 
+/// Summing usage where one side reports no input-token breakdown leaves the
+/// cached count unknown, whichever side it is and whether the breakdown is
+/// missing or empty: absence is not zero, so the other side's count alone is
+/// never reported as the total. Output breakdowns, whose counters are
+/// required, keep the side that has one.
 #[test]
-fn responses_usage_add_preserves_rhs_details_when_lhs_details_are_absent() {
-    let lhs = ResponsesUsage {
+fn a_usage_sum_with_an_unreported_cached_count_leaves_it_unknown() {
+    let usage = |input_tokens_details: Option<InputTokensDetails>,
+                 output_tokens_details: Option<OutputTokensDetails>| ResponsesUsage {
         input_tokens: 10,
-        input_tokens_details: None,
+        input_tokens_details,
         output_tokens: 20,
-        output_tokens_details: None,
+        output_tokens_details,
         total_tokens: 30,
     };
-    let rhs = ResponsesUsage {
-        input_tokens: 3,
-        input_tokens_details: Some(InputTokensDetails {
-            cached_tokens: Some(2),
-        }),
-        output_tokens: 5,
-        output_tokens_details: Some(OutputTokensDetails {
-            reasoning_tokens: 4,
-        }),
-        total_tokens: 8,
+    let reported = || {
+        usage(
+            Some(InputTokensDetails {
+                cached_tokens: Some(2),
+            }),
+            Some(OutputTokensDetails {
+                reasoning_tokens: 4,
+            }),
+        )
+    };
+    let missing = || usage(None, None);
+    let empty = || {
+        usage(
+            Some(InputTokensDetails {
+                cached_tokens: None,
+            }),
+            None,
+        )
     };
 
-    let usage = lhs + rhs;
-    let token_usage = crate::completion::Usage::from(&usage);
+    for (label, sum) in [
+        ("missing + reported", missing() + reported()),
+        ("reported + missing", reported() + missing()),
+        ("empty + reported", empty() + reported()),
+        ("reported + empty", reported() + empty()),
+    ] {
+        let token_usage = crate::completion::Usage::from(&sum);
+        assert_eq!(token_usage.cached_input_tokens, None, "{label}");
+        assert_eq!(token_usage.input_tokens, Some(20), "{label}");
+        assert_eq!(token_usage.output_tokens, Some(40), "{label}");
+        assert_eq!(token_usage.reasoning_tokens, Some(4), "{label}");
+        assert_eq!(token_usage.total_tokens, Some(60), "{label}");
+    }
 
-    assert_eq!(token_usage.input_tokens, Some(13));
-    assert_eq!(token_usage.cached_input_tokens, Some(2));
-    assert_eq!(token_usage.output_tokens, Some(25));
-    assert_eq!(token_usage.reasoning_tokens, Some(4));
-    assert_eq!(token_usage.total_tokens, Some(38));
+    // Both sides reported: the counts add.
+    let both = crate::completion::Usage::from(&(reported() + reported()));
+    assert_eq!(both.cached_input_tokens, Some(4));
+    // Neither side reported: still no breakdown at all.
+    assert!((missing() + missing()).input_tokens_details.is_none());
 }
 
 #[test]

@@ -1165,7 +1165,27 @@ impl From<ResponsesUsage> for crate::completion::Usage {
     }
 }
 
+/// Sums input-token breakdowns. A side without one reports no cached count,
+/// so the summed count is unknown, never the other side's value alone:
+/// absence is not zero, in aggregation as in decoding.
+fn add_input_details(
+    lhs: Option<InputTokensDetails>,
+    rhs: Option<InputTokensDetails>,
+) -> Option<InputTokensDetails> {
+    const UNREPORTED: InputTokensDetails = InputTokensDetails {
+        cached_tokens: None,
+    };
+    match (lhs, rhs) {
+        (None, None) => None,
+        (lhs, rhs) => Some(lhs.unwrap_or(UNREPORTED) + rhs.unwrap_or(UNREPORTED)),
+    }
+}
+
 /// Adds present breakdowns, preserving a lone value or joint absence.
+///
+/// Used for output-token breakdowns only, whose counters are required: an
+/// absent breakdown there is kept as the other side's (see
+/// [`add_input_details`] for the input side, whose count is optional).
 fn add_optional_details<T: Add<Output = T>>(lhs: Option<T>, rhs: Option<T>) -> Option<T> {
     match (lhs, rhs) {
         (Some(lhs), Some(rhs)) => Some(lhs + rhs),
@@ -1179,7 +1199,7 @@ impl Add for ResponsesUsage {
     fn add(self, rhs: Self) -> Self::Output {
         Self {
             input_tokens: self.input_tokens + rhs.input_tokens,
-            input_tokens_details: add_optional_details(
+            input_tokens_details: add_input_details(
                 self.input_tokens_details,
                 rhs.input_tokens_details,
             ),
@@ -2599,7 +2619,6 @@ impl OutputText {
                         key != "text"
                             && key != "type"
                             && key != OPENAI_RESPONSES_PHASE_KEY
-                            && key != OPENAI_RESPONSES_REFUSAL_KEY
                     })
                     .collect()
             })
@@ -2632,10 +2651,14 @@ fn assistant_text_replay_message(
              object — replaying without these extras"
         );
     }
-    let own_extras = additional_params
-        .as_ref()
-        .and_then(|params| params.wire_extras(OPENAI_RESPONSES_EXTRAS_KEY))
-        .is_some();
+    let refusal = is_refusal(additional_params.as_ref());
+    // The refusal marker is Responses-owned metadata too, though it lives
+    // beside the sibling mirror rather than in it.
+    let own_extras = refusal
+        || additional_params
+            .as_ref()
+            .and_then(|params| params.wire_extras(OPENAI_RESPONSES_EXTRAS_KEY))
+            .is_some();
     if text.is_empty() && !(own_extras && id.is_some()) {
         return None;
     }
@@ -2647,7 +2670,6 @@ fn assistant_text_replay_message(
         .and_then(|extras| extras.get(OPENAI_RESPONSES_PHASE_KEY))
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let refusal = is_refusal(additional_params.as_ref());
     match id {
         Some(id) => Some(Message::Assistant {
             // A marked refusal goes back as the refusal part it came from.
@@ -2687,27 +2709,35 @@ pub(crate) const OPENAI_RESPONSES_EXTRAS_KEY: &str = "openai_responses";
 /// lifted back onto the assistant input item at replay.
 pub(crate) const OPENAI_RESPONSES_PHASE_KEY: &str = "phase";
 
-/// Key inside the [`OPENAI_RESPONSES_EXTRAS_KEY`] object that marks a text
-/// block as a Responses `refusal` content part rather than `output_text`.
-/// Like [`OPENAI_RESPONSES_PHASE_KEY`], it rides the text block's own-wire
-/// extras in rig history, and replay turns it back into a refusal part. Other
-/// wires read only the text, so there a refusal replays as plain text.
-pub(crate) const OPENAI_RESPONSES_REFUSAL_KEY: &str = "refusal";
+/// Responses-owned metadata about which content part a text block came
+/// from, kept in its own [`Text::additional_params`](crate::message::Text)
+/// entry beside [`OPENAI_RESPONSES_EXTRAS_KEY`] rather than inside it. The
+/// extras object mirrors the wire part's own sibling fields verbatim, so a
+/// key reserved there could collide with a field the provider sends; this
+/// entry holds only what rig itself records.
+pub(crate) const OPENAI_RESPONSES_PART_KEY: &str = "openai_responses_part";
 
-/// The own-wire extras that mark a text block as a refusal.
+/// The part kind, under [`OPENAI_RESPONSES_PART_KEY`], of a Responses
+/// `refusal` content part. Replay turns a block carrying it back into a
+/// refusal part; other wires read only the text, so there a refusal replays
+/// as plain text.
+const REFUSAL_PART_KIND: &str = "refusal";
+
+/// The metadata that marks a text block as a refusal.
 pub(crate) fn refusal_marker() -> Option<crate::message::AdditionalParams> {
     crate::message::AdditionalParams::from_entries(Some((
-        OPENAI_RESPONSES_EXTRAS_KEY,
-        serde_json::json!({ OPENAI_RESPONSES_REFUSAL_KEY: true }),
+        OPENAI_RESPONSES_PART_KEY,
+        serde_json::json!({ "kind": REFUSAL_PART_KIND }),
     )))
 }
 
-/// Whether a text block's own-wire extras mark it as a refusal.
+/// Whether a text block is marked as a refusal.
 pub(crate) fn is_refusal(additional_params: Option<&crate::message::AdditionalParams>) -> bool {
     additional_params
-        .and_then(|params| params.wire_extras(OPENAI_RESPONSES_EXTRAS_KEY))
-        .and_then(|extras| extras.get(OPENAI_RESPONSES_REFUSAL_KEY))
-        == Some(&Value::Bool(true))
+        .and_then(|params| params.wire_extras(OPENAI_RESPONSES_PART_KEY))
+        .and_then(|part| part.get("kind"))
+        .and_then(Value::as_str)
+        == Some(REFUSAL_PART_KIND)
 }
 
 /// Record an output message's `phase` on a text block's own-wire extras so
@@ -2716,25 +2746,30 @@ pub(crate) fn stamp_phase(text: &mut Text, phase: Option<&str>) {
     let Some(phase) = phase else {
         return;
     };
-    let mut extras = text
+    // Keep every other entry — a refusal block's part marker among them.
+    let mut entries = match text
         .additional_params
-        .as_ref()
-        .and_then(|params| params.wire_extras(OPENAI_RESPONSES_EXTRAS_KEY))
-        .cloned()
-        .unwrap_or_default();
+        .take()
+        .map(crate::message::AdditionalParams::into_value)
+    {
+        Some(Value::Object(entries)) => entries,
+        _ => Map::new(),
+    };
+    let mut extras = match entries.remove(OPENAI_RESPONSES_EXTRAS_KEY) {
+        Some(Value::Object(extras)) => extras,
+        _ => Map::new(),
+    };
     extras.insert(
         OPENAI_RESPONSES_PHASE_KEY.to_string(),
         Value::String(phase.to_string()),
     );
-    text.additional_params = crate::message::AdditionalParams::from_entries(Some((
-        OPENAI_RESPONSES_EXTRAS_KEY,
-        Value::Object(extras),
-    )));
+    entries.insert(OPENAI_RESPONSES_EXTRAS_KEY.to_string(), Value::Object(extras));
+    text.additional_params = crate::message::AdditionalParams::new(entries);
 }
 
 /// Converts output text or a refusal to a Rig text block, retaining nonempty
 /// output-text extras under the Responses key. A refusal is marked with
-/// [`OPENAI_RESPONSES_REFUSAL_KEY`], so it stays distinct from output text.
+/// [`refusal_marker`], so it stays distinct from output text.
 pub(crate) fn text_block(value: AssistantContent) -> Text {
     match value {
         AssistantContent::Refusal { refusal } => Text {

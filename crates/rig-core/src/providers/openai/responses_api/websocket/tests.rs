@@ -294,6 +294,22 @@ fn an_error_event_without_an_error_object_decodes_and_keeps_its_fields() {
     );
 }
 
+/// An explicit `"error": null` decodes as an empty payload, exactly as a
+/// missing `error` does, so a wrapped error event is never lost to a decode
+/// failure.
+#[test]
+fn an_error_event_with_a_null_error_decodes_as_an_empty_payload() {
+    let payload = json!({ "type": "error", "status": 429, "error": null }).to_string();
+    let Some(ResponsesWebSocketEvent::Error(event)) =
+        parse_server_event(&payload).expect("the event parses")
+    else {
+        panic!("an error event with a null error still decodes");
+    };
+    assert_eq!(event.status, Some(429));
+    assert!(event.error.is_empty());
+    assert!(event.extra.is_empty(), "the null error is not kept as an extra");
+}
+
 /// The flattened `extra` cannot swallow the tag: an event whose `type` is not
 /// `error` does not decode as an error event.
 #[test]
