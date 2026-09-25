@@ -73,6 +73,18 @@ impl Operation for Completion {
         }
     }
 
+    fn stamp_response_headers(
+        event: &mut Self::Event,
+        headers: &crate::completion::ProviderResponseHeaders,
+    ) {
+        // As with the request id, the terminal's own headers win.
+        if let StreamEvent::Final(terminal) = event
+            && terminal.provider_response_headers.is_empty()
+        {
+            terminal.provider_response_headers = headers.clone();
+        }
+    }
+
     fn span(
         provider: &str,
         model: Option<&str>,
@@ -188,9 +200,14 @@ impl Fold<Completion> for CompletionFold {
             &issuer,
             reply.raw,
         );
-        // The terminal's own id wins; the reply headers only fill a gap.
-        if response.provider_request_id.is_none() {
-            Ok(response.with_optional_provider_request_id(reply.provider_request_id))
+        // The terminal's own metadata wins; the reply headers only fill a gap.
+        let response = if response.provider_request_id.is_none() {
+            response.with_optional_provider_request_id(reply.provider_request_id)
+        } else {
+            response
+        };
+        if response.provider_response_headers.is_empty() {
+            Ok(response.with_provider_response_headers(reply.response_headers))
         } else {
             Ok(response)
         }

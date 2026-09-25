@@ -82,7 +82,8 @@ fn encoded(
         envelope(provider, &mut request)?;
     }
     Ok(Encoded::new(request, Framing::Whole)
-        .with_request_id_header(provider.dialect.request_id_header))
+        .with_request_id_header(provider.dialect.request_id_header)
+        .with_captured_response_headers(provider.dialect.response_header_prefix))
 }
 
 /// Refuse an embeddings request parameter the dialect does not accept.

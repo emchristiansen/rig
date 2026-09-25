@@ -660,6 +660,10 @@ pub struct Dialect {
     pub base_url_env: Option<&'static str>,
     /// The reply header carrying the provider's transport request id.
     pub request_id_header: Option<&'static str>,
+    /// The name prefix of the success-reply headers this dialect keeps on
+    /// its responses (the ChatGPT backend's `x-codex-` rate-limit headers);
+    /// `None` keeps none.
+    pub response_header_prefix: Option<&'static str>,
     /// A second credential this dialect accepts, with its own variable and
     /// header. `None` for every dialect but Azure.
     pub alternate_auth: Option<AuthAlternative>,
@@ -681,6 +685,7 @@ impl Dialect {
             api_key_env,
             base_url_env: None,
             request_id_header: None,
+            response_header_prefix: None,
             alternate_auth: None,
             quirks: Quirks::openai(),
         }

@@ -1319,6 +1319,7 @@ fn fold_events(
         raw: serde_json::to_value(response)?,
         // The websocket carries no reply headers past the handshake.
         provider_request_id: None,
+        response_headers: crate::completion::ProviderResponseHeaders::new(),
     })
 }
 

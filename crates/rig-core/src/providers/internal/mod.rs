@@ -202,6 +202,35 @@ pub(crate) fn request_id_from_headers(
     })
 }
 
+/// The headers of a reply whose lowercase name starts with `prefix`, as
+/// [`crate::completion::ProviderResponseHeaders`]: a header repeated in the
+/// reply is joined with `", "` in arrival order (RFC 9110, section 5.3), and
+/// a value is kept exactly unless it is not valid UTF-8, which alone is
+/// converted lossily. `None` captures nothing.
+pub(crate) fn captured_response_headers(
+    headers: &http::HeaderMap,
+    prefix: Option<&str>,
+) -> crate::completion::ProviderResponseHeaders {
+    let Some(prefix) = prefix else {
+        return crate::completion::ProviderResponseHeaders::new();
+    };
+    headers
+        .keys()
+        .filter(|name| name.as_str().starts_with(prefix))
+        .map(|name| {
+            let values: Vec<String> = headers
+                .get_all(name)
+                .iter()
+                .map(|value| match String::from_utf8(value.as_bytes().to_vec()) {
+                    Ok(value) => value,
+                    Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+                })
+                .collect();
+            (name.as_str().to_owned(), values.join(", "))
+        })
+        .collect()
+}
+
 /// Append `pairs` to `path` as a percent-encoded query string.
 /// Encoding preserves cursor delimiters and prevents query-parameter injection.
 pub(crate) fn with_query_pairs(path: &str, pairs: &[(&str, &str)]) -> String {

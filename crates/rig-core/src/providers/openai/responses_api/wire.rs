@@ -84,7 +84,8 @@ impl Responses {
             Framing::Whole
         };
         let encoded = Encoded::new(request, framing)
-            .with_request_id_header(self.provider.dialect.request_id_header);
+            .with_request_id_header(self.provider.dialect.request_id_header)
+            .with_captured_response_headers(self.provider.dialect.response_header_prefix);
         Ok(if codex {
             encoded.with_relaxed_content_type()
         } else {
@@ -370,6 +371,8 @@ pub(crate) fn fold_body(
         provider: provider.to_owned(),
         raw: serde_json::to_value(&response)?,
         provider_request_id: response.provider_request_id.clone(),
+        // A body already in hand: no reply headers came with it.
+        response_headers: crate::completion::ProviderResponseHeaders::new(),
     };
     // A whole body is a unary reply, whose contract accepts an incomplete
     // terminal.

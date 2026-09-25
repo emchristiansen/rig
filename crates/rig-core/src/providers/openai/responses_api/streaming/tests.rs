@@ -308,6 +308,7 @@ fn folded_stream_events(
         provider: provider.to_owned(),
         raw: serde_json::to_value(raw_response)?,
         provider_request_id: raw_response.provider_request_id.clone(),
+        response_headers: Default::default(),
     };
     let mut fold = <Completion as Operation>::Fold::default();
     for event in events {

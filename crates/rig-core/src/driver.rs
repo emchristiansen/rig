@@ -357,6 +357,7 @@ where
         requests,
         framing,
         request_id_header,
+        response_header_prefix,
         relaxed_content_type,
     } = wire.encode(request, Mode::Unary)?;
 
@@ -364,6 +365,7 @@ where
         provider: wire.name().to_owned(),
         raw: serde_json::Value::Null,
         provider_request_id: None,
+        response_headers: crate::completion::ProviderResponseHeaders::new(),
     };
 
     // Preserve every page document so batched replies do not lose earlier data.
@@ -485,6 +487,10 @@ where
             .or_else(|| page.document())
             .unwrap_or(serde_json::Value::Null);
         reply.provider_request_id = page_reply.provider_request_id;
+        reply.response_headers = crate::providers::internal::captured_response_headers(
+            &page_reply.headers,
+            response_header_prefix,
+        );
         crate::providers::internal::trace_json(
             crate::providers::internal::LogTarget::Completions,
             &format!("{} {} reply", wire.name(), <W::Op as Operation>::NAME),
@@ -559,6 +565,7 @@ where
         requests,
         framing,
         request_id_header,
+        response_header_prefix,
         relaxed_content_type,
     } = wire.encode(request, Mode::Streaming)?;
     // No streamed operation sends a batch: a batch exists for providers
@@ -641,6 +648,10 @@ where
         }
         let request_id = request_id_from(response.headers(), request_id_header);
         record_request_id(&recording, request_id.as_deref());
+        let response_headers = crate::providers::internal::captured_response_headers(
+            response.headers(),
+            response_header_prefix,
+        );
         let mut body = response.into_body();
         let mut framer = Framer::new(framing);
         while let Some(chunk) = body.next().await {
@@ -653,7 +664,7 @@ where
                     }
                     driver.fail(ProviderError::from_transport_error(error));
                     for item in driver.drain() {
-                        yield stamped::<W>(item, &request_id, &recording);
+                        yield stamped::<W>(item, &request_id, &response_headers, &recording);
                     }
                     return;
                 }
@@ -664,7 +675,7 @@ where
             for payload in framer.push(&chunk) {
                 driver.absorb(payload);
                 for item in driver.drain() {
-                    yield stamped::<W>(item, &request_id, &recording);
+                    yield stamped::<W>(item, &request_id, &response_headers, &recording);
                 }
                 if driver.done() {
                     return;
@@ -674,7 +685,7 @@ where
         for payload in framer.finish() {
             driver.absorb(payload);
             for item in driver.drain() {
-                yield stamped::<W>(item, &request_id, &recording);
+                yield stamped::<W>(item, &request_id, &response_headers, &recording);
             }
             if driver.done() {
                 return;
@@ -682,23 +693,26 @@ where
         }
         driver.finish();
         for item in driver.drain() {
-            yield stamped::<W>(item, &request_id, &recording);
+            yield stamped::<W>(item, &request_id, &response_headers, &recording);
         }
     };
     Ok(tracing_futures::Instrument::instrument(frames, span))
 }
 
 /// Stamp the transport request id captured off the reply onto a terminal
-/// event or a preserved provider error. An id an upstream constructor
-/// already attached is never replaced: it saw the reply that carried it.
+/// event or a preserved provider error, and the captured success-reply
+/// headers onto a terminal event. Metadata an upstream constructor already
+/// attached is never replaced: it saw the reply that carried it.
 fn stamped<W: Wire>(
     item: Result<Event<W>, ProviderError>,
     request_id: &Option<String>,
+    response_headers: &crate::completion::ProviderResponseHeaders,
     span: &tracing::Span,
 ) -> Result<Event<W>, ProviderError> {
     match item {
         Ok(mut event) => {
             <W::Op as Operation>::stamp_request_id(&mut event, request_id);
+            <W::Op as Operation>::stamp_response_headers(&mut event, response_headers);
             <W::Op as Operation>::record_event(span, &event);
             Ok(event)
         }

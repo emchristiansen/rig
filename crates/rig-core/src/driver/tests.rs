@@ -38,6 +38,7 @@ use crate::wire::{
 struct Echo {
     framing: Framing,
     request_id_header: Option<&'static str>,
+    response_header_prefix: Option<&'static str>,
     relaxed_content_type: bool,
 }
 
@@ -46,6 +47,7 @@ impl Echo {
         Self {
             framing: Framing::Whole,
             request_id_header: Some("request-id"),
+            response_header_prefix: None,
             relaxed_content_type: false,
         }
     }
@@ -54,6 +56,7 @@ impl Echo {
         Self {
             framing: Framing::Sse,
             request_id_header: Some("request-id"),
+            response_header_prefix: None,
             relaxed_content_type: false,
         }
     }
@@ -62,6 +65,11 @@ impl Echo {
     /// endpoint's shape on a dialect that always streams.
     fn sse_unary() -> Self {
         Self::streaming()
+    }
+
+    fn capturing(mut self, prefix: &'static str) -> Self {
+        self.response_header_prefix = Some(prefix);
+        self
     }
 
     fn relaxed(mut self) -> Self {
@@ -170,8 +178,9 @@ impl Wire for Echo {
         }))?;
         let request =
             http::Request::post("https://echo.invalid/v1/messages").body(Body::Bytes(body))?;
-        let encoded =
-            Encoded::new(request, self.framing).with_request_id_header(self.request_id_header);
+        let encoded = Encoded::new(request, self.framing)
+            .with_request_id_header(self.request_id_header)
+            .with_captured_response_headers(self.response_header_prefix);
         Ok(if self.relaxed_content_type {
             encoded.with_relaxed_content_type()
         } else {
@@ -1028,4 +1037,97 @@ fn a_stream_the_driver_cannot_send_is_a_request_failure() {
         );
         assert!(!error.is_retryable());
     }
+}
+
+// ── captured success-reply headers ─────────────────────────────────────
+
+/// A successful reply's headers: three `x-codex-*` ones — one repeated, one
+/// not valid UTF-8 — beside headers no dialect captures here.
+fn codex_reply_headers(content_type: &'static str) -> http::HeaderMap {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static(content_type),
+    );
+    headers.insert("request-id", http::HeaderValue::from_static("req_9"));
+    headers.insert(
+        "x-codex-primary-used-percent",
+        http::HeaderValue::from_static("12.5"),
+    );
+    headers.append(
+        "x-codex-credits-balance",
+        http::HeaderValue::from_static("10"),
+    );
+    headers.append(
+        "x-codex-credits-balance",
+        http::HeaderValue::from_static("20"),
+    );
+    headers.insert(
+        "x-codex-promo-message",
+        http::HeaderValue::from_bytes(b"caf\xe9").expect("an opaque header value"),
+    );
+    headers
+}
+
+/// What a dialect capturing `x-codex-` keeps from [`codex_reply_headers`]:
+/// only those headers, a repeated one joined in arrival order, and a value
+/// that is not UTF-8 converted lossily.
+fn captured_codex_headers() -> crate::completion::ProviderResponseHeaders {
+    [
+        ("x-codex-credits-balance", "10, 20"),
+        ("x-codex-primary-used-percent", "12.5"),
+        ("x-codex-promo-message", "caf\u{FFFD}"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    .collect()
+}
+
+#[tokio::test]
+async fn a_unary_reply_keeps_the_success_headers_its_dialect_captures() {
+    let http = RecordingHttpClient::new(UNARY_BODY);
+    http.set_response(MockHttpResponse::SuccessWithHeaders(
+        Bytes::from_static(UNARY_BODY.as_bytes()),
+        codex_reply_headers("application/json"),
+    ));
+    let bound = Bound::new(Echo::unary().capturing("x-codex-"), http.clone());
+    let response = bound.completion(prompt()).await.expect("the reply decodes");
+    assert_eq!(response.provider_response_headers, captured_codex_headers());
+
+    // A wire that captures nothing keeps nothing from the same reply.
+    let plain = Bound::new(Echo::unary(), http);
+    let response = plain.completion(prompt()).await.expect("the reply decodes");
+    assert!(response.provider_response_headers.is_empty());
+}
+
+#[tokio::test]
+async fn a_streamed_reply_keeps_the_success_headers_its_dialect_captures() {
+    let http = NonSuccessStreamingClient {
+        status: http::StatusCode::OK,
+        headers: codex_reply_headers("text/event-stream"),
+        body: Bytes::from_static(STREAM_BODY.as_bytes()),
+    };
+    let frames = stream(
+        &Echo::streaming().capturing("x-codex-"),
+        &http,
+        prompt(),
+        None,
+    )
+    .expect("the stream opens");
+    let items: Vec<_> = frames.collect().await;
+    let terminal = items
+        .iter()
+        .find_map(|item| match item {
+            Ok(StreamEvent::Final(terminal)) => Some(terminal),
+            _ => None,
+        })
+        .expect("the stream ends with a terminal record");
+    assert_eq!(terminal.provider_response_headers, captured_codex_headers());
+
+    let frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
+    let items: Vec<_> = frames.collect().await;
+    assert!(items.iter().all(|item| match item {
+        Ok(StreamEvent::Final(terminal)) => terminal.provider_response_headers.is_empty(),
+        _ => true,
+    }));
 }

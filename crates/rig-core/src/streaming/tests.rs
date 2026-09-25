@@ -1614,3 +1614,59 @@ async fn typed_tool_identity_streams_colliding_spellings_without_lookahead() {
         assert_ne!(calls[0].id, calls[1].id);
     }
 }
+
+/// The captured success-reply headers are part of the terminal record's and
+/// the completion response's serialized form: a non-empty map round-trips,
+/// through `StreamEvent::Final` too, and an empty one is omitted, so records
+/// from dialects that capture nothing serialize exactly as before.
+#[test]
+fn captured_response_headers_round_trip_and_are_omitted_when_empty() {
+    let headers: crate::completion::ProviderResponseHeaders = [
+        ("x-codex-credits-balance", "10, 20"),
+        ("x-codex-primary-used-percent", "12.5"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    .collect();
+
+    let terminal = StreamFinal::new(TEST_PROVIDER, Usage::default(), serde_json::json!({}))
+        .with_provider_response_headers(headers.clone());
+    let event = StreamEvent::Final(terminal.clone());
+    let json = serde_json::to_value(&event).expect("the event serializes");
+    assert_eq!(
+        serde_json::from_value::<StreamEvent>(json).expect("the event deserializes"),
+        event
+    );
+    let json = serde_json::to_value(&terminal).expect("the terminal serializes");
+    assert_eq!(
+        json["provider_response_headers"],
+        serde_json::json!({
+            "x-codex-credits-balance": "10, 20",
+            "x-codex-primary-used-percent": "12.5"
+        })
+    );
+
+    let response = crate::completion::CompletionResponse::new(
+        Vec::new(),
+        Usage::default(),
+        TEST_PROVIDER,
+        serde_json::json!({}),
+    )
+    .with_provider_response_headers(headers.clone());
+    let json = serde_json::to_value(&response).expect("the response serializes");
+    let back: crate::completion::CompletionResponse =
+        serde_json::from_value(json).expect("the response deserializes");
+    assert_eq!(back.provider_response_headers, headers);
+
+    let bare = StreamFinal::new(TEST_PROVIDER, Usage::default(), serde_json::json!({}));
+    let json = serde_json::to_value(&bare).expect("the terminal serializes");
+    assert!(json.get("provider_response_headers").is_none(), "{json}");
+    let json = serde_json::to_value(crate::completion::CompletionResponse::new(
+        Vec::new(),
+        Usage::default(),
+        TEST_PROVIDER,
+        serde_json::json!({}),
+    ))
+    .expect("the response serializes");
+    assert!(json.get("provider_response_headers").is_none(), "{json}");
+}
