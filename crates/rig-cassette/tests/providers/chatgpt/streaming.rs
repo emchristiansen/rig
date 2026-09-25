@@ -31,7 +31,8 @@ async fn example_streaming_prompt() {
         .await
         .agent(LIVE_MODEL)
         .preamble("Be precise and concise.")
-        .temperature(0.5)
+        // No temperature: the Codex contract refuses a caller-set
+        // `temperature` by name.
         .build();
 
     let mut stream = agent

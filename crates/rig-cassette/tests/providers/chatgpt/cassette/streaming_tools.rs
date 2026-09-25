@@ -7,7 +7,7 @@ use rig::providers::chatgpt;
 use rig::streaming::StreamEvent;
 use serde_json::json;
 
-use super::super::support::with_chatgpt_cassette;
+use super::super::support::{recorded_include, with_chatgpt_cassette};
 use crate::cassettes::cassette_path;
 use crate::support::zero_arg_tool_definition;
 
@@ -44,6 +44,7 @@ async fn nonstreaming_tool_call_completed_response_without_output() {
                 )
                 .tool(zero_arg_tool_definition("ping"))
                 .tool_choice(ToolChoice::Required)
+                .additional_params(recorded_include())
                 .build();
 
             // The premise of the scenario: the terminal `response.completed`
@@ -94,6 +95,7 @@ async fn stream_tool_call_completed_response_without_output() {
                 )
                 .tool(zero_arg_tool_definition("ping"))
                 .tool_choice(ToolChoice::Required)
+                .additional_params(recorded_include())
                 .build();
 
             let mut stream = model.stream(request).await.expect("stream should start");

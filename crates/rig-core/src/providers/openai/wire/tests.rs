@@ -522,3 +522,36 @@ fn llamacpp_serves_its_operational_routes_unversioned() {
         }
     }
 }
+
+/// The configuration a ChatGPT caller sets programmatically — account,
+/// instructions and originator — reaches the request headers and the merged
+/// instructions exactly as the environment spellings do.
+#[test]
+fn chatgpt_identity_setters_reach_the_request() {
+    fn headers(provider: &OpenAI) -> http::HeaderMap {
+        provider
+            .headers(http::Request::get("https://example.invalid/"))
+            .body(())
+            .expect("builds")
+            .headers()
+            .clone()
+    }
+
+    let config = OpenAI::with_key(&crate::providers::chatgpt::DIALECT, "tok")
+        .with_account_id("acct-1")
+        .with_originator("ccc")
+        .with_instructions("");
+    let sent = headers(&config);
+    assert_eq!(sent["chatgpt-account-id"], "acct-1");
+    assert_eq!(sent["originator"], "ccc");
+    let user_agent = sent["user-agent"].to_str().expect("ascii user agent");
+    assert!(
+        user_agent.starts_with("rig/") && user_agent.ends_with("; ccc)"),
+        "the default user agent names the new originator, got {user_agent}"
+    );
+    assert_eq!(config.instructions.as_deref(), Some(""));
+
+    // A dialect with no caller identity gains one when asked.
+    let plain = headers(&OpenAI::new("sk-test").with_originator("ccc"));
+    assert_eq!(plain["originator"], "ccc");
+}

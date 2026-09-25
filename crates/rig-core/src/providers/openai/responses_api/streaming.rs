@@ -10,9 +10,12 @@ use crate::operation::AdapterOutput;
 use crate::operation::Completion;
 use crate::providers::internal::wire::{self, WireEvent};
 use crate::providers::openai::responses_api::{
-    IncompleteDetailsReason, ReasoningSummary, ResponseStatus, ResponsesUsage,
+    ClassifiedArguments, FunctionCallArguments, IncompleteDetailsReason, ReasoningSummary,
+    ResponseStatus, ResponsesUsage, ToolStatus,
 };
-use crate::streaming::{BlockId, StreamFinal, ToolCallEnd, UnparseableToolInput};
+use crate::streaming::{
+    BlockId, CustomToolCallEnd, StreamFinal, ToolCallEnd, UnparseableToolInput,
+};
 use crate::wire::Decoder;
 use crate::wire::WireFrame;
 use serde::{Deserialize, Serialize};
@@ -222,26 +225,79 @@ pub fn classify_responses_frame(data: &str) -> WireEvent<StreamingCompletionChun
     wire::classify_tagged_frame(data, "type", is_known_responses_event_type)
 }
 
-#[derive(Clone, Copy)]
+/// How a decoder takes a terminal `response.incomplete` event (for example a
+/// `max_output_tokens` truncation).
+///
+/// The contract is transport-specific: an HTTP SSE stream refuses it by
+/// default and accepts it only when the caller opts in
+/// ([`super::wire::Responses::with_streamed_incomplete`]); a unary reply and a
+/// websocket session accept it. Either way incomplete is never reported as
+/// completed: an accepted one ends the turn with its truthful finish reason
+/// (max-output → `Length`, content-filter → `ContentFilter`, else `Other`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteTerminal {
+    /// End the reply with an error carrying the provider's terminal event.
+    /// The HTTP SSE default.
+    #[default]
+    Refuse,
+    /// Keep the partial output and usage and end the turn with the finish
+    /// reason the provider's `incomplete_details` states.
+    Accept,
+}
+
+/// The decoder's two independent policy axes: when a completed tool call is
+/// published, and how a terminal `response.incomplete` is taken.
+#[derive(Clone, Copy, Debug)]
 #[doc(hidden)]
-pub enum ResponsesStreamOptions {
-    Strict,
-    StrictWithImmediateToolCalls,
+pub struct ResponsesStreamOptions {
+    /// Publish a call the wire delivered whole at its `output_item.done`
+    /// rather than buffering it to the terminal.
+    immediate_tool_calls: bool,
+    /// How a terminal `response.incomplete` is taken.
+    incomplete: IncompleteTerminal,
 }
 
 impl ResponsesStreamOptions {
+    /// Buffered tool calls; a terminal `response.incomplete` is refused.
     #[doc(hidden)]
     pub const fn strict() -> Self {
-        Self::Strict
+        Self {
+            immediate_tool_calls: false,
+            incomplete: IncompleteTerminal::Refuse,
+        }
     }
 
     pub(crate) const fn strict_with_immediate_tool_calls() -> Self {
-        Self::StrictWithImmediateToolCalls
+        Self {
+            immediate_tool_calls: true,
+            incomplete: IncompleteTerminal::Refuse,
+        }
+    }
+
+    /// The same options with `incomplete` selecting how a terminal
+    /// `response.incomplete` is taken.
+    #[doc(hidden)]
+    pub const fn with_incomplete(mut self, incomplete: IncompleteTerminal) -> Self {
+        self.incomplete = incomplete;
+        self
     }
 
     const fn emits_completed_tool_calls_immediately(self) -> bool {
-        matches!(self, Self::StrictWithImmediateToolCalls)
+        self.immediate_tool_calls
     }
+
+    const fn refuses_incomplete(self) -> bool {
+        matches!(self.incomplete, IncompleteTerminal::Refuse)
+    }
+}
+
+/// A tool call the wire delivered whole, buffered to the terminal.
+enum BufferedCall {
+    /// A function call, finalized by the shared accumulator.
+    Function(ToolCallEnd),
+    /// A custom call: complete as delivered, with verbatim input.
+    Custom(CustomToolCallEnd),
 }
 
 #[doc(hidden)]
@@ -258,7 +314,7 @@ pub struct RawChoiceAccumulator {
     /// error) as `BlockEnd`s keyed by the slot's assembly id. Assembly and
     /// internal-id correlation live in the shared accumulator, keyed by the
     /// function-call item id the added/delta/done events share.
-    tool_calls: Vec<(BlockId, ToolCallEnd)>,
+    tool_calls: Vec<(BlockId, BufferedCall)>,
     /// Whether a genuine terminal event (`response.completed` or
     /// `response.incomplete`) arrived. Without one the stream was truncated,
     /// and `finish` withholds the terminal record.
@@ -274,6 +330,15 @@ pub struct RawChoiceAccumulator {
     /// terminal drain (its `output_item.done` frame was lost) still
     /// finalizes with the dual-wire identity Responses replay pairs on.
     pending_call_ids: std::collections::HashMap<u64, String>,
+    /// The namespace each open slot announced on `output_item.added`, kept
+    /// for the same reason as [`Self::pending_call_ids`]: a slot the terminal
+    /// drain closes must not lose its qualifier.
+    pending_namespaces: std::collections::HashMap<u64, String>,
+    /// The argument fragments each open function-call slot streamed, assembled
+    /// exactly as the shared accumulator assembles its buffer for that slot.
+    /// The done item's verdict reads it to know whether that buffer would
+    /// answer for a restatement that does not parse.
+    argument_fragments: std::collections::HashMap<u64, AssembledArguments>,
     /// The message item whose text block is currently open. A text or
     /// refusal delta carrying a different `item_id` opens a new text block
     /// (a text `BlockStart` keyed by that item id), so two `message` output
@@ -321,6 +386,8 @@ impl RawChoiceAccumulator {
                     crate::streaming::SyntheticIds::output(),
                 ),
             pending_call_ids: std::collections::HashMap::new(),
+            pending_namespaces: std::collections::HashMap::new(),
+            argument_fragments: std::collections::HashMap::new(),
             current_text_item: None,
             delta_text_items: std::collections::HashSet::new(),
             delta_text_slots: std::collections::HashSet::new(),
@@ -473,6 +540,9 @@ impl RawChoiceAccumulator {
                     self.pending_call_ids
                         .insert(output_index, func.call_id.clone());
                 }
+                if let Some(namespace) = func.namespace {
+                    self.pending_namespaces.insert(output_index, namespace);
+                }
                 out.tool_name(&key, func.name);
             }
             ItemChunkKind::OutputItemDone(message) => {
@@ -498,7 +568,7 @@ impl RawChoiceAccumulator {
             // Summary and raw-reasoning deltas differ only in which wire
             // event carries them; both are fragments of the output item's
             // reasoning block and accumulate under its slot identity.
-            ItemChunkKind::ReasoningSummaryTextDelta(SummaryTextChunk { delta, .. })
+            ItemChunkKind::ReasoningSummaryTextDelta(SummaryTextDeltaChunk { delta, .. })
             | ItemChunkKind::ReasoningTextDelta(DeltaTextChunkWithItemId { delta, .. }) => {
                 // A later text delta must reactivate its message block after interleaved reasoning.
                 self.current_text_item = None;
@@ -520,6 +590,10 @@ impl RawChoiceAccumulator {
                     .open(output_index, outer_item_id.as_deref(), None);
                 slot.saw_arguments_delta = true;
                 let key = slot.key().clone();
+                self.argument_fragments
+                    .entry(output_index)
+                    .or_default()
+                    .push(&delta.delta);
                 out.tool_arguments(&key, delta.delta);
             }
             _ => {}
@@ -548,10 +622,13 @@ impl RawChoiceAccumulator {
                 // does not state it twice.
                 self.merge_terminal_body_text(&response, out);
                 // A terminal can close calls missing their done event; incomplete arguments drop.
+                self.argument_fragments.clear();
                 for (index, slot) in self.tool_slots.drain_ordered_indexed() {
                     let mut end = slot.end(UnparseableToolInput::Drop);
                     end.call_id = self.pending_call_ids.remove(&index);
-                    self.tool_calls.push((slot.key().clone(), end));
+                    end.namespace = self.pending_namespaces.remove(&index);
+                    self.tool_calls
+                        .push((slot.key().clone(), BufferedCall::Function(end)));
                 }
                 // The terminal event is the only place the stream learns how the
                 // turn ended, which model answered, and which assistant message
@@ -598,9 +675,11 @@ impl RawChoiceAccumulator {
             Output::FunctionCall(func) => {
                 // Authoritative done fields replace fragments under the slot's established key.
                 let slot = self.tool_slots.remove(output_index);
-                // The done item restates its own call_id; the announce-time
-                // copy is only for slots the terminal drain must close.
+                // The done item restates its own call_id and namespace; the
+                // announce-time copies are only for slots the terminal drain
+                // must close.
                 self.pending_call_ids.remove(&output_index);
+                self.pending_namespaces.remove(&output_index);
                 let item_id = match &slot {
                     // Keep the key that owns any accumulated fragments.
                     Some(slot) => slot.key().clone(),
@@ -610,8 +689,16 @@ impl RawChoiceAccumulator {
                     }
                     None => BlockId::wire(func.id.clone()),
                 };
+                let fragments = self.argument_fragments.remove(&output_index);
+                // A parsed restatement is authoritative, so the accumulator
+                // never consults this policy for it; it keeps the spelling
+                // effect logs already recorded for such an end.
                 let mut end = ToolCallEnd::new(UnparseableToolInput::Drop);
                 end.name = Some(func.name);
+                // The done item is authoritative for the qualifier too: without
+                // it the streamed call would lose a namespace the unary decode
+                // of the same item keeps.
+                end.namespace = func.namespace;
                 // An empty call_id means no provider identity. Never substitute
                 // the fc_* item id: replay requires a real call_id.
                 end.call_id = crate::streaming::non_empty_id(func.call_id.clone());
@@ -623,15 +710,44 @@ impl RawChoiceAccumulator {
                     .call_id
                     .as_ref()
                     .and_then(|_| crate::streaming::non_empty_id(func.id.clone()));
-                // Parsed restatements win; invalid raw arguments use the accumulator's drop policy.
-                match func.arguments.parse() {
-                    Ok(arguments) => end.arguments = Some(arguments),
-                    // Buffer raw restatements only without prior fragments to avoid duplicate bytes.
-                    Err(_) => {
-                        let saw_fragments =
-                            slot.as_ref().is_some_and(|slot| slot.saw_arguments_delta);
-                        if !saw_fragments {
-                            out.tool_arguments(&item_id, func.arguments.as_str());
+                // The restatement is authoritative in both of its states. A
+                // parsed one supersedes the fragments. One that does not parse
+                // is judged under the policy its item status selects, and the
+                // buffer is made to hold unparseable bytes so it never answers
+                // for the restatement with arguments the provider did not
+                // assert.
+                match func.arguments.classify() {
+                    ClassifiedArguments::Parsed(arguments) => end.arguments = Some(arguments),
+                    ClassifiedArguments::Unparseable(restated) => {
+                        // Item status supplies protocol confidence, never a
+                        // cause: it says how far the provider stands behind
+                        // this call, and nothing about why its arguments fail
+                        // to parse. A call it does not assert is dropped; one
+                        // it asserts (`completed`, or `in_progress` at this
+                        // terminal normalization point) must not be silently
+                        // lost, so it is refused by name.
+                        end.on_unparseable = match func.status {
+                            ToolStatus::Incomplete => UnparseableToolInput::Drop,
+                            ToolStatus::Completed | ToolStatus::InProgress => {
+                                UnparseableToolInput::Error
+                            }
+                        };
+                        match fragments {
+                            // No fragment preceded it: the restatement is the
+                            // whole input, and reaches the buffer once.
+                            None => out.tool_arguments(&item_id, restated),
+                            // The fragments are already unparseable, as when they
+                            // stream the same bytes the restatement repeats:
+                            // re-emitting would put those bytes in the buffer
+                            // twice, and the verdict is already the policy's.
+                            Some(fragments) if !fragments.parses() => {}
+                            // The fragments parse but the provider restated
+                            // something that does not (a whitespace or `{}` delta
+                            // followed by malformed text). Appending the
+                            // restatement leaves the buffer unparseable: a
+                            // complete JSON value, or whitespace, followed by
+                            // non-whitespace that does not parse, never parses.
+                            Some(_) => out.tool_arguments(&item_id, restated),
                         }
                     }
                 }
@@ -639,7 +755,33 @@ impl RawChoiceAccumulator {
                 if emit_completed_tool_calls_immediately {
                     out.tool_end(item_id, end);
                 } else {
-                    self.tool_calls.push((item_id, end));
+                    self.tool_calls.push((item_id, BufferedCall::Function(end)));
+                }
+            }
+            // A custom call never fragments here: this client models no
+            // `custom_tool_call_input` delta, so no slot is open and the done
+            // item is the whole call. Its input travels verbatim, never
+            // parsed, because it is not JSON arguments.
+            Output::CustomToolCall(call) => {
+                self.current_text_item = None;
+                // Mirror the function-call identity rule: an item id keys the
+                // block only as half of a correlated pair; otherwise mint from
+                // the bridge's one counter.
+                let key = if call.id.is_empty() || call.call_id.is_empty() {
+                    self.tool_slots.minted_ids().mint()
+                } else {
+                    BlockId::wire(call.id.clone())
+                };
+                let mut end = CustomToolCallEnd::new(call.name, call.input)
+                    .with_call_id(call.call_id)
+                    .with_namespace(call.namespace);
+                if end.call_id.is_some() {
+                    end = end.with_tool_id(call.id);
+                }
+                if emit_completed_tool_calls_immediately {
+                    out.custom_tool_call(key, end);
+                } else {
+                    self.tool_calls.push((key, BufferedCall::Custom(end)));
                 }
             }
             Output::Reasoning {
@@ -777,8 +919,11 @@ impl RawChoiceAccumulator {
     /// must not produce a terminal record.
     #[doc(hidden)]
     pub fn flush_tool_calls(&mut self, out: &mut AdapterOutput) {
-        for (id, end) in std::mem::take(&mut self.tool_calls) {
-            out.tool_end(id, end);
+        for (id, call) in std::mem::take(&mut self.tool_calls) {
+            match call {
+                BufferedCall::Function(end) => out.tool_end(id, end),
+                BufferedCall::Custom(end) => out.custom_tool_call(id, end),
+            }
         }
     }
 
@@ -803,6 +948,37 @@ impl RawChoiceAccumulator {
             Ok(record) => out.final_record(record),
             Err(error) => out.error(error),
         }
+    }
+}
+
+/// One function-call slot's streamed argument fragments, assembled by the
+/// accumulator's own rule
+/// ([`append_tool_input_fragment`](crate::streaming::append_tool_input_fragment)),
+/// so it holds what the accumulator's buffer for that slot holds.
+#[derive(Debug, Default)]
+struct AssembledArguments {
+    bytes: String,
+    /// The accumulation bound refused a fragment. The accumulator then
+    /// finalizes the call as unparseable whatever the retained bytes say.
+    overflowed: bool,
+}
+
+impl AssembledArguments {
+    fn push(&mut self, fragment: &str) {
+        if !crate::streaming::append_tool_input_fragment(&mut self.bytes, fragment) {
+            self.overflowed = true;
+        }
+    }
+
+    /// Whether the accumulator would finalize these fragments as arguments,
+    /// under the one classification every reader of a Responses argument
+    /// string shares.
+    fn parses(&self) -> bool {
+        !self.overflowed
+            && matches!(
+                FunctionCallArguments(self.bytes.clone()).classify(),
+                ClassifiedArguments::Parsed(_)
+            )
     }
 }
 
@@ -845,6 +1021,16 @@ pub enum ResponsesEvent {
     Failure(String),
     /// `[DONE]` sentinel. Does not independently establish successful completion.
     Sentinel,
+}
+
+/// The `response` object of a raw response-lifecycle frame, exactly as the
+/// provider sent it.
+fn native_response_object(raw: &str) -> Option<serde_json::Value> {
+    let mut frame = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    frame
+        .as_object_mut()?
+        .remove("response")
+        .filter(serde_json::Value::is_object)
 }
 
 /// Top-level presence markers for response bodies, including error envelopes.
@@ -963,8 +1149,26 @@ impl ResponsesDecoder {
             }
             StreamingCompletionChunk::Response(chunk) => {
                 let ResponseChunk { kind, response, .. } = chunk;
-                // Keep the latest snapshot so raw output includes final status and usage.
-                self.document = serde_json::to_value(&response).ok();
+                // Keep the latest snapshot so raw output includes final status
+                // and usage. The provider's own `response` object is kept
+                // rather than the typed re-serialization: the typed decode
+                // drops an echoed metadata key whose value does not fit its
+                // field, and the capture is where that native evidence stays.
+                self.document =
+                    native_response_object(&raw).or_else(|| serde_json::to_value(&response).ok());
+                if matches!(kind, ResponseChunkKind::ResponseIncomplete)
+                    && self.options.refuses_incomplete()
+                {
+                    // A streamed turn the provider cut short is not a
+                    // completed one: unless the caller opted into partial
+                    // success, it ends in an error carrying the provider's
+                    // terminal event. Fully-delivered tool calls flush first,
+                    // as before any terminal error.
+                    self.accumulator.flush_tool_calls(out);
+                    out.error(crate::error::ProviderError::from_provider_body(&raw));
+                    self.finished = true;
+                    return;
+                }
                 if matches!(kind, ResponseChunkKind::ResponseCompleted) {
                     // Inert under the driver, which records the same fields
                     // off the terminal record; the client layer's stream
@@ -1126,9 +1330,9 @@ pub enum ItemChunkKind {
     #[serde(rename = "response.reasoning_summary_part.done")]
     ReasoningSummaryPartDone(SummaryPartChunk),
     #[serde(rename = "response.reasoning_summary_text.delta")]
-    ReasoningSummaryTextDelta(SummaryTextChunk),
+    ReasoningSummaryTextDelta(SummaryTextDeltaChunk),
     #[serde(rename = "response.reasoning_summary_text.done")]
-    ReasoningSummaryTextDone(SummaryTextChunk),
+    ReasoningSummaryTextDone(SummaryTextDoneChunk),
     #[serde(rename = "response.reasoning_text.delta")]
     ReasoningTextDelta(DeltaTextChunkWithItemId),
     /// Raw-reasoning text restatement. Decoded but not emitted to avoid
@@ -1242,7 +1446,11 @@ pub struct ArgsTextChunk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_index: Option<u64>,
     pub sequence_number: u64,
-    pub arguments: serde_json::Value,
+    /// The call's arguments, in the same type (and so under the same
+    /// classification) as the `output_item.done` item's
+    /// [`OutputFunctionCall::arguments`](super::OutputFunctionCall::arguments);
+    /// [`FunctionCallArguments::reconcile`] settles whether the two agree.
+    pub arguments: FunctionCallArguments,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1252,14 +1460,28 @@ pub struct SummaryPartChunk {
     pub part: SummaryPartChunkPart,
 }
 
+/// A reasoning-summary text fragment (`response.reasoning_summary_text.delta`).
+///
+/// The delta and done events are distinct shapes with distinct members: a
+/// `delta` is required here and a `text` member is not accepted in its place,
+/// so a done-shaped payload can never parse as a fragment (nor the reverse).
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SummaryTextChunk {
+pub struct SummaryTextDeltaChunk {
+    /// The reasoning summary this fragment belongs to.
     pub summary_index: u64,
     pub sequence_number: u64,
-    // `response.reasoning_summary_text.delta` carries `delta`;
-    // the `.done` sibling carries the full `text` under the same shape.
-    #[serde(alias = "text")]
+    /// The incremental text.
     pub delta: String,
+}
+
+/// A reasoning-summary text restatement (`response.reasoning_summary_text.done`).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SummaryTextDoneChunk {
+    /// The reasoning summary this restatement closes.
+    pub summary_index: u64,
+    pub sequence_number: u64,
+    /// The summary's full text.
+    pub text: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

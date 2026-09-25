@@ -37,7 +37,8 @@ async fn example_streaming_with_tools() {
             "You are a calculator here to help the user perform arithmetic operations. \
              Use the tools provided to answer the user's question and answer in a full sentence.",
         )
-        .max_tokens(1024)
+        // No output-token cap: the Codex contract refuses a caller-set
+        // `max_output_tokens` by name.
         .tool(Adder)
         .tool(Subtract)
         .build();

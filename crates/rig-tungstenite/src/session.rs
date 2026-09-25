@@ -15,6 +15,9 @@
 use crate::TungsteniteClient;
 use rig_core::driver::Bound;
 use rig_core::error::ProviderError;
+use rig_core::providers::openai::responses_api::websocket::codex::{
+    CodexWebSocketSession, CodexWebSocketSessionBuilder,
+};
 use rig_core::providers::openai::responses_api::websocket::{
     ResponsesWebSocketExt, ResponsesWebSocketSession, ResponsesWebSocketSessionBuilder,
 };
@@ -49,15 +52,26 @@ where
 
 /// Connect a configured session using the bundled [`TungsteniteClient`].
 pub trait DefaultWebSocketBuilder {
+    /// The session the builder opens.
+    type Session;
+
     /// Open the session over the bundled backend, returning an error if
     /// connection setup fails.
-    fn connect(
-        self,
-    ) -> impl Future<Output = Result<ResponsesWebSocketSession, ProviderError>> + Send;
+    fn connect(self) -> impl Future<Output = Result<Self::Session, ProviderError>> + Send;
 }
 
 impl DefaultWebSocketBuilder for ResponsesWebSocketSessionBuilder {
+    type Session = ResponsesWebSocketSession;
+
     async fn connect(self) -> Result<ResponsesWebSocketSession, ProviderError> {
+        self.connect_with(&TungsteniteClient).await
+    }
+}
+
+impl DefaultWebSocketBuilder for CodexWebSocketSessionBuilder {
+    type Session = CodexWebSocketSession;
+
+    async fn connect(self) -> Result<CodexWebSocketSession, ProviderError> {
         self.connect_with(&TungsteniteClient).await
     }
 }

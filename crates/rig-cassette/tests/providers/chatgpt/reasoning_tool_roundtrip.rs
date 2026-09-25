@@ -17,7 +17,8 @@ async fn streaming() {
         .await
         .agent(LIVE_MODEL)
         .preamble(reasoning::TOOL_SYSTEM_PROMPT)
-        .max_tokens(4096)
+        // No output-token cap: the Codex contract refuses a caller-set
+        // `max_output_tokens` by name.
         .tool(WeatherTool::new(call_count.clone()))
         .additional_params(serde_json::json!({
             "reasoning": { "effort": "high" }

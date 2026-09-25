@@ -508,7 +508,11 @@ async fn responses_streaming_reasoning_budget_exhausted() {
     with_openai_truncation_cassette(
         "truncated_turn_matrix/responses_streaming_reasoning_budget_exhausted",
         |client| async move {
-            let model = client.openai.completion("gpt-5-nano");
+            // A truncated stream is partial success only by opt-in.
+            let model = client
+                .openai
+                .completion("gpt-5-nano")
+                .map_wire(super::super::support::accepting_streamed_incomplete);
             let request = model
                 .completion_request(LONG_PROMPT)
                 .max_tokens(TINY_CAP)

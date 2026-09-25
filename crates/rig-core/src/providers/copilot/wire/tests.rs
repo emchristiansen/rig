@@ -825,3 +825,32 @@ fn both_completion_envelopes_see_the_original_vision_and_assistant_history() {
         }
     }
 }
+
+/// The incomplete-terminal opt-in reaches the Responses route's wire and
+/// leaves the chat route untouched; the default refuses.
+#[test]
+fn the_streamed_incomplete_opt_in_is_a_responses_route_option() {
+    let copilot = copilot();
+    let OpenAiWire::Responses(default) = copilot.completion(super::super::GPT_5_3_CODEX).wire
+    else {
+        panic!("a Codex model is served by /responses");
+    };
+    assert_eq!(default.streamed_incomplete, IncompleteTerminal::Refuse);
+
+    let OpenAiWire::Responses(opted_in) = copilot
+        .completion(super::super::GPT_5_3_CODEX)
+        .with_streamed_incomplete(IncompleteTerminal::Accept)
+        .wire
+    else {
+        panic!("a Codex model is served by /responses");
+    };
+    assert_eq!(opted_in.streamed_incomplete, IncompleteTerminal::Accept);
+
+    let chat = copilot.completion(super::super::GPT_4O);
+    assert_eq!(
+        chat.clone()
+            .with_streamed_incomplete(IncompleteTerminal::Accept)
+            .wire,
+        chat.wire
+    );
+}

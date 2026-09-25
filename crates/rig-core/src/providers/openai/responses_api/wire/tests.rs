@@ -275,11 +275,12 @@ fn the_chatgpt_dialect_always_streams_and_relaxes_the_content_type() {
     );
 }
 
-/// The codex gateway takes the turn and its tools; the sampling, storage and
-/// structured-output parameters are not its to accept, and the reasoning
-/// payload must be asked for because the gateway stores nothing.
+/// The Codex contract states `store: false` and otherwise sends the request
+/// the caller built: no sampling, metadata or structured-output control is
+/// cleared, and the encrypted-reasoning include is not forced onto a request
+/// that carries no reasoning.
 #[test]
-fn the_chatgpt_dialect_sends_only_the_codex_parameter_subset() {
+fn the_chatgpt_dialect_states_store_false_and_clears_nothing() {
     let wire = chatgpt();
     let body = encoded_body(&wire, Mode::Unary);
 
@@ -287,14 +288,237 @@ fn the_chatgpt_dialect_sends_only_the_codex_parameter_subset() {
     assert_eq!(body.get("max_output_tokens"), None);
     assert_eq!(body.get("top_p"), None);
     assert_eq!(body.get("store"), Some(&serde_json::Value::Bool(false)));
-    assert_eq!(
-        body.get("include"),
-        Some(&serde_json::json!(["reasoning.encrypted_content"]))
-    );
+    assert_eq!(body.get("include"), None);
     assert_eq!(
         body.get("instructions").and_then(serde_json::Value::as_str),
         Some("You are ChatGPT, a helpful AI assistant.")
     );
+}
+
+/// The Codex request Muninn's HTTP lane builds, in the typed shape it builds
+/// it, with neither `top_p` nor `temperature` set: cache identity
+/// (`prompt_cache_key` and `client_metadata` session/thread ids) and reasoning
+/// egress (`reasoning`, `include`, `store`), over a history that opens with a
+/// system message.
+fn muninn_shaped_codex_request() -> CompletionRequest {
+    use crate::providers::openai::responses_api::{
+        AdditionalParameters, Include, Reasoning, ReasoningEffort,
+    };
+    let params = AdditionalParameters {
+        prompt_cache_key: Some("thread-7".to_string()),
+        client_metadata: std::collections::BTreeMap::from([
+            ("session_id".to_string(), "session-7".to_string()),
+            ("thread_id".to_string(), "thread-7".to_string()),
+        ]),
+        reasoning: Some(Reasoning::new().with_effort(ReasoningEffort::High)),
+        include: Some(vec![Include::ReasoningEncryptedContent]),
+        store: Some(false),
+        ..Default::default()
+    };
+    CompletionRequest {
+        chat_history: vec![Message::system("Be brief."), Message::user("say hi")],
+        additional_params: Some(serde_json::to_value(params).expect("params serialize")),
+        ..prompt()
+    }
+}
+
+/// The ChatGPT wire configured as Muninn configures its client: explicit empty
+/// default instructions (`default_instructions("")` at the fork).
+fn muninn_configured_chatgpt() -> Responses {
+    OpenAI::with_key(&CHATGPT, "test-token")
+        .with_instructions("")
+        .responses("gpt-5.4")
+}
+
+/// The exact request bytes one encode sends.
+fn encoded_bytes(wire: &Responses, request: CompletionRequest, mode: Mode) -> String {
+    let encoded = wire.encode(request, mode).expect("the request encodes");
+    let request = encoded
+        .requests
+        .first()
+        .expect("a Responses request is one request");
+    let Body::Bytes(body) = request.body() else {
+        panic!("a Responses body is bytes");
+    };
+    String::from_utf8(body.to_vec()).expect("the body is UTF-8")
+}
+
+/// Pinned FINAL outbound bytes of the Codex HTTP lane with `top_p` and
+/// `temperature` unset: byte-identical to what fork revision `fa1430e4`'s
+/// `chatgpt::ResponsesCompletionModel::create_request` emitted for the same
+/// request and client configuration. That revision serialized the same
+/// `CompletionRequest`/`AdditionalParameters` field order, lifted every
+/// system message into `instructions` (merged after its empty default
+/// instructions, which leaves the preamble alone), forced `stream: true`,
+/// kept the caller's `include` (its reasoning gate was already satisfied)
+/// and `store: false`, and wrote `prompt_cache_key` and `client_metadata` as
+/// top-level members. No `top_p` or `temperature` key is emitted.
+///
+/// The input item's key order is not fixed by either revision: `InputItem`
+/// serializes through `serde_json::Value` (identical code at `fa1430e4`), so
+/// its keys follow the build's `serde_json/preserve_order` feature, which a
+/// workspace-wide build unifies on and a `-p rig-core` build leaves off. Both
+/// spellings are pinned, and the probe selects the one this build produces.
+#[test]
+fn the_codex_lane_sends_the_fork_bytes_when_sampling_is_unset() {
+    let preserve_order = serde_json::to_string(&serde_json::json!({ "b": 0, "a": 0 }))
+        .expect("serializes")
+        == r#"{"b":0,"a":0}"#;
+    let input = if preserve_order {
+        r#"{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"say hi"}]}],"#
+    } else {
+        r#"{"input":[{"content":[{"text":"say hi","type":"input_text"}],"role":"user","type":"message"}],"#
+    };
+    let expected = [
+        input,
+        r#""model":"gpt-5.4","instructions":"Be brief.","stream":true,"#,
+        r#""include":["reasoning.encrypted_content"],"prompt_cache_key":"thread-7","#,
+        r#""reasoning":{"effort":"high"},"store":false,"#,
+        r#""client_metadata":{"session_id":"session-7","thread_id":"thread-7"}}"#,
+    ]
+    .concat();
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let bytes = encoded_bytes(
+            &muninn_configured_chatgpt(),
+            muninn_shaped_codex_request(),
+            mode,
+        );
+        assert_eq!(bytes, expected, "{mode:?}");
+    }
+}
+
+/// With reasoning but no explicit include, the Codex request gets the
+/// encrypted-reasoning include by the same rule as every other dialect.
+#[test]
+fn the_chatgpt_dialect_includes_encrypted_reasoning_alongside_reasoning() {
+    let request = CompletionRequest {
+        additional_params: Some(serde_json::json!({ "reasoning": { "effort": "low" } })),
+        ..prompt()
+    };
+    let body = encoded_body_of(&chatgpt(), request, Mode::Unary);
+    assert_eq!(
+        body.get("include"),
+        Some(&serde_json::json!(["reasoning.encrypted_content"]))
+    );
+}
+
+/// Controls upstream used to clear silently, other than the refused sampling
+/// controls, now reach the Codex wire as set.
+#[test]
+fn the_chatgpt_dialect_sends_the_controls_it_used_to_clear() {
+    let request = CompletionRequest {
+        additional_params: Some(serde_json::json!({
+            "background": false,
+            "metadata": { "k": "v" },
+            "parallel_tool_calls": true,
+            "service_tier": "priority",
+            "text": { "format": { "type": "text" } },
+            "user": "user-1",
+        })),
+        ..prompt()
+    };
+    let body = encoded_body_of(&chatgpt(), request, Mode::Unary);
+    assert_eq!(body["background"], serde_json::json!(false));
+    assert_eq!(body["metadata"], serde_json::json!({ "k": "v" }));
+    assert_eq!(body["parallel_tool_calls"], serde_json::json!(true));
+    assert_eq!(body["service_tier"], serde_json::json!("priority"));
+    assert_eq!(
+        body["text"],
+        serde_json::json!({ "format": { "type": "text" } })
+    );
+    assert_eq!(body["user"], serde_json::json!("user-1"));
+}
+
+/// The control a Codex encode refused, recovered by type from the request
+/// error, with the error's rendering.
+fn refused_codex_control(request: CompletionRequest) -> (UnsupportedCodexControl, String) {
+    let error = chatgpt()
+        .encode(request, Mode::Unary)
+        .expect_err("the Codex contract must refuse this control");
+    let crate::error::ProviderError::Request(source) = crate::error::ProviderError::from(error)
+    else {
+        panic!("an encode refusal is a request error");
+    };
+    let control = *source
+        .downcast_ref::<UnsupportedCodexControl>()
+        .unwrap_or_else(|| panic!("expected a named Codex refusal, got {source}"));
+    (control, source.to_string())
+}
+
+/// A caller-set control this adapter does not send on the Codex contract is
+/// refused by name, never cleared, and the request is never built: `top_p`,
+/// `temperature`, an output-token cap, and `store: true`. Each refusal names
+/// the control and the Codex contract, as this adapter's refusal.
+#[test]
+fn the_chatgpt_dialect_refuses_caller_set_controls_by_name() {
+    let cases = [
+        (
+            CompletionRequest {
+                additional_params: Some(serde_json::json!({ "top_p": 0.5 })),
+                ..prompt()
+            },
+            UnsupportedCodexControl::TopP,
+            "`top_p`",
+        ),
+        (
+            CompletionRequest {
+                temperature: Some(0.25),
+                ..prompt()
+            },
+            UnsupportedCodexControl::Temperature,
+            "`temperature`",
+        ),
+        (
+            CompletionRequest {
+                max_tokens: Some(64),
+                ..prompt()
+            },
+            UnsupportedCodexControl::MaxOutputTokens,
+            "`max_output_tokens`",
+        ),
+        (
+            CompletionRequest {
+                additional_params: Some(serde_json::json!({ "store": true })),
+                ..prompt()
+            },
+            UnsupportedCodexControl::Store,
+            "`store: true`",
+        ),
+    ];
+    for (request, control, spelling) in cases {
+        let (refused, rendered) = refused_codex_control(request);
+        assert_eq!(refused, control);
+        assert!(
+            rendered.contains(spelling)
+                && rendered.contains("Codex Responses contract")
+                && rendered.starts_with("this adapter refuses"),
+            "{control:?}: {rendered}"
+        );
+    }
+}
+
+/// The generic OpenAI Responses contract is unchanged: it sends `top_p` and
+/// `temperature` as set.
+#[test]
+fn the_generic_contract_sends_top_p_and_temperature() {
+    let request = CompletionRequest {
+        temperature: Some(0.25),
+        additional_params: Some(serde_json::json!({ "top_p": 0.5 })),
+        ..prompt()
+    };
+    let body = encoded_body_of(&openai(), request, Mode::Unary);
+    assert_eq!(body["temperature"], serde_json::json!(0.25));
+    assert_eq!(body["top_p"], serde_json::json!(0.5));
+}
+
+/// The incomplete-terminal policy is decoder configuration: it never reaches
+/// the request body.
+#[test]
+fn the_incomplete_policy_stays_off_the_wire() {
+    let wire = openai().with_streamed_incomplete(IncompleteTerminal::Accept);
+    let accepting = encoded_body(&wire, Mode::Streaming);
+    let refusing = encoded_body(&openai(), Mode::Streaming);
+    assert_eq!(accepting, refusing);
 }
 
 /// The gateway's own instructions lead, the caller's follow: a backend that
@@ -417,6 +641,31 @@ async fn a_chatgpt_reply_captures_the_terminal_response_object_as_raw() {
             "{case}"
         );
     }
+}
+
+/// A Codex turn whose terminal restates an echoed `top_p` in a shape that does
+/// not fit its typed field. The typed projection drops only that key.
+const CHATGPT_MISTYPED_TOP_P: &str = r#"data: {"type":"response.output_text.delta","delta":"hi"}
+
+data: {"type":"response.completed","response":{"id":"resp_chatgpt_raw","object":"response","created_at":1,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-5.4","service_tier":"default","top_p":{"value":0.95},"usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2},"output":[],"tools":[]}}
+
+data: [DONE]"#;
+
+/// Lenient projection of echoed metadata is confined to the typed view: the
+/// captured `raw` keeps the provider's own value of a key the projection could
+/// not type, rather than discarding it so the typed key looks valid. The
+/// authoritative fields stay strict (see
+/// `known_terminal_with_malformed_usage_surfaces_error_without_terminal`).
+#[tokio::test]
+async fn a_mistyped_echoed_metadata_key_survives_in_the_captured_raw() {
+    let response = folded_unary(chatgpt(), CHATGPT_MISTYPED_TOP_P).await;
+
+    assert_eq!(response.raw["top_p"], serde_json::json!({ "value": 0.95 }));
+    assert_eq!(response.raw["service_tier"], "default");
+    let typed: crate::providers::openai::responses_api::CompletionResponse =
+        serde_json::from_value(response.raw.clone()).expect("raw still decodes");
+    assert_eq!(typed.additional_parameters.top_p, None);
+    assert_eq!(response.usage.total_tokens, Some(2));
 }
 
 fn xai() -> Responses {

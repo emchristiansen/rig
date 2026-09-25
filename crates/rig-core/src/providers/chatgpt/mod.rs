@@ -16,6 +16,14 @@
 
 pub mod auth;
 
+/// The Codex Responses websocket session adapter, re-exported under the
+/// ChatGPT provider's websocket path. The session itself lives with the
+/// Responses wire it composes over, at
+/// [`responses_api::websocket::codex`](crate::providers::openai::responses_api::websocket::codex).
+#[cfg(feature = "websocket")]
+#[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
+pub use crate::providers::openai::responses_api::websocket::codex as websocket;
+
 use crate::providers::openai::responses_api::SystemInstructionsPlacement;
 use crate::providers::openai::wire::{
     Dialect, Identity, OutputCap, Quirks, ResponsesContract, ResponsesQuirks, Route,
@@ -43,6 +51,16 @@ pub const PROVIDER_NAME: &str = "chatgpt";
 
 /// Subscription-backend dialect with SSE replies, Codex parameters, and caller identity.
 /// All system messages become top-level instructions; replayed frames omit envelope metadata.
+///
+/// Requests follow the Codex Responses contract: `store: false` is stated when
+/// unset; the `prompt_cache_key` and `client_metadata` cache identity, the
+/// reasoning include and the other controls the caller sets reach the wire as
+/// set; and a caller-set `top_p`, `temperature`, `max_output_tokens` or
+/// `store: true` is refused by name
+/// ([`UnsupportedCodexControl`](crate::providers::openai::responses_api::wire::UnsupportedCodexControl))
+/// rather than silently cleared. Left unset, those controls emit no field. A streamed reply refuses a terminal
+/// `response.incomplete` unless the wire opts in
+/// ([`Responses::with_streamed_incomplete`](crate::providers::openai::responses_api::wire::Responses::with_streamed_incomplete)).
 pub const DIALECT: Dialect = Dialect {
     base_url_env: Some("CHATGPT_API_BASE"),
     request_id_header: Some("x-request-id"),

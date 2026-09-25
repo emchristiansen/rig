@@ -15,10 +15,9 @@ use crate::wire::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::streaming::{ResponsesDecoder, ResponsesStreamOptions};
+use super::streaming::{IncompleteTerminal, ResponsesDecoder, ResponsesStreamOptions};
 use super::{
-    CompletionRequest, Include, ResponsesRequestParams, ResponsesToolDefinition,
-    SystemInstructionsPlacement,
+    CompletionRequest, ResponsesRequestParams, ResponsesToolDefinition, SystemInstructionsPlacement,
 };
 
 /// The Responses wire: `POST /responses`, SSE when streamed.
@@ -35,6 +34,12 @@ pub struct Responses {
     /// Where this wire puts Rig's system instructions. Defaults to the
     /// dialect's placement.
     pub system_instructions: SystemInstructionsPlacement,
+    /// How a streamed (SSE) reply's terminal `response.incomplete` is taken:
+    /// refused by default, accepted with its truthful finish reason when the
+    /// caller opts in. A unary reply always accepts it. This is decoder
+    /// policy, never a request parameter, so it does not reach the wire.
+    #[serde(default)]
+    pub streamed_incomplete: IncompleteTerminal,
 }
 
 impl Responses {
@@ -95,7 +100,50 @@ impl Responses {
             provider,
             model: model.into(),
             tools: Vec::new(),
+            streamed_incomplete: IncompleteTerminal::default(),
         }
+    }
+
+    /// Select how a streamed reply's terminal `response.incomplete` is taken.
+    ///
+    /// [`IncompleteTerminal::Refuse`] (the default) ends the stream with an
+    /// error carrying the provider's terminal event;
+    /// [`IncompleteTerminal::Accept`] opts this wire's requests into partial
+    /// success: the partial output and usage are kept and the turn ends with
+    /// the finish reason the provider's `incomplete_details` states. A wire
+    /// is a cheap value, so a per-request choice is a per-request wire.
+    pub fn with_streamed_incomplete(mut self, incomplete: IncompleteTerminal) -> Self {
+        self.streamed_incomplete = incomplete;
+        self
+    }
+
+    /// The decoder for one reply, taking a terminal
+    /// `response.incomplete` as `incomplete` says rather than as this wire's
+    /// transport default.
+    ///
+    /// For a transport whose contract differs from HTTP's, such as a
+    /// websocket session, which accepts an incomplete terminal.
+    pub fn decoder_with_incomplete(&self, incomplete: IncompleteTerminal) -> ResponsesDecoder {
+        let quirks = &self.provider.dialect.quirks.responses;
+        let options = if quirks.contract == ResponsesContract::Xai {
+            // xAI answers a 200 with its error envelope, and the same
+            // gateway publishes a finished call at its `output_item.done`.
+            ResponsesStreamOptions::strict_with_immediate_tool_calls()
+        } else {
+            ResponsesStreamOptions::strict()
+        }
+        .with_incomplete(incomplete);
+        let mut decoder = ResponsesDecoder::new(self.provider.dialect.name, options);
+        if quirks.contract == ResponsesContract::Codex {
+            // The codex gateway's replayed frames may omit their envelope
+            // bookkeeping; elsewhere an envelope-less frame is a defect
+            // worth surfacing rather than salvaging.
+            decoder = decoder.with_envelope_repair();
+        }
+        if self.provider.dialect.quirks.upstream_reasoning_issuer {
+            decoder = decoder.with_upstream_reasoning_issuer();
+        }
+        decoder
     }
 
     /// Sanitize function schemas for strict mode and send `strict: true`.
@@ -163,35 +211,79 @@ impl Responses {
             ));
         }
         if quirks.contract == ResponsesContract::Codex {
-            // The codex gateway takes the turn and the tools; sampling,
-            // storage, metadata and structured output are not its to accept,
-            // and `store: false` is the one value it wants stated.
-            request.temperature = None;
-            request.max_output_tokens = None;
-            request.additional_parameters.background = None;
-            request.additional_parameters.metadata.clear();
-            request.additional_parameters.parallel_tool_calls = None;
-            request.additional_parameters.service_tier = None;
-            request.additional_parameters.store = Some(false);
-            request.additional_parameters.text = None;
-            request.additional_parameters.top_p = None;
-            request.additional_parameters.user = None;
-            // Reasoning items replay across turns only with their encrypted
-            // payload, and this gateway stores nothing.
-            let include = request
-                .additional_parameters
-                .include
-                .get_or_insert_with(Vec::new);
-            if !include
-                .iter()
-                .any(|item| matches!(item, Include::ReasoningEncryptedContent))
-            {
-                include.push(Include::ReasoningEncryptedContent);
-            }
+            shape_codex_request(&mut request).map_err(EncodeError::request)?;
         }
         request.stream = streaming.then_some(true);
         Ok(request)
     }
+}
+
+/// A caller-set request control this adapter refuses on the Codex Responses
+/// contract.
+///
+/// Refused by name at encode rather than cleared: a control the caller set and
+/// the wire silently dropped would make the request that left differ from the
+/// one the caller built, with nothing to say so. Only a value the caller set is
+/// refused; an unset control emits no field and raises nothing. Every control
+/// not named here is sent as the caller set it. The refusal is this adapter's
+/// policy for the Codex contract; it is not a statement about what the Codex
+/// backend itself accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum UnsupportedCodexControl {
+    /// A caller-set output-token cap (`max_output_tokens`).
+    #[error(
+        "this adapter refuses a caller-set `max_output_tokens` on the Codex Responses \
+         contract; leave the output-token cap unset for this dialect"
+    )]
+    MaxOutputTokens,
+    /// A caller-set `store: true`; `store: false` is what this adapter states
+    /// for the Codex contract.
+    #[error(
+        "this adapter refuses a caller-set `store: true` on the Codex Responses contract; \
+         leave `store` unset or send `false`"
+    )]
+    Store,
+    /// A caller-set nucleus-sampling value (`top_p`).
+    #[error(
+        "this adapter refuses a caller-set `top_p` on the Codex Responses contract; \
+         leave `top_p` unset for this dialect"
+    )]
+    TopP,
+    /// A caller-set sampling temperature (`temperature`).
+    #[error(
+        "this adapter refuses a caller-set `temperature` on the Codex Responses contract; \
+         leave `temperature` unset for this dialect"
+    )]
+    Temperature,
+}
+
+/// Shape a request for the Codex contract: state `store: false` when the
+/// caller left it unset, and refuse by name each caller-set control this
+/// adapter does not send on the contract ([`UnsupportedCodexControl`]).
+///
+/// Nothing else is rewritten. Cache identity (`prompt_cache_key`,
+/// `client_metadata`), metadata, service tier, text format, parallel tool
+/// calls and user reach the wire as set, and the encrypted-reasoning include
+/// follows the rule every dialect shares (requested alongside `reasoning`)
+/// rather than being forced on. An unset refused control emits no field, so a
+/// request that sets none of them is sent as built.
+fn shape_codex_request(request: &mut CompletionRequest) -> Result<(), UnsupportedCodexControl> {
+    if request.max_output_tokens.is_some() {
+        return Err(UnsupportedCodexControl::MaxOutputTokens);
+    }
+    if request.temperature.is_some() {
+        return Err(UnsupportedCodexControl::Temperature);
+    }
+    if request.additional_parameters.top_p.is_some() {
+        return Err(UnsupportedCodexControl::TopP);
+    }
+    match request.additional_parameters.store {
+        Some(true) => return Err(UnsupportedCodexControl::Store),
+        Some(false) => {}
+        // `store: false` is the one value the gateway wants stated.
+        None => request.additional_parameters.store = Some(false),
+    }
+    Ok(())
 }
 
 /// Merge a gateway's own instructions ahead of the caller's preamble,
@@ -235,26 +327,15 @@ impl Wire for Responses {
         self.encode_with_headers(request, mode, OpenAI::completion_headers)
     }
 
-    fn decoder(&self, _mode: Mode) -> ResponsesDecoder {
-        let quirks = &self.provider.dialect.quirks.responses;
-        let options = if quirks.contract == ResponsesContract::Xai {
-            // xAI answers a 200 with its error envelope, and the same
-            // gateway publishes a finished call at its `output_item.done`.
-            ResponsesStreamOptions::strict_with_immediate_tool_calls()
-        } else {
-            ResponsesStreamOptions::strict()
+    fn decoder(&self, mode: Mode) -> ResponsesDecoder {
+        // The contract is per transport: a unary reply (including a gateway
+        // that answers a unary call with an event stream) accepts an
+        // incomplete terminal; a streamed one takes the wire's policy.
+        let incomplete = match mode {
+            Mode::Unary => IncompleteTerminal::Accept,
+            Mode::Streaming => self.streamed_incomplete,
         };
-        let mut decoder = ResponsesDecoder::new(self.provider.dialect.name, options);
-        if quirks.contract == ResponsesContract::Codex {
-            // The codex gateway's replayed frames may omit their envelope
-            // bookkeeping; elsewhere an envelope-less frame is a defect
-            // worth surfacing rather than salvaging.
-            decoder = decoder.with_envelope_repair();
-        }
-        if self.provider.dialect.quirks.upstream_reasoning_issuer {
-            decoder = decoder.with_upstream_reasoning_issuer();
-        }
-        decoder
+        self.decoder_with_incomplete(incomplete)
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -281,7 +362,12 @@ pub(crate) fn fold_body(
         raw: serde_json::to_value(&response)?,
         provider_request_id: response.provider_request_id.clone(),
     };
-    let mut decoder = ResponsesDecoder::new(provider, ResponsesStreamOptions::strict());
+    // A whole body is a unary reply, whose contract accepts an incomplete
+    // terminal.
+    let mut decoder = ResponsesDecoder::new(
+        provider,
+        ResponsesStreamOptions::strict().with_incomplete(IncompleteTerminal::Accept),
+    );
     let mut out = AdapterOutput::new();
     decoder.interpret(ResponsesEvent::Whole(Box::new(response)), &mut out);
 

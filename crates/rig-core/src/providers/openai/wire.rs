@@ -938,6 +938,21 @@ impl OpenAI {
         self
     }
 
+    /// Send `originator` as the caller identity's `originator` header.
+    ///
+    /// The programmatic twin of the dialect's originator environment
+    /// variable, with the same effect: the `user-agent` becomes the default
+    /// one naming the new originator. A dialect whose gateway asks for no
+    /// caller identity gains one, so both headers are sent.
+    pub fn with_originator(mut self, originator: impl Into<String>) -> Self {
+        let originator = originator.into();
+        self.identity = Some(CallerIdentity {
+            user_agent: default_user_agent(&originator),
+            originator,
+        });
+        self
+    }
+
     /// Put Rig's system instructions somewhere other than the dialect's
     /// default placement, for every Responses wire this configuration
     /// builds.

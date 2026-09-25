@@ -752,12 +752,13 @@ fn unrepresentable_calls() -> [(rig_core::message::AssistantContent, &'static st
 fn grpc_refuses_namespaced_and_custom_calls() {
     for (content, refusal) in unrepresentable_calls() {
         let error = rig_assistant_content_to_grpc_part(content).expect_err("refused, not dropped");
-        let ProviderError::Request(reason) = &error else {
-            panic!("a request refusal, got {error:?}");
-        };
-        let reason = reason.to_string();
         assert!(
-            reason.starts_with("Gemini gRPC generateContent "),
+            matches!(error, ProviderError::Request(_)),
+            "a request refusal, got {error:?}"
+        );
+        let reason = error.to_string();
+        assert!(
+            reason.starts_with("RequestError: Gemini gRPC generateContent "),
             "{reason}"
         );
         assert!(reason.contains(refusal), "{reason}");

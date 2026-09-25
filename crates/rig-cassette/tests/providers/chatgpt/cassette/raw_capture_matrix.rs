@@ -58,7 +58,9 @@ const PROMPT: &str = "Reply with exactly the single word: pong";
 type ChatGptModel = Bound<OpenAiWire>;
 
 fn request(model: &ChatGptModel) -> rig::completion::CompletionRequest {
-    model.completion_request(PROMPT).max_tokens(64).build()
+    // No output-token cap: the Codex contract refuses a caller-set
+    // `max_output_tokens` by name.
+    model.completion_request(PROMPT).build()
 }
 
 /// The premise every cell rests on: the scenario recorded exactly one

@@ -74,6 +74,44 @@ pub trait WebSocketClientExt: Clone + WasmCompatSend + WasmCompatSync + 'static 
     ) -> impl Future<Output = Result<BoxedWebSocketConnection>> + WasmCompatSend;
 }
 
+/// What a [`WebSocketConnection::recv_ready`] read found without waiting on the
+/// peer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadyFrame {
+    /// A frame that had already arrived.
+    Frame(Frame),
+    /// The peer had already ended the stream.
+    Ended,
+    /// Nothing had arrived yet.
+    Empty,
+}
+
+/// A backend that does not implement an optional [`WebSocketConnection`]
+/// capability.
+///
+/// The capability's default implementation returns this rather than a guess,
+/// so a caller that needs it is told by name instead of being handed an answer
+/// the backend never gave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("this websocket backend does not support `{capability}`")]
+pub struct UnsupportedCapability {
+    /// The trait method the backend does not implement.
+    pub capability: &'static str,
+}
+
+impl UnsupportedCapability {
+    /// Whether `error` is this refusal, for the named capability.
+    #[must_use]
+    pub fn is(error: &Error, capability: &'static str) -> bool {
+        match error {
+            Error::Instance(inner) => inner
+                .downcast_ref::<Self>()
+                .is_some_and(|unsupported| unsupported.capability == capability),
+            _ => false,
+        }
+    }
+}
+
 /// One open websocket connection, usable as a trait object.
 /// Calls are sequential: sessions must not poll send and receive concurrently.
 /// WASM-compatible bounds preserve the containing session's thread-safety contract.
@@ -87,6 +125,41 @@ pub trait WebSocketConnection: WasmCompatSend + WasmCompatSync {
     /// Completes a close handshake. Callers must avoid repeated closes;
     /// backends may return an error for an already closed socket.
     fn close(&mut self, frame: Option<CloseFrame>) -> WasmBoxedFuture<'_, Result<()>>;
+
+    /// Take the next frame that has already arrived, without waiting for the
+    /// peer to send one: [`ReadyFrame::Empty`] when nothing is buffered.
+    ///
+    /// This is what an idle session uses to service a connection between
+    /// turns. It exists because [`Self::recv`] cannot be used for that: a
+    /// transport-neutral caller cannot tell "nothing has arrived" from "the
+    /// answer is still on its way", and polling `recv` once and dropping it is
+    /// lossless only for backends whose receive happens to be cancel-safe.
+    ///
+    /// Implementations must not lose a frame when the returned future is
+    /// dropped before it resolves: a frame not handed back stays readable.
+    ///
+    /// The default refuses with [`UnsupportedCapability`] rather than
+    /// reporting an empty buffer it never inspected.
+    fn recv_ready(&mut self) -> WasmBoxedFuture<'_, Result<ReadyFrame>> {
+        Box::pin(std::future::ready(Err(Error::instance(
+            UnsupportedCapability {
+                capability: "recv_ready",
+            },
+        ))))
+    }
+
+    /// Write out anything the backend queued on its own, such as the automatic
+    /// pong it owes for a ping a read consumed.
+    ///
+    /// The default refuses with [`UnsupportedCapability`] rather than claiming
+    /// a queue it never inspected is empty.
+    fn flush(&mut self) -> WasmBoxedFuture<'_, Result<()>> {
+        Box::pin(std::future::ready(Err(Error::instance(
+            UnsupportedCapability {
+                capability: "flush",
+            },
+        ))))
+    }
 }
 
 /// A type-erased [`WebSocketConnection`].
@@ -103,6 +176,14 @@ impl WebSocketConnection for BoxedWebSocketConnection {
 
     fn close(&mut self, frame: Option<CloseFrame>) -> WasmBoxedFuture<'_, Result<()>> {
         (**self).close(frame)
+    }
+
+    fn recv_ready(&mut self) -> WasmBoxedFuture<'_, Result<ReadyFrame>> {
+        (**self).recv_ready()
+    }
+
+    fn flush(&mut self) -> WasmBoxedFuture<'_, Result<()>> {
+        (**self).flush()
     }
 }
 

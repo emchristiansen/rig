@@ -16,7 +16,7 @@ use rig::tool::Tool;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::super::support::with_chatgpt_cassette;
+use super::super::support::{recorded_include, with_chatgpt_cassette};
 use crate::support::{
     REQUIRED_ZERO_ARG_TOOL_PROMPT, assert_stream_contains_zero_arg_tool_call_named,
     collect_raw_stream_observation, zero_arg_tool_definition,
@@ -163,6 +163,7 @@ async fn zero_argument_tool_call_streaming() {
                 .completion_request(REQUIRED_ZERO_ARG_TOOL_PROMPT)
                 .preamble("Follow the tool-calling instructions exactly.".to_string())
                 .tool(zero_arg_tool_definition("ping"))
+                .additional_params(recorded_include())
                 .build();
 
             let stream = model
@@ -186,6 +187,7 @@ async fn zero_argument_tool_call_nonstreaming() {
                 .completion_request(REQUIRED_ZERO_ARG_TOOL_PROMPT)
                 .preamble("Follow the tool-calling instructions exactly.".to_string())
                 .tool(zero_arg_tool_definition("ping"))
+                .additional_params(recorded_include())
                 .build();
 
             let response = model
@@ -222,6 +224,7 @@ async fn nested_arguments_roundtrip_nonstreaming() {
                 .preamble(NESTED_ARGS_PREAMBLE)
                 .tool(PlanTrip)
                 .default_max_turns(4)
+                .additional_params(recorded_include())
                 .build();
             let mut history = Vec::<Message>::new();
 
@@ -267,6 +270,7 @@ async fn nested_arguments_streaming() {
                 .completion_request(NESTED_ARGS_PROMPT)
                 .preamble(NESTED_ARGS_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&PlanTrip))
+                .additional_params(recorded_include())
                 .build();
 
             let observation = collect_raw_stream_observation(
@@ -320,6 +324,7 @@ async fn unicode_arguments_streaming() {
                         "required": ["message"]
                     }),
                 })
+                .additional_params(recorded_include())
                 .build();
 
             let observation = collect_raw_stream_observation(

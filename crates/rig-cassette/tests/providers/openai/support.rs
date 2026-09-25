@@ -13,6 +13,26 @@ use futures::FutureExt;
 // dead code under `-D warnings`.
 use crate::cassettes::DirectRecordingHttpClient;
 
+/// The flagship route with the HTTP SSE incomplete-terminal opt-in set.
+///
+/// A streamed Responses reply refuses a terminal `response.incomplete` by
+/// default; a scenario whose recording *is* a truncated stream opts in on the
+/// wire it sends through, which keeps the partial output and ends the turn
+/// with the provider's finish reason. The chat route has no such terminal and
+/// passes through unchanged.
+pub(super) fn accepting_streamed_incomplete(
+    wire: rig::providers::openai::wire::OpenAiWire,
+) -> rig::providers::openai::wire::OpenAiWire {
+    use rig::providers::openai::responses_api::streaming::IncompleteTerminal;
+    use rig::providers::openai::wire::OpenAiWire;
+    match wire {
+        OpenAiWire::Responses(responses) => {
+            OpenAiWire::Responses(responses.with_streamed_incomplete(IncompleteTerminal::Accept))
+        }
+        chat => chat,
+    }
+}
+
 /// The one OpenAI configuration a recorded endpoint serves, bound — twice.
 ///
 /// `openai::Client` was `Client<OpenAIResponses, H>` — the Responses API —

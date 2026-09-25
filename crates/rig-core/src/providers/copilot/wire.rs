@@ -21,6 +21,7 @@ use crate::model::{Model, ModelList};
 use crate::operation::{Completion, ModelListing};
 use crate::providers::internal::wire::classify_untyped_line;
 use crate::providers::openai::responses_api::SystemInstructionsPlacement;
+use crate::providers::openai::responses_api::streaming::IncompleteTerminal;
 /// Copilot's embeddings wire is the shared one, pointed at Copilot by
 /// [`Copilot::embeddings`]; the editor envelope is the dialect's modality
 /// hook.
@@ -291,6 +292,20 @@ impl CopilotWire {
     /// constructor already enables this for Copilot, so this is the chat route's opt-in.
     pub fn with_strict_tools(mut self) -> Self {
         self.wire = self.wire.with_strict_tools();
+        self
+    }
+
+    /// Select how a streamed reply's terminal `response.incomplete` is taken
+    /// on the Responses route (Codex-class models).
+    ///
+    /// Refused by default, like every HTTP SSE Responses stream; with
+    /// [`IncompleteTerminal::Accept`] the partial output is kept and the turn
+    /// ends with the provider's finish reason. The chat route has no such
+    /// terminal, so this is a no-op there.
+    pub fn with_streamed_incomplete(mut self, incomplete: IncompleteTerminal) -> Self {
+        if let OpenAiWire::Responses(wire) = self.wire {
+            self.wire = OpenAiWire::Responses(wire.with_streamed_incomplete(incomplete));
+        }
         self
     }
 

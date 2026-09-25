@@ -14,7 +14,9 @@ use rig::providers::openai::responses_api;
 use rig::tool::Tool;
 use serde::Deserialize;
 
-use super::super::support::{with_chatgpt_cassette, with_chatgpt_cassette_default_instructions};
+use super::super::support::{
+    recorded_include, with_chatgpt_cassette, with_chatgpt_cassette_default_instructions,
+};
 use crate::cassettes::recorded_interaction_bodies;
 use crate::support::{Adder, TOOLS_PREAMBLE};
 
@@ -35,6 +37,7 @@ async fn strict_tools_opt_in_roundtrip() {
                 .completion_request("Use the add tool to add 7 and 5.")
                 .preamble(TOOLS_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&Adder))
+                .additional_params(recorded_include())
                 .build();
 
             let response = model
@@ -98,6 +101,7 @@ async fn store_false_and_prompt_cache_fields_roundtrip() {
                     model
                         .completion_request("Reply with exactly this marker: CODEX-STORE-FALSE")
                         .preamble("Return only the requested marker.".to_string())
+                        .additional_params(recorded_include())
                         .build(),
                 )
                 .await
@@ -156,6 +160,7 @@ async fn explicit_preamble_and_mid_conversation_system_messages_are_instructions
             let agent = client
                 .agent(chatgpt::GPT_5_4)
                 .preamble("You are a concise assistant.")
+                .additional_params(recorded_include())
                 .build();
             let mut history = vec![
                 Message::user("Hello!"),
@@ -188,6 +193,7 @@ async fn default_instructions_merge_with_explicit_preamble() {
             let agent = client
                 .agent(chatgpt::GPT_5_4)
                 .preamble("Explicit instruction marker: also include EXPLICIT-CODEX-MARKER.")
+                .additional_params(recorded_include())
                 .build();
             let mut history = Vec::<Message>::new();
 

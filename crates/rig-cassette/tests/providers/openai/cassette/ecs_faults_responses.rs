@@ -104,11 +104,19 @@ fn reply(status: u16, retry_after: bool) -> MockHttpResponse {
 
 /// The wire over a transport that answers one streaming request with
 /// `frames`, then EOF.
+///
+/// The wire opts into the HTTP SSE incomplete-terminal policy: the filtered
+/// rows script a terminal `response.incomplete` (`content_filter`), which a
+/// streamed Responses reply accepts only by opt-in, and these rows measure how
+/// the filtered turn ends, not the strict default. No other scripted row ends
+/// in `response.incomplete`, so the opt-in changes nothing else here.
 fn scripted_stream(frames: &[String]) -> Wire<impl CompletionModel + Clone + 'static> {
     let client = OpenAI::new(SCRIPTED_KEY).bind(scripted(vec![sse_bytes(frames)]));
     Wire {
         thinking: crate::ecs_matrix::cells::ThinkingWire::OpenAiResponses,
-        model: client.completion(GPT_5_MINI),
+        model: client
+            .completion(GPT_5_MINI)
+            .map_wire(super::super::support::accepting_streamed_incomplete),
         route: None,
         temperature: None,
         additional_params: None,

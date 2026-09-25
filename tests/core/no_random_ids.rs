@@ -6,8 +6,12 @@
 //! Tool-call handles for wires that carry no id used to draw from
 //! `fastrand`; they now derive from the block that assembled the call or
 //! the call's index in the response. This guard pins the remaining random
-//! sources to the two transport headers and the LSH index, none of which
-//! can reach a request, a message or an effect record.
+//! sources to the two transport headers, the Codex websocket session
+//! identity and the LSH index. None of them can reach a message or an effect
+//! record. The transport headers and the LSH index reach no request body
+//! either; the Codex identity reaches only the frames of the websocket
+//! session it names (its cache key and client metadata), and no effect log
+//! records those frames.
 
 use std::path::{Path, PathBuf};
 
@@ -61,6 +65,11 @@ const GENERATE_SITES: &[(&str, &str)] = &[
         "crates/rig-core/src/providers/chatgpt/mod.rs",
         "a `session_id` transport header",
     ),
+    (
+        "crates/rig-core/src/providers/openai/responses_api/websocket/codex.rs",
+        "the Codex websocket session identity: its handshake headers and the cache key \
+         and client metadata of that session's own frames, never a message or an effect record",
+    ),
 ];
 
 fn offenders(root: &Path, needle: &str, allowed: &[(&str, &str)]) -> Vec<String> {
@@ -113,7 +122,7 @@ fn randomness_is_drawn_only_where_it_cannot_reach_a_record() {
     let generate = generator_offenders(&root);
     assert!(
         generate.is_empty(),
-        "`id::generate` is called outside the two transport headers:\n{}",
+        "`id::generate` is called outside its allowed sites:\n{}",
         generate.join("\n")
     );
 }

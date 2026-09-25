@@ -831,7 +831,7 @@ async fn response_failed_chunk_surfaces_provider_error_with_code_prefix() {
 }
 
 #[tokio::test]
-async fn response_incomplete_chunk_is_a_successful_terminal_with_mapped_finish_reason() {
+async fn an_opted_in_response_incomplete_chunk_is_a_terminal_with_mapped_finish_reason() {
     let text_delta = json!({
         "type": "response.output_text.delta",
         "content_index": 0,
@@ -861,15 +861,26 @@ async fn response_incomplete_chunk_is_a_successful_terminal_with_mapped_finish_r
         "response": response,
     });
 
-    let mut stream = responses_stream(MockStreamingClient {
-        sse_bytes: sse_bytes_from_json_events(&[text_delta, incomplete]),
-    })
-    .await;
+    // HTTP SSE refuses an incomplete terminal unless the caller opts in; this
+    // is the opted-in half (the default half is
+    // `a_streamed_incomplete_terminal_errors_by_default`).
+    let model = Bound::new(
+        OpenAI::new("test-key")
+            .responses("gpt-5.4")
+            .with_streamed_incomplete(super::IncompleteTerminal::Accept),
+        MockStreamingClient {
+            sse_bytes: sse_bytes_from_json_events(&[text_delta, incomplete]),
+        },
+    );
+    let mut stream = model
+        .stream(model.completion_request("hello").build())
+        .await
+        .expect("stream should start");
 
     let mut text = String::new();
     let mut final_response = None;
     while let Some(item) = stream.next().await {
-        match item.expect("incomplete stream should not error") {
+        match item.expect("an opted-in incomplete stream should not error") {
             StreamEvent::BlockDelta {
                 delta: Delta::Text { text: delta },
                 ..
@@ -2653,4 +2664,564 @@ fn empty_item_ids_identify_nothing_and_do_not_panic() {
         )),
         "no block is keyed on the empty string: {events:?}"
     );
+}
+
+// ── custom calls, namespaces, incomplete policy, summary identity, native
+//    evidence ─────────────────────────────────────────────────────────────
+
+/// The folded choice of a buffered SSE body, decoded with the given options.
+fn folded_body_with(
+    options: ResponsesStreamOptions,
+    events: &[serde_json::Value],
+) -> Result<crate::completion::CompletionResponse, ProviderError> {
+    let mut driver: WireDriver<Completion, _> =
+        WireDriver::new(ResponsesDecoder::new("openai", options));
+    let mut decoded = Vec::new();
+    for event in events {
+        driver.push(WireFrame::Text(event.to_string()));
+        for item in driver.drain() {
+            decoded.push(item?);
+        }
+    }
+    driver.finish();
+    for item in driver.drain() {
+        decoded.push(item?);
+    }
+    folded_stream_events(
+        "openai",
+        decoded,
+        &sample_response(ResponseStatus::Completed),
+    )
+}
+
+fn completed_with_output(output: serde_json::Value) -> serde_json::Value {
+    let mut response =
+        serde_json::to_value(sample_response(ResponseStatus::Completed)).expect("serializes");
+    response["output"] = output;
+    json!({
+        "type": "response.completed",
+        "sequence_number": 9,
+        "response": response,
+    })
+}
+
+/// A `custom_tool_call` item decodes into a typed custom call: its raw input
+/// verbatim (even though it parses as JSON), its namespace, and both provider
+/// identifiers. Never a function call, and never dropped.
+#[test]
+fn a_custom_tool_call_item_folds_into_a_custom_call_with_raw_input() {
+    let item = json!({
+        "type": "custom_tool_call",
+        "id": "ctc_1",
+        "call_id": "call_custom",
+        "name": "apply_patch",
+        "namespace": "editor",
+        "input": "{\"looks\":\"like json\"}",
+        "status": "completed",
+    });
+    let events = [
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "sequence_number": 1,
+            "item": item,
+        }),
+        completed_with_output(json!([item])),
+    ];
+
+    for options in [
+        ResponsesStreamOptions::strict(),
+        ResponsesStreamOptions::strict_with_immediate_tool_calls(),
+    ] {
+        let response = folded_body_with(options, &events).expect("the custom call folds");
+        let [AssistantContent::CustomToolCall(call)] = response.choice.as_slice() else {
+            panic!(
+                "expected exactly one custom call, got {:?}",
+                response.choice
+            );
+        };
+        assert_eq!(call.name, "apply_patch");
+        assert_eq!(call.namespace.as_deref(), Some("editor"));
+        assert_eq!(call.input, "{\"looks\":\"like json\"}");
+        let provider = call.provider.as_ref().expect("the wire issued ids");
+        assert_eq!(provider.call_id, "call_custom");
+        assert_eq!(provider.item_id.as_deref(), Some("ctc_1"));
+    }
+}
+
+/// A namespaced function call keeps its namespace on the streamed path,
+/// whether the call closes at its `output_item.done` or, with that frame lost,
+/// at the terminal drain (which reads the namespace `output_item.added`
+/// announced).
+#[test]
+fn a_namespaced_function_call_keeps_its_namespace_streamed_and_drained() {
+    let added = json!({
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "sequence_number": 1,
+        "item": {
+            "type": "function_call",
+            "id": "fc_ns",
+            "call_id": "call_ns",
+            "name": "search",
+            "namespace": "web",
+            "arguments": "",
+            "status": "in_progress",
+        },
+    });
+    let delta = json!({
+        "type": "response.function_call_arguments.delta",
+        "item_id": "fc_ns",
+        "output_index": 0,
+        "sequence_number": 2,
+        "delta": "{\"q\":\"rig\"}",
+    });
+    let done = json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "sequence_number": 3,
+        "item": {
+            "type": "function_call",
+            "id": "fc_ns",
+            "call_id": "call_ns",
+            "name": "search",
+            "namespace": "web",
+            "arguments": "{\"q\":\"rig\"}",
+            "status": "completed",
+        },
+    });
+    let terminal = completed_with_output(json!([]));
+
+    for (case, events) in [
+        (
+            "done item",
+            vec![added.clone(), delta.clone(), done, terminal.clone()],
+        ),
+        ("terminal drain", vec![added, delta, terminal]),
+    ] {
+        let response = folded_body_with(ResponsesStreamOptions::strict(), &events)
+            .unwrap_or_else(|error| panic!("{case}: the call folds: {error}"));
+        let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else {
+            panic!(
+                "{case}: expected one function call, got {:?}",
+                response.choice
+            );
+        };
+        assert_eq!(call.function.name, "search", "{case}");
+        assert_eq!(call.function.namespace.as_deref(), Some("web"), "{case}");
+        assert_eq!(call.function.arguments, json!({"q": "rig"}), "{case}");
+    }
+}
+
+fn incomplete_turn_events() -> [serde_json::Value; 2] {
+    let mut response = sample_response(ResponseStatus::Incomplete);
+    response.incomplete_details = Some(IncompleteDetailsReason {
+        reason: "max_output_tokens".to_string(),
+    });
+    [
+        json!({
+            "type": "response.output_text.delta",
+            "content_index": 0,
+            "delta": "partial",
+            "item_id": "msg_incomplete_1",
+            "output_index": 0,
+            "sequence_number": 1,
+        }),
+        json!({
+            "type": "response.incomplete",
+            "sequence_number": 2,
+            "response": response,
+        }),
+    ]
+}
+
+/// HTTP SSE is strict by default: a terminal `response.incomplete` ends the
+/// stream with an error carrying the provider's event, and no terminal record
+/// presents the partial turn as completed.
+#[tokio::test]
+async fn a_streamed_incomplete_terminal_errors_by_default() {
+    let mut stream = responses_stream_of(&incomplete_turn_events()).await;
+    let mut error = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(StreamEvent::Final(_)) => {
+                panic!("an incomplete turn must not produce a final record")
+            }
+            Ok(_) => {}
+            Err(err) => {
+                error = Some(err);
+                break;
+            }
+        }
+    }
+    let error = error.expect("the incomplete terminal must surface an error");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("response.incomplete") && rendered.contains("max_output_tokens"),
+        "the error must carry the provider's terminal event: {rendered}"
+    );
+}
+
+/// The per-request opt-in lives on the wire: with it, the same turn keeps its
+/// partial output and ends with the truthful `Length` finish reason.
+#[tokio::test]
+async fn a_streamed_incomplete_terminal_is_accepted_with_the_opt_in() {
+    let wire = OpenAI::new("test-key")
+        .responses("gpt-5.4")
+        .with_streamed_incomplete(super::IncompleteTerminal::Accept);
+    let model = Bound::new(
+        wire,
+        MockStreamingClient {
+            sse_bytes: sse_bytes_from_json_events(&incomplete_turn_events()),
+        },
+    );
+    let mut stream = model
+        .stream(model.completion_request("hello").build())
+        .await
+        .expect("stream should start");
+    let mut text = String::new();
+    let mut final_response = None;
+    while let Some(item) = stream.next().await {
+        match item.expect("an accepted incomplete stream must not error") {
+            StreamEvent::BlockDelta {
+                delta: Delta::Text { text: delta },
+                ..
+            } => text.push_str(&delta),
+            StreamEvent::Final(response) => final_response = Some(response),
+            _ => {}
+        }
+    }
+    assert_eq!(text, "partial");
+    assert_eq!(
+        final_response.expect("a final record").finish_reason,
+        Some(crate::completion::FinishReason::Length)
+    );
+}
+
+/// A unary reply accepts an incomplete terminal whatever the wire's streamed
+/// policy, including when the gateway answers the unary call with an event
+/// stream: the decoder the wire hands a unary call accepts it.
+#[test]
+fn a_unary_reply_accepts_an_incomplete_terminal() {
+    use crate::wire::{Mode, Wire};
+
+    let wire = OpenAI::new("test-key").responses("gpt-5.4");
+    let mut driver: WireDriver<Completion, _> = WireDriver::new(wire.decoder(Mode::Unary));
+    let mut decoded = Vec::new();
+    for event in incomplete_turn_events() {
+        driver.push(WireFrame::Text(event.to_string()));
+        decoded.extend(driver.drain());
+    }
+    driver.finish();
+    decoded.extend(driver.drain());
+    let decoded = decoded
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("a unary incomplete reply is not an error");
+    let finish = decoded.iter().find_map(|event| match event {
+        StreamEvent::Final(response) => Some(response.finish_reason.clone()),
+        _ => None,
+    });
+    assert_eq!(finish, Some(Some(crate::completion::FinishReason::Length)));
+}
+
+/// A websocket-style caller picks the accepting policy explicitly on the
+/// decoder API, independently of the wire's HTTP SSE default.
+#[test]
+fn the_decoder_api_lets_a_session_accept_an_incomplete_terminal() {
+    let wire = OpenAI::new("test-key").responses("gpt-5.4");
+    let mut driver: WireDriver<Completion, _> =
+        WireDriver::new(wire.decoder_with_incomplete(super::IncompleteTerminal::Accept));
+    let mut decoded = Vec::new();
+    for event in incomplete_turn_events() {
+        driver.push(WireFrame::Text(event.to_string()));
+        decoded.extend(driver.drain());
+    }
+    driver.finish();
+    decoded.extend(driver.drain());
+    assert!(
+        decoded.iter().all(Result::is_ok),
+        "an accepted incomplete terminal decodes without error: {decoded:?}"
+    );
+    assert!(
+        decoded
+            .iter()
+            .any(|event| matches!(event, Ok(StreamEvent::Final(_)))),
+        "an accepted incomplete terminal produces the final record"
+    );
+}
+
+/// The summary delta and done events are distinct shapes: a delta event that
+/// carries `text` instead of `delta` is a defect of a known event, not a
+/// fragment, and the done event's `text` is not read as a `delta`.
+#[test]
+fn summary_delta_and_done_keep_their_own_members() {
+    let delta_with_text = json!({
+        "type": "response.reasoning_summary_text.delta",
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "sequence_number": 1,
+        "text": "wrong member",
+    });
+    assert!(
+        matches!(
+            classify_responses_frame(&delta_with_text.to_string()),
+            WireEvent::Corrupt(_)
+        ),
+        "a delta without `delta` must not decode"
+    );
+
+    let done_with_delta = json!({
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "sequence_number": 2,
+        "delta": "wrong member",
+    });
+    assert!(
+        matches!(
+            classify_responses_frame(&done_with_delta.to_string()),
+            WireEvent::Corrupt(_)
+        ),
+        "a done without `text` must not decode"
+    );
+
+    let done = json!({
+        "type": "response.reasoning_summary_text.done",
+        "item_id": "rs_1",
+        "output_index": 0,
+        "summary_index": 0,
+        "sequence_number": 3,
+        "text": "the whole summary",
+    });
+    let WireEvent::Known(StreamingCompletionChunk::Delta(ItemChunk {
+        data: ItemChunkKind::ReasoningSummaryTextDone(chunk),
+        ..
+    })) = classify_responses_frame(&done.to_string())
+    else {
+        panic!("a well-formed done event decodes");
+    };
+    assert_eq!(chunk.text, "the whole summary");
+}
+
+/// `response.function_call_arguments.done` carries its arguments in the same
+/// type as the `output_item.done` item, so the two observations reconcile
+/// through the one classification.
+#[test]
+fn arguments_done_and_the_done_item_reconcile_through_one_type() {
+    let args_done = json!({
+        "type": "response.function_call_arguments.done",
+        "item_id": "fc_1",
+        "output_index": 0,
+        "sequence_number": 1,
+        "arguments": "{\"a\": 1}",
+    });
+    let WireEvent::Known(StreamingCompletionChunk::Delta(ItemChunk {
+        data: ItemChunkKind::FunctionCallArgsDone(chunk),
+        ..
+    })) = classify_responses_frame(&args_done.to_string())
+    else {
+        panic!("the args-done event decodes");
+    };
+    let item: crate::providers::openai::responses_api::OutputFunctionCall =
+        serde_json::from_value(json!({
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "f",
+            "arguments": "{\"a\":1}",
+            "status": "completed",
+        }))
+        .expect("the done item decodes");
+    assert_eq!(
+        chunk.arguments.reconcile(&item.arguments),
+        Ok(json!({"a": 1}))
+    );
+    // Serialization keeps the stringified spelling the provider sent.
+    assert_eq!(
+        serde_json::to_value(&chunk).expect("serializes")["arguments"],
+        json!("{\"a\": 1}")
+    );
+}
+
+/// A function-call `output_item.done` whose restated arguments do not
+/// parse, under the given item status.
+fn malformed_function_call_done(status: &str, sequence_number: u64) -> serde_json::Value {
+    json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "sequence_number": sequence_number,
+        "item": {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "add",
+            "arguments": "{\"x\":481",
+            "status": status
+        },
+    })
+}
+
+/// An argument delta for the slot [`malformed_function_call_done`] closes.
+fn argument_delta(delta: &str) -> serde_json::Value {
+    json!({
+        "type": "response.function_call_arguments.delta",
+        "item_id": "fc_1",
+        "output_index": 0,
+        "sequence_number": 1,
+        "delta": delta,
+    })
+}
+
+/// Drain a scripted Responses stream, returning the tool calls it delivered
+/// and every error it surfaced, in order.
+async fn delivered_calls_and_errors(
+    events: &[serde_json::Value],
+) -> (Vec<crate::message::ToolCall>, Vec<ErrorReport>) {
+    let mut stream = responses_stream_of(events).await;
+    let mut calls = Vec::new();
+    let mut errors = Vec::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(StreamEvent::BlockEnd {
+                block: Some(AssistantContent::ToolCall(call)),
+                ..
+            }) => calls.push(call),
+            Ok(_) => {}
+            Err(error) => errors.push(error),
+        }
+    }
+    (calls, errors)
+}
+
+/// The streamed half of the asserted-status policy: a call the provider
+/// states `completed` or `in_progress` whose arguments do not parse is refused
+/// by name, never silently dropped and never delivered.
+#[tokio::test]
+async fn a_streamed_asserted_call_with_unparseable_arguments_is_refused_by_name() {
+    for status in ["completed", "in_progress"] {
+        let (calls, errors) =
+            delivered_calls_and_errors(&[malformed_function_call_done(status, 1)]).await;
+        assert!(
+            calls.is_empty(),
+            "{status}: no call is delivered: {calls:?}"
+        );
+        let [error] = errors.as_slice() else {
+            panic!("{status}: exactly one refusal, got {errors:?}");
+        };
+        assert!(
+            error
+                .message
+                .starts_with("tool call `add` arrived with malformed JSON input"),
+            "{status}: the refusal names the call: {error:?}"
+        );
+        assert!(
+            matches!(
+                &error.detail,
+                Some(crate::error::ErrorDetail::MalformedToolInput(detail))
+                    if detail.name == "add" && detail.raw == "{\"x\":481"
+            ),
+            "{status}: the refusal keeps the raw restatement for recovery: {error:?}"
+        );
+    }
+}
+
+/// The unasserted half: a call the provider marks `incomplete` is dropped
+/// without an error, as before.
+#[tokio::test]
+async fn a_streamed_unasserted_call_with_unparseable_arguments_is_dropped() {
+    let (calls, errors) =
+        delivered_calls_and_errors(&[malformed_function_call_done("incomplete", 1)]).await;
+    assert!(calls.is_empty(), "the call is dropped: {calls:?}");
+    assert!(errors.is_empty(), "dropping is not an error: {errors:?}");
+}
+
+/// Fragments that stream the same malformed bytes the restatement repeats
+/// reach the same verdict: refused when asserted, dropped when not.
+#[tokio::test]
+async fn streamed_fragments_repeating_a_malformed_restatement_take_its_verdict() {
+    let (calls, errors) = delivered_calls_and_errors(&[
+        argument_delta("{\"x\":481"),
+        malformed_function_call_done("completed", 2),
+    ])
+    .await;
+    assert!(calls.is_empty(), "no call is delivered: {calls:?}");
+    assert!(
+        matches!(errors.as_slice(), [error]
+            if error.message.starts_with("tool call `add` arrived with malformed JSON input")),
+        "the asserted call is refused by name: {errors:?}"
+    );
+
+    let (calls, errors) = delivered_calls_and_errors(&[
+        argument_delta("{\"x\":481"),
+        malformed_function_call_done("incomplete", 2),
+    ])
+    .await;
+    assert!(
+        calls.is_empty(),
+        "the unasserted call is dropped: {calls:?}"
+    );
+    assert!(errors.is_empty(), "dropping is not an error: {errors:?}");
+}
+
+/// A delta whose bytes parse (whitespace, which is a parameterless `{}`, or a
+/// complete `{}`) must not answer for a restatement that does not: the call
+/// is never delivered with arguments the provider did not assert.
+#[tokio::test]
+async fn a_parsing_delta_cannot_rescue_a_malformed_restatement() {
+    for delta in ["   ", "{}"] {
+        let (calls, errors) = delivered_calls_and_errors(&[
+            argument_delta(delta),
+            malformed_function_call_done("completed", 2),
+        ])
+        .await;
+        assert!(
+            calls.is_empty(),
+            "{delta:?}: a parseable delta does not make a malformed restatement executable: \
+             {calls:?}"
+        );
+        assert!(
+            matches!(errors.as_slice(), [error]
+                if error.message.starts_with("tool call `add` arrived with malformed JSON input")),
+            "{delta:?}: the asserted call is refused by name: {errors:?}"
+        );
+
+        let (calls, errors) = delivered_calls_and_errors(&[
+            argument_delta(delta),
+            malformed_function_call_done("incomplete", 2),
+        ])
+        .await;
+        assert!(
+            calls.is_empty(),
+            "{delta:?}: the unasserted call is dropped, never fabricated: {calls:?}"
+        );
+        assert!(
+            errors.is_empty(),
+            "{delta:?}: dropping is not an error: {errors:?}"
+        );
+    }
+}
+
+/// The streamed and unary surfaces refuse the same asserted call in the same
+/// words, so an operator reading logs cannot tell them apart.
+#[tokio::test]
+async fn streaming_and_unary_refuse_an_asserted_malformed_call_alike() {
+    let (_, errors) =
+        delivered_calls_and_errors(&[malformed_function_call_done("completed", 1)]).await;
+    let [streamed] = errors.as_slice() else {
+        panic!("exactly one streamed refusal, got {errors:?}");
+    };
+
+    let mut response = sample_response(ResponseStatus::Completed);
+    response.output = vec![
+        serde_json::from_value(malformed_function_call_done("completed", 1)["item"].clone())
+            .expect("the function-call item decodes"),
+    ];
+    let unary = super::super::wire::fold_body("openai", response)
+        .expect_err("the unary surface refuses the same call");
+    let ProviderError::Response(unary) = unary else {
+        panic!("the unary refusal is a response error, got {unary:?}");
+    };
+    assert_eq!(streamed.message, unary);
 }

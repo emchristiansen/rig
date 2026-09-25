@@ -72,6 +72,26 @@ struct OpenToolInput {
 /// Maximum accumulated argument bytes per tool call.
 const MAX_TOOL_INPUT_BYTES: usize = 32 * 1024 * 1024;
 
+/// Append one streamed argument fragment to a call's assembly buffer, under
+/// the rules the accumulator assembles every call by. Returns `false` when
+/// the accumulation bound refused the fragment, leaving the buffer as it was.
+///
+/// Some OpenAI-compatible gateways emit a literal `null` placeholder before
+/// streaming the real JSON argument fragments; a later non-empty fragment
+/// supersedes it. An adapter that must know what the buffer will hold (the
+/// Responses decoder, deciding whether assembled fragments would answer for
+/// a restatement that does not parse) assembles through this same function.
+pub(crate) fn append_tool_input_fragment(buffer: &mut String, fragment: &str) -> bool {
+    if buffer.trim() == "null" && !fragment.trim().is_empty() {
+        buffer.clear();
+    }
+    if buffer.len().saturating_add(fragment.len()) > MAX_TOOL_INPUT_BYTES {
+        return false;
+    }
+    buffer.push_str(fragment);
+    true
+}
+
 impl BlockAccumulator {
     /// An empty accumulator.
     pub fn new() -> Self {
@@ -419,25 +439,14 @@ impl BlockAccumulator {
         if let Some(input) = self.open_tool_inputs.get_mut(index) {
             // Enforce the bound even for the first fragment.
             let buffer = input.buffer.get_or_insert_with(String::new);
-            // Some OpenAI-compatible gateways emit a literal
-            // `null` placeholder before streaming the real JSON
-            // argument fragments; a later non-empty fragment
-            // supersedes it.
-            if buffer.trim() == "null" && !fragment.trim().is_empty() {
-                buffer.clear();
-            }
-            if buffer.len().saturating_add(fragment.len()) > MAX_TOOL_INPUT_BYTES {
-                if !input.overflowed {
-                    input.overflowed = true;
-                    tracing::warn!(
-                        tool = %input.name,
-                        "streamed tool-call input exceeded the accumulation bound; \
-                         truncating — the call will finalize through the wire's \
-                         unparseable-input policy"
-                    );
-                }
-            } else {
-                buffer.push_str(fragment);
+            if !append_tool_input_fragment(buffer, fragment) && !input.overflowed {
+                input.overflowed = true;
+                tracing::warn!(
+                    tool = %input.name,
+                    "streamed tool-call input exceeded the accumulation bound; \
+                     truncating — the call will finalize through the wire's \
+                     unparseable-input policy"
+                );
             }
         }
     }

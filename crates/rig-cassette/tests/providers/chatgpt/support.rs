@@ -85,6 +85,17 @@ async fn chatgpt_noninteractive_oauth_cassette(
     (cassette, provider.bind(http), temp)
 }
 
+/// The `include` every Codex request in these cassettes was recorded with.
+///
+/// The Codex contract no longer forces `reasoning.encrypted_content` into
+/// `include`: it follows the rule every dialect shares, which requests it only
+/// alongside `reasoning`. These recordings were made while the Codex request
+/// always carried it, so a test that sets no `reasoning` states the include
+/// itself, and the request it sends is the one that was recorded.
+pub(super) fn recorded_include() -> serde_json::Value {
+    serde_json::json!({ "include": ["reasoning.encrypted_content"] })
+}
+
 pub(super) async fn with_chatgpt_cassette<F, Fut>(spec: impl Into<CassetteSpec>, test_body: F)
 where
     F: FnOnce(Bound<OpenAI>) -> Fut,

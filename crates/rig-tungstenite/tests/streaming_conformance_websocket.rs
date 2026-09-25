@@ -141,7 +141,7 @@ async fn drain_openai_responses_websocket_events(
             }
             // Semantic skip, raw passthrough: an unknown frame never reaches
             // the accumulator but is still yielded verbatim.
-            Ok(ResponsesWebSocketEvent::Unknown(value)) => out.unknown(value),
+            Ok(ResponsesWebSocketEvent::Unknown(event)) => out.unknown(event.payload),
             // `response.done` / `error` envelopes are websocket-only shapes the
             // fixtures never script; the production session maps them to a
             // terminal or a provider error before this replay runs.

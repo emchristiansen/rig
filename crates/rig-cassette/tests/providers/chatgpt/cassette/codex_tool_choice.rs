@@ -13,7 +13,7 @@ use rig::message::{AssistantContent, ToolChoice};
 use rig::providers::chatgpt;
 use rig::tool::Tool;
 
-use super::super::support::with_chatgpt_cassette;
+use super::super::support::{recorded_include, with_chatgpt_cassette};
 use crate::support::{Adder, AlphaSignal, Subtract, TOOLS_PREAMBLE};
 
 fn tool_call_names(choice: &[AssistantContent]) -> Vec<String> {
@@ -37,6 +37,7 @@ async fn required_forces_a_tool_call() {
                 .preamble(TOOLS_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&Adder))
                 .tool_choice(ToolChoice::Required)
+                .additional_params(recorded_include())
                 .build();
 
             let response = model
@@ -70,6 +71,7 @@ async fn none_suppresses_tool_calls() {
                 .preamble(TOOLS_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&Adder))
                 .tool_choice(ToolChoice::None)
+                .additional_params(recorded_include())
                 .build();
 
             let response = model
@@ -113,6 +115,7 @@ async fn specific_single_function_targets_named_tool() {
                 .tool_choice(ToolChoice::Specific {
                     function_names: vec![Subtract::NAME.to_string()],
                 })
+                .additional_params(recorded_include())
                 .build();
 
             let response = model
@@ -173,6 +176,7 @@ async fn specific_multiple_functions_use_allowed_tools() {
                 .tool_choice(ToolChoice::Specific {
                     function_names: vec![Adder::NAME.to_string(), Subtract::NAME.to_string()],
                 })
+                .additional_params(recorded_include())
                 .build();
 
             let response = model

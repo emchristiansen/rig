@@ -7,8 +7,9 @@
 use futures::{SinkExt, StreamExt};
 use rig_core::http_client::{Error, Result};
 use rig_core::wasm_compat::WasmBoxedFuture;
-use rig_core::ws_client::{CloseFrame, Frame, WebSocketConnection};
+use rig_core::ws_client::{CloseFrame, Frame, ReadyFrame, WebSocketConnection};
 use std::collections::VecDeque;
+use std::task::Poll;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as TungsteniteCloseFrame;
 use tokio_tungstenite::{
@@ -62,6 +63,40 @@ impl WebSocketConnection for DirectConnection {
                 .map_err(crate::from_tungstenite)
         })
     }
+
+    /// Polls the socket exactly once per frame and never suspends, so the
+    /// returned future resolves on its first poll.
+    ///
+    /// A single `poll_next` either yields a whole message or leaves every
+    /// byte it read in tungstenite's own read buffer, so nothing can be lost
+    /// between the poll and the return. A read that consumes a ping queues
+    /// its pong inside tungstenite; [`Self::flush`] writes it.
+    fn recv_ready(&mut self) -> WasmBoxedFuture<'_, Result<ReadyFrame>> {
+        Box::pin(futures::future::poll_fn(move |cx| {
+            loop {
+                let answer = match self.0.poll_next_unpin(cx) {
+                    Poll::Pending => Ok(ReadyFrame::Empty),
+                    Poll::Ready(None) => Ok(ReadyFrame::Ended),
+                    Poll::Ready(Some(Err(error))) => Err(crate::from_tungstenite(error)),
+                    Poll::Ready(Some(Ok(message))) => match from_message(message) {
+                        Some(frame) => Ok(ReadyFrame::Frame(frame)),
+                        // A raw frame carries no protocol payload; `recv`
+                        // skips it the same way.
+                        None => continue,
+                    },
+                };
+                return Poll::Ready(answer);
+            }
+        }))
+    }
+
+    fn flush(&mut self) -> WasmBoxedFuture<'_, Result<()>> {
+        Box::pin(async move {
+            SinkExt::flush(&mut self.0)
+                .await
+                .map_err(crate::from_tungstenite)
+        })
+    }
 }
 
 /// One request to the connection actor, with the channel its answer goes back
@@ -69,6 +104,9 @@ impl WebSocketConnection for DirectConnection {
 enum Command {
     Send(Frame, futures::channel::oneshot::Sender<Result<()>>),
     Recv(futures::channel::oneshot::Sender<Result<Option<Frame>>>),
+    /// Answer at once with what has already arrived, without waiting.
+    RecvReady(futures::channel::oneshot::Sender<Result<ReadyFrame>>),
+    Flush(futures::channel::oneshot::Sender<Result<()>>),
     Close(
         Option<CloseFrame>,
         futures::channel::oneshot::Sender<Result<()>>,
@@ -161,6 +199,47 @@ async fn run_actor(socket: Socket, mut requests: futures::channel::mpsc::Receive
             // The sequential contract means there is at most one outstanding
             // read; a second one supersedes a caller that has gone away.
             Command::Recv(reply) => pending_read = Some(reply),
+            Command::RecvReady(reply) => {
+                // Take in whatever the socket already holds before answering,
+                // so "already arrived" means arrived at the socket rather than
+                // "already picked up by this loop". A single poll that is not
+                // ready leaves every byte in tungstenite's read buffer.
+                while !stream_ended && inbound.len() < READ_AHEAD {
+                    match stream.next().now_or_never() {
+                        Some(Some(Ok(message))) => {
+                            if let Some(frame) = from_message(message) {
+                                inbound.push_back(Ok(frame));
+                            }
+                        }
+                        Some(Some(Err(error))) => {
+                            inbound.push_back(Err(crate::from_tungstenite(error)));
+                        }
+                        Some(None) => stream_ended = true,
+                        None => break,
+                    }
+                }
+                let answer = match inbound.pop_front() {
+                    Some(Ok(frame)) => Ok(ReadyFrame::Frame(frame)),
+                    Some(Err(error)) => Err(error),
+                    None if stream_ended => Ok(ReadyFrame::Ended),
+                    None => Ok(ReadyFrame::Empty),
+                };
+                // A caller that stopped waiting has not received the frame:
+                // keep it at the front, exactly as a cancelled `Recv` does.
+                if let Err(answer) = reply.send(answer) {
+                    match answer {
+                        Ok(ReadyFrame::Frame(frame)) => inbound.push_front(Ok(frame)),
+                        Err(error) => inbound.push_front(Err(error)),
+                        Ok(ReadyFrame::Ended | ReadyFrame::Empty) => {}
+                    }
+                }
+            }
+            Command::Flush(reply) => {
+                let result = SinkExt::flush(&mut sink)
+                    .await
+                    .map_err(crate::from_tungstenite);
+                let _ = reply.send(result);
+            }
             Command::Close(frame, reply) => {
                 let mut result = sink
                     .send(Message::Close(frame.map(into_close_frame)))
@@ -218,6 +297,17 @@ impl WebSocketConnection for ForwardedConnection {
 
     fn close(&mut self, frame: Option<CloseFrame>) -> WasmBoxedFuture<'_, Result<()>> {
         Box::pin(async move { self.request(|reply| Command::Close(frame, reply)).await })
+    }
+
+    /// A round trip to the actor, which answers from its own buffer without
+    /// waiting on the peer. Dropping this future before the answer arrives
+    /// loses nothing: the actor puts an unreceived frame back at the front.
+    fn recv_ready(&mut self) -> WasmBoxedFuture<'_, Result<ReadyFrame>> {
+        Box::pin(async move { self.request(Command::RecvReady).await })
+    }
+
+    fn flush(&mut self) -> WasmBoxedFuture<'_, Result<()>> {
+        Box::pin(async move { self.request(Command::Flush).await })
     }
 }
 

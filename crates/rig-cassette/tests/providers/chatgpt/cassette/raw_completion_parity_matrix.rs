@@ -79,14 +79,15 @@ fn weather_tool() -> ToolDefinition {
 type ChatGptModel = Bound<OpenAiWire>;
 
 fn request(model: &ChatGptModel) -> rig::completion::CompletionRequest {
-    model.completion_request(PROMPT).max_tokens(64).build()
+    // No output-token cap: the Codex contract refuses a caller-set
+    // `max_output_tokens` by name.
+    model.completion_request(PROMPT).build()
 }
 
 fn tool_request(model: &ChatGptModel) -> rig::completion::CompletionRequest {
     model
         .completion_request(TOOL_PROMPT)
         .tool(weather_tool())
-        .max_tokens(128)
         .build()
 }
 

@@ -19,7 +19,7 @@ use rig::prelude::*;
 use rig::providers::chatgpt;
 use rig::tool::Tool;
 
-use super::super::support::with_chatgpt_cassette;
+use super::super::support::{recorded_include, with_chatgpt_cassette};
 use crate::reasoning::{self, WeatherTool};
 use crate::support::{
     ALPHA_SIGNAL_OUTPUT, Adder, AlphaSignal, BETA_SIGNAL_OUTPUT, BetaSignal,
@@ -104,6 +104,7 @@ async fn sequential_tool_calls_nonstreaming() {
                 .tool(Adder)
                 .tool(Subtract)
                 .default_max_turns(6)
+                .additional_params(recorded_include())
                 .build();
             let mut history = Vec::<Message>::new();
 
@@ -175,6 +176,7 @@ async fn sequential_tool_calls_streaming() {
                 .preamble(SEQUENTIAL_TOOLS_PREAMBLE)
                 .tool(Adder)
                 .tool(Subtract)
+                .additional_params(recorded_include())
                 .build();
 
             let mut stream = agent
@@ -223,6 +225,7 @@ async fn parallel_tool_calls_single_turn_nonstreaming() {
                 .tool(AlphaSignal)
                 .tool(BetaSignal)
                 .default_max_turns(5)
+                .additional_params(recorded_include())
                 .build();
             let mut history = Vec::<Message>::new();
 
@@ -283,6 +286,7 @@ async fn parallel_tool_calls_single_turn_streaming() {
                 .preamble(TWO_TOOL_STREAM_PREAMBLE)
                 .tool(AlphaSignal)
                 .tool(BetaSignal)
+                .additional_params(recorded_include())
                 .build();
 
             let mut stream = agent.prompt(TWO_TOOL_STREAM_PROMPT).max_turns(5).stream();
@@ -312,6 +316,7 @@ async fn long_history_replay_nonstreaming() {
                 .completion_request("Look up the harbor label with the tool.")
                 .preamble(preamble.to_string())
                 .tool(rig::tool::tool_definition(&AlphaSignal))
+                .additional_params(recorded_include())
                 .build();
             let first_response = model
                 .completion(first_request)
@@ -362,6 +367,7 @@ async fn long_history_replay_nonstreaming() {
                 )))
                 .message(Message::assistant("The harbor label is crimson-harbor."))
                 .tool(rig::tool::tool_definition(&AlphaSignal))
+                .additional_params(recorded_include())
                 .build();
 
             let response = model
@@ -406,7 +412,9 @@ async fn reasoning_session_two_tool_calls_streaming() {
             let agent = client
                 .agent(chatgpt::GPT_5_4)
                 .preamble(reasoning::TOOL_SYSTEM_PROMPT)
-                .max_tokens(6000)
+                // No output-token cap: the Codex contract refuses a
+                // caller-set `max_output_tokens` by name, and the recorded
+                // request carries none.
                 .tool(WeatherTool::new(call_count.clone()))
                 .additional_params(serde_json::json!({
                     "reasoning": { "effort": "low" }
@@ -469,6 +477,57 @@ async fn reasoning_session_two_tool_calls_streaming() {
     .await;
 }
 
+/// The output-token cap `reasoning_session_two_tool_calls_streaming` once set
+/// is refused by name on the Codex contract, on both the completion-model and
+/// the agent surface, rather than being cleared from the request.
+///
+/// No cassette: the refusal happens while the request is encoded, so nothing
+/// is sent. The base URL is a local discard address, so even a regression that
+/// did send would never leave the machine.
+#[tokio::test]
+async fn a_caller_set_output_token_cap_is_refused_by_name() {
+    use rig::error::ProviderError;
+    use rig::providers::openai::OpenAI;
+    use rig::providers::openai::responses_api::wire::UnsupportedCodexControl;
+
+    let client = OpenAI::with_key(&chatgpt::DIALECT, "unused-token")
+        .with_base_url("http://127.0.0.1:9")
+        .bound()
+        .expect("transport should build");
+
+    let model = client.completion(chatgpt::GPT_5_4);
+    let request = model.completion_request("hello").max_tokens(6000).build();
+    let error = model
+        .completion(request)
+        .await
+        .expect_err("a caller-set output-token cap is refused on the Codex contract");
+    let ProviderError::Request(source) = &error else {
+        panic!("an encode refusal is a request error, got {error:?}");
+    };
+    assert_eq!(
+        source.downcast_ref::<UnsupportedCodexControl>(),
+        Some(&UnsupportedCodexControl::MaxOutputTokens),
+        "expected the named Codex refusal, got {source}"
+    );
+
+    let agent = client
+        .agent(chatgpt::GPT_5_4)
+        .preamble(reasoning::TOOL_SYSTEM_PROMPT)
+        .max_tokens(6000)
+        .build();
+    let error = agent
+        .prompt("hello")
+        .await
+        .expect_err("the agent surfaces the same refusal");
+    let rendered = format!("{error} / {error:?}");
+    assert!(
+        rendered.contains(
+            "this adapter refuses a caller-set `max_output_tokens` on the Codex Responses contract"
+        ),
+        "the agent error names the refused control: {rendered}"
+    );
+}
+
 #[tokio::test]
 async fn usage_accumulates_across_streaming_multi_turn() {
     with_chatgpt_cassette(
@@ -478,6 +537,7 @@ async fn usage_accumulates_across_streaming_multi_turn() {
                 .agent(chatgpt::GPT_5_4)
                 .preamble(ORDERED_TOOL_STREAM_PREAMBLE)
                 .tool(AlphaSignal)
+                .additional_params(recorded_include())
                 .build();
 
             let mut stream = agent

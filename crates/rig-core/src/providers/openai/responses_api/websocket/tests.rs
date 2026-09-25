@@ -1,3 +1,4 @@
+use super::test_connection::Script;
 use super::*;
 use crate::http_client::{HeaderMap, StatusCode};
 use crate::providers::openai::OpenAI;
@@ -5,6 +6,7 @@ use crate::providers::openai::responses_api::{
     IncompleteDetailsReason, ResponseError, ResponseObject, ResponsesUsage,
 };
 use crate::ws_client::CloseFrame;
+use futures::FutureExt as _;
 use serde_json::json;
 
 /// The wire a session is opened over.
@@ -428,12 +430,23 @@ fn unknown_event_type_is_forwarded_raw() {
     });
 
     let result = parse_server_event(&payload.to_string()).expect("unknown event should not error");
-    // Semantically skipped, but carried verbatim so the streaming surface
-    // can yield it on the `StreamEvent::Unknown` passthrough.
+    // Semantically skipped, but carried verbatim with its tag so the streaming
+    // surface can yield it on the `StreamEvent::Unknown` passthrough and a
+    // consumer failing closed can name it.
     match result {
-        Some(ResponsesWebSocketEvent::Unknown(value)) => assert_eq!(value, payload.into()),
+        Some(ResponsesWebSocketEvent::Unknown(event)) => {
+            assert_eq!(event.kind, "response.some_future_event");
+            assert_eq!(event.payload, payload.into());
+        }
         other => panic!("expected the raw Unknown passthrough event, got {other:?}"),
     }
+    assert!(
+        !parse_server_event(&json!({ "type": "codex.rate_limits" }).to_string())
+            .expect("an unknown namespace should not error")
+            .expect("an unknown event is not skipped")
+            .is_terminal(),
+        "an unmodelled event ends nothing"
+    );
 }
 
 #[test]
@@ -541,4 +554,440 @@ fn websocket_frame_to_text_maps_control_frames() {
     let error = websocket_frame_to_text(Frame::Close(None))
         .expect_err("a reasonless close still ends the turn");
     assert!(error.to_string().contains("without a close reason"));
+}
+
+// ---------------------------------------------------------------------------
+// Idle keepalive: servicing, custody of recovered frames, and its bounds.
+// ---------------------------------------------------------------------------
+
+fn user_request(text: &str) -> completion::CompletionRequest {
+    completion::CompletionRequest {
+        model: None,
+        chat_history: vec![completion::Message::user(text)],
+        documents: Vec::new(),
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        additional_params: None,
+        output_schema: None,
+        record_telemetry_content: false,
+    }
+}
+
+fn completed_event(response_id: &str) -> String {
+    json!({
+        "type": "response.completed",
+        "sequence_number": 1,
+        "response": serde_json::to_value(CompletionResponse {
+            id: response_id.to_string(),
+            ..sample_response(ResponseStatus::Completed)
+        })
+        .expect("response should serialize"),
+    })
+    .to_string()
+}
+
+fn done_event(response_id: &str) -> String {
+    json!({
+        "type": "response.done",
+        "response": { "id": response_id, "status": "completed" },
+    })
+    .to_string()
+}
+
+fn unknown_event(kind: &str, seen: &str) -> String {
+    json!({ "type": kind, "seen": seen }).to_string()
+}
+
+fn stray_delta() -> String {
+    json!({
+        "type": "response.output_text.delta",
+        "content_index": 0,
+        "delta": "stray",
+        "item_id": "msg_stray",
+        "logprobs": [],
+        "output_index": 0,
+        "sequence_number": 1
+    })
+    .to_string()
+}
+
+fn session_over(script: &Script) -> ResponsesWebSocketSession {
+    ResponsesWebSocketSession::from_connection(
+        test_wire("https://api.openai.com/v1"),
+        script.connection(),
+        None,
+    )
+}
+
+/// The frames of a drain that must have serviced the socket cleanly.
+fn serviced(drain: KeepaliveDrain, context: &str) -> Vec<UnrecognizedEvent> {
+    let (recovered, ending) = drain.into_parts();
+    if let Some(error) = ending {
+        panic!("{context}, but the drain failed: {error}");
+    }
+    recovered
+}
+
+/// The frames a failing drain still recovered, and the failure itself. Both
+/// halves, always: that is the property under test.
+fn failed(drain: KeepaliveDrain, context: &str) -> (Vec<UnrecognizedEvent>, ProviderError) {
+    let (recovered, ending) = drain.into_parts();
+    let Some(error) = ending else {
+        panic!("{context}, but the drain reported success");
+    };
+    (recovered, error)
+}
+
+fn kinds(events: &[UnrecognizedEvent]) -> Vec<&str> {
+    events.iter().map(|event| event.kind.as_str()).collect()
+}
+
+#[tokio::test]
+async fn keepalive_returns_every_unknown_event_in_arrival_order_and_consumes_the_trailing_done() {
+    let script = Script::new()
+        .turn([completed_event("resp_1")])
+        .turn([completed_event("resp_2")]);
+    let mut session = session_over(&script);
+
+    session
+        .completion(user_request("first"))
+        .await
+        .expect("first turn should complete");
+
+    // The trailing `done` sits between unmodelled frames: the drain must
+    // neither reorder them nor let its `done` handling drop the one after it.
+    script.arrive_text([
+        unknown_event("codex.rate_limits", "first"),
+        unknown_event("responsesapi.websocket_timing", "second"),
+        done_event("resp_1"),
+        unknown_event("response.some_future_event", "last"),
+    ]);
+
+    let drained = serviced(
+        session.keepalive().await,
+        "unknown idle events must not fail the session",
+    );
+    assert_eq!(
+        kinds(&drained),
+        vec![
+            "codex.rate_limits",
+            "responsesapi.websocket_timing",
+            "response.some_future_event",
+        ]
+    );
+    assert_eq!(
+        drained[2].payload.value()["seen"],
+        "last",
+        "the complete parsed value is returned, not just the kind"
+    );
+    assert_eq!(script.unread(), 0, "the trailing done was consumed");
+    assert_eq!(session.previous_response_id(), Some("resp_1"));
+
+    // The session is still usable and still chains the untouched tip.
+    session
+        .completion(user_request("second"))
+        .await
+        .expect("second turn should complete after the drain");
+    assert!(
+        script.sent()[1].contains("\"previous_response_id\":\"resp_1\""),
+        "expected the tip to survive the drain, got {}",
+        script.sent()[1]
+    );
+}
+
+#[tokio::test]
+async fn keepalive_answers_an_idle_ping_with_a_flushed_pong() {
+    let script = Script::new();
+    let mut session = session_over(&script);
+
+    script.arrive([Frame::Ping(bytes::Bytes::from_static(b"are you there"))]);
+    let drained = serviced(
+        session.keepalive().await,
+        "keepalive should service the server ping",
+    );
+
+    assert!(drained.is_empty());
+    assert_eq!(script.unread(), 0, "the ping was read");
+    assert_eq!(script.pongs_flushed(), 1, "the owed pong reached the wire");
+    // Servicing a ping must not invent or advance a live tip.
+    assert_eq!(session.previous_response_id(), None);
+}
+
+#[tokio::test]
+async fn keepalive_recovers_frames_consumed_before_the_stream_ended() {
+    let script = Script::new();
+    let mut session = session_over(&script);
+
+    script.arrive_text([unknown_event("response.some_future_event", "before close")]);
+    script.end_stream();
+
+    let (recovered, error) = failed(
+        session.keepalive().await,
+        "a socket that ends mid-drain must report the failure",
+    );
+    assert_eq!(kinds(&recovered), vec!["response.some_future_event"]);
+    assert!(
+        error.to_string().contains("closed during idle keepalive"),
+        "got {error}"
+    );
+
+    let closed = session
+        .send(user_request("after close"))
+        .await
+        .expect_err("a closed session refuses a send");
+    assert!(
+        closed.to_string().contains("session is closed"),
+        "got {closed}"
+    );
+}
+
+#[tokio::test]
+async fn keepalive_stops_at_the_frame_budget_and_keeps_what_it_consumed() {
+    let script = Script::new();
+    let mut session = session_over(&script);
+
+    // One more than the budget, so the cap stops the drain rather than the
+    // supply running out.
+    script
+        .arrive_text((0..=MAX_KEEPALIVE_DRAIN_FRAMES).map(|_| json!({ "type": "z" }).to_string()));
+
+    let (recovered, error) = failed(
+        session.keepalive().await,
+        "exceeding the frame budget must be reported",
+    );
+    assert_eq!(recovered.len(), MAX_KEEPALIVE_DRAIN_FRAMES);
+    assert!(error.to_string().contains("buffered frames"), "got {error}");
+    assert_eq!(script.unread(), 1, "nothing past the budget was consumed");
+
+    // A socket that cannot be read to a known state is not serviceable: the
+    // session failed, and a later drain is the ordinary no-op.
+    let after = serviced(
+        session.keepalive().await,
+        "a failed session drains as a no-op",
+    );
+    assert!(after.is_empty());
+    assert_eq!(script.unread(), 1);
+}
+
+#[tokio::test]
+async fn keepalive_fails_loud_on_an_idle_modelled_event_and_returns_what_preceded_it() {
+    let script = Script::new();
+    let mut session = session_over(&script);
+
+    script.arrive_text([
+        unknown_event("codex.rate_limits", "before the stray delta"),
+        stray_delta(),
+    ]);
+
+    let (recovered, error) = failed(
+        session.keepalive().await,
+        "an idle data frame should fail keepalive",
+    );
+    assert_eq!(kinds(&recovered), vec!["codex.rate_limits"]);
+    assert!(
+        error.to_string().contains("unexpected server event"),
+        "got {error}"
+    );
+
+    let closed = session
+        .send(user_request("after failure"))
+        .await
+        .expect_err("the session is unusable after a failed keepalive");
+    assert!(
+        closed.to_string().contains("session is closed"),
+        "got {closed}"
+    );
+}
+
+#[tokio::test]
+async fn keepalive_is_a_noop_while_a_turn_is_in_flight() {
+    let script = Script::new().turn([completed_event("resp_in_flight")]);
+    let mut session = session_over(&script);
+
+    session
+        .send(user_request("hello"))
+        .await
+        .expect("request should send");
+    let drained = serviced(
+        session.keepalive().await,
+        "keepalive should be a no-op while in flight",
+    );
+    assert!(drained.is_empty());
+    assert_eq!(
+        script.unread(),
+        1,
+        "reading here would steal the in-flight turn's own event"
+    );
+    assert_eq!(script.flushes(), 0);
+
+    let event = session
+        .next_event()
+        .await
+        .expect("the in-flight turn is still readable");
+    assert_eq!(event.response_id(), Some("resp_in_flight"));
+}
+
+#[tokio::test]
+async fn keepalive_is_a_noop_after_close() {
+    let script = Script::new();
+    let mut session = session_over(&script);
+
+    session.close().await.expect("close should succeed");
+    script.arrive_text([unknown_event("codex.rate_limits", "after close")]);
+    let drained = serviced(
+        session.keepalive().await,
+        "keepalive should be a no-op after close",
+    );
+    assert!(drained.is_empty());
+    assert_eq!(script.unread(), 1);
+    assert!(script.closed());
+}
+
+/// A backend without the ready-read capability is refused by name, and since
+/// nothing was read, the session stays usable.
+#[tokio::test]
+async fn keepalive_names_a_backend_without_ready_reads_and_leaves_the_session_open() {
+    let script = Script::new()
+        .without_recv_ready()
+        .turn([completed_event("resp_1")]);
+    let mut session = session_over(&script);
+
+    script.arrive_text([unknown_event("codex.rate_limits", "unread")]);
+    let (recovered, error) = failed(
+        session.keepalive().await,
+        "a backend that cannot read only arrived frames cannot be drained",
+    );
+    assert!(recovered.is_empty());
+    match &error {
+        ProviderError::Request(inner) => assert_eq!(
+            inner.downcast_ref::<UnsupportedCapability>(),
+            Some(&UnsupportedCapability {
+                capability: "recv_ready"
+            })
+        ),
+        other => panic!("expected a named request refusal, got {other:?}"),
+    }
+    assert_eq!(script.unread(), 1, "nothing was consumed");
+
+    session
+        .send(user_request("still usable"))
+        .await
+        .expect("the session is still open");
+}
+
+#[tokio::test]
+async fn keepalive_names_a_backend_without_flush() {
+    let script = Script::new().without_flush();
+    let mut session = session_over(&script);
+
+    script.arrive_text([unknown_event("codex.rate_limits", "recovered")]);
+    let (recovered, error) = failed(
+        session.keepalive().await,
+        "a backend that cannot flush cannot promise the pongs went out",
+    );
+    assert_eq!(kinds(&recovered), vec!["codex.rate_limits"]);
+    assert!(error.to_string().contains("`flush`"), "got {error}");
+}
+
+#[tokio::test]
+async fn a_failed_flush_returns_the_recovered_frames_and_fails_the_session() {
+    let script = Script::new();
+    let mut session = session_over(&script);
+
+    script.arrive_text([unknown_event("codex.rate_limits", "recovered")]);
+    script.set_flush_fails(true);
+    let (recovered, _error) = failed(session.keepalive().await, "the flush failed");
+    assert_eq!(kinds(&recovered), vec!["codex.rate_limits"]);
+
+    session
+        .send(user_request("after a failed flush"))
+        .await
+        .expect_err("an unflushable socket is not serviceable");
+}
+
+/// The one suspension is bounded inside the drain: a flush that never
+/// finishes returns the recovered frames beside a typed failure after
+/// [`KEEPALIVE_FLUSH_TIMEOUT`], without any bound from the caller.
+#[tokio::test]
+async fn a_stalled_flush_is_bounded_internally_and_keeps_the_recovered_frames() {
+    let script = Script::new();
+    let mut session = session_over(&script);
+
+    script.arrive_text([unknown_event("codex.rate_limits", "recovered")]);
+    script.set_flush_stalls(true);
+    let (recovered, error) = failed(session.keepalive().await, "the flush stalled");
+    assert_eq!(kinds(&recovered), vec!["codex.rate_limits"]);
+    assert!(
+        error.to_string().contains("Timed out flushing"),
+        "got {error}"
+    );
+}
+
+/// Dropping a drain midway cannot destroy what it consumed: the frames are in
+/// the session's custody, a send is refused until they are collected, and the
+/// next drain returns them first, in order.
+#[tokio::test]
+async fn a_dropped_keepalive_leaves_its_frames_in_the_session() {
+    let script = Script::new().turn([completed_event("resp_1")]);
+    let mut session = session_over(&script);
+
+    script.arrive_text([unknown_event("codex.rate_limits", "first")]);
+    script.set_flush_stalls(true);
+    // The reads complete on the first poll; the flush does not, so this
+    // drops the drain at its one suspension point.
+    assert!(session.keepalive().now_or_never().is_none());
+
+    let refused = session
+        .send(user_request("too early"))
+        .await
+        .expect_err("a send must wait for the recovered frames to be collected");
+    match &refused {
+        ProviderError::Request(inner) => assert_eq!(
+            inner.downcast_ref::<UncollectedRecoveredFrames>(),
+            Some(&UncollectedRecoveredFrames { count: 1 })
+        ),
+        other => panic!("expected a named request refusal, got {other:?}"),
+    }
+    assert!(script.sent().is_empty(), "the refused send wrote nothing");
+
+    script.set_flush_stalls(false);
+    script.arrive_text([unknown_event("response.some_future_event", "second")]);
+    let drained = serviced(session.keepalive().await, "the next drain succeeds");
+    assert_eq!(
+        kinds(&drained),
+        vec!["codex.rate_limits", "response.some_future_event"]
+    );
+
+    session
+        .completion(user_request("now"))
+        .await
+        .expect("the session sends once the frames are collected");
+}
+
+/// An unknown frame mid-turn reaches the caller before the terminal event.
+#[tokio::test]
+async fn an_unknown_event_mid_turn_is_returned_with_its_tag() {
+    let script = Script::new().turn([
+        unknown_event("codex.rate_limits", "mid-turn"),
+        completed_event("resp_1"),
+    ]);
+    let mut session = session_over(&script);
+
+    session
+        .send(user_request("hello"))
+        .await
+        .expect("request should send");
+    match session.next_event().await.expect("first event") {
+        ResponsesWebSocketEvent::Unknown(event) => assert_eq!(event.kind, "codex.rate_limits"),
+        other => panic!("expected the unknown event first, got {other:?}"),
+    }
+    assert!(
+        session
+            .next_event()
+            .await
+            .expect("terminal event")
+            .is_terminal()
+    );
 }

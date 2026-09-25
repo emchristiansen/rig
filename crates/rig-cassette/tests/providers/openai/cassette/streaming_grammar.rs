@@ -643,7 +643,11 @@ async fn incomplete_mid_tool_call_normalizes_to_length() {
     with_openai_cassette(
         "streaming_grammar/incomplete_mid_tool_call",
         |client| async move {
-            let model = client.openai.completion(openai::GPT_5_6);
+            // A truncated stream is partial success only by opt-in.
+            let model = client
+                .openai
+                .completion(openai::GPT_5_6)
+                .map_wire(super::super::support::accepting_streamed_incomplete);
             let request = model
                 .completion_request(
                     "Add 48151.62342 and 27182.81828 using the add tool. You must call the tool.",
@@ -826,7 +830,11 @@ async fn incomplete_max_output_tokens_normalizes_to_length() {
     with_openai_cassette(
         "streaming_grammar/incomplete_max_output_tokens",
         |client| async move {
-            let model = client.openai.completion(openai::GPT_5_6);
+            // A truncated stream is partial success only by opt-in.
+            let model = client
+                .openai
+                .completion(openai::GPT_5_6)
+                .map_wire(super::super::support::accepting_streamed_incomplete);
             let request = model
                 .completion_request("Write a 300-word essay about the history of lighthouses.")
                 .max_tokens(32)

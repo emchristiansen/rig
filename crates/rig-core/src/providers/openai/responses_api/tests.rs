@@ -198,6 +198,7 @@ fn rig_tool_result(content: message::ToolResultContent) -> message::Message {
             provider: message::ProviderCallId::new("call-id")
                 .map(|provider| provider.with_item_id("result-id")),
             name: "tool".to_string(),
+            answers: message::AnsweredToolCall::Function,
             content: vec![content],
         })],
     }
@@ -413,6 +414,7 @@ fn multiple_text_tool_result_blocks_preserve_order_as_rich_function_output() {
             provider: message::ProviderCallId::new("call-id")
                 .map(|provider| provider.with_item_id("result-id")),
             name: "tool".to_string(),
+            answers: message::AnsweredToolCall::Function,
             content,
         })],
     };
@@ -508,6 +510,7 @@ fn tool_result_images_and_text_preserve_order_as_rich_function_output() {
             provider: message::ProviderCallId::new("call-id")
                 .map(|provider| provider.with_item_id("result-id")),
             name: "tool".to_string(),
+            answers: message::AnsweredToolCall::Function,
             content,
         })],
     };
@@ -2856,4 +2859,390 @@ fn the_last_text_signature_is_the_items() {
     let item = openai_reasoning_from_core(&reasoning).expect("identified reasoning replays");
     assert_eq!(item.signature.as_deref(), Some("final"));
     assert_eq!(item.content, ["first", "second"]);
+}
+
+// ── custom calls, namespaces, answers pairing, argument classification ───
+
+/// A two-turn history: the assistant's function call (namespaced) and custom
+/// call, then the user's results answering each by kind.
+fn custom_and_namespaced_history() -> Vec<completion::Message> {
+    let function = completion::AssistantContent::tool_call_with_namespace(
+        "fc_1",
+        "call_fn".to_string(),
+        "search",
+        Some("web".to_string()),
+        json!({"q": "rig"}),
+    );
+    let custom = completion::AssistantContent::custom_tool_call(
+        "ctc_1",
+        "call_custom",
+        "apply_patch",
+        Some("editor".to_string()),
+        "*** Begin Patch\n{\"not\": \"arguments\"}",
+    );
+    let (
+        completion::AssistantContent::ToolCall(function_call),
+        completion::AssistantContent::CustomToolCall(custom_call),
+    ) = (&function, &custom)
+    else {
+        unreachable!("the constructors build the named variants");
+    };
+    let function_result = message::UserContent::tool_result_for_call(
+        function_call,
+        vec![message::ToolResultContent::text("found")],
+    );
+    let custom_result = message::UserContent::tool_result_for_custom_call(
+        custom_call,
+        vec![
+            message::ToolResultContent::text("applied "),
+            message::ToolResultContent::json(json!({"ok": true})),
+        ],
+    );
+    vec![
+        completion::Message::user("go"),
+        completion::Message::Assistant {
+            id: None,
+            content: vec![function, custom],
+        },
+        completion::Message::User {
+            content: vec![function_result, custom_result],
+        },
+    ]
+}
+
+/// Pinned NEW-format request bytes: the namespace rides the `function_call`
+/// item, the custom call replays as `custom_tool_call` with its raw input
+/// verbatim, and each result is the item its `answers` names.
+#[test]
+fn custom_calls_namespaces_and_answers_encode_to_pinned_bytes() {
+    let request = completion::CompletionRequest {
+        chat_history: custom_and_namespaced_history(),
+        ..weather_tool_request()
+    };
+    let request = wire_request(&openai_wire("gpt-5.4"), request);
+    let input = serde_json::to_value(&request.input).expect("input serializes");
+    let items = input.as_array().expect("input is an array");
+
+    assert_eq!(
+        items[1],
+        json!({
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_fn",
+            "name": "search",
+            "namespace": "web",
+            "arguments": "{\"q\":\"rig\"}",
+            "status": "completed",
+        })
+    );
+    assert_eq!(
+        items[2],
+        json!({
+            "type": "custom_tool_call",
+            "id": "ctc_1",
+            "call_id": "call_custom",
+            "name": "apply_patch",
+            "namespace": "editor",
+            "input": "*** Begin Patch\n{\"not\": \"arguments\"}",
+        })
+    );
+    assert_eq!(
+        items[3],
+        json!({
+            "type": "function_call_output",
+            "call_id": "call_fn",
+            "output": "found",
+            "status": "completed",
+        })
+    );
+    assert_eq!(
+        items[4],
+        json!({
+            "type": "custom_tool_call_output",
+            "call_id": "call_custom",
+            "name": "apply_patch",
+            "output": "applied {\"ok\":true}",
+        })
+    );
+    assert_eq!(items.len(), 5, "nothing else is emitted: {input}");
+}
+
+/// A function call without a namespace keeps upstream's serde form exactly:
+/// no `namespace` member appears.
+#[test]
+fn an_unqualified_function_call_carries_no_namespace_member() {
+    let call = OutputFunctionCall {
+        id: "fc_1".to_string(),
+        arguments: json!({}).into(),
+        call_id: "call_1".to_string(),
+        name: "f".to_string(),
+        namespace: None,
+        status: ToolStatus::Completed,
+    };
+    assert_eq!(
+        serde_json::to_value(&call).expect("serializes"),
+        json!({
+            "id": "fc_1",
+            "arguments": "{}",
+            "call_id": "call_1",
+            "name": "f",
+            "status": "completed",
+        })
+    );
+}
+
+/// A custom tool's output is one string; an image has nowhere to go and is
+/// refused rather than dropped.
+#[test]
+fn a_custom_result_carrying_an_image_is_refused() {
+    let custom = crate::message::CustomToolCall::from_dual_wire(
+        "ctc_1",
+        "call_custom",
+        "draw",
+        None,
+        "circle",
+    );
+    let result = message::UserContent::tool_result_for_custom_call(
+        &custom,
+        vec![message::ToolResultContent::image_base64(
+            "aGVsbG8=",
+            Some(message::ImageMediaType::PNG),
+            None,
+        )],
+    );
+    let history = vec![
+        completion::Message::user("go"),
+        completion::Message::Assistant {
+            id: None,
+            content: vec![completion::AssistantContent::CustomToolCall(custom)],
+        },
+        completion::Message::User {
+            content: vec![result],
+        },
+    ];
+    let request = completion::CompletionRequest {
+        chat_history: history,
+        ..weather_tool_request()
+    };
+    let error = openai_wire("gpt-5.4")
+        .responses_request(request, false)
+        .expect_err("an image in a custom result must be refused");
+    assert!(
+        error.to_string().contains("custom_tool_call_output"),
+        "the refusal names the item that cannot carry it: {error}"
+    );
+}
+
+/// A `custom_tool_call` output item decodes into its typed variant, and the
+/// unary fold yields a typed custom call — never `Unknown`, never a function
+/// call — that round-trips its wire bytes.
+#[test]
+fn a_custom_tool_call_output_item_decodes_and_round_trips() {
+    let wire_item = json!({
+        "type": "custom_tool_call",
+        "id": "ctc_9",
+        "call_id": "call_9",
+        "name": "grammar_tool",
+        "input": "SELECT 1",
+        "status": "completed",
+    });
+    let output: Output = serde_json::from_value(wire_item.clone()).expect("decodes");
+    assert!(matches!(output, Output::CustomToolCall(_)), "{output:?}");
+    assert_eq!(
+        serde_json::to_value(&output).expect("serializes"),
+        wire_item
+    );
+
+    let choice = folded_choice(vec![output]);
+    let [completion::AssistantContent::CustomToolCall(call)] = choice.as_slice() else {
+        panic!("expected one custom call, got {choice:?}");
+    };
+    assert_eq!(call.input, "SELECT 1");
+    assert_eq!(call.namespace, None);
+}
+
+/// The unary fold keeps a function call's namespace.
+#[test]
+fn a_namespaced_function_call_output_item_keeps_its_namespace_unary() {
+    let output: Output = serde_json::from_value(json!({
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "call_1",
+        "name": "search",
+        "namespace": "web",
+        "arguments": "{\"q\":\"rig\"}",
+        "status": "completed",
+    }))
+    .expect("decodes");
+    let choice = folded_choice(vec![output]);
+    let [completion::AssistantContent::ToolCall(call)] = choice.as_slice() else {
+        panic!("expected one function call, got {choice:?}");
+    };
+    assert_eq!(call.function.namespace.as_deref(), Some("web"));
+}
+
+fn arguments(raw: &str) -> FunctionCallArguments {
+    serde_json::from_value(json!(raw)).expect("a string always decodes")
+}
+
+/// The one classification: empty and whitespace strings are a
+/// parameterless invocation, parseable strings carry their value, and a
+/// malformed string keeps its bytes as unparseable.
+#[test]
+fn argument_classification_keeps_empty_and_malformed_meaning() {
+    assert_eq!(
+        arguments("").classify(),
+        ClassifiedArguments::Parsed(json!({}))
+    );
+    assert_eq!(
+        arguments("  ").classify(),
+        ClassifiedArguments::Parsed(json!({}))
+    );
+    assert_eq!(
+        arguments("{\"x\":1}").classify(),
+        ClassifiedArguments::Parsed(json!({"x": 1}))
+    );
+    assert_eq!(
+        arguments("{\"x\":").classify(),
+        ClassifiedArguments::Unparseable("{\"x\":".to_string())
+    );
+    // A non-string payload is a schema defect of the known shape.
+    assert!(serde_json::from_value::<FunctionCallArguments>(json!({"x": 1})).is_err());
+}
+
+/// Two observations of one call agree only when both parse to the same
+/// value; an unparseable observation agrees with nothing and names its side.
+#[test]
+fn reconcile_settles_two_observations_of_one_call() {
+    let left = arguments("{\"x\": 1}");
+    let agreeing = arguments("{\"x\":1}");
+    let disagreeing = arguments("{\"x\":2}");
+    let malformed = arguments("{\"x\":");
+
+    assert_eq!(left.reconcile(&agreeing), Ok(json!({"x": 1})));
+    assert_eq!(arguments("").reconcile(&arguments("{}")), Ok(json!({})));
+    assert_eq!(
+        left.reconcile(&disagreeing),
+        Err(ReconcileArgumentsError::Mismatch)
+    );
+    assert_eq!(
+        malformed.reconcile(&agreeing),
+        Err(ReconcileArgumentsError::Unparseable(UnparseableSide::Left))
+    );
+    assert_eq!(
+        left.reconcile(&malformed),
+        Err(ReconcileArgumentsError::Unparseable(UnparseableSide::Right))
+    );
+    assert_eq!(
+        malformed.reconcile(&arguments("{\"x\":")),
+        Err(ReconcileArgumentsError::Unparseable(UnparseableSide::Both))
+    );
+}
+
+/// The old request-level incomplete-tolerance key is refused by name rather
+/// than ignored as an unknown member, which would silently lose the opt-in.
+#[test]
+fn the_retired_incomplete_tolerance_key_is_refused_by_name() {
+    let request = completion::CompletionRequest {
+        additional_params: Some(json!({ "__rig_tolerate_incomplete": true })),
+        ..weather_tool_request()
+    };
+    let error = openai_wire("gpt-5.4")
+        .responses_request(request, false)
+        .expect_err("the retired key must be refused");
+    assert!(
+        error.to_string().contains("with_streamed_incomplete"),
+        "the refusal names the replacement: {error}"
+    );
+}
+
+/// `client_metadata` is a typed top-level request member: it deserializes
+/// from `additional_params`, reaches the body at the top level, and is
+/// omitted when empty.
+#[test]
+fn client_metadata_serializes_at_the_top_level_and_is_omitted_when_empty() {
+    let params: AdditionalParameters = serde_json::from_value(json!({
+        "prompt_cache_key": "thread-1",
+        "client_metadata": { "session_id": "session-1", "thread_id": "thread-1" },
+    }))
+    .expect("additional parameters decode");
+    assert_eq!(
+        params.client_metadata.get("session_id").map(String::as_str),
+        Some("session-1")
+    );
+    let request = completion::CompletionRequest {
+        additional_params: Some(serde_json::to_value(&params).expect("serializes")),
+        ..weather_tool_request()
+    };
+    let body = serde_json::to_value(wire_request(&openai_wire("gpt-5.4"), request))
+        .expect("request serializes");
+    assert_eq!(
+        body["client_metadata"],
+        json!({ "session_id": "session-1", "thread_id": "thread-1" })
+    );
+    assert_eq!(body["prompt_cache_key"], json!("thread-1"));
+
+    let empty = serde_json::to_value(AdditionalParameters::default()).expect("serializes");
+    assert_eq!(empty.get("client_metadata"), None);
+}
+
+/// A whole reply carrying one function call with unparseable arguments,
+/// under the given item status.
+fn reply_with_malformed_call(status: ToolStatus) -> CompletionResponse {
+    CompletionResponse {
+        id: "resp_1".to_string(),
+        object: ResponseObject::Response,
+        provider_request_id: None,
+        created_at: 0,
+        status: ResponseStatus::Completed,
+        error: None,
+        incomplete_details: None,
+        instructions: None,
+        max_output_tokens: None,
+        model: "gpt-5-mini".to_string(),
+        provider_reasoning: None,
+        reasoning_metadata: None,
+        reasoning_context: None,
+        usage: None,
+        output: vec![Output::FunctionCall(OutputFunctionCall {
+            id: "fc_1".to_string(),
+            arguments: serde_json::from_value(json!("{\"x\":481"))
+                .expect("a malformed argument string decodes"),
+            call_id: "call_1".to_string(),
+            name: "add".to_string(),
+            namespace: None,
+            status,
+        })],
+        tools: Vec::new(),
+        additional_parameters: AdditionalParameters::default(),
+    }
+}
+
+/// The unary half of the asserted-status policy: a call the provider states
+/// `completed` or `in_progress` whose arguments do not parse fails the reply
+/// by name rather than quietly shortening its content.
+#[test]
+fn a_unary_asserted_call_with_unparseable_arguments_is_refused_by_name() {
+    for status in [ToolStatus::Completed, ToolStatus::InProgress] {
+        let error = wire::fold_body("openai", reply_with_malformed_call(status.clone()))
+            .expect_err("an asserted malformed call is a response defect");
+        assert!(
+            matches!(&error, ProviderError::Response(message)
+                if message.starts_with("tool call `add` arrived with malformed JSON input")),
+            "{status:?}: expected the named refusal, got {error:?}"
+        );
+    }
+}
+
+/// A call the provider marks `incomplete` does not assert its arguments, so
+/// the unary reply drops it and still succeeds.
+#[test]
+fn a_unary_unasserted_call_with_unparseable_arguments_is_dropped() {
+    let response = wire::fold_body("openai", reply_with_malformed_call(ToolStatus::Incomplete))
+        .expect("an unasserted malformed call is dropped, not an error");
+    assert!(
+        response.choice.is_empty(),
+        "the dropped call yields no content: {:?}",
+        response.choice
+    );
 }

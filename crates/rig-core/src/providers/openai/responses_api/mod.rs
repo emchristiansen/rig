@@ -21,6 +21,7 @@ use crate::{completion, message};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::ops::Add;
 use std::str::FromStr;
@@ -175,6 +176,13 @@ pub enum InputContent {
     Reasoning(OpenAIReasoning),
     FunctionCall(OutputFunctionCall),
     FunctionCallOutput(ToolResult),
+    /// A custom (grammar) tool call replayed as input: its raw `input` goes
+    /// back verbatim, never as a function call's stringified arguments.
+    CustomToolCall(OutputCustomToolCall),
+    /// The output answering a custom tool call. The provider pairs a
+    /// `custom_tool_call` only with this item, never with a
+    /// `function_call_output`.
+    CustomToolCallOutput(CustomToolResult),
     /// Opaque compaction data for replaying a compacted context. All fields
     /// other than the separately serialized `type` tag are preserved.
     Compaction(Map<String, Value>),
@@ -319,6 +327,36 @@ fn unsupported_document_source(source: DocumentSourceKind) -> EncodeError {
     }
 }
 
+/// A custom (grammar) tool's output, lowered to the single string its wire
+/// item carries.
+///
+/// [`CustomToolResult::output`] is a plain string rather than the
+/// text-or-blocks union a function output accepts, so the rich shapes have
+/// nowhere to go. Text and JSON lower to their own text. An image is refused
+/// rather than dropped: sending an empty output would read to the model as a
+/// successful empty answer.
+fn responses_custom_tool_result_output(
+    content: Vec<message::ToolResultContent>,
+) -> Result<String, MessageError> {
+    let mut output = String::new();
+
+    for content in content {
+        match content {
+            message::ToolResultContent::Text(Text { text, .. }) => output.push_str(&text),
+            message::ToolResultContent::Json { value } => output.push_str(&value.to_string()),
+            message::ToolResultContent::Image(_) => {
+                return Err(MessageError::ConversionError(
+                    "a custom tool result carries text, not an image: the \
+                     custom_tool_call_output wire item has no image member"
+                        .into(),
+                ));
+            }
+        }
+    }
+
+    Ok(output)
+}
+
 fn responses_tool_result_output(
     content: Vec<message::ToolResultContent>,
 ) -> Result<ToolResultOutput, MessageError> {
@@ -402,15 +440,33 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                         crate::message::UserContent::ToolResult(tool_result) => {
                             // Prefer provider identity so results match replayed calls.
                             let call_id = tool_result.wire_call_id().into_owned();
-                            let output = responses_tool_result_output(tool_result.content)?;
-                            items.push(InputItem {
-                                role: None,
-                                input: InputContent::FunctionCallOutput(ToolResult {
-                                    call_id,
-                                    output,
-                                    status: ToolStatus::Completed,
-                                }),
-                            });
+                            // The kind the result says it answers selects the
+                            // wire item, exhaustively: the provider pairs a
+                            // `custom_tool_call` only with a
+                            // `custom_tool_call_output`, so choosing by
+                            // anything else leaves the turn unpaired. The two
+                            // arms build different payload types, so neither
+                            // can be handed the other's output.
+                            let input = match tool_result.answers {
+                                crate::message::AnsweredToolCall::Function => {
+                                    InputContent::FunctionCallOutput(ToolResult {
+                                        call_id,
+                                        output: responses_tool_result_output(tool_result.content)?,
+                                        status: ToolStatus::Completed,
+                                    })
+                                }
+                                crate::message::AnsweredToolCall::Custom => {
+                                    InputContent::CustomToolCallOutput(CustomToolResult {
+                                        id: None,
+                                        call_id,
+                                        name: Some(tool_result.name),
+                                        output: responses_custom_tool_result_output(
+                                            tool_result.content,
+                                        )?,
+                                    })
+                                }
+                            };
+                            items.push(InputItem { role: None, input });
                         }
                         crate::message::UserContent::Document(Document {
                             data: DocumentSourceKind::FileId(file_id),
@@ -542,7 +598,42 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                                     call_id,
                                     id: item_id,
                                     name: function.name,
+                                    // The Responses wire represents a namespace
+                                    // on the call item, so it travels verbatim:
+                                    // dropping it would call a different tool.
+                                    namespace: function.namespace,
                                     status: ToolStatus::Completed,
+                                }),
+                            });
+                        }
+                        crate::message::AssistantContent::CustomToolCall(
+                            crate::message::CustomToolCall {
+                                id,
+                                provider,
+                                name,
+                                namespace,
+                                input,
+                            },
+                        ) => {
+                            let (call_id, item_id) = match provider {
+                                Some(provider) => {
+                                    let item_id = provider.item_id.clone().unwrap_or_default();
+                                    (provider.call_id, item_id)
+                                }
+                                None => (id.wire_hint().into_owned(), String::new()),
+                            };
+                            // A custom call replays as `custom_tool_call`
+                            // with its raw input byte for byte, never as a
+                            // function call whose arguments are that text.
+                            other_items.push(InputItem {
+                                role: None,
+                                input: InputContent::CustomToolCall(OutputCustomToolCall {
+                                    id: item_id,
+                                    call_id,
+                                    name,
+                                    namespace,
+                                    input,
+                                    status: None,
                                 }),
                             });
                         }
@@ -1123,6 +1214,11 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
     }
 }
 
+/// The request-level spelling of the incomplete-tolerance opt-in before it
+/// became a decoder policy. Recognized only so a request still carrying it is
+/// refused rather than silently read as the strict default.
+const LEGACY_TOLERATE_INCOMPLETE_KEY: &str = "__rig_tolerate_incomplete";
+
 /// Parameters for converting a [`crate::completion::CompletionRequest`] into a
 /// Responses API [`CompletionRequest`] with a non-default configuration.
 pub struct ResponsesRequestParams {
@@ -1156,7 +1252,11 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
                         items.iter_mut().filter_map(|item| match &mut item.input {
                             InputContent::FunctionCall(call) => Some(&mut call.call_id),
                             InputContent::FunctionCallOutput(result) => Some(&mut result.call_id),
-                            _ => None,
+                            InputContent::CustomToolCall(call) => Some(&mut call.call_id),
+                            InputContent::CustomToolCallOutput(result) => Some(&mut result.call_id),
+                            InputContent::Message(_)
+                            | InputContent::Reasoning(_)
+                            | InputContent::Compaction(_) => None,
                         }),
                     )
                     .map_err(EncodeError::request)?;
@@ -1223,6 +1323,18 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
 
         let mut additional_tools = Vec::new();
         if let Some(additional_params_map) = additional_params_payload.as_object_mut() {
+            // The incomplete-tolerance opt-in is a decoder policy
+            // ([`wire::Responses::with_streamed_incomplete`]), not a request
+            // parameter. A request still carrying the old control key would
+            // otherwise have it ignored as an unknown member and silently
+            // lose the opt-in, so it is refused by name instead.
+            if additional_params_map.contains_key(LEGACY_TOLERATE_INCOMPLETE_KEY) {
+                return Err(EncodeError::request(format!(
+                    "`additional_params[\"{LEGACY_TOLERATE_INCOMPLETE_KEY}\"]` is no longer read: \
+                     select the incomplete-terminal policy on the Responses wire with \
+                     `Responses::with_streamed_incomplete`"
+                )));
+            }
             if let Some(raw_tools) = additional_params_map.remove("tools") {
                 additional_tools = serde_json::from_value::<Vec<ResponsesToolDefinition>>(
                     raw_tools,
@@ -1530,6 +1642,11 @@ pub struct AdditionalParameters {
     /// Whether or not to store the response for later retrieval by API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
+    /// Provider-specific client metadata, serialized at the top level of the
+    /// request body (the Codex backend reads its `session_id`/`thread_id`
+    /// cache identity here). Empty by default and omitted when empty.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub client_metadata: BTreeMap<String, String>,
 }
 
 fn deserialize_metadata<'de, D>(
@@ -1823,6 +1940,9 @@ pub enum Include {
 pub enum Output {
     Message(OutputMessage),
     FunctionCall(OutputFunctionCall),
+    /// A custom (grammar) tool call, whose `input` is verbatim text rather
+    /// than JSON arguments.
+    CustomToolCall(OutputCustomToolCall),
     Reasoning {
         id: String,
         summary: Vec<ReasoningSummary>,
@@ -1897,6 +2017,7 @@ impl Serialize for Output {
         let value = match self {
             Output::Message(message) => tagged_output_object("message", message),
             Output::FunctionCall(call) => tagged_output_object("function_call", call),
+            Output::CustomToolCall(call) => tagged_output_object("custom_tool_call", call),
             Output::Reasoning {
                 id,
                 summary,
@@ -1954,6 +2075,11 @@ impl<'de> Deserialize<'de> for Output {
             "function_call" => serde_json::from_value(value)
                 .map(Output::FunctionCall)
                 .map_err(serde::de::Error::custom),
+            // Must precede the catch-all: without it a custom call decodes as
+            // `Unknown` and loses its typed identity silently.
+            "custom_tool_call" => serde_json::from_value(value)
+                .map(Output::CustomToolCall)
+                .map_err(serde::de::Error::custom),
             "reasoning" => serde_json::from_value::<ReasoningFields>(value)
                 .map(Output::from)
                 .map_err(serde::de::Error::custom),
@@ -1982,14 +2108,109 @@ pub struct OutputFunctionCall {
     pub arguments: FunctionCallArguments,
     pub call_id: String,
     pub name: String,
+    /// The namespace qualifying this callable, verbatim; absent for the
+    /// default one.
+    ///
+    /// Present in both directions because this struct is shared by
+    /// [`Output::FunctionCall`] and [`InputContent::FunctionCall`]; dropping
+    /// it on either side would strip the qualifier before any consumer saw it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     pub status: ToolStatus,
+}
+
+/// An OpenAI Responses custom (grammar) tool call.
+///
+/// Distinct from [`OutputFunctionCall`] because its payload is `input`:
+/// verbatim text that is not JSON arguments, even when it happens to parse.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct OutputCustomToolCall {
+    /// Provider-assigned output-item id, omitted when absent.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// The correlator its [`CustomToolResult`] echoes back.
+    pub call_id: String,
+    /// The custom tool's name.
+    pub name: String,
+    /// The namespace qualifying this callable, verbatim; absent for the
+    /// default one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// The model's verbatim input, preserved byte for byte.
+    pub input: String,
+    /// The item status, when the provider stated one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+}
+
+/// The output of a custom (grammar) tool call, sent back as input.
+///
+/// Separate from [`ToolResult`] because the custom output item carries a plain
+/// string, where a function output carries text or rich blocks.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct CustomToolResult {
+    /// The output item's own id, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The answered call's correlator.
+    pub call_id: String,
+    /// The executed tool's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The tool's output text.
+    pub output: String,
 }
 
 /// Raw Responses function-call arguments, parsed as JSON at consumption time.
 /// Truncated arguments remain valid wire data; parsing them can fail without
 /// discarding the enclosing response or its terminal status.
+///
+/// One type carries the arguments of **both** events that state them — the
+/// `response.function_call_arguments.done` event
+/// ([`streaming::ArgsTextChunk`]) and the `response.output_item.done` item —
+/// and [`Self::classify`] is the one parsed/unparseable classification both
+/// are read through, so the two observations of one call cannot drift apart
+/// by being decoded differently. Deciding whether they agree is
+/// [`Self::reconcile`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct FunctionCallArguments(String);
+
+/// What an argument string is, under the one classification every reader of
+/// [`FunctionCallArguments`] shares.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClassifiedArguments {
+    /// The string parsed. An empty or whitespace-only string is a
+    /// parameterless invocation and classifies as `{}`.
+    Parsed(serde_json::Value),
+    /// A non-empty string that does not parse. The bytes are retained as the
+    /// provider sent them; nothing is substituted for them.
+    Unparseable(String),
+}
+
+/// Which side of a [`FunctionCallArguments::reconcile`] did not parse: `Left`
+/// is the receiver, `Right` the argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnparseableSide {
+    Left,
+    Right,
+    Both,
+}
+
+/// Why two observations of one call's arguments could not be reconciled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ReconcileArgumentsError {
+    /// An unparseable observation establishes no arguments, so it agrees
+    /// with nothing, including another unparseable one.
+    #[error(
+        "function-call arguments could not be reconciled: the {0:?} observation does not parse"
+    )]
+    Unparseable(UnparseableSide),
+    /// Both observations parsed, to different values.
+    #[error(
+        "function-call arguments could not be reconciled: the two observations parse to different values"
+    )]
+    Mismatch,
+}
 
 impl FunctionCallArguments {
     /// Parse the raw wire string into JSON arguments. An empty string is a
@@ -2001,6 +2222,45 @@ impl FunctionCallArguments {
     /// The raw wire string, exactly as the provider sent it.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The one parsed/unparseable classification of these arguments, decided
+    /// by the same [`json_utils::parse_tool_arguments`] every consumer of the
+    /// wire string uses.
+    pub fn classify(&self) -> ClassifiedArguments {
+        match self.parse() {
+            Ok(value) => ClassifiedArguments::Parsed(value),
+            Err(_) => ClassifiedArguments::Unparseable(self.0.clone()),
+        }
+    }
+
+    /// The agreed arguments of two observations of one call (for example the
+    /// `function_call_arguments.done` event and the `output_item.done` item).
+    ///
+    /// An unparseable side refuses, naming which side it was; two parsed
+    /// values that differ refuse as a mismatch. Agreement is structural
+    /// equality of the parsed values, so spelling differences the parse
+    /// erases (whitespace, key order) agree, and an empty string agrees with
+    /// `{}` because both are a parameterless invocation.
+    pub fn reconcile(&self, other: &Self) -> Result<serde_json::Value, ReconcileArgumentsError> {
+        match (self.classify(), other.classify()) {
+            (ClassifiedArguments::Unparseable(_), ClassifiedArguments::Unparseable(_)) => {
+                Err(ReconcileArgumentsError::Unparseable(UnparseableSide::Both))
+            }
+            (ClassifiedArguments::Unparseable(_), ClassifiedArguments::Parsed(_)) => {
+                Err(ReconcileArgumentsError::Unparseable(UnparseableSide::Left))
+            }
+            (ClassifiedArguments::Parsed(_), ClassifiedArguments::Unparseable(_)) => {
+                Err(ReconcileArgumentsError::Unparseable(UnparseableSide::Right))
+            }
+            (ClassifiedArguments::Parsed(left), ClassifiedArguments::Parsed(right)) => {
+                if left == right {
+                    Ok(left)
+                } else {
+                    Err(ReconcileArgumentsError::Mismatch)
+                }
+            }
+        }
     }
 }
 
