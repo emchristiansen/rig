@@ -563,8 +563,8 @@ fn chatgpt_identity_setters_reach_the_request() {
 /// websocket handshake cannot change what an HTTP request carries.
 #[test]
 fn chatgpt_http_headers_are_exactly_the_credential_identity_session_and_account() {
-    let provider = OpenAI::with_key(&crate::providers::chatgpt::DIALECT, "tok")
-        .with_account_id("acct-1");
+    let provider =
+        OpenAI::with_key(&crate::providers::chatgpt::DIALECT, "tok").with_account_id("acct-1");
     let sent = |provider: &OpenAI| {
         provider
             .headers(http::Request::get("https://example.invalid/"))
@@ -596,4 +596,20 @@ fn chatgpt_http_headers_are_exactly_the_credential_identity_session_and_account(
 
     // The session id is fresh for every request.
     assert_ne!(sent(&provider)["session_id"], first["session_id"]);
+}
+
+/// A configuration without a caller identity stamps none: `identify` leaves
+/// the request without `originator` or `user-agent`.
+#[test]
+fn a_configuration_without_a_caller_identity_stamps_none() {
+    let provider = OpenAI::new("sk-test");
+    assert!(
+        provider.identity.is_none(),
+        "the OpenAI dialect asks for none"
+    );
+    let request = provider
+        .identify(http::Request::get("https://example.invalid/"))
+        .body(())
+        .expect("builds");
+    assert!(request.headers().is_empty(), "got {:?}", request.headers());
 }

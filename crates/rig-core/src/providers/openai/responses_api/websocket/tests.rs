@@ -307,7 +307,10 @@ fn an_error_event_with_a_null_error_decodes_as_an_empty_payload() {
     };
     assert_eq!(event.status, Some(429));
     assert!(event.error.is_empty());
-    assert!(event.extra.is_empty(), "the null error is not kept as an extra");
+    assert!(
+        event.extra.is_empty(),
+        "the null error is not kept as an extra"
+    );
 }
 
 /// The flattened `extra` cannot swallow the tag: an event whose `type` is not

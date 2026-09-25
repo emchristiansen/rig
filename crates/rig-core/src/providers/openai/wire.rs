@@ -1163,14 +1163,23 @@ impl OpenAI {
         }
     }
 
+    /// Stamp the configured caller identity, `originator` and `user-agent`,
+    /// when this configuration has one; otherwise leave the request as is.
+    ///
+    /// The one source of caller identity for every transport: the HTTP
+    /// request headers and the Codex websocket handshake both stamp it here.
+    pub(crate) fn identify(&self, builder: http::request::Builder) -> http::request::Builder {
+        match &self.identity {
+            Some(identity) => builder
+                .header("originator", &identity.originator)
+                .header(http::header::USER_AGENT, &identity.user_agent),
+            None => builder,
+        }
+    }
+
     /// Apply authentication, configured identity, account, and per-request session headers.
     pub(crate) fn headers(&self, builder: http::request::Builder) -> http::request::Builder {
-        let mut builder = self.authenticate(builder);
-        if let Some(identity) = &self.identity {
-            builder = builder
-                .header("originator", &identity.originator)
-                .header(http::header::USER_AGENT, &identity.user_agent);
-        }
+        let mut builder = self.identify(self.authenticate(builder));
         if self
             .dialect
             .quirks

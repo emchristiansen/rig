@@ -146,14 +146,40 @@ fn refusal(error: &ProviderError) -> IncrementalSendRefused {
 
 // --- identity ---------------------------------------------------------------
 
-/// The handshake is exactly the Codex set: the wire's credential, the account,
-/// the dashed identity headers, the correlation header and the beta opt-in —
-/// nothing else (the backend adds the websocket handshake headers itself).
+/// The caller identity a wire's HTTP requests carry: its `originator` and
+/// `user-agent` header values.
+fn http_caller_identity(wire: &Responses) -> (String, String) {
+    let request = wire
+        .provider
+        .headers(http::Request::get("https://example.invalid/"))
+        .body(())
+        .expect("builds");
+    let value = |name: &str| {
+        request.headers()[name]
+            .to_str()
+            .expect("ascii header")
+            .to_owned()
+    };
+    (value("originator"), value("user-agent"))
+}
+
+/// The handshake is exactly the Codex set: the wire's credential, its caller
+/// identity (the same `originator` and `user-agent` its HTTP requests carry),
+/// the account, the dashed identity headers, the correlation header and the
+/// beta opt-in — nothing else (the backend adds the websocket handshake
+/// headers itself). Strict, so a header added to the HTTP set later cannot
+/// reach the handshake unnoticed.
 #[test]
 fn the_handshake_carries_exactly_the_codex_identity_headers() {
     let identity = CodexIdentity::generate();
+    let wire = codex_wire();
+    let (originator, user_agent) = http_caller_identity(&wire);
+    assert_eq!(
+        originator, "rig",
+        "the ChatGPT dialect's default originator"
+    );
     let request = identity
-        .handshake_request(&codex_wire())
+        .handshake_request(&wire)
         .expect("handshake request should build");
 
     assert_eq!(request.method(), http::Method::GET);
@@ -176,6 +202,8 @@ fn the_handshake_carries_exactly_the_codex_identity_headers() {
     let mut expected = vec![
         ("authorization".to_owned(), format!("Bearer {ACCESS_TOKEN}")),
         ("chatgpt-account-id".to_owned(), ACCOUNT_ID.to_owned()),
+        ("originator".to_owned(), originator),
+        ("user-agent".to_owned(), user_agent),
         (
             "openai-beta".to_owned(),
             "responses_websockets=2026-02-06".to_owned(),
@@ -189,6 +217,26 @@ fn the_handshake_carries_exactly_the_codex_identity_headers() {
     ];
     expected.sort();
     assert_eq!(headers, expected);
+}
+
+/// An originator set on the wire reaches the handshake exactly as it reaches
+/// the wire's HTTP requests, with the default user agent naming it.
+#[test]
+fn the_handshake_carries_the_wire_s_configured_originator() {
+    let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_originator("muninn")
+        .responses(chatgpt::GPT_5_3_CODEX);
+    let (originator, user_agent) = http_caller_identity(&wire);
+    assert_eq!(originator, "muninn");
+    assert!(
+        user_agent.ends_with("; muninn)"),
+        "the default user agent names the originator, got {user_agent}"
+    );
+    let request = CodexIdentity::generate()
+        .handshake_request(&wire)
+        .expect("handshake request should build");
+    assert_eq!(request.headers()["originator"], originator.as_str());
+    assert_eq!(request.headers()["user-agent"], user_agent.as_str());
 }
 
 #[test]

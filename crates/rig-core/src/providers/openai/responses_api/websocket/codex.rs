@@ -135,8 +135,12 @@ impl CodexIdentity {
 
     /// The handshake request that opens a Codex websocket carrying this
     /// identity: `GET {base_url}/responses` on the websocket scheme, with the
-    /// wire's credential, its account id when set, the dashed identity
-    /// headers, `x-client-request-id`, and the `OpenAI-Beta` opt-in.
+    /// wire's credential, its caller identity (`originator` and `user-agent`,
+    /// exactly as its HTTP requests carry them) when it has one, its account
+    /// id when set, the dashed identity headers, `x-client-request-id`, and
+    /// the `OpenAI-Beta` opt-in. Nothing else: the per-request `session_id`
+    /// HTTP header is not sent, because the dashed pair is the session
+    /// identity here.
     ///
     /// Public so a caller that opens its own connection can open it with the
     /// same identity the session will stamp on every frame.
@@ -147,10 +151,12 @@ impl CodexIdentity {
         let url = crate::ws_client::websocket_url(&wire.provider.base_url, WEBSOCKET_PATH)
             .map_err(EncodeError::request)?;
 
-        let mut builder = wire.provider.authenticate(
-            http_client::Request::builder()
-                .method(http::Method::GET)
-                .uri(url),
+        let mut builder = wire.provider.identify(
+            wire.provider.authenticate(
+                http_client::Request::builder()
+                    .method(http::Method::GET)
+                    .uri(url),
+            ),
         );
         if let Some(account_id) = &wire.provider.account_id {
             builder = builder.header(CHATGPT_ACCOUNT_ID_HEADER, account_id);

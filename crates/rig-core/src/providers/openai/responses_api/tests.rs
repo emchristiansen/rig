@@ -2385,14 +2385,15 @@ fn mocked_second_turn_request_omits_unreplayable_reasoning() {
 /// required, keep the side that has one.
 #[test]
 fn a_usage_sum_with_an_unreported_cached_count_leaves_it_unknown() {
-    let usage = |input_tokens_details: Option<InputTokensDetails>,
-                 output_tokens_details: Option<OutputTokensDetails>| ResponsesUsage {
-        input_tokens: 10,
-        input_tokens_details,
-        output_tokens: 20,
-        output_tokens_details,
-        total_tokens: 30,
-    };
+    let usage =
+        |input_tokens_details: Option<InputTokensDetails>,
+         output_tokens_details: Option<OutputTokensDetails>| ResponsesUsage {
+            input_tokens: 10,
+            input_tokens_details,
+            output_tokens: 20,
+            output_tokens_details,
+            total_tokens: 30,
+        };
     let reported = || {
         usage(
             Some(InputTokensDetails {

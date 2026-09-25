@@ -2616,9 +2616,7 @@ impl OutputText {
                     // Reserved keys would duplicate the block's text or tag.
                     // Phase belongs on the message, not the content block.
                     .filter(|(key, _)| {
-                        key != "text"
-                            && key != "type"
-                            && key != OPENAI_RESPONSES_PHASE_KEY
+                        key != "text" && key != "type" && key != OPENAI_RESPONSES_PHASE_KEY
                     })
                     .collect()
             })
@@ -2763,7 +2761,10 @@ pub(crate) fn stamp_phase(text: &mut Text, phase: Option<&str>) {
         OPENAI_RESPONSES_PHASE_KEY.to_string(),
         Value::String(phase.to_string()),
     );
-    entries.insert(OPENAI_RESPONSES_EXTRAS_KEY.to_string(), Value::Object(extras));
+    entries.insert(
+        OPENAI_RESPONSES_EXTRAS_KEY.to_string(),
+        Value::Object(extras),
+    );
     text.additional_params = crate::message::AdditionalParams::new(entries);
 }
 
