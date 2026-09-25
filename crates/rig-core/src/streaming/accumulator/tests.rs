@@ -1746,6 +1746,16 @@ fn ordered_slots_sort_around_fixed_unordered_slots() {
 }
 
 #[test]
+fn equal_source_coordinates_keep_stable_arrival_order() {
+    let mut accumulator = BlockAccumulator::new();
+    let coordinate = SourceOrder::new(1, 0);
+    ordered_text(&mut accumulator, "first", coordinate, "first");
+    ordered_text(&mut accumulator, "second", coordinate, "second");
+
+    assert_eq!(part_labels(&accumulator.finish()), ["first", "second"]);
+}
+
+#[test]
 fn unfinished_ordered_reservations_are_absent() {
     let mut accumulator = BlockAccumulator::new();
     accumulator

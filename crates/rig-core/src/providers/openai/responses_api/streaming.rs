@@ -328,9 +328,15 @@ pub struct RawChoiceAccumulator {
     /// Reasoning assembly keys fixed by the first event in each output slot.
     /// Later wire IDs do not change an established key.
     reasoning_slots: std::collections::HashMap<u64, crate::streaming::BlockId>,
-    /// Tool-call assembly keys fixed per output slot, sharing a mint counter
-    /// with reasoning so id-less blocks cannot collide.
+    /// Anonymous reasoning keys use their own namespace, distinct from
+    /// anonymous tools and output-index-keyed provider items.
+    reasoning_ids: crate::streaming::SyntheticIds,
+    /// Tool-call assembly keys fixed per output slot.
     tool_slots: crate::providers::internal::tool_call_bridge::ToolCallBridge<u64>,
+    /// Output slots whose opaque provider item was already published by an
+    /// `output_item.done` event or whole-response replay. The terminal body
+    /// fills only missing opaque slots.
+    finished_provider_items: std::collections::HashSet<u64>,
     /// The `call_…` correlator each open slot announced on
     /// `output_item.added`, kept beside the bridge so a slot closed by the
     /// terminal drain (its `output_item.done` frame was lost) still
@@ -395,10 +401,14 @@ impl RawChoiceAccumulator {
             tool_calls: Vec::new(),
             saw_terminal: false,
             reasoning_slots: std::collections::HashMap::new(),
+            reasoning_ids: crate::streaming::SyntheticIds::new(
+                crate::streaming::MintKind::Reasoning,
+            ),
             tool_slots:
                 crate::providers::internal::tool_call_bridge::ToolCallBridge::with_minted_namespace(
-                    crate::streaming::SyntheticIds::output(),
+                    crate::streaming::SyntheticIds::tool(),
                 ),
+            finished_provider_items: std::collections::HashSet::new(),
             pending_call_ids: std::collections::HashMap::new(),
             pending_namespaces: std::collections::HashMap::new(),
             argument_fragments: std::collections::HashMap::new(),
@@ -556,8 +566,28 @@ impl RawChoiceAccumulator {
         }
     }
 
+    /// Publish opaque output items that appeared only in the terminal body.
+    /// Known items retain their existing reconciliation and tool-flush paths.
+    fn merge_terminal_provider_items(
+        &mut self,
+        response: &CompletionResponse,
+        out: &mut AdapterOutput,
+    ) {
+        for (output_index, item) in response.output.iter().cloned().enumerate() {
+            let output_index = output_index as u64;
+            if self.finished_provider_items.contains(&output_index)
+                || !matches!(&item, Output::Unknown(_) | Output::Compaction(_))
+            {
+                continue;
+            }
+            out.in_source_order(crate::streaming::SourceOrder::new(output_index, 0), |out| {
+                self.push_output_item_done(item, output_index, out, true)
+            });
+        }
+    }
+
     /// Return the slot's established reasoning key, creating it from `item_id`
-    /// or the shared mint counter only on first use.
+    /// or the reasoning mint namespace only on first use.
     fn reasoning_slot_key(
         &mut self,
         output_index: u64,
@@ -566,9 +596,8 @@ impl RawChoiceAccumulator {
         if let Some(key) = self.reasoning_slots.get(&output_index) {
             return key.clone();
         }
-        // A shared counter prevents collisions between reasoning and tool assemblies.
-        let key = item_id.map_or_else(
-            || self.tool_slots.minted_ids().mint(),
+        let key = item_id.filter(|id| !id.is_empty()).map_or_else(
+            || self.reasoning_ids.mint(),
             crate::streaming::BlockId::wire,
         );
         self.reasoning_slots.insert(output_index, key.clone());
@@ -723,6 +752,7 @@ impl RawChoiceAccumulator {
                 // it in the choice, and one that streamed the text first
                 // does not state it twice.
                 self.merge_terminal_body_text(&response, out);
+                self.merge_terminal_provider_items(&response, out);
                 // A terminal can close calls missing their done event; incomplete arguments drop.
                 self.argument_fragments.clear();
                 for (index, slot) in self.tool_slots.drain_ordered_indexed() {
@@ -922,9 +952,9 @@ impl RawChoiceAccumulator {
                 let key = match slot {
                     Some(key) => key,
                     // No slot and no id (an envelope-less done item with
-                    // nothing before it): mint from the bridge's ONE
-                    // counter, as a delta would have.
-                    None if id.is_empty() => self.tool_slots.minted_ids().mint(),
+                    // nothing before it): mint from the reasoning namespace,
+                    // as a delta would have.
+                    None if id.is_empty() => self.reasoning_ids.mint(),
                     None => BlockId::wire(id),
                 };
                 let reasoning = reasoning_from_done_item(
@@ -960,6 +990,7 @@ impl RawChoiceAccumulator {
             // the raw item to stream consumers, mirroring how the non-streaming
             // decode preserves it on `CompletionResponse.output`.
             Output::Unknown(value) => {
+                self.finished_provider_items.insert(output_index);
                 let key = provider_item_key(&value, output_index);
                 out.provider_item(key, opaque_item(value));
             }
@@ -972,6 +1003,7 @@ impl RawChoiceAccumulator {
                     serde_json::Value::String("compaction".to_string()),
                 );
                 let value = serde_json::Value::Object(map);
+                self.finished_provider_items.insert(output_index);
                 let key = provider_item_key(&value, output_index);
                 out.provider_item(key, opaque_item(value));
             }
@@ -999,9 +1031,9 @@ impl RawChoiceAccumulator {
                 .as_deref()
                 .filter(|reasoning| !reasoning.is_empty())
         {
-            // Minted from the bridge's ONE counter, as a delta would be:
-            // this block has no wire id to key it on.
-            let key = self.tool_slots.minted_ids().mint();
+            // This block has no wire id; use the same reasoning namespace as
+            // anonymous reasoning item deltas and restatements.
+            let key = self.reasoning_ids.mint();
             out.reasoning_block(
                 key,
                 None,
