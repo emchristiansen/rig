@@ -25,8 +25,10 @@ use crate::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 
 use super::Secret;
 
-/// What a [`CredentialSource`] reports when it cannot supply a credential.
-pub type CredentialSourceError = Box<dyn std::error::Error + Send + Sync + 'static>;
+/// What a [`CredentialSource`] reports when it cannot supply a credential:
+/// the crate's boxed error, which is `Send + Sync` except on WASM, so a
+/// browser-local source can return a browser-local error whole.
+pub type CredentialSourceError = crate::error::BoxError;
 
 /// The credential a request is sent with: the token, and the account it
 /// belongs to when the gateway asks which (`ChatGPT-Account-Id`).

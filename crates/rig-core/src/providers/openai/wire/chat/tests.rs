@@ -1287,3 +1287,71 @@ async fn a_failing_credential_source_refuses_a_stream_as_it_refuses_a_unary_requ
     };
     assert_eq!(streamed.to_string(), unary.to_string());
 }
+
+/// A credential a source stamps at send time gets exactly the treatment a
+/// statically configured key gets in observation: the same scenario, once
+/// with each, where the provider's error echoes the credential back, records
+/// the same error envelope, and neither credential appears in the trace.
+#[tokio::test]
+async fn a_source_credential_is_kept_out_of_observed_diagnostics_as_a_static_key_is() {
+    let mut envelopes = Vec::new();
+    let cases = [
+        (
+            "static",
+            OpenAI::new("static-secret-key"),
+            "static-secret-key",
+        ),
+        (
+            "source",
+            OpenAI::new("static-key").with_credential_source(RotatingSource::holding(
+                crate::wire::Credential::new("source-secret-token"),
+            )),
+            "source-secret-token",
+        ),
+    ];
+    for (label, provider, token) in cases {
+        let http = RecordingHttpClient::new(CHAT_REPLY);
+        http.set_response(crate::test_utils::MockHttpResponse::ErrorResponse(
+            http::StatusCode::UNAUTHORIZED,
+            Bytes::from(format!(
+                r#"{{"error":{{"message":"invalid token {token}","type":"invalid_request_error"}}}}"#
+            )),
+        ));
+        let log = std::sync::Arc::new(crate::observe::ObservationLog::with_capacity(64));
+        let context = crate::observe::AdapterContext::new(
+            log.clone(),
+            crate::observe::Subject::default(),
+            "credential-test".to_owned(),
+        );
+        let _ = crate::driver::call(
+            &Chat::new(provider, "gpt-4o"),
+            &http,
+            prompt("one"),
+            Some(context),
+        )
+        .await;
+
+        let bearer = format!("Bearer {token}");
+        assert_eq!(
+            header(&http.requests()[0].headers, "authorization"),
+            Some(bearer.as_str()),
+            "{label}: the credential reached the transport"
+        );
+        let trace = format!("{:?}", log.trace());
+        assert!(!trace.contains(token), "{label}: {trace}");
+        let envelope = trace
+            .find("ErrorEnvelope")
+            .map(|start| {
+                let rest = &trace[start..];
+                rest[..rest.find('}').map_or(rest.len(), |end| end + 1)].to_owned()
+            })
+            .unwrap_or_else(|| {
+                panic!("{label}: the provider's error envelope was observed: {trace}")
+            });
+        envelopes.push(envelope);
+    }
+    assert_eq!(
+        envelopes[0], envelopes[1],
+        "a source credential and a static key are observed alike"
+    );
+}

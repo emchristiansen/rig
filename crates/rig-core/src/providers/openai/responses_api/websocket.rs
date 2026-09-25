@@ -607,7 +607,8 @@ impl ResponsesWebSocketSession {
     where
         W: WebSocketClientExt,
     {
-        let request = websocket_request(&wire)?;
+        let mut request = websocket_request(&wire)?;
+        authorize_handshake(&wire, &mut request).await?;
         let socket = connect(backend, request, connect_timeout).await?;
         Ok(Self::from_connection(wire, socket, event_timeout))
     }
@@ -1469,6 +1470,22 @@ fn websocket_request(wire: &Responses) -> Result<http_client::Request<NoBody>, E
     request.body(NoBody).map_err(|error| {
         EncodeError::request(format!("Failed to build OpenAI websocket request: {error}"))
     })
+}
+
+/// Stamp the wire's send-time credential onto a handshake about to be sent,
+/// when the wire reads one from a credential source. The one authorization
+/// step of every managed websocket connect, plain and Codex alike: the source
+/// is read once, before anything reaches the backend, a failing source
+/// refuses the connect, and the open connection keeps the credential it was
+/// opened with, so a rotation takes effect at the next connect.
+pub(super) async fn authorize_handshake(
+    wire: &Responses,
+    request: &mut http_client::Request<NoBody>,
+) -> Result<(), ProviderError> {
+    if let Some(authorizer) = wire.provider.authorizer() {
+        authorizer.authorize(request.headers_mut()).await?;
+    }
+    Ok(())
 }
 
 /// Open a connection for `request` over `backend`, mapping a rejected upgrade

@@ -202,12 +202,7 @@ impl CodexWebSocketSessionBuilder {
         W: WebSocketClientExt,
     {
         let mut request = self.identity.handshake_request(&self.wire)?;
-        // A credential source is read once, here: the open connection keeps
-        // the credential it was opened with, and a rotation takes effect at
-        // the next session's connect.
-        if let Some(authorizer) = self.wire.provider.authorizer() {
-            authorizer.authorize(request.headers_mut()).await?;
-        }
+        super::authorize_handshake(&self.wire, &mut request).await?;
         let connection = connect(backend, request, self.connect_timeout).await?;
         Ok(CodexWebSocketSession {
             session: ResponsesWebSocketSession::from_connection(

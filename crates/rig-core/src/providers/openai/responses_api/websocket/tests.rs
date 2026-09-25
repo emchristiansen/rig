@@ -1168,3 +1168,111 @@ async fn a_declared_tool_reaches_the_response_create_frame_as_written() {
         "every other declared member is as written"
     );
 }
+
+// --- credential source on the ordinary Responses websocket -----------------
+
+/// A websocket backend recording each handshake it is asked to open.
+#[derive(Clone, Default)]
+struct HandshakeRecorder {
+    handshakes: std::sync::Arc<std::sync::Mutex<Vec<HeaderMap>>>,
+}
+
+impl crate::ws_client::WebSocketClientExt for HandshakeRecorder {
+    fn connect(
+        &self,
+        request: crate::http_client::Request<crate::http_client::NoBody>,
+        _options: crate::ws_client::ConnectOptions,
+    ) -> impl std::future::Future<
+        Output = crate::http_client::Result<crate::ws_client::BoxedWebSocketConnection>,
+    > + crate::wasm_compat::WasmCompatSend {
+        self.handshakes
+            .lock()
+            .expect("unpoisoned")
+            .push(request.headers().clone());
+        let connection = Script::new().connection();
+        async move { Ok(connection) }
+    }
+}
+
+/// A source counting its reads, supplying `source-token-<n>` and no account,
+/// or failing when `fails`.
+#[derive(Clone, Default)]
+struct CountingSource {
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fails: bool,
+}
+
+impl crate::wire::CredentialSource for CountingSource {
+    fn current(
+        &self,
+    ) -> crate::wasm_compat::WasmBoxedFuture<
+        '_,
+        Result<crate::wire::Credential, crate::wire::CredentialSourceError>,
+    > {
+        let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let fails = self.fails;
+        Box::pin(async move {
+            if fails {
+                Err("the token owner is offline".into())
+            } else {
+                Ok(crate::wire::Credential::new(format!("source-token-{read}")))
+            }
+        })
+    }
+}
+
+fn wire_with_source(source: CountingSource) -> Responses {
+    OpenAI::new("static-key")
+        .with_account_id("static-account")
+        .with_credential_source(source)
+        .responses("gpt-5.4")
+}
+
+/// The ordinary Responses websocket reads the source once per connect and
+/// opens with what it supplied, in place of the static key and account.
+#[tokio::test]
+async fn an_ordinary_websocket_connect_reads_the_credential_source_once() {
+    let source = CountingSource::default();
+    let backend = HandshakeRecorder::default();
+    for _ in 0..2 {
+        ResponsesWebSocketSessionBuilder::new(wire_with_source(source.clone()))
+            .connect_with(&backend)
+            .await
+            .expect("the scripted connection opens");
+    }
+
+    assert_eq!(source.reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let handshakes = backend.handshakes.lock().expect("unpoisoned").clone();
+    for (index, handshake) in handshakes.iter().enumerate() {
+        assert_eq!(
+            handshake["authorization"],
+            format!("Bearer source-token-{}", index + 1).as_str()
+        );
+        assert!(
+            handshake.get("chatgpt-account-id").is_none(),
+            "the source names no account, so the static one is not sent"
+        );
+    }
+}
+
+/// A source that fails refuses the connect by name, and the backend is never
+/// asked to open anything.
+#[tokio::test]
+async fn a_failing_credential_source_refuses_an_ordinary_websocket_connect() {
+    let backend = HandshakeRecorder::default();
+    let result = ResponsesWebSocketSessionBuilder::new(wire_with_source(CountingSource {
+        fails: true,
+        ..CountingSource::default()
+    }))
+    .connect_with(&backend)
+    .await;
+    let Err(ProviderError::Request(inner)) = result else {
+        panic!("expected a request refusal");
+    };
+    assert!(
+        inner
+            .downcast_ref::<crate::wire::CredentialUnavailable>()
+            .is_some()
+    );
+    assert!(backend.handshakes.lock().expect("unpoisoned").is_empty());
+}

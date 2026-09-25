@@ -48,6 +48,15 @@ pub struct Responses {
     /// The Codex conversation identity every HTTP request from this wire
     /// carries, when set (see [`Self::with_codex_identity`]). `None` sends a
     /// fresh `session_id` per request, as the dialect asks.
+    ///
+    /// An identity names ONE conversation: every HTTP request, and every
+    /// websocket session built from this wire value, shares its cache
+    /// affinity. A caller running several conversations gives each its own
+    /// wire value with its own identity ([`CodexIdentity::from_ids`] or
+    /// [`CodexIdentity::generate`]).
+    ///
+    /// [`CodexIdentity::from_ids`]: super::codex_identity::CodexIdentity::from_ids
+    /// [`CodexIdentity::generate`]: super::codex_identity::CodexIdentity::generate
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_identity: Option<super::codex_identity::CodexIdentity>,
 }
