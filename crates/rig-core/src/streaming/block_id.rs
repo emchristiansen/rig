@@ -21,16 +21,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MintKind {
-    /// Reasoning blocks on constant-id wires (gemini REST, ollama,
-    /// chat-compat `reasoning_content`, candle).
+    /// Anonymous reasoning assemblies, including constant-id wires and
+    /// Responses output items without provider IDs.
     Reasoning,
     /// Opaque reasoning payloads without provider IDs. A separate kind prevents
     /// encrypted blocks from replacing accumulated reasoning text.
     EncryptedReasoning,
     /// Content blocks on index-as-id wires (anthropic, bedrock).
     Block,
-    /// OpenAI Responses `output_index` fallback for delta events lacking
-    /// `item_id`.
+    /// OpenAI Responses `output_index` fallback for opaque output items
+    /// without provider IDs.
     Output,
     /// Tool-call fragments whose wire omits the tool-call id.
     Tool,
