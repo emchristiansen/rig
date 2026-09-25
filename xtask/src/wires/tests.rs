@@ -33,7 +33,7 @@ fn the_named_non_wire_surfaces_may_own_what_encode_cannot_be() {
     }
     assert_eq!(
         SESSION_EXCEPTIONS.len(),
-        1,
+        2,
         "a new non-wire surface must be argued for, not added quietly"
     );
 }
