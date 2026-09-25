@@ -363,9 +363,10 @@ pub struct RawChoiceAccumulator {
     /// An unknown content part carries no parent kind of its own.
     parent_kinds: std::collections::HashMap<u64, PartParent>,
     /// Unknown content parts seen before their slot's parent kind, kept raw per
-    /// `(output_index, content_index)` in arrival order. Identical restatements
-    /// collapse; distinct observations are all kept.
-    undecided_parts: std::collections::BTreeMap<(u64, u64), Vec<serde_json::Value>>,
+    /// `(output_index, content_index)` in arrival order with the item id their
+    /// event named. Identical restatements collapse; distinct observations are
+    /// all kept.
+    undecided_parts: std::collections::BTreeMap<(u64, u64), Vec<UndecidedPart>>,
     /// A protocol refusal raised mid-event, taken by the decoder, which ends the
     /// reply after the usual pre-error flush.
     refusal: Option<ProviderError>,
@@ -391,6 +392,34 @@ enum PartParent {
     Reasoning,
 }
 
+/// An unknown content part waiting for its parent kind. A part whose event
+/// named an item binds only to that item; an id-less part binds by position.
+#[derive(Debug, PartialEq)]
+struct UndecidedPart {
+    item_id: Option<String>,
+    value: serde_json::Value,
+}
+
+impl UndecidedPart {
+    fn binds_to(&self, item_id: Option<&str>) -> bool {
+        self.item_id
+            .as_deref()
+            .is_none_or(|own| item_id == Some(own))
+    }
+}
+
+/// A completed snapshot's content, which may take over a slot that id-less
+/// deltas filled when it restates that slot exactly.
+#[derive(Clone, Copy)]
+enum Restatement<'a> {
+    /// Not a completed snapshot (`added` or a delta): never takes over.
+    None,
+    /// A whole message item: `output_item.done` or the terminal body.
+    Item(&'a [super::AssistantContent]),
+    /// One completed content part: `content_part.done`.
+    Part(u64, &'a super::AssistantContent),
+}
+
 struct MessagePart {
     key: BlockId,
     text: String,
@@ -402,6 +431,22 @@ struct MessagePart {
 impl MessagePart {
     fn is_opaque(&self) -> bool {
         super::opaque_message_part(self.metadata.as_ref()).is_some()
+    }
+
+    /// Whether `content` states exactly this part: the same kind, equal
+    /// text, or an equal raw value for an opaque part.
+    fn restated_by(&self, content: &super::AssistantContent) -> bool {
+        match content {
+            super::AssistantContent::Unknown(value) => {
+                super::opaque_message_part(self.metadata.as_ref()) == Some(value)
+            }
+            super::AssistantContent::Refusal { refusal } => {
+                self.refusal_marked && self.text == *refusal
+            }
+            super::AssistantContent::OutputText(text) => {
+                !self.refusal_marked && !self.is_opaque() && self.text == text.text
+            }
+        }
     }
 }
 
@@ -533,6 +578,10 @@ struct ReasoningParts {
     // publication waits for the last snapshot of the turn.
     wire_sent: bool,
     ready: bool,
+    /// A reasoning delta opened this slot's block on the live stream. An
+    /// opened block is closed exactly once by the flush, whatever its
+    /// restatements carried: an empty one keeps it eligible, never cancels it.
+    opened: bool,
 }
 
 impl ReasoningParts {
@@ -639,52 +688,126 @@ impl RawChoiceAccumulator {
         }
     }
 
-    /// Take the unknown parts buffered for `output_index`, in content order.
-    fn take_undecided(&mut self, output_index: u64) -> Vec<(u64, serde_json::Value)> {
+    /// Take the unknown parts buffered for `output_index` that bind to the
+    /// item `item_id` names, in content order. A part another item's event
+    /// named keeps waiting for that item.
+    fn take_undecided(
+        &mut self,
+        output_index: u64,
+        item_id: Option<&str>,
+    ) -> Vec<(u64, serde_json::Value)> {
         let keys: Vec<_> = self
             .undecided_parts
             .range((output_index, 0)..=(output_index, u64::MAX))
             .map(|(key, _)| *key)
             .collect();
-        keys.into_iter()
-            .filter_map(|key| {
-                self.undecided_parts
-                    .remove(&key)
-                    .map(|values| (key.1, values))
+        let mut taken = Vec::new();
+        for key in keys {
+            let Some(parts) = self.undecided_parts.remove(&key) else {
+                continue;
+            };
+            let (binding, waiting): (Vec<_>, Vec<_>) =
+                parts.into_iter().partition(|part| part.binds_to(item_id));
+            if !waiting.is_empty() {
+                self.undecided_parts.insert(key, waiting);
+            }
+            taken.extend(binding.into_iter().map(|part| (key.1, part.value)));
+        }
+        taken
+    }
+
+    /// Move the unknown parts an item's events named to the slot that item
+    /// now owns, so they bind there and nowhere else.
+    fn rekey_undecided(&mut self, item_id: &str, slot: u64) {
+        let keys: Vec<_> = self
+            .undecided_parts
+            .iter()
+            .filter(|((index, _), parts)| {
+                *index != slot
+                    && parts
+                        .iter()
+                        .any(|part| part.item_id.as_deref() == Some(item_id))
             })
-            .flat_map(|(content_index, values)| {
-                values.into_iter().map(move |value| (content_index, value))
-            })
-            .collect()
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys {
+            let Some(parts) = self.undecided_parts.remove(&key) else {
+                continue;
+            };
+            let (moving, staying): (Vec<_>, Vec<_>) = parts
+                .into_iter()
+                .partition(|part| part.item_id.as_deref() == Some(item_id));
+            if !staying.is_empty() {
+                self.undecided_parts.insert(key, staying);
+            }
+            let target = self.undecided_parts.entry((slot, key.1)).or_default();
+            for part in moving {
+                if !target.contains(&part) {
+                    target.push(part);
+                }
+            }
+        }
+    }
+
+    /// Whether `restatement` states every message part stored at `slot`
+    /// exactly (for one completed part, the part at its own index).
+    fn restates(&self, slot: u64, restatement: Restatement<'_>) -> bool {
+        let mut stored = self
+            .message_parts
+            .range((slot, 0)..=(slot, u64::MAX))
+            .peekable();
+        if stored.peek().is_none() {
+            return false;
+        }
+        match restatement {
+            Restatement::None => false,
+            Restatement::Item(content) => stored.all(|(&(_, content_index), part)| {
+                usize::try_from(content_index)
+                    .ok()
+                    .and_then(|index| content.get(index))
+                    .is_some_and(|content| part.restated_by(content))
+            }),
+            Restatement::Part(content_index, content) => self
+                .message_parts
+                .get(&(slot, content_index))
+                .is_some_and(|part| part.restated_by(content)),
+        }
     }
 
     /// The slot a message event addresses. An id keeps the slot it first
     /// owned. An unseen id owns its own position, except that a completed
     /// snapshot (`done` or terminal) of an unseen id whose own slot holds no
-    /// message content takes over a slot that id-less deltas filled: that is
-    /// the same message restated. An `output_item.added` never aliases.
-    fn message_slot(&mut self, output_index: u64, item_id: Option<&str>, snapshot: bool) -> u64 {
+    /// message content takes over a slot that id-less deltas filled when it
+    /// restates that slot exactly: that is the same message restated. Any
+    /// other content is a different message, which keeps its own position. An
+    /// `output_item.added` or a delta never aliases.
+    fn message_slot(
+        &mut self,
+        output_index: u64,
+        item_id: Option<&str>,
+        restatement: Restatement<'_>,
+    ) -> u64 {
         let Some(id) = item_id.filter(|id| !id.is_empty()) else {
             return output_index;
         };
         if let Some(slot) = self.message_slot_by_id.get(id) {
             return *slot;
         }
-        let own_slot_empty = self
-            .message_parts
-            .range((output_index, 0)..=(output_index, u64::MAX))
-            .next()
-            .is_none();
-        let slot = if snapshot && own_slot_empty {
-            self.unattributed_message_slots
-                .first()
-                .copied()
-                .unwrap_or(output_index)
-        } else {
-            output_index
-        };
+        let own = (output_index, 0)..=(output_index, u64::MAX);
+        let own_slot_empty = self.message_parts.range(own.clone()).next().is_none()
+            && self.undecided_parts.range(own).next().is_none();
+        let slot = own_slot_empty
+            .then(|| {
+                self.unattributed_message_slots
+                    .iter()
+                    .copied()
+                    .find(|slot| self.restates(*slot, restatement))
+            })
+            .flatten()
+            .unwrap_or(output_index);
         self.unattributed_message_slots.remove(&slot);
         self.message_slot_by_id.insert(id.to_owned(), slot);
+        self.rekey_undecided(id, slot);
         slot
     }
 
@@ -796,7 +919,7 @@ impl RawChoiceAccumulator {
         self.parent_kinds
             .entry(output_index)
             .or_insert(PartParent::Message);
-        for (content_index, value) in self.take_undecided(output_index) {
+        for (content_index, value) in self.take_undecided(output_index, item_id) {
             self.publish_message_part(
                 output_index,
                 content_index,
@@ -812,11 +935,11 @@ impl RawChoiceAccumulator {
     /// passthrough channel: without that evidence they have no assistant
     /// content to join.
     fn flush_undecided_parts(&mut self, out: &mut AdapterOutput) {
-        for value in std::mem::take(&mut self.undecided_parts)
+        for part in std::mem::take(&mut self.undecided_parts)
             .into_values()
             .flatten()
         {
-            out.unknown(value.into());
+            out.unknown(part.value.into());
         }
     }
 
@@ -861,7 +984,7 @@ impl RawChoiceAccumulator {
         {
             self.unattributed_message_slots.insert(output_index);
         }
-        let output_index = self.message_slot(output_index, item_id, false);
+        let output_index = self.message_slot(output_index, item_id, Restatement::None);
         // Refuse before any state changes, as a snapshot would: known text
         // cannot join a published or waiting opaque part.
         if let Some(error) = self.message_kind_conflict(output_index, content_index, false) {
@@ -988,7 +1111,12 @@ impl RawChoiceAccumulator {
         snapshot: bool,
         out: &mut AdapterOutput,
     ) {
-        let output_index = self.message_slot(output_index, Some(&message.id), snapshot);
+        let restatement = if snapshot {
+            Restatement::Item(&message.content)
+        } else {
+            Restatement::None
+        };
+        let output_index = self.message_slot(output_index, Some(&message.id), restatement);
         // A contradicted part refuses the whole snapshot before any of it lands.
         if let Some(error) = message
             .content
@@ -1028,17 +1156,25 @@ impl RawChoiceAccumulator {
 
     fn merge_terminal_body_text(&mut self, response: &CompletionResponse, out: &mut AdapterOutput) {
         for (output_index, item) in response.output.iter().enumerate() {
-            if self.refusal.is_some() {
-                return;
-            }
             match item {
-                Output::Message(message) => {
+                // After a refusal no further message lands.
+                Output::Message(message) if self.refusal.is_none() => {
                     self.publish_message_text(output_index as u64, message, true, out)
                 }
-                Output::Reasoning { .. } => out.in_source_order(
-                    crate::streaming::SourceOrder::new(output_index as u64, 0),
-                    |out| self.push_output_item_done(item.clone(), output_index as u64, out, true),
-                ),
+                // Reasoning keeps absorbing so the error-path flush closes
+                // every opened block; the first refusal stands.
+                Output::Reasoning { .. } => {
+                    let first_refusal = self.refusal.take();
+                    out.in_source_order(
+                        crate::streaming::SourceOrder::new(output_index as u64, 0),
+                        |out| {
+                            self.push_output_item_done(item.clone(), output_index as u64, out, true)
+                        },
+                    );
+                    if first_refusal.is_some() {
+                        self.refusal = first_refusal;
+                    }
+                }
                 _ => {}
             }
         }
@@ -1061,11 +1197,12 @@ impl RawChoiceAccumulator {
         _out: &mut AdapterOutput,
     ) -> &mut ReasoningParts {
         // Reasoning evidence binds the slot: unknown parts that waited for it
-        // are reasoning content.
+        // are reasoning content. Distinct observations of one content index
+        // bind last-writer-wins, as a known parent's history keeps its last.
         self.parent_kinds
             .entry(output_index)
             .or_insert(PartParent::Reasoning);
-        let undecided = self.take_undecided(output_index);
+        let undecided = self.take_undecided(output_index, item_id);
         let parts = self.reasoning_parts.entry(output_index).or_default();
         for (content_index, value) in undecided {
             parts
@@ -1087,7 +1224,8 @@ impl RawChoiceAccumulator {
             .reasoning_parts
             .iter()
             .filter(|(index, parts)| {
-                !self.finished_reasoning.contains(index) && (parts.ready || parts.has_opaque())
+                !self.finished_reasoning.contains(index)
+                    && (parts.ready || parts.opened || parts.has_opaque())
             })
             .map(|(index, _)| *index)
             .collect();
@@ -1158,6 +1296,8 @@ impl RawChoiceAccumulator {
             output_index,
             data: item,
         } = chunk;
+        // A completed content part may restate a slot id-less deltas filled.
+        let part_done = matches!(item, ItemChunkKind::ContentPartDone(_));
 
         // Every block this event opens carries the item's output slot; a part
         // refines it with its content index.
@@ -1347,12 +1487,16 @@ impl RawChoiceAccumulator {
                                     out,
                                 ),
                                 None => {
+                                    let part = UndecidedPart {
+                                        item_id: outer_item_id.clone().filter(|id| !id.is_empty()),
+                                        value,
+                                    };
                                     let seen = self
                                         .undecided_parts
                                         .entry((output_index, chunk.content_index))
                                         .or_default();
-                                    if !seen.contains(&value) {
-                                        seen.push(value);
+                                    if !seen.contains(&part) {
+                                        seen.push(part);
                                     }
                                 }
                             }
@@ -1371,8 +1515,16 @@ impl RawChoiceAccumulator {
                                 | ContentPartChunkPart::SummaryText { .. }
                                 | ContentPartChunkPart::ReasoningText { .. } => return,
                             };
-                            let output_index =
-                                self.message_slot(output_index, outer_item_id.as_deref(), false);
+                            let restatement = if part_done {
+                                Restatement::Part(chunk.content_index, &content)
+                            } else {
+                                Restatement::None
+                            };
+                            let output_index = self.message_slot(
+                                output_index,
+                                outer_item_id.as_deref(),
+                                restatement,
+                            );
                             if let Some(error) =
                                 self.message_kind_conflict(output_index, chunk.content_index, false)
                             {
@@ -1434,6 +1586,7 @@ impl RawChoiceAccumulator {
                     {
                         text.push_str(&delta);
                     }
+                    parts.opened = true;
                     let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref(), out);
                     out.reasoning_delta(
                         &id,
@@ -1468,6 +1621,7 @@ impl RawChoiceAccumulator {
                     {
                         text.push_str(&delta);
                     }
+                    parts.opened = true;
                     let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref(), out);
                     out.reasoning_delta(
                         &id,
@@ -1766,7 +1920,7 @@ impl RawChoiceAccumulator {
                 let nonempty = !summary.is_empty()
                     || !content.is_empty()
                     || encrypted_content.as_ref().is_some_and(|s| !s.is_empty())
-                    || signature.is_some();
+                    || signature.as_ref().is_some_and(|s| !s.is_empty());
                 let parts = self.reasoning_parts(output_index, Some(&id), out);
                 parts.absorb(summary, content, encrypted_content, signature);
                 parts.wire_sent = true;
