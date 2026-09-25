@@ -37,9 +37,11 @@ pub enum MintKind {
     /// Text blocks opened by a bare `Message` on wires that never announce
     /// text-block boundaries.
     Text,
-    /// OpenAI Responses refusal content parts, each kept as its own text
-    /// block (minted in stream order) so a refusal is never merged into the
-    /// output text beside it.
+    /// OpenAI Responses message content parts that cannot take the message's
+    /// wire id: refusals, parts after the first, and parts of an id-less
+    /// message. Each is its own text block, minted in stream order, so a
+    /// refusal or an opaque part is never merged into the text beside it.
+    /// The serialized kind keeps its historical name.
     Refusal,
 }
 

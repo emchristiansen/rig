@@ -336,6 +336,9 @@ impl Responses {
         if let Some(identity) = lite_identity {
             super::responses_lite::shape_request(&mut request, identity)
                 .map_err(EncodeError::request)?;
+            // Lite may have created `reasoning`; the shared include rule
+            // follows it.
+            request.additional_parameters.request_reasoning_ciphertext();
         }
         request.stream = streaming.then_some(true);
         Ok(request)
