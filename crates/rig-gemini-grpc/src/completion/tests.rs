@@ -764,3 +764,24 @@ fn grpc_refuses_namespaced_and_custom_calls() {
         assert!(reason.contains(refusal), "{reason}");
     }
 }
+
+#[test]
+fn grpc_refuses_provider_items_by_name_for_known_and_unknown_issuers() {
+    for issuer in [Some("openai"), None] {
+        let content = message::AssistantContent::ProviderItem(message::ProviderItem {
+            item: serde_json::json!({"type": "web_search_call", "id": "search_1"}),
+            provider: issuer.map(str::to_owned),
+        });
+        let error = rig_assistant_content_to_grpc_part(content)
+            .expect_err("provider items have no representation on this wire");
+        let ProviderError::Request(inner) = error else {
+            panic!("expected a request refusal, got {error:?}");
+        };
+        let refusal = inner
+            .downcast_ref::<message::UnreplayableProviderItem>()
+            .expect("the refusal retains its shared concrete type");
+        assert_eq!(refusal.wire, GEMINI_GRPC_WIRE);
+        assert_eq!(refusal.issuer.as_deref(), issuer);
+        assert_eq!(refusal.item_type.as_deref(), Some("web_search_call"));
+    }
+}
