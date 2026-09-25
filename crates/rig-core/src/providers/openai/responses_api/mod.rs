@@ -2654,10 +2654,7 @@ fn assistant_text_replay_message(
             content: vec![AssistantContentType::Text(if refusal {
                 AssistantContent::Refusal { refusal: text }
             } else {
-                AssistantContent::OutputText(OutputText::from_message_text(
-                    text,
-                    additional_params,
-                ))
+                AssistantContent::OutputText(OutputText::from_message_text(text, additional_params))
             })],
             id,
             name: None,

@@ -3254,7 +3254,10 @@ fn refusal_parts_stream_into_their_own_marked_blocks() {
             "response": sample_response(ResponseStatus::Completed),
         }),
     ];
-    let body: String = events.iter().map(|event| format!("data: {event}\n\n")).collect();
+    let body: String = events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect();
     let decoded = stream_events_from_sse_body("openai", &body, None).expect("the body decodes");
 
     let refusal_starts: Vec<BlockId> = decoded

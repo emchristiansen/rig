@@ -64,28 +64,39 @@ fn provenance_survives_serde_and_renders_for_logs() {
     assert!(serde_json::from_str::<BlockId>("\"minted:nope:1\"").is_err());
 }
 
-/// Every kind in [`MintKind::ALL`] renders and parses back, and a minted key
-/// of each kind survives its `minted:<kind>:<index>` serialization.
+/// [`MintKind::ALL`] lists every kind exactly once, in declaration order, and
+/// each renders and parses back, surviving its `minted:<kind>:<index>`
+/// serialization.
 ///
-/// `declared_position` is an exhaustive match, so adding a kind stops this
-/// test compiling until the kind is given a position here: the prompt to add
-/// it to `ALL` too, which is what `parse_name` reads. The loop pins every
-/// listed kind to its declared position.
+/// Completeness is enforced two ways. Each listed kind's declaration index
+/// (`kind as usize`; the enum sets no explicit discriminants) must equal its
+/// position in `ALL`, so an omitted or reordered kind before the last one
+/// fails. `is_last_declared` is an exhaustive match, so appending a kind
+/// stops this test compiling until the new kind is named last here; `ALL`
+/// must then end with it too, which is what `parse_name` reads.
 #[test]
 fn every_mint_kind_round_trips_through_its_name_and_serialization() {
-    fn declared_position(kind: MintKind) -> usize {
+    fn is_last_declared(kind: MintKind) -> bool {
         match kind {
-            MintKind::Reasoning => 0,
-            MintKind::EncryptedReasoning => 1,
-            MintKind::Block => 2,
-            MintKind::Output => 3,
-            MintKind::Tool => 4,
-            MintKind::Text => 5,
-            MintKind::Refusal => 6,
+            MintKind::Refusal => true,
+            MintKind::Reasoning
+            | MintKind::EncryptedReasoning
+            | MintKind::Block
+            | MintKind::Output
+            | MintKind::Tool
+            | MintKind::Text => false,
         }
     }
+    let last = *MintKind::ALL.last().expect("ALL is not empty");
+    assert!(
+        is_last_declared(last),
+        "ALL must end with the last-declared kind"
+    );
     for (position, kind) in MintKind::ALL.into_iter().enumerate() {
-        assert_eq!(declared_position(kind), position);
+        assert_eq!(
+            kind as usize, position,
+            "{kind:?} is listed out of declaration order"
+        );
         assert_eq!(MintKind::parse_name(kind.as_str()), Some(kind));
         let key = BlockId::minted(kind, 3);
         let text = serde_json::to_string(&key).expect("a minted key serializes");

@@ -426,7 +426,12 @@ impl RawChoiceAccumulator {
     /// Make the refusal part at (`output_index`, `content_index`) the block
     /// that bare text deltas land in, opening it, marked as a refusal, on its
     /// first fragment. The item's output text reopens its own block after.
-    fn start_refusal_part(&mut self, output_index: u64, content_index: u64, out: &mut AdapterOutput) {
+    fn start_refusal_part(
+        &mut self,
+        output_index: u64,
+        content_index: u64,
+        out: &mut AdapterOutput,
+    ) {
         let (block, opened) = match self.refusal_blocks.get(&(output_index, content_index)) {
             Some(block) => (block.clone(), false),
             None => {

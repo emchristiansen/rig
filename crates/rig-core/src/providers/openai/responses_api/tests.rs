@@ -1455,7 +1455,9 @@ fn service_tier_serializes_expected_strings() {
 fn responses_usage_token_usage_preserves_reasoning_tokens() {
     let usage = ResponsesUsage {
         input_tokens: 100,
-        input_tokens_details: Some(InputTokensDetails { cached_tokens: Some(25) }),
+        input_tokens_details: Some(InputTokensDetails {
+            cached_tokens: Some(25),
+        }),
         output_tokens: 50,
         output_tokens_details: Some(OutputTokensDetails {
             reasoning_tokens: 15,
@@ -2387,7 +2389,9 @@ fn responses_usage_add_preserves_rhs_details_when_lhs_details_are_absent() {
     };
     let rhs = ResponsesUsage {
         input_tokens: 3,
-        input_tokens_details: Some(InputTokensDetails { cached_tokens: Some(2) }),
+        input_tokens_details: Some(InputTokensDetails {
+            cached_tokens: Some(2),
+        }),
         output_tokens: 5,
         output_tokens_details: Some(OutputTokensDetails {
             reasoning_tokens: 4,
@@ -3433,7 +3437,9 @@ fn an_omitted_cached_token_count_is_absent_not_zero() {
     }))
     .expect("usage without cached_tokens decodes");
     assert_eq!(
-        omitted.input_tokens_details.map(|details| details.cached_tokens),
+        omitted
+            .input_tokens_details
+            .map(|details| details.cached_tokens),
         Some(None)
     );
     assert_eq!(completion::Usage::from(&omitted).cached_input_tokens, None);

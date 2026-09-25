@@ -246,7 +246,10 @@ fn a_codex_wrapped_error_event_keeps_its_status_and_headers() {
     assert_eq!(event.status, Some(429));
 
     let err = provider_error_from_event(&event);
-    assert_eq!(err.provider_response_status(), Some(StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!(
+        err.provider_response_status(),
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    );
     let headers = err
         .provider_response_headers()
         .expect("the event's headers are attached");
@@ -285,7 +288,10 @@ fn an_error_event_without_an_error_object_decodes_and_keeps_its_fields() {
         .provider_response_json()
         .expect("preserved body should be valid JSON")
         .expect("provider response body should be present");
-    assert_eq!(body, json!({"type": "error", "status": 503, "request_id": "req_1"}));
+    assert_eq!(
+        body,
+        json!({"type": "error", "status": 503, "request_id": "req_1"})
+    );
 }
 
 /// The flattened `extra` cannot swallow the tag: an event whose `type` is not

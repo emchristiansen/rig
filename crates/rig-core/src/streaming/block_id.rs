@@ -65,9 +65,7 @@ impl MintKind {
 
     /// Parse [`MintKind::as_str`]'s rendering.
     pub fn parse_name(name: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-        .find(|kind| kind.as_str() == name)
+        Self::ALL.into_iter().find(|kind| kind.as_str() == name)
     }
 
     /// The stable name used when a minted id is rendered.

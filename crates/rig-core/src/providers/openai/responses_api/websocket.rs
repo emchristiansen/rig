@@ -129,10 +129,17 @@ pub struct ResponsesWebSocketErrorEvent {
     #[serde(rename = "type")]
     pub kind: ResponsesWebSocketErrorEventKind,
     /// The HTTP status the provider reports for this failure, when it does.
-    #[serde(default, alias = "status_code", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "status_code",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub status: Option<u16>,
     /// The provider error payload; empty when the event carries none.
-    #[serde(default, skip_serializing_if = "ResponsesWebSocketErrorPayload::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "ResponsesWebSocketErrorPayload::is_empty"
+    )]
     pub error: ResponsesWebSocketErrorPayload,
     /// Response headers the provider reports with this failure, when it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
