@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::env::{self, EnvError};
 use crate::driver::{Bound, HasEmbedding, HasModelListing, HasRerank, HasTranscription, HasVerify};
-use crate::wire::{HasCompletion, Secret};
+use crate::wire::{Authorizer, CredentialSource, CredentialSourceHandle, HasCompletion, Secret};
 
 use super::responses_api::SystemInstructionsPlacement;
 use super::responses_api::wire::Responses;
@@ -761,6 +761,11 @@ pub struct OpenAI {
     /// Responses instruction placement override. `None` uses the dialect default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_instructions: Option<SystemInstructionsPlacement>,
+    /// Where the credential is read at send time, when it is not
+    /// [`Self::api_key`]; see [`Self::with_credential_source`]. Never
+    /// serialized, like the credential itself.
+    #[serde(skip)]
+    pub credential_source: Option<CredentialSourceHandle>,
 }
 
 impl OpenAI {
@@ -799,6 +804,7 @@ impl OpenAI {
                 user_agent: default_user_agent(identity.originator),
             }),
             system_instructions: None,
+            credential_source: None,
         }
     }
 
@@ -898,7 +904,11 @@ impl OpenAI {
     /// Point this configuration at another dialect: the same credential,
     /// with everything else at that dialect's defaults.
     pub fn with_dialect(self, dialect: &Dialect) -> Self {
-        Self::with_key(dialect, self.api_key)
+        let credential_source = self.credential_source;
+        Self {
+            credential_source,
+            ..Self::with_key(dialect, self.api_key)
+        }
     }
 
     /// Route through a Hugging Face sub-provider.
@@ -935,6 +945,35 @@ impl OpenAI {
     pub fn with_account_id(mut self, account_id: impl Into<String>) -> Self {
         self.account_id = Some(account_id.into());
         self
+    }
+
+    /// Read the credential from `source` each time a request is sent,
+    /// instead of sending [`Self::api_key`].
+    ///
+    /// The source is read once per send attempt (every request, every page
+    /// of a paged reply, every Codex websocket connect), so a credential
+    /// rotated by its owner reaches the next request without rebuilding
+    /// anything. Its credential replaces the header [`Self::auth`] names
+    /// (`Authorization: Bearer …` or `api-key`), and it is authoritative for
+    /// the account too: a credential naming an account sends
+    /// `ChatGPT-Account-Id`, and one naming none sends no account header,
+    /// even when [`Self::account_id`] is set. A source that fails refuses the
+    /// request with [`crate::wire::CredentialUnavailable`] before anything is
+    /// sent.
+    pub fn with_credential_source(mut self, source: impl CredentialSource + 'static) -> Self {
+        self.credential_source = Some(CredentialSourceHandle::new(source));
+        self
+    }
+
+    /// What stamps this configuration's credential at send time: `None`
+    /// unless a [credential source](Self::with_credential_source) is set.
+    pub(crate) fn authorizer(&self) -> Option<std::sync::Arc<dyn Authorizer>> {
+        self.credential_source.as_ref().map(|source| {
+            std::sync::Arc::new(SourceAuthorizer {
+                source: source.clone(),
+                auth: self.auth,
+            }) as std::sync::Arc<dyn Authorizer>
+        })
     }
 
     /// Merge these instructions ahead of every Responses turn's preamble.
@@ -1199,6 +1238,67 @@ impl OpenAI {
         }
         builder
     }
+}
+
+/// Stamps the credential a [`CredentialSource`] currently supplies, in the
+/// header the configuration's [`Auth`] names, plus the account header.
+struct SourceAuthorizer {
+    source: CredentialSourceHandle,
+    auth: Auth,
+}
+
+impl Authorizer for SourceAuthorizer {
+    fn authorize<'a>(
+        &'a self,
+        headers: &'a mut http::HeaderMap,
+    ) -> crate::wasm_compat::WasmBoxedFuture<'a, Result<(), crate::error::ProviderError>> {
+        Box::pin(async move {
+            let credential = self
+                .source
+                .0
+                .current()
+                .await
+                .map_err(crate::wire::CredentialUnavailable::new)?;
+            let token = credential.token.expose();
+            // The same header `OpenAI::authenticate` writes for this auth,
+            // replacing whatever encoding stamped there.
+            headers.remove(http::header::AUTHORIZATION);
+            headers.remove(API_KEY_HEADER);
+            match self.auth {
+                Auth::OptionalBearer if token.is_empty() => {}
+                Auth::Bearer | Auth::OptionalBearer => {
+                    headers.insert(
+                        http::header::AUTHORIZATION,
+                        header_value(&format!("Bearer {token}"))?,
+                    );
+                }
+                Auth::ApiKeyHeader => {
+                    headers.insert(API_KEY_HEADER, header_value(token)?);
+                }
+            }
+            // Authoritative for the account: none named means none sent.
+            headers.remove(ACCOUNT_ID_HEADER);
+            if let Some(account_id) = &credential.account_id {
+                headers.insert(ACCOUNT_ID_HEADER, header_value(account_id)?);
+            }
+            Ok(())
+        })
+    }
+}
+
+/// The header `Auth::ApiKeyHeader` sends the credential in.
+const API_KEY_HEADER: &str = "api-key";
+/// The header naming the account a credential belongs to.
+const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
+
+/// A credential header value, refusing one no header can carry. The refusal
+/// names the problem, never the value.
+fn header_value(value: &str) -> Result<http::HeaderValue, crate::error::ProviderError> {
+    http::HeaderValue::from_str(value).map_err(|_| {
+        crate::error::ProviderError::Request(
+            "the credential source supplied a value that cannot be sent in a header".into(),
+        )
+    })
 }
 
 /// Build completion wires using configured, model-specific, or dialect routing.

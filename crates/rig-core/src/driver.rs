@@ -371,9 +371,21 @@ where
     // Preserve every page document so batched replies do not lose earlier data.
     let mut documents: Vec<serde_json::Value> = Vec::new();
     let mut pending: std::collections::VecDeque<http::Request<Body>> = requests.into();
+    let authorizer = wire.authorizer();
     // Replies read in this call, which is what MAX_CONTINUATION_PAGES bounds.
     let mut pages: usize = 0;
     while let Some(mut http_request) = pending.pop_front() {
+        // Every page is its own send attempt, so it reads the credential
+        // afresh; a refusal sends nothing.
+        if let Some(authorizer) = &authorizer {
+            let route = http_request.uri().path().to_owned();
+            tracing::Instrument::instrument(
+                authorizer.authorize(http_request.headers_mut()),
+                span.clone(),
+            )
+            .await
+            .map_err(|error| <W::Op as Operation>::with_route(error, wire.name(), &route))?;
+        }
         accept_header(&mut http_request, framing);
         // Errors need the actual path; observations use the declared template
         // to group attempts independently of concrete URLs.
@@ -586,6 +598,7 @@ where
     let http_request = byte_request(http_request)?;
 
     let http = http.clone();
+    let authorizer = wire.authorizer();
     let observation = context.as_ref().map(|_| AdapterSlot::default());
     let mut driver =
         WireDriver::<W::Op, _>::observed(wire.decoder(Mode::Streaming), observation.clone());
@@ -595,6 +608,18 @@ where
     let declared_route = wire.route().map(str::to_owned);
 
     let frames = async_stream::stream! {
+        // The one send attempt reads the credential when it is first
+        // polled; a refusal sends nothing and is the stream's only item.
+        let mut http_request = http_request;
+        if let Some(authorizer) = &authorizer
+            && let Err(error) = authorizer.authorize(http_request.headers_mut()).await
+        {
+            driver.fail(error);
+            for item in driver.drain() {
+                yield item;
+            }
+            return;
+        }
         // Unpolled streams must not report transport attempts.
         if let Some(observation) = &observation {
             // Group attempts by declared route rather than concrete path.

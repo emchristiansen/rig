@@ -19,8 +19,13 @@ pub use crate::http_client::framing::Framing;
 pub use crate::observe::{AdapterErrorEnvelope, AdapterEvent, AdapterUsage, AdapterVerdict};
 pub use crate::providers::internal::wire::WireEvent;
 
+pub mod credential;
 pub(crate) mod secret;
 
+pub use credential::{
+    Authorizer, Credential, CredentialSource, CredentialSourceError, CredentialSourceHandle,
+    CredentialUnavailable,
+};
 pub use secret::Secret;
 
 /// One transport frame, after framing but before decoding.
@@ -445,6 +450,14 @@ pub trait Wire: WasmCompatSend + WasmCompatSync + 'static {
     /// Stable endpoint template for observation grouping, without base-URL
     /// prefixes or interpolated values. `None` uses the concrete request path.
     fn route(&self) -> Option<&str> {
+        None
+    }
+
+    /// What stamps this wire's credential at send time, when it reads one
+    /// then rather than while encoding (see [`Authorizer`]). The driver awaits
+    /// it once per send attempt. `None`, the default, sends each request
+    /// exactly as encoded.
+    fn authorizer(&self) -> Option<std::sync::Arc<dyn Authorizer>> {
         None
     }
 

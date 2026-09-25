@@ -18,10 +18,13 @@
 //!   body fields of every frame, so cache routing stays sticky across turns.
 //! - **Single in-flight custody**, inherited from the shared session.
 //!
-//! Credentials are the wire's static credential: the handshake carries
-//! whatever [`OpenAI::api_key`](crate::providers::openai::OpenAI::api_key)
-//! holds when the session connects. A caller that refreshes tokens builds the
-//! wire from the fresh token before connecting.
+//! The handshake carries the wire's credential as it stands when the session
+//! connects: [`OpenAI::api_key`](crate::providers::openai::OpenAI::api_key),
+//! or, when the wire has a
+//! [credential source](crate::providers::openai::OpenAI::with_credential_source),
+//! what that source supplies at connect. An open connection keeps the
+//! credential it was opened with; a rotated credential takes effect at the
+//! next session's connect.
 //!
 //! ```no_run
 //! use rig_core::providers::chatgpt;
@@ -143,7 +146,9 @@ impl CodexIdentity {
     /// identity here.
     ///
     /// Public so a caller that opens its own connection can open it with the
-    /// same identity the session will stamp on every frame.
+    /// same identity the session will stamp on every frame. It stamps the
+    /// wire's static credential; a caller with a credential source reads it
+    /// itself, as [`CodexWebSocketSessionBuilder::connect_with`] does.
     pub fn handshake_request(
         &self,
         wire: &Responses,
@@ -288,7 +293,13 @@ impl CodexWebSocketSessionBuilder {
     where
         W: WebSocketClientExt,
     {
-        let request = self.identity.handshake_request(&self.wire)?;
+        let mut request = self.identity.handshake_request(&self.wire)?;
+        // A credential source is read once, here: the open connection keeps
+        // the credential it was opened with, and a rotation takes effect at
+        // the next session's connect.
+        if let Some(authorizer) = self.wire.provider.authorizer() {
+            authorizer.authorize(request.headers_mut()).await?;
+        }
         let connection = connect(backend, request, self.connect_timeout).await?;
         Ok(CodexWebSocketSession {
             session: ResponsesWebSocketSession::from_connection(

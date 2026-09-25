@@ -283,6 +283,10 @@ impl Wire for Embeddings {
     type Op = Embedding;
     type Decoder = EmbeddingsDecoder;
 
+    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
+        self.provider.authorizer()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -512,6 +516,10 @@ impl Wire for Transcriptions {
     type Op = Transcription;
     type Decoder = TranscriptionsDecoder;
 
+    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
+        self.provider.authorizer()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -712,6 +720,10 @@ impl Wire for Images {
     type Op = crate::operation::ImageGeneration;
     type Decoder = ImagesDecoder;
 
+    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
+        self.provider.authorizer()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -880,6 +892,10 @@ impl Wire for Speech {
     type Op = crate::operation::AudioGeneration;
     type Decoder = SpeechDecoder;
 
+    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
+        self.provider.authorizer()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -1038,6 +1054,10 @@ impl Wire for Models {
     type Op = ModelListing;
     type Decoder = ModelsDecoder;
 
+    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
+        self.provider.authorizer()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -1165,6 +1185,10 @@ impl Wire for Rerank {
     type Op = RerankOp;
     type Decoder = RerankDecoder;
 
+    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
+        self.provider.authorizer()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -1240,6 +1264,10 @@ pub use crate::operation::VerifyDecoder;
 impl Wire for Verify {
     type Op = VerifyOp;
     type Decoder = VerifyDecoder;
+
+    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
+        self.provider.authorizer()
+    }
 
     fn name(&self) -> &str {
         self.provider.dialect.name

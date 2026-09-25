@@ -441,6 +441,44 @@ impl HttpClientExt for MockStreamingClient {
     }
 }
 
+/// A [`MockStreamingClient`] that also records each streamed request's
+/// headers, as the transport received them.
+#[derive(Debug, Clone, Default)]
+pub struct CapturingStreamingClient {
+    /// Bytes returned as a single streaming response chunk.
+    pub sse_bytes: Bytes,
+    /// The headers of every request sent, in order.
+    pub requests: Arc<Mutex<Vec<http::HeaderMap>>>,
+}
+
+impl HttpClientExt for CapturingStreamingClient {
+    no_unary_surface!();
+
+    fn send_streaming<T>(
+        &self,
+        req: Request<T>,
+    ) -> impl Future<Output = http_client::Result<StreamingResponse>> + WasmCompatSend
+    where
+        T: Into<Bytes> + WasmCompatSend,
+    {
+        self.requests
+            .lock()
+            .expect("the capture lock is never poisoned")
+            .push(req.headers().clone());
+        let sse_bytes = self.sse_bytes.clone();
+        async move {
+            let byte_stream =
+                futures::stream::iter(vec![Ok::<Bytes, http_client::Error>(sse_bytes)]);
+            let boxed_stream: http_client::BoxedStream = Box::pin(byte_stream);
+            Response::builder()
+                .status(http::StatusCode::OK)
+                .header(http::header::CONTENT_TYPE, "text/event-stream")
+                .body(boxed_stream)
+                .map_err(http_client::Error::Protocol)
+        }
+    }
+}
+
 /// An [`HttpClientExt`] implementation whose `send_streaming` fails immediately
 /// with a non-success HTTP status and response body.
 #[derive(Debug, Clone)]

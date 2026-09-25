@@ -234,6 +234,63 @@ fn gemini_interactions_policy_requires_api_key_header() {
     assert!(required_headers_present(policy, &request.headers));
 }
 
+/// A request whose credential a credential source stamped at send time
+/// reaches the recorder exactly as a statically encoded one does, as ordinary
+/// request headers, and the recorder keeps neither the token nor the account
+/// it names: only allow-listed request headers are recorded.
+#[tokio::test]
+async fn direct_recorder_keeps_no_credential_a_source_stamped() {
+    let policy =
+        CassettePolicy::for_scenario("chatgpt", "agent/completion_smoke", ReplayMatching::Ordered);
+    let interactions = Arc::new(Mutex::new(Vec::new()));
+    let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
+    let recorder = DirectRecorder {
+        interactions: interactions.clone(),
+        policy,
+        ledger: Arc::new(relay::LedgerTarget {
+            path: ledger_dir.path().join("ledger.jsonl"),
+            provider: "chatgpt".to_owned(),
+            scenario: "agent/completion_smoke".to_owned(),
+            origin: "https://chatgpt.com".to_owned(),
+        }),
+    };
+
+    recorder
+        .record_http_interaction(
+            DirectHttpRequest {
+                method: "POST",
+                uri: "https://chatgpt.com/backend-api/codex/responses",
+                headers: [
+                    ("authorization", "Bearer source-token-rotated"),
+                    ("chatgpt-account-id", "source-account"),
+                    ("content-type", "application/json"),
+                ],
+                body: br#"{"ok":true}"#,
+            },
+            DirectHttpResponse {
+                status: 200,
+                headers: [("content-type", "application/json")],
+                body: br#"{"ok":true}"#,
+            },
+        )
+        .await;
+
+    let interactions = interactions.lock().await;
+    let interaction = interactions
+        .first()
+        .expect("interaction should be recorded");
+    let recorded: Vec<&str> = interaction
+        .when
+        .header
+        .iter()
+        .map(|header| header.name.as_str())
+        .collect();
+    assert_eq!(recorded, vec!["content-type"]);
+    let rendered = format!("{interaction:?}");
+    assert!(!rendered.contains("source-token-rotated"), "{rendered}");
+    assert!(!rendered.contains("source-account"), "{rendered}");
+}
+
 #[tokio::test]
 async fn direct_recorder_omits_sigv4_headers() {
     let policy =

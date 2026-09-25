@@ -754,6 +754,10 @@ impl Wire for Chat {
     type Op = crate::operation::Completion;
     type Decoder = ChatDecoder;
 
+    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
+        self.provider.authorizer()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }

@@ -310,6 +310,10 @@ impl Wire for Responses {
     type Op = Completion;
     type Decoder = ResponsesDecoder;
 
+    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
+        self.provider.authorizer()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }

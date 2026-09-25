@@ -908,3 +908,82 @@ async fn a_declared_namespace_reaches_the_codex_frame_verbatim_under_strict_mode
     assert_eq!(frames[0]["type"], "response.create");
     assert_eq!(frames[0]["tools"], json!([namespace]));
 }
+
+// --- credential source ------------------------------------------------------
+
+/// A websocket backend that records each handshake it is asked to open and
+/// answers with a scripted connection.
+#[derive(Clone, Default)]
+struct HandshakeRecorder {
+    handshakes: std::sync::Arc<std::sync::Mutex<Vec<http::HeaderMap>>>,
+}
+
+impl crate::ws_client::WebSocketClientExt for HandshakeRecorder {
+    fn connect(
+        &self,
+        request: crate::http_client::Request<crate::http_client::NoBody>,
+        _options: crate::ws_client::ConnectOptions,
+    ) -> impl std::future::Future<
+        Output = crate::http_client::Result<crate::ws_client::BoxedWebSocketConnection>,
+    > + crate::wasm_compat::WasmCompatSend {
+        self.handshakes
+            .lock()
+            .expect("unpoisoned")
+            .push(request.headers().clone());
+        let connection = Script::new().connection();
+        async move { Ok(connection) }
+    }
+}
+
+/// A source that counts its reads and always supplies the same credential.
+#[derive(Clone, Default)]
+struct CountingSource {
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl crate::wire::CredentialSource for CountingSource {
+    fn current(
+        &self,
+    ) -> crate::wasm_compat::WasmBoxedFuture<
+        '_,
+        Result<crate::wire::Credential, crate::wire::CredentialSourceError>,
+    > {
+        let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        Box::pin(async move {
+            Ok(crate::wire::Credential::new(format!("source-token-{read}"))
+                .with_account_id("source-account"))
+        })
+    }
+}
+
+/// Each session connect reads the credential source once, and the handshake
+/// carries what it supplied in place of the static key and account; the open
+/// connection keeps it, so a second session reads again.
+#[tokio::test]
+async fn each_connect_reads_the_credential_source_once() {
+    let source = CountingSource::default();
+    let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_account_id(ACCOUNT_ID)
+        .with_credential_source(source.clone())
+        .responses(chatgpt::GPT_5_3_CODEX);
+    let backend = HandshakeRecorder::default();
+
+    for _ in 0..2 {
+        CodexWebSocketSessionBuilder::new(wire.clone())
+            .expect("the ChatGPT dialect speaks the Codex contract")
+            .connect_with(&backend)
+            .await
+            .expect("the scripted connection opens");
+    }
+
+    assert_eq!(source.reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let handshakes = backend.handshakes.lock().expect("unpoisoned").clone();
+    for (index, handshake) in handshakes.iter().enumerate() {
+        assert_eq!(
+            handshake["authorization"],
+            format!("Bearer source-token-{}", index + 1).as_str()
+        );
+        assert_eq!(handshake["chatgpt-account-id"], "source-account");
+        assert_eq!(handshake.get_all("authorization").iter().count(), 1);
+    }
+}

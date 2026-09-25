@@ -1079,3 +1079,176 @@ fn recorded_chunk_field(field: &str) -> String {
     .next_back()
     .expect("the recorded chunks carry the field")
 }
+
+// ── credentials read at send time ──────────────────────────────────────
+
+/// A credential source that counts its reads and hands out whatever it
+/// currently holds, or fails with `fails`' message.
+#[derive(Clone, Default)]
+struct RotatingSource {
+    current: std::sync::Arc<std::sync::Mutex<Option<crate::wire::Credential>>>,
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl RotatingSource {
+    fn holding(credential: crate::wire::Credential) -> Self {
+        let source = Self::default();
+        source.rotate(credential);
+        source
+    }
+
+    fn rotate(&self, credential: crate::wire::Credential) {
+        *self.current.lock().expect("unpoisoned") = Some(credential);
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl crate::wire::CredentialSource for RotatingSource {
+    fn current(
+        &self,
+    ) -> crate::wasm_compat::WasmBoxedFuture<
+        '_,
+        Result<crate::wire::Credential, crate::wire::CredentialSourceError>,
+    > {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let current = self.current.lock().expect("unpoisoned").clone();
+        Box::pin(async move { current.ok_or_else(|| "the token owner is offline".into()) })
+    }
+}
+
+const CHAT_REPLY: &str = r#"{"id":"chatcmpl-1","object":"chat.completion","created":0,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+
+fn header<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .map(|value| value.to_str().expect("ascii header"))
+}
+
+/// Each request reads the source afresh and sends what it holds then, in
+/// place of the static key: a rotation between two requests reaches the
+/// second. The source is authoritative for the account: a credential naming
+/// none removes the configuration's static account header.
+#[tokio::test]
+async fn a_credential_source_is_read_for_every_request_and_replaces_the_static_key() {
+    let source = RotatingSource::holding(
+        crate::wire::Credential::new("token-1").with_account_id("account-1"),
+    );
+    let provider = OpenAI::new("static-key")
+        .with_account_id("static-account")
+        .with_credential_source(source.clone());
+    let http = RecordingHttpClient::new(CHAT_REPLY);
+    let bound = Bound::new(Chat::new(provider, "gpt-4o"), http.clone());
+
+    bound
+        .completion(prompt("one"))
+        .await
+        .expect("the first reply decodes");
+    source.rotate(crate::wire::Credential::new("token-2"));
+    bound
+        .completion(prompt("two"))
+        .await
+        .expect("the second reply decodes");
+
+    assert_eq!(source.reads(), 2, "one read per request");
+    let requests = http.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        header(&requests[0].headers, "authorization"),
+        Some("Bearer token-1")
+    );
+    assert_eq!(
+        header(&requests[0].headers, "chatgpt-account-id"),
+        Some("account-1")
+    );
+    assert_eq!(
+        header(&requests[1].headers, "authorization"),
+        Some("Bearer token-2")
+    );
+    assert_eq!(
+        header(&requests[1].headers, "chatgpt-account-id"),
+        None,
+        "a credential naming no account sends none, whatever is configured"
+    );
+    for request in &requests {
+        assert_eq!(request.headers.get_all("authorization").iter().count(), 1);
+    }
+}
+
+/// An `api-key` dialect gets the source's token in `api-key`, not a bearer.
+#[tokio::test]
+async fn a_credential_source_fills_the_api_key_header_its_auth_names() {
+    let source = RotatingSource::holding(crate::wire::Credential::new("token-1"));
+    let provider = OpenAI::new("static-key")
+        .with_auth(crate::providers::openai::wire::Auth::ApiKeyHeader)
+        .with_credential_source(source.clone());
+    let http = RecordingHttpClient::new(CHAT_REPLY);
+    Bound::new(Chat::new(provider, "gpt-4o"), http.clone())
+        .completion(prompt("one"))
+        .await
+        .expect("the reply decodes");
+
+    let requests = http.requests();
+    assert_eq!(header(&requests[0].headers, "api-key"), Some("token-1"));
+    assert_eq!(header(&requests[0].headers, "authorization"), None);
+}
+
+/// A source that cannot supply a credential refuses the request by name,
+/// keeping its own error whole, and nothing reaches the transport.
+#[tokio::test]
+async fn a_failing_credential_source_refuses_before_anything_is_sent() {
+    let provider = OpenAI::new("static-key").with_credential_source(RotatingSource::default());
+    let http = RecordingHttpClient::new(CHAT_REPLY);
+    let error = Bound::new(Chat::new(provider, "gpt-4o"), http.clone())
+        .completion(prompt("one"))
+        .await
+        .expect_err("the source has no credential");
+
+    assert!(http.requests().is_empty(), "nothing was sent");
+    let crate::error::ProviderError::Request(inner) = &error else {
+        panic!("expected a request refusal, got {error:?}");
+    };
+    let refusal = inner
+        .downcast_ref::<crate::wire::CredentialUnavailable>()
+        .unwrap_or_else(|| panic!("expected CredentialUnavailable, got {inner}"));
+    assert!(refusal.to_string().contains("the token owner is offline"));
+    assert_eq!(
+        std::error::Error::source(refusal)
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("the token owner is offline")
+    );
+}
+
+/// A streamed request reads the source once, when it is sent, and the
+/// transport receives the source's credential.
+#[tokio::test]
+async fn a_streamed_request_reads_the_credential_source_when_it_is_sent() {
+    let source = RotatingSource::holding(
+        crate::wire::Credential::new("token-1").with_account_id("account-1"),
+    );
+    let provider = OpenAI::new("static-key").with_credential_source(source.clone());
+    let http = crate::test_utils::CapturingStreamingClient {
+        sse_bytes: Bytes::from_static(b"data: [DONE]\n\n"),
+        ..Default::default()
+    };
+    let mut response = Bound::new(Chat::new(provider, "gpt-4o"), http.clone())
+        .stream(prompt("one"))
+        .await
+        .expect("the stream opens");
+    while response.next().await.is_some() {}
+
+    assert_eq!(source.reads(), 1);
+    let requests = http.requests.lock().expect("unpoisoned").clone();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        header(&requests[0], "authorization"),
+        Some("Bearer token-1")
+    );
+    assert_eq!(
+        header(&requests[0], "chatgpt-account-id"),
+        Some("account-1")
+    );
+}

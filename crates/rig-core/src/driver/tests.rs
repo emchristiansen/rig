@@ -1124,10 +1124,16 @@ async fn a_streamed_reply_keeps_the_success_headers_its_dialect_captures() {
         .expect("the stream ends with a terminal record");
     assert_eq!(terminal.provider_response_headers, captured_codex_headers());
 
+    // A wire that captures nothing still ends in a terminal record, which
+    // keeps no headers.
     let frames = stream(&Echo::streaming(), &http, prompt(), None).expect("the stream opens");
     let items: Vec<_> = frames.collect().await;
-    assert!(items.iter().all(|item| match item {
-        Ok(StreamEvent::Final(terminal)) => terminal.provider_response_headers.is_empty(),
-        _ => true,
-    }));
+    let terminal = items
+        .iter()
+        .find_map(|item| match item {
+            Ok(StreamEvent::Final(terminal)) => Some(terminal),
+            _ => None,
+        })
+        .expect("the stream ends with a terminal record");
+    assert!(terminal.provider_response_headers.is_empty());
 }
