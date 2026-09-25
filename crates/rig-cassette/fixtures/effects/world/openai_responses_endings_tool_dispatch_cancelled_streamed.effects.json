@@ -2,7 +2,7 @@
   "header": {
     "deliveries": [
       {
-        "batch": 67,
+        "batch": 51,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -10,7 +10,7 @@
         }
       },
       {
-        "batch": 75,
+        "batch": 53,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -18,7 +18,7 @@
         }
       },
       {
-        "batch": 78,
+        "batch": 55,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -26,7 +26,7 @@
         }
       },
       {
-        "batch": 80,
+        "batch": 57,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -34,7 +34,7 @@
         }
       },
       {
-        "batch": 82,
+        "batch": 60,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -42,7 +42,7 @@
         }
       },
       {
-        "batch": 84,
+        "batch": 62,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -50,7 +50,7 @@
         }
       },
       {
-        "batch": 86,
+        "batch": 63,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -58,7 +58,7 @@
         }
       },
       {
-        "batch": 88,
+        "batch": 65,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -66,7 +66,7 @@
         }
       },
       {
-        "batch": 89,
+        "batch": 66,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -74,7 +74,7 @@
         }
       },
       {
-        "batch": 91,
+        "batch": 68,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -82,7 +82,7 @@
         }
       },
       {
-        "batch": 96,
+        "batch": 70,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -90,7 +90,7 @@
         }
       },
       {
-        "batch": 157,
+        "batch": 92,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -98,7 +98,7 @@
         }
       },
       {
-        "batch": 157,
+        "batch": 92,
         "id": 0,
         "kind": {
           "delivery": "outcome"
@@ -291,6 +291,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_0a048fcbafe371c3006ab2b2a7287887d09849dfce3bed81b5",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_0a048fcbafe371c3006ab2b2a7287887d09849dfce3bed81b5"
@@ -299,6 +303,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_0a048fcbafe371c3006ab2b2a86ec487d08c495336b1339a88",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }

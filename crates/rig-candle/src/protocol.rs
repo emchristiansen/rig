@@ -151,6 +151,13 @@ fn validate_protocol_inputs(
                         AssistantContent::CustomToolCall(call) => {
                             return Err(call.refused_by_json_only_wire(CANDLE_WIRE).into());
                         }
+                        AssistantContent::ProviderItem(item) => {
+                            return Err(rig_core::message::UnreplayableProviderItem::new(
+                                CANDLE_WIRE,
+                                item,
+                            )
+                            .into());
+                        }
                         AssistantContent::Image(_) => {}
                     }
                 }
@@ -441,6 +448,13 @@ fn render_plain_message(message: &Message) -> Result<(&'static str, String), Can
                     AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => {
                         return Err(CandleError::UnsupportedPromptContent("tool calls"));
                     }
+                    AssistantContent::ProviderItem(item) => {
+                        return Err(rig_core::message::UnreplayableProviderItem::new(
+                            CANDLE_WIRE,
+                            item,
+                        )
+                        .into());
+                    }
                     AssistantContent::Reasoning(_) => {
                         return Err(CandleError::UnsupportedPromptContent(
                             "structured reasoning",
@@ -625,6 +639,13 @@ fn render_qwen_message(
                     }
                     AssistantContent::CustomToolCall(call) => {
                         return Err(call.refused_by_json_only_wire(CANDLE_WIRE).into());
+                    }
+                    AssistantContent::ProviderItem(item) => {
+                        return Err(rig_core::message::UnreplayableProviderItem::new(
+                            CANDLE_WIRE,
+                            item,
+                        )
+                        .into());
                     }
                     AssistantContent::Image(_) => {
                         return Err(CandleError::UnsupportedPromptContent(

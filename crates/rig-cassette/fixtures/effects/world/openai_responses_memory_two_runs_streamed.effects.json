@@ -2,14 +2,14 @@
   "header": {
     "deliveries": [
       {
-        "batch": 1,
+        "batch": 6,
         "id": 0,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 62,
+        "batch": 49,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -17,7 +17,23 @@
         }
       },
       {
-        "batch": 74,
+        "batch": 53,
+        "id": 1,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 55,
+        "id": 1,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 63,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -29,48 +45,32 @@
         "id": 1,
         "kind": {
           "delivery": "stream",
-          "items": 1
-        }
-      },
-      {
-        "batch": 85,
-        "id": 1,
-        "kind": {
-          "delivery": "stream",
-          "items": 1
-        }
-      },
-      {
-        "batch": 97,
-        "id": 1,
-        "kind": {
-          "delivery": "stream",
           "items": 2
         }
       },
       {
-        "batch": 97,
+        "batch": 77,
         "id": 1,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 100,
+        "batch": 79,
         "id": 2,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 112,
+        "batch": 91,
         "id": 3,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 211,
+        "batch": 135,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -78,7 +78,7 @@
         }
       },
       {
-        "batch": 218,
+        "batch": 139,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -86,7 +86,7 @@
         }
       },
       {
-        "batch": 219,
+        "batch": 141,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -94,7 +94,7 @@
         }
       },
       {
-        "batch": 227,
+        "batch": 148,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -102,7 +102,7 @@
         }
       },
       {
-        "batch": 242,
+        "batch": 163,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -110,14 +110,14 @@
         }
       },
       {
-        "batch": 242,
+        "batch": 163,
         "id": 4,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 244,
+        "batch": 165,
         "id": 5,
         "kind": {
           "delivery": "outcome"
@@ -282,6 +282,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_090e23a73445605d006ab2b35bd96487d08657639480f308e5",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_090e23a73445605d006ab2b35bd96487d08657639480f308e5"
@@ -290,6 +294,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_090e23a73445605d006ab2b35c45b887d0950ba097db0b19b1",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -305,6 +313,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_090e23a73445605d006ab2b35c45b887d0950ba097db0b19b1",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }
@@ -607,6 +619,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_090e23a73445605d006ab2b35d362c87d09863486e09bc001b",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_090e23a73445605d006ab2b35d362c87d09863486e09bc001b"
@@ -615,6 +631,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_090e23a73445605d006ab2b35db72087d0b33d1507d4ffcdf6",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -630,6 +650,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_090e23a73445605d006ab2b35db72087d0b33d1507d4ffcdf6",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

@@ -31,6 +31,7 @@ impl Serve for Stages {
 fn open() -> StreamEvent {
     StreamEvent::BlockStart {
         id: BlockId::Wire("reused".into()),
+        source_order: None,
         kind: BlockKind::ToolCall,
     }
 }

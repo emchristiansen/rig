@@ -481,6 +481,7 @@ impl Serve for Truncating {
                 writer
                     .event(StreamEvent::BlockStart {
                         id: id.clone(),
+                        source_order: None,
                         kind: BlockKind::Text {
                             additional_params: None,
                         },

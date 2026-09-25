@@ -443,6 +443,9 @@ fn rig_assistant_content_to_grpc_part(
         message::AssistantContent::CustomToolCall(call) => Err(ProviderError::Request(
             call.refused_by_json_only_wire(GEMINI_GRPC_WIRE).into(),
         )),
+        message::AssistantContent::ProviderItem(item) => Err(ProviderError::Request(
+            message::UnreplayableProviderItem::new(GEMINI_GRPC_WIRE, &item).into(),
+        )),
         _ => Err(ProviderError::Request(
             "Unsupported assistant content type".into(),
         )),

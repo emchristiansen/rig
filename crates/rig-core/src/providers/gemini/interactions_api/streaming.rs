@@ -220,6 +220,7 @@ impl Decoder<Completion> for InteractionsDecoder {
                     let tool_events = vec![
                         streaming::StreamEvent::BlockStart {
                             id: key.clone(),
+                            source_order: None,
                             kind: streaming::BlockKind::ToolCall,
                         },
                         streaming::StreamEvent::BlockDelta {
@@ -456,6 +457,7 @@ fn raw_content_parts(
         tool_events: vec![
             streaming::StreamEvent::BlockStart {
                 id: id.clone(),
+                source_order: None,
                 kind: streaming::BlockKind::Text {
                     additional_params: Some(params),
                 },

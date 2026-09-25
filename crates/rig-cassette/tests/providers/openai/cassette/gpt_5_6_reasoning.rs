@@ -375,6 +375,7 @@ async fn five_turn_streaming_reasoning_metadata_roundtrip() {
                         StreamEvent::BlockStart {
                             id,
                             kind: BlockKind::Message,
+                            ..
                         } => {
                             message_id = id.wire_str().map(str::to_owned);
                         }

@@ -511,6 +511,7 @@ fn test_content_delta_function_call_event() {
     let [
         crate::streaming::StreamEvent::BlockStart {
             id: start_id,
+            source_order: None,
             kind: crate::streaming::BlockKind::ToolCall,
         },
         crate::streaming::StreamEvent::BlockEnd {

@@ -271,6 +271,33 @@ impl Responses {
     }
 
     /// The Responses request this wire sends, before serialization.
+    /// Refuse, by name, a provider item this wire cannot replay: one another
+    /// issuer produced. Items it issued, and items of unknown provenance, go
+    /// back verbatim; nothing is dropped here.
+    fn refuse_unreplayable_provider_items(
+        &self,
+        history: &[crate::message::Message],
+    ) -> Result<(), EncodeError> {
+        let issuers = <Self as crate::wire::Wire>::replay_issuers(self, Some(&self.model));
+        for message in history {
+            let crate::message::Message::Assistant { content, .. } = message else {
+                continue;
+            };
+            for part in content.iter() {
+                if let crate::message::AssistantContent::ProviderItem(item) = part
+                    && !issuers.iter().any(|issuer| item.replayable_to(issuer))
+                {
+                    return Err(crate::message::UnreplayableProviderItem::new(
+                        self.provider.dialect.name,
+                        item,
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn responses_request(
         &self,
         request: completion::CompletionRequest,
@@ -295,6 +322,7 @@ impl Responses {
             }
         }
         let quirks = &self.provider.dialect.quirks.responses;
+        self.refuse_unreplayable_provider_items(&request.chat_history)?;
         let lite_identity = super::responses_lite::validate_activation(
             self.codex_request_shape,
             quirks.contract,

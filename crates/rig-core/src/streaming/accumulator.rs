@@ -27,13 +27,19 @@ use crate::streaming::event::{
 
 /// Accumulates the streamed parts of one assistant choice, in arrival order.
 ///
+/// Source-ordered ready slots sort lexicographically among the positions held
+/// by source-ordered slots, with arrival order breaking ties. Unordered ready
+/// slots remain fixed at their arrival positions. Pending slots are omitted.
+///
 /// Owns every aggregation decision the streaming surfaces make. Consumers
 /// feed events through [`BlockAccumulator::apply`] and read the choice with
 /// [`BlockAccumulator::snapshot`] or [`BlockAccumulator::finish`].
 #[derive(Default)]
 pub struct BlockAccumulator {
-    /// Accumulated parts in insertion order.
-    parts: Vec<AssistantContent>,
+    /// Accumulated and reserved parts in observed event order.
+    parts: Vec<PartSlot>,
+    /// Ordered block starts waiting for their content, keyed by block identity.
+    reservations: HashMap<BlockId, usize>,
     /// Open reasoning entities: key → index in `parts`. Invariant: every
     /// mapped index holds an `AssistantContent::Reasoning` part.
     open_reasoning: HashMap<BlockId, usize>,
@@ -54,6 +60,37 @@ pub struct BlockAccumulator {
     /// Whether any completed tool call was recorded; the streaming
     /// counterpart of the unary path's finish-reason reconciliation input.
     saw_tool_call: bool,
+    /// Keys whose provider item was recorded: a repeated end cannot record
+    /// the item twice.
+    finished_items: HashSet<BlockId>,
+}
+
+/// One assistant-content position. Ordered starts reserve a pending slot so a
+/// later completion cannot move the part behind content that arrived first.
+struct PartSlot {
+    source_order: Option<crate::streaming::SourceOrder>,
+    state: PartState,
+}
+
+enum PartState {
+    Pending,
+    Ready(AssistantContent),
+}
+
+impl PartSlot {
+    fn content(&self) -> Option<&AssistantContent> {
+        match &self.state {
+            PartState::Pending => None,
+            PartState::Ready(content) => Some(content),
+        }
+    }
+
+    fn content_mut(&mut self) -> Option<&mut AssistantContent> {
+        match &mut self.state {
+            PartState::Pending => None,
+            PartState::Ready(content) => Some(content),
+        }
+    }
 }
 
 /// A tool call under fragment assembly.
@@ -98,6 +135,74 @@ impl BlockAccumulator {
         Self::default()
     }
 
+    /// Reserve an ordered block's eventual position. Unordered starts retain
+    /// the existing rule of registering content only when it arrives.
+    fn reserve(&mut self, id: &BlockId, source_order: Option<crate::streaming::SourceOrder>) {
+        let Some(source_order) = source_order else {
+            return;
+        };
+        if self.reservations.contains_key(id) {
+            return;
+        }
+        let index = self.parts.len();
+        self.parts.push(PartSlot {
+            source_order: Some(source_order),
+            state: PartState::Pending,
+        });
+        self.reservations.insert(id.clone(), index);
+    }
+
+    /// Fill an ordered reservation, or append under the legacy arrival rule.
+    fn place_part(&mut self, id: &BlockId, part: AssistantContent) -> usize {
+        if let Some(index) = self.reservations.remove(id)
+            && let Some(slot) = self.parts.get_mut(index)
+        {
+            slot.state = PartState::Ready(part);
+            return index;
+        }
+        let index = self.parts.len();
+        self.parts.push(PartSlot {
+            source_order: None,
+            state: PartState::Ready(part),
+        });
+        index
+    }
+
+    /// Fill the assembly key's reservation, falling back to the authoritative
+    /// end key when a whole completion adopted that assembly. Identity stays
+    /// with `published`; either key may be the one that announced wire order.
+    fn place_adopted_part(
+        &mut self,
+        published: &BlockId,
+        completed: &BlockId,
+        part: AssistantContent,
+    ) -> usize {
+        let reservation = self
+            .reservations
+            .remove(published)
+            .or_else(|| self.reservations.remove(completed));
+        if published != completed {
+            self.reservations.remove(completed);
+        }
+        if let Some(index) = reservation
+            && let Some(slot) = self.parts.get_mut(index)
+        {
+            slot.state = PartState::Ready(part);
+            return index;
+        }
+        let index = self.parts.len();
+        self.parts.push(PartSlot {
+            source_order: None,
+            state: PartState::Ready(part),
+        });
+        index
+    }
+
+    /// Leave an unfilled reservation absent from snapshots and final output.
+    fn discard_reservation(&mut self, id: &BlockId) {
+        self.reservations.remove(id);
+    }
+
     /// Fold one event into the accumulated choice.
     ///
     /// Returns the block a `BlockEnd` finalized for consumers, keyed by the
@@ -111,18 +216,31 @@ impl BlockAccumulator {
         event: &StreamEvent,
     ) -> Result<Option<(BlockId, AssistantContent)>, ErrorReport> {
         match event {
-            StreamEvent::BlockStart { id, kind } => {
+            StreamEvent::BlockStart {
+                id,
+                source_order,
+                kind,
+            } => {
                 match kind {
                     BlockKind::Message => {}
                     BlockKind::Text { additional_params } => {
+                        if !self.text_ids.contains_key(id) {
+                            self.reserve(id, *source_order);
+                        }
                         self.text_start(id, additional_params.clone());
                     }
                     BlockKind::Reasoning { provider_id } => {
+                        if !self.open_reasoning.contains_key(id) {
+                            self.reserve(id, *source_order);
+                        }
                         self.reasoning_start(id, provider_id.as_deref());
                     }
                     BlockKind::ToolCall => {
+                        self.reserve(id, *source_order);
                         self.ensure_open_tool_input(id);
                     }
+                    // The whole item arrives with its end.
+                    BlockKind::ProviderItem => self.reserve(id, *source_order),
                 }
                 Ok(None)
             }
@@ -139,7 +257,10 @@ impl BlockAccumulator {
                 Ok(None)
             }
             StreamEvent::BlockEnd { id, end, .. } => match end {
-                BlockClose::Text => Ok(None),
+                BlockClose::Text => {
+                    self.discard_reservation(id);
+                    Ok(None)
+                }
                 BlockClose::Reasoning {
                     reasoning,
                     signature,
@@ -153,12 +274,37 @@ impl BlockAccumulator {
                         .filter(|_| authoritative)
                         .map(|reasoning| (id.clone(), AssistantContent::Reasoning(reasoning))))
                 }
-                BlockClose::ToolCall(end) => Ok(self
-                    .tool_end(id, end.clone())?
-                    .map(|(id, call)| (id, AssistantContent::ToolCall(call)))),
-                BlockClose::CustomToolCall(end) => Ok(self
-                    .custom_tool_end(id, end.clone())
-                    .map(|(id, call)| (id, AssistantContent::CustomToolCall(call)))),
+                BlockClose::ToolCall(end) => match self.tool_end(id, end.clone()) {
+                    Ok(completed) => {
+                        if completed.is_none()
+                            && !self.open_tool_inputs.iter().any(|input| input.id == *id)
+                        {
+                            self.discard_reservation(id);
+                        }
+                        Ok(completed.map(|(id, call)| (id, AssistantContent::ToolCall(call))))
+                    }
+                    Err(error) => {
+                        self.discard_reservation(id);
+                        Err(error)
+                    }
+                },
+                BlockClose::CustomToolCall(end) => {
+                    let completed = self.custom_tool_end(id, end.clone());
+                    if completed.is_none() {
+                        self.discard_reservation(id);
+                    }
+                    Ok(completed.map(|(id, call)| (id, AssistantContent::CustomToolCall(call))))
+                }
+                BlockClose::ProviderItem(item) => {
+                    if !self.finished_items.insert(id.clone()) {
+                        self.discard_reservation(id);
+                        tracing::debug!("ignoring a repeated end for a recorded provider item");
+                        return Ok(None);
+                    }
+                    let part = AssistantContent::ProviderItem(item.clone());
+                    self.place_part(id, part.clone());
+                    Ok(Some((id.clone(), part)))
+                }
             },
             StreamEvent::Final(_) | StreamEvent::Unknown(_) => Ok(None),
         }
@@ -180,7 +326,9 @@ impl BlockAccumulator {
     /// unseen.
     fn text_delta(&mut self, id: &BlockId, text: &str) {
         let index = self.ensure_text_block(id);
-        if let Some(AssistantContent::Text(existing)) = self.parts.get_mut(index) {
+        if let Some(AssistantContent::Text(existing)) =
+            self.parts.get_mut(index).and_then(PartSlot::content_mut)
+        {
             existing.text.push_str(text);
         }
     }
@@ -192,7 +340,9 @@ impl BlockAccumulator {
         additional_params: crate::message::AdditionalParams,
     ) {
         let index = self.ensure_text_block(id);
-        let Some(AssistantContent::Text(text)) = self.parts.get_mut(index) else {
+        let Some(AssistantContent::Text(text)) =
+            self.parts.get_mut(index).and_then(PartSlot::content_mut)
+        else {
             return;
         };
         match text.additional_params.as_mut() {
@@ -206,8 +356,7 @@ impl BlockAccumulator {
         if let Some(&index) = self.text_ids.get(id) {
             return index;
         }
-        self.parts.push(AssistantContent::text(""));
-        let index = self.parts.len() - 1;
+        let index = self.place_part(id, AssistantContent::text(""));
         self.text_ids.insert(id.clone(), index);
         index
     }
@@ -226,7 +375,9 @@ impl BlockAccumulator {
     /// Finished parts are not reused.
     fn reasoning_delta(&mut self, id: &BlockId, provider_id: Option<&str>, text: &str) {
         if let Some(&index) = self.open_reasoning.get(id) {
-            if let Some(AssistantContent::Reasoning(existing)) = self.parts.get_mut(index) {
+            if let Some(AssistantContent::Reasoning(existing)) =
+                self.parts.get_mut(index).and_then(PartSlot::content_mut)
+            {
                 if let Some(ReasoningContent::Text {
                     text: existing_text,
                     ..
@@ -265,7 +416,7 @@ impl BlockAccumulator {
     ) -> Option<Reasoning> {
         if let Some(index) = self.open_reasoning.remove(id) {
             if let Some(mut restatement) = restatement
-                && let Some(part) = self.parts.get_mut(index)
+                && let Some(part) = self.parts.get_mut(index).and_then(PartSlot::content_mut)
             {
                 // An omitted restatement ID must not erase established identity.
                 if restatement.id.is_none()
@@ -276,7 +427,7 @@ impl BlockAccumulator {
                 *part = AssistantContent::Reasoning(restatement);
             }
             if let Some(signature) = signature
-                && let Some(part) = self.parts.get_mut(index)
+                && let Some(part) = self.parts.get_mut(index).and_then(PartSlot::content_mut)
             {
                 attach_signature(part, signature);
             }
@@ -290,7 +441,7 @@ impl BlockAccumulator {
                 // one, including multiple signatures under a reused key.
                 (None, Some(signature)) => {
                     let part_already_signed = matches!(
-                        self.parts.get(index),
+                        self.parts.get(index).and_then(PartSlot::content),
                         Some(AssistantContent::Reasoning(reasoning))
                             if reasoning.content.iter().any(|content| matches!(
                                 content,
@@ -300,7 +451,7 @@ impl BlockAccumulator {
                     if part_already_signed {
                         return self.finish_signature_only(id, signature);
                     }
-                    if let Some(part) = self.parts.get_mut(index) {
+                    if let Some(part) = self.parts.get_mut(index).and_then(PartSlot::content_mut) {
                         attach_signature(part, signature);
                     }
                     return self.reasoning_at(index);
@@ -331,7 +482,7 @@ impl BlockAccumulator {
         if let Some(signature) = signature {
             attach_reasoning_signature(&mut restatement, signature);
         }
-        let index = self.push_reasoning_part(restatement);
+        let index = self.push_reasoning_part(id, restatement);
         self.finished_reasoning.insert(id.clone(), index);
         self.reasoning_at(index)
     }
@@ -339,14 +490,17 @@ impl BlockAccumulator {
     /// Record a signature with no chain-of-thought as its own finished part
     /// under `id`.
     fn finish_signature_only(&mut self, id: &BlockId, signature: String) -> Option<Reasoning> {
-        let index = self.push_reasoning_part(Reasoning {
-            provider: None,
-            id: None,
-            content: vec![ReasoningContent::Text {
-                text: String::new(),
-                signature: Some(signature),
-            }],
-        });
+        let index = self.push_reasoning_part(
+            id,
+            Reasoning {
+                provider: None,
+                id: None,
+                content: vec![ReasoningContent::Text {
+                    text: String::new(),
+                    signature: Some(signature),
+                }],
+            },
+        );
         self.finished_reasoning.insert(id.clone(), index);
         self.reasoning_at(index)
     }
@@ -357,22 +511,24 @@ impl BlockAccumulator {
         provider_id: Option<&str>,
         content: Vec<ReasoningContent>,
     ) {
-        let index = self.push_reasoning_part(Reasoning {
-            provider: None,
-            id: provider_id.map(str::to_owned),
-            content,
-        });
+        let index = self.push_reasoning_part(
+            id,
+            Reasoning {
+                provider: None,
+                id: provider_id.map(str::to_owned),
+                content,
+            },
+        );
         self.open_reasoning.insert(id.clone(), index);
     }
 
     /// Register a new reasoning part at the current arrival position.
-    fn push_reasoning_part(&mut self, reasoning: Reasoning) -> usize {
-        self.parts.push(AssistantContent::Reasoning(reasoning));
-        self.parts.len() - 1
+    fn push_reasoning_part(&mut self, id: &BlockId, reasoning: Reasoning) -> usize {
+        self.place_part(id, AssistantContent::Reasoning(reasoning))
     }
 
     fn reasoning_at(&self, index: usize) -> Option<Reasoning> {
-        match self.parts.get(index) {
+        match self.parts.get(index).and_then(PartSlot::content) {
             Some(AssistantContent::Reasoning(reasoning)) => Some(reasoning.clone()),
             _ => None,
         }
@@ -406,9 +562,9 @@ impl BlockAccumulator {
     }
 
     /// Appends a completed tool call and records that the turn used tools.
-    fn push_tool_call(&mut self, tool_call: ToolCall) {
+    fn push_tool_call(&mut self, published: &BlockId, completed: &BlockId, tool_call: ToolCall) {
         self.saw_tool_call = true;
-        self.parts.push(AssistantContent::ToolCall(tool_call));
+        self.place_adopted_part(published, completed, AssistantContent::ToolCall(tool_call));
     }
 
     /// Whether any completed tool call was recorded on this stream.
@@ -516,6 +672,9 @@ impl BlockAccumulator {
                 // The drop finalizes the entity: a later payload-bearing
                 // end for this key must not resurrect it as a phantom call.
                 self.finished_tools.insert(id.clone());
+                if published != *id {
+                    self.discard_reservation(&published);
+                }
             }
             return Ok(None);
         }
@@ -564,6 +723,9 @@ impl BlockAccumulator {
                                 // The drop finalizes the entity, exactly like
                                 // a successful completion.
                                 self.finished_tools.insert(id.clone());
+                                if published != *id {
+                                    self.discard_reservation(&published);
+                                }
                                 return Ok(None);
                             }
                             // The wire superseded this call mid-assembly; deliver
@@ -576,6 +738,9 @@ impl BlockAccumulator {
                             UnparseableToolInput::Error => {
                                 self.finished_tools.insert(id.clone());
                                 self.finished_tools.insert(published.clone());
+                                if published != *id {
+                                    self.discard_reservation(&published);
+                                }
                                 return Err(ErrorReport::new(
                                     ErrorKind::Response,
                                     format!(
@@ -613,7 +778,7 @@ impl BlockAccumulator {
         // Both keys must reject repeated ends after adoption.
         self.finished_tools.insert(id.clone());
         self.finished_tools.insert(published.clone());
-        self.push_tool_call(tool_call.clone());
+        self.push_tool_call(&published, id, tool_call.clone());
         Ok(Some((published, tool_call)))
     }
 
@@ -673,8 +838,7 @@ impl BlockAccumulator {
             input,
         };
         self.saw_tool_call = true;
-        self.parts
-            .push(AssistantContent::CustomToolCall(call.clone()));
+        self.place_part(id, AssistantContent::CustomToolCall(call.clone()));
         Some((id.clone(), call))
     }
 
@@ -706,25 +870,46 @@ impl BlockAccumulator {
     /// tool calls and text with neither content nor metadata; retains open
     /// reasoning. Repeated snapshots without new events are equal.
     pub fn snapshot(&self) -> Vec<AssistantContent> {
+        let mut ordered: Vec<_> = self
+            .parts
+            .iter()
+            .enumerate()
+            .filter_map(|(arrival, slot)| {
+                let content = slot.content()?.clone();
+                let source_order = slot.source_order?;
+                Self::survives(&content).then_some((source_order, arrival, content))
+            })
+            .collect();
+        ordered.sort_by_key(|(source_order, arrival, _)| (*source_order, *arrival));
+        let mut ordered = ordered.into_iter().map(|(_, _, content)| content);
+
         self.parts
             .iter()
-            .filter(|part| Self::survives(part))
-            .cloned()
+            .filter_map(|slot| {
+                let content = slot.content()?;
+                if !Self::survives(content) {
+                    return None;
+                }
+                match slot.source_order {
+                    Some(_) => ordered.next(),
+                    None => Some(content.clone()),
+                }
+            })
             .collect()
     }
 
     /// Returns the same parts as [`Self::snapshot`] and resets all state.
     /// A stream with no content produces an empty vector.
     pub fn finish(&mut self) -> Vec<AssistantContent> {
-        let parts: Vec<AssistantContent> = std::mem::take(&mut self.parts)
-            .into_iter()
-            .filter(Self::survives)
-            .collect();
+        let parts = self.snapshot();
+        self.parts.clear();
+        self.reservations.clear();
         self.open_reasoning.clear();
         self.finished_reasoning.clear();
         self.text_ids.clear();
         self.open_tool_inputs.clear();
         self.finished_tools.clear();
+        self.finished_items.clear();
         self.saw_tool_call = false;
         parts
     }
@@ -737,7 +922,8 @@ impl BlockAccumulator {
             AssistantContent::ToolCall(_)
             | AssistantContent::CustomToolCall(_)
             | AssistantContent::Reasoning(_)
-            | AssistantContent::Image(_) => true,
+            | AssistantContent::Image(_)
+            | AssistantContent::ProviderItem(_) => true,
         }
     }
 }

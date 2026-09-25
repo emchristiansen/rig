@@ -20,6 +20,26 @@ use crate::message::{AdditionalParams, AssistantContent, Reasoning};
 
 use super::{BlockId, StreamFinal, UnknownPayload, UnparseableToolInput};
 
+/// A provider's stable position for one assistant-content block.
+///
+/// The primary coordinate orders provider output items. The secondary
+/// coordinate preserves content order within one item. Providers that do not
+/// expose stable positions leave this absent and retain arrival-order folding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SourceOrder {
+    /// The provider output item's position.
+    pub primary: u64,
+    /// The content position within that output item.
+    pub secondary: u64,
+}
+
+impl SourceOrder {
+    /// Construct a source-order coordinate.
+    pub const fn new(primary: u64, secondary: u64) -> Self {
+        Self { primary, secondary }
+    }
+}
+
 /// One event of a completion stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -28,6 +48,9 @@ pub enum StreamEvent {
     BlockStart {
         /// The block's identity for the life of the stream.
         id: BlockId,
+        /// The block's provider position, when the wire supplies one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_order: Option<SourceOrder>,
         /// What kind of block, with the metadata the wire announced at the
         /// boundary.
         kind: BlockKind,
@@ -116,6 +139,9 @@ pub enum BlockKind {
     },
     /// A tool call under assembly.
     ToolCall,
+    /// An opaque provider output item; its [`BlockClose::ProviderItem`]
+    /// carries the whole item.
+    ProviderItem,
 }
 
 /// A fragment of a block.
@@ -180,6 +206,9 @@ pub enum BlockClose {
     /// Its input is authoritative and verbatim; any function-argument
     /// fragments assembled under the same key are superseded, never parsed.
     CustomToolCall(CustomToolCallEnd),
+    /// An opaque provider output item arrived whole: the accumulator records
+    /// it as [`AssistantContent::ProviderItem`], in stream order.
+    ProviderItem(crate::message::ProviderItem),
 }
 
 /// The end of a streamed tool call's input.

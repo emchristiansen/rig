@@ -1067,6 +1067,10 @@ pub mod gemini_api_types {
                 message::AssistantContent::CustomToolCall(call) => {
                     Err(call.refused_by_json_only_wire(GEMINI_WIRE).into())
                 }
+                // An opaque provider item has no representation on this wire.
+                message::AssistantContent::ProviderItem(item) => {
+                    Err(message::UnreplayableProviderItem::new(GEMINI_WIRE, &item).into())
+                }
                 message::AssistantContent::Reasoning(reasoning) => Ok(Part {
                     thought: Some(true),
                     thought_signature: reasoning.first_signature().map(str::to_owned),

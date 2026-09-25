@@ -1675,6 +1675,10 @@ pub mod interactions_api_types {
                 message::AssistantContent::CustomToolCall(call) => {
                     Err(call.refused_by_json_only_wire(INTERACTIONS_WIRE).into())
                 }
+                // An opaque provider item has no representation on this wire.
+                message::AssistantContent::ProviderItem(item) => {
+                    Err(message::UnreplayableProviderItem::new(INTERACTIONS_WIRE, &item).into())
+                }
                 message::AssistantContent::Reasoning(message::Reasoning { content, .. }) => {
                     // Preserve signature-only thoughts without empty summary items,
                     // which the API rejects.

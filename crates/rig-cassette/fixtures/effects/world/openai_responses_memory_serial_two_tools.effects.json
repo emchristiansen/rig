@@ -2,14 +2,14 @@
   "header": {
     "deliveries": [
       {
-        "batch": 3,
+        "batch": 1,
         "id": 0,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 79,
+        "batch": 55,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -17,7 +17,7 @@
         }
       },
       {
-        "batch": 81,
+        "batch": 59,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -25,7 +25,7 @@
         }
       },
       {
-        "batch": 83,
+        "batch": 60,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -33,7 +33,7 @@
         }
       },
       {
-        "batch": 90,
+        "batch": 68,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -41,7 +41,7 @@
         }
       },
       {
-        "batch": 95,
+        "batch": 70,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -49,7 +49,7 @@
         }
       },
       {
-        "batch": 155,
+        "batch": 97,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -57,28 +57,28 @@
         }
       },
       {
-        "batch": 155,
+        "batch": 97,
         "id": 1,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 159,
+        "batch": 98,
         "id": 2,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 161,
+        "batch": 100,
         "id": 3,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 232,
+        "batch": 158,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -86,7 +86,7 @@
         }
       },
       {
-        "batch": 240,
+        "batch": 163,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -94,7 +94,7 @@
         }
       },
       {
-        "batch": 244,
+        "batch": 166,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -102,7 +102,7 @@
         }
       },
       {
-        "batch": 245,
+        "batch": 169,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -110,7 +110,7 @@
         }
       },
       {
-        "batch": 246,
+        "batch": 171,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -118,7 +118,7 @@
         }
       },
       {
-        "batch": 247,
+        "batch": 172,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -126,7 +126,7 @@
         }
       },
       {
-        "batch": 248,
+        "batch": 174,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -134,7 +134,7 @@
         }
       },
       {
-        "batch": 250,
+        "batch": 176,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -142,7 +142,7 @@
         }
       },
       {
-        "batch": 251,
+        "batch": 178,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -150,7 +150,7 @@
         }
       },
       {
-        "batch": 252,
+        "batch": 179,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -158,7 +158,7 @@
         }
       },
       {
-        "batch": 257,
+        "batch": 181,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -166,7 +166,7 @@
         }
       },
       {
-        "batch": 258,
+        "batch": 185,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -174,7 +174,7 @@
         }
       },
       {
-        "batch": 259,
+        "batch": 187,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -182,7 +182,7 @@
         }
       },
       {
-        "batch": 260,
+        "batch": 189,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -190,7 +190,7 @@
         }
       },
       {
-        "batch": 262,
+        "batch": 191,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -198,7 +198,7 @@
         }
       },
       {
-        "batch": 265,
+        "batch": 200,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -206,7 +206,7 @@
         }
       },
       {
-        "batch": 291,
+        "batch": 219,
         "id": 4,
         "kind": {
           "delivery": "stream",
@@ -214,14 +214,14 @@
         }
       },
       {
-        "batch": 291,
+        "batch": 219,
         "id": 4,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 293,
+        "batch": 220,
         "id": 5,
         "kind": {
           "delivery": "outcome"
@@ -457,6 +457,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_05879b5f00b60697006ab2b3518b9c87d099783fc5f96dad81",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_05879b5f00b60697006ab2b3518b9c87d099783fc5f96dad81"
@@ -465,6 +469,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_05879b5f00b60697006ab2b356d0ac87d09a188cbd71f9ce72",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }
@@ -488,6 +496,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_05879b5f00b60697006ab2b356d0bc87d082922ac6e2afc61f",
+          "source_order": {
+            "primary": 2,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }
@@ -894,6 +906,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_05879b5f00b60697006ab2b357ce4c87d0ac8f64b64e61589b",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_05879b5f00b60697006ab2b357ce4c87d0ac8f64b64e61589b"
@@ -902,6 +918,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_05879b5f00b60697006ab2b35a173887d0ad161589c2fc85b0",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -1013,6 +1033,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_05879b5f00b60697006ab2b35a173887d0ad161589c2fc85b0",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

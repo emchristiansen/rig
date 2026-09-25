@@ -131,6 +131,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_082af6be0dd7a3df006ab2b47ddac887d081de7ee875330187",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_082af6be0dd7a3df006ab2b47ddac887d081de7ee875330187"

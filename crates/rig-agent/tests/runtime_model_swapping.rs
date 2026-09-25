@@ -275,6 +275,7 @@ fn stream_from_script(
     }
     let mut events = vec![Ok(StreamEvent::BlockStart {
         id: BlockId::wire(turn.message_id()),
+        source_order: None,
         kind: BlockKind::Message,
     })];
     let text_block = MintKind::Text.for_wire_index(0);
@@ -312,6 +313,7 @@ fn stream_from_script(
             let whole = MintKind::Reasoning.for_wire_index(1);
             events.push(Ok(StreamEvent::BlockStart {
                 id: whole.clone(),
+                source_order: None,
                 kind: BlockKind::Reasoning { provider_id: None },
             }));
             events.push(Ok(StreamEvent::BlockEnd {

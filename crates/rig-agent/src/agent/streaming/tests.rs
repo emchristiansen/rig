@@ -4235,6 +4235,7 @@ async fn stream_prompt_observes_interleaved_reasoning_deltas_before_unchanged_em
             Ok(MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockStart {
                 id,
                 kind: BlockKind::Reasoning { provider_id },
+                ..
             })) => {
                 provider_ids.insert(id, provider_id);
             }

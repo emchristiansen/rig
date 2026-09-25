@@ -3243,6 +3243,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -3266,6 +3270,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

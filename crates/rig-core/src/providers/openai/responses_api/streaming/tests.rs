@@ -19,7 +19,7 @@ use crate::providers::openai::responses_api::{
     AdditionalParameters, CompletionResponse, IncompleteDetailsReason, OutputTokensDetails,
     ReasoningSummary, ResponseError, ResponseObject, ResponseStatus, ResponsesUsage,
 };
-use crate::streaming::{BlockClose, BlockId, BlockKind, Delta, StreamEvent};
+use crate::streaming::{BlockClose, BlockId, BlockKind, Delta, SourceOrder, StreamEvent};
 use crate::test_utils::MockStreamingClient;
 use crate::wire::WireFrame;
 use crate::wire::{Fold, Operation, Reply};
@@ -521,6 +521,7 @@ fn reasoning_output_item_done_emits_reasoning_text_content() {
             kind: BlockKind::Reasoning {
                 provider_id: Some(provider_id)
             },
+            ..
         }) if id == &BlockId::wire("rs_text_1") && provider_id == "rs_text_1"
     ));
     assert!(matches!(
@@ -543,7 +544,7 @@ fn reasoning_output_item_done_emits_reasoning_text_content() {
 }
 
 /// Envelope-less replay shape (ChatGPT bodies): an id-less summary
-/// delta mints an Output-kind key, the done item restates the whole
+/// delta mints a Reasoning-kind key, the done item restates the whole
 /// block under the SAME adopted minted key, and visible text follows.
 /// The driver's boundary law must treat the same-key whole block as a
 /// close — this exact body used to abort every debug build
@@ -614,6 +615,7 @@ fn reasoning_text_delta_emits_reasoning_delta() {
             kind: BlockKind::Reasoning {
                 provider_id: Some(provider_id)
             },
+            ..
         }) if id == &BlockId::wire("rs_delta_1") && provider_id == "rs_delta_1"
     ));
     assert!(matches!(
@@ -624,11 +626,11 @@ fn reasoning_text_delta_emits_reasoning_delta() {
 }
 
 #[test]
-fn unknown_output_item_surfaces_as_raw_unknown_choice() {
+fn unknown_output_item_surfaces_as_a_verbatim_provider_item_block() {
     // A hosted-tool item (web_search_call) arriving on
-    // `response.output_item.done` must surface to stream consumers as
-    // `StreamEvent::Unknown` carrying the verbatim item, mirroring how
-    // the non-streaming decode preserves it on `CompletionResponse.output`.
+    // `response.output_item.done` must surface to stream consumers as a
+    // provider-item block, keyed by its wire id and closing with the verbatim
+    // item, the same part the non-streaming fold keeps in the answer.
     let item = json!({
         "type": "web_search_call",
         "id": "ws_001",
@@ -648,13 +650,31 @@ fn unknown_output_item_surfaces_as_raw_unknown_choice() {
     let events =
         stream_events_from_sse_body("openai", &body, None).expect("sse body should decode");
 
-    let unknown = events.iter().find_map(|event| match event {
-        StreamEvent::Unknown(value) => Some(value),
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Unknown(_))),
+        "an opaque item is a provider-item block, not an unknown event",
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::BlockStart {
+            id,
+            source_order: Some(SourceOrder { primary: 0, secondary: 0 }),
+            kind: BlockKind::ProviderItem,
+        } if id == &BlockId::wire("ws_001")
+    )));
+    let closed = events.iter().find_map(|event| match event {
+        StreamEvent::BlockEnd {
+            id,
+            end: BlockClose::ProviderItem(part),
+            ..
+        } if id == &BlockId::wire("ws_001") => Some(part),
         _ => None,
     });
     assert_eq!(
-        unknown,
-        Some(&item.into()),
+        closed.map(|part| &part.item),
+        Some(&item),
         "the raw web_search_call item should reach the consumer verbatim",
     );
 }
@@ -1447,7 +1467,7 @@ fn envelope_less_frames_repair_onto_the_shared_interpreter() {
     assert!(events.iter().any(|event| matches!(
         event,
         StreamEvent::BlockDelta { id, delta: Delta::ToolArguments { .. } }
-            if id == &crate::streaming::MintKind::Output.for_wire_index(0)
+            if id == &crate::streaming::MintKind::Tool.for_wire_index(0)
     )));
 
     // Live-path parity, pinned: an envelope-less bookkeeping event whose
@@ -1465,8 +1485,8 @@ fn envelope_less_frames_repair_onto_the_shared_interpreter() {
             .any(|event| matches!(event, StreamEvent::Final(_)))
     );
 
-    // An envelope-less reasoning summary delta keys by the repaired
-    // `output_index`, matching the live derivation.
+    // An envelope-less reasoning summary delta uses the reasoning namespace;
+    // the repaired `output_index` still selects its assembly slot.
     let body = format!(
         "data: {}\ndata: {completed}\n",
         json!({ "type": "response.reasoning_summary_text.delta", "delta": "think" })
@@ -1476,7 +1496,7 @@ fn envelope_less_frames_repair_onto_the_shared_interpreter() {
     assert!(events.iter().any(|event| matches!(
         event,
         StreamEvent::BlockDelta { id, delta: Delta::Reasoning { text } }
-            if id == &crate::streaming::MintKind::Output.for_wire_index(0) && text == "think"
+            if id == &crate::streaming::MintKind::Reasoning.for_wire_index(0) && text == "think"
     )));
 }
 
@@ -1580,7 +1600,7 @@ fn a_fragmentless_unparseable_restatement_still_reaches_the_buffer() {
 /// ChatGPT's envelope-less replay bodies omit the id on a subset of a
 /// slot's events) must key every frame — and the done item — by ONE
 /// slot identity, the same discipline `tool_slots` applies. Per-event
-/// resolution split the slot into `Wire("rs_1")` and `Minted(Output, 0)`,
+/// resolution split the slot into `Wire("rs_1")` and a minted reasoning key,
 /// and the done item superseded only one of them: the other survived as
 /// an orphaned partial part carrying the same provider id.
 #[tokio::test]
@@ -1626,6 +1646,7 @@ async fn mixed_id_and_id_less_reasoning_frames_share_one_slot_key() {
             StreamEvent::BlockStart {
                 id,
                 kind: BlockKind::Reasoning { .. },
+                ..
             }
             | StreamEvent::BlockDelta {
                 id,
@@ -1698,7 +1719,7 @@ async fn envelope_less_reasoning_deltas_are_superseded_by_their_done_item() {
             id,
             end: BlockClose::Reasoning { reasoning: Some(_), .. },
             ..
-        } if id == &crate::streaming::MintKind::Output.for_wire_index(0)
+        } if id == &crate::streaming::MintKind::Reasoning.for_wire_index(0)
     )));
 
     let raw_response = sample_response(ResponseStatus::Completed);
@@ -1785,7 +1806,7 @@ async fn same_item_text_resumes_as_one_part_across_interleaved_reasoning() {
         .filter(|event| {
             matches!(
                 event,
-                StreamEvent::BlockStart { id, kind: BlockKind::Text { .. } }
+                StreamEvent::BlockStart { id, kind: BlockKind::Text { .. }, .. }
                     if id == &BlockId::wire("msg_1")
             )
         })
@@ -1887,6 +1908,7 @@ async fn mixed_id_and_id_less_events_share_one_slot_key() {
             StreamEvent::BlockStart {
                 id,
                 kind: BlockKind::ToolCall,
+                ..
             }
             | StreamEvent::BlockDelta {
                 id,
@@ -2114,7 +2136,7 @@ async fn id_less_args_deltas_surface_and_truncation_fabricates_no_call() {
             StreamEvent::BlockDelta {
                 id,
                 delta: Delta::ToolArguments { arguments },
-            } if id == &crate::streaming::MintKind::Output.for_wire_index(0) && arguments == "{\"loc\":"
+            } if id == &crate::streaming::MintKind::Tool.for_wire_index(0) && arguments == "{\"loc\":"
         )),
         "the id-less args fragment must surface as a delta: {raw_choices:?}"
     );
@@ -3297,6 +3319,7 @@ fn refusal_parts_stream_into_their_own_marked_blocks() {
             StreamEvent::BlockStart {
                 id,
                 kind: BlockKind::Text { additional_params },
+                ..
             } if super::super::is_refusal(additional_params.as_ref()) => Some(id.clone()),
             _ => None,
         })
@@ -3404,6 +3427,607 @@ fn an_id_less_text_delta_after_a_message_done_never_extends_a_refusal() {
     );
 }
 
+/// Opaque output items (a compaction and an unmodeled hosted-tool item) join
+/// the answer as provider items, in order, and fold alike whether the reply
+/// is unary or streamed. A stream carries them as provider-item blocks, not
+/// as `StreamEvent::Unknown`, and an item without an id is keyed by its
+/// output index.
+#[test]
+fn opaque_output_items_join_the_answer_alike_unary_and_streamed() {
+    let compaction = json!({"type": "compaction", "id": "cmp_1", "encrypted_content": "opaque"});
+    let hosted =
+        json!({"type": "web_search_call", "status": "completed", "action": {"query": "rig"}});
+    let message = json!({
+        "type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+        "content": [{"type": "output_text", "text": "hi", "annotations": []}]
+    });
+    let items = [compaction.clone(), hosted.clone(), message];
+
+    let outputs: Vec<crate::providers::openai::responses_api::Output> =
+        serde_json::from_value(serde_json::Value::Array(items.to_vec()))
+            .expect("the output decodes");
+    let unary = super::super::tests::folded_choice(outputs);
+
+    // The message streams its text as a real reply does: a delta, then its
+    // done item.
+    let text_delta = json!({
+        "type": "response.output_text.delta", "item_id": "msg_1", "output_index": 2,
+        "content_index": 0, "sequence_number": 3, "delta": "hi"
+    });
+    let body: String = items
+        .iter()
+        .enumerate()
+        .flat_map(|(index, item)| {
+            let done = json!({
+                "type": "response.output_item.done",
+                "output_index": index,
+                "sequence_number": index + 1,
+                "item": item
+            });
+            if index == 2 {
+                vec![text_delta.clone(), done]
+            } else {
+                vec![done]
+            }
+        })
+        .chain(std::iter::once(json!({
+            "type": "response.completed",
+            "sequence_number": 9,
+            "response": sample_response(ResponseStatus::Completed),
+        })))
+        .map(|event| format!("data: {event}\n\n"))
+        .collect();
+    let decoded = stream_events_from_sse_body("openai", &body, None).expect("the body decodes");
+    assert!(
+        !decoded
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Unknown(_))),
+        "opaque items are provider-item blocks, not unknown events"
+    );
+    assert!(decoded.iter().any(|event| matches!(
+        event,
+        StreamEvent::BlockStart { id, kind: BlockKind::ProviderItem, .. }
+            if *id == crate::streaming::MintKind::Output.for_wire_index(1)
+    )));
+    let streamed = folded_stream_events(
+        "openai",
+        decoded,
+        &sample_response(ResponseStatus::Completed),
+    )
+    .expect("the stream folds")
+    .choice;
+
+    assert_eq!(unary, streamed);
+    let items: Vec<&crate::message::ProviderItem> = streamed
+        .iter()
+        .filter_map(|part| match part {
+            AssistantContent::ProviderItem(item) => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].item, compaction);
+    assert_eq!(items[1].item, hosted);
+    for item in items {
+        assert_eq!(
+            item.provider.as_deref(),
+            Some("openai"),
+            "stamped with its issuer"
+        );
+    }
+}
+
+#[test]
+fn anonymous_tool_and_reasoning_keys_do_not_collide_with_indexed_provider_items() {
+    let provider = json!({
+        "type": "web_search_call",
+        "status": "completed",
+        "action": {"query": "rig"}
+    });
+    let function = json!({
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "call_1",
+        "name": "lookup",
+        "arguments": "{}",
+        "status": "completed"
+    });
+    let tool_output = json!([provider, function]);
+    let tool_events = [
+        json!({
+            "type": "response.function_call_arguments.delta",
+            "output_index": 1,
+            "sequence_number": 1,
+            "delta": "{}"
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "sequence_number": 2,
+            "item": tool_output[0]
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "sequence_number": 3,
+            "item": tool_output[1]
+        }),
+        completed_with_output(tool_output.clone()),
+    ];
+    let tool_body = tool_events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+    let decoded = stream_events_from_sse_body("openai", &tool_body, None)
+        .expect("the anonymous tool stream decodes");
+    assert!(decoded.iter().any(|event| matches!(
+        event,
+        StreamEvent::BlockStart { id, kind: BlockKind::ToolCall, .. }
+            if id == &crate::streaming::MintKind::Tool.for_wire_index(0)
+    )));
+    assert!(decoded.iter().any(|event| matches!(
+        event,
+        StreamEvent::BlockStart { id, kind: BlockKind::ProviderItem, .. }
+            if id == &crate::streaming::MintKind::Output.for_wire_index(0)
+    )));
+    let streamed = folded_body_with(ResponsesStreamOptions::strict(), &tool_events)
+        .expect("the anonymous tool stream folds")
+        .choice;
+    let unary = super::super::tests::folded_choice(
+        serde_json::from_value(tool_output).expect("the tool output decodes"),
+    );
+    assert_eq!(response_choice_labels(&streamed), ["provider", "function"]);
+    assert_eq!(streamed, unary);
+
+    let provider = json!({
+        "type": "web_search_call",
+        "status": "completed",
+        "action": {"query": "rig"}
+    });
+    let reasoning = json!({
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [{"type": "summary_text", "text": "think"}],
+        "content": [],
+        "status": "completed"
+    });
+    let reasoning_output = json!([provider, reasoning]);
+    let reasoning_events = [
+        json!({
+            "type": "response.reasoning_summary_text.delta",
+            "output_index": 1,
+            "summary_index": 0,
+            "sequence_number": 1,
+            "delta": "think"
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "sequence_number": 2,
+            "item": reasoning_output[0]
+        }),
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "sequence_number": 3,
+            "item": reasoning_output[1]
+        }),
+        completed_with_output(reasoning_output.clone()),
+    ];
+    let reasoning_body = reasoning_events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+    let decoded = stream_events_from_sse_body("openai", &reasoning_body, None)
+        .expect("the anonymous reasoning stream decodes");
+    assert!(decoded.iter().any(|event| matches!(
+        event,
+        StreamEvent::BlockStart { id, kind: BlockKind::Reasoning { .. }, .. }
+            if id == &crate::streaming::MintKind::Reasoning.for_wire_index(0)
+    )));
+    assert!(decoded.iter().any(|event| matches!(
+        event,
+        StreamEvent::BlockStart { id, kind: BlockKind::ProviderItem, .. }
+            if id == &crate::streaming::MintKind::Output.for_wire_index(0)
+    )));
+    assert!(decoded.iter().any(|event| matches!(
+        event,
+        StreamEvent::BlockStart {
+            source_order: Some(source_order),
+            kind: BlockKind::ProviderItem,
+            ..
+        } if *source_order == crate::streaming::SourceOrder::new(0, 0)
+    )));
+    let streamed = folded_body_with(ResponsesStreamOptions::strict(), &reasoning_events)
+        .expect("the anonymous reasoning stream folds")
+        .choice;
+    let unary = super::super::tests::folded_choice(
+        serde_json::from_value(reasoning_output).expect("the reasoning output decodes"),
+    );
+    assert_eq!(response_choice_labels(&streamed), ["provider", "reasoning"]);
+    assert_eq!(streamed, unary);
+}
+
+#[test]
+fn top_level_reasoning_fallback_uses_the_reasoning_namespace() {
+    let mut response = sample_response(ResponseStatus::Completed);
+    response.provider_reasoning = Some("think".to_owned());
+    let mut accumulator = RawChoiceAccumulator::new("openai", None);
+    let mut emitted = AdapterOutput::new();
+    accumulator.replay_whole_response(response, &mut emitted);
+    let events: Vec<_> = emitted
+        .into_items()
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .expect("whole-response replay succeeds");
+
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::BlockStart { id, kind: BlockKind::Reasoning { .. }, .. }
+            if id == &crate::streaming::MintKind::Reasoning.for_wire_index(0)
+    )));
+}
+
+#[test]
+fn terminal_reconciles_only_unseen_provider_item_slots() {
+    let done = json!({
+        "type": "web_search_call",
+        "status": "completed",
+        "action": {"query": "done"}
+    });
+    let added_only = json!({
+        "type": "web_search_call",
+        "status": "completed",
+        "action": {"query": "added"}
+    });
+    let terminal_only = json!({"type": "compaction", "id": "cmp_2", "encrypted_content": "opaque"});
+    let output = json!([done, added_only, terminal_only]);
+    let events = [
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "sequence_number": 1,
+            "item": output[0]
+        }),
+        json!({
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "sequence_number": 2,
+            "item": output[1]
+        }),
+        completed_with_output(output.clone()),
+    ];
+    let body = events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+    let decoded =
+        stream_events_from_sse_body("openai", &body, None).expect("the mixed stream decodes");
+    assert_eq!(
+        decoded
+            .iter()
+            .filter(|event| matches!(
+                event,
+                StreamEvent::BlockEnd {
+                    end: BlockClose::ProviderItem(_),
+                    ..
+                }
+            ))
+            .count(),
+        3,
+        "the done item stays single and both unseen terminal slots are filled"
+    );
+    for output_index in 0..3 {
+        assert!(decoded.iter().any(|event| matches!(
+            event,
+            StreamEvent::BlockStart {
+                source_order: Some(source_order),
+                kind: BlockKind::ProviderItem,
+                ..
+            } if *source_order == crate::streaming::SourceOrder::new(output_index, 0)
+        )));
+    }
+
+    let streamed = folded_body_with(ResponsesStreamOptions::strict(), &events)
+        .expect("the mixed stream folds")
+        .choice;
+    let outputs: Vec<crate::providers::openai::responses_api::Output> =
+        serde_json::from_value(output).expect("the output decodes");
+    let unary = super::super::tests::folded_choice(outputs);
+    assert_eq!(
+        response_choice_labels(&streamed),
+        ["provider", "provider", "provider"]
+    );
+    assert_eq!(streamed, unary);
+}
+
+#[test]
+fn whole_response_replay_publishes_each_provider_item_once() {
+    let output = json!([
+        {
+            "type": "web_search_call",
+            "status": "completed",
+            "action": {"query": "rig"}
+        },
+        {"type": "compaction", "encrypted_content": "opaque"}
+    ]);
+    let outputs: Vec<crate::providers::openai::responses_api::Output> =
+        serde_json::from_value(output).expect("the output decodes");
+    let choice = super::super::tests::folded_choice(outputs.clone());
+    assert_eq!(response_choice_labels(&choice), ["provider", "provider"]);
+
+    let mut response = sample_response(ResponseStatus::Completed);
+    response.output = outputs;
+    let mut accumulator = RawChoiceAccumulator::new("openai", None);
+    let mut emitted = AdapterOutput::new();
+    accumulator.replay_whole_response(response, &mut emitted);
+    assert_eq!(
+        emitted
+            .into_items()
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Ok(StreamEvent::BlockEnd {
+                    end: BlockClose::ProviderItem(_),
+                    ..
+                })
+            ))
+            .count(),
+        2,
+        "terminal reconciliation must not repeat whole-response provider items"
+    );
+}
+
+fn response_choice_labels(choice: &[AssistantContent]) -> Vec<&str> {
+    choice
+        .iter()
+        .map(|part| match part {
+            AssistantContent::ProviderItem(_) => "provider",
+            AssistantContent::ToolCall(_) => "function",
+            AssistantContent::CustomToolCall(_) => "custom",
+            AssistantContent::Text(text)
+                if super::super::is_refusal(text.additional_params.as_ref()) =>
+            {
+                "refusal"
+            }
+            AssistantContent::Text(_) => "text",
+            AssistantContent::Reasoning(_) => "reasoning",
+            AssistantContent::Image(_) => "image",
+        })
+        .collect()
+}
+
+#[test]
+fn reversed_first_observations_keep_provider_output_order_and_unary_parity() {
+    let provider = json!({
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed",
+        "action": {"query": "rig"}
+    });
+    let function = json!({
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "call_1",
+        "name": "lookup",
+        "arguments": "{}",
+        "status": "completed"
+    });
+    let custom = json!({
+        "type": "custom_tool_call",
+        "id": "ctc_1",
+        "call_id": "call_2",
+        "name": "shell",
+        "input": "pwd",
+        "status": "completed"
+    });
+    let message = json!({
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "done", "annotations": []}]
+    });
+    let output = json!([provider, function, custom, message]);
+    let events = [
+        json!({
+            "type": "response.output_text.delta", "item_id": "msg_1",
+            "output_index": 3, "content_index": 0, "sequence_number": 1,
+            "delta": "done"
+        }),
+        json!({
+            "type": "response.output_item.done", "output_index": 1,
+            "sequence_number": 2, "item": output[1]
+        }),
+        json!({
+            "type": "response.output_item.done", "output_index": 0,
+            "sequence_number": 3, "item": output[0]
+        }),
+        json!({
+            "type": "response.output_item.done", "output_index": 2,
+            "sequence_number": 4, "item": output[2]
+        }),
+        // A repeated late end for the same identity and source slot is inert.
+        json!({
+            "type": "response.output_item.done", "output_index": 1,
+            "sequence_number": 5, "item": output[1]
+        }),
+        json!({
+            "type": "response.output_item.done", "output_index": 3,
+            "sequence_number": 6, "item": output[3]
+        }),
+        completed_with_output(output.clone()),
+    ];
+
+    let body = events
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+    let decoded =
+        stream_events_from_sse_body("openai", &body, None).expect("the reversed stream decodes");
+    assert_eq!(
+        decoded
+            .iter()
+            .filter(|event| matches!(event,
+                StreamEvent::BlockStart { id, kind: BlockKind::ToolCall, .. }
+                if id == &BlockId::wire("fc_1")
+            ))
+            .count(),
+        1,
+        "a repeated done keeps its second end but invents no second positioned start"
+    );
+
+    let streamed = folded_body_with(ResponsesStreamOptions::strict(), &events)
+        .expect("the reversed stream folds")
+        .choice;
+    let outputs: Vec<crate::providers::openai::responses_api::Output> =
+        serde_json::from_value(output).expect("the output decodes");
+    let unary = super::super::tests::folded_choice(outputs);
+
+    assert_eq!(
+        response_choice_labels(&streamed),
+        ["provider", "function", "custom", "text"]
+    );
+    assert_eq!(streamed, unary);
+}
+
+#[test]
+fn separated_message_text_parts_stay_separate_parts_with_unary_parity() {
+    let message = json!({
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [
+            {"type": "output_text", "text": "yes", "annotations": []},
+            {"type": "refusal", "refusal": "no"},
+            {"type": "output_text", "text": " later", "annotations": []}
+        ]
+    });
+    let events = [
+        json!({
+            "type": "response.output_text.delta", "item_id": "msg_1",
+            "output_index": 0, "content_index": 0, "sequence_number": 1,
+            "delta": "yes"
+        }),
+        json!({
+            "type": "response.refusal.delta", "item_id": "msg_1",
+            "output_index": 0, "content_index": 1, "sequence_number": 2,
+            "delta": "no"
+        }),
+        json!({
+            "type": "response.output_text.delta", "item_id": "msg_1",
+            "output_index": 0, "content_index": 2, "sequence_number": 3,
+            "delta": " later"
+        }),
+        json!({
+            "type": "response.output_item.done", "output_index": 0,
+            "sequence_number": 4, "item": message
+        }),
+        completed_with_output(json!([message])),
+    ];
+
+    let streamed = folded_body_with(ResponsesStreamOptions::strict(), &events)
+        .expect("the mixed-content stream folds")
+        .choice;
+    let outputs: Vec<crate::providers::openai::responses_api::Output> =
+        serde_json::from_value(json!([message])).expect("the output decodes");
+    let unary = super::super::tests::folded_choice(outputs);
+
+    assert_eq!(
+        response_choice_labels(&streamed),
+        ["text", "refusal", "text"]
+    );
+    let text: Vec<_> = streamed
+        .iter()
+        .filter_map(|part| match part {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    // Each content part is its own block, ordered by its content coordinate:
+    // text on either side of a refusal stays separate, streamed and unary alike.
+    assert_eq!(text, ["yes", "no", " later"]);
+    assert_eq!(streamed, unary);
+}
+
+#[test]
+fn reversed_message_content_observations_use_the_content_coordinate() {
+    let message = json!({
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [
+            {"type": "output_text", "text": "yes", "annotations": []},
+            {"type": "refusal", "refusal": "no"}
+        ]
+    });
+    let events = [
+        json!({
+            "type": "response.refusal.delta", "item_id": "msg_1",
+            "output_index": 0, "content_index": 1, "sequence_number": 1,
+            "delta": "no"
+        }),
+        json!({
+            "type": "response.output_text.delta", "item_id": "msg_1",
+            "output_index": 0, "content_index": 0, "sequence_number": 2,
+            "delta": "yes"
+        }),
+        json!({
+            "type": "response.output_item.done", "output_index": 0,
+            "sequence_number": 3, "item": message
+        }),
+        completed_with_output(json!([message])),
+    ];
+
+    let streamed = folded_body_with(ResponsesStreamOptions::strict(), &events)
+        .expect("the reversed mixed-content stream folds")
+        .choice;
+    let outputs: Vec<crate::providers::openai::responses_api::Output> =
+        serde_json::from_value(json!([message])).expect("the output decodes");
+    let unary = super::super::tests::folded_choice(outputs);
+
+    assert_eq!(response_choice_labels(&streamed), ["text", "refusal"]);
+    assert_eq!(streamed, unary);
+}
+
+#[test]
+fn dropped_ordered_call_leaves_no_placeholder() {
+    let provider = json!({
+        "type": "web_search_call", "id": "ws_1", "status": "completed",
+        "action": {"query": "rig"}
+    });
+    let incomplete = json!({
+        "type": "function_call", "id": "fc_1", "call_id": "call_1",
+        "name": "lookup", "arguments": "{", "status": "incomplete"
+    });
+    let events = [
+        json!({
+            "type": "response.output_item.added", "output_index": 1,
+            "sequence_number": 1, "item": incomplete
+        }),
+        json!({
+            "type": "response.function_call_arguments.delta", "item_id": "fc_1",
+            "output_index": 1, "sequence_number": 2, "delta": "{"
+        }),
+        json!({
+            "type": "response.output_item.done", "output_index": 0,
+            "sequence_number": 3, "item": provider
+        }),
+        json!({
+            "type": "response.output_item.done", "output_index": 1,
+            "sequence_number": 4, "item": incomplete
+        }),
+        completed_with_output(json!([provider, incomplete])),
+    ];
+
+    let choice = folded_body_with(ResponsesStreamOptions::strict(), &events)
+        .expect("the incomplete call is dropped")
+        .choice;
+    assert_eq!(response_choice_labels(&choice), ["provider"]);
+}
+
 fn opaque_message_fixture(parts: serde_json::Value) -> serde_json::Value {
     json!({"type":"message","id":"msg_opaque","role":"assistant","status":"completed","content":parts})
 }
@@ -3443,9 +4067,9 @@ fn opaque_message_snapshots_preserve_parts_and_replace_raw_metadata_atomically()
 }
 
 #[test]
-fn opaque_message_late_part_retains_payload_with_standalone_arrival_order() {
-    // SourceOrder integration in the composed branch restores [A, unknown, B].
-    // This standalone decoder's fold registers parts on first delivery.
+fn opaque_message_late_part_retains_payload_in_source_order() {
+    // The part first seen in the terminal folds at its content coordinate,
+    // between the parts that streamed before it.
     let unknown = json!({"type":"future_message","payload":{"list":[1]}});
     let item = opaque_message_fixture(json!([
         {"type":"output_text","text":"A"},unknown,{"type":"output_text","text":"B"}
@@ -3458,9 +4082,7 @@ fn opaque_message_late_part_retains_payload_with_standalone_arrival_order() {
     let response = folded_body_with(ResponsesStreamOptions::strict(), &events).unwrap();
     assert_eq!(
         replay_opaque_choice(response.choice)[0]["content"],
-        json!([
-            {"type":"output_text","text":"A"},{"type":"output_text","text":"B"},unknown
-        ])
+        item["content"]
     );
 }
 
@@ -4213,6 +4835,36 @@ fn reasoning_completion_keeps_its_authoritative_provider_id() {
     ])
     .unwrap();
     assert_eq!(replay_opaque_choice(response.choice)[0]["id"], "rs_done");
+}
+
+#[test]
+fn reasoning_first_published_at_the_flush_keeps_its_output_slot() {
+    // Slot 0's unknown part waits for its parent kind until the terminal says
+    // reasoning; slot 1's text streamed meanwhile. The deferred close carries
+    // slot 0's coordinate, so the fold matches the unary order.
+    let unknown = json!({"type":"future_content","payload":[1]});
+    let reasoning = json!({"type":"reasoning","id":"rs_late","summary":[],"content":[unknown]});
+    let message = opaque_message_fixture(json!([{"type":"output_text","text":"answer"}]));
+    let streamed = folded_body_with(ResponsesStreamOptions::strict(), &[
+        json!({"type":"response.content_part.added","item_id":"rs_late","output_index":0,"content_index":0,"sequence_number":0,"part":unknown}),
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":1,"content_index":0,"sequence_number":1,"delta":"answer"}),
+        completed_with_output(json!([reasoning, message])),
+    ])
+    .unwrap()
+    .choice;
+    let outputs: Vec<super::super::Output> =
+        serde_json::from_value(json!([reasoning, message])).unwrap();
+    let unary = super::super::tests::folded_choice(outputs);
+    assert!(
+        matches!(&streamed[0], AssistantContent::Reasoning(r) if r.content == vec![ReasoningContent::OpaqueContent(unknown.clone())]),
+        "{streamed:?}"
+    );
+    assert!(
+        matches!(&streamed[1], AssistantContent::Text(t) if t.text == "answer"),
+        "{streamed:?}"
+    );
+    assert_eq!(streamed.len(), 2);
+    assert_eq!(streamed, unary);
 }
 
 #[test]

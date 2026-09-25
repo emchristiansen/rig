@@ -192,6 +192,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_033c484c5bd1d6aa006ab2b303903887d0b31c0fdb92838ed8",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_033c484c5bd1d6aa006ab2b303903887d0b31c0fdb92838ed8"
@@ -200,6 +204,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_033c484c5bd1d6aa006ab2b3049b8487d0aa73a6e8f50b68da",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }
@@ -600,6 +608,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_033c484c5bd1d6aa006ab2b305a3fc87d09739de32c7947259",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -615,6 +627,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_033c484c5bd1d6aa006ab2b305a3fc87d09739de32c7947259",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

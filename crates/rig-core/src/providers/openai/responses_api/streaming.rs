@@ -295,9 +295,15 @@ impl ResponsesStreamOptions {
 /// A tool call the wire delivered whole, buffered to the terminal.
 enum BufferedCall {
     /// A function call, finalized by the shared accumulator.
-    Function(ToolCallEnd),
+    Function {
+        source_order: crate::streaming::SourceOrder,
+        end: ToolCallEnd,
+    },
     /// A custom call: complete as delivered, with verbatim input.
-    Custom(CustomToolCallEnd),
+    Custom {
+        source_order: crate::streaming::SourceOrder,
+        end: CustomToolCallEnd,
+    },
 }
 
 #[doc(hidden)]
@@ -322,9 +328,15 @@ pub struct RawChoiceAccumulator {
     /// Reasoning assembly keys fixed by the first event in each output slot.
     /// Later wire IDs do not change an established key.
     reasoning_slots: std::collections::HashMap<u64, crate::streaming::BlockId>,
-    /// Tool-call assembly keys fixed per output slot, sharing a mint counter
-    /// with reasoning so id-less blocks cannot collide.
+    /// Anonymous reasoning keys use their own namespace, distinct from
+    /// anonymous tools and output-index-keyed provider items.
+    reasoning_ids: crate::streaming::SyntheticIds,
+    /// Tool-call assembly keys fixed per output slot.
     tool_slots: crate::providers::internal::tool_call_bridge::ToolCallBridge<u64>,
+    /// Output slots whose opaque provider item was already published by an
+    /// `output_item.done` event or whole-response replay. The terminal body
+    /// fills only missing opaque slots.
+    finished_provider_items: std::collections::HashSet<u64>,
     /// The `call_…` correlator each open slot announced on
     /// `output_item.added`, kept beside the bridge so a slot closed by the
     /// terminal drain (its `output_item.done` frame was lost) still
@@ -650,10 +662,14 @@ impl RawChoiceAccumulator {
             tool_calls: Vec::new(),
             saw_terminal: false,
             reasoning_slots: std::collections::HashMap::new(),
+            reasoning_ids: crate::streaming::SyntheticIds::new(
+                crate::streaming::MintKind::Reasoning,
+            ),
             tool_slots:
                 crate::providers::internal::tool_call_bridge::ToolCallBridge::with_minted_namespace(
-                    crate::streaming::SyntheticIds::output(),
+                    crate::streaming::SyntheticIds::tool(),
                 ),
+            finished_provider_items: std::collections::HashSet::new(),
             pending_call_ids: std::collections::HashMap::new(),
             pending_namespaces: std::collections::HashMap::new(),
             argument_fragments: std::collections::HashMap::new(),
@@ -1040,7 +1056,10 @@ impl RawChoiceAccumulator {
         part.text.push_str(&delta);
         let key = part.key.clone();
         if self.active_message_part.as_ref() != Some(&key) || marker.is_some() {
-            out.text_start(key.clone(), marker);
+            out.in_source_order(
+                crate::streaming::SourceOrder::new(output_index, content_index),
+                |out| out.text_start(key.clone(), marker),
+            );
             self.active_message_part = Some(key);
         }
         out.text(delta);
@@ -1094,7 +1113,10 @@ impl RawChoiceAccumulator {
             .then(super::refusal_marker)
             .flatten();
         if self.active_message_part.as_ref() != Some(&key) {
-            out.text_start(key.clone(), start_marker.clone());
+            out.in_source_order(
+                crate::streaming::SourceOrder::new(output_index, content_index),
+                |out| out.text_start(key.clone(), start_marker.clone()),
+            );
             self.active_message_part = Some(key);
         } else if let Some(marker) = start_marker.clone() {
             out.text_meta(marker);
@@ -1194,7 +1216,12 @@ impl RawChoiceAccumulator {
                 // every opened block; the first refusal stands.
                 Output::Reasoning { .. } => {
                     let first_refusal = self.refusal.take();
-                    self.push_output_item_done(item.clone(), output_index as u64, out, true);
+                    out.in_source_order(
+                        crate::streaming::SourceOrder::new(output_index as u64, 0),
+                        |out| {
+                            self.push_output_item_done(item.clone(), output_index as u64, out, true)
+                        },
+                    );
                     if first_refusal.is_some() {
                         self.refusal = first_refusal;
                     }
@@ -1207,7 +1234,9 @@ impl RawChoiceAccumulator {
     fn merge_terminal_reasoning(&mut self, response: &CompletionResponse, out: &mut AdapterOutput) {
         for (index, item) in response.output.iter().enumerate() {
             if matches!(item, Output::Reasoning { .. }) {
-                self.push_output_item_done(item.clone(), index as u64, out, true);
+                out.in_source_order(crate::streaming::SourceOrder::new(index as u64, 0), |out| {
+                    self.push_output_item_done(item.clone(), index as u64, out, true)
+                });
             }
         }
     }
@@ -1265,14 +1294,37 @@ impl RawChoiceAccumulator {
             if let Some(parts) = self.reasoning_parts.remove(&index) {
                 let key = self.reasoning_slot_key(index, parts.id.as_deref(), out);
                 let wire_sent = parts.wire_sent;
-                out.reasoning_end(key, Some(parts.into_reasoning()), None, wire_sent);
+                // A close first published here still belongs to its slot.
+                out.in_source_order(crate::streaming::SourceOrder::new(index, 0), |out| {
+                    out.reasoning_end(key, Some(parts.into_reasoning()), None, wire_sent)
+                });
                 self.finished_reasoning.insert(index);
             }
         }
     }
 
+    /// Publish opaque output items that appeared only in the terminal body.
+    /// Known items retain their existing reconciliation and tool-flush paths.
+    fn merge_terminal_provider_items(
+        &mut self,
+        response: &CompletionResponse,
+        out: &mut AdapterOutput,
+    ) {
+        for (output_index, item) in response.output.iter().cloned().enumerate() {
+            let output_index = output_index as u64;
+            if self.finished_provider_items.contains(&output_index)
+                || !matches!(&item, Output::Unknown(_) | Output::Compaction(_))
+            {
+                continue;
+            }
+            out.in_source_order(crate::streaming::SourceOrder::new(output_index, 0), |out| {
+                self.push_output_item_done(item, output_index, out, true)
+            });
+        }
+    }
+
     /// Return the slot's established reasoning key, creating it from `item_id`
-    /// or the shared mint counter only on first use.
+    /// or the reasoning mint namespace only on first use.
     fn reasoning_slot_key(
         &mut self,
         output_index: u64,
@@ -1283,9 +1335,8 @@ impl RawChoiceAccumulator {
             out.declare_indexed_reasoning(key);
             return key.clone();
         }
-        // A shared counter prevents collisions between reasoning and tool assemblies.
-        let key = item_id.map_or_else(
-            || self.tool_slots.minted_ids().mint(),
+        let key = item_id.filter(|id| !id.is_empty()).map_or_else(
+            || self.reasoning_ids.mint(),
             crate::streaming::BlockId::wire,
         );
         out.declare_indexed_reasoning(&key);
@@ -1309,384 +1360,405 @@ impl RawChoiceAccumulator {
         // A completed content part may restate a slot id-less deltas filled.
         let part_done = matches!(item, ItemChunkKind::ContentPartDone(_));
 
-        match item {
-            ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
-                item: Output::FunctionCall(func),
-                ..
-            }) => {
-                // A function-call item interleaving a message item closes the
-                // open text block; forget it so a later delta for that message
-                // re-emits its text `BlockStart` and reactivates its block
-                // downstream.
-                self.active_message_part = None;
-                out.end_active_text();
-                // Without call_id, mint an assembly key so the item ID cannot become
-                // a fabricated tool-result correlator.
-                let wire_id = (!func.call_id.is_empty()).then_some(func.id.as_str());
-                let key = self
-                    .tool_slots
-                    .open(output_index, wire_id, Some(&func.name))
-                    .key()
-                    .to_owned();
-                if !func.call_id.is_empty() {
-                    self.pending_call_ids
-                        .insert(output_index, func.call_id.clone());
-                }
-                if let Some(namespace) = func.namespace {
-                    self.pending_namespaces.insert(output_index, namespace);
-                }
-                out.tool_name(&key, func.name);
-            }
-            ItemChunkKind::OutputItemDone(message) => {
-                // Refusals have explicit part boundaries. Ordinary same-key
-                // text keeps the existing lifecycle across item snapshots.
-                if self.active_message_part.as_ref().is_some_and(|key| {
-                    self.message_parts
-                        .values()
-                        .any(|part| &part.key == key && part.refusal_marked)
-                }) {
+        // Every block this event opens carries the item's output slot; a part
+        // refines it with its content index.
+        out.in_source_order(
+            crate::streaming::SourceOrder::new(output_index, 0),
+            |out| match item {
+                ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
+                    item: Output::FunctionCall(func),
+                    ..
+                }) => {
+                    // A function-call item interleaving a message item closes the
+                    // open text block; forget it so a later delta for that message
+                    // re-emits its text `BlockStart` and reactivates its block
+                    // downstream.
+                    self.active_message_part = None;
                     out.end_active_text();
+                    // Without call_id, mint an assembly key so the item ID cannot become
+                    // a fabricated tool-result correlator.
+                    let wire_id = (!func.call_id.is_empty()).then_some(func.id.as_str());
+                    let key = self
+                        .tool_slots
+                        .open(output_index, wire_id, Some(&func.name))
+                        .key()
+                        .to_owned();
+                    if !func.call_id.is_empty() {
+                        self.pending_call_ids
+                            .insert(output_index, func.call_id.clone());
+                    }
+                    if let Some(namespace) = func.namespace {
+                        self.pending_namespaces.insert(output_index, namespace);
+                    }
+                    out.tool_name(&key, func.name);
                 }
-                self.active_message_part = None;
-                self.push_output_item_done(
-                    message.item,
+                ItemChunkKind::OutputItemDone(message) => {
+                    // Refusals have explicit part boundaries. Ordinary same-key
+                    // text keeps the existing lifecycle across item snapshots.
+                    if self.active_message_part.as_ref().is_some_and(|key| {
+                        self.message_parts
+                            .values()
+                            .any(|part| &part.key == key && part.refusal_marked)
+                    }) {
+                        out.end_active_text();
+                    }
+                    self.active_message_part = None;
+                    self.push_output_item_done(
+                        message.item,
+                        output_index,
+                        out,
+                        options.emits_completed_tool_calls_immediately(),
+                    );
+                }
+                ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
+                    item: Output::Message(message),
+                    ..
+                }) => {
+                    self.publish_message_text(output_index, &message, false, out);
+                }
+                ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
+                    item:
+                        Output::Reasoning {
+                            id,
+                            summary,
+                            content,
+                            encrypted_content,
+                            signature,
+                            ..
+                        },
+                    ..
+                }) => {
+                    if let Some(error) = self.reasoning_snapshot_conflict(
+                        output_index,
+                        Some(&id),
+                        &summary,
+                        &content,
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
+                    let parts = self.reasoning_parts(output_index, Some(&id), out);
+                    parts.absorb(summary, content, encrypted_content, signature);
+                }
+                ItemChunkKind::OutputTextDelta(DeltaTextChunk {
+                    delta,
+                    content_index,
+                    ..
+                }) => self.message_delta(
                     output_index,
+                    content_index,
+                    outer_item_id.as_deref(),
+                    delta,
+                    false,
                     out,
-                    options.emits_completed_tool_calls_immediately(),
-                );
-            }
-            ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
-                item: Output::Message(message),
-                ..
-            }) => {
-                self.publish_message_text(output_index, &message, false, out);
-            }
-            ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
-                item:
-                    Output::Reasoning {
-                        id,
-                        summary,
-                        content,
-                        encrypted_content,
-                        signature,
-                        ..
-                    },
-                ..
-            }) => {
-                if let Some(error) =
-                    self.reasoning_snapshot_conflict(output_index, Some(&id), &summary, &content)
-                {
-                    self.refusal = Some(error);
-                    return;
-                }
-                let parts = self.reasoning_parts(output_index, Some(&id), out);
-                parts.absorb(summary, content, encrypted_content, signature);
-            }
-            ItemChunkKind::OutputTextDelta(DeltaTextChunk {
-                delta,
-                content_index,
-                ..
-            }) => self.message_delta(
-                output_index,
-                content_index,
-                outer_item_id.as_deref(),
-                delta,
-                false,
-                out,
-            ),
-            ItemChunkKind::RefusalDelta(DeltaTextChunk {
-                delta,
-                content_index,
-                ..
-            }) => self.message_delta(
-                output_index,
-                content_index,
-                outer_item_id.as_deref(),
-                delta,
-                true,
-                out,
-            ),
-            ItemChunkKind::ContentPartAdded(chunk) | ItemChunkKind::ContentPartDone(chunk) => {
-                match chunk.part {
-                    ContentPartChunkPart::SummaryText { text } => {
-                        if let Some(error) = self.reasoning_kind_conflict(
-                            output_index,
-                            outer_item_id.as_deref(),
-                            ReasoningArray::Summary,
-                            chunk.content_index,
-                            false,
-                        ) {
-                            self.refusal = Some(error);
-                            return;
-                        }
-                        self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
-                            .summary
-                            .insert(chunk.content_index, ReasoningSummary::SummaryText { text });
-                    }
-                    // Known reasoning content: its deltas append to it and its
-                    // done event completes it, as with `reasoning_text.done`.
-                    ContentPartChunkPart::ReasoningText { text } => {
-                        // A documented reasoning part never joins a message.
-                        let message_slot =
-                            self.known_message_slot(output_index, outer_item_id.as_deref());
-                        if [output_index, message_slot]
-                            .iter()
-                            .any(|slot| self.parent_kinds.get(slot) == Some(&PartParent::Message))
-                        {
-                            self.refusal =
-                                Some(conflicting_parent_kind(output_index, chunk.content_index));
-                            return;
-                        }
-                        if let Some(error) = self.reasoning_kind_conflict(
-                            output_index,
-                            outer_item_id.as_deref(),
-                            ReasoningArray::Content,
-                            chunk.content_index,
-                            false,
-                        ) {
-                            self.refusal = Some(error);
-                            return;
-                        }
-                        self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
-                            .content
-                            .insert(
+                ),
+                ItemChunkKind::RefusalDelta(DeltaTextChunk {
+                    delta,
+                    content_index,
+                    ..
+                }) => self.message_delta(
+                    output_index,
+                    content_index,
+                    outer_item_id.as_deref(),
+                    delta,
+                    true,
+                    out,
+                ),
+                ItemChunkKind::ContentPartAdded(chunk) | ItemChunkKind::ContentPartDone(chunk) => {
+                    match chunk.part {
+                        ContentPartChunkPart::SummaryText { text } => {
+                            if let Some(error) = self.reasoning_kind_conflict(
+                                output_index,
+                                outer_item_id.as_deref(),
+                                ReasoningArray::Summary,
                                 chunk.content_index,
-                                ReasoningTextContent::ReasoningText { text },
-                            );
-                    }
-                    // An unknown part names no parent kind. It joins the slot's
-                    // established item, or waits for evidence of one; the item
-                    // ID's spelling is not that evidence.
-                    ContentPartChunkPart::Unknown(value) => {
-                        let output_index =
-                            self.known_message_slot(output_index, outer_item_id.as_deref());
-                        match self.parent_kinds.get(&output_index) {
-                            Some(PartParent::Reasoning) => {
-                                if let Some(error) = self.reasoning_kind_conflict(
-                                    output_index,
-                                    outer_item_id.as_deref(),
-                                    ReasoningArray::Content,
+                                false,
+                            ) {
+                                self.refusal = Some(error);
+                                return;
+                            }
+                            self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
+                                .summary
+                                .insert(
                                     chunk.content_index,
-                                    true,
-                                ) {
-                                    self.refusal = Some(error);
-                                    return;
-                                }
-                                self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
+                                    ReasoningSummary::SummaryText { text },
+                                );
+                        }
+                        // Known reasoning content: its deltas append to it and its
+                        // done event completes it, as with `reasoning_text.done`.
+                        ContentPartChunkPart::ReasoningText { text } => {
+                            // A documented reasoning part never joins a message.
+                            let message_slot =
+                                self.known_message_slot(output_index, outer_item_id.as_deref());
+                            if [output_index, message_slot].iter().any(|slot| {
+                                self.parent_kinds.get(slot) == Some(&PartParent::Message)
+                            }) {
+                                self.refusal = Some(conflicting_parent_kind(
+                                    output_index,
+                                    chunk.content_index,
+                                ));
+                                return;
+                            }
+                            if let Some(error) = self.reasoning_kind_conflict(
+                                output_index,
+                                outer_item_id.as_deref(),
+                                ReasoningArray::Content,
+                                chunk.content_index,
+                                false,
+                            ) {
+                                self.refusal = Some(error);
+                                return;
+                            }
+                            self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
+                                .content
+                                .insert(
+                                    chunk.content_index,
+                                    ReasoningTextContent::ReasoningText { text },
+                                );
+                        }
+                        // An unknown part names no parent kind. It joins the slot's
+                        // established item, or waits for evidence of one; the item
+                        // ID's spelling is not that evidence.
+                        ContentPartChunkPart::Unknown(value) => {
+                            let output_index =
+                                self.known_message_slot(output_index, outer_item_id.as_deref());
+                            match self.parent_kinds.get(&output_index) {
+                                Some(PartParent::Reasoning) => {
+                                    if let Some(error) = self.reasoning_kind_conflict(
+                                        output_index,
+                                        outer_item_id.as_deref(),
+                                        ReasoningArray::Content,
+                                        chunk.content_index,
+                                        true,
+                                    ) {
+                                        self.refusal = Some(error);
+                                        return;
+                                    }
+                                    self.reasoning_parts(
+                                        output_index,
+                                        outer_item_id.as_deref(),
+                                        out,
+                                    )
                                     .content
                                     .insert(
                                         chunk.content_index,
                                         ReasoningTextContent::Unknown(value),
                                     );
-                            }
-                            Some(PartParent::Message) => self.publish_message_part(
-                                output_index,
-                                chunk.content_index,
-                                outer_item_id.as_deref(),
-                                super::AssistantContent::Unknown(value),
-                                None,
-                                out,
-                            ),
-                            None => {
-                                let part = UndecidedPart {
-                                    item_id: outer_item_id.clone().filter(|id| !id.is_empty()),
-                                    value,
-                                };
-                                let seen = self
-                                    .undecided_parts
-                                    .entry((output_index, chunk.content_index))
-                                    .or_default();
-                                if !seen.contains(&part) {
-                                    seen.push(part);
+                                }
+                                Some(PartParent::Message) => self.publish_message_part(
+                                    output_index,
+                                    chunk.content_index,
+                                    outer_item_id.as_deref(),
+                                    super::AssistantContent::Unknown(value),
+                                    None,
+                                    out,
+                                ),
+                                None => {
+                                    let part = UndecidedPart {
+                                        item_id: outer_item_id.clone().filter(|id| !id.is_empty()),
+                                        value,
+                                    };
+                                    let seen = self
+                                        .undecided_parts
+                                        .entry((output_index, chunk.content_index))
+                                        .or_default();
+                                    if !seen.contains(&part) {
+                                        seen.push(part);
+                                    }
                                 }
                             }
                         }
-                    }
-                    part => {
-                        let content = match part {
-                            ContentPartChunkPart::OutputText { text } => {
-                                super::AssistantContent::OutputText(super::OutputText::new(text))
+                        part => {
+                            let content = match part {
+                                ContentPartChunkPart::OutputText { text } => {
+                                    super::AssistantContent::OutputText(super::OutputText::new(
+                                        text,
+                                    ))
+                                }
+                                ContentPartChunkPart::Refusal { refusal } => {
+                                    super::AssistantContent::Refusal { refusal }
+                                }
+                                ContentPartChunkPart::Unknown(_)
+                                | ContentPartChunkPart::SummaryText { .. }
+                                | ContentPartChunkPart::ReasoningText { .. } => return,
+                            };
+                            let restatement = if part_done {
+                                Restatement::Part(chunk.content_index, &content)
+                            } else {
+                                Restatement::None
+                            };
+                            let output_index = self.message_slot(
+                                output_index,
+                                outer_item_id.as_deref(),
+                                restatement,
+                            );
+                            if let Some(error) = self.message_kind_conflict(
+                                output_index,
+                                chunk.content_index,
+                                false,
+                                outer_item_id.as_deref(),
+                            ) {
+                                self.refusal = Some(error);
+                                return;
                             }
-                            ContentPartChunkPart::Refusal { refusal } => {
-                                super::AssistantContent::Refusal { refusal }
+                            self.bind_message(output_index, outer_item_id.as_deref(), out);
+                            if self.refusal.is_some() {
+                                return;
                             }
-                            ContentPartChunkPart::Unknown(_)
-                            | ContentPartChunkPart::SummaryText { .. }
-                            | ContentPartChunkPart::ReasoningText { .. } => return,
-                        };
-                        let restatement = if part_done {
-                            Restatement::Part(chunk.content_index, &content)
-                        } else {
-                            Restatement::None
-                        };
-                        let output_index =
-                            self.message_slot(output_index, outer_item_id.as_deref(), restatement);
-                        if let Some(error) = self.message_kind_conflict(
-                            output_index,
-                            chunk.content_index,
-                            false,
-                            outer_item_id.as_deref(),
-                        ) {
-                            self.refusal = Some(error);
-                            return;
+                            self.publish_message_part(
+                                output_index,
+                                chunk.content_index,
+                                outer_item_id.as_deref(),
+                                content,
+                                None,
+                                out,
+                            );
                         }
-                        self.bind_message(output_index, outer_item_id.as_deref(), out);
-                        if self.refusal.is_some() {
-                            return;
-                        }
-                        self.publish_message_part(
-                            output_index,
-                            chunk.content_index,
-                            outer_item_id.as_deref(),
-                            content,
-                            None,
-                            out,
-                        );
                     }
                 }
-            }
-            ItemChunkKind::ReasoningSummaryPartAdded(chunk)
-            | ItemChunkKind::ReasoningSummaryPartDone(chunk) => {
-                if let Some(error) = self.reasoning_kind_conflict(
-                    output_index,
-                    outer_item_id.as_deref(),
-                    ReasoningArray::Summary,
-                    chunk.summary_index,
-                    matches!(chunk.part, ReasoningSummary::Unknown(_)),
-                ) {
-                    self.refusal = Some(error);
-                    return;
-                }
-                self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
-                    .summary
-                    .insert(chunk.summary_index, chunk.part);
-            }
-            ItemChunkKind::ReasoningSummaryTextDelta(SummaryTextDeltaChunk {
-                delta,
-                summary_index,
-                ..
-            }) => {
-                if let Some(error) = self.reasoning_kind_conflict(
-                    output_index,
-                    outer_item_id.as_deref(),
-                    ReasoningArray::Summary,
-                    summary_index,
-                    false,
-                ) {
-                    self.refusal = Some(error);
-                    return;
-                }
-                self.active_message_part = None;
-                let parts = self.reasoning_parts(output_index, outer_item_id.as_deref(), out);
-                if let ReasoningSummary::SummaryText { text } = parts
-                    .summary
-                    .entry(summary_index)
-                    .or_insert_with(|| ReasoningSummary::SummaryText {
-                        text: String::new(),
-                    })
-                {
-                    text.push_str(&delta);
-                }
-                parts.opened = true;
-                let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref(), out);
-                out.reasoning_delta(
-                    &id,
-                    outer_item_id
-                        .clone()
-                        .and_then(crate::streaming::non_empty_id),
-                    delta,
-                );
-            }
-            ItemChunkKind::ReasoningTextDelta(DeltaTextChunkWithItemId {
-                delta,
-                content_index,
-                ..
-            }) => {
-                if let Some(error) = self.reasoning_kind_conflict(
-                    output_index,
-                    outer_item_id.as_deref(),
-                    ReasoningArray::Content,
-                    content_index.unwrap_or(0),
-                    false,
-                ) {
-                    self.refusal = Some(error);
-                    return;
-                }
-                self.active_message_part = None;
-                let parts = self.reasoning_parts(output_index, outer_item_id.as_deref(), out);
-                if let ReasoningTextContent::ReasoningText { text } = parts
-                    .content
-                    .entry(content_index.unwrap_or(0))
-                    .or_insert_with(|| ReasoningTextContent::ReasoningText {
-                        text: String::new(),
-                    })
-                {
-                    text.push_str(&delta);
-                }
-                parts.opened = true;
-                let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref(), out);
-                out.reasoning_delta(
-                    &id,
-                    outer_item_id
-                        .clone()
-                        .and_then(crate::streaming::non_empty_id),
-                    delta,
-                );
-            }
-            ItemChunkKind::ReasoningSummaryTextDone(chunk) => {
-                if let Some(error) = self.reasoning_kind_conflict(
-                    output_index,
-                    outer_item_id.as_deref(),
-                    ReasoningArray::Summary,
-                    chunk.summary_index,
-                    false,
-                ) {
-                    self.refusal = Some(error);
-                    return;
-                }
-                self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
-                    .summary
-                    .insert(
+                ItemChunkKind::ReasoningSummaryPartAdded(chunk)
+                | ItemChunkKind::ReasoningSummaryPartDone(chunk) => {
+                    if let Some(error) = self.reasoning_kind_conflict(
+                        output_index,
+                        outer_item_id.as_deref(),
+                        ReasoningArray::Summary,
                         chunk.summary_index,
-                        ReasoningSummary::SummaryText { text: chunk.text },
-                    );
-            }
-            ItemChunkKind::ReasoningTextDone(chunk) => {
-                if let Some(error) = self.reasoning_kind_conflict(
-                    output_index,
-                    outer_item_id.as_deref(),
-                    ReasoningArray::Content,
-                    chunk.content_index,
-                    false,
-                ) {
-                    self.refusal = Some(error);
-                    return;
+                        matches!(chunk.part, ReasoningSummary::Unknown(_)),
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
+                    self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
+                        .summary
+                        .insert(chunk.summary_index, chunk.part);
                 }
-                self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
-                    .content
-                    .insert(
-                        chunk.content_index,
-                        ReasoningTextContent::ReasoningText { text: chunk.text },
+                ItemChunkKind::ReasoningSummaryTextDelta(SummaryTextDeltaChunk {
+                    delta,
+                    summary_index,
+                    ..
+                }) => {
+                    if let Some(error) = self.reasoning_kind_conflict(
+                        output_index,
+                        outer_item_id.as_deref(),
+                        ReasoningArray::Summary,
+                        summary_index,
+                        false,
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
+                    self.active_message_part = None;
+                    let parts = self.reasoning_parts(output_index, outer_item_id.as_deref(), out);
+                    if let ReasoningSummary::SummaryText { text } = parts
+                        .summary
+                        .entry(summary_index)
+                        .or_insert_with(|| ReasoningSummary::SummaryText {
+                            text: String::new(),
+                        })
+                    {
+                        text.push_str(&delta);
+                    }
+                    parts.opened = true;
+                    let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref(), out);
+                    out.reasoning_delta(
+                        &id,
+                        outer_item_id
+                            .clone()
+                            .and_then(crate::streaming::non_empty_id),
+                        delta,
                     );
-            }
-            ItemChunkKind::FunctionCallArgsDelta(delta) => {
-                // Tool output interleaving text is a block boundary too.
-                self.active_message_part = None;
-                out.end_active_text();
-                // Establish identity before done arrives; late IDs must not move buffered fragments.
-                let slot = self
-                    .tool_slots
-                    .open(output_index, outer_item_id.as_deref(), None);
-                slot.saw_arguments_delta = true;
-                let key = slot.key().clone();
-                self.argument_fragments
-                    .entry(output_index)
-                    .or_default()
-                    .push(&delta.delta);
-                out.tool_arguments(&key, delta.delta);
-            }
-            _ => {}
-        }
+                }
+                ItemChunkKind::ReasoningTextDelta(DeltaTextChunkWithItemId {
+                    delta,
+                    content_index,
+                    ..
+                }) => {
+                    if let Some(error) = self.reasoning_kind_conflict(
+                        output_index,
+                        outer_item_id.as_deref(),
+                        ReasoningArray::Content,
+                        content_index.unwrap_or(0),
+                        false,
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
+                    self.active_message_part = None;
+                    let parts = self.reasoning_parts(output_index, outer_item_id.as_deref(), out);
+                    if let ReasoningTextContent::ReasoningText { text } = parts
+                        .content
+                        .entry(content_index.unwrap_or(0))
+                        .or_insert_with(|| ReasoningTextContent::ReasoningText {
+                            text: String::new(),
+                        })
+                    {
+                        text.push_str(&delta);
+                    }
+                    parts.opened = true;
+                    let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref(), out);
+                    out.reasoning_delta(
+                        &id,
+                        outer_item_id
+                            .clone()
+                            .and_then(crate::streaming::non_empty_id),
+                        delta,
+                    );
+                }
+                ItemChunkKind::ReasoningSummaryTextDone(chunk) => {
+                    if let Some(error) = self.reasoning_kind_conflict(
+                        output_index,
+                        outer_item_id.as_deref(),
+                        ReasoningArray::Summary,
+                        chunk.summary_index,
+                        false,
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
+                    self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
+                        .summary
+                        .insert(
+                            chunk.summary_index,
+                            ReasoningSummary::SummaryText { text: chunk.text },
+                        );
+                }
+                ItemChunkKind::ReasoningTextDone(chunk) => {
+                    if let Some(error) = self.reasoning_kind_conflict(
+                        output_index,
+                        outer_item_id.as_deref(),
+                        ReasoningArray::Content,
+                        chunk.content_index,
+                        false,
+                    ) {
+                        self.refusal = Some(error);
+                        return;
+                    }
+                    self.reasoning_parts(output_index, outer_item_id.as_deref(), out)
+                        .content
+                        .insert(
+                            chunk.content_index,
+                            ReasoningTextContent::ReasoningText { text: chunk.text },
+                        );
+                }
+                ItemChunkKind::FunctionCallArgsDelta(delta) => {
+                    // Tool output interleaving text is a block boundary too.
+                    self.active_message_part = None;
+                    out.end_active_text();
+                    // Establish identity before done arrives; late IDs must not move buffered fragments.
+                    let slot = self
+                        .tool_slots
+                        .open(output_index, outer_item_id.as_deref(), None);
+                    slot.saw_arguments_delta = true;
+                    let key = slot.key().clone();
+                    self.argument_fragments
+                        .entry(output_index)
+                        .or_default()
+                        .push(&delta.delta);
+                    out.tool_arguments(&key, delta.delta);
+                }
+                _ => {}
+            },
+        );
     }
 
     #[doc(hidden)]
@@ -1709,6 +1781,7 @@ impl RawChoiceAccumulator {
                 // it in the choice, and one that streamed the text first
                 // does not state it twice.
                 self.merge_terminal_body_text(&response, out);
+                self.merge_terminal_provider_items(&response, out);
                 // A terminal that contradicts a streamed part's kind is no
                 // genuine end of this turn.
                 if let Some(error) = self.refusal.take() {
@@ -1723,8 +1796,13 @@ impl RawChoiceAccumulator {
                     let mut end = slot.end(UnparseableToolInput::Drop);
                     end.call_id = self.pending_call_ids.remove(&index);
                     end.namespace = self.pending_namespaces.remove(&index);
-                    self.tool_calls
-                        .push((slot.key().clone(), BufferedCall::Function(end)));
+                    self.tool_calls.push((
+                        slot.key().clone(),
+                        BufferedCall::Function {
+                            source_order: crate::streaming::SourceOrder::new(index, 0),
+                            end,
+                        },
+                    ));
                 }
                 // The terminal event is the only place the stream learns how the
                 // turn ended, which model answered, and which assistant message
@@ -1854,7 +1932,13 @@ impl RawChoiceAccumulator {
                 if emit_completed_tool_calls_immediately {
                     out.tool_end(item_id, end);
                 } else {
-                    self.tool_calls.push((item_id, BufferedCall::Function(end)));
+                    self.tool_calls.push((
+                        item_id,
+                        BufferedCall::Function {
+                            source_order: crate::streaming::SourceOrder::new(output_index, 0),
+                            end,
+                        },
+                    ));
                 }
             }
             // A custom call never fragments here: this client models no
@@ -1881,7 +1965,13 @@ impl RawChoiceAccumulator {
                 if emit_completed_tool_calls_immediately {
                     out.custom_tool_call(key, end);
                 } else {
-                    self.tool_calls.push((key, BufferedCall::Custom(end)));
+                    self.tool_calls.push((
+                        key,
+                        BufferedCall::Custom {
+                            source_order: crate::streaming::SourceOrder::new(output_index, 0),
+                            end,
+                        },
+                    ));
                 }
             }
             Output::Reasoning {
@@ -1931,17 +2021,22 @@ impl RawChoiceAccumulator {
             // the raw item to stream consumers, mirroring how the non-streaming
             // decode preserves it on `CompletionResponse.output`.
             Output::Unknown(value) => {
-                out.unknown(value.into());
+                self.finished_provider_items.insert(output_index);
+                let key = provider_item_key(&value, output_index);
+                out.provider_item(key, opaque_item(value));
             }
-            // A compaction item mid-stream: surfaced raw like an unmodeled
-            // item so a stateless consumer can capture it from the stream.
+            // A compaction item joins the answer the same way: a
+            // must-replay item, replayed through its input twin.
             Output::Compaction(fields) => {
                 let mut map = fields;
                 map.insert(
                     "type".to_string(),
                     serde_json::Value::String("compaction".to_string()),
                 );
-                out.unknown(serde_json::Value::Object(map).into());
+                let value = serde_json::Value::Object(map);
+                self.finished_provider_items.insert(output_index);
+                let key = provider_item_key(&value, output_index);
+                out.provider_item(key, opaque_item(value));
             }
         }
     }
@@ -1967,9 +2062,9 @@ impl RawChoiceAccumulator {
                 .as_deref()
                 .filter(|reasoning| !reasoning.is_empty())
         {
-            // Minted from the bridge's ONE counter, as a delta would be:
-            // this block has no wire id to key it on.
-            let key = self.tool_slots.minted_ids().mint();
+            // This block has no wire id; use the same reasoning namespace as
+            // anonymous reasoning item deltas and restatements.
+            let key = self.reasoning_ids.mint();
             out.reasoning_block(
                 key,
                 None,
@@ -1983,7 +2078,9 @@ impl RawChoiceAccumulator {
         for (output_index, item) in response.output.iter().cloned().enumerate() {
             let output_index = output_index as u64;
             // Immediate publication preserves output order when the fold registers parts.
-            self.push_output_item_done(item, output_index, out, true);
+            out.in_source_order(crate::streaming::SourceOrder::new(output_index, 0), |out| {
+                self.push_output_item_done(item, output_index, out, true)
+            });
         }
 
         // `response.completed` and `response.incomplete` are the wire's two
@@ -2011,8 +2108,12 @@ impl RawChoiceAccumulator {
         self.flush_reasoning(out);
         for (id, call) in std::mem::take(&mut self.tool_calls) {
             match call {
-                BufferedCall::Function(end) => out.tool_end(id, end),
-                BufferedCall::Custom(end) => out.custom_tool_call(id, end),
+                BufferedCall::Function { source_order, end } => {
+                    out.in_source_order(source_order, |out| out.tool_end(id, end));
+                }
+                BufferedCall::Custom { source_order, end } => {
+                    out.in_source_order(source_order, |out| out.custom_tool_call(id, end));
+                }
             }
         }
     }
@@ -2394,6 +2495,28 @@ impl Decoder<Completion> for ResponsesDecoder {
 
     fn is_finished(&self) -> bool {
         self.finished
+    }
+}
+
+/// The block key of an opaque output item: its own wire id when it carries
+/// one, else the output-index fallback, which is deterministic and unique
+/// per item (one output index holds one item).
+fn provider_item_key(item: &serde_json::Value, output_index: u64) -> BlockId {
+    item.get("id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|id| crate::streaming::non_empty_id(id.to_owned()))
+        .map_or_else(
+            || crate::streaming::MintKind::Output.for_wire_index(output_index),
+            BlockId::wire,
+        )
+}
+
+/// An opaque output item, kept whole. Its issuer is stamped when the
+/// response is folded, exactly as reasoning's is.
+fn opaque_item(item: serde_json::Value) -> crate::message::ProviderItem {
+    crate::message::ProviderItem {
+        item,
+        provider: None,
     }
 }
 

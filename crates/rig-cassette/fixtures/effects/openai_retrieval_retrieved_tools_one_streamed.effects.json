@@ -244,6 +244,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_06d2eb07f6220f2a006ab396943e4487d0bd62df28bc958fa0",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }
@@ -609,6 +613,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_06d2eb07f6220f2a006ab3969572e487d0898a7a7cdf5c3a87",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -624,6 +632,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_06d2eb07f6220f2a006ab3969572e487d0898a7a7cdf5c3a87",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

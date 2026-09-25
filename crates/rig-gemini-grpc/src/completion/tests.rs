@@ -766,6 +766,28 @@ fn grpc_refuses_namespaced_and_custom_calls() {
 }
 
 #[test]
+fn grpc_refuses_provider_items_by_name_for_known_and_unknown_issuers() {
+    for issuer in [Some("openai"), None] {
+        let content = message::AssistantContent::ProviderItem(message::ProviderItem {
+            item: serde_json::json!({"type": "web_search_call", "id": "search_1"}),
+            provider: issuer.map(str::to_owned),
+        });
+        let error = rig_assistant_content_to_grpc_part(content)
+            .expect_err("provider items have no representation on this wire");
+        let refusal = match &error {
+            ProviderError::Request(inner) => {
+                inner.downcast_ref::<message::UnreplayableProviderItem>()
+            }
+            _ => None,
+        }
+        .expect("a request refusal that retains its shared concrete type");
+        assert_eq!(refusal.wire, GEMINI_GRPC_WIRE);
+        assert_eq!(refusal.issuer.as_deref(), issuer);
+        assert_eq!(refusal.item_type.as_deref(), Some("web_search_call"));
+    }
+}
+
+#[test]
 fn opaque_responses_parts_are_refused_before_request_content_is_discarded() {
     use rig_core::message::{AssistantContent, Message, Reasoning, ReasoningContent};
     let raw = serde_json::json!({"type":"future_part","payload":{"list":[1,2]}});

@@ -303,6 +303,7 @@ fn invalid_streamed_turn(
     let block = BlockId::wire("assembly");
     let mut events = vec![StreamEvent::BlockStart {
         id: block.clone(),
+        source_order: None,
         kind: BlockKind::ToolCall,
     }];
     if let Some(name) = name_delta {

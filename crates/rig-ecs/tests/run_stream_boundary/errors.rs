@@ -29,6 +29,7 @@ impl Serve for ErrorAndName {
             writer
                 .event(StreamEvent::BlockStart {
                     id: id.clone(),
+                    source_order: None,
                     kind: BlockKind::ToolCall,
                 })
                 .await

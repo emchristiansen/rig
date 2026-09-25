@@ -2,7 +2,7 @@
   "header": {
     "deliveries": [
       {
-        "batch": 59,
+        "batch": 45,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -10,7 +10,7 @@
         }
       },
       {
-        "batch": 62,
+        "batch": 48,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -18,7 +18,7 @@
         }
       },
       {
-        "batch": 64,
+        "batch": 49,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -26,7 +26,7 @@
         }
       },
       {
-        "batch": 68,
+        "batch": 51,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -34,7 +34,7 @@
         }
       },
       {
-        "batch": 69,
+        "batch": 54,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -42,7 +42,7 @@
         }
       },
       {
-        "batch": 71,
+        "batch": 55,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -50,7 +50,7 @@
         }
       },
       {
-        "batch": 72,
+        "batch": 57,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -58,7 +58,7 @@
         }
       },
       {
-        "batch": 74,
+        "batch": 58,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -66,7 +66,7 @@
         }
       },
       {
-        "batch": 75,
+        "batch": 60,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -74,7 +74,7 @@
         }
       },
       {
-        "batch": 80,
+        "batch": 61,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -82,7 +82,7 @@
         }
       },
       {
-        "batch": 83,
+        "batch": 63,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -90,7 +90,7 @@
         }
       },
       {
-        "batch": 139,
+        "batch": 90,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -98,21 +98,21 @@
         }
       },
       {
-        "batch": 139,
+        "batch": 90,
         "id": 0,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 145,
+        "batch": 91,
         "id": 1,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 186,
+        "batch": 120,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -120,7 +120,7 @@
         }
       },
       {
-        "batch": 195,
+        "batch": 122,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -128,7 +128,7 @@
         }
       },
       {
-        "batch": 205,
+        "batch": 128,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -136,7 +136,7 @@
         }
       },
       {
-        "batch": 213,
+        "batch": 145,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -144,7 +144,7 @@
         }
       },
       {
-        "batch": 213,
+        "batch": 145,
         "id": 2,
         "kind": {
           "delivery": "outcome"
@@ -346,6 +346,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_0b4ccd6880bda668006ab2b4cb374887d0927bfb6bcd3c5056",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_0b4ccd6880bda668006ab2b4cb374887d0927bfb6bcd3c5056"
@@ -354,6 +358,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_0b4ccd6880bda668006ab2b4cd77cc87d090a5d24fed508fd7",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }
@@ -743,6 +751,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_0b4ccd6880bda668006ab2b4cf44d087d0a7c75de0c89c1e33",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -758,6 +770,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_0b4ccd6880bda668006ab2b4cf44d087d0a7c75de0c89c1e33",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }
