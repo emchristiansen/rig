@@ -1084,6 +1084,67 @@ fn a_codex_identity_refuses_ids_no_header_can_carry() {
         )
         .is_err()
     );
+    assert!(
+        serde_json::from_value::<CodexIdentity>(
+            serde_json::json!({"session_id": "s", "thread_id": "line\nbreak"})
+        )
+        .is_err(),
+        "an id no header can carry is refused on the way in, too"
+    );
+}
+
+/// An identity that reaches a non-Codex wire other than through
+/// `with_codex_identity`, by field assignment or by serde, is refused by name
+/// when the request is encoded, so nothing is stamped or sent.
+#[test]
+fn a_codex_identity_on_a_non_codex_wire_is_refused_when_encoding() {
+    use super::super::codex_identity::NotACodexWire;
+    let mut by_field = openai();
+    by_field.codex_identity = Some(derived_identity());
+    let mut json = serde_json::to_value(openai()).expect("serializes");
+    json["codex_identity"] = serde_json::to_value(derived_identity()).expect("serializes");
+    let by_serde: Responses = serde_json::from_value(json).expect("deserializes");
+
+    for wire in [by_field, by_serde] {
+        let Err(error) = wire.encode(prompt(), Mode::Unary) else {
+            panic!("an OpenAI wire does not speak the Codex contract");
+        };
+        let crate::error::ProviderError::Request(reason) = crate::error::ProviderError::from(error)
+        else {
+            panic!("an encode refusal is a request error");
+        };
+        assert_eq!(
+            reason.downcast_ref::<NotACodexWire>(),
+            Some(&NotACodexWire { dialect: "openai" })
+        );
+    }
+}
+
+/// Over HTTP, as over the websocket, a request's own cache key and metadata
+/// keys are kept; the identity fills only what is missing.
+#[test]
+fn a_callers_own_cache_key_and_metadata_are_kept_over_http() {
+    let wire = chatgpt()
+        .with_codex_identity(derived_identity())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    let mut request = prompt();
+    request.additional_params = Some(serde_json::json!({
+        "prompt_cache_key": "caller-key",
+        "client_metadata": {"session_id": "caller-session"},
+    }));
+    let mut encoded = wire
+        .encode(request, Mode::Unary)
+        .expect("the request encodes");
+    let request = encoded.requests.remove(0);
+    let Body::Bytes(body) = request.body() else {
+        panic!("a Responses body is bytes");
+    };
+    let body: serde_json::Value = serde_json::from_slice(body).expect("the body is JSON");
+    assert_eq!(body["prompt_cache_key"], "caller-key");
+    assert_eq!(
+        body["client_metadata"],
+        serde_json::json!({"session_id": "caller-session", "thread_id": "thread-derived"})
+    );
 }
 
 // ── provider items at encode ──────────────────────────────────────────────

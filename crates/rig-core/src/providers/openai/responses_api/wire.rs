@@ -95,6 +95,10 @@ impl Responses {
             // the same dashed headers and body fields its websocket frames
             // carry, so both transports name one conversation alike.
             Some(identity) => {
+                // An identity can reach a wire by field assignment or serde as
+                // well as through `with_codex_identity`; it is refused here
+                // all the same, before anything is stamped.
+                super::codex_identity::require_codex(self).map_err(EncodeError::request)?;
                 if let Some(headers) = builder.headers_mut() {
                     headers.remove(SESSION_ID_PER_REQUEST_HEADER);
                 }
@@ -394,8 +398,8 @@ impl Wire for Responses {
     type Op = Completion;
     type Decoder = ResponsesDecoder;
 
-    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
-        self.provider.authorizer()
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
     }
 
     fn name(&self) -> &str {

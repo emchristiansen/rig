@@ -336,8 +336,8 @@ impl Wire for CopilotWire {
 
     // The contained OpenAI-shaped wire's credential source, if it has one:
     // the driver is bound to this wrapper, so the wrapper must forward it.
-    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
-        self.wire.authorizer()
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.wire.credential_stamp()
     }
 
     fn name(&self) -> &str {

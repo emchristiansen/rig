@@ -23,8 +23,8 @@ pub mod credential;
 pub(crate) mod secret;
 
 pub use credential::{
-    Authorizer, Credential, CredentialSource, CredentialSourceError, CredentialSourceHandle,
-    CredentialUnavailable,
+    Credential, CredentialPlacement, CredentialSource, CredentialSourceError,
+    CredentialSourceHandle, CredentialStamp, CredentialUnavailable, TokenPlacement,
 };
 pub use secret::Secret;
 
@@ -453,11 +453,11 @@ pub trait Wire: WasmCompatSend + WasmCompatSync + 'static {
         None
     }
 
-    /// What stamps this wire's credential at send time, when it reads one
-    /// then rather than while encoding (see [`Authorizer`]). The driver awaits
-    /// it once per send attempt. `None`, the default, sends each request
-    /// exactly as encoded.
-    fn authorizer(&self) -> Option<std::sync::Arc<dyn Authorizer>> {
+    /// This wire's send-time credential, when it reads one then rather than
+    /// while encoding: data only (see [`CredentialStamp`]). The driver reads
+    /// and applies it once per send attempt. `None`, the default, sends each
+    /// request exactly as encoded.
+    fn credential_stamp(&self) -> Option<CredentialStamp> {
         None
     }
 

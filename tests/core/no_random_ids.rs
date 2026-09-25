@@ -9,9 +9,11 @@
 //! sources to the two transport headers, the Codex websocket session
 //! identity and the LSH index. None of them can reach a message or an effect
 //! record. The transport headers and the LSH index reach no request body
-//! either; the Codex identity reaches only the frames of the websocket
-//! session it names (its cache key and client metadata), and no effect log
-//! records those frames.
+//! either; the Codex identity reaches only the requests of the conversation
+//! it names: its websocket session's handshake and frames, and the HTTP
+//! requests of a Responses wire that carries it (their identity headers,
+//! cache key and client metadata). It is stamped as a request is encoded,
+//! and no effect log records those requests.
 
 use std::path::{Path, PathBuf};
 

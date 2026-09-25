@@ -129,9 +129,11 @@ pub struct ResponsesWebSocketErrorEvent {
     #[serde(rename = "type")]
     pub kind: ResponsesWebSocketErrorEventKind,
     /// The HTTP status the provider reports for this failure, when it does.
+    /// A number no HTTP status can be refuses the event as malformed.
     #[serde(
         default,
         alias = "status_code",
+        deserialize_with = "http_status",
         skip_serializing_if = "Option::is_none"
     )]
     pub status: Option<u16>,
@@ -154,6 +156,21 @@ pub struct ResponsesWebSocketErrorEvent {
 impl std::fmt::Display for ResponsesWebSocketErrorEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.error.fmt(f)
+    }
+}
+
+/// An error event's reported status: absent or `null` is none, and a number
+/// is kept only when it is a valid HTTP status. Anything else is a malformed
+/// known field, refused with a typed decode error rather than read as none.
+fn http_status<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<u16>::deserialize(deserializer)? {
+        Some(status) if http::StatusCode::from_u16(status).is_err() => Err(
+            serde::de::Error::custom(format!("`{status}` is not an HTTP status")),
+        ),
+        status => Ok(status),
     }
 }
 
@@ -1482,8 +1499,8 @@ pub(super) async fn authorize_handshake(
     wire: &Responses,
     request: &mut http_client::Request<NoBody>,
 ) -> Result<(), ProviderError> {
-    if let Some(authorizer) = wire.provider.authorizer() {
-        authorizer.authorize(request.headers_mut()).await?;
+    if let Some(stamp) = wire.provider.credential_stamp() {
+        stamp.authorize(request.headers_mut()).await?;
     }
     Ok(())
 }

@@ -131,7 +131,8 @@ impl CodexIdentity {
         &self.thread_id
     }
 
-    /// The cache-routing key. Codex derives it from the thread id.
+    /// The cache-routing key, taken from the thread id. (Codex's own client
+    /// keys its cache by its session id instead.)
     #[must_use]
     pub fn prompt_cache_key(&self) -> &str {
         &self.thread_id

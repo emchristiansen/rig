@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::env::{self, EnvError};
 use crate::driver::{Bound, HasEmbedding, HasModelListing, HasRerank, HasTranscription, HasVerify};
-use crate::wire::{Authorizer, CredentialSource, CredentialSourceHandle, HasCompletion, Secret};
+use crate::wire::{
+    CredentialPlacement, CredentialSource, CredentialSourceHandle, CredentialStamp, HasCompletion,
+    Secret, TokenPlacement,
+};
 
 use super::responses_api::SystemInstructionsPlacement;
 use super::responses_api::wire::Responses;
@@ -951,7 +954,7 @@ impl OpenAI {
     /// instead of sending [`Self::api_key`].
     ///
     /// The source is read once per send attempt (every request, every page
-    /// of a paged reply, every Codex websocket connect), so a credential
+    /// of a paged reply, every managed websocket connect), so a credential
     /// rotated by its owner reaches the next request without rebuilding
     /// anything. Its credential replaces the header [`Self::auth`] names
     /// (`Authorization: Bearer …` or `api-key`), and it is authoritative for
@@ -965,15 +968,27 @@ impl OpenAI {
         self
     }
 
-    /// What stamps this configuration's credential at send time: `None`
-    /// unless a [credential source](Self::with_credential_source) is set.
-    pub(crate) fn authorizer(&self) -> Option<std::sync::Arc<dyn Authorizer>> {
-        self.credential_source.as_ref().map(|source| {
-            std::sync::Arc::new(SourceAuthorizer {
+    /// This configuration's send-time credential: `None` unless a
+    /// [credential source](Self::with_credential_source) is set. Its token
+    /// goes in the header [`Self::auth`] names, the one
+    /// [`Self::authenticate`] writes, and it is authoritative for
+    /// `ChatGPT-Account-Id`.
+    pub(crate) fn credential_stamp(&self) -> Option<CredentialStamp> {
+        self.credential_source
+            .as_ref()
+            .map(|source| CredentialStamp {
                 source: source.clone(),
-                auth: self.auth,
-            }) as std::sync::Arc<dyn Authorizer>
-        })
+                placement: CredentialPlacement {
+                    token: match self.auth {
+                        Auth::Bearer => TokenPlacement::Bearer,
+                        Auth::OptionalBearer => TokenPlacement::OptionalBearer,
+                        Auth::ApiKeyHeader => {
+                            TokenPlacement::Header(http::HeaderName::from_static(API_KEY_HEADER))
+                        }
+                    },
+                    account: Some(http::HeaderName::from_static(ACCOUNT_ID_HEADER)),
+                },
+            })
     }
 
     /// Merge these instructions ahead of every Responses turn's preamble.
@@ -1240,66 +1255,10 @@ impl OpenAI {
     }
 }
 
-/// Stamps the credential a [`CredentialSource`] currently supplies, in the
-/// header the configuration's [`Auth`] names, plus the account header.
-struct SourceAuthorizer {
-    source: CredentialSourceHandle,
-    auth: Auth,
-}
-
-impl Authorizer for SourceAuthorizer {
-    fn authorize<'a>(
-        &'a self,
-        headers: &'a mut http::HeaderMap,
-    ) -> crate::wasm_compat::WasmBoxedFuture<'a, Result<(), crate::error::ProviderError>> {
-        Box::pin(async move {
-            let credential = self
-                .source
-                .0
-                .current()
-                .await
-                .map_err(crate::wire::CredentialUnavailable::new)?;
-            let token = credential.token.expose();
-            // The same header `OpenAI::authenticate` writes for this auth,
-            // replacing whatever encoding stamped there.
-            headers.remove(http::header::AUTHORIZATION);
-            headers.remove(API_KEY_HEADER);
-            match self.auth {
-                Auth::OptionalBearer if token.is_empty() => {}
-                Auth::Bearer | Auth::OptionalBearer => {
-                    headers.insert(
-                        http::header::AUTHORIZATION,
-                        header_value(&format!("Bearer {token}"))?,
-                    );
-                }
-                Auth::ApiKeyHeader => {
-                    headers.insert(API_KEY_HEADER, header_value(token)?);
-                }
-            }
-            // Authoritative for the account: none named means none sent.
-            headers.remove(ACCOUNT_ID_HEADER);
-            if let Some(account_id) = &credential.account_id {
-                headers.insert(ACCOUNT_ID_HEADER, header_value(account_id)?);
-            }
-            Ok(())
-        })
-    }
-}
-
 /// The header `Auth::ApiKeyHeader` sends the credential in.
 const API_KEY_HEADER: &str = "api-key";
 /// The header naming the account a credential belongs to.
 const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
-
-/// A credential header value, refusing one no header can carry. The refusal
-/// names the problem, never the value.
-fn header_value(value: &str) -> Result<http::HeaderValue, crate::error::ProviderError> {
-    http::HeaderValue::from_str(value).map_err(|_| {
-        crate::error::ProviderError::Request(
-            "the credential source supplied a value that cannot be sent in a header".into(),
-        )
-    })
-}
 
 /// Build completion wires using configured, model-specific, or dialect routing.
 impl HasCompletion for OpenAI {

@@ -133,17 +133,107 @@ impl From<CredentialUnavailable> for ProviderError {
     }
 }
 
-/// Stamps a request's credential headers at send time, after encoding.
-///
-/// The driver awaits it once per send attempt, before the request reaches
-/// the transport, so whatever it writes is seen by the transport, and by
-/// any recording or scrubbing there, exactly as a credential written while
-/// encoding would be.
-pub trait Authorizer: WasmCompatSend + WasmCompatSync {
-    /// Write the current credential headers into `headers`. An error refuses
-    /// the request before anything is sent.
-    fn authorize<'a>(
-        &'a self,
-        headers: &'a mut http::HeaderMap,
-    ) -> WasmBoxedFuture<'a, Result<(), ProviderError>>;
+/// Where a credential's token goes in a request's headers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TokenPlacement {
+    /// `Authorization: Bearer <token>`.
+    Bearer,
+    /// `Authorization: Bearer <token>`, or no credential header at all when
+    /// the token is empty.
+    OptionalBearer,
+    /// `<name>: <token>`, the token alone (Azure's `api-key`, for example).
+    Header(http::HeaderName),
 }
+
+/// How a send-time credential is written into a request's headers: where the
+/// token goes, and which header, if any, names its account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialPlacement {
+    /// Where the token goes.
+    pub token: TokenPlacement,
+    /// The header naming the credential's account. With one set, the
+    /// credential is authoritative for it: an account is sent when the
+    /// credential names one, and the header is removed when it names none.
+    pub account: Option<http::HeaderName>,
+}
+
+impl CredentialPlacement {
+    /// Write `credential` into `headers`, replacing the credential and account
+    /// headers encoding wrote. A pure function of its inputs, shared by every
+    /// transport that authorizes at send time, so they cannot drift.
+    ///
+    /// A token or account no header can carry refuses the request; the
+    /// refusal names the problem, never the value.
+    pub fn apply(
+        &self,
+        headers: &mut http::HeaderMap,
+        credential: &Credential,
+    ) -> Result<(), ProviderError> {
+        let token = credential.token.expose();
+        headers.remove(http::header::AUTHORIZATION);
+        match &self.token {
+            TokenPlacement::OptionalBearer if token.is_empty() => {}
+            TokenPlacement::Bearer | TokenPlacement::OptionalBearer => {
+                headers.insert(
+                    http::header::AUTHORIZATION,
+                    header_value(&format!("Bearer {token}"))?,
+                );
+            }
+            TokenPlacement::Header(name) => {
+                headers.remove(name);
+                headers.insert(name.clone(), header_value(token)?);
+            }
+        }
+        if let Some(account) = &self.account {
+            headers.remove(account);
+            if let Some(account_id) = &credential.account_id {
+                headers.insert(account.clone(), header_value(account_id)?);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A wire's send-time credential: the source it is read from and where it
+/// goes. Data only; the driver and the websocket handshake read and apply it
+/// through [`Self::authorize`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct CredentialStamp {
+    /// The source read at send time.
+    pub source: CredentialSourceHandle,
+    /// Where its credential is written.
+    pub placement: CredentialPlacement,
+}
+
+impl CredentialStamp {
+    /// Read the source once and write its credential into `headers`. A
+    /// failing source refuses with [`CredentialUnavailable`] before anything
+    /// is written, so nothing is sent.
+    ///
+    /// Called once per send attempt, after encoding and before the request
+    /// reaches the transport, so whatever it writes is seen by the transport,
+    /// and by any recording or scrubbing there, exactly as a credential
+    /// written while encoding would be.
+    pub async fn authorize(&self, headers: &mut http::HeaderMap) -> Result<(), ProviderError> {
+        let credential = self
+            .source
+            .0
+            .current()
+            .await
+            .map_err(CredentialUnavailable::new)?;
+        self.placement.apply(headers, &credential)
+    }
+}
+
+/// A credential header value, refusing one no header can carry. The refusal
+/// names the problem, never the value.
+fn header_value(value: &str) -> Result<http::HeaderValue, ProviderError> {
+    http::HeaderValue::from_str(value).map_err(|_| {
+        ProviderError::Request(
+            "the credential source supplied a value that cannot be sent in a header".into(),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests;

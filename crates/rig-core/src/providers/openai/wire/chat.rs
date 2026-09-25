@@ -754,8 +754,8 @@ impl Wire for Chat {
     type Op = crate::operation::Completion;
     type Decoder = ChatDecoder;
 
-    fn authorizer(&self) -> Option<std::sync::Arc<dyn crate::wire::Authorizer>> {
-        self.provider.authorizer()
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
     }
 
     fn name(&self) -> &str {
