@@ -54,6 +54,9 @@ pub struct BlockAccumulator {
     /// Whether any completed tool call was recorded; the streaming
     /// counterpart of the unary path's finish-reason reconciliation input.
     saw_tool_call: bool,
+    /// Keys whose provider item was recorded: a repeated end cannot record
+    /// the item twice.
+    finished_items: HashSet<BlockId>,
 }
 
 /// A tool call under fragment assembly.
@@ -123,6 +126,8 @@ impl BlockAccumulator {
                     BlockKind::ToolCall => {
                         self.ensure_open_tool_input(id);
                     }
+                    // The whole item arrives with its end.
+                    BlockKind::ProviderItem => {}
                 }
                 Ok(None)
             }
@@ -159,6 +164,15 @@ impl BlockAccumulator {
                 BlockClose::CustomToolCall(end) => Ok(self
                     .custom_tool_end(id, end.clone())
                     .map(|(id, call)| (id, AssistantContent::CustomToolCall(call)))),
+                BlockClose::ProviderItem(item) => {
+                    if !self.finished_items.insert(id.clone()) {
+                        tracing::debug!("ignoring a repeated end for a recorded provider item");
+                        return Ok(None);
+                    }
+                    let part = AssistantContent::ProviderItem(item.clone());
+                    self.parts.push(part.clone());
+                    Ok(Some((id.clone(), part)))
+                }
             },
             StreamEvent::Final(_) | StreamEvent::Unknown(_) => Ok(None),
         }
@@ -725,6 +739,7 @@ impl BlockAccumulator {
         self.text_ids.clear();
         self.open_tool_inputs.clear();
         self.finished_tools.clear();
+        self.finished_items.clear();
         self.saw_tool_call = false;
         parts
     }
@@ -737,7 +752,8 @@ impl BlockAccumulator {
             AssistantContent::ToolCall(_)
             | AssistantContent::CustomToolCall(_)
             | AssistantContent::Reasoning(_)
-            | AssistantContent::Image(_) => true,
+            | AssistantContent::Image(_)
+            | AssistantContent::ProviderItem(_) => true,
         }
     }
 }

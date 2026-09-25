@@ -83,6 +83,9 @@ pub enum BlockKind {
     },
     /// A tool call under assembly.
     ToolCall,
+    /// An opaque provider output item; its [`BlockClose::ProviderItem`]
+    /// carries the whole item.
+    ProviderItem,
 }
 
 /// A fragment of a block.
@@ -147,6 +150,9 @@ pub enum BlockClose {
     /// Its input is authoritative and verbatim; any function-argument
     /// fragments assembled under the same key are superseded, never parsed.
     CustomToolCall(CustomToolCallEnd),
+    /// An opaque provider output item arrived whole: the accumulator records
+    /// it as [`AssistantContent::ProviderItem`], in stream order.
+    ProviderItem(crate::message::ProviderItem),
 }
 
 /// The end of a streamed tool call's input.

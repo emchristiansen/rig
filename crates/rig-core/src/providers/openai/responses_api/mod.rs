@@ -111,6 +111,10 @@ impl Serialize for InputItem {
     where
         S: serde::Serializer,
     {
+        // A raw item goes back exactly as it came: no role, no re-tagging.
+        if let InputContent::Raw(value) = &self.input {
+            return value.serialize(serializer);
+        }
         let mut value = serde_json::to_value(&self.input).map_err(serde::ser::Error::custom)?;
         let map = value.as_object_mut().ok_or_else(|| {
             serde::ser::Error::custom("Input content must serialize to an object")
@@ -196,6 +200,11 @@ pub enum InputContent {
     /// Opaque compaction data for replaying a compacted context. All fields
     /// other than the separately serialized `type` tag are preserved.
     Compaction(Map<String, Value>),
+    /// An opaque output item rig does not model, replayed exactly as the
+    /// provider sent it, its own `type` included. Serialized verbatim by
+    /// [`InputItem`]'s serializer, never through this enum's tag.
+    #[serde(skip)]
+    Raw(Value),
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -660,6 +669,24 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                                 "Assistant image content is not supported in OpenAI Responses API"
                                     .to_string(),
                             ));
+                        }
+                        // An opaque output item goes back as its own input
+                        // item, verbatim: a compaction through its typed
+                        // twin, anything else exactly as the provider sent
+                        // it. Whether this wire may replay it is checked
+                        // when the request is encoded.
+                        crate::message::AssistantContent::ProviderItem(item) => {
+                            let input = match item.item {
+                                Value::Object(mut map)
+                                    if map.get("type").and_then(Value::as_str)
+                                        == Some("compaction") =>
+                                {
+                                    map.remove("type");
+                                    InputContent::Compaction(map)
+                                }
+                                other => InputContent::Raw(other),
+                            };
+                            other_items.push(InputItem { role: None, input });
                         }
                     }
                 }
@@ -1451,7 +1478,8 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
                             InputContent::CustomToolCallOutput(result) => Some(&mut result.call_id),
                             InputContent::Message(_)
                             | InputContent::Reasoning(_)
-                            | InputContent::Compaction(_) => None,
+                            | InputContent::Compaction(_)
+                            | InputContent::Raw(_) => None,
                         }),
                     )
                     .map_err(EncodeError::request)?;

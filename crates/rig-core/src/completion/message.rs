@@ -82,13 +82,13 @@ pub fn turn_delivered_no_answer(choice: &[AssistantContent]) -> bool {
         AssistantContent::ToolCall(_) => true,
         AssistantContent::CustomToolCall(_) => true,
         AssistantContent::Image(_) => true,
-        // The one exclusion: scratch work, not an answer.
-        AssistantContent::Reasoning(_) => false,
+        // Scratch work and opaque provider items are not an answer.
+        AssistantContent::Reasoning(_) | AssistantContent::ProviderItem(_) => false,
     })
 }
 
-/// Groups streamed choices as reasoning, text, tool calls, then images,
-/// preserving order within each group. Choices without reasoning or tool calls
+/// Groups streamed choices as reasoning, text and provider items, tool
+/// calls, then images, preserving order within each group. Choices without reasoning or tool calls
 /// retain their original order.
 pub fn canonical_streamed_choice(choice: Vec<AssistantContent>) -> Vec<AssistantContent> {
     let regroup = choice.iter().any(|part| {
@@ -109,7 +109,8 @@ pub fn canonical_streamed_choice(choice: Vec<AssistantContent>) -> Vec<Assistant
     for part in choice {
         match part {
             AssistantContent::Reasoning(block) => reasoning.push(block),
-            AssistantContent::Text(_) => text.push(part),
+            // Provider items keep their stream order relative to the text.
+            AssistantContent::Text(_) | AssistantContent::ProviderItem(_) => text.push(part),
             AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => {
                 calls.push(part);
             }
@@ -159,6 +160,117 @@ pub enum AssistantContent {
     Reasoning(Reasoning),
     /// Image content emitted by the assistant.
     Image(Image),
+    /// An output item rig does not model, kept whole so it can be replayed
+    /// to the wire that issued it or refused by name elsewhere. Serialized
+    /// with the `"type": "provider_item"` tag.
+    #[serde(rename = "provider_item")]
+    ProviderItem(ProviderItem),
+}
+
+/// An opaque output item a provider returned that rig does not model (a
+/// hosted-tool result, a `compaction` item), kept whole in history.
+///
+/// Only a wire that can carry an opaque output item back as input replays
+/// it, verbatim, and only when [`Self::replayable_to`] that wire: issued
+/// there, or of unknown provenance (`provider` is `None`). Every other wire
+/// refuses it by name with [`UnreplayableProviderItem`], and so does a
+/// replaying wire for an item another issuer produced; none is ever
+/// dropped silently. To switch providers deliberately, drop the items the
+/// destination cannot replay with [`retain_replayable_provider_items`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ProviderItem {
+    /// The item as the provider sent it.
+    pub item: serde_json::Value,
+    /// The service that issued this item, with the same meaning as
+    /// [`Reasoning::provider`]. `None` is unknown provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+impl ProviderItem {
+    /// An item issued by `provider`.
+    pub fn new(item: serde_json::Value, provider: impl Into<String>) -> Self {
+        Self {
+            item,
+            provider: Some(provider.into()),
+        }
+    }
+
+    /// The item's `type`, when it names one.
+    pub fn item_type(&self) -> Option<&str> {
+        self.item.get("type").and_then(serde_json::Value::as_str)
+    }
+
+    /// Whether this item may be replayed to `issuer`, exactly as
+    /// [`Reasoning::replayable_to`] decides it.
+    pub fn replayable_to(&self, issuer: &str) -> bool {
+        issued_to(self.provider.as_deref(), issuer)
+    }
+}
+
+/// Whether content issued by `provider` may be replayed to `issuer`: it was
+/// issued there, or its provenance is unknown. An `issuer` ending in `/`
+/// names a family and accepts every issuer under it. The one rule for
+/// reasoning and provider items alike.
+fn issued_to(provider: Option<&str>, issuer: &str) -> bool {
+    provider.is_none_or(|provider| {
+        provider == issuer || (issuer.ends_with('/') && provider.starts_with(issuer))
+    })
+}
+
+/// Drop provider items none of `issuers` could replay from `history`.
+///
+/// Never applied implicitly: an item a destination cannot replay is refused
+/// by name when encoded, so calling this is a caller's deliberate choice to
+/// drop them, for example before switching providers. Items of unknown
+/// provenance are kept, as [`retain_replayable_reasoning`] keeps reasoning.
+/// An assistant message left empty by the filter is removed.
+pub fn retain_replayable_provider_items(history: &mut Vec<Message>, issuers: &[&str]) {
+    history.retain_mut(|message| {
+        let Message::Assistant { content, .. } = message else {
+            return true;
+        };
+        let before = content.len();
+        content.retain(|part| match part {
+            AssistantContent::ProviderItem(item) => {
+                issuers.iter().any(|issuer| item.replayable_to(issuer))
+            }
+            _ => true,
+        });
+        before == 0 || !content.is_empty()
+    });
+}
+
+/// A provider item reached a wire that cannot replay it: the wire carries no
+/// opaque output item as input, or the item came from another issuer.
+///
+/// Converts into [`MessageError`], [`crate::error::EncodeError`], and
+/// therefore [`ProviderError::Request`]. Drop such items deliberately with
+/// [`retain_replayable_provider_items`].
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error(
+    "{wire} cannot replay the `{}` item issued by {}; drop it with retain_replayable_provider_items to switch providers deliberately",
+    item_type.as_deref().unwrap_or("untyped"),
+    issuer.as_deref().unwrap_or("an unknown provider")
+)]
+pub struct UnreplayableProviderItem {
+    /// The destination wire.
+    pub wire: &'static str,
+    /// The item's issuer, when known.
+    pub issuer: Option<String>,
+    /// The item's `type`, when it names one.
+    pub item_type: Option<String>,
+}
+
+impl UnreplayableProviderItem {
+    /// The refusal for replaying `item` to `wire`.
+    pub fn new(wire: &'static str, item: &ProviderItem) -> Self {
+        Self {
+            wire,
+            issuer: item.provider.clone(),
+            item_type: item.item_type().map(str::to_owned),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -249,9 +361,7 @@ impl Reasoning {
     /// family and accepts every issuer under it (`openrouter/` accepts
     /// `openrouter/openai`).
     pub fn replayable_to(&self, issuer: &str) -> bool {
-        self.provider.as_deref().is_none_or(|provider| {
-            provider == issuer || (issuer.ends_with('/') && provider.starts_with(issuer))
-        })
+        issued_to(self.provider.as_deref(), issuer)
     }
 
     /// Set a provider reasoning ID.
@@ -725,7 +835,8 @@ pub fn normalize_missing_tool_call_ids(content: &mut [AssistantContent]) {
             AssistantContent::CustomToolCall(call) => Some((&mut call.id, &call.provider)),
             AssistantContent::Text(_)
             | AssistantContent::Reasoning(_)
-            | AssistantContent::Image(_) => None,
+            | AssistantContent::Image(_)
+            | AssistantContent::ProviderItem(_) => None,
         })
         .enumerate()
     {
@@ -880,9 +991,11 @@ pub fn json_only_wire_tool_call<'a>(
     match content {
         AssistantContent::ToolCall(call) => call.for_json_only_wire(wire).map(Some),
         AssistantContent::CustomToolCall(call) => Err(call.refused_by_json_only_wire(wire)),
-        AssistantContent::Text(_) | AssistantContent::Reasoning(_) | AssistantContent::Image(_) => {
-            Ok(None)
-        }
+        // Not a call: each wire refuses a provider item it cannot replay.
+        AssistantContent::Text(_)
+        | AssistantContent::Reasoning(_)
+        | AssistantContent::Image(_)
+        | AssistantContent::ProviderItem(_) => Ok(None),
     }
 }
 
@@ -941,9 +1054,10 @@ pub fn name_dispatchable_call(
             name: call.name.clone(),
             namespace: call.namespace.clone(),
         }),
-        AssistantContent::Text(_) | AssistantContent::Reasoning(_) | AssistantContent::Image(_) => {
-            Ok(None)
-        }
+        AssistantContent::Text(_)
+        | AssistantContent::Reasoning(_)
+        | AssistantContent::Image(_)
+        | AssistantContent::ProviderItem(_) => Ok(None),
     }
 }
 
@@ -2213,6 +2327,9 @@ pub enum MessageError {
     /// A tool call the destination wire cannot represent.
     #[error(transparent)]
     UnrepresentableToolCall(#[from] UnrepresentableToolCall),
+    /// A provider item the destination wire cannot replay.
+    #[error(transparent)]
+    UnreplayableProviderItem(#[from] UnreplayableProviderItem),
 }
 
 impl From<MessageError> for ProviderError {

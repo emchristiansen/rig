@@ -124,6 +124,11 @@ pub fn stamp_reasoning(choice: Vec<AssistantContent>, issuer: &str) -> Vec<Assis
             AssistantContent::Reasoning(reasoning) if reasoning.provider.is_none() => {
                 AssistantContent::Reasoning(reasoning.with_provider(issuer))
             }
+            // A provider item's issuer is recorded the same way.
+            AssistantContent::ProviderItem(mut item) if item.provider.is_none() => {
+                item.provider = Some(issuer.to_owned());
+                AssistantContent::ProviderItem(item)
+            }
             part => part,
         })
         .collect()

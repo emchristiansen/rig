@@ -386,6 +386,13 @@ impl TryFrom<message::Message> for Vec<Message> {
                         message::AssistantContent::CustomToolCall(call) => {
                             return Err(call.refused_by_json_only_wire(COHERE_CHAT_WIRE).into());
                         }
+                        message::AssistantContent::ProviderItem(item) => {
+                            return Err(message::UnreplayableProviderItem::new(
+                                COHERE_CHAT_WIRE,
+                                &item,
+                            )
+                            .into());
+                        }
                         message::AssistantContent::Reasoning(reasoning) => {
                             let thinking = reasoning.display_text();
                             text_content.push(AssistantContent::Thinking { thinking });

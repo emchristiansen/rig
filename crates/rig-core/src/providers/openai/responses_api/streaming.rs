@@ -913,17 +913,20 @@ impl RawChoiceAccumulator {
             // the raw item to stream consumers, mirroring how the non-streaming
             // decode preserves it on `CompletionResponse.output`.
             Output::Unknown(value) => {
-                out.unknown(value.into());
+                let key = provider_item_key(&value, output_index);
+                out.provider_item(key, opaque_item(value));
             }
-            // A compaction item mid-stream: surfaced raw like an unmodeled
-            // item so a stateless consumer can capture it from the stream.
+            // A compaction item joins the answer the same way: a
+            // must-replay item, replayed through its input twin.
             Output::Compaction(fields) => {
                 let mut map = fields;
                 map.insert(
                     "type".to_string(),
                     serde_json::Value::String("compaction".to_string()),
                 );
-                out.unknown(serde_json::Value::Object(map).into());
+                let value = serde_json::Value::Object(map);
+                let key = provider_item_key(&value, output_index);
+                out.provider_item(key, opaque_item(value));
             }
         }
     }
@@ -1359,6 +1362,28 @@ impl Decoder<Completion> for ResponsesDecoder {
 
     fn is_finished(&self) -> bool {
         self.finished
+    }
+}
+
+/// The block key of an opaque output item: its own wire id when it carries
+/// one, else the output-index fallback, which is deterministic and unique
+/// per item (one output index holds one item).
+fn provider_item_key(item: &serde_json::Value, output_index: u64) -> BlockId {
+    item.get("id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|id| crate::streaming::non_empty_id(id.to_owned()))
+        .map_or_else(
+            || crate::streaming::MintKind::Output.for_wire_index(output_index),
+            BlockId::wire,
+        )
+}
+
+/// An opaque output item, kept whole. Its issuer is stamped when the
+/// response is folded, exactly as reasoning's is.
+fn opaque_item(item: serde_json::Value) -> crate::message::ProviderItem {
+    crate::message::ProviderItem {
+        item,
+        provider: None,
     }
 }
 

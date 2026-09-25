@@ -55,7 +55,8 @@ pub fn resolve_empty_tool_result_names(history: &mut [crate::message::Message]) 
                     }),
                     AssistantContent::Text(_)
                     | AssistantContent::Reasoning(_)
-                    | AssistantContent::Image(_) => None,
+                    | AssistantContent::Image(_)
+                    | AssistantContent::ProviderItem(_) => None,
                 }));
             }
             Message::User { content } => {

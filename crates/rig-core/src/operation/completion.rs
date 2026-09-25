@@ -592,6 +592,17 @@ impl AdapterOutput {
         }));
     }
 
+    /// An opaque provider output item, whole: opens its block and closes it
+    /// with the item, which the fold records in stream order.
+    pub fn provider_item(&mut self, id: BlockId, item: crate::message::ProviderItem) {
+        self.open_if_unseen(&id, BlockKind::ProviderItem);
+        self.push(Ok(StreamEvent::BlockEnd {
+            id,
+            end: BlockClose::ProviderItem(item),
+            block: None,
+        }));
+    }
+
     /// Open the reasoning block `id` (a no-op when already open).
     pub fn reasoning_start(&mut self, id: &BlockId, provider_id: Option<String>) {
         self.open_if_unseen(id, BlockKind::Reasoning { provider_id });

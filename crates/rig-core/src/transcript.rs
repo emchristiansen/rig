@@ -95,7 +95,8 @@ pub fn validate_canonical(messages: &[Message]) -> Result<(), TranscriptError> {
                         AssistantContent::CustomToolCall(call) => (&call.id, call.answered_by()),
                         AssistantContent::Text(_)
                         | AssistantContent::Reasoning(_)
-                        | AssistantContent::Image(_) => continue,
+                        | AssistantContent::Image(_)
+                        | AssistantContent::ProviderItem(_) => continue,
                     };
                     // Duplicate IDs are one pending ID; the first call's kind binds.
                     calls.entry(id.clone()).or_insert(kind);

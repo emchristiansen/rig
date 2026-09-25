@@ -734,6 +734,13 @@ impl TryFrom<crate::message::Message> for Vec<Message> {
                         crate::message::AssistantContent::CustomToolCall(call) => {
                             return Err(call.refused_by_json_only_wire(OLLAMA_CHAT_WIRE).into());
                         }
+                        crate::message::AssistantContent::ProviderItem(item) => {
+                            return Err(crate::message::UnreplayableProviderItem::new(
+                                OLLAMA_CHAT_WIRE,
+                                &item,
+                            )
+                            .into());
+                        }
                         crate::message::AssistantContent::Reasoning(reasoning) => {
                             let display = reasoning.display_text();
                             if !display.is_empty() {
