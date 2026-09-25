@@ -555,3 +555,45 @@ fn chatgpt_identity_setters_reach_the_request() {
     let plain = headers(&OpenAI::new("sk-test").with_originator("ccc"));
     assert_eq!(plain["originator"], "ccc");
 }
+
+/// A ChatGPT wire's HTTP request headers are exactly its credential, its
+/// caller identity (`originator` and `user-agent`, at the dialect defaults
+/// here), a fresh `session_id` per request and its account — nothing else.
+/// Pinned so that the identity stamping `headers()` shares with the Codex
+/// websocket handshake cannot change what an HTTP request carries.
+#[test]
+fn chatgpt_http_headers_are_exactly_the_credential_identity_session_and_account() {
+    let provider = OpenAI::with_key(&crate::providers::chatgpt::DIALECT, "tok")
+        .with_account_id("acct-1");
+    let sent = |provider: &OpenAI| {
+        provider
+            .headers(http::Request::get("https://example.invalid/"))
+            .body(())
+            .expect("builds")
+            .headers()
+            .clone()
+    };
+    let first = sent(&provider);
+
+    let mut names: Vec<&str> = first.keys().map(http::HeaderName::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "authorization",
+            "chatgpt-account-id",
+            "originator",
+            "session_id",
+            "user-agent"
+        ]
+    );
+    assert_eq!(first["authorization"], "Bearer tok");
+    assert_eq!(first["chatgpt-account-id"], "acct-1");
+    assert_eq!(first["originator"], "rig");
+    assert_eq!(first["user-agent"], default_user_agent("rig").as_str());
+    assert!(!first["session_id"].is_empty());
+    assert_eq!(first.len(), names.len(), "no header is repeated");
+
+    // The session id is fresh for every request.
+    assert_ne!(sent(&provider)["session_id"], first["session_id"]);
+}
