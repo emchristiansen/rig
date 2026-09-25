@@ -117,13 +117,29 @@ enum ResponsesWebSocketClientEventKind {
 }
 
 /// A protocol error event emitted by OpenAI WebSocket mode.
+///
+/// The Codex backend wraps HTTP-shaped failures in this event: a top-level
+/// `status` (also spelled `status_code`), the `error` object, and a
+/// `headers` map that carries its `x-codex-*` rate-limit values. Every field
+/// but the tag is optional, and unmodelled top-level fields are kept in
+/// `extra`, so the event is carried whole rather than trimmed to a message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponsesWebSocketErrorEvent {
     /// The event type.
     #[serde(rename = "type")]
     pub kind: ResponsesWebSocketErrorEventKind,
-    /// The provider error payload.
+    /// The HTTP status the provider reports for this failure, when it does.
+    #[serde(default, alias = "status_code", skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// The provider error payload; empty when the event carries none.
+    #[serde(default, skip_serializing_if = "ResponsesWebSocketErrorPayload::is_empty")]
     pub error: ResponsesWebSocketErrorPayload,
+    /// Response headers the provider reports with this failure, when it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Map<String, Value>>,
+    /// Any other top-level fields supplied by the provider.
+    #[serde(flatten, default)]
+    pub extra: Map<String, Value>,
 }
 
 impl std::fmt::Display for ResponsesWebSocketErrorEvent {
@@ -151,6 +167,13 @@ pub struct ResponsesWebSocketErrorPayload {
     /// Any extra fields supplied by the provider.
     #[serde(flatten, default)]
     pub extra: Map<String, Value>,
+}
+
+impl ResponsesWebSocketErrorPayload {
+    /// Whether the payload carries nothing: no code, no message, no extras.
+    pub fn is_empty(&self) -> bool {
+        self.code.is_none() && self.message.is_none() && self.extra.is_empty()
+    }
 }
 
 impl std::fmt::Display for ResponsesWebSocketErrorPayload {
@@ -1060,9 +1083,9 @@ impl ResponsesWebSocketSession {
                 }
                 ResponsesWebSocketEvent::Error(error) => {
                     // Genuine provider error event: preserve the serialized payload
-                    // (code + message + any extra fields) so provider_response_json()
-                    // parses it, matching the response.failed path. No HTTP status on
-                    // the websocket stream, so status: None.
+                    // (status, code, message, headers and any extra fields) so
+                    // provider_response_json() parses it, matching the
+                    // response.failed path. A status the event reports is kept.
                     return Err(provider_error_from_event(&error));
                 }
                 // Unknown frames retain their raw payload through decoder passthrough.
@@ -1320,12 +1343,40 @@ fn response_error_message(fallback: &str) -> String {
     format!("OpenAI websocket returned a {fallback}")
 }
 
-/// Preserve an error event as reserialized provider JSON without an HTTP status.
-/// Fall back to its display text if serialization fails.
+/// Preserve an error event as reserialized provider JSON. When the event
+/// reports an HTTP status, the error carries it, with the event's headers, so
+/// it classifies by status as the same failure over HTTP would; otherwise it
+/// has none. Fall back to its display text if serialization fails.
 fn provider_error_from_event(error: &ResponsesWebSocketErrorEvent) -> ProviderError {
-    ProviderError::from_provider_body(
-        serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()),
-    )
+    let body = serde_json::to_string(&error).unwrap_or_else(|_| error.to_string());
+    match error
+        .status
+        .and_then(|status| http::StatusCode::from_u16(status).ok())
+    {
+        Some(status) => ProviderError::from_http_response(status, body)
+            .with_response_headers(error.headers.as_ref().map(header_map_from_json)),
+        None => ProviderError::from_provider_body(body),
+    }
+}
+
+/// Converts an error event's JSON `headers` map to an HTTP header map. String
+/// values are taken as-is and scalars by their JSON text. An entry that is not
+/// a valid header name or value is left out of the map; it is still present
+/// in the preserved body, which keeps the whole event.
+fn header_map_from_json(headers: &Map<String, Value>) -> http::HeaderMap {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let text = match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            Some((
+                http::HeaderName::from_bytes(name.as_bytes()).ok()?,
+                http::HeaderValue::from_str(&text).ok()?,
+            ))
+        })
+        .collect()
 }
 
 /// Decode WebSocket error and done events or delegate to Responses classification.

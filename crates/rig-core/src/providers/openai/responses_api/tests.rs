@@ -1455,7 +1455,7 @@ fn service_tier_serializes_expected_strings() {
 fn responses_usage_token_usage_preserves_reasoning_tokens() {
     let usage = ResponsesUsage {
         input_tokens: 100,
-        input_tokens_details: Some(InputTokensDetails { cached_tokens: 25 }),
+        input_tokens_details: Some(InputTokensDetails { cached_tokens: Some(25) }),
         output_tokens: 50,
         output_tokens_details: Some(OutputTokensDetails {
             reasoning_tokens: 15,
@@ -2387,7 +2387,7 @@ fn responses_usage_add_preserves_rhs_details_when_lhs_details_are_absent() {
     };
     let rhs = ResponsesUsage {
         input_tokens: 3,
-        input_tokens_details: Some(InputTokensDetails { cached_tokens: 2 }),
+        input_tokens_details: Some(InputTokensDetails { cached_tokens: Some(2) }),
         output_tokens: 5,
         output_tokens_details: Some(OutputTokensDetails {
             reasoning_tokens: 4,
@@ -3404,4 +3404,66 @@ fn a_unary_unasserted_call_with_unparseable_arguments_is_dropped() {
         "the dropped call yields no content: {:?}",
         response.choice
     );
+}
+
+/// A failed response whose error omits `code` still decodes: the code is
+/// absent rather than the whole body being rejected, and the message
+/// survives. Re-serializing keeps it absent instead of inventing an empty one.
+#[test]
+fn a_response_error_without_a_code_decodes_and_stays_absent() {
+    let error: ResponseError = serde_json::from_value(json!({"message": "overloaded"}))
+        .expect("an error without a code decodes");
+    assert_eq!(error.code, None);
+    assert_eq!(error.message, "overloaded");
+    assert_eq!(
+        serde_json::to_value(&error).expect("the error serializes"),
+        json!({"message": "overloaded"}),
+    );
+}
+
+/// An omitted cached-token count stays absent through decoding and the usage
+/// projection; it is never reported as zero, while a reported zero stays zero.
+#[test]
+fn an_omitted_cached_token_count_is_absent_not_zero() {
+    let omitted: ResponsesUsage = serde_json::from_value(json!({
+        "input_tokens": 3,
+        "input_tokens_details": {},
+        "output_tokens": 2,
+        "total_tokens": 5,
+    }))
+    .expect("usage without cached_tokens decodes");
+    assert_eq!(
+        omitted.input_tokens_details.map(|details| details.cached_tokens),
+        Some(None)
+    );
+    assert_eq!(completion::Usage::from(&omitted).cached_input_tokens, None);
+    assert_eq!(
+        serde_json::to_value(omitted.input_tokens_details).expect("details serialize"),
+        json!({}),
+        "an absent count is omitted, not written as null"
+    );
+
+    let zero: ResponsesUsage = serde_json::from_value(json!({
+        "input_tokens": 3,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": 2,
+        "total_tokens": 5,
+    }))
+    .expect("usage with a zero cached_tokens decodes");
+    assert_eq!(completion::Usage::from(&zero).cached_input_tokens, Some(0));
+}
+
+/// Summing usage details keeps absence: a total is known only when every part
+/// is, so one omitted count makes the sum absent rather than undercounting.
+#[test]
+fn summed_cached_token_counts_are_known_only_when_every_part_is() {
+    let known = InputTokensDetails {
+        cached_tokens: Some(4),
+    };
+    let absent = InputTokensDetails {
+        cached_tokens: None,
+    };
+    assert_eq!((known + known).cached_tokens, Some(8));
+    assert_eq!((known + absent).cached_tokens, None);
+    assert_eq!((absent + known).cached_tokens, None);
 }

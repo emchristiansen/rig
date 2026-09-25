@@ -1149,7 +1149,7 @@ impl From<&ResponsesUsage> for crate::completion::Usage {
             cached_input_tokens: usage
                 .input_tokens_details
                 .as_ref()
-                .map(|details| details.cached_tokens),
+                .and_then(|details| details.cached_tokens),
             reasoning_tokens: usage
                 .output_tokens_details
                 .as_ref()
@@ -1196,15 +1196,25 @@ impl Add for ResponsesUsage {
 /// In-depth details on input tokens.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct InputTokensDetails {
-    /// Cached tokens from OpenAI
-    pub cached_tokens: u64,
+    /// Cached tokens from OpenAI, `None` when the provider omits the count.
+    ///
+    /// Absence is not zero: an omitted count stays `None` through
+    /// deserialization, arithmetic and the usage projection, so a missing
+    /// field never fails the whole decode and is never reported as zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
 }
 
 impl Add for InputTokensDetails {
     type Output = Self;
+    /// A sum is known only when both parts are: one absent side makes the
+    /// total absent rather than silently counting it as zero.
     fn add(self, rhs: Self) -> Self::Output {
         Self {
-            cached_tokens: self.cached_tokens + rhs.cached_tokens,
+            cached_tokens: self
+                .cached_tokens
+                .zip(rhs.cached_tokens)
+                .map(|(left, right)| left + right),
         }
     }
 }
@@ -1235,8 +1245,10 @@ pub struct IncompleteDetailsReason {
 /// A response error from OpenAI's Response API.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ResponseError {
-    /// Error code
-    pub code: String,
+    /// Error code, `None` when the provider omits it. A failed response
+    /// without a code still decodes, so its message and status survive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     /// Error message
     pub message: String,
 }
@@ -2584,7 +2596,10 @@ impl OutputText {
                     // Reserved keys would duplicate the block's text or tag.
                     // Phase belongs on the message, not the content block.
                     .filter(|(key, _)| {
-                        key != "text" && key != "type" && key != OPENAI_RESPONSES_PHASE_KEY
+                        key != "text"
+                            && key != "type"
+                            && key != OPENAI_RESPONSES_PHASE_KEY
+                            && key != OPENAI_RESPONSES_REFUSAL_KEY
                     })
                     .collect()
             })
@@ -2632,11 +2647,18 @@ fn assistant_text_replay_message(
         .and_then(|extras| extras.get(OPENAI_RESPONSES_PHASE_KEY))
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let refusal = is_refusal(additional_params.as_ref());
     match id {
         Some(id) => Some(Message::Assistant {
-            content: vec![AssistantContentType::Text(AssistantContent::OutputText(
-                OutputText::from_message_text(text, additional_params),
-            ))],
+            // A marked refusal goes back as the refusal part it came from.
+            content: vec![AssistantContentType::Text(if refusal {
+                AssistantContent::Refusal { refusal: text }
+            } else {
+                AssistantContent::OutputText(OutputText::from_message_text(
+                    text,
+                    additional_params,
+                ))
+            })],
             id,
             name: None,
             status: ToolStatus::Completed,
@@ -2668,6 +2690,29 @@ pub(crate) const OPENAI_RESPONSES_EXTRAS_KEY: &str = "openai_responses";
 /// lifted back onto the assistant input item at replay.
 pub(crate) const OPENAI_RESPONSES_PHASE_KEY: &str = "phase";
 
+/// Key inside the [`OPENAI_RESPONSES_EXTRAS_KEY`] object that marks a text
+/// block as a Responses `refusal` content part rather than `output_text`.
+/// Like [`OPENAI_RESPONSES_PHASE_KEY`], it rides the text block's own-wire
+/// extras in rig history, and replay turns it back into a refusal part. Other
+/// wires read only the text, so there a refusal replays as plain text.
+pub(crate) const OPENAI_RESPONSES_REFUSAL_KEY: &str = "refusal";
+
+/// The own-wire extras that mark a text block as a refusal.
+pub(crate) fn refusal_marker() -> Option<crate::message::AdditionalParams> {
+    crate::message::AdditionalParams::from_entries(Some((
+        OPENAI_RESPONSES_EXTRAS_KEY,
+        serde_json::json!({ OPENAI_RESPONSES_REFUSAL_KEY: true }),
+    )))
+}
+
+/// Whether a text block's own-wire extras mark it as a refusal.
+pub(crate) fn is_refusal(additional_params: Option<&crate::message::AdditionalParams>) -> bool {
+    additional_params
+        .and_then(|params| params.wire_extras(OPENAI_RESPONSES_EXTRAS_KEY))
+        .and_then(|extras| extras.get(OPENAI_RESPONSES_REFUSAL_KEY))
+        == Some(&Value::Bool(true))
+}
+
 /// Record an output message's `phase` on a text block's own-wire extras so
 /// the follow-up request can re-send it.
 pub(crate) fn stamp_phase(text: &mut Text, phase: Option<&str>) {
@@ -2691,10 +2736,14 @@ pub(crate) fn stamp_phase(text: &mut Text, phase: Option<&str>) {
 }
 
 /// Converts output text or a refusal to a Rig text block, retaining nonempty
-/// output-text extras under the Responses key.
+/// output-text extras under the Responses key. A refusal is marked with
+/// [`OPENAI_RESPONSES_REFUSAL_KEY`], so it stays distinct from output text.
 pub(crate) fn text_block(value: AssistantContent) -> Text {
     match value {
-        AssistantContent::Refusal { refusal } => Text::new(refusal),
+        AssistantContent::Refusal { refusal } => Text {
+            text: refusal,
+            additional_params: refusal_marker(),
+        },
         // Keep this destructuring exhaustive so new wire fields force an
         // explicit capture-or-drop decision.
         AssistantContent::OutputText(OutputText { text, extras }) => {

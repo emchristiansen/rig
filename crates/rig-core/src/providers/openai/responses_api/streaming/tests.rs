@@ -391,7 +391,7 @@ async fn flushed_tool_call_then_error(
 fn a_buffered_body_preserves_its_error_payloads() {
     let mut response = sample_response(ResponseStatus::Failed);
     response.error = Some(ResponseError {
-        code: "server_error".to_string(),
+        code: Some("server_error".to_string()),
         message: "response failed".to_string(),
     });
     let events = [
@@ -786,7 +786,7 @@ fn reasoning_summary_part_done_deserializes_snake_case_part_type() {
 async fn response_failed_chunk_surfaces_provider_error_without_empty_code_prefix() {
     let mut response = sample_response(ResponseStatus::Failed);
     response.error = Some(ResponseError {
-        code: String::new(),
+        code: Some(String::new()),
         message: "maximum context length exceeded".to_string(),
     });
 
@@ -809,7 +809,7 @@ async fn response_failed_chunk_surfaces_provider_error_without_empty_code_prefix
 async fn response_failed_chunk_surfaces_provider_error_with_code_prefix() {
     let mut response = sample_response(ResponseStatus::Failed);
     response.error = Some(ResponseError {
-        code: "context_length_exceeded".to_string(),
+        code: Some("context_length_exceeded".to_string()),
         message: "maximum context length exceeded".to_string(),
     });
 
@@ -997,7 +997,7 @@ async fn response_failed_flushes_delivered_tool_calls_before_the_error() {
 
     let mut response = sample_response(ResponseStatus::Failed);
     response.error = Some(ResponseError {
-        code: "server_error".to_string(),
+        code: Some("server_error".to_string()),
         message: "response stream failed".to_string(),
     });
 
@@ -3224,4 +3224,81 @@ async fn streaming_and_unary_refuse_an_asserted_malformed_call_alike() {
         panic!("the unary refusal is a response error, got {unary:?}");
     };
     assert_eq!(streamed.message, unary);
+}
+
+/// Refusal deltas stream into their own text block per content part, marked
+/// as a refusal and keyed by a deterministic stream-order minted id; output
+/// text of the same item reopens its own block after a refusal part, so
+/// nothing is merged across the two.
+#[test]
+fn refusal_parts_stream_into_their_own_marked_blocks() {
+    let delta = |kind: &str, content_index: u64, sequence_number: u64, text: &str| {
+        json!({
+            "type": kind,
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": content_index,
+            "sequence_number": sequence_number,
+            "delta": text
+        })
+    };
+    let events = [
+        delta("response.output_text.delta", 0, 1, "Hello"),
+        delta("response.refusal.delta", 1, 2, "I can't"),
+        delta("response.refusal.delta", 1, 3, " do that"),
+        delta("response.output_text.delta", 0, 4, " there"),
+        delta("response.refusal.delta", 2, 5, "Nor that"),
+        json!({
+            "type": "response.completed",
+            "sequence_number": 6,
+            "response": sample_response(ResponseStatus::Completed),
+        }),
+    ];
+    let body: String = events.iter().map(|event| format!("data: {event}\n\n")).collect();
+    let decoded = stream_events_from_sse_body("openai", &body, None).expect("the body decodes");
+
+    let refusal_starts: Vec<BlockId> = decoded
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::BlockStart {
+                id,
+                kind: BlockKind::Text { additional_params },
+            } if super::super::is_refusal(additional_params.as_ref()) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        refusal_starts,
+        [
+            BlockId::minted(crate::streaming::MintKind::Refusal, 0),
+            BlockId::minted(crate::streaming::MintKind::Refusal, 1),
+        ],
+        "one marked block per refusal part, minted in stream order"
+    );
+
+    let response = folded_stream_events(
+        "openai",
+        decoded,
+        &sample_response(ResponseStatus::Completed),
+    )
+    .expect("the stream folds");
+    let parts: Vec<(String, bool)> = response
+        .choice
+        .iter()
+        .map(|part| match part {
+            AssistantContent::Text(text) => (
+                text.text.clone(),
+                super::super::is_refusal(text.additional_params.as_ref()),
+            ),
+            other => panic!("expected text blocks, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        parts,
+        [
+            ("Hello there".to_string(), false),
+            ("I can't do that".to_string(), true),
+            ("Nor that".to_string(), true),
+        ]
+    );
 }

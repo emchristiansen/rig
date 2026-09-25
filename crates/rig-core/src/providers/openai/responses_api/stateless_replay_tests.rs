@@ -134,3 +134,51 @@ fn history_without_phase_replays_without_the_key() {
     let wire = serde_json::to_value(&items[0]).expect("item serializes");
     assert!(wire.get("phase").is_none(), "{wire}");
 }
+
+/// `Output::Message` with an `output_text` part and a `refusal` part → rig
+/// history → assistant input item: the refusal is its own text block, marked
+/// as a refusal, and replays as the `refusal` part it came from, while the
+/// marker never leaks onto the output-text block.
+#[test]
+fn a_refusal_part_stays_distinct_in_history_and_replays_as_a_refusal() {
+    let output = Output::Message(OutputMessage {
+        id: "msg_1".to_string(),
+        role: OutputRole::Assistant,
+        status: ResponseStatus::Completed,
+        content: vec![
+            AssistantContent::OutputText(OutputText::new("Here is part of it.")),
+            AssistantContent::Refusal {
+                refusal: "I can't help with the rest.".to_string(),
+            },
+        ],
+        phase: None,
+    });
+    let content = super::tests::folded_choice(vec![output]);
+    let texts: Vec<&Text> = content
+        .iter()
+        .map(|part| match part {
+            completion::AssistantContent::Text(text) => text,
+            other => panic!("expected text blocks, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(texts.len(), 2, "the refusal is not merged into the text");
+    assert_eq!(texts[0].text, "Here is part of it.");
+    assert!(!is_refusal(texts[0].additional_params.as_ref()));
+    assert_eq!(texts[1].text, "I can't help with the rest.");
+    assert!(is_refusal(texts[1].additional_params.as_ref()));
+
+    let history = completion::Message::Assistant {
+        id: Some("msg_1".to_string()),
+        content,
+    };
+    let items = Vec::<InputItem>::try_from(history).expect("history converts");
+    let wire = serde_json::to_value(&items).expect("items serialize");
+    assert_eq!(wire.as_array().map(Vec::len), Some(1), "one assistant item");
+    assert_eq!(
+        wire[0]["content"],
+        json!([
+            {"type": "output_text", "text": "Here is part of it."},
+            {"type": "refusal", "refusal": "I can't help with the rest."}
+        ])
+    );
+}

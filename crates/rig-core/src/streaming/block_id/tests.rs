@@ -15,14 +15,7 @@ fn mint_counts_up_per_stream() {
 
 #[test]
 fn minted_keys_are_distinct_across_kinds_and_indices() {
-    let kinds = [
-        MintKind::Reasoning,
-        MintKind::EncryptedReasoning,
-        MintKind::Block,
-        MintKind::Output,
-        MintKind::Tool,
-        MintKind::Text,
-    ];
+    let kinds = MintKind::ALL;
     let mut seen = std::collections::HashSet::new();
     for kind in kinds {
         for index in [0u64, 1, 7, u64::MAX] {
@@ -69,4 +62,38 @@ fn provenance_survives_serde_and_renders_for_logs() {
     assert_eq!(back, keyed);
     assert!(serde_json::from_str::<BlockId>("\"tool-0\"").is_err());
     assert!(serde_json::from_str::<BlockId>("\"minted:nope:1\"").is_err());
+}
+
+/// Every kind in [`MintKind::ALL`] renders and parses back, and a minted key
+/// of each kind survives its `minted:<kind>:<index>` serialization.
+///
+/// `declared_position` is an exhaustive match, so adding a kind stops this
+/// test compiling until the kind is given a position here: the prompt to add
+/// it to `ALL` too, which is what `parse_name` reads. The loop pins every
+/// listed kind to its declared position.
+#[test]
+fn every_mint_kind_round_trips_through_its_name_and_serialization() {
+    fn declared_position(kind: MintKind) -> usize {
+        match kind {
+            MintKind::Reasoning => 0,
+            MintKind::EncryptedReasoning => 1,
+            MintKind::Block => 2,
+            MintKind::Output => 3,
+            MintKind::Tool => 4,
+            MintKind::Text => 5,
+            MintKind::Refusal => 6,
+        }
+    }
+    for (position, kind) in MintKind::ALL.into_iter().enumerate() {
+        assert_eq!(declared_position(kind), position);
+        assert_eq!(MintKind::parse_name(kind.as_str()), Some(kind));
+        let key = BlockId::minted(kind, 3);
+        let text = serde_json::to_string(&key).expect("a minted key serializes");
+        assert_eq!(text, format!("\"minted:{}:3\"", kind.as_str()));
+        assert_eq!(
+            serde_json::from_str::<BlockId>(&text).expect("it parses back"),
+            key
+        );
+    }
+    assert_eq!(MintKind::parse_name("refusal"), Some(MintKind::Refusal));
 }

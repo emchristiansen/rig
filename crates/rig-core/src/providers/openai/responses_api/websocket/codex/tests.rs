@@ -560,6 +560,48 @@ async fn an_incremental_send_after_a_failed_turn_is_refused() {
     assert_eq!(script.sent().len(), 2);
 }
 
+/// A Codex-wrapped error event that reports an HTTP status still ends the turn
+/// without a tip: the status it now carries changes nothing about incremental
+/// eligibility, so the next delta is refused by name.
+#[tokio::test]
+async fn an_incremental_send_after_a_status_bearing_error_event_is_refused() {
+    let wrapped_error = json!({
+        "type": "error",
+        "status": 429,
+        "error": {"type": "usage_limit_reached", "message": "The usage limit has been reached"},
+        "headers": {"x-codex-primary-used-percent": "100.0"}
+    })
+    .to_string();
+    let script = Script::new()
+        .turn([completed("resp_1")])
+        .turn([wrapped_error]);
+    let mut session = session_over(&script);
+
+    session
+        .completion(user_request("ROOT"))
+        .await
+        .expect("root turn should complete");
+    session
+        .send_incremental(delta("FIRST_DELTA"))
+        .await
+        .expect("incremental turn should send");
+    let ResponsesWebSocketEvent::Error(event) = finish_turn(&mut session).await else {
+        panic!("the wrapped error ends the turn");
+    };
+    assert_eq!(event.status, Some(429));
+    assert_eq!(session.previous_response_id(), None);
+
+    let error = session
+        .send_incremental(delta("SECOND_DELTA"))
+        .await
+        .expect_err("an error terminal leaves no tip");
+    assert_eq!(
+        refusal(&error),
+        IncrementalSendRefused::LastTurnNotCompleted
+    );
+    assert_eq!(script.sent().len(), 2);
+}
+
 #[tokio::test]
 async fn clearing_the_tip_refuses_incremental_sends_until_a_root_send() {
     let script = Script::new()

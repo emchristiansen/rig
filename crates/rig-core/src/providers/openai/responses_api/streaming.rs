@@ -346,6 +346,14 @@ pub struct RawChoiceAccumulator {
     /// Deltas without an `item_id` (ChatGPT's envelope-less replays) extend
     /// the open block, or open a boundary-minted one in the output helper.
     current_text_item: Option<String>,
+    /// Refusal content parts each get their own text block, marked as a
+    /// refusal, so a refusal is never merged into the output text beside it.
+    /// Keyed by the part's own coordinate (`output_index`, `content_index`),
+    /// minted in stream order so the keys are deterministic.
+    refusal_ids: crate::streaming::SyntheticIds,
+    refusal_blocks: std::collections::HashMap<(u64, u64), crate::streaming::BlockId>,
+    /// The refusal part's block that bare text deltas currently land in.
+    active_refusal_block: Option<crate::streaming::BlockId>,
     /// The message items whose visible text a delta already delivered, and
     /// whether any fragment arrived that could not be attributed to one.
     /// The terminal restates the whole turn's output, so its message text
@@ -389,6 +397,9 @@ impl RawChoiceAccumulator {
             pending_namespaces: std::collections::HashMap::new(),
             argument_fragments: std::collections::HashMap::new(),
             current_text_item: None,
+            refusal_ids: crate::streaming::SyntheticIds::new(crate::streaming::MintKind::Refusal),
+            refusal_blocks: std::collections::HashMap::new(),
+            active_refusal_block: None,
             delta_text_items: std::collections::HashSet::new(),
             delta_text_slots: std::collections::HashSet::new(),
             unattributed_text_delta: false,
@@ -403,8 +414,33 @@ impl RawChoiceAccumulator {
             && self.current_text_item.as_deref() != Some(item_id)
         {
             self.current_text_item = Some(item_id.to_string());
+            self.active_refusal_block = None;
             out.text_start(BlockId::wire(item_id.to_string()), None);
+        } else if self.active_refusal_block.take().is_some() {
+            // Output text must not extend a refusal part's block: close it,
+            // so the next bare delta opens a text block of its own.
+            out.end_active_text();
         }
+    }
+
+    /// Make the refusal part at (`output_index`, `content_index`) the block
+    /// that bare text deltas land in, opening it, marked as a refusal, on its
+    /// first fragment. The item's output text reopens its own block after.
+    fn start_refusal_part(&mut self, output_index: u64, content_index: u64, out: &mut AdapterOutput) {
+        let (block, opened) = match self.refusal_blocks.get(&(output_index, content_index)) {
+            Some(block) => (block.clone(), false),
+            None => {
+                let block = self.refusal_ids.mint();
+                self.refusal_blocks
+                    .insert((output_index, content_index), block.clone());
+                (block, true)
+            }
+        };
+        if self.active_refusal_block.as_ref() != Some(&block) {
+            out.text_start(block.clone(), opened.then(super::refusal_marker).flatten());
+            self.active_refusal_block = Some(block);
+        }
+        self.current_text_item = None;
     }
 
     /// Record that a delta delivered the visible text of a message item.
@@ -453,11 +489,16 @@ impl RawChoiceAccumulator {
         // sends one delta per content part; a part's own-wire extras ride
         // the block's metadata, where the accumulator merges them into the
         // one block the item published.
-        self.start_text_item(Some(&message.id), out);
         if !message.content.is_empty() {
             self.note_text_delta(output_index, Some(&message.id));
         }
-        for content in message.content.iter().cloned() {
+        for (content_index, content) in message.content.iter().cloned().enumerate() {
+            // A refusal part gets its own block, as its deltas would have.
+            if matches!(content, super::AssistantContent::Refusal { .. }) {
+                self.start_refusal_part(output_index, content_index as u64, out);
+            } else {
+                self.start_text_item(Some(&message.id), out);
+            }
             let mut text = super::text_block(content);
             super::stamp_phase(&mut text, message.phase.as_deref());
             out.text(text.text);
@@ -528,6 +569,7 @@ impl RawChoiceAccumulator {
                 // re-emits its text `BlockStart` and reactivates its block
                 // downstream.
                 self.current_text_item = None;
+                self.active_refusal_block = None;
                 // Without call_id, mint an assembly key so the item ID cannot become
                 // a fabricated tool-result correlator.
                 let wire_id = (!func.call_id.is_empty()).then_some(func.id.as_str());
@@ -549,6 +591,7 @@ impl RawChoiceAccumulator {
                 // Any completed item ends the block it carried; a text delta
                 // arriving afterwards belongs to a (re)opened block.
                 self.current_text_item = None;
+                self.active_refusal_block = None;
                 self.push_output_item_done(
                     message.item,
                     output_index,
@@ -556,12 +599,20 @@ impl RawChoiceAccumulator {
                     options.emits_completed_tool_calls_immediately(),
                 );
             }
-            // Text and refusal deltas are the same visible-text stream: a
-            // refusal is the assistant's message for that turn, and both
-            // (re)open the item's text block before their fragment.
-            ItemChunkKind::OutputTextDelta(DeltaTextChunk { delta, .. })
-            | ItemChunkKind::RefusalDelta(DeltaTextChunk { delta, .. }) => {
+            // Output text (re)opens the item's text block before its fragment.
+            ItemChunkKind::OutputTextDelta(DeltaTextChunk { delta, .. }) => {
                 self.start_text_item(outer_item_id.as_deref(), out);
+                self.note_text_delta(output_index, outer_item_id.as_deref());
+                out.text(delta);
+            }
+            // A refusal is visible text of the same item, but it goes to its
+            // own block, marked as a refusal, keyed by the part it belongs to.
+            ItemChunkKind::RefusalDelta(DeltaTextChunk {
+                delta,
+                content_index,
+                ..
+            }) => {
+                self.start_refusal_part(output_index, content_index, out);
                 self.note_text_delta(output_index, outer_item_id.as_deref());
                 out.text(delta);
             }
@@ -572,6 +623,7 @@ impl RawChoiceAccumulator {
             | ItemChunkKind::ReasoningTextDelta(DeltaTextChunkWithItemId { delta, .. }) => {
                 // A later text delta must reactivate its message block after interleaved reasoning.
                 self.current_text_item = None;
+                self.active_refusal_block = None;
                 let id = self.reasoning_slot_key(output_index, outer_item_id.as_deref());
                 out.reasoning_delta(
                     &id,
@@ -584,6 +636,7 @@ impl RawChoiceAccumulator {
             ItemChunkKind::FunctionCallArgsDelta(delta) => {
                 // Tool output interleaving text is a block boundary too.
                 self.current_text_item = None;
+                self.active_refusal_block = None;
                 // Establish identity before done arrives; late IDs must not move buffered fragments.
                 let slot = self
                     .tool_slots
@@ -764,6 +817,7 @@ impl RawChoiceAccumulator {
             // parsed, because it is not JSON arguments.
             Output::CustomToolCall(call) => {
                 self.current_text_item = None;
+                self.active_refusal_block = None;
                 // Mirror the function-call identity rule: an item id keys the
                 // block only as half of a correlated pair; otherwise mint from
                 // the bridge's one counter.

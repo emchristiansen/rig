@@ -199,6 +199,9 @@ fn websocket_error_event_preserves_provider_payload_as_json() {
             message: Some("slow down".to_string()),
             extra,
         },
+        status: None,
+        headers: None,
+        extra: Map::new(),
     };
 
     let err = provider_error_from_event(&event);
@@ -213,6 +216,87 @@ fn websocket_error_event_preserves_provider_payload_as_json() {
     assert_eq!(json["error"]["code"], "rate_limit_exceeded");
     assert_eq!(json["error"]["message"], "slow down");
     assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+/// The Codex backend's wrapped failure: a top-level `status`, the `error`
+/// object, and a `headers` map carrying `x-codex-*` rate-limit values. The
+/// event decodes whole, and the error it raises carries that status and those
+/// headers, so it classifies as the same failure over HTTP would.
+#[test]
+fn a_codex_wrapped_error_event_keeps_its_status_and_headers() {
+    let payload = json!({
+        "type": "error",
+        "status": 429,
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "The usage limit has been reached",
+            "resets_at": 1738888888
+        },
+        "headers": {
+            "x-codex-primary-used-percent": "100.0",
+            "x-codex-primary-window-minutes": 15
+        }
+    })
+    .to_string();
+    let Some(ResponsesWebSocketEvent::Error(event)) =
+        parse_server_event(&payload).expect("the event parses")
+    else {
+        panic!("a wrapped error decodes as an error event");
+    };
+    assert_eq!(event.status, Some(429));
+
+    let err = provider_error_from_event(&event);
+    assert_eq!(err.provider_response_status(), Some(StatusCode::TOO_MANY_REQUESTS));
+    let headers = err
+        .provider_response_headers()
+        .expect("the event's headers are attached");
+    assert_eq!(headers["x-codex-primary-used-percent"], "100.0");
+    assert_eq!(headers["x-codex-primary-window-minutes"], "15");
+    let body = err
+        .provider_response_json()
+        .expect("preserved body should be valid JSON")
+        .expect("provider response body should be present");
+    assert_eq!(body["status"], 429);
+    assert_eq!(body["error"]["type"], "usage_limit_reached");
+    assert_eq!(body["error"]["resets_at"], 1738888888);
+    assert_eq!(body["headers"]["x-codex-primary-window-minutes"], 15);
+}
+
+/// The `status_code` spelling is read as the status, an event without an
+/// `error` object still decodes, and unmodelled top-level fields are kept
+/// rather than dropped.
+#[test]
+fn an_error_event_without_an_error_object_decodes_and_keeps_its_fields() {
+    let payload = json!({
+        "type": "error",
+        "status_code": 503,
+        "request_id": "req_1"
+    })
+    .to_string();
+    let Some(ResponsesWebSocketEvent::Error(event)) =
+        parse_server_event(&payload).expect("the event parses")
+    else {
+        panic!("an error event without an error object still decodes");
+    };
+    assert_eq!(event.status, Some(503));
+    assert!(event.error.is_empty());
+    assert_eq!(event.extra["request_id"], "req_1");
+    let body = provider_error_from_event(&event)
+        .provider_response_json()
+        .expect("preserved body should be valid JSON")
+        .expect("provider response body should be present");
+    assert_eq!(body, json!({"type": "error", "status": 503, "request_id": "req_1"}));
+}
+
+/// The flattened `extra` cannot swallow the tag: an event whose `type` is not
+/// `error` does not decode as an error event.
+#[test]
+fn an_event_with_another_type_does_not_decode_as_an_error_event() {
+    let decoded = serde_json::from_value::<ResponsesWebSocketErrorEvent>(json!({
+        "type": "response.completed",
+        "status": 429,
+    }));
+    assert!(decoded.is_err(), "the tag is still checked: {decoded:?}");
 }
 
 fn sample_response(status: ResponseStatus) -> CompletionResponse {
@@ -478,7 +562,7 @@ fn terminal_response_requires_completed_status() {
 fn terminal_failed_response_with_error_preserves_raw_payload() {
     let mut response = sample_response(ResponseStatus::Failed);
     response.error = Some(ResponseError {
-        code: "server_error".to_string(),
+        code: Some("server_error".to_string()),
         message: "the model failed to generate a response".to_string(),
     });
 
