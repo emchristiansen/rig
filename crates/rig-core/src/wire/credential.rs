@@ -158,8 +158,10 @@ pub struct CredentialPlacement {
 }
 
 impl CredentialPlacement {
-    /// Write `credential` into `headers`, replacing the credential and account
-    /// headers encoding wrote. A pure function of its inputs, shared by every
+    /// Write `credential` into `headers`. The placement replaces exactly the
+    /// headers it names, its token header and its account header, and
+    /// nothing else, so whatever encoding wrote there is replaced and every
+    /// other header is kept. A pure function of its inputs, shared by every
     /// transport that authorizes at send time, so they cannot drift.
     ///
     /// A token or account no header can carry refuses the request; the
@@ -170,10 +172,12 @@ impl CredentialPlacement {
         credential: &Credential,
     ) -> Result<(), ProviderError> {
         let token = credential.token.expose();
-        headers.remove(http::header::AUTHORIZATION);
         match &self.token {
-            TokenPlacement::OptionalBearer if token.is_empty() => {}
+            TokenPlacement::OptionalBearer if token.is_empty() => {
+                headers.remove(http::header::AUTHORIZATION);
+            }
             TokenPlacement::Bearer | TokenPlacement::OptionalBearer => {
+                headers.remove(http::header::AUTHORIZATION);
                 headers.insert(
                     http::header::AUTHORIZATION,
                     header_value(&format!("Bearer {token}"))?,

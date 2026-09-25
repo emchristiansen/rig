@@ -115,6 +115,8 @@ fn an_empty_optional_bearer_sends_no_credential_header() {
     );
 }
 
+/// A named header carries the token alone and replaces only itself: an
+/// `Authorization` header the caller set is kept.
 #[test]
 fn a_named_header_carries_the_token_alone() {
     let placement = CredentialPlacement {
@@ -123,10 +125,46 @@ fn a_named_header_carries_the_token_alone() {
     };
     let mut headers = http::HeaderMap::new();
     headers.insert("api-key", http::HeaderValue::from_static("static-key"));
+    headers.insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer caller-set"),
+    );
     placement
         .apply(&mut headers, &Credential::new("source-token"))
         .expect("the token fits a header");
-    assert_eq!(written(&headers), pairs(&[("api-key", "source-token")]));
+    assert_eq!(
+        written(&headers),
+        pairs(&[
+            ("api-key", "source-token"),
+            ("authorization", "Bearer caller-set"),
+        ])
+    );
+}
+
+/// A bearer placement replaces only `Authorization`: an `api-key` header the
+/// caller set is kept, the mirror of the named-header case.
+#[test]
+fn a_bearer_placement_keeps_a_callers_api_key_header() {
+    let placement = CredentialPlacement {
+        token: TokenPlacement::Bearer,
+        account: None,
+    };
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer static-key"),
+    );
+    headers.insert("api-key", http::HeaderValue::from_static("caller-set"));
+    placement
+        .apply(&mut headers, &Credential::new("source-token"))
+        .expect("the token fits a header");
+    assert_eq!(
+        written(&headers),
+        pairs(&[
+            ("api-key", "caller-set"),
+            ("authorization", "Bearer source-token"),
+        ])
+    );
 }
 
 #[test]
