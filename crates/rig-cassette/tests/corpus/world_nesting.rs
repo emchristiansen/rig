@@ -161,7 +161,8 @@ fn finish_lookup(
                         AssistantContent::ToolCall(_)
                         | AssistantContent::CustomToolCall(_)
                         | AssistantContent::Reasoning(_)
-                        | AssistantContent::Image(_) => None,
+                        | AssistantContent::Image(_)
+                        | AssistantContent::ProviderItem(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join(" "),

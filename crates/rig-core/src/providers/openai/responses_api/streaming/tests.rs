@@ -599,11 +599,11 @@ fn reasoning_text_delta_emits_reasoning_delta() {
 }
 
 #[test]
-fn unknown_output_item_surfaces_as_raw_unknown_choice() {
+fn unknown_output_item_surfaces_as_a_verbatim_provider_item_block() {
     // A hosted-tool item (web_search_call) arriving on
-    // `response.output_item.done` must surface to stream consumers as
-    // `StreamEvent::Unknown` carrying the verbatim item, mirroring how
-    // the non-streaming decode preserves it on `CompletionResponse.output`.
+    // `response.output_item.done` must surface to stream consumers as a
+    // provider-item block, keyed by its wire id and closing with the verbatim
+    // item, the same part the non-streaming fold keeps in the answer.
     let item = json!({
         "type": "web_search_call",
         "id": "ws_001",
@@ -623,13 +623,28 @@ fn unknown_output_item_surfaces_as_raw_unknown_choice() {
     let events =
         stream_events_from_sse_body("openai", &body, None).expect("sse body should decode");
 
-    let unknown = events.iter().find_map(|event| match event {
-        StreamEvent::Unknown(value) => Some(value),
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Unknown(_))),
+        "an opaque item is a provider-item block, not an unknown event",
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::BlockStart { id, kind: BlockKind::ProviderItem }
+            if id == &BlockId::wire("ws_001")
+    )));
+    let closed = events.iter().find_map(|event| match event {
+        StreamEvent::BlockEnd {
+            id,
+            end: BlockClose::ProviderItem(part),
+            ..
+        } if id == &BlockId::wire("ws_001") => Some(part),
         _ => None,
     });
     assert_eq!(
-        unknown,
-        Some(&item.into()),
+        closed.map(|part| &part.item),
+        Some(&item),
         "the raw web_search_call item should reach the consumer verbatim",
     );
 }
