@@ -45,7 +45,7 @@ fn wire_request(
     wire: &wire::Responses,
     request: completion::CompletionRequest,
 ) -> CompletionRequest {
-    wire.responses_request(request, false)
+    wire.responses_request(request, false, wire.codex_identity.as_ref())
         .expect("request should convert")
 }
 
@@ -2614,7 +2614,7 @@ fn output_reasoning_round_trips_value_equal() {
         summary: vec![ReasoningSummary::SummaryText {
             text: "weighing options".to_string(),
         }],
-        content: vec!["private reasoning".to_string()],
+        content: vec!["private reasoning".into()],
         encrypted_content: Some("ENCRYPTED".to_string()),
         signature: None,
         status: Some(ToolStatus::Completed),
@@ -2632,7 +2632,7 @@ fn output_reasoning_conversion_omits_empty_encrypted_content() {
     let output = Output::Reasoning {
         id: "reasoning_1".to_string(),
         summary: vec![],
-        content: vec!["visible reasoning".to_string()],
+        content: vec!["visible reasoning".into()],
         encrypted_content: Some(String::new()),
         signature: None,
         status: Some(ToolStatus::Completed),
@@ -3047,7 +3047,13 @@ fn the_last_text_signature_is_the_items() {
     };
     let item = openai_reasoning_from_core(&reasoning).expect("identified reasoning replays");
     assert_eq!(item.signature.as_deref(), Some("final"));
-    assert_eq!(item.content, ["first", "second"]);
+    assert_eq!(
+        item.content,
+        [
+            ReasoningTextContent::from("first"),
+            ReasoningTextContent::from("second")
+        ]
+    );
 }
 
 // ── custom calls, namespaces, answers pairing, argument classification ───
@@ -3214,7 +3220,7 @@ fn a_custom_result_carrying_an_image_is_refused() {
         ..weather_tool_request()
     };
     let error = openai_wire("gpt-5.4")
-        .responses_request(request, false)
+        .responses_request(request, false, None)
         .expect_err("an image in a custom result must be refused");
     assert!(
         error.to_string().contains("custom_tool_call_output"),
@@ -3337,7 +3343,7 @@ fn the_retired_incomplete_tolerance_key_is_refused_by_name() {
         ..weather_tool_request()
     };
     let error = openai_wire("gpt-5.4")
-        .responses_request(request, false)
+        .responses_request(request, false, None)
         .expect_err("the retired key must be refused");
     assert!(
         error.to_string().contains("with_streamed_incomplete"),

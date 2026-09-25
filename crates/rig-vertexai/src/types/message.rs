@@ -100,92 +100,102 @@ impl TryFrom<RigMessage> for vertexai::model::Content {
             Message::Assistant { content, .. } => {
                 let parts: Result<Vec<vertexai::model::Part>, _> = content
                     .into_iter()
-                    .map(|assistant_content| match assistant_content {
-                        AssistantContent::Text(text) => {
-                            let signature = rig_core::providers::gemini::text_signature_at(
-                                &text,
-                                crate::types::completion_response::VERTEX_TEXT_EXTRAS_KEY,
-                            )
-                            .map(str::to_owned);
-                            let mut part = vertexai::model::Part::new().set_text(text.text);
-                            // A signed answer part returns with its signature.
-                            if let Some(signature) = signature {
-                                match BASE64.decode(signature.as_bytes()) {
-                                    Ok(bytes) => part = part.set_thought_signature(bytes),
-                                    Err(err) => tracing::warn!(
-                                        %err,
-                                        "Failed to base64-decode text thought_signature; \
-                                         dropping it for this turn"
-                                    ),
+                    .map(|assistant_content| {
+                        rig_core::providers::internal::refuse_opaque_responses_part(
+                            &assistant_content,
+                            "Vertex AI",
+                        )
+                        .map_err(|error| ProviderError::Request(error.into()))?;
+                        match assistant_content {
+                            AssistantContent::Text(text) => {
+                                let signature = rig_core::providers::gemini::text_signature_at(
+                                    &text,
+                                    crate::types::completion_response::VERTEX_TEXT_EXTRAS_KEY,
+                                )
+                                .map(str::to_owned);
+                                let mut part = vertexai::model::Part::new().set_text(text.text);
+                                // A signed answer part returns with its signature.
+                                if let Some(signature) = signature {
+                                    match BASE64.decode(signature.as_bytes()) {
+                                        Ok(bytes) => part = part.set_thought_signature(bytes),
+                                        Err(err) => tracing::warn!(
+                                            %err,
+                                            "Failed to base64-decode text thought_signature; \
+                                             dropping it for this turn"
+                                        ),
+                                    }
                                 }
+                                Ok(part)
                             }
-                            Ok(part)
-                        }
-                        AssistantContent::Image(image) => vertex_assistant_image_part(image),
-                        // `functionCall.args` is a struct; a custom call's raw
-                        // input has no representation on this wire.
-                        AssistantContent::CustomToolCall(call) => Err(ProviderError::Request(
-                            call.refused_by_json_only_wire(VERTEX_AI_WIRE).into(),
-                        )),
-                        // An opaque provider item has no representation on
-                        // this wire.
-                        AssistantContent::ProviderItem(item) => Err(ProviderError::Request(
-                            rig_core::message::UnreplayableProviderItem::new(VERTEX_AI_WIRE, &item)
+                            AssistantContent::Image(image) => vertex_assistant_image_part(image),
+                            // `functionCall.args` is a struct; a custom call's raw
+                            // input has no representation on this wire.
+                            AssistantContent::CustomToolCall(call) => Err(ProviderError::Request(
+                                call.refused_by_json_only_wire(VERTEX_AI_WIRE).into(),
+                            )),
+                            // An opaque provider item has no representation on
+                            // this wire.
+                            AssistantContent::ProviderItem(item) => Err(ProviderError::Request(
+                                rig_core::message::UnreplayableProviderItem::new(
+                                    VERTEX_AI_WIRE,
+                                    &item,
+                                )
                                 .into(),
-                        )),
-                        AssistantContent::ToolCall(tool_call) => {
-                            // `functionCall` has no namespace member.
-                            tool_call
-                                .for_json_only_wire(VERTEX_AI_WIRE)
-                                .map_err(|refusal| ProviderError::Request(refusal.into()))?;
-                            let serde_json::Value::Object(struct_val) =
-                                tool_call.function.arguments
-                            else {
-                                return Err(ProviderError::Provider(
-                                    "Expected JSON object for Struct conversion".to_string(),
-                                ));
-                            };
+                            )),
+                            AssistantContent::ToolCall(tool_call) => {
+                                // `functionCall` has no namespace member.
+                                tool_call
+                                    .for_json_only_wire(VERTEX_AI_WIRE)
+                                    .map_err(|refusal| ProviderError::Request(refusal.into()))?;
+                                let serde_json::Value::Object(struct_val) =
+                                    tool_call.function.arguments
+                                else {
+                                    return Err(ProviderError::Provider(
+                                        "Expected JSON object for Struct conversion".to_string(),
+                                    ));
+                                };
 
-                            let function_call = vertexai::model::FunctionCall::new()
-                                .set_name(tool_call.function.name.clone())
-                                .set_args(struct_val);
+                                let function_call = vertexai::model::FunctionCall::new()
+                                    .set_name(tool_call.function.name.clone())
+                                    .set_args(struct_val);
 
-                            let mut part =
-                                vertexai::model::Part::new().set_function_call(function_call);
+                                let mut part =
+                                    vertexai::model::Part::new().set_function_call(function_call);
 
-                            // Restore signature bytes for replay; malformed base64
-                            // is omitted with a warning rather than rejecting the turn.
-                            if let Some(signature) = &tool_call.signature {
-                                match BASE64.decode(signature.as_bytes()) {
-                                    Ok(bytes) => part = part.set_thought_signature(bytes),
-                                    Err(err) => tracing::warn!(
-                                        %err,
-                                        tool = %tool_call.function.name,
-                                        "Failed to base64-decode tool call thought_signature; \
-                                         dropping it for this turn"
-                                    ),
+                                // Restore signature bytes for replay; malformed base64
+                                // is omitted with a warning rather than rejecting the turn.
+                                if let Some(signature) = &tool_call.signature {
+                                    match BASE64.decode(signature.as_bytes()) {
+                                        Ok(bytes) => part = part.set_thought_signature(bytes),
+                                        Err(err) => tracing::warn!(
+                                            %err,
+                                            tool = %tool_call.function.name,
+                                            "Failed to base64-decode tool call thought_signature; \
+                                             dropping it for this turn"
+                                        ),
+                                    }
                                 }
+
+                                Ok(part)
                             }
+                            AssistantContent::Reasoning(reasoning) => {
+                                let mut part = vertexai::model::Part::new()
+                                    .set_text(reasoning.display_text())
+                                    .set_thought(true);
 
-                            Ok(part)
-                        }
-                        AssistantContent::Reasoning(reasoning) => {
-                            let mut part = vertexai::model::Part::new()
-                                .set_text(reasoning.display_text())
-                                .set_thought(true);
-
-                            if let Some(signature) = reasoning.first_signature() {
-                                match BASE64.decode(signature.as_bytes()) {
-                                    Ok(bytes) => part = part.set_thought_signature(bytes),
-                                    Err(err) => tracing::warn!(
-                                        %err,
-                                        "Failed to base64-decode reasoning thought_signature; \
-                                         dropping it for this turn"
-                                    ),
+                                if let Some(signature) = reasoning.first_signature() {
+                                    match BASE64.decode(signature.as_bytes()) {
+                                        Ok(bytes) => part = part.set_thought_signature(bytes),
+                                        Err(err) => tracing::warn!(
+                                            %err,
+                                            "Failed to base64-decode reasoning thought_signature; \
+                                             dropping it for this turn"
+                                        ),
+                                    }
                                 }
-                            }
 
-                            Ok(part)
+                                Ok(part)
+                            }
                         }
                     })
                     .collect();

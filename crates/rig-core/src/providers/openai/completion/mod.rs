@@ -874,6 +874,7 @@ pub fn assistant_content_to_messages(
     let mut details: Vec<ReasoningDetails> = Vec::new();
 
     for content in value {
+        crate::providers::internal::refuse_opaque_responses_part(&content, CHAT_COMPLETIONS_WIRE)?;
         match content {
             message::AssistantContent::Text(text) => text_content.push(text),
             message::AssistantContent::ToolCall(tool_call) => tool_calls.push(tool_call),
@@ -897,36 +898,49 @@ pub fn assistant_content_to_messages(
                 // `index` numbers the entries across the whole message, the
                 // way the provider numbers the array it sent.
                 let base = details.len();
-                let entries = reasoning.content.iter().enumerate().map(|(offset, part)| {
-                    let id = id.clone();
-                    let index = Some(base + offset);
-                    match part {
-                        message::ReasoningContent::Text { text, signature } => {
-                            ReasoningDetails::Text {
-                                id,
-                                format: None,
-                                index,
-                                text: Some(text.clone()),
-                                signature: signature.clone(),
+                let entries = reasoning
+                    .content
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, part)| {
+                        let id = id.clone();
+                        let index = Some(base + offset);
+                        Ok(match part {
+                            message::ReasoningContent::OpaqueSummary(_)
+                            | message::ReasoningContent::OpaqueContent(_) => {
+                                return Err(message::UnrepresentableOpaqueContent::new(
+                                    CHAT_COMPLETIONS_WIRE,
+                                ));
                             }
-                        }
-                        message::ReasoningContent::Summary(summary) => ReasoningDetails::Summary {
-                            id,
-                            format: None,
-                            index,
-                            summary: summary.clone(),
-                        },
-                        message::ReasoningContent::Encrypted(data)
-                        | message::ReasoningContent::Redacted { data } => {
-                            ReasoningDetails::Encrypted {
-                                id,
-                                format: None,
-                                index,
-                                data: data.clone(),
+                            message::ReasoningContent::Text { text, signature } => {
+                                ReasoningDetails::Text {
+                                    id,
+                                    format: None,
+                                    index,
+                                    text: Some(text.clone()),
+                                    signature: signature.clone(),
+                                }
                             }
-                        }
-                    }
-                });
+                            message::ReasoningContent::Summary(summary) => {
+                                ReasoningDetails::Summary {
+                                    id,
+                                    format: None,
+                                    index,
+                                    summary: summary.clone(),
+                                }
+                            }
+                            message::ReasoningContent::Encrypted(data)
+                            | message::ReasoningContent::Redacted { data } => {
+                                ReasoningDetails::Encrypted {
+                                    id,
+                                    format: None,
+                                    index,
+                                    data: data.clone(),
+                                }
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>, message::UnrepresentableOpaqueContent>>()?;
                 details.extend(entries);
             }
             message::AssistantContent::Reasoning(reasoning) => {

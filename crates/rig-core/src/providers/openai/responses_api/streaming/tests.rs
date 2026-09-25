@@ -27,6 +27,31 @@ use futures::StreamExt;
 use serde_json::{self, json};
 
 #[test]
+fn known_event_cannot_fall_back_to_a_whole_response() {
+    let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict());
+    let mut body = json!({
+        "id":"resp_1", "object":"response", "created_at":0,
+        "status":"completed", "model":"gpt-test"
+    });
+    assert!(matches!(
+        decoder.classify_payload(&body.to_string()),
+        WireEvent::Known(super::ResponsesEvent::Whole(_))
+    ));
+    body["type"] = json!("response.completed");
+    assert!(matches!(
+        decoder.classify_payload(&body.to_string()),
+        WireEvent::Corrupt(_)
+    ));
+    // Even a duplicate discriminator must not make body decoding rescue the
+    // event's invalid envelope.
+    let duplicate = format!("{{\"type\":\"future.event\",{}", &body.to_string()[1..]);
+    assert!(matches!(
+        decoder.classify_payload(&duplicate),
+        WireEvent::Corrupt(_)
+    ));
+}
+
+#[test]
 fn classify_known_event_decodes() {
     let frame = json!({
         "type": "response.output_text.delta",
@@ -209,7 +234,7 @@ fn content_part_duplicate_type_key_dispatches_on_the_last_occurrence() {
 // corresponding delta events), round-tripping the value verbatim.
 #[test]
 fn content_part_unknown_tag_is_preserved_verbatim() {
-    let wire = json!({"type": "refusal", "refusal": "no"});
+    let wire = json!({"type": "future_refusal", "refusal": "no"});
     let part: ContentPartChunkPart = serde_json::from_value(wire.clone()).unwrap();
     let ContentPartChunkPart::Unknown(value) = &part else {
         panic!("unmodeled part tag must fall back to Unknown");
@@ -440,7 +465,7 @@ fn reasoning_done_item_fuses_summary_content_and_encrypted_into_one_end() {
     let reasoning = reasoning_from_done_item(
         Some("rs_1"),
         summary,
-        content,
+        content.into_iter().map(Into::into).collect(),
         Some("enc_blob".to_string()),
         None,
     );
@@ -675,8 +700,13 @@ fn reasoning_done_item_without_encrypted_emits_summary_only() {
 fn empty_encrypted_reasoning_is_not_emitted() {
     let content = vec!["visible reasoning".to_string()];
 
-    let reasoning =
-        reasoning_from_done_item(Some("rs_1"), Vec::new(), content, Some(String::new()), None);
+    let reasoning = reasoning_from_done_item(
+        Some("rs_1"),
+        Vec::new(),
+        content.into_iter().map(Into::into).collect(),
+        Some(String::new()),
+        None,
+    );
 
     let Some(reasoning) = reasoning else {
         panic!("expected one reasoning restatement");
@@ -3862,7 +3892,7 @@ fn reversed_first_observations_keep_provider_output_order_and_unary_parity() {
 }
 
 #[test]
-fn separated_message_text_parts_keep_established_grouping_and_unary_parity() {
+fn separated_message_text_parts_stay_separate_parts_with_unary_parity() {
     let message = json!({
         "type": "message",
         "id": "msg_1",
@@ -3904,7 +3934,10 @@ fn separated_message_text_parts_keep_established_grouping_and_unary_parity() {
         serde_json::from_value(json!([message])).expect("the output decodes");
     let unary = super::super::tests::folded_choice(outputs);
 
-    assert_eq!(response_choice_labels(&streamed), ["text", "refusal"]);
+    assert_eq!(
+        response_choice_labels(&streamed),
+        ["text", "refusal", "text"]
+    );
     let text: Vec<_> = streamed
         .iter()
         .filter_map(|part| match part {
@@ -3912,10 +3945,9 @@ fn separated_message_text_parts_keep_established_grouping_and_unary_parity() {
             _ => None,
         })
         .collect();
-    // The current fold groups all output-text parts of one message under its
-    // message identity, even across a refusal. Source coordinates order the
-    // two parts that grouping produces; part reconciliation is separate work.
-    assert_eq!(text, ["yes later", "no"]);
+    // Each content part is its own block, ordered by its content coordinate:
+    // text on either side of a refusal stays separate, streamed and unary alike.
+    assert_eq!(text, ["yes", "no", " later"]);
     assert_eq!(streamed, unary);
 }
 
@@ -3994,4 +4026,839 @@ fn dropped_ordered_call_leaves_no_placeholder() {
         .expect("the incomplete call is dropped")
         .choice;
     assert_eq!(response_choice_labels(&choice), ["provider"]);
+}
+
+fn opaque_message_fixture(parts: serde_json::Value) -> serde_json::Value {
+    json!({"type":"message","id":"msg_opaque","role":"assistant","status":"completed","content":parts})
+}
+
+fn replay_opaque_choice(choice: Vec<AssistantContent>) -> serde_json::Value {
+    let input: Vec<super::super::InputItem> = crate::message::Message::Assistant {
+        id: Some("msg_opaque".into()),
+        content: choice,
+    }
+    .try_into()
+    .expect("same-wire replay");
+    serde_json::to_value(input).expect("input JSON")
+}
+
+#[test]
+fn opaque_message_snapshots_preserve_parts_and_replace_raw_metadata_atomically() {
+    let initial = json!({"type":"future_message","payload":{"list":[1],"old":true}});
+    let final_part = json!({"type":"future_message","payload":{"list":[2]}});
+    let item = opaque_message_fixture(json!([
+        {"type":"output_text","text":"A"},final_part,{"type":"output_text","text":"B"}
+    ]));
+    let events = vec![
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"delta":"A"}),
+        json!({"type":"response.content_part.added","item_id":"msg_opaque","output_index":0,"content_index":1,"sequence_number":1,"part":initial}),
+        json!({"type":"response.content_part.done","item_id":"msg_opaque","output_index":0,"content_index":1,"sequence_number":2,"part":final_part}),
+        json!({"type":"response.content_part.done","item_id":"msg_opaque","output_index":0,"content_index":1,"sequence_number":3,"part":final_part}),
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":2,"sequence_number":4,"delta":"B"}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":5,"item":item}),
+        completed_with_output(json!([item])),
+    ];
+    let response = folded_body_with(ResponsesStreamOptions::strict(), &events).unwrap();
+    assert_eq!(response.choice.len(), 3);
+    assert_eq!(
+        replay_opaque_choice(response.choice)[0]["content"],
+        item["content"]
+    );
+}
+
+#[test]
+fn opaque_message_late_part_retains_payload_in_source_order() {
+    // The part first seen in the terminal folds at its content coordinate,
+    // between the parts that streamed before it.
+    let unknown = json!({"type":"future_message","payload":{"list":[1]}});
+    let item = opaque_message_fixture(json!([
+        {"type":"output_text","text":"A"},unknown,{"type":"output_text","text":"B"}
+    ]));
+    let events = vec![
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"delta":"A"}),
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":2,"sequence_number":1,"delta":"B"}),
+        completed_with_output(json!([item])),
+    ];
+    let response = folded_body_with(ResponsesStreamOptions::strict(), &events).unwrap();
+    assert_eq!(
+        replay_opaque_choice(response.choice)[0]["content"],
+        item["content"]
+    );
+}
+
+#[test]
+fn opaque_reasoning_part_events_survive_missing_done_and_truncation_with_known_fragments() {
+    let unknown = json!({"type":"future_summary","payload":{"list":[1]}});
+    let events = vec![
+        json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_opaque","output_index":0,"summary_index":0,"sequence_number":0,"delta":"known"}),
+        json!({"type":"response.reasoning_summary_part.added","item_id":"rs_opaque","output_index":0,"summary_index":1,"sequence_number":1,"part":unknown}),
+        json!({"type":"response.reasoning_summary_part.done","item_id":"rs_opaque","output_index":0,"summary_index":1,"sequence_number":2,"part":unknown}),
+    ];
+    for terminal in [false, true] {
+        let mut frames = events.clone();
+        if terminal {
+            frames.push(completed_with_output(json!([])));
+        }
+        let response = folded_body_with(ResponsesStreamOptions::strict(), &frames).unwrap();
+        let [AssistantContent::Reasoning(reasoning)] = response.choice.as_slice() else {
+            panic!("one reasoning item: {:?}", response.choice);
+        };
+        assert_eq!(
+            reasoning.content,
+            vec![
+                ReasoningContent::Summary("known".into()),
+                ReasoningContent::OpaqueSummary(unknown.clone())
+            ]
+        );
+        let replay = replay_opaque_choice(response.choice);
+        assert_eq!(replay[0]["id"], "rs_opaque");
+        assert_eq!(
+            replay[0]["summary"],
+            json!([{"type":"summary_text","text":"known"},unknown])
+        );
+    }
+}
+
+#[test]
+fn opaque_reasoning_item_and_terminal_snapshots_emit_one_complete_restatement() {
+    let unknown = json!({"type":"future_content","text":"opaque","list":[1]});
+    let item = json!({"type":"reasoning","id":"rs_opaque","summary":[{"type":"summary_text","text":"known"}],"content":[unknown,{"type":"reasoning_text","text":"visible"}]});
+    let events = vec![
+        json!({"type":"response.output_item.added","output_index":0,"sequence_number":0,"item":item}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":item}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":item}),
+        completed_with_output(json!([item])),
+    ];
+    let response = folded_body_with(ResponsesStreamOptions::strict(), &events).unwrap();
+    assert_eq!(response.choice.len(), 1);
+    let replay = replay_opaque_choice(response.choice);
+    assert_eq!(replay[0]["summary"], item["summary"]);
+    assert_eq!(replay[0]["content"], item["content"]);
+}
+
+#[test]
+fn opaque_siblings_do_not_duplicate_annotations_when_text_snapshots_grow() {
+    let unknown = json!({"type":"future_message","value":[1]});
+    let annotations =
+        json!([{"type":"url_citation","url":"https://example.com","start_index":0,"end_index":1}]);
+    let item = opaque_message_fixture(json!([
+        {"type":"output_text","text":"AB","annotations":annotations},unknown
+    ]));
+    let terminal = opaque_message_fixture(json!([
+        {"type":"output_text","text":"ABC","annotations":annotations},unknown
+    ]));
+    let events = vec![
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"delta":"A"}),
+        json!({"type":"response.content_part.done","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":1,"part":{"type":"output_text","text":"AB","annotations":annotations}}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":item}),
+        completed_with_output(json!([terminal])),
+    ];
+    let response = folded_body_with(ResponsesStreamOptions::strict(), &events).unwrap();
+    let replay = replay_opaque_choice(response.choice);
+    assert_eq!(replay[0]["content"], terminal["content"]);
+}
+
+#[test]
+fn opaque_message_full_snapshot_annotations_append_only_the_new_suffix() {
+    let a = json!({"url":"a","range":[0,1]});
+    let b = json!({"url":"b","range":[1,2]});
+    let opaque = json!({"type":"future_part","payload":[1]});
+    let item =
+        opaque_message_fixture(json!([{"type":"output_text","text":"A","annotations":[a]},opaque]));
+    let terminal = opaque_message_fixture(
+        json!([{"type":"output_text","text":"AB","annotations":[a,b]},opaque]),
+    );
+    let response = folded_body_with(ResponsesStreamOptions::strict(),&[
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":0,"item":item}),
+        completed_with_output(json!([terminal])),
+    ]).unwrap();
+    assert_eq!(
+        replay_opaque_choice(response.choice)[0]["content"],
+        terminal["content"]
+    );
+}
+
+#[test]
+fn complete_snapshot_replacement_resets_only_owned_extras_contiguously() {
+    use crate::message::AdditionalParams;
+    let before = AdditionalParams::new(
+        json!({"openai_responses":{"annotations":["a","b"],"old":true}})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let after = AdditionalParams::new(
+        json!({"openai_responses":{"annotations":["replacement"]}})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let mut out = AdapterOutput::new();
+    out.text_start(BlockId::wire("msg_opaque"), None);
+    out.text_meta(
+        AdditionalParams::new(
+            json!({"unrelated":{"list":[1]},"openai_responses_part":{"kind":"refusal"}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap(),
+    );
+    out.text_meta(before.clone());
+    super::message_snapshot_metadata(Some(&before), Some(&after), Some("final_answer"), &mut out);
+    let events: Vec<_> = out.into_items().into_iter().map(Result::unwrap).collect();
+    assert!(
+        matches!(&events[events.len()-2],StreamEvent::BlockDelta {delta:Delta::TextMeta {additional_params},..} if additional_params.get("openai_responses") == Some(&json!(null)))
+    );
+    assert!(
+        matches!(&events[events.len()-1],StreamEvent::BlockDelta {delta:Delta::TextMeta {additional_params},..} if additional_params.get("openai_responses") == Some(&json!({"annotations":["replacement"],"phase":"final_answer"})))
+    );
+    let mut folded = crate::streaming::BlockAccumulator::new();
+    for event in &events {
+        folded.apply(event).unwrap();
+    }
+    let choice = folded.finish();
+    let AssistantContent::Text(text) = &choice[0] else {
+        panic!("text")
+    };
+    let params = text.additional_params.as_ref().unwrap();
+    assert_eq!(params.get("unrelated"), Some(&json!({"list":[1]})));
+    assert_eq!(
+        params.get("openai_responses_part"),
+        Some(&json!({"kind":"refusal"}))
+    );
+    assert_eq!(
+        params.get("openai_responses"),
+        Some(&json!({"annotations":["replacement"],"phase":"final_answer"}))
+    );
+}
+
+#[test]
+fn complete_snapshot_removing_all_extras_emits_empty_replacement() {
+    use crate::message::AdditionalParams;
+    let before = AdditionalParams::new(
+        json!({"openai_responses":{"annotations":["a"]}})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let mut out = AdapterOutput::new();
+    out.text_start(BlockId::wire("msg_empty_extras"), None);
+    out.text_meta(before.clone());
+    super::message_snapshot_metadata(Some(&before), None, None, &mut out);
+    let events: Vec<_> = out.into_items().into_iter().map(Result::unwrap).collect();
+    assert!(
+        matches!(&events[events.len()-2],StreamEvent::BlockDelta {delta:Delta::TextMeta {additional_params},..} if additional_params.get("openai_responses") == Some(&json!(null)))
+    );
+    assert!(
+        matches!(&events[events.len()-1],StreamEvent::BlockDelta {delta:Delta::TextMeta {additional_params},..} if additional_params.get("openai_responses") == Some(&json!({})))
+    );
+    let mut folded = crate::streaming::BlockAccumulator::new();
+    for event in &events {
+        folded.apply(event).unwrap();
+    }
+    let choice = folded.finish();
+    let AssistantContent::Text(text) = &choice[0] else {
+        panic!("text")
+    };
+    assert_eq!(
+        text.additional_params
+            .as_ref()
+            .unwrap()
+            .get("openai_responses"),
+        Some(&json!({}))
+    );
+}
+
+#[test]
+fn reasoning_done_waits_for_late_terminal_parts_without_losing_its_position() {
+    let summary = json!({"type":"future_summary","payload":[1]});
+    let content = json!({"type":"future_content","payload":{"a":true}});
+    let done = json!({"type":"reasoning","id":"rs_late","summary":[{"type":"summary_text","text":"known"}],"content":[],"signature":"signature"});
+    let terminal_item = json!({"type":"reasoning","id":"rs_late","summary":[{"type":"summary_text","text":"known"},summary],"content":[content],"signature":"signature"});
+    for with_delta in [false, true] {
+        let mut driver: WireDriver<Completion, _> = WireDriver::new(ResponsesDecoder::new(
+            "openai",
+            ResponsesStreamOptions::strict(),
+        ));
+        let mut events = Vec::new();
+        if with_delta {
+            driver.push(WireFrame::Text(json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_late","output_index":0,"summary_index":0,"sequence_number":0,"delta":"known"}).to_string()));
+            events.extend(driver.drain().map(Result::unwrap));
+            assert!(events.iter().any(|event| matches!(event,StreamEvent::BlockDelta {delta:Delta::Reasoning {text},..} if text == "known")));
+        }
+        for sequence_number in [1, 2] {
+            driver.push(WireFrame::Text(json!({"type":"response.output_item.done","output_index":0,"sequence_number":sequence_number,"item":done}).to_string()));
+            events.extend(driver.drain().map(Result::unwrap));
+        }
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::BlockStart {
+                kind: BlockKind::Reasoning { .. },
+                ..
+            }
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            StreamEvent::BlockEnd {
+                end: BlockClose::Reasoning { .. },
+                ..
+            }
+        )));
+        driver.push(WireFrame::Text(json!({"type":"response.output_text.delta","item_id":"msg_late","output_index":1,"content_index":0,"sequence_number":3,"delta":"answer"}).to_string()));
+        events.extend(driver.drain().map(Result::unwrap));
+        driver.push(WireFrame::Text(
+            completed_with_output(json!([terminal_item])).to_string(),
+        ));
+        events.extend(driver.drain().map(Result::unwrap));
+        driver.finish();
+        events.extend(driver.drain().map(Result::unwrap));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    StreamEvent::BlockEnd {
+                        end: BlockClose::Reasoning {
+                            wire_sent: true,
+                            ..
+                        },
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        let folded = folded_stream_events(
+            "openai",
+            events,
+            &sample_response(ResponseStatus::Completed),
+        )
+        .unwrap();
+        assert!(matches!(&folded.choice[0], AssistantContent::Reasoning(_)));
+        assert!(matches!(&folded.choice[1],AssistantContent::Text(text) if text.text == "answer"));
+        let replay = replay_opaque_choice(folded.choice);
+        assert_eq!(replay[0]["summary"], terminal_item["summary"]);
+        assert_eq!(replay[0]["content"], terminal_item["content"]);
+        assert_eq!(replay[0]["signature"], "signature");
+    }
+    let whole: super::super::Output = serde_json::from_value(terminal_item.clone()).unwrap();
+    let replay = replay_opaque_choice(super::super::tests::folded_choice(vec![whole]));
+    assert_eq!(replay[0]["summary"], terminal_item["summary"]);
+    assert_eq!(replay[0]["content"], terminal_item["content"]);
+}
+
+#[test]
+fn opaque_reasoning_partial_flush_keeps_content_and_truthful_wire_end() {
+    let raw = json!({"type":"future_summary","payload":[1]});
+    let item = json!({"type":"reasoning","id":"rs_partial","summary":[{"type":"summary_text","text":"known"},raw]});
+    for with_done in [false, true] {
+        for ending in ["eof", "error", "incomplete", "failed"] {
+            let mut driver: WireDriver<Completion, _> = WireDriver::new(ResponsesDecoder::new(
+                "openai",
+                ResponsesStreamOptions::strict(),
+            ));
+            let mut frames = vec![
+                json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_partial","output_index":0,"summary_index":0,"sequence_number":0,"delta":"known"}),
+                json!({"type":"response.reasoning_summary_part.done","item_id":"rs_partial","output_index":0,"summary_index":1,"sequence_number":1,"part":raw}),
+            ];
+            if with_done {
+                frames.push(json!({"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":item}));
+            }
+            if ending == "error" {
+                frames.push(json!({"error":{"message":"failure","type":"server_error"}}));
+            }
+            if matches!(ending, "incomplete" | "failed") {
+                let mut terminal = completed_with_output(json!([item]));
+                terminal["type"] = json!(format!("response.{ending}"));
+                terminal["response"]["status"] = json!(ending);
+                frames.push(terminal);
+            }
+            let mut events = Vec::new();
+            let mut errors = 0;
+            for frame in frames {
+                driver.push(WireFrame::Text(frame.to_string()));
+                for event in driver.drain() {
+                    match event {
+                        Ok(event) => events.push(event),
+                        Err(_) => errors += 1,
+                    }
+                }
+            }
+            driver.finish();
+            for event in driver.drain() {
+                match event {
+                    Ok(event) => events.push(event),
+                    Err(_) => errors += 1,
+                }
+            }
+            assert_eq!(errors, usize::from(ending != "eof"), "{ending}");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, StreamEvent::Final(_)))
+            );
+            let closes: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    StreamEvent::BlockEnd {
+                        end:
+                            BlockClose::Reasoning {
+                                reasoning: Some(reasoning),
+                                wire_sent,
+                                ..
+                            },
+                        ..
+                    } => Some((reasoning, *wire_sent)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(closes.len(), 1, "{ending}");
+            assert_eq!(
+                closes[0].1,
+                with_done || matches!(ending, "incomplete" | "failed"),
+                "{ending}"
+            );
+            assert_eq!(
+                closes[0].0.content,
+                vec![
+                    ReasoningContent::Summary("known".into()),
+                    ReasoningContent::OpaqueSummary(raw.clone())
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn reasoning_completion_keeps_authoritative_ciphertext_and_signature() {
+    let item = |cipher: &str, signature: &str| json!({"type":"reasoning","id":"rs_cipher","summary":[],"encrypted_content":cipher,"signature":signature});
+    let provisional = item("provisional", "provisional-signature");
+    let done = item("done", "done-signature");
+    let mut terminal = item("terminal", "terminal-signature");
+    let opaque = json!({"type":"future_summary","value":[1]});
+    terminal["summary"] = json!([opaque]);
+    let response = folded_body_with(ResponsesStreamOptions::strict(),&[
+        json!({"type":"response.output_item.added","output_index":0,"sequence_number":0,"item":provisional}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":done}),
+        completed_with_output(json!([terminal])),
+    ]).unwrap();
+    let replay = replay_opaque_choice(response.choice);
+    assert_eq!(replay[0]["encrypted_content"], "done");
+    assert_eq!(replay[0]["signature"], "done-signature");
+    assert_eq!(replay[0]["summary"], json!([opaque]));
+}
+
+#[test]
+fn unchanged_message_snapshots_do_not_reopen_text_blocks() {
+    let item = opaque_message_fixture(json!([{"type":"output_text","text":"A"}]));
+    let frames = [
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"delta":"A"}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":item}),
+        completed_with_output(json!([item])),
+    ];
+    let body = frames
+        .iter()
+        .map(|frame| format!("data: {frame}\n"))
+        .collect::<String>();
+    let events = stream_events_from_sse_body("openai", &body, None).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                StreamEvent::BlockStart {
+                    kind: BlockKind::Text { .. },
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                StreamEvent::BlockEnd {
+                    end: BlockClose::Text,
+                    ..
+                }
+            ))
+            .count(),
+        0
+    );
+}
+
+/// Drive raw frames through a strict decoder, keeping events and errors apart.
+fn driven_frames(frames: &[serde_json::Value]) -> (Vec<StreamEvent>, Vec<ProviderError>) {
+    let mut driver: WireDriver<Completion, _> = WireDriver::new(ResponsesDecoder::new(
+        "openai",
+        ResponsesStreamOptions::strict(),
+    ));
+    let mut events = Vec::new();
+    let mut errors = Vec::new();
+    let mut keep = |item: Result<StreamEvent, ProviderError>| match item {
+        Ok(event) => events.push(event),
+        Err(error) => errors.push(error),
+    };
+    for frame in frames {
+        driver.push(WireFrame::Text(frame.to_string()));
+        driver.drain().for_each(&mut keep);
+    }
+    driver.finish();
+    driver.drain().for_each(&mut keep);
+    (events, errors)
+}
+
+fn unknown_payloads(events: &[StreamEvent]) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Unknown(payload) => Some(payload.value().clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_unknown_part_before_parent_evidence_joins_the_item_that_evidence_names() {
+    let unknown = json!({"type":"future_part","payload":{"list":[1]}});
+    // The part event's item ID spells like reasoning; only typed evidence binds.
+    let part = json!({"type":"response.content_part.added","item_id":"rs_spelling_only","output_index":0,"content_index":0,"sequence_number":0,"part":unknown});
+    let message = |content| opaque_message_fixture(content);
+    let reasoning =
+        |content| json!({"type":"reasoning","id":"rs_opaque","summary":[],"content":content});
+    for parent in ["message", "reasoning"] {
+        let item = |content| {
+            if parent == "message" {
+                message(content)
+            } else {
+                reasoning(content)
+            }
+        };
+        for evidence in ["added", "done", "terminal"] {
+            let mut frames = vec![part.clone()];
+            match evidence {
+                "added" => frames.push(json!({"type":"response.output_item.added","output_index":0,"sequence_number":1,"item":item(json!([]))})),
+                "done" => frames.push(json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":item(json!([]))})),
+                _ => {}
+            }
+            frames.push(completed_with_output(if evidence == "terminal" {
+                json!([item(json!([unknown]))])
+            } else {
+                json!([])
+            }));
+            let (events, errors) = driven_frames(&frames);
+            assert!(errors.is_empty(), "{parent}/{evidence}: {errors:?}");
+            assert!(unknown_payloads(&events).is_empty(), "{parent}/{evidence}");
+            let folded = folded_stream_events(
+                "openai",
+                events,
+                &sample_response(ResponseStatus::Completed),
+            )
+            .unwrap();
+            assert_eq!(
+                folded.choice.len(),
+                1,
+                "{parent}/{evidence}: {:?}",
+                folded.choice
+            );
+            if parent == "reasoning" {
+                let AssistantContent::Reasoning(reasoning) = &folded.choice[0] else {
+                    panic!(
+                        "{evidence}: reasoning, not a fabricated message: {:?}",
+                        folded.choice
+                    );
+                };
+                assert_eq!(
+                    reasoning.content,
+                    vec![ReasoningContent::OpaqueContent(unknown.clone())]
+                );
+                assert_eq!(
+                    replay_opaque_choice(folded.choice)[0]["content"],
+                    json!([unknown])
+                );
+            } else {
+                assert!(
+                    matches!(&folded.choice[0], AssistantContent::Text(_)),
+                    "{evidence}"
+                );
+                assert_eq!(
+                    replay_opaque_choice(folded.choice)[0]["content"],
+                    json!([unknown])
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_known_typed_part_binds_waiting_unknown_siblings_in_content_order() {
+    let unknown = json!({"type":"future_part","payload":[1]});
+    let frames = [
+        json!({"type":"response.content_part.added","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"part":unknown}),
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":1,"sequence_number":1,"delta":"B"}),
+        completed_with_output(json!([])),
+    ];
+    let (events, errors) = driven_frames(&frames);
+    assert!(errors.is_empty(), "{errors:?}");
+    let folded = folded_stream_events(
+        "openai",
+        events,
+        &sample_response(ResponseStatus::Completed),
+    )
+    .unwrap();
+    assert_eq!(
+        replay_opaque_choice(folded.choice)[0]["content"],
+        json!([unknown, {"type":"output_text","text":"B"}])
+    );
+}
+
+#[test]
+fn unresolved_unknown_parts_leave_raw_before_the_flush_without_a_fabricated_choice() {
+    let first = json!({"type":"future_part","payload":[1]});
+    let second = json!({"type":"future_part","payload":[2]});
+    let parts = [
+        json!({"type":"response.content_part.added","item_id":"item_0","output_index":0,"content_index":0,"sequence_number":0,"part":first}),
+        // An identical restatement collapses; a distinct one is kept.
+        json!({"type":"response.content_part.done","item_id":"item_0","output_index":0,"content_index":0,"sequence_number":1,"part":first}),
+        json!({"type":"response.content_part.done","item_id":"item_0","output_index":0,"content_index":0,"sequence_number":2,"part":second}),
+    ];
+    for ending in ["eof", "error", "failed", "incomplete", "completed"] {
+        let mut frames = parts.to_vec();
+        match ending {
+            "error" => frames.push(json!({"error":{"message":"failure","type":"server_error"}})),
+            "failed" | "incomplete" => {
+                let mut terminal = completed_with_output(json!([]));
+                terminal["type"] = json!(format!("response.{ending}"));
+                terminal["response"]["status"] = json!(ending);
+                frames.push(terminal);
+            }
+            "completed" => frames.push(completed_with_output(json!([]))),
+            _ => {}
+        }
+        let (events, errors) = driven_frames(&frames);
+        assert_eq!(
+            errors.len(),
+            usize::from(!matches!(ending, "eof" | "completed")),
+            "{ending}"
+        );
+        assert_eq!(
+            unknown_payloads(&events),
+            vec![first.clone(), second.clone()],
+            "{ending}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::BlockStart { .. })),
+            "{ending}: no message or reasoning is fabricated: {events:?}"
+        );
+        if ending == "completed" {
+            let unknown_at = events
+                .iter()
+                .rposition(|event| matches!(event, StreamEvent::Unknown(_)))
+                .unwrap();
+            let final_at = events
+                .iter()
+                .position(|event| matches!(event, StreamEvent::Final(_)))
+                .unwrap();
+            assert!(unknown_at < final_at);
+            let folded = folded_stream_events(
+                "openai",
+                events,
+                &sample_response(ResponseStatus::Completed),
+            )
+            .unwrap();
+            assert!(folded.choice.is_empty(), "{:?}", folded.choice);
+        }
+    }
+}
+
+#[test]
+fn a_part_restated_as_the_other_kind_is_refused_before_any_mutation() {
+    let unknown = json!({"type":"future_part","payload":[1]});
+    let opaque_first = json!({"type":"response.content_part.added","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"part":unknown});
+    let text_first = json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"delta":"A"});
+    let added = json!({"type":"response.output_item.added","output_index":0,"sequence_number":1,"item":opaque_message_fixture(json!([]))});
+    let cases = [
+        // opaque, then a known text delta
+        (
+            vec![
+                added.clone(),
+                opaque_first.clone(),
+                json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":2,"delta":"late"}),
+            ],
+            true,
+        ),
+        // opaque, then a known output_text part
+        (
+            vec![
+                added.clone(),
+                opaque_first.clone(),
+                json!({"type":"response.content_part.done","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":2,"part":{"type":"output_text","text":"late"}}),
+            ],
+            true,
+        ),
+        // opaque, then a terminal stating known text at that index
+        (
+            vec![
+                added.clone(),
+                opaque_first.clone(),
+                completed_with_output(json!([opaque_message_fixture(
+                    json!([{"type":"output_text","text":"late"}])
+                )])),
+            ],
+            true,
+        ),
+        // known text, then an opaque part at that index
+        (
+            vec![
+                text_first.clone(),
+                json!({"type":"response.content_part.done","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":1,"part":unknown}),
+            ],
+            false,
+        ),
+    ];
+    for (index, (frames, stored_opaque)) in cases.into_iter().enumerate() {
+        let (events, errors) = driven_frames(&frames);
+        assert_eq!(errors.len(), 1, "case {index}: {errors:?}");
+        let message = errors[0].to_string();
+        assert!(
+            message.contains("conflicting Responses content part kind"),
+            "case {index}: {message}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Final(_))),
+            "case {index}"
+        );
+        let texts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::BlockDelta {
+                    delta: Delta::Text { text },
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let markers: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::BlockDelta {
+                    delta: Delta::TextMeta { additional_params },
+                    ..
+                }
+                | StreamEvent::BlockStart {
+                    kind:
+                        BlockKind::Text {
+                            additional_params: Some(additional_params),
+                        },
+                    ..
+                } => additional_params.get("openai_responses_part").cloned(),
+                _ => None,
+            })
+            .collect();
+        if stored_opaque {
+            assert!(
+                texts.is_empty(),
+                "case {index}: no text appended to the opaque part: {texts:?}"
+            );
+            assert_eq!(
+                markers,
+                vec![json!({"kind":"opaque","value":unknown})],
+                "case {index}"
+            );
+        } else {
+            assert_eq!(texts, ["A"], "case {index}");
+            assert!(
+                markers.is_empty(),
+                "case {index}: the text part gains no opaque marker"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_streamed_message_takes_no_phase_from_its_snapshots_while_unary_keeps_it() {
+    // Known issue: the stream keeps ca81's replay bytes, so a streamed
+    // message replays without the phase a unary reply of it carries.
+    let mut item = opaque_message_fixture(json!([{"type":"output_text","text":"A"}]));
+    item["phase"] = json!("final_answer");
+    let streamed = folded_body_with(ResponsesStreamOptions::strict(), &[
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"delta":"A"}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":item}),
+        completed_with_output(json!([item])),
+    ])
+    .unwrap();
+    let replay = replay_opaque_choice(streamed.choice);
+    assert_eq!(
+        replay[0]["content"],
+        json!([{"type":"output_text","text":"A"}])
+    );
+    assert!(replay[0].get("phase").is_none(), "{replay}");
+
+    // A message only the terminal states keeps its phase, as at ca81.
+    let terminal_only = folded_body_with(
+        ResponsesStreamOptions::strict(),
+        &[completed_with_output(json!([item]))],
+    )
+    .unwrap();
+    assert_eq!(
+        replay_opaque_choice(terminal_only.choice)[0]["phase"],
+        "final_answer"
+    );
+
+    let whole: super::super::Output = serde_json::from_value(item.clone()).unwrap();
+    let unary = replay_opaque_choice(super::super::tests::folded_choice(vec![whole]));
+    assert_eq!(unary[0]["phase"], "final_answer");
+}
+
+#[test]
+fn reasoning_completion_keeps_its_authoritative_provider_id() {
+    let item =
+        |id: &str| json!({"type":"reasoning","id":id,"summary":[],"encrypted_content":"cipher"});
+    let response = folded_body_with(ResponsesStreamOptions::strict(), &[
+        json!({"type":"response.output_item.added","output_index":0,"sequence_number":0,"item":item("rs_added")}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":item("rs_done")}),
+        completed_with_output(json!([item("rs_terminal")])),
+    ])
+    .unwrap();
+    assert_eq!(replay_opaque_choice(response.choice)[0]["id"], "rs_done");
+}
+
+#[test]
+fn reasoning_first_published_at_the_flush_keeps_its_output_slot() {
+    // Slot 0's unknown part waits for its parent kind until the terminal says
+    // reasoning; slot 1's text streamed meanwhile. The deferred close carries
+    // slot 0's coordinate, so the fold matches the unary order.
+    let unknown = json!({"type":"future_content","payload":[1]});
+    let reasoning = json!({"type":"reasoning","id":"rs_late","summary":[],"content":[unknown]});
+    let message = opaque_message_fixture(json!([{"type":"output_text","text":"answer"}]));
+    let streamed = folded_body_with(ResponsesStreamOptions::strict(), &[
+        json!({"type":"response.content_part.added","item_id":"rs_late","output_index":0,"content_index":0,"sequence_number":0,"part":unknown}),
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":1,"content_index":0,"sequence_number":1,"delta":"answer"}),
+        completed_with_output(json!([reasoning, message])),
+    ])
+    .unwrap()
+    .choice;
+    let outputs: Vec<super::super::Output> =
+        serde_json::from_value(json!([reasoning, message])).unwrap();
+    let unary = super::super::tests::folded_choice(outputs);
+    assert!(
+        matches!(&streamed[0], AssistantContent::Reasoning(r) if r.content == vec![ReasoningContent::OpaqueContent(unknown.clone())]),
+        "{streamed:?}"
+    );
+    assert!(
+        matches!(&streamed[1], AssistantContent::Text(t) if t.text == "answer"),
+        "{streamed:?}"
+    );
+    assert_eq!(streamed.len(), 2);
+    assert_eq!(streamed, unary);
 }

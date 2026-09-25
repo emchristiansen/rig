@@ -17,6 +17,9 @@ use crate::profile::ConversationProtocol;
 /// Why a local Candle completion failed.
 #[derive(Debug, Error, Clone)]
 pub enum CandleError {
+    /// An opaque content part this prompt format cannot represent.
+    #[error(transparent)]
+    UnrepresentableOpaqueContent(#[from] rig_core::message::UnrepresentableOpaqueContent),
     /// A required artifact buffer was empty.
     #[error("the {artifact} buffer is empty")]
     EmptyBuffer { artifact: &'static str },
@@ -228,6 +231,9 @@ impl From<CandleError> for ProviderError {
         match error {
             // A request the local prompt format cannot express, refused
             // before any inference: a request failure, as on every other wire.
+            CandleError::UnrepresentableOpaqueContent(refusal) => {
+                ProviderError::Request(refusal.into())
+            }
             CandleError::UnrepresentableToolCall(refusal) => ProviderError::Request(refusal.into()),
             error => ProviderError::Provider(error.to_string()),
         }

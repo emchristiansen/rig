@@ -220,25 +220,130 @@ pub struct ResponsesWebSocketDoneEvent {
     #[serde(rename = "type")]
     pub kind: ResponsesWebSocketDoneEventKind,
     /// The provider payload for the finished response.
-    pub response: Value,
+    pub response: ResponsesWebSocketDoneResponse,
+}
+
+/// A validated WebSocket terminal object, including supported sparse replies.
+/// Every modeled structural field is checked when present. Unknown fields and
+/// optional echoed metadata retain the full response decoder's leniency.
+#[derive(Debug, Clone)]
+pub struct ResponsesWebSocketDoneResponse {
+    raw: Map<String, Value>,
+    id: String,
+    status: ResponseStatus,
+    full: Option<Box<CompletionResponse>>,
+}
+
+impl ResponsesWebSocketDoneResponse {
+    /// The complete provider object, including fields the client does not model.
+    #[must_use]
+    pub fn as_object(&self) -> &Map<String, Value> {
+        &self.raw
+    }
+
+    /// The provider's response identifier.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The provider's status, including future string values.
+    #[must_use]
+    pub fn status(&self) -> &ResponseStatus {
+        &self.status
+    }
+}
+
+impl Serialize for ResponsesWebSocketDoneResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.raw.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ResponsesWebSocketDoneResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = Map::<String, Value>::deserialize(deserializer)?;
+        let id = serde_json::from_value(
+            raw.get("id")
+                .cloned()
+                .ok_or_else(|| <D::Error as serde::de::Error>::missing_field("id"))?,
+        )
+        .map_err(serde::de::Error::custom)?;
+        let status = serde_json::from_value(
+            raw.get("status")
+                .cloned()
+                .ok_or_else(|| <D::Error as serde::de::Error>::missing_field("status"))?,
+        )
+        .map_err(serde::de::Error::custom)?;
+
+        // These are CompletionResponseWire's structural fields and exact types;
+        // metadata and its deliberately permissive reasoning echo stay raw.
+        validate_done_field::<super::ResponseObject>(&raw, "object")
+            .and_then(|()| validate_done_field::<u64>(&raw, "created_at"))
+            .and_then(|()| validate_done_field::<String>(&raw, "model"))
+            .and_then(|()| validate_done_field::<Option<super::ResponseError>>(&raw, "error"))
+            .and_then(|()| {
+                validate_done_field::<Option<super::IncompleteDetailsReason>>(
+                    &raw,
+                    "incomplete_details",
+                )
+            })
+            .and_then(|()| validate_done_field::<Option<String>>(&raw, "instructions"))
+            .and_then(|()| validate_done_field::<Option<u64>>(&raw, "max_output_tokens"))
+            .and_then(|()| validate_done_field::<Option<super::ResponsesUsage>>(&raw, "usage"))
+            .and_then(|()| validate_done_field::<Vec<super::Output>>(&raw, "output"))
+            .and_then(|()| {
+                validate_done_field::<Vec<super::ResponsesToolDefinition>>(&raw, "tools")
+            })
+            .map_err(serde::de::Error::custom)?;
+
+        let full = if ["id", "object", "created_at", "status", "model"]
+            .iter()
+            .all(|key| raw.contains_key(*key))
+        {
+            Some(Box::new(
+                serde_json::from_value(Value::Object(raw.clone()))
+                    .map_err(serde::de::Error::custom)?,
+            ))
+        } else {
+            None
+        };
+        Ok(Self {
+            raw,
+            id,
+            status,
+            full,
+        })
+    }
+}
+
+fn validate_done_field<T: serde::de::DeserializeOwned>(
+    raw: &Map<String, Value>,
+    field: &str,
+) -> Result<(), serde_json::Error> {
+    if let Some(value) = raw.get(field) {
+        serde_json::from_value::<T>(value.clone()).map_err(|error| {
+            <serde_json::Error as serde::de::Error>::custom(format!(
+                "response.done.response.{field}: {error}"
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 impl ResponsesWebSocketDoneEvent {
     /// Returns the response ID if the payload includes one.
     #[must_use]
     pub fn response_id(&self) -> Option<&str> {
-        self.response.get("id").and_then(Value::as_str)
+        Some(self.response.id())
     }
 
-    fn status(&self) -> Option<ResponseStatus> {
-        self.response
-            .get("status")
-            .cloned()
-            .and_then(|status| serde_json::from_value(status).ok())
+    fn status(&self) -> &ResponseStatus {
+        self.response.status()
     }
 
     fn as_completion_response(&self) -> Option<CompletionResponse> {
-        serde_json::from_value(self.response.clone()).ok()
+        self.response.full.as_deref().cloned()
     }
 }
 
@@ -684,7 +789,7 @@ impl ResponsesWebSocketSession {
         options: ResponsesWebSocketCreateOptions,
     ) -> Result<(), ProviderError> {
         self.ensure_can_send()?;
-        let request = self.prepare_request(completion_request, Chaining::Automatic)?;
+        let request = self.prepare_request(completion_request, Chaining::Automatic, None)?;
         let frame = encode_frame(&request, options.generate, |_| Ok(()))?;
         self.send_encoded(request, frame).await
     }
@@ -1004,11 +1109,14 @@ impl ResponsesWebSocketSession {
         &self,
         completion_request: crate::completion::CompletionRequest,
         chaining: Chaining,
+        identity: Option<&super::codex_identity::CodexIdentity>,
     ) -> Result<crate::providers::openai::responses_api::CompletionRequest, ProviderError> {
         // Direct session requests bypass builder validation.
         completion_request.validate_message_content()?;
 
-        let mut request = self.wire.responses_request(completion_request, false)?;
+        let mut request = self
+            .wire
+            .responses_request(completion_request, false, identity)?;
 
         // WebSocket mode is always event-driven, so these HTTP/SSE-specific flags
         // are ignored by the provider and only add noise to the payload.
@@ -1158,29 +1266,25 @@ impl ResponsesWebSocketSession {
             ResponsesWebSocketEvent::Done(done) => {
                 let response_id = done.response_id().map(str::to_owned);
                 let ending = match done.status() {
-                    Some(ResponseStatus::Completed) => {
+                    ResponseStatus::Completed => {
                         if let Some(response_id) = &response_id {
                             self.previous_response_id = Some(response_id.clone());
                         }
                         TurnEnding::Completed { response_id }
                     }
-                    Some(ResponseStatus::Incomplete) => {
+                    ResponseStatus::Incomplete => {
                         if let Some(response_id) = &response_id {
                             self.previous_response_id = Some(response_id.clone());
                         }
                         TurnEnding::Incomplete { response_id }
                     }
-                    Some(
-                        ResponseStatus::Failed
-                        | ResponseStatus::Cancelled
-                        | ResponseStatus::Other(_),
-                    ) => {
+                    ResponseStatus::Failed
+                    | ResponseStatus::Cancelled
+                    | ResponseStatus::Other(_) => {
                         self.previous_response_id = None;
                         TurnEnding::NotCompleted
                     }
-                    Some(ResponseStatus::InProgress | ResponseStatus::Queued) | None => {
-                        TurnEnding::NotCompleted
-                    }
+                    ResponseStatus::InProgress | ResponseStatus::Queued => TurnEnding::NotCompleted,
                 };
                 self.pending_done_response_id = None;
                 ending

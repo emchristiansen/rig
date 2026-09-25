@@ -15,6 +15,7 @@ use crate::wire::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::responses_lite::{CodexRequestShape, ResponsesLiteError};
 use super::streaming::{IncompleteTerminal, ResponsesDecoder, ResponsesStreamOptions};
 use super::{
     CompletionRequest, ResponsesRequestParams, ResponsesRequestTool, ResponsesToolDefinition,
@@ -59,6 +60,10 @@ pub struct Responses {
     /// [`CodexIdentity::generate`]: super::codex_identity::CodexIdentity::generate
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_identity: Option<super::codex_identity::CodexIdentity>,
+    /// Whether this wire emits the ordinary Responses envelope or the Codex
+    /// Responses Lite developer prefix. Standard is the serialized default.
+    #[serde(default, skip_serializing_if = "CodexRequestShape::is_standard")]
+    pub codex_request_shape: CodexRequestShape,
 }
 
 impl Responses {
@@ -84,7 +89,10 @@ impl Responses {
             &request,
             http::Request::post(self.provider.uri(quirks.path, None)),
         );
-        let request = self.responses_request(request, streaming)?;
+        let request = self.responses_request(request, streaming, self.codex_identity.as_ref())?;
+        if self.codex_request_shape.is_lite() {
+            builder = builder.header(super::responses_lite::HTTP_HEADER, "true");
+        }
         crate::providers::internal::trace_json(
             crate::providers::internal::LogTarget::Completions,
             "Responses completion request",
@@ -163,7 +171,23 @@ impl Responses {
             tools: Vec::new(),
             streamed_incomplete: IncompleteTerminal::default(),
             codex_identity: None,
+            codex_request_shape: CodexRequestShape::default(),
         }
+    }
+
+    /// Emit the Codex Responses Lite request shape.
+    ///
+    /// The wire still needs a stable [`CodexIdentity`](super::codex_identity::CodexIdentity)
+    /// before HTTP encoding. A Codex WebSocket builder supplies its selected
+    /// session identity when it prepares each frame. Returns
+    /// [`ResponsesLiteError::ResponsesLiteRequiresCodex`] for another dialect.
+    pub fn with_responses_lite(mut self) -> Result<Self, ResponsesLiteError> {
+        super::responses_lite::validate_codex(
+            self.provider.dialect.quirks.responses.contract,
+            self.provider.dialect.name,
+        )?;
+        self.codex_request_shape = CodexRequestShape::ResponsesLite;
+        Ok(self)
     }
 
     /// Select how a streamed reply's terminal `response.incomplete` is taken.
@@ -278,9 +302,35 @@ impl Responses {
         &self,
         request: completion::CompletionRequest,
         streaming: bool,
+        identity: Option<&super::codex_identity::CodexIdentity>,
     ) -> Result<CompletionRequest, EncodeError> {
+        let issuers = self.replay_issuers(request.model.as_deref().or(Some(&self.model)));
+        for message in &request.chat_history {
+            if let crate::message::Message::Assistant { content, .. } = message {
+                for part in content {
+                    if let crate::message::AssistantContent::Reasoning(reasoning) = part
+                        && reasoning.has_opaque_parts()
+                        && !issuers.iter().any(|issuer| reasoning.replayable_to(issuer))
+                    {
+                        return Err(EncodeError::request(
+                            crate::message::UnrepresentableOpaqueContent::new(
+                                "OpenAI Responses with incompatible reasoning provenance",
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         let quirks = &self.provider.dialect.quirks.responses;
         self.refuse_unreplayable_provider_items(&request.chat_history)?;
+        let lite_identity = super::responses_lite::validate_activation(
+            self.codex_request_shape,
+            quirks.contract,
+            self.provider.dialect.name,
+            self.system_instructions,
+            identity,
+        )
+        .map_err(EncodeError::request)?;
         let mut request = CompletionRequest::try_from(ResponsesRequestParams {
             model: self.model.clone(),
             request,
@@ -310,6 +360,10 @@ impl Responses {
         }
         if quirks.contract == ResponsesContract::Codex {
             shape_codex_request(&mut request).map_err(EncodeError::request)?;
+        }
+        if let Some(identity) = lite_identity {
+            super::responses_lite::shape_request(&mut request, identity)
+                .map_err(EncodeError::request)?;
         }
         request.stream = streaming.then_some(true);
         Ok(request)

@@ -289,6 +289,10 @@ pub enum ReasoningContent {
     Redacted { data: String },
     /// Provider-generated reasoning summary text.
     Summary(String),
+    /// An opaque provider summary part retained for its original wire.
+    OpaqueSummary(serde_json::Value),
+    /// An opaque provider reasoning-content part retained for its original wire.
+    OpaqueContent(serde_json::Value),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -303,7 +307,8 @@ pub struct Reasoning {
     /// model vendor where several transports serve the same models (Claude
     /// on Bedrock records `anthropic`). Signatures, encrypted and redacted
     /// payloads and reasoning ids only mean something to their issuer, so a
-    /// request elsewhere omits them ([`retain_replayable_reasoning`]).
+    /// request elsewhere omits known reasoning ([`retain_replayable_reasoning`]).
+    /// Opaque parts remain until the encoder can reject unsupported replay.
     /// `None` is unknown provenance (reasoning built by hand, or history
     /// serialized before provenance existed) and is replayed as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -313,7 +318,9 @@ pub struct Reasoning {
 /// Drop reasoning none of `issuers` issued from `history`, before a request
 /// that accepts reasoning from `issuers` is encoded. Signatures, encrypted
 /// and redacted payloads and reasoning ids only mean something to the
-/// service that issued them. Reasoning of unknown provenance is kept. An
+/// service that issued them. Reasoning containing opaque parts is retained so
+/// the encoder can refuse unsupported replay instead of silently losing it.
+/// Known-only foreign reasoning is dropped; unknown provenance is kept. An
 /// assistant turn that held nothing else is dropped with it rather than sent
 /// empty, which leaves the user turns around it adjacent.
 pub fn retain_replayable_reasoning(history: &mut Vec<Message>, issuers: &[&str]) {
@@ -324,7 +331,8 @@ pub fn retain_replayable_reasoning(history: &mut Vec<Message>, issuers: &[&str])
         let before = content.len();
         content.retain(|part| match part {
             AssistantContent::Reasoning(reasoning) => {
-                issuers.iter().any(|issuer| reasoning.replayable_to(issuer))
+                reasoning.has_opaque_parts()
+                    || issuers.iter().any(|issuer| reasoning.replayable_to(issuer))
             }
             _ => true,
         });
@@ -333,6 +341,16 @@ pub fn retain_replayable_reasoning(history: &mut Vec<Message>, issuers: &[&str])
 }
 
 impl Reasoning {
+    /// Whether replay requires preservation of an unmodeled provider part.
+    pub fn has_opaque_parts(&self) -> bool {
+        self.content.iter().any(|part| {
+            matches!(
+                part,
+                ReasoningContent::OpaqueSummary(_) | ReasoningContent::OpaqueContent(_)
+            )
+        })
+    }
+
     /// Create a new reasoning item from a single item
     pub fn new(input: &str) -> Self {
         Self::new_with_signature(input, None)
@@ -420,7 +438,9 @@ impl Reasoning {
                 ReasoningContent::Text { text, .. } => Some(text.as_str()),
                 ReasoningContent::Summary(summary) => Some(summary.as_str()),
                 ReasoningContent::Redacted { data } => Some(data.as_str()),
-                ReasoningContent::Encrypted(_) => None,
+                ReasoningContent::Encrypted(_)
+                | ReasoningContent::OpaqueSummary(_)
+                | ReasoningContent::OpaqueContent(_) => None,
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1296,7 +1316,19 @@ impl AdditionalParams {
                 (existing, incoming) => *existing = incoming,
             }
         }
-        merge_maps(&mut self.0, incoming.0);
+        for (key, value) in incoming.0 {
+            // Only the top-level owned marker is an atomic provider value.
+            if crate::providers::openai::responses_api::is_opaque_part_marker(&key, &value) {
+                self.0.insert(key, value);
+            } else {
+                match self.0.get_mut(&key) {
+                    Some(existing) => merge_value(existing, value),
+                    None => {
+                        self.0.insert(key, value);
+                    }
+                }
+            }
+        }
     }
 
     /// Returns the object under the provider's own key, or `None` for absent
@@ -2319,9 +2351,27 @@ pub enum ToolChoice {
     },
 }
 
+/// A destination cannot faithfully replay an opaque Responses content part.
+#[derive(Clone, Debug, Error)]
+#[error("{wire} cannot replay opaque OpenAI Responses content")]
+pub struct UnrepresentableOpaqueContent {
+    /// Destination wire that cannot represent the part.
+    pub wire: &'static str,
+}
+
+impl UnrepresentableOpaqueContent {
+    /// Name the destination whose encoder refused the opaque part.
+    pub fn new(wire: &'static str) -> Self {
+        Self { wire }
+    }
+}
+
 /// Error type to represent issues with converting messages to and from specific provider messages.
 #[derive(Debug, Error)]
 pub enum MessageError {
+    /// Opaque content the destination cannot replay faithfully.
+    #[error(transparent)]
+    UnrepresentableOpaqueContent(#[from] UnrepresentableOpaqueContent),
     #[error("Message conversion error: {0}")]
     ConversionError(String),
     /// A tool call the destination wire cannot represent.

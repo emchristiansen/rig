@@ -474,6 +474,108 @@ fn parse_done_event_exposes_response_id() {
 }
 
 #[test]
+fn done_response_keeps_valid_sparse_subsets_and_open_metadata() {
+    let fields = [
+        ("object", json!("response")),
+        ("created_at", json!(0)),
+        ("model", json!("gpt-test")),
+    ];
+    for mask in 0..8 {
+        let mut raw = json!({
+            "id":"resp_sparse", "status":"future_status",
+            "reasoning":42, "parallel_tool_calls":"future metadata",
+            "future":{"nested":[1, null, "kept"]}
+        });
+        for (index, (key, value)) in fields.iter().enumerate() {
+            if mask & (1 << index) != 0 {
+                raw[*key] = value.clone();
+            }
+        }
+        let response: ResponsesWebSocketDoneResponse =
+            serde_json::from_value(raw.clone()).expect("valid sparse subsets decode");
+        assert_eq!(response.id(), "resp_sparse");
+        assert_eq!(
+            response.status(),
+            &ResponseStatus::Other("future_status".into())
+        );
+        assert_eq!(response.full.is_some(), mask == 7);
+        assert_eq!(
+            serde_json::to_value(response).expect("raw map serializes"),
+            raw
+        );
+    }
+}
+
+#[test]
+fn done_response_rejects_malformed_present_structural_fields() {
+    for raw in [
+        json!(null),
+        json!(42),
+        json!([]),
+        json!({}),
+        json!({"id":"r"}),
+        json!({"status":"completed"}),
+    ] {
+        assert!(serde_json::from_value::<ResponsesWebSocketDoneResponse>(raw).is_err());
+    }
+    let invalid = [
+        ("id", json!(null)),
+        ("status", json!(42)),
+        ("object", json!(null)),
+        ("object", json!("not_response")),
+        ("created_at", json!(null)),
+        ("created_at", json!(-1)),
+        ("model", json!(null)),
+        ("model", json!(42)),
+        ("output", json!(null)),
+        ("output", json!([{"type":"message","content":42}])),
+        ("tools", json!(42)),
+        ("usage", json!({})),
+        ("error", json!({"message":42})),
+        ("incomplete_details", json!({"reason":42})),
+        ("instructions", json!([])),
+        ("max_output_tokens", json!(-1)),
+    ];
+    for (field, value) in invalid {
+        for full in [false, true] {
+            let mut raw = if full {
+                json!({"id":"r","status":"completed","object":"response","created_at":0,"model":"gpt-test"})
+            } else {
+                json!({"id":"r","status":"completed"})
+            };
+            raw[field] = value.clone();
+            assert!(
+                serde_json::from_value::<ResponsesWebSocketDoneResponse>(raw.clone()).is_err(),
+                "malformed field must not become a sparse success: {raw}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn malformed_done_does_not_settle_a_successful_response() {
+    let script = Script::new().turn([json!({
+        "type":"response.done", "response":{"id":"bad_tip","status":"completed","output":42}
+    })
+    .to_string()]);
+    let mut session = session_over(&script);
+    session
+        .send(user_request("hello"))
+        .await
+        .expect("request sends");
+    assert!(session.next_event().await.is_err());
+    assert_eq!(session.previous_response_id(), None);
+    assert!(session.continuation().is_err());
+    assert!(session.send(user_request("again")).await.is_err());
+}
+
+#[test]
+fn known_websocket_event_cannot_decode_as_a_whole_response() {
+    let payload = json!({"type":"response.completed","id":"r","object":"response","created_at":0,"status":"completed","model":"gpt-test"});
+    assert!(parse_server_event(&payload.to_string()).is_err());
+}
+
+#[test]
 fn parse_response_completed_event_is_terminal() {
     let payload = json!({
         "type": "response.completed",

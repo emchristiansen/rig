@@ -468,7 +468,8 @@ fn stream_final_round_trips_and_is_distinguishable_from_unknown_content() {
     });
     let unknown = StreamEvent::Unknown(provider_item.clone().into());
     let encoded = serde_json::to_value(&unknown).expect("serialize unknown item");
-    assert_eq!(encoded["event"], serde_json::json!("unknown"));
+    assert_eq!(encoded["event"], serde_json::json!("unknown_v2"));
+    assert_eq!(encoded["payload"], provider_item);
     let decoded = serde_json::from_value::<StreamEvent>(encoded).expect("deserialize unknown item");
     assert_eq!(decoded, unknown);
     assert!(

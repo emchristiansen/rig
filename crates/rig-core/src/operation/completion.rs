@@ -54,7 +54,8 @@ impl Operation for Completion {
         Some(StreamEvent::Unknown(payload))
     }
 
-    /// Reasoning another wire issued is omitted; see
+    /// Known-only reasoning another wire issued is omitted; opaque parts reach
+    /// the encoder for explicit refusal. See
     /// [`crate::message::retain_replayable_reasoning`].
     fn scope_to_wire(request: &mut Self::Request, issuers: &[&str]) {
         crate::message::retain_replayable_reasoning(&mut request.chat_history, issuers);
@@ -247,9 +248,32 @@ pub struct AdapterOutput {
     /// slot even after closure, so a repeated late end must not synthesize a
     /// second start for the same identity and position.
     positioned: std::collections::HashSet<(BlockId, crate::streaming::SourceOrder)>,
+    /// Explicitly indexed reasoning assemblies may interleave other content.
+    /// This decoder declaration is local bookkeeping, never an event field.
+    indexed_reasoning: std::collections::HashSet<BlockId>,
 }
 
 impl AdapterOutput {
+    /// Declare a bounded wire slot before its first reasoning start or delta.
+    /// The declaration survives batch drains for the lifetime of this stream.
+    pub(crate) fn declare_indexed_reasoning(&mut self, id: &BlockId) {
+        // A late declaration cannot excuse a boundary-less block already
+        // emitted in this batch (including raw deltas without a start).
+        if self.opened.contains(id)
+            || self.items.iter().any(|item| {
+                matches!(item, Ok(event)
+                if event.block_id() == Some(id) && Self::is_reasoning_event(event))
+            })
+        {
+            return;
+        }
+        self.indexed_reasoning.insert(id.clone());
+    }
+
+    pub(crate) fn is_indexed_reasoning(&self, id: &BlockId) -> bool {
+        self.indexed_reasoning.contains(id)
+    }
+
     /// An empty output buffer.
     pub fn new() -> Self {
         Self::default()
