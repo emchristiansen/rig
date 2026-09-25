@@ -487,6 +487,8 @@ where
             .or_else(|| page.document())
             .unwrap_or(serde_json::Value::Null);
         reply.provider_request_id = page_reply.provider_request_id;
+        // Like the request id, the last page's headers win: a paged reply
+        // keeps only its final page's captured headers.
         reply.response_headers = crate::providers::internal::captured_response_headers(
             &page_reply.headers,
             response_header_prefix,
