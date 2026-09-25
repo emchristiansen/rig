@@ -1,48 +1,76 @@
-use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize, Serializer};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
 
-/// Deserialize a JSON string into `T`, optionally routing through `serde_json::Value`
-/// to dodge the incompatibility between `serde_json/arbitrary_precision` and
-/// `#[serde(flatten)]` on structs whose flatten tree reaches a concrete `f64` field
-/// (see <https://github.com/serde-rs/json/issues/1157>).
+/// `skip_serializing_if` helper: serde requires a `fn(&bool) -> bool`, so the
+/// trivially-copy lint does not apply here.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+pub(crate) fn is_false(value: &bool) -> bool {
+    !value
+}
+
+/// Serializes a `HashMap` in lexicographic key order, propagating serializer errors.
+/// Stable ordering avoids randomized map iteration changing request bytes.
+pub fn serialize_map_sorted<S, V>(
+    map: &HashMap<String, V>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    V: Serialize,
+{
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_by_key(|(key, _)| *key);
+    serializer.collect_map(entries)
+}
+
+/// [`serialize_map_sorted`] for an optional map.
 ///
-/// Exact trigger: `serde_json/arbitrary_precision` + `#[serde(flatten)]` + reachable `f64`
-/// + JSON carrying a float value for that `f64`. `u64`/`i64`/`String` fields under flatten
-/// are not affected; only `f64` (or types deserialized via `f64`) hit the
-/// `invalid type: map, expected f64` error introduced by the arbitrary-precision
-/// tagged-Number representation in `ContentDeserializer`.
-///
-/// Call sites in this crate that satisfy the trigger and therefore route through
-/// this helper: `CompletionResponse` (flatten → `AdditionalParameters.top_p: Option<f64>`)
-/// and `StreamingCompletionChunk` (untagged enum whose `Response` variant wraps
-/// `CompletionResponse`).
-///
-/// With the `arbitrary-precision-flatten-workaround` feature off (default),
-/// this delegates directly to `serde_json::from_str` and is upstream-equivalent.
-///
-/// With the feature on, the input is parsed into a `serde_json::Value` first,
-/// then `serde_json::from_value` is used to convert into `T`. This two-step
-/// path materializes numbers as `Value::Number` before flatten-driven field
-/// collection sees them, sidestepping the bug.
-///
-/// Note: this feature only gates Rig's workaround code path. Whether
-/// `serde_json/arbitrary_precision` is actually enabled in the build is a
-/// separate, downstream decision; consumers who do not enable it pay only
-/// the small two-step parse cost and observe identical results.
-pub fn from_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, serde_json::Error> {
-    #[cfg(not(feature = "arbitrary-precision-flatten-workaround"))]
-    {
-        serde_json::from_str(s)
+/// Pairs with `#[serde(skip_serializing_if = "Option::is_none")]`: serde still
+/// routes `Some` through this function, and the `None` arm only runs for a field
+/// that is serialized unconditionally.
+pub fn serialize_optional_map_sorted<S, V>(
+    map: &Option<HashMap<String, V>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+    V: Serialize,
+{
+    match map {
+        Some(map) => serialize_map_sorted(map, serializer),
+        None => serializer.serialize_none(),
     }
-    #[cfg(feature = "arbitrary-precision-flatten-workaround")]
-    {
-        let value: serde_json::Value = serde_json::from_str(s)?;
-        serde_json::from_value(value)
+}
+
+/// Renders compact JSON with lexicographically sorted object keys at every depth,
+/// independent of serde_json's `preserve_order` feature. Array order is retained.
+pub fn to_canonical_string(value: &serde_json::Value) -> String {
+    fn sorted(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_by_key(|(key, _)| *key);
+                let mut out = serde_json::Map::new();
+                for (key, value) in entries {
+                    out.insert(key.clone(), sorted(value));
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(sorted).collect())
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => value.clone(),
+        }
     }
+    sorted(value).to_string()
 }
 
 pub fn merge(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
@@ -57,9 +85,20 @@ pub fn merge(a: serde_json::Value, b: serde_json::Value) -> serde_json::Value {
     }
 }
 
-// Only the feature-gated `image` / `audio` provider request builders call this
-// now; the default feature set has no caller, so allow it to be unused there
-// rather than warning on an otherwise-live utility.
+/// Applies a request builder's `additional_params` call: `None` clears, and a
+/// value merges over the parameters earlier calls set. Merging combines JSON
+/// objects key by key; earlier parameters that are not an object are kept.
+pub(crate) fn merge_params(
+    existing: Option<serde_json::Value>,
+    params: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    Some(match (existing, params?) {
+        (Some(existing), params) => merge(existing, params),
+        (None, params) => params,
+    })
+}
+
+// Callers require the image or audio feature.
 #[cfg_attr(not(any(feature = "image", feature = "audio")), allow(dead_code))]
 pub fn merge_inplace(a: &mut serde_json::Value, b: serde_json::Value) {
     if let (serde_json::Value::Object(a_map), serde_json::Value::Object(b_map)) = (a, b) {
@@ -80,26 +119,14 @@ pub fn value_to_json_string(value: &serde_json::Value) -> String {
     }
 }
 
-/// Serialize a JSON value to its compact string form (with `String` scalars kept quoted).
-///
-/// Unlike [`value_to_json_string`], this never unwraps a `String` value — a JSON
-/// string is serialized with its quotes. Used by the classic runtime when
-/// canonicalizing tool-call arguments and hook-rewritten payloads.
+/// Serializes compact JSON, retaining quotes and escaping for string values.
 pub fn serialize_json_value(value: &serde_json::Value) -> String {
     value.to_string()
 }
 
-/// Deserialize a field that may arrive as either a JSON-encoded string or any other
-/// JSON value, into `Option<String>`.
-///
-/// - A string is taken verbatim.
-/// - Any other JSON value is re-serialized to its compact JSON-string form (via
-///   [`value_to_json_string`]). Object key order is not preserved, which is fine
-///   because callers re-parse the string.
-/// - `null` or a missing field becomes `None`.
-///
-/// Tolerates OpenAI-compatible gateways that stream `tool_calls[].function.arguments`
-/// as an object (e.g. `{}`) instead of the spec-mandated JSON string (`"{}"`).
+/// Deserializes strings verbatim and other non-null values as compact JSON text.
+/// Null becomes `None`; fields that may be absent need a serde default.
+/// Object key order depends on serde_json's enabled features.
 pub fn deserialize_json_string_or_value<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -121,9 +148,8 @@ pub fn parse_tool_arguments(arguments: &str) -> serde_json::Result<serde_json::V
     serde_json::from_str(arguments)
 }
 
-/// This module is helpful in cases where raw json objects are serialized and deserialized as
-///  strings such as `"{\"key\": \"value\"}"`. This might seem odd but it's actually how some
-///  some providers such as OpenAI return function arguments (for some reason).
+/// Serde adapters for JSON encoded inside strings. Empty or whitespace-only
+/// strings deserialize to empty objects.
 pub mod stringified_json {
     use super::parse_tool_arguments;
     use serde::{self, Deserialize, Deserializer, Serializer};
@@ -147,10 +173,8 @@ pub mod stringified_json {
         serde_json::from_str(&s).map_err(serde::de::Error::custom)
     }
 
-    /// Deserialize JSON that may be encoded either as a string or as a raw JSON value.
-    /// OpenAI-compatible providers typically return tool arguments as a stringified JSON
-    /// object, while some implementations such as Hugging Face and `llama.cpp` return the
-    /// JSON object directly.
+    /// Parses string contents as JSON and passes other values through unchanged.
+    /// Empty or whitespace-only strings become empty objects.
     pub fn deserialize_maybe_stringified<'de, D>(
         deserializer: D,
     ) -> Result<serde_json::Value, D::Error>
@@ -166,6 +190,8 @@ pub mod stringified_json {
     }
 }
 
+/// Deserializes a string or object as one item, a sequence as multiple items,
+/// and null as an empty list. Strings use [`FromStr`]; objects use [`Deserialize`].
 pub fn string_or_vec<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     T: Deserialize<'de> + FromStr<Err = Infallible>,
@@ -198,19 +224,6 @@ where
             Deserialize::deserialize(de::value::SeqAccessDeserializer::new(seq))
         }
 
-        /// A bare object where a list is expected is one block, not a defect —
-        /// several wires spell single-block content that way. This arm comes
-        /// from the removed non-empty container's `string_or_one_or_many`,
-        /// whose callers (Anthropic `Message.content`, OpenAI system and user
-        /// content) now share this helper.
-        ///
-        /// The two were not interchangeable: this one also has
-        /// `visit_none`/`visit_unit`, so the migrated fields now accept `null`
-        /// where they used to raise a parse error. Those arms are load-bearing
-        /// for the OpenAI assistant-content field that already used this
-        /// helper — OpenAI sends `"content": null` for a tool-calls-only
-        /// message — so the widening is the price of sharing one helper, and it
-        /// is documented in MIGRATING rather than hidden.
         fn visit_map<M>(self, map: M) -> Result<Vec<T>, M::Error>
         where
             M: MapAccess<'de>,
@@ -250,308 +263,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Serialize, Deserialize, Debug, PartialEq)]
-    struct Dummy {
-        #[serde(with = "stringified_json")]
-        data: serde_json::Value,
-    }
-
-    #[derive(Serialize, Deserialize, Debug, PartialEq)]
-    struct DummyMaybeStringified {
-        #[serde(deserialize_with = "stringified_json::deserialize_maybe_stringified")]
-        data: serde_json::Value,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ArgWrapper {
-        #[serde(default, deserialize_with = "deserialize_json_string_or_value")]
-        arguments: Option<String>,
-    }
-
-    /// Spec-compliant case: `arguments` is already a JSON-encoded string, taken verbatim.
-    #[test]
-    fn json_string_or_value_string_passthrough() {
-        let w: ArgWrapper = serde_json::from_str(r#"{"arguments":"{\"a\":1}"}"#).unwrap();
-        assert_eq!(w.arguments.as_deref(), Some(r#"{"a":1}"#));
-    }
-
-    /// Non-compliant gateway: an empty object `{}` must serialize to the string `"{}"`,
-    /// not be treated as absent (None).
-    #[test]
-    fn json_string_or_value_empty_object() {
-        let w: ArgWrapper = serde_json::from_str(r#"{"arguments":{}}"#).unwrap();
-        assert_eq!(w.arguments.as_deref(), Some("{}"));
-    }
-
-    /// Non-compliant gateway: a nested object is re-serialized to a string.
-    #[test]
-    fn json_string_or_value_nested_object() {
-        let w: ArgWrapper =
-            serde_json::from_str(r#"{"arguments":{"path":"/tmp","depth":2}}"#).unwrap();
-        // `arguments` is re-serialized from a Value; object key order is not guaranteed
-        // (depends on serde_json's `preserve_order` feature), so re-parse and compare
-        // values rather than the raw string.
-        let parsed: serde_json::Value =
-            serde_json::from_str(w.arguments.as_deref().unwrap()).unwrap();
-        assert_eq!(parsed["path"], "/tmp");
-        assert_eq!(parsed["depth"], 2);
-    }
-
-    /// Non-compliant gateway: an array is also "any other JSON value" and serializes to a
-    /// string. Array order is meaningful and preserved by serde_json, so compare the string
-    /// directly.
-    #[test]
-    fn json_string_or_value_array() {
-        let w: ArgWrapper = serde_json::from_str(r#"{"arguments":[1,2,3]}"#).unwrap();
-        assert_eq!(w.arguments.as_deref(), Some("[1,2,3]"));
-    }
-
-    /// Regression test: JSON null must collapse to None (not the string "null").
-    /// Removing `.filter(|v| !v.is_null())` from the deserializer would fail this test.
-    #[test]
-    fn json_string_or_value_null_is_none() {
-        let w: ArgWrapper = serde_json::from_str(r#"{"arguments":null}"#).unwrap();
-        assert!(w.arguments.is_none());
-    }
-
-    /// A missing field is likewise None (relies on `#[serde(default)]`).
-    #[test]
-    fn json_string_or_value_missing_is_none() {
-        let w: ArgWrapper = serde_json::from_str(r#"{}"#).unwrap();
-        assert!(w.arguments.is_none());
-    }
-
-    #[test]
-    fn test_merge() {
-        let a = serde_json::json!({"key1": "value1"});
-        let b = serde_json::json!({"key2": "value2"});
-        let result = merge(a, b);
-        let expected = serde_json::json!({"key1": "value1", "key2": "value2"});
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_merge_inplace() {
-        let mut a = serde_json::json!({"key1": "value1"});
-        let b = serde_json::json!({"key2": "value2"});
-        merge_inplace(&mut a, b);
-        let expected = serde_json::json!({"key1": "value1", "key2": "value2"});
-        assert_eq!(a, expected);
-    }
-
-    #[test]
-    fn test_stringified_json_serialize() {
-        let dummy = Dummy {
-            data: serde_json::json!({"key": "value"}),
-        };
-        let serialized = serde_json::to_string(&dummy).unwrap();
-        let expected = r#"{"data":"{\"key\":\"value\"}"}"#;
-        assert_eq!(serialized, expected);
-    }
-
-    #[test]
-    fn test_stringified_json_deserialize() {
-        let json_str = r#"{"data":"{\"key\":\"value\"}"}"#;
-        let dummy: Dummy = serde_json::from_str(json_str).unwrap();
-        let expected = Dummy {
-            data: serde_json::json!({"key": "value"}),
-        };
-        assert_eq!(dummy, expected);
-    }
-
-    #[test]
-    fn test_stringified_json_deserialize_empty_string() {
-        let json_str = r#"{"data":""}"#;
-        let dummy: Dummy = serde_json::from_str(json_str).unwrap();
-        assert_eq!(dummy.data, serde_json::json!({}));
-    }
-
-    #[test]
-    fn test_deserialize_maybe_stringified_value_from_string() {
-        let json_str = r#"{"data":"{\"key\":\"value\"}"}"#;
-        let dummy: DummyMaybeStringified = serde_json::from_str(json_str).unwrap();
-        assert_eq!(dummy.data, serde_json::json!({"key": "value"}));
-    }
-
-    #[test]
-    fn test_deserialize_maybe_stringified_value_from_object() {
-        let json_str = r#"{"data":{"key":"value"}}"#;
-        let dummy: DummyMaybeStringified = serde_json::from_str(json_str).unwrap();
-        assert_eq!(dummy.data, serde_json::json!({"key": "value"}));
-    }
-
-    #[test]
-    fn test_deserialize_maybe_stringified_value_from_empty_string() {
-        let json_str = r#"{"data":""}"#;
-        let dummy: DummyMaybeStringified = serde_json::from_str(json_str).unwrap();
-        assert_eq!(dummy.data, serde_json::json!({}));
-    }
-
-    #[test]
-    fn test_parse_tool_arguments_empty_string() {
-        let parsed = parse_tool_arguments("").unwrap();
-        assert_eq!(parsed, serde_json::json!({}));
-    }
-
-    #[test]
-    fn test_parse_tool_arguments_whitespace_string() {
-        let parsed = parse_tool_arguments("   ").unwrap();
-        assert_eq!(parsed, serde_json::json!({}));
-    }
-
-    #[test]
-    fn test_parse_tool_arguments_valid_json() {
-        let parsed = parse_tool_arguments(r#"{"key":"value"}"#).unwrap();
-        assert_eq!(parsed, serde_json::json!({"key": "value"}));
-    }
-
-    /// The OFF arm of [`from_str`] — the default-build production parse path — must be a
-    /// behavior-identical delegate to `serde_json::from_str`. This is the inverse-gated
-    /// complement of `streaming.rs::tests::arbitrary_precision_flatten_workaround` (gated ON):
-    /// gating on the workaround being OFF means this module compiles under exactly the build in
-    /// which the OFF arm is compiled, so it can never accidentally exercise the ON arm. The
-    /// comparison holds under both the default feature set and `_internal-test-arbitrary-precision`,
-    /// because it asserts the OFF arm mirrors `serde_json` whatever `serde_json` does under the
-    /// active features.
-    #[cfg(not(feature = "arbitrary-precision-flatten-workaround"))]
-    mod off_arm_equivalence {
-        use super::super::from_str;
-        use serde::Deserialize;
-
-        // Reproduces the serde-rs/json#1157 shape the ON arm exists to work around:
-        // `#[serde(flatten)]` reaching a concrete `f64`. Exercising equivalence on this shape (not
-        // a trivial struct) covers the one input class where the two arms could plausibly diverge.
-        #[derive(Deserialize, Debug, PartialEq)]
-        struct Flattened {
-            name: String,
-            #[serde(flatten)]
-            rest: Inner,
-        }
-        #[derive(Deserialize, Debug, PartialEq)]
-        struct Inner {
-            top_p: Option<f64>,
-        }
-
-        // Reduce a `serde_json` result to a form comparable across the two call paths: success
-        // values by `PartialEq`; failures by their public observable surface — category, line,
-        // column, and Display message. `serde_json::Error` is not `PartialEq`, so this normalized
-        // tuple is the strongest available comparison; for a literal delegate the OFF arm must
-        // yield the identical normalized result.
-        fn observable<T>(
-            r: Result<T, serde_json::Error>,
-        ) -> Result<T, (serde_json::error::Category, usize, usize, String)> {
-            r.map_err(|e| (e.classify(), e.line(), e.column(), e.to_string()))
-        }
-
-        #[test]
-        fn off_arm_from_str_matches_serde_json_direct() {
-            let inputs = [
-                r#"{"name":"a","top_p":0.5}"#, // flatten + float — the #1157 shape (Ok by default; Err under AP)
-                r#"{"name":"b","top_p":null}"#, // absent number
-                r#"{"name":"c"}"#,             // missing optional
-                r#"{"name":"a","top_p":"not-a-number"}"#, // type mismatch → Err on both
-                r#"{"top_p":0.5}"#,            // missing required `name` → Err on both
-                r#"{ this is not json "#,      // syntax error → Err on both
-            ];
-            for s in inputs {
-                assert_eq!(
-                    observable(from_str::<Flattened>(s)),
-                    observable(serde_json::from_str::<Flattened>(s)),
-                    "OFF arm diverged from serde_json::from_str for input: {s}",
-                );
-            }
-        }
-    }
-
-    mod string_or_vec_shapes {
-        use serde::Deserialize;
-        use std::convert::Infallible;
-        use std::str::FromStr;
-
-        /// A content block that can arrive in every shape the helper accepts.
-        ///
-        /// The suite deliberately does not use `Vec<String>`: a bare object
-        /// cannot deserialize into a `String`, so a string element type makes
-        /// the `visit_map` arm structurally untestable — and that is the arm
-        /// whose loss would be a silent wire break, since several providers
-        /// spell single-block content as a bare object.
-        #[derive(Debug, Deserialize, PartialEq)]
-        struct Block {
-            text: String,
-        }
-
-        impl FromStr for Block {
-            type Err = Infallible;
-
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
-                Ok(Block {
-                    text: value.to_owned(),
-                })
-            }
-        }
-
-        #[derive(Debug, Deserialize, PartialEq)]
-        struct Holder {
-            #[serde(deserialize_with = "super::super::string_or_vec")]
-            content: Vec<Block>,
-        }
-
-        fn decode(json: serde_json::Value) -> Vec<Block> {
-            serde_json::from_value::<Holder>(json)
-                .expect("shape should decode")
-                .content
-        }
-
-        fn block(text: &str) -> Block {
-            Block {
-                text: text.to_owned(),
-            }
-        }
-
-        #[test]
-        fn a_bare_object_is_one_element() {
-            // `visit_map`. Carried over from the removed container's
-            // `string_or_one_or_many`, which had this arm where the helper it
-            // merged into did not.
-            assert_eq!(
-                decode(serde_json::json!({"content": {"text": "hi"}})),
-                vec![block("hi")]
-            );
-        }
-
-        #[test]
-        fn a_bare_string_becomes_one_element_via_from_str() {
-            assert_eq!(
-                decode(serde_json::json!({"content": "hi"})),
-                vec![block("hi")]
-            );
-        }
-
-        #[test]
-        fn a_sequence_decodes_elementwise() {
-            assert_eq!(
-                decode(serde_json::json!({"content": [{"text": "a"}, {"text": "b"}]})),
-                vec![block("a"), block("b")]
-            );
-        }
-
-        #[test]
-        fn an_empty_sequence_is_an_empty_list() {
-            // The non-empty container this helper replaced rejected `[]`
-            // outright. It is now a value.
-            assert!(decode(serde_json::json!({"content": []})).is_empty());
-        }
-
-        #[test]
-        fn null_is_an_empty_list() {
-            // Load-bearing: OpenAI sends `"content": null` for a message that
-            // carries only tool calls, so dropping this arm would turn a normal
-            // response into a decode error.
-            assert!(decode(serde_json::json!({"content": null})).is_empty());
-        }
-    }
-}
+mod tests;

@@ -1,3 +1,14 @@
+//! Lazy UTF-8 loading from filesystem paths or in-memory bytes.
+//!
+//! ```
+//! use rig_core::loaders::FileLoader;
+//!
+//! let documents = FileLoader::from_bytes(b"hello".to_vec())
+//!     .read().into_iter().collect::<Result<Vec<_>, _>>()?;
+//! assert_eq!(documents, vec!["hello"]);
+//! # Ok::<(), rig_core::loaders::file::FileLoaderError>(())
+//! ```
+
 use std::{fs, path::PathBuf, string::FromUtf8Error};
 
 use thiserror::Error;
@@ -20,9 +31,6 @@ pub enum FileLoaderError {
     StringUtf8Error(#[from] FromUtf8Error),
 }
 
-// ================================================================
-// Implementing Readable trait for reading file contents
-// ================================================================
 loadable_trait!(Readable, FileLoaderError, String, read, read_with_path);
 
 impl Readable for PathBuf {
@@ -47,56 +55,15 @@ impl Readable for Vec<u8> {
     }
 }
 
-// ================================================================
-// FileLoader definitions and implementations
-// ================================================================
-
-/// [FileLoader] is a utility for loading files from the filesystem using glob patterns or directory
-///  paths. It provides methods to read file contents and handle errors gracefully.
-///
-/// # Errors
-///
-/// This module defines a custom error type [FileLoaderError] which can represent various errors
-///  that might occur during file loading operations, such as invalid glob patterns, IO errors, and
-///  glob errors.
-///
-/// # Example Usage
-///
-/// ```no_run
-/// use rig_core::loaders::FileLoader;
-///
-/// fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     // Create a FileLoader using a glob pattern
-///     let loader = FileLoader::with_glob("path/to/files/*.txt")?;
-///
-///     // Read file contents, ignoring any errors
-///     let contents: Vec<String> = loader
-///         .read()
-///         .ignore_errors()
-///         .into_iter()
-///         .collect();
-///
-///     for content in contents {
-///         println!("{}", content);
-///     }
-///
-///     Ok(())
-/// }
-/// ```
-///
-/// [FileLoader] uses strict typing between the iterator methods to ensure that transitions between
-///   different implementations of the loaders and it's methods are handled properly by the compiler.
+/// Iterator pipeline for loading UTF-8 documents. Reads happen synchronously
+/// during iteration; per-item I/O and decoding errors are yielded unless filtered.
 pub struct FileLoader<'a, T> {
     iterator: Box<dyn Iterator<Item = T> + 'a>,
 }
 
 #[allow(private_bounds)] // `Readable` deliberately seals which states expose these methods
 impl<'a, T: Readable + 'a> FileLoader<'a, T> {
-    /// Reads the contents of the files within the iterator returned by [FileLoader::with_glob] or
-    ///  [FileLoader::with_dir].
-    ///
-    /// # Example
-    /// Read files in directory "files/*.txt" and print the content for each file
+    /// Decodes each input as UTF-8 during iteration, yielding I/O or decoding errors.
     ///
     /// ```no_run
     /// # use rig_core::loaders::FileLoader;
@@ -104,8 +71,8 @@ impl<'a, T: Readable + 'a> FileLoader<'a, T> {
     /// let content = FileLoader::with_glob("files/*.txt")?.read();
     /// for result in content {
     ///     match result {
-    ///         Ok(content) => println!("{}", content),
-    ///         Err(e) => eprintln!("Error reading file: {}", e),
+    ///         Ok(content) => println!("{content}"),
+    ///         Err(e) => eprintln!("Error reading file: {e}"),
     ///     }
     /// }
     /// # Ok(())
@@ -113,15 +80,11 @@ impl<'a, T: Readable + 'a> FileLoader<'a, T> {
     /// ```
     pub fn read(self) -> FileLoader<'a, Result<String, FileLoaderError>> {
         FileLoader {
-            iterator: Box::new(self.iterator.map(|res| res.read())),
+            iterator: Box::new(self.iterator.map(Readable::read)),
         }
     }
-    /// Reads the contents of the files within the iterator returned by [FileLoader::with_glob] or
-    ///  [FileLoader::with_dir] and returns the path along with the content.
-    ///
-    /// # Example
-    /// Read files in directory "files/*.txt" and print the content for corresponding path for each
-    ///  file.
+    /// Decodes each input as UTF-8 and pairs it with its source path, yielding
+    /// I/O or decoding errors. In-memory inputs use the path `<memory>`.
     ///
     /// ```no_run
     /// # use rig_core::loaders::FileLoader;
@@ -129,8 +92,8 @@ impl<'a, T: Readable + 'a> FileLoader<'a, T> {
     /// let content = FileLoader::with_glob("files/*.txt")?.read_with_path();
     /// for result in content {
     ///     match result {
-    ///         Ok((path, content)) => println!("{:?} {}", path, content),
-    ///         Err(e) => eprintln!("Error reading file: {}", e),
+    ///         Ok((path, content)) => println!("{path:?} {content}"),
+    ///         Err(e) => eprintln!("Error reading file: {e}"),
     ///     }
     /// }
     /// # Ok(())
@@ -138,7 +101,7 @@ impl<'a, T: Readable + 'a> FileLoader<'a, T> {
     /// ```
     pub fn read_with_path(self) -> FileLoader<'a, Result<(PathBuf, String), FileLoaderError>> {
         FileLoader {
-            iterator: Box::new(self.iterator.map(|res| res.read_with_path())),
+            iterator: Box::new(self.iterator.map(Readable::read_with_path)),
         }
     }
 }
@@ -147,68 +110,4 @@ loader_scaffold!(FileLoader, FileLoaderError, dir: files_only);
 loader_from_bytes!(FileLoader);
 
 #[cfg(test)]
-mod tests {
-    use assert_fs::prelude::{FileTouch, FileWriteStr, PathChild};
-
-    use super::FileLoader;
-
-    #[test]
-    fn test_file_loader() {
-        let temp = assert_fs::TempDir::new().expect("Failed to create temp dir");
-        let foo_file = temp.child("foo.txt");
-        let bar_file = temp.child("bar.txt");
-
-        foo_file.touch().expect("Failed to create foo.txt");
-        bar_file.touch().expect("Failed to create bar.txt");
-
-        foo_file.write_str("foo").expect("Failed to write to foo");
-        bar_file.write_str("bar").expect("Failed to write to bar");
-
-        let glob = temp.path().to_string_lossy().to_string() + "/*.txt";
-
-        let loader = FileLoader::with_glob(&glob).unwrap();
-        let mut actual = loader
-            .ignore_errors()
-            .read()
-            .ignore_errors()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut expected = vec!["foo".to_string(), "bar".to_string()];
-
-        actual.sort();
-        expected.sort();
-
-        assert!(!actual.is_empty());
-        assert!(expected == actual)
-    }
-
-    #[test]
-    fn test_file_loader_bytes() {
-        let temp = assert_fs::TempDir::new().expect("Failed to create temp dir");
-        let foo_file = temp.child("foo.txt");
-        let bar_file = temp.child("bar.txt");
-
-        foo_file.touch().expect("Failed to create foo.txt");
-        bar_file.touch().expect("Failed to create bar.txt");
-
-        foo_file.write_str("foo").expect("Failed to write to foo");
-        bar_file.write_str("bar").expect("Failed to write to bar");
-
-        let foo_bytes = std::fs::read(foo_file.path()).unwrap();
-        let bar_bytes = std::fs::read(bar_file.path()).unwrap();
-
-        let loader = FileLoader::from_bytes_multi(vec![foo_bytes, bar_bytes]);
-        let mut actual = loader
-            .read()
-            .ignore_errors()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut expected = vec!["foo".to_string(), "bar".to_string()];
-
-        actual.sort();
-        expected.sort();
-
-        assert!(!actual.is_empty());
-        assert!(expected == actual)
-    }
-}
+mod tests;

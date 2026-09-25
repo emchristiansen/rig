@@ -1,8 +1,7 @@
-use rig::client::Nothing;
 use rig::prelude::*;
+use rig::providers::ollama::wire::Ollama;
 use rig::{
-    Embed, completion::Prompt, embeddings::EmbeddingsBuilder, providers::ollama::Client,
-    vector_store::in_memory_store::InMemoryVectorStore,
+    Embed, embeddings::EmbeddingsBuilder, vector_store::in_memory_store::InMemoryVectorStore,
 };
 use serde::Serialize;
 
@@ -26,8 +25,8 @@ async fn main() -> Result<(), anyhow::Error> {
         .init();
 
     // Create ollama client
-    let ollama_client = Client::from_val(Nothing.into())?;
-    let embedding_model = ollama_client.embedding_model("nomic-embed-text");
+    let ollama_client = Ollama::new().bound()?;
+    let embedding_model = ollama_client.embedding("nomic-embed-text", None);
 
     // Generate embeddings for the definitions of all the documents using the specified embedding model.
     let embeddings = EmbeddingsBuilder::new(embedding_model.clone())
@@ -74,7 +73,10 @@ async fn main() -> Result<(), anyhow::Error> {
         .build();
 
     // Prompt the agent and print the response
-    let response = rag_agent.prompt("What does \"glarb-glarb\" mean?").await?;
+    let response = rag_agent
+        .prompt("What does \"glarb-glarb\" mean?")
+        .await?
+        .output;
 
     println!("{response}");
 

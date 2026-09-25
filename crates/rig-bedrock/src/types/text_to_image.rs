@@ -1,7 +1,8 @@
 use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
+use rig_core::error::ProviderError;
 use rig_core::image_generation;
-use rig_core::image_generation::ImageGenerationError;
+use rig_core::image_generation::NormalizeImageGenerationResponse;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -14,24 +15,19 @@ pub enum ImageQuality {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageGenerationConfig {
-    // The quality of the image.
-    // Default: standard
+    /// Image quality. Defaults to standard.
     pub quality: Option<ImageQuality>,
-    // The number of images to generate.
-    // Default: 1, Minimum: 1, Maximum: 5
+    /// Requested image count, defaulting to one. Provider limits are not validated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub number_of_images: Option<u32>,
-    // The height of the image in pixels.
+    /// Image height in pixels, defaulting to 512.
     pub height: Option<u32>,
-    // The width of the image in pixels.
+    /// Image width in pixels, defaulting to 512.
     pub width: Option<u32>,
-    // Specifies how strongly the generated image should adhere to the prompt. Use a lower value to introduce more randomness in the generation.
-    // Default: 8.0. Minimum: 1.1, Maximum: 10.0
+    /// Prompt adherence strength. Omitted by default for the provider to choose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cfg_scale: Option<f32>,
-    // Use to control and reproduce results. Determines the initial noise setting.
-    // Use the same seed and the same settings as a previous run to allow inference to create a similar image.
-    // Default: 42, Minimum: 0, Maximum: 2147483646
+    /// Initial noise seed for reproducible generation. Omitted by default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seed: Option<u32>,
 }
@@ -83,49 +79,47 @@ impl TextToImageGeneration {
         }
     }
 
-    pub fn height(&mut self, height: u32) -> &Self {
+    pub fn height(mut self, height: u32) -> Self {
         self.image_generation_config.height = Some(height);
         self
     }
 
-    pub fn width(&mut self, width: u32) -> &Self {
+    pub fn width(mut self, width: u32) -> Self {
         self.image_generation_config.width = Some(width);
         self
     }
 }
 
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TextToImageResponse {
     pub images: Option<Vec<String>>,
     pub error: Option<String>,
 }
 
-impl TryFrom<TextToImageResponse>
-    for image_generation::ImageGenerationResponse<TextToImageResponse>
-{
-    type Error = ImageGenerationError;
-
-    fn try_from(value: TextToImageResponse) -> Result<Self, Self::Error> {
-        if let Some(error) = value.error {
-            return Err(ImageGenerationError::ResponseError(error));
+impl NormalizeImageGenerationResponse for TextToImageResponse {
+    fn normalize(
+        self,
+        provider: &str,
+    ) -> Result<image_generation::ImageGenerationResponse, ProviderError> {
+        if let Some(error) = self.error {
+            return Err(ProviderError::Response(error));
         }
 
-        if let Some(images) = value.to_owned().images {
+        if let Some(images) = self.images {
             let image = images.first().ok_or_else(|| {
-                ImageGenerationError::ResponseError("Bedrock image response was empty".into())
+                ProviderError::Response("Bedrock image response was empty".into())
             })?;
             let data = BASE64_STANDARD
                 .decode(image)
-                .map_err(|err| ImageGenerationError::ResponseError(err.to_string()))?;
+                .map_err(|err| ProviderError::Response(err.to_string()))?;
 
-            return Ok(Self {
-                image: data,
-                response: value,
-            });
+            return Ok(image_generation::ImageGenerationResponse::new(
+                data, provider,
+            ));
         }
 
-        Err(ImageGenerationError::ResponseError(
+        Err(ProviderError::Response(
             "Malformed response from model".to_string(),
         ))
     }

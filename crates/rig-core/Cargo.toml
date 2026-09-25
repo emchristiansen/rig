@@ -24,21 +24,17 @@ path = "src/lib.rs"
 doctest = true
 
 [dependencies]
-as-any = { workspace = true }
 async-stream = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 epub = { workspace = true, optional = true }
 futures = { workspace = true }
 glob = { workspace = true }
-indexmap = { workspace = true }
 lopdf = { workspace = true, optional = true }
 mime_guess = { workspace = true }
 ordered-float = { workspace = true }
 quick-xml = { workspace = true, optional = true }
-rayon = { workspace = true, optional = true }
-reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
-rig-derive = { version = "0.41.0", path = "../rig-derive", optional = true }
+rig-derive = { version = "0.42.0", path = "../rig-derive", optional = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -46,33 +42,16 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
 http = { workspace = true }
 tracing-futures = { workspace = true, features = ["futures-03"] }
 fastrand = { workspace = true }
-nanoid = { workspace = true }
-eventsource-stream = { workspace = true }
-pin-project-lite = { workspace = true }
 futures-timer = { workspace = true }
 mime = { workspace = true }
-reqwest-middleware = { workspace = true, optional = true, features = [
-  "json",
-  "multipart",
-  "charset",
-  "http2",
-] }
-
-# Native-only dependency for OpenAI Responses websocket mode.
-# Keeping it target-scoped avoids pulling a tokio socket transport into wasm builds.
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-tokio-tungstenite = { workspace = true, optional = true }
-rustls = { workspace = true, optional = true }
-
 # futures-timer's default backend uses a background timer thread, which cannot
 # drive timers on wasm. Pull in its wasm-bindgen (setTimeout) backend whenever
 # the target is browser wasm — regardless of feature flags — so
-# `wasm_compat::timeout` and the SSE retry backoff actually fire instead of
-# hanging. Scoped to `target_os = "unknown"` (browser) rather than the whole
+# `wasm_compat::timeout` actually fires instead of hanging. Scoped to
+# `target_os = "unknown"` (browser) rather than the whole
 # `wasm` family because the gloo-timers/setTimeout backend needs a JS host and
 # would be wrong-by-construction on WASI.
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
@@ -88,30 +67,17 @@ anyhow = { workspace = true }
 # for every rig-core test target (unit, integration, doctest), so the
 # sequence laws panic in ALL of rig's own suites while staying log-only in
 # downstream builds.
-rig-core = { path = ".", features = ["test-utils"] }
-# identity-leak compile-fail tests (tests/identity_leak.rs)
-trybuild = "1.0"
+rig-core = { path = ".", features = ["test-utils", "websocket"] }
 # streaming identity/merge law property tests
 proptest = "1"
 assert_fs = { workspace = true }
 futures = { workspace = true }
-# server side of the websocket conformance suite (tests/streaming_conformance_websocket.rs)
-tokio-tungstenite = { workspace = true, features = ["handshake"] }
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tokio-test = { workspace = true }
 redis = { workspace = true, features = ["tokio-comp", "aio", "vector-sets"] }
 serde_path_to_error = { workspace = true }
 base64 = { workspace = true }
-reqwest-retry = { workspace = true }
-reqwest-middleware = { workspace = true, features = [
-  "json",
-  "multipart",
-  "charset",
-  "http2",
-  "rustls",
-] }
-
 # required for otel
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
@@ -120,53 +86,15 @@ tracing-opentelemetry = { workspace = true }
 
 
 [features]
-default = ["reqwest", "derive", "rustls"]
+default = ["derive"]
 audio = []
 image = []
 derive = ["dep:rig-derive"]
 test-utils = []
 pdf = ["dep:lopdf"]
 epub = ["dep:epub", "dep:quick-xml"]
-rayon = ["dep:rayon"]
-socks = ["reqwest/socks"]
-reqwest = [
-  "reqwest/charset",
-  "reqwest/http2",
-  "reqwest/system-proxy",
-]
-websocket = ["websocket-rustls"]
-websocket-rustls = [
-  "dep:tokio-tungstenite",
-  "tokio-tungstenite/connect",
-  "dep:rustls",
-  "rustls",
-]
-websocket-native-tls = [
-  "dep:tokio-tungstenite",
-  "tokio-tungstenite/connect",
-  "native-tls",
-]
-rustls = ["reqwest/rustls", "tokio-tungstenite?/rustls-tls-webpki-roots"]
-native-tls = ["reqwest/native-tls", "tokio-tungstenite?/native-tls"]
-reqwest-middleware = ["reqwest-middleware-rustls"]
-reqwest-middleware-rustls = ["dep:reqwest-middleware", "rustls", "reqwest-middleware/rustls"]
-# Route OpenAI Responses API deserializers through `serde_json::Value` to dodge
-# the incompatibility between `serde_json/arbitrary_precision` and `#[serde(flatten)]`
-# on structs with concrete numeric fields (serde-rs/json#1157).
-#
-# This feature gates **only** Rig's workaround code path: when enabled, the wrapper
-# in `json_utils::from_str` switches to the `Value` round-trip path. It deliberately
-# does NOT enable `serde_json/arbitrary_precision` — that remains a downstream choice.
-# A consumer who already enables `serde_json/arbitrary_precision` elsewhere in its
-# dependency graph (e.g. for lossless decoding of integers beyond u64::MAX) turns on
-# this feature to avoid the #1157 crash; a consumer who does not enable
-# `arbitrary_precision` pays only the small two-step parse cost. Default off —
-# feature-off behavior is upstream-equivalent.
-arbitrary-precision-flatten-workaround = []
-# Internal test-only feature: turns on `serde_json/arbitrary_precision` so the
-# `arbitrary_precision_flatten_workaround` proof tests can exercise the #1157
-# bug trigger. Not part of the public API; downstream consumers should not enable
-# this. CI runs the proof tests with this feature plus
-# `arbitrary-precision-flatten-workaround` to demonstrate the asymmetry.
-_internal-test-arbitrary-precision = ["serde_json/arbitrary_precision"]
-reqwest-middleware-native-tls = ["dep:reqwest-middleware", "native-tls"]
+# The transport-agnostic websocket contract (`ws_client`) and the provider
+# websocket sessions written against it. Adds no dependency — the contract is
+# built from `http`/`bytes`/`futures`/`url`, which rig-core already has — but
+# stays gated so the surface is opt-in, matching `audio`/`image`.
+websocket = []

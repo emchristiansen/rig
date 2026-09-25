@@ -1,9 +1,12 @@
-use rig_core::client::ProviderClient;
 use rig_core::vector_store::InsertDocuments;
 use rig_core::vector_store::request::VectorSearchRequest;
 use rig_core::{
-    Embed, client::EmbeddingsClient, embeddings::EmbeddingsBuilder, vector_store::VectorStoreIndex,
+    Embed,
+    embeddings::EmbeddingsBuilder,
+    providers::openai::{self, wire::OpenAI},
+    vector_store::VectorStoreIndex,
 };
+use rig_reqwest::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // A vector search needs to be performed on the `definitions` field, so we derive the `Embed` trait for `WordDefinition`
@@ -25,9 +28,9 @@ impl std::fmt::Display for WordDefinition {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // Create OpenAI client
-    let openai_client = rig_core::providers::openai::Client::from_env()?;
-    let model = openai_client.embedding_model(rig_core::providers::openai::TEXT_EMBEDDING_3_SMALL);
+    // Bind the OpenAI embeddings endpoint
+    let openai_client = OpenAI::from_env()?.bound()?;
+    let model = openai_client.embedding(openai::TEXT_EMBEDDING_3_SMALL, None);
 
     let base_url = std::env::var("MILVUS_BASE_URL")?;
     let collection_name = std::env::var("MILVUS_COLLECTION_NAME")?;
@@ -37,7 +40,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let vector_store =
         rig_milvus::MilvusVectorStore::new(model.clone(), base_url, database_name, collection_name)
-            .auth(milvus_user, milvus_password);
+            .auth(&milvus_user, &milvus_password);
 
     // create test documents with mocked embeddings
     let words = vec![

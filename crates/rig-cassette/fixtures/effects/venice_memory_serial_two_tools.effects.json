@@ -1,0 +1,816 @@
+{
+  "header": {
+    "run_spec": 6972143684084239244,
+    "handlers": [
+      {
+        "key": "golden/memory",
+        "family": {
+          "family": "memory"
+        }
+      },
+      {
+        "key": "golden/model:default",
+        "family": {
+          "family": "completion",
+          "model": "default",
+          "capabilities": {
+            "composes_native_output_with_tools": true
+          }
+        }
+      },
+      {
+        "key": "golden/tool:lookup_harbor_label#0",
+        "family": {
+          "family": "tool",
+          "name": "lookup_harbor_label",
+          "description": "Return the alpha signal marker.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      },
+      {
+        "key": "golden/tool:lookup_orchard_label#1",
+        "family": {
+          "family": "tool",
+          "name": "lookup_orchard_label",
+          "description": "Return the beta signal marker.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      }
+    ],
+    "signature": {
+      "golden/memory": "memory",
+      "golden/model:default": "completion",
+      "golden/tool:lookup_harbor_label#0": "tool",
+      "golden/tool:lookup_orchard_label#1": "tool"
+    },
+    "hooks": [],
+    "required": {
+      "golden/memory": "memory",
+      "golden/model:default": "completion",
+      "golden/tool:lookup_harbor_label#0": "tool",
+      "golden/tool:lookup_orchard_label#1": "tool"
+    },
+    "bus": {
+      "command_capacity": 16,
+      "stream_capacity": 64,
+      "serial_per_handler": true
+    }
+  },
+  "records": [
+    {
+      "tool_output": null,
+      "id": 1,
+      "key": "golden/memory",
+      "kind": {
+        "effect": "memory",
+        "op": {
+          "op": "load",
+          "conversation": "golden-conversation"
+        }
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "memory",
+          "memory": "loaded",
+          "messages": []
+        }
+      }
+    },
+    {
+      "tool_output": null,
+      "id": 2,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a precise assistant. When tools are available, you must use them instead of guessing. Call both `lookup_harbor_label` and `lookup_orchard_label` before writing any normal text. Never call the same tool twice once you already have its result."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering. After both tool results are available, stop calling tools and respond in one short sentence that includes both exact tool outputs."
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "lookup_harbor_label",
+              "description": "Return the alpha signal marker.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+              }
+            },
+            {
+              "name": "lookup_orchard_label",
+              "description": "Return the beta signal marker.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+              }
+            }
+          ],
+          "temperature": 0.0,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "LNCjx0YGN"
+              },
+              "provider": {
+                "call_id": "LNCjx0YGN"
+              },
+              "function": {
+                "name": "lookup_harbor_label",
+                "arguments": {}
+              },
+              "signature": null,
+              "additional_params": null
+            },
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "aPOfRAcFN"
+              },
+              "provider": {
+                "call_id": "aPOfRAcFN"
+              },
+              "function": {
+                "name": "lookup_orchard_label",
+                "arguments": {}
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          ],
+          "usage": {
+            "input_tokens": 1154,
+            "output_tokens": 16,
+            "total_tokens": 1170
+          },
+          "message_id": null,
+          "response_id": "chatcmpl-Rf92vwJvbZBgSKdTkK9bwNKQ",
+          "finish_reason": "tool_calls",
+          "provider": "venice",
+          "model": "mistral-small-3-2-24b-instruct",
+          "raw": {
+            "usage": {
+              "prompt_tokens": 1154,
+              "completion_tokens": 16,
+              "total_tokens": 1170
+            },
+            "finish_reason": "tool_calls",
+            "response_id": "chatcmpl-Rf92vwJvbZBgSKdTkK9bwNKQ",
+            "model": "mistral-small-3-2-24b-instruct",
+            "additional_params": {
+              "created": 0,
+              "object": "chat.completion.chunk",
+              "service_tier": "default",
+              "cost": {
+                "diem": 0,
+                "usd": 0.0001121875
+              }
+            }
+          }
+        }
+      },
+      "events": [
+        {
+          "event": "block_delta",
+          "id": "wire:LNCjx0YGN",
+          "delta": {
+            "delta": "tool_name",
+            "name": "lookup_harbor_label"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:LNCjx0YGN",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "{}"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:aPOfRAcFN",
+          "delta": {
+            "delta": "tool_name",
+            "name": "lookup_orchard_label"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:aPOfRAcFN",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "{}"
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:LNCjx0YGN",
+          "end": {
+            "close": "tool_call",
+            "tool_id": "LNCjx0YGN",
+            "on_unparseable": "error"
+          },
+          "block": {
+            "type": "toolcall",
+            "id": {
+              "origin": "explicit",
+              "id": "LNCjx0YGN"
+            },
+            "provider": {
+              "call_id": "LNCjx0YGN"
+            },
+            "function": {
+              "name": "lookup_harbor_label",
+              "arguments": {}
+            },
+            "signature": null,
+            "additional_params": null
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:aPOfRAcFN",
+          "end": {
+            "close": "tool_call",
+            "tool_id": "aPOfRAcFN",
+            "on_unparseable": "error"
+          },
+          "block": {
+            "type": "toolcall",
+            "id": {
+              "origin": "explicit",
+              "id": "aPOfRAcFN"
+            },
+            "provider": {
+              "call_id": "aPOfRAcFN"
+            },
+            "function": {
+              "name": "lookup_orchard_label",
+              "arguments": {}
+            },
+            "signature": null,
+            "additional_params": null
+          }
+        },
+        {
+          "event": "final",
+          "usage": {
+            "input_tokens": 1154,
+            "output_tokens": 16,
+            "total_tokens": 1170
+          },
+          "finish_reason": "tool_calls",
+          "message_id": null,
+          "response_id": "chatcmpl-Rf92vwJvbZBgSKdTkK9bwNKQ",
+          "provider": "venice",
+          "model": "mistral-small-3-2-24b-instruct",
+          "raw": {
+            "usage": {
+              "prompt_tokens": 1154,
+              "completion_tokens": 16,
+              "total_tokens": 1170
+            },
+            "finish_reason": "tool_calls",
+            "response_id": "chatcmpl-Rf92vwJvbZBgSKdTkK9bwNKQ",
+            "model": "mistral-small-3-2-24b-instruct",
+            "additional_params": {
+              "created": 0,
+              "object": "chat.completion.chunk",
+              "service_tier": "default",
+              "cost": {
+                "diem": 0,
+                "usd": 0.0001121875
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "tool_output": {},
+      "id": 3,
+      "key": "golden/tool:lookup_harbor_label#0",
+      "kind": {
+        "effect": "tool_call",
+        "name": "lookup_harbor_label",
+        "args": "{}"
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "tool_result",
+          "result": {
+            "status": "success",
+            "value": [
+              {
+                "type": "text",
+                "text": "crimson-harbor"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "tool_output": {},
+      "id": 4,
+      "key": "golden/tool:lookup_orchard_label#1",
+      "kind": {
+        "effect": "tool_call",
+        "name": "lookup_orchard_label",
+        "args": "{}"
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "tool_result",
+          "result": {
+            "status": "success",
+            "value": [
+              {
+                "type": "text",
+                "text": "silver-orchard"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "tool_output": null,
+      "id": 5,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a precise assistant. When tools are available, you must use them instead of guessing. Call both `lookup_harbor_label` and `lookup_orchard_label` before writing any normal text. Never call the same tool twice once you already have its result."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering. After both tool results are available, stop calling tools and respond in one short sentence that includes both exact tool outputs."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "LNCjx0YGN"
+                  },
+                  "provider": {
+                    "call_id": "LNCjx0YGN"
+                  },
+                  "function": {
+                    "name": "lookup_harbor_label",
+                    "arguments": {}
+                  },
+                  "signature": null,
+                  "additional_params": null
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "aPOfRAcFN"
+                  },
+                  "provider": {
+                    "call_id": "aPOfRAcFN"
+                  },
+                  "function": {
+                    "name": "lookup_orchard_label",
+                    "arguments": {}
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "LNCjx0YGN"
+                  },
+                  "provider": {
+                    "call_id": "LNCjx0YGN"
+                  },
+                  "name": "lookup_harbor_label",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "crimson-harbor"
+                    }
+                  ]
+                },
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "aPOfRAcFN"
+                  },
+                  "provider": {
+                    "call_id": "aPOfRAcFN"
+                  },
+                  "name": "lookup_orchard_label",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "silver-orchard"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "lookup_harbor_label",
+              "description": "Return the alpha signal marker.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+              }
+            },
+            {
+              "name": "lookup_orchard_label",
+              "description": "Return the beta signal marker.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+              }
+            }
+          ],
+          "temperature": 0.0,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "text",
+              "text": "The current signals are crimson-harbor and silver-orchard."
+            }
+          ],
+          "usage": {
+            "input_tokens": 1214,
+            "output_tokens": 15,
+            "total_tokens": 1229
+          },
+          "message_id": null,
+          "response_id": "chatcmpl-RTzj6V8Fz1jMhRgWj7l5t2e9",
+          "finish_reason": "stop",
+          "provider": "venice",
+          "model": "mistral-small-3-2-24b-instruct",
+          "raw": {
+            "usage": {
+              "prompt_tokens": 1214,
+              "completion_tokens": 15,
+              "total_tokens": 1229
+            },
+            "finish_reason": "stop",
+            "response_id": "chatcmpl-RTzj6V8Fz1jMhRgWj7l5t2e9",
+            "model": "mistral-small-3-2-24b-instruct",
+            "additional_params": {
+              "created": 0,
+              "object": "chat.completion.chunk",
+              "service_tier": "default",
+              "cost": {
+                "diem": 0,
+                "usd": 0.00011756249999999999
+              }
+            }
+          }
+        }
+      },
+      "events": [
+        {
+          "event": "block_start",
+          "id": "minted:text:0",
+          "kind": {
+            "kind": "text"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": "The"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": " current"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": " signals"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": " are"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": " cr"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": "imson"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": "-h"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": "ar"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": "bor"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": " and"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": " silver"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": "-or"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": "chard"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "minted:text:0",
+          "delta": {
+            "delta": "text",
+            "text": "."
+          }
+        },
+        {
+          "event": "final",
+          "usage": {
+            "input_tokens": 1214,
+            "output_tokens": 15,
+            "total_tokens": 1229
+          },
+          "finish_reason": "stop",
+          "message_id": null,
+          "response_id": "chatcmpl-RTzj6V8Fz1jMhRgWj7l5t2e9",
+          "provider": "venice",
+          "model": "mistral-small-3-2-24b-instruct",
+          "raw": {
+            "usage": {
+              "prompt_tokens": 1214,
+              "completion_tokens": 15,
+              "total_tokens": 1229
+            },
+            "finish_reason": "stop",
+            "response_id": "chatcmpl-RTzj6V8Fz1jMhRgWj7l5t2e9",
+            "model": "mistral-small-3-2-24b-instruct",
+            "additional_params": {
+              "created": 0,
+              "object": "chat.completion.chunk",
+              "service_tier": "default",
+              "cost": {
+                "diem": 0,
+                "usd": 0.00011756249999999999
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "tool_output": null,
+      "id": 6,
+      "key": "golden/memory",
+      "kind": {
+        "effect": "memory",
+        "op": {
+          "op": "append",
+          "conversation": "golden-conversation",
+          "messages": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering. After both tool results are available, stop calling tools and respond in one short sentence that includes both exact tool outputs."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "LNCjx0YGN"
+                  },
+                  "provider": {
+                    "call_id": "LNCjx0YGN"
+                  },
+                  "function": {
+                    "name": "lookup_harbor_label",
+                    "arguments": {}
+                  },
+                  "signature": null,
+                  "additional_params": null
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "aPOfRAcFN"
+                  },
+                  "provider": {
+                    "call_id": "aPOfRAcFN"
+                  },
+                  "function": {
+                    "name": "lookup_orchard_label",
+                    "arguments": {}
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "LNCjx0YGN"
+                  },
+                  "provider": {
+                    "call_id": "LNCjx0YGN"
+                  },
+                  "name": "lookup_harbor_label",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "crimson-harbor"
+                    }
+                  ]
+                },
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "aPOfRAcFN"
+                  },
+                  "provider": {
+                    "call_id": "aPOfRAcFN"
+                  },
+                  "name": "lookup_orchard_label",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "silver-orchard"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "text",
+                  "text": "The current signals are crimson-harbor and silver-orchard."
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "memory",
+          "memory": "appended"
+        }
+      }
+    }
+  ]
+}

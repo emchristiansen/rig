@@ -1,7 +1,9 @@
 use aws_smithy_types::Blob;
-use rig_core::embeddings::{self, Embedding, EmbeddingError};
+use rig_core::embeddings::{self, Embedding};
+use rig_core::error::ProviderError;
 use serde::{Deserialize, Serialize};
 
+use crate::types::assistant_content::PROVIDER_NAME;
 use crate::{client::Client, types::errors::AwsSdkInvokeModelError};
 
 #[derive(Serialize)]
@@ -12,15 +14,13 @@ pub struct EmbeddingRequest {
     pub normalize: bool,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbeddingResponse {
     pub embedding: Vec<f64>,
     pub input_text_token_count: usize,
 }
 
-// The model-id string values are canonically defined in `crate::completion`;
-// these aliases keep this module's historical public names.
 pub use crate::completion::{
     AMAZON_TITAN_EMBEDDINGS_G1_TEXT as AMAZON_TITAN_EMBED_TEXT_V1,
     AMAZON_TITAN_MULTIMODAL_EMBEDDINGS_G1 as AMAZON_TITAN_EMBED_IMAGE_V1,
@@ -48,12 +48,12 @@ impl EmbeddingModel {
     pub async fn document_to_embeddings(
         &self,
         request: EmbeddingRequest,
-    ) -> Result<EmbeddingResponse, EmbeddingError> {
-        let input_document = serde_json::to_string(&request).map_err(EmbeddingError::JsonError)?;
+    ) -> Result<EmbeddingResponse, ProviderError> {
+        let input_document = serde_json::to_string(&request).map_err(ProviderError::Json)?;
 
         let model_response = self
             .client
-            .get_inner()
+            .inner()
             .await
             .invoke_model()
             .model_id(self.model.as_str())
@@ -65,61 +65,76 @@ impl EmbeddingModel {
 
         let response = model_response
             .map_err(|sdk_error| AwsSdkInvokeModelError(sdk_error).into())
-            .map_err(|e: EmbeddingError| e)?;
+            .map_err(|e: ProviderError| e)?;
 
         let response_str = String::from_utf8(response.body.into_inner())
-            .map_err(|e| EmbeddingError::ResponseError(e.to_string()))?;
+            .map_err(|e| ProviderError::Response(e.to_string()))?;
 
         let result: EmbeddingResponse =
-            serde_json::from_str(&response_str).map_err(EmbeddingError::JsonError)?;
+            serde_json::from_str(&response_str).map_err(ProviderError::Json)?;
 
         Ok(result)
     }
 }
 
 impl embeddings::EmbeddingModel for EmbeddingModel {
-    const MAX_DOCUMENTS: usize = 1024;
-
-    type Client = Client;
-
-    fn make(client: &Self::Client, model: impl Into<String>, dims: Option<usize>) -> Self {
-        Self::new(client.clone(), model, dims)
+    fn max_documents(&self) -> usize {
+        1024
     }
 
     fn ndims(&self) -> usize {
         self.ndims.unwrap_or_default()
     }
 
-    async fn embed_texts(
+    async fn embed_texts_response(
         &self,
         documents: impl IntoIterator<Item = String> + Send,
-    ) -> Result<Vec<Embedding>, EmbeddingError> {
-        let documents: Vec<String> = documents.into_iter().collect();
+    ) -> Result<embeddings::EmbeddingResponse, ProviderError> {
+        rig_core::telemetry::instrument_modality::<rig_core::operation::Embedding, _>(
+            PROVIDER_NAME,
+            &self.model,
+            async {
+                let documents: Vec<String> = documents.into_iter().collect();
 
-        // Deliberately sequential: issuing the requests one at a time keeps
-        // Bedrock's per-account throttling behavior unchanged.
-        let mut results = Vec::new();
-        let mut first_error = None;
-        for doc in documents {
-            let request = EmbeddingRequest {
-                input_text: doc.clone(),
-                dimensions: self.ndims(),
-                normalize: true,
-            };
-            match self.document_to_embeddings(request).await {
-                Ok(embeddings) => results.push(Embedding {
-                    document: doc,
-                    vec: embeddings.embedding,
-                }),
-                Err(err) => {
-                    first_error.get_or_insert(err);
+                // Sequential requests limit concurrent load against account quotas.
+                let mut results = Vec::new();
+                let mut raw = Vec::new();
+                let mut usage = rig_core::completion::Usage::default();
+                let mut first_error = None;
+                for doc in documents {
+                    let request = EmbeddingRequest {
+                        input_text: doc.clone(),
+                        dimensions: self.ndims(),
+                        normalize: true,
+                    };
+                    match self.document_to_embeddings(request).await {
+                        Ok(response) => {
+                            let tokens = response.input_text_token_count as u64;
+                            usage += rig_core::completion::Usage {
+                                input_tokens: Some(tokens),
+                                total_tokens: Some(tokens),
+                                ..Default::default()
+                            };
+                            raw.push(serde_json::to_value(&response)?);
+                            results.push(Embedding {
+                                document: doc,
+                                vec: response.embedding,
+                            });
+                        }
+                        Err(err) => {
+                            first_error.get_or_insert(err);
+                        }
+                    }
                 }
-            }
-        }
 
-        match first_error {
-            None => Ok(results),
-            Some(err) => Err(EmbeddingError::ResponseError(err.to_string())),
-        }
+                match first_error {
+                    None => Ok(embeddings::EmbeddingResponse::new(results, PROVIDER_NAME)
+                        .with_usage(usage)
+                        .with_raw(serde_json::Value::Array(raw))),
+                    Some(err) => Err(ProviderError::Response(err.to_string())),
+                }
+            },
+        )
+        .await
     }
 }

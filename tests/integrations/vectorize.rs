@@ -1,11 +1,3 @@
-#![allow(
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::unwrap_used,
-    clippy::unreachable
-)]
-
 //! Integration tests for rig-vectorize.
 //!
 //! These tests require a real Cloudflare Vectorize index and valid credentials.
@@ -300,7 +292,7 @@ async fn test_query_with_eq_filter() {
             }
         }
         Err(e) => {
-            eprintln!("Filter test skipped - metadata may not be indexed: {:?}", e);
+            eprintln!("Filter test skipped - metadata may not be indexed: {e:?}");
         }
     }
 }
@@ -354,7 +346,7 @@ async fn test_query_with_combined_filters() {
 
     // category = "programming" AND id != "doc-rust"
     let filter = VectorizeFilter::eq("category", serde_json::json!("programming"))
-        .and(VectorizeFilter::ne("id", serde_json::json!("doc-rust")));
+        .and(VectorizeFilter::ne("id", &serde_json::json!("doc-rust")));
 
     let request = VectorSearchRequest::builder()
         .query("programming")
@@ -379,7 +371,7 @@ async fn test_query_with_combined_filters() {
             }
         }
         Err(e) => {
-            eprintln!("Filter test skipped - metadata may not be indexed: {:?}", e);
+            eprintln!("Filter test skipped - metadata may not be indexed: {e:?}");
         }
     }
 }
@@ -433,7 +425,7 @@ async fn test_query_with_in_filter() {
 
     let filter = VectorizeFilter::in_values(
         "category",
-        vec![
+        &[
             serde_json::json!("programming"),
             serde_json::json!("database"),
         ],
@@ -462,7 +454,7 @@ async fn test_query_with_in_filter() {
             }
         }
         Err(e) => {
-            eprintln!("Filter test skipped - metadata may not be indexed: {:?}", e);
+            eprintln!("Filter test skipped - metadata may not be indexed: {e:?}");
         }
     }
 }
@@ -493,27 +485,19 @@ impl MockEmbeddingModel {
     }
 }
 
-struct MockClient;
-
 impl EmbeddingModel for MockEmbeddingModel {
-    const MAX_DOCUMENTS: usize = 100;
-
-    type Client = MockClient;
-
-    fn make(_client: &Self::Client, _model: impl Into<String>, dims: Option<usize>) -> Self {
-        Self {
-            dimensions: dims.unwrap_or(1536),
-        }
+    fn max_documents(&self) -> usize {
+        100
     }
 
     fn ndims(&self) -> usize {
         self.dimensions
     }
 
-    async fn embed_texts(
+    async fn embed_texts_response(
         &self,
         texts: impl IntoIterator<Item = String> + Send,
-    ) -> Result<Vec<rig::embeddings::Embedding>, rig::embeddings::EmbeddingError> {
+    ) -> Result<rig::embeddings::EmbeddingResponse, rig::error::ProviderError> {
         let texts: Vec<String> = texts.into_iter().collect();
         let embeddings = texts
             .into_iter()
@@ -531,7 +515,7 @@ impl EmbeddingModel for MockEmbeddingModel {
                 }
             })
             .collect();
-        Ok(embeddings)
+        Ok(rig::embeddings::EmbeddingResponse::new(embeddings, "mock"))
     }
 }
 
@@ -577,7 +561,7 @@ async fn clear_test_index() {
         let result = match client.list_vectors(Some(1000), cursor.as_deref()).await {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Warning: Failed to list vectors: {:?}", e);
+                eprintln!("Warning: Failed to list vectors: {e:?}");
                 return;
             }
         };
@@ -588,7 +572,7 @@ async fn clear_test_index() {
 
         let ids: Vec<String> = result.vectors.into_iter().map(|v| v.id).collect();
         if let Err(e) = client.delete_by_ids(ids).await {
-            eprintln!("Warning: Failed to delete vectors: {:?}", e);
+            eprintln!("Warning: Failed to delete vectors: {e:?}");
             return;
         }
 

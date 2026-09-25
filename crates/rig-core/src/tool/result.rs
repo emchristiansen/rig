@@ -1,6 +1,16 @@
-//! Canonical structured tool errors and execution results.
+//! Structured tool failures and model-visible execution results.
+//!
+//! ```
+//! use rig_core::tool::{ToolExecutionError, ToolResult};
+//!
+//! let result = ToolResult::failed(ToolExecutionError::invalid_args("Provide a name"));
+//! assert!(result.is_error());
+//! assert_eq!(result.output().as_text(), Some("Provide a name"));
+//! ```
 
-use std::{error::Error, sync::Arc};
+use std::error::Error;
+#[cfg(not(target_family = "wasm"))]
+use std::sync::Arc;
 
 use crate::{
     tool::ToolOutput,
@@ -8,8 +18,8 @@ use crate::{
 };
 
 /// Normalized classification for a tool execution error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolErrorKind {
     /// Arguments could not be decoded or validated.
     InvalidArgs,
@@ -43,7 +53,9 @@ macro_rules! kind_defaults {
                 match self { $(Self::$variant => $name,)+ }
             }
 
-            const fn default_retryable(self) -> Option<bool> {
+            /// Default retryability, or `None` when the tool must supply a verdict.
+            /// Without an override, `None` becomes non-retryable in error reports.
+            pub const fn default_retryable(self) -> Option<bool> {
                 match self { $(Self::$variant => $retryable,)+ }
             }
 
@@ -120,19 +132,65 @@ impl std::fmt::Display for ToolErrorKind {
 /// [`Self::from_error`] instead treats an arbitrary source as operator-only and
 /// exposes safe kind-level feedback. Use [`Self::with_model_feedback`] or
 /// [`Self::with_model_output`] to provide a purpose-built presentation.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(from = "ToolExecutionErrorRepr", into = "ToolExecutionErrorRepr")]
 pub struct ToolExecutionError {
     kind: ToolErrorKind,
     message: String,
-    model_output: Box<ToolOutput>,
+    model_output: ToolOutput,
     retryable: Option<bool>,
     code: Option<String>,
     http_status: Option<u16>,
     refusal: bool,
+    /// The concrete source, kept for downcasting on native. Browser wasm
+    /// retains none: its errors are not `Send + Sync`, and this type must be
+    /// (it crosses the effect bus and the wire as part of an `Outcome`).
     #[cfg(not(target_family = "wasm"))]
     source: Option<Arc<dyn Error + Send + Sync + 'static>>,
-    #[cfg(target_family = "wasm")]
-    source: Option<Arc<dyn Error + 'static>>,
+}
+
+/// The wire form of [`ToolExecutionError`]: every field but `source`. A
+/// source is live process state (a boxed error); it does not cross a wire
+/// and a report reconstructed from one has none.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ToolExecutionErrorRepr {
+    kind: ToolErrorKind,
+    message: String,
+    model_output: ToolOutput,
+    retryable: Option<bool>,
+    code: Option<String>,
+    http_status: Option<u16>,
+    refusal: bool,
+}
+
+impl From<ToolExecutionError> for ToolExecutionErrorRepr {
+    fn from(error: ToolExecutionError) -> Self {
+        Self {
+            kind: error.kind,
+            message: error.message,
+            model_output: error.model_output,
+            retryable: error.retryable,
+            code: error.code,
+            http_status: error.http_status,
+            refusal: error.refusal,
+        }
+    }
+}
+
+impl From<ToolExecutionErrorRepr> for ToolExecutionError {
+    fn from(repr: ToolExecutionErrorRepr) -> Self {
+        Self {
+            kind: repr.kind,
+            message: repr.message,
+            model_output: repr.model_output,
+            retryable: repr.retryable,
+            code: repr.code,
+            http_status: repr.http_status,
+            refusal: repr.refusal,
+            #[cfg(not(target_family = "wasm"))]
+            source: None,
+        }
+    }
 }
 
 impl ToolExecutionError {
@@ -141,12 +199,13 @@ impl ToolExecutionError {
         let message = message.into();
         Self {
             kind,
-            model_output: Box::new(ToolOutput::text(message.clone())),
+            model_output: ToolOutput::text(message.clone()),
             message,
             retryable: kind.default_retryable(),
             code: None,
             http_status: None,
             refusal: false,
+            #[cfg(not(target_family = "wasm"))]
             source: None,
         }
     }
@@ -163,10 +222,10 @@ impl ToolExecutionError {
 
     /// Build a safely presented `Other` error from a concrete source.
     ///
-    /// The source's display string remains available as the operator-facing
-    /// [`Self::message`] and the source remains downcastable, but the model sees
-    /// only the stable feedback for [`ToolErrorKind::Other`]. Passing an existing
-    /// `ToolExecutionError` preserves its classification and presentation.
+    /// The source's display string remains in [`Self::message`], while the model
+    /// sees stable [`ToolErrorKind::Other`] feedback. Native targets retain the
+    /// downcastable source; WASM drops it. An existing `ToolExecutionError`
+    /// retains its classification and presentation.
     pub fn from_error<E>(error: E) -> Self
     where
         E: Error + WasmCompatSend + WasmCompatSync + 'static,
@@ -189,26 +248,21 @@ impl ToolExecutionError {
             let source: Box<dyn Error + 'static> = Box::new(error);
             match source.downcast::<Self>() {
                 Ok(error) => *error,
-                Err(source) => {
-                    let message = source.to_string();
-                    let mut error = Self::other(message).redact_model_feedback();
-                    error.source = Some(Arc::from(source));
-                    error
-                }
+                Err(source) => Self::other(source.to_string()).redact_model_feedback(),
             }
         }
     }
 
     /// Replace the model-visible output with literal text feedback.
     pub fn with_model_feedback(mut self, feedback: impl Into<String>) -> Self {
-        self.model_output = Box::new(ToolOutput::text(feedback));
+        self.model_output = ToolOutput::text(feedback);
         self
     }
 
     /// Replace the model-visible output with canonical JSON or multimodal
     /// content.
     pub fn with_model_output(mut self, output: ToolOutput) -> Self {
-        self.model_output = Box::new(output);
+        self.model_output = output;
         self
     }
 
@@ -219,8 +273,8 @@ impl ToolExecutionError {
     /// keep failures actionable. Call this when an explicitly constructed
     /// error's operator diagnostic may contain secrets; [`Self::from_error`]
     /// already uses this safe presentation for arbitrary source errors.
-    pub fn redact_model_feedback(mut self) -> Self {
-        self.model_output = Box::new(ToolOutput::text(self.kind.default_model_feedback()));
+    pub(crate) fn redact_model_feedback(mut self) -> Self {
+        self.model_output = ToolOutput::text(self.kind.default_model_feedback());
         self
     }
 
@@ -243,11 +297,22 @@ impl ToolExecutionError {
     }
 
     /// Preserve a concrete source for later downcasting.
+    ///
+    /// Browser wasm keeps no source (see the field): the call is accepted
+    /// and the source dropped, so tool code stays target-independent.
+    #[cfg_attr(target_family = "wasm", allow(unused_mut))]
     pub fn with_source<E>(mut self, source: E) -> Self
     where
         E: Error + WasmCompatSend + WasmCompatSync + 'static,
     {
-        self.source = Some(Arc::new(source));
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.source = Some(Arc::new(source));
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = source;
+        }
         self
     }
 
@@ -299,7 +364,14 @@ impl ToolExecutionError {
     where
         E: Error + WasmCompatSend + WasmCompatSync + 'static,
     {
-        self.source.as_ref()?.downcast_ref::<E>()
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.source.as_ref()?.downcast_ref::<E>()
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            None
+        }
     }
 
     /// Whether the concrete source has type `E`.
@@ -326,21 +398,42 @@ impl std::fmt::Debug for ToolExecutionError {
             .field("http_status", &self.http_status)
             .field("refusal", &self.refusal)
             .field("model_output", &"<redacted>")
-            .field("source_configured", &self.source.is_some())
+            .field("source_configured", &self.has_source())
             .finish()
+    }
+}
+
+impl ToolExecutionError {
+    fn has_source(&self) -> bool {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.source.is_some()
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            false
+        }
     }
 }
 
 impl Error for ToolExecutionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn Error + 'static))
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.source
+                .as_deref()
+                .map(|source| source as &(dyn Error + 'static))
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            None
+        }
     }
 }
 
 /// Private mutually exclusive state behind [`ToolResult`].
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", content = "value", rename_all = "snake_case")]
 enum ToolDisposition {
     Success(ToolOutput),
     Error(ToolExecutionError),
@@ -353,7 +446,8 @@ enum ToolDisposition {
 /// Each result has exactly one disposition. The tagged state is private so tool
 /// authors keep returning ordinary `Result` values while runtime callers use
 /// the stable query methods on this type.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct ToolResult {
     disposition: ToolDisposition,
 }
@@ -403,7 +497,24 @@ impl ToolResult {
         }
     }
 
-    /// Canonical model-visible output before any presentation-only hook rewrite.
+    /// The same result with its model-visible output replaced, keeping its
+    /// disposition: a success or a skip carries the new output; a failure or
+    /// refusal keeps its error and presents the new output to the model.
+    pub fn with_output(self, output: ToolOutput) -> Self {
+        let disposition = match self.disposition {
+            ToolDisposition::Success(_) => ToolDisposition::Success(output),
+            ToolDisposition::Skipped(_) => ToolDisposition::Skipped(output),
+            ToolDisposition::Error(error) => {
+                ToolDisposition::Error(error.with_model_output(output))
+            }
+            ToolDisposition::Refused(error) => {
+                ToolDisposition::Refused(error.with_model_output(output))
+            }
+        };
+        Self { disposition }
+    }
+
+    /// Current model-visible output, including replacements made by [`Self::with_output`].
     pub fn output(&self) -> &ToolOutput {
         match &self.disposition {
             ToolDisposition::Success(output) | ToolDisposition::Skipped(output) => output,
@@ -466,7 +577,16 @@ impl ToolResult {
         self.error().is_some_and(|error| error.kind == kind)
     }
 
-    /// Returns the stable telemetry name for this result disposition.
+    /// Converts success or skipped dispositions to `Ok(output)` and errors or
+    /// refusals to `Err(error)`.
+    pub fn into_result(self) -> Result<ToolOutput, ToolExecutionError> {
+        match self.disposition {
+            ToolDisposition::Success(output) | ToolDisposition::Skipped(output) => Ok(output),
+            ToolDisposition::Error(error) | ToolDisposition::Refused(error) => Err(error),
+        }
+    }
+
+    /// Stable telemetry disposition: `success`, `error`, `denied`, or `skipped`.
     pub fn status_name(&self) -> &'static str {
         match &self.disposition {
             ToolDisposition::Success(_) => "success",
@@ -485,241 +605,7 @@ const _: fn() = || {
 };
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Debug, thiserror::Error)]
-    #[error("secret detail")]
-    struct Concrete;
-
-    #[test]
-    fn envelope_is_classified_cloneable_downcastable_and_redacted() {
-        let error = ToolExecutionError::provider("operator message")
-            .with_model_feedback("safe feedback")
-            .with_http_status(503)
-            .with_source(Concrete);
-        let cloned = error.clone();
-        assert_eq!(error.kind(), ToolErrorKind::Provider);
-        assert_eq!(error.model_feedback(), Some("safe feedback"));
-        assert_eq!(error.http_status(), Some(503));
-        assert!(cloned.is::<Concrete>());
-        assert!(!format!("{error:?}").contains("secret detail"));
-    }
-
-    #[test]
-    fn converting_an_existing_envelope_preserves_classification() {
-        let error = ToolExecutionError::from_error(ToolExecutionError::timeout("slow"));
-        assert_eq!(error.kind(), ToolErrorKind::Timeout);
-        assert_eq!(error.retryable(), Some(true));
-    }
-
-    #[test]
-    fn detailed_diagnostics_are_model_visible_by_default() {
-        let error = ToolExecutionError::provider("upstream rejected field `region`");
-        let result = ToolResult::failed(error.clone());
-
-        assert_eq!(error.message(), "upstream rejected field `region`");
-        assert_eq!(
-            error.model_feedback(),
-            Some("upstream rejected field `region`")
-        );
-        assert_eq!(
-            result.output().as_text(),
-            Some("upstream rejected field `region`")
-        );
-    }
-
-    #[test]
-    fn sensitive_diagnostics_can_be_explicitly_redacted() {
-        let error = ToolExecutionError::provider("authorization header Bearer secret-token")
-            .redact_model_feedback();
-        let result = ToolResult::failed(error.clone());
-
-        assert_eq!(error.message(), "authorization header Bearer secret-token");
-        assert_eq!(error.model_feedback(), Some("the tool provider failed"));
-        assert_eq!(result.output().as_text(), Some("the tool provider failed"));
-        assert!(!result.output().render().contains("secret-token"));
-    }
-
-    #[test]
-    fn errors_can_expose_structured_model_output() {
-        let output = ToolOutput::json(serde_json::json!({
-            "error": "invalid region",
-            "allowed": ["us", "eu"]
-        }));
-        let result = ToolResult::failed(
-            ToolExecutionError::invalid_args("region was invalid")
-                .with_model_output(output.clone()),
-        );
-
-        assert_eq!(result.output(), &output);
-        assert_eq!(result.error().unwrap().model_output(), &output);
-        assert_eq!(result.error().unwrap().model_feedback(), None);
-    }
-
-    #[test]
-    fn skip_refusal_and_permission_failure_are_distinct() {
-        let skipped = ToolResult::skipped("policy");
-        let refused = ToolResult::failed(ToolExecutionError::refused("tool refused"));
-        let permission_failure = ToolResult::failed(ToolExecutionError::permission_denied(
-            "authorization failed",
-        ));
-        assert!(skipped.is_skipped());
-        assert!(!skipped.is_refused());
-        assert!(refused.is_refused());
-        assert!(!refused.is_skipped());
-        assert!(!refused.is_error());
-        assert!(refused.error().is_none());
-        assert!(refused.refusal().is_some_and(|error| error.is_refusal()));
-        assert!(permission_failure.is_error());
-        assert!(!permission_failure.is_refused());
-        assert!(permission_failure.refusal().is_none());
-        assert!(permission_failure.is_error_kind(ToolErrorKind::PermissionDenied));
-        assert!(!refused.is_error_kind(ToolErrorKind::PermissionDenied));
-        assert_eq!(refused.status_name(), "denied");
-        assert_eq!(permission_failure.status_name(), "error");
-    }
-
-    #[test]
-    fn execution_error_debug_redacts_operator_and_model_payloads() {
-        let error = ToolExecutionError::provider("Bearer secret-operator-message")
-            .with_model_output(ToolOutput::json(serde_json::json!({
-                "credential": "secret-model-output"
-            })))
-            .with_source(Concrete);
-
-        let debug = format!("{error:?}");
-        assert!(debug.contains("kind: Provider"));
-        assert!(debug.contains("model_output: \"<redacted>\""));
-        assert!(debug.contains("source_configured: true"));
-        for secret in [
-            "secret-operator-message",
-            "secret-model-output",
-            "secret detail",
-        ] {
-            assert!(!debug.contains(secret));
-        }
-    }
-
-    #[test]
-    fn debug_redacts_every_tool_result_disposition() {
-        let success = ToolResult::success(ToolOutput::text("secret-success"));
-        let failure = ToolResult::failed(
-            ToolExecutionError::provider("secret-operator").with_model_feedback("secret-model"),
-        );
-        let skipped = ToolResult::skipped("secret-skip");
-        let refused = ToolResult::failed(ToolExecutionError::refused("secret-refusal"));
-
-        for (result, expected_status) in [
-            (success, "success"),
-            (failure, "error"),
-            (skipped, "skipped"),
-            (refused, "denied"),
-        ] {
-            let debug = format!("{result:?}");
-            assert!(debug.contains(expected_status));
-            for secret in [
-                "secret-success",
-                "secret-operator",
-                "secret-model",
-                "secret-skip",
-                "secret-refusal",
-            ] {
-                assert!(!debug.contains(secret));
-            }
-        }
-    }
-}
+mod tests;
 
 #[cfg(test)]
-mod migrated_tests {
-    use super::*;
-
-    #[test]
-    fn per_kind_constructors_set_default_retryability() {
-        for (error, retryable) in [
-            (ToolExecutionError::timeout("t"), Some(true)),
-            (ToolExecutionError::rate_limited("r"), Some(true)),
-            (ToolExecutionError::network("n"), Some(true)),
-            (ToolExecutionError::not_found("nf"), Some(false)),
-            (ToolExecutionError::permission_denied("p"), Some(false)),
-            (ToolExecutionError::invalid_args("i"), Some(false)),
-            (ToolExecutionError::cancelled("c"), Some(false)),
-            (ToolExecutionError::provider("p"), None),
-            (ToolExecutionError::other("o"), None),
-        ] {
-            assert_eq!(error.retryable(), retryable);
-        }
-    }
-
-    #[test]
-    fn error_builder_preserves_policy_fields_and_feedback() {
-        let error = ToolExecutionError::rate_limited("operator")
-            .with_model_feedback("slow down")
-            .with_retryable(false)
-            .with_code("RATE_42")
-            .with_http_status(429);
-        assert_eq!(error.kind(), ToolErrorKind::RateLimited);
-        assert_eq!(error.message(), "operator");
-        assert_eq!(error.model_feedback(), Some("slow down"));
-        assert_eq!(error.retryable(), Some(false));
-        assert_eq!(error.code(), Some("RATE_42"));
-        assert_eq!(error.http_status(), Some(429));
-        let result = ToolResult::failed(error);
-        assert_eq!(result.output().as_text(), Some("slow down"));
-        assert!(result.is_error_kind(ToolErrorKind::RateLimited));
-    }
-
-    #[test]
-    fn success_preserves_multiline_output_verbatim() {
-        let result = ToolResult::success(ToolOutput::text("hello\nworld"));
-        assert!(result.is_success());
-        assert_eq!(result.output().as_text(), Some("hello\nworld"));
-        assert!(result.error().is_none());
-    }
-
-    #[test]
-    fn result_states_are_mutually_distinguishable() {
-        let success = ToolResult::success(ToolOutput::text("ok"));
-        let failure = ToolResult::failed(ToolExecutionError::not_found("missing"));
-        let skipped = ToolResult::skipped("policy");
-        let refused = ToolResult::failed(ToolExecutionError::refused("denied"));
-        assert!(success.is_success());
-        assert!(failure.is_error());
-        assert!(skipped.is_skipped());
-        assert!(refused.is_refused());
-        assert!(!refused.is_error());
-        assert!(!skipped.is_refused());
-        assert!(!refused.is_skipped());
-        assert_eq!(success.status_name(), "success");
-        assert_eq!(failure.status_name(), "error");
-        assert_eq!(skipped.status_name(), "skipped");
-        assert_eq!(refused.status_name(), "denied");
-    }
-
-    #[test]
-    fn from_error_keeps_existing_envelope_and_wraps_other_sources() {
-        #[derive(Debug, thiserror::Error)]
-        #[error("boom")]
-        struct Boom;
-        let existing = ToolExecutionError::timeout("slow").with_code("T");
-        let kept = ToolExecutionError::from_error(existing);
-        assert_eq!(kept.kind(), ToolErrorKind::Timeout);
-        assert_eq!(kept.code(), Some("T"));
-        let wrapped = ToolExecutionError::from_error(Boom);
-        assert_eq!(wrapped.kind(), ToolErrorKind::Other);
-        assert!(wrapped.is::<Boom>());
-        assert_eq!(wrapped.message(), "boom");
-        assert_eq!(wrapped.model_feedback(), Some("the tool failed"));
-    }
-
-    #[test]
-    fn from_error_preserves_refusal_disposition() {
-        let refused = ToolExecutionError::from_error(
-            ToolExecutionError::refused("declined").with_code("POLICY"),
-        );
-        assert!(refused.is_refusal());
-        assert_eq!(refused.kind(), ToolErrorKind::PermissionDenied);
-        assert_eq!(refused.code(), Some("POLICY"));
-    }
-}
+mod migrated_tests;

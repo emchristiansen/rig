@@ -1,7 +1,7 @@
 //! Code generation for `#[rig_tool]`.
 
 use convert_case::{Case, Casing};
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use std::ops::Deref;
 use syn::{Attribute, Expr, ExprLit, Lit, Meta, PathArguments, ReturnType, Type};
@@ -44,9 +44,8 @@ fn extract_doc_comment(attrs: &[Attribute]) -> Option<String> {
     )
 }
 
-/// Check if a type is `Option<T>`. Matches by the final path segment, the
-/// conventional proc-macro approximation: a non-`std` type named `Option` is
-/// misdetected, but such a type would break `Deserialize` expectations anyway.
+/// Checks whether the final type-path segment is named `Option`.
+/// Does not resolve aliases or distinguish unrelated types with that name.
 fn is_option_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty
         && let Some(segment) = type_path.path.segments.last()
@@ -106,7 +105,10 @@ struct ModelParam<'a> {
     optional: bool,
 }
 
-pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Result<TokenStream> {
+pub(crate) fn expand_rig_tool(
+    args: &MacroArgs,
+    input_fn: &syn::ItemFn,
+) -> syn::Result<TokenStream> {
     let refs = CrateRefs::resolve();
     let core = &refs.core;
 
@@ -133,17 +135,15 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
 
     let (output_type, error_type) = result_type_tokens(&input_fn.sig.output)?;
 
-    // Generate PascalCase struct name from the function name
     let struct_name = format_ident!("{}", fn_name_str.to_case(Case::Pascal));
 
-    // Tool description: explicit attribute > doc comment > default
     let fn_doc = extract_doc_comment(&input_fn.attrs);
     let tool_description = match &args.description {
         Some(desc) => quote! { #desc.to_string() },
-        None => match fn_doc {
-            Some(doc) => quote! { #doc.to_string() },
-            None => quote! { format!("Function to {}", #tool_name) },
-        },
+        None => fn_doc.map_or_else(
+            || quote! { format!("Function to {}", #tool_name) },
+            |doc| quote! { #doc.to_string() },
+        ),
     };
 
     // Classify parameters: model-facing fields are built independently from
@@ -151,6 +151,9 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
     // generated JSON schema.
     let mut model_params = Vec::new();
     let mut call_arguments = Vec::new();
+    // Generated locals must not shadow the original function, even in a nested scope.
+    let arguments_ident = format_ident!("args", span = Span::mixed_site());
+    let context_ident = format_ident!("_context", span = Span::mixed_site());
     let mut context: Option<(&syn::PatType, syn::Ident)> = None;
 
     for arg in input_fn.sig.inputs.iter() {
@@ -178,7 +181,7 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
                 ));
             };
             context = Some((pat_type, param_ident.ident.clone()));
-            call_arguments.push(quote! { _context });
+            call_arguments.push(quote! { #context_ident });
             continue;
         }
 
@@ -190,7 +193,7 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
         };
 
         let ident = &param_ident.ident;
-        call_arguments.push(quote! { args.#ident });
+        call_arguments.push(quote! { #arguments_ident.#ident });
         model_params.push(ModelParam {
             ident,
             ty: &pat_type.ty,
@@ -200,20 +203,6 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
     }
 
     let has_context = context.is_some();
-
-    // Contextual tools live in the classic runtime crate; give a targeted
-    // error when it is not reachable instead of emitting an unresolved path.
-    let agent_root = match (&context, &refs.agent) {
-        (Some(_), Some(agent)) => Some(agent.clone()),
-        (Some((pat_type, _)), None) => {
-            return Err(syn::Error::new_spanned(
-                pat_type,
-                "contextual tools (`&mut ToolContext`) require a dependency on `rig` or \
-                 `rig-agent`; portable tools only need `rig-core`",
-            ));
-        }
-        (None, _) => None,
-    };
 
     // Validate `params(...)` and `required(...)` names against the actual
     // parameter list so a typo cannot silently alter the advertised schema.
@@ -246,10 +235,8 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
     if let Some(required) = &args.required {
         for ident in required {
             validate_name(ident)?;
-            // schemars excludes `Option` fields from `required` regardless of
-            // attributes, and serde deserializes a missing `Option` to `None`,
-            // so listing one here would be silently ignored on both sides.
-            // Reject it instead of dropping the author's directive.
+            // Reject required Option fields because serde and schemars would
+            // otherwise treat the field as optional despite the directive.
             if model_params
                 .iter()
                 .any(|param| param.optional && param.ident == ident)
@@ -263,14 +250,11 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
         }
     }
 
-    // Required-ness has one source of truth: the parameter types, unless
-    // `required(...)` explicitly overrides it. Either way the deserializer and
-    // the advertised schema agree, because optional fields get
-    // `#[serde(default)]` and schemars derives `required` from exactly that.
+    // Requiredness must agree between the schema and deserializer.
     let explicit_required: Option<Vec<String>> = args
         .required
         .as_ref()
-        .map(|list| list.iter().map(|ident| ident.to_string()).collect());
+        .map(|list| list.iter().map(std::string::ToString::to_string).collect());
 
     let field_tokens: Vec<TokenStream> = model_params
         .iter()
@@ -279,7 +263,6 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
             let ty = param.ty;
             let name = ident.to_string();
 
-            // Field description: explicit params() > parameter doc comment > default
             let field_doc_attr = if let Some(explicit) = args.description_for(&name) {
                 quote! { #[schemars(description = #explicit)] }
             } else if let Some(doc) = extract_doc_comment(param.attrs) {
@@ -293,11 +276,8 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
                 None => !param.optional,
                 Some(required) => required.contains(&name),
             };
-            // A parameter the schema advertises as optional must also be
-            // optional for the deserializer. Absent `Option` fields become
-            // `None`; any other type falls back to its `Default` — a missing
-            // `Default` impl is a compile error here rather than a runtime
-            // deserialization failure when the model omits the field.
+            // Optional schema fields need matching deserialization defaults;
+            // missing Default implementations must fail at compile time.
             let serde_default = (!is_required).then(|| quote! { #[serde(default)] });
 
             quote! {
@@ -311,25 +291,22 @@ pub(crate) fn expand_rig_tool(args: MacroArgs, input_fn: syn::ItemFn) -> syn::Re
     let params_struct_name = format_ident!("{}Parameters", struct_name);
     let static_name = format_ident!("{}", fn_name_str.to_uppercase());
 
-    let tool_module = match &agent_root {
-        Some(agent) => quote!(#agent::tool),
-        None => quote!(#core::tool),
-    };
-    // Contextual tools implement the classic `Tool` trait; context-free tools
-    // implement the portable `PortableTool` contract owned by `rig-core`.
+    // Resolve both tool traits through core so runtime dependencies are unnecessary.
+    let tool_module = quote!(#core::tool);
     let tool_trait = if has_context {
         quote!(#tool_module::Tool)
     } else {
         quote!(#tool_module::PortableTool)
     };
 
-    let context_arg = has_context.then(|| quote! { _context: &mut #tool_module::ToolContext, });
+    let context_arg =
+        has_context.then(|| quote! { #context_ident: &mut #tool_module::ToolContext, });
     let await_suffix = is_async.then(|| quote!(.await));
     let call_impl = quote! {
         async fn call(
             &self,
             #context_arg
-            args: Self::Args,
+            #arguments_ident: Self::Args,
         ) -> Result<Self::Output, Self::Error> {
             #fn_name(#(#call_arguments),*) #await_suffix
         }

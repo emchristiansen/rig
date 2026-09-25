@@ -1,18 +1,35 @@
+//! Agent configuration, request preparation, and prompting entry points.
+//!
+//! ```no_run
+//! # async fn example(agent: rig_agent::Agent) -> Result<(), rig_agent::completion::PromptError> {
+//! let response = agent.prompt("Explain ownership.").await?;
+//! println!("{}", response.output);
+//! # Ok(())
+//! # }
+//! ```
+
 use super::hook::{HookStack, RequestPatch};
-use super::model::ModelHandle;
-use super::prompt_request::{self, PromptRequest};
-use super::run::OutputMode;
+use super::run::{AgentRun, OutputMode};
 use super::runner::AgentRunner;
+use super::typed::TypedRun;
+use crate::bus::{BusDriver, Dispatcher, ModelHandle};
 use crate::{
-    agent::prompt_request::streaming::StreamingPromptRequest,
     completion::{
-        Chat, CompletionError, CompletionModel, CompletionRequestBuilder, Document, Message,
-        Prompt, PromptError, ToolDefinition, TypedPrompt,
+        CompletionModel, CompletionRequest, CompletionRequestBuilder, Document, Message,
+        PromptError, ToolDefinition,
     },
-    json_utils,
-    streaming::{StreamingChat, StreamingPrompt},
-    tool::server::{ToolRegistrySnapshot, ToolServerError, ToolServerHandle},
+    run::response::PromptResponse,
+    tool::{
+        ToolCatalog,
+        server::{ToolServerError, ToolServerHandle},
+    },
 };
+use rig_core::completion::ModelRef;
+use rig_core::effect::{HandlerDescriptor, HandlerKey, Key, family};
+use rig_core::error::ProviderError;
+use rig_core::id::ConversationId;
+
+use super::drive::AgentBus;
 use rig_core::{message::ToolChoice, wasm_compat::WasmCompatSend};
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -21,516 +38,128 @@ use super::UNKNOWN_AGENT_NAME;
 /// A prepared completion request plus the executable Rig tool names advertised
 /// to the provider for this turn.
 pub(crate) struct PreparedCompletionRequest {
-    /// Builder carrying the selected model handle: request preparation ran
-    /// against this handle's captured capabilities, and the same handle
-    /// executes the prepared request.
-    pub(crate) builder: CompletionRequestBuilder<ModelHandle>,
+    /// Request prepared against the selected model's capabilities.
+    pub(crate) request: CompletionRequest,
+    /// The messages telemetry records for this attempt.
+    pub(crate) telemetry_messages: Vec<Message>,
+    /// The typed view the request is dispatched to.
+    pub(crate) model: ModelHandle,
     /// Exact implementations behind this turn's provider definitions.
-    pub(crate) tool_snapshot: Arc<ToolRegistrySnapshot>,
+    pub(crate) tool_snapshot: Arc<ToolCatalog>,
+    /// The definitions the request carries (executable tools plus, in Tool
+    /// output mode, the synthetic output tool), for the run's `TurnTools`.
+    pub(crate) advertised_tools: Vec<ToolDefinition>,
     pub(crate) executable_tool_names: BTreeSet<String>,
     pub(crate) allowed_tool_names: BTreeSet<String>,
     /// When Tool output mode is active, the name of the synthetic output tool
-    /// advertised to the model (allowed but not executable). See #1928.
+    /// advertised to the model, allowed but not executable.
     pub(crate) output_tool_name: Option<String>,
+    /// Effective structured output-token cap after runner overrides and request
+    /// patches. Does not interpret caps passed through additional parameters.
+    pub(crate) max_tokens: Option<u64>,
 }
 
-/// Base name of the synthetic output tool used by [`OutputMode::Tool`].
-const DEFAULT_OUTPUT_TOOL_NAME: &str = "final_result";
-
-/// Whether the active [`ToolChoice`] lets the model call the synthetic output
-/// tool. Tool output mode finalizes via that call, so when the choice forbids it
-/// (`None`, or a `Specific` allow-list that lists only the caller's real tools)
-/// Tool mode cannot work and must fall back to native structured output.
-fn tool_choice_permits_output_tool(tool_choice: Option<&ToolChoice>) -> bool {
-    matches!(
-        tool_choice,
-        None | Some(ToolChoice::Auto | ToolChoice::Required)
-    )
-}
-
-/// Whether the active [`ToolChoice`] can call the *named* synthetic output tool.
-///
-/// Unlike [`tool_choice_permits_output_tool`] — which runs during output-mode
-/// resolution, before the output-tool name is known, and so conservatively
-/// treats every `Specific` set as forbidding the call — this knows the committed
-/// output-tool name, so a `Specific` set that names it counts as callable. That
-/// matches [`allowed_tool_names_for_choice`], which advertises the output tool
-/// for exactly that choice. Only a `None` choice or a `Specific` set that omits
-/// the output tool genuinely cannot finalize a pinned Tool-mode turn.
-fn output_tool_callable(tool_choice: Option<&ToolChoice>, output_tool_name: &str) -> bool {
-    match tool_choice {
-        Some(ToolChoice::Specific { function_names }) => function_names
-            .iter()
-            .any(|name| name.as_str() == output_tool_name),
-        other => tool_choice_permits_output_tool(other),
-    }
-}
-
-/// Resolve the caller-facing [`OutputMode`] to a concrete mode for one request.
-///
-/// With no schema there is nothing to enforce, so the result is always `Native`
-/// (the synthetic tool and prompt injection only make sense with a schema).
-/// `Auto` becomes `Tool` only when a real executable tool is present, the tool
-/// choice permits the output-tool call, AND the provider does *not* compose
-/// native structured output with tools — i.e. only where the native constraint
-/// would actually suppress tool calls (#1928). On providers that compose them
-/// (OpenAI, Anthropic), `Auto` keeps guaranteed native structured output.
-/// `Tool` (explicit or via `Auto`) requires that the active [`ToolChoice`]
-/// permit the output-tool call; when it does not, it degrades to `Native` so
-/// structured output is still enforced rather than silently dropped. Explicit
-/// `Prompted`/`Native` are honored when a schema is present. The returned mode is
-/// never `Auto`.
-fn resolve_output_mode(
-    has_schema: bool,
-    has_executable_tools: bool,
-    output_tool_callable: bool,
-    provider_composes_native: bool,
-    requested: &OutputMode,
-) -> OutputMode {
-    if !has_schema {
-        return OutputMode::Native;
-    }
-    match requested {
-        OutputMode::Native => OutputMode::Native,
-        OutputMode::Prompted => OutputMode::Prompted,
-        OutputMode::Tool if output_tool_callable => OutputMode::Tool,
-        OutputMode::Tool => OutputMode::Native,
-        OutputMode::Auto
-            if has_executable_tools && output_tool_callable && !provider_composes_native =>
-        {
-            OutputMode::Tool
-        }
-        OutputMode::Auto => OutputMode::Native,
-    }
-}
-
-/// Pick a collision-safe name for the synthetic output tool, never shadowing a
-/// real executable tool (which would make the model's output call dispatchable).
-fn pick_output_tool_name(executable_tool_names: &BTreeSet<String>) -> String {
-    let mut name = DEFAULT_OUTPUT_TOOL_NAME.to_string();
-    let mut suffix = 1u32;
-    while executable_tool_names.contains(&name) {
-        name = format!("{DEFAULT_OUTPUT_TOOL_NAME}_{suffix}");
-        suffix += 1;
-    }
-    name
-}
-
-/// Compute the allowed tool names for a `tool_choice` **and** validate the
-/// effective request locally (no provider round-trip).
-///
-/// The effective advertised tool set for a turn is the executable tools (after
-/// any per-turn `active_tools` filtering) plus the synthetic output tool
-/// (`output_tool_name`) when structured output runs in Tool mode. Validation:
-///
-/// - [`ToolChoice::Required`] with **no** advertised tool (no executable tool and
-///   no output tool) is a local error — the model is forced to call a tool but
-///   none is advertised.
-/// - [`ToolChoice::Specific`] must name only advertised tools (executable tools
-///   or the output tool); an empty specific set is also an error.
-///
-/// `pre_filter_tool_names` is the full executable tool set *before* any per-turn
-/// `active_tools` filtering — `Some` only when an `active_tools` allow-list was
-/// applied. When the incompatibility was actually **caused** by that filter (a
-/// tool that would otherwise satisfy the choice was dropped), the error says so
-/// and suggests setting a compatible `tool_choice` in the same `RequestPatch`.
-/// A plain typo naming a tool that never existed is *not* blamed on the filter.
-pub(crate) fn allowed_tool_names_for_choice(
-    executable_tool_names: &BTreeSet<String>,
-    tool_choice: Option<&ToolChoice>,
-    output_tool_name: Option<&str>,
-    pre_filter_tool_names: Option<&BTreeSet<String>>,
-) -> Result<BTreeSet<String>, CompletionError> {
-    let has_advertised_tool = !executable_tool_names.is_empty() || output_tool_name.is_some();
-    let hint = |active_tools_caused: bool| {
-        if active_tools_caused {
-            " A per-turn `active_tools` allow-list narrowed the advertised tools this turn; \
-             set a compatible `tool_choice` in the same `RequestPatch`, or widen `active_tools`."
-        } else {
-            ""
-        }
-    };
-    // The advertised tools the model may call: executable tools + the output tool.
-    let advertised = || {
-        executable_tool_names
-            .iter()
-            .map(String::as_str)
-            .chain(output_tool_name)
-            .collect::<Vec<_>>()
-    };
-
-    let allowed = match tool_choice {
-        None | Some(ToolChoice::Auto) => executable_tool_names.clone(),
-        Some(ToolChoice::Required) => {
-            if !has_advertised_tool {
-                // The filter caused this only if there *were* tools before it ran.
-                let active_tools_caused = pre_filter_tool_names.is_some_and(|pf| !pf.is_empty());
-                return Err(CompletionError::RequestError(
-                    format!(
-                        "ToolChoice::Required forces the model to call a tool, but no tools are \
-                         advertised this turn.{}",
-                        hint(active_tools_caused)
-                    )
-                    .into(),
-                ));
-            }
-            executable_tool_names.clone()
-        }
-        Some(ToolChoice::None) => BTreeSet::new(),
-        Some(ToolChoice::Specific { function_names }) => {
-            if function_names.is_empty() {
-                return Err(CompletionError::RequestError(
-                    "ToolChoice::Specific requires at least one function name".into(),
-                ));
-            }
-
-            let requested = function_names.iter().cloned().collect::<BTreeSet<String>>();
-            let missing = function_names
-                .iter()
-                .map(String::as_str)
-                .filter(|name| {
-                    !executable_tool_names.contains(*name) && Some(*name) != output_tool_name
-                })
-                .collect::<Vec<_>>();
-
-            if !missing.is_empty() {
-                // The filter caused this only if a missing name existed pre-filter
-                // (i.e. `active_tools` dropped it) — not for a plain typo.
-                let active_tools_caused = pre_filter_tool_names
-                    .is_some_and(|pf| missing.iter().any(|name| pf.contains(*name)));
-                return Err(CompletionError::RequestError(
-                    format!(
-                        "ToolChoice::Specific requested tool names not advertised this turn: \
-                         {missing:?}. Advertised: {:?}.{}",
-                        advertised(),
-                        hint(active_tools_caused)
-                    )
-                    .into(),
-                ));
-            }
-
-            requested
-        }
-    };
-
-    Ok(allowed)
-}
-
-/// Helper function to build a completion request from the runner's configured
-/// baseline while preserving the executable Rig tool names sent to the
-/// provider. Only the per-turn inputs — the selected model, prompt, history,
-/// committed output tool, and hook patch — arrive as parameters; everything
-/// else is read off the runner.
+/// Retrieve tools and prepare a request from runner defaults and per-turn inputs.
+/// Pins executable registrations and the selected model for this attempt.
+/// Returns retrieval, preparation, and message-validation failures.
 pub(crate) async fn build_prepared_completion_request(
     runner: &crate::agent::AgentRunner,
+    ctx: &crate::agent::HookContext,
     model: &ModelHandle,
     prompt: Message,
     chat_history: &[Message],
     committed_output_tool: Option<&str>,
     request_patch: Option<&RequestPatch>,
-) -> Result<PreparedCompletionRequest, CompletionError> {
-    let preamble = runner.config.preamble.as_deref();
-    let static_context = &runner.config.static_context;
-    let temperature = runner.config.temperature;
-    let max_tokens = runner.config.max_tokens;
-    let additional_params = runner.config.additional_params.as_ref();
+) -> Result<PreparedCompletionRequest, ProviderError> {
     let record_telemetry_content = runner.config.record_telemetry_content;
-    let tool_choice = runner.config.tool_choice.as_ref();
     let tool_server_handle = &runner.tool_server_handle;
-    let output_schema = runner.config.output_schema.as_ref();
-    let output_mode = &runner.config.output_mode;
-    let output_tool_description = runner.output_tool_description.as_deref();
-    let augment_output_preamble = runner.augment_output_preamble;
-    // Apply a per-turn request patch (the merged patch from every `CompletionCall`
-    // hook): each set field replaces the agent's configured value for this turn,
-    // unset fields inherit it, `additional_params` is shallow-merged, and
-    // `extra_context`/`history` are applied below. This is per-turn only — it
-    // never mutates the agent's baseline.
-    let preamble = request_patch
-        .and_then(|o| o.preamble.as_deref())
-        .or(preamble);
-    let temperature = request_patch.and_then(|o| o.temperature).or(temperature);
-    let max_tokens = request_patch.and_then(|o| o.max_tokens).or(max_tokens);
-    let tool_choice = request_patch
-        .and_then(|o| o.tool_choice.as_ref())
-        .or(tool_choice);
-    // Provider passthrough params: when both the baseline and the override are
-    // JSON objects, shallow-merge them (top-level keys, the override winning);
-    // otherwise the override value wins wholesale when set, else the baseline.
-    // This keeps the override winning consistently instead of silently dropping a
-    // non-object patch — `json_utils::merge` returns its first argument unchanged
-    // when either side isn't an object.
-    let additional_params: Option<serde_json::Value> = match (
-        additional_params,
-        request_patch.and_then(|o| o.additional_params.as_ref()),
-    ) {
-        (Some(base), Some(patch)) if base.is_object() && patch.is_object() => {
-            Some(json_utils::merge(base.clone(), patch.clone()))
-        }
-        (base, patch) => patch.or(base).cloned(),
-    };
-    let active_tools = request_patch.and_then(|o| o.active_tools.as_deref());
 
-    // Retrieved tools keep their existing query-selection behavior: prefer the
-    // current prompt's RAG text, then the latest matching history message.
     let retrieval_query = prompt.rag_text().or_else(|| {
         chat_history
             .iter()
             .rev()
-            .find_map(|message| message.rag_text())
+            .find_map(rig_core::completion::Message::rag_text)
     });
 
-    let mut tool_snapshot = tool_server_handle
-        .snapshot_tool_defs(retrieval_query)
-        .await
-        .map_err(|_| CompletionError::RequestError("Failed to get tool definitions".into()))?;
-
-    // When a per-turn `active_tools` allow-list is present, capture the full tool
-    // set BEFORE filtering: the synthetic output-tool name must avoid colliding
-    // with ANY advertised tool, not just this turn's narrowed set — a tool
-    // filtered out this turn can be advertised again on a later turn, while the
-    // output-tool name is pinned for the whole run, so picking against only the
-    // narrowed set could commit a name that collides once the filter lifts.
-    // Without a filter the full set equals `executable_tool_names` below, so we
-    // skip the extra allocation and reuse that.
-    let pre_filter_tool_names: Option<BTreeSet<String>> = active_tools.map(|_| {
-        tool_snapshot
-            .definitions()
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect()
-    });
-
-    // Apply a per-turn `active_tools` allow-list (from a `CompletionCall` hook):
-    // narrow the advertised tool set to the named tools BEFORE computing the
-    // executable set, so tool-choice resolution and invalid-tool-call validation
-    // all operate on the narrowed set. The synthetic output tool is appended
-    // later and is unaffected, so structured output still works under an empty
-    // allow-list. A name that isn't available this turn is a hook bug, surfaced
-    // as a request error (mirroring `ToolChoice::Specific`'s contract).
-    if let Some(allow) = active_tools {
-        if let Some(missing) = allow.iter().find(|name| {
-            !tool_snapshot
-                .definitions()
-                .iter()
-                .any(|tool| &tool.name == *name)
-        }) {
-            return Err(CompletionError::RequestError(
-                format!(
-                    "active_tools requested tool `{missing}`, which is not available this turn"
-                )
-                .into(),
-            ));
-        }
-        let allowed: BTreeSet<String> = allow.iter().cloned().collect();
-        tool_snapshot.retain_names(&allowed);
-    }
-
-    let mut tooldefs = tool_snapshot.definitions().to_vec();
-
-    // Executable tools are the real tool-server tools, computed BEFORE any
-    // synthetic output tool is appended.
-    let executable_tool_names: BTreeSet<String> =
-        tooldefs.iter().map(|tool| tool.name.clone()).collect();
-
-    // Resolve the effective output mode (#1928). Once the run has committed to a
-    // Tool-mode output tool on an earlier turn (signaled by `committed_output_
-    // tool`, which is persisted on the run via `output_tool_name`), stay in Tool
-    // mode and reuse that name — so a later turn whose tool set differs (e.g. RAG
-    // retrieved no tools) can't flip Tool -> Native and re-apply the native
-    // constraint that suppressed tools in the first place. Only Tool mode is
-    // pinned; Native/Prompted re-resolve, so a tool-less first turn can still
-    // become Tool once tools appear. Otherwise resolve from the request, the
-    // schema, the tool set, whether the tool choice permits the output-tool call,
-    // and whether the provider composes native structured output with tools.
-    let resolved_mode = if committed_output_tool.is_some() && output_schema.is_some() {
-        OutputMode::Tool
-    } else {
-        resolve_output_mode(
-            output_schema.is_some(),
-            !executable_tool_names.is_empty(),
-            tool_choice_permits_output_tool(tool_choice),
-            model.capabilities().composes_native_output_with_tools,
-            output_mode,
+    // Tool retrieval is a `Retrieve` dispatch at the boundary (observe-only
+    // for hooks unless one opts in), recorded like every other effect.
+    let mut dynamic_tool_ids = Vec::new();
+    for (key, kind) in tool_server_handle.retrieval_effects(retrieval_query) {
+        let ids = crate::agent::engine::dispatch_effect(
+            &runner.config.hooks,
+            ctx,
+            runner.config.bus.dispatcher(),
+            &key,
+            kind,
         )
-    };
-
-    // In Tool mode, reuse the run's committed name or pick a collision-safe one
-    // against the full pre-filter set (or the executable set when unfiltered).
-    let output_tool_name = matches!(resolved_mode, OutputMode::Tool).then(|| {
-        committed_output_tool.map(str::to_owned).unwrap_or_else(|| {
-            pick_output_tool_name(
-                pre_filter_tool_names
-                    .as_ref()
-                    .unwrap_or(&executable_tool_names),
-            )
+        .await
+        .and_then(|outcome| match outcome {
+            rig_core::effect::Outcome::Documents(rig_core::effect::RetrievedDocuments::Ids(
+                ids,
+            )) => Ok(ids.into_iter().map(|(_, id)| id).collect::<Vec<String>>()),
+            other => Err(crate::agent::engine::wrong_outcome("retrieved ids", &other)),
         })
-    });
-
-    // A freshly picked name never collides, but a name pinned on turn 1 can if a
-    // real tool with that name becomes effective later (for example through a
-    // shared tool server, retrieval, or an MCP refresh). The output-tool
-    // intercept matches by name, so fail before provider I/O: advertising both
-    // definitions would make a call to the real tool finalize the run instead
-    // of reaching normal dispatch.
-    if let Some(name) = &output_tool_name
-        && executable_tool_names.contains(name)
-    {
-        return Err(CompletionError::RequestError(
-            format!(
-                "real tool `{name}` conflicts with the structured-output tool reserved for this \
-                 run; rename or remove the real tool, exclude it with `active_tools`, or make it \
-                 visible before starting a new run so Rig can reserve a different output-tool name"
-            )
-            .into(),
-        ));
+        .map_err(|report| {
+            ProviderError::Request(format!("Failed to get tool definitions: {report}").into())
+        })?;
+        dynamic_tool_ids.extend(ids);
     }
+    let mut tool_snapshot = tool_server_handle.snapshot_with_dynamic(&dynamic_tool_ids);
 
-    // In committed Tool mode the run can only finalize by calling the synthetic
-    // output tool, and the mode is pinned (it cannot degrade to Native mid-run,
-    // see #1928). A `tool_choice` that forbids the output-tool call — `None`, or
-    // a `Specific` set that excludes it, e.g. from a per-turn `RequestPatch` —
-    // therefore produces a turn that cannot emit the structured result. The
-    // non-committed path degrades to Native via `resolve_output_mode`, so this
-    // only fires once a turn has committed Tool mode; warn rather than silently
-    // stall the run. Use the name-aware check so a `Specific` set that *names*
-    // the output tool (which `allowed_tool_names_for_choice` accepts) is not
-    // falsely flagged as unable to finalize.
-    if let Some(name) = &output_tool_name
-        && !output_tool_callable(tool_choice, name)
-    {
-        tracing::warn!(
-            "the active tool_choice forbids calling the structured-output tool while the \
-             run is pinned to Tool output mode; this turn cannot emit the structured \
-             result (check for a `RequestPatch` setting `tool_choice` to None or a \
-             Specific set that excludes the output tool)"
-        );
-    }
+    let mut spec = runner.config.run_spec();
+    spec.output_tool_description
+        .clone_from(&runner.output_tool_description);
+    spec.augment_output_preamble = runner.augment_output_preamble;
 
-    // Augment the preamble for Tool/Prompted modes, then prepend it as a system
-    // message (deferred from the original position so it can reference the tool).
-    let effective_preamble: Option<String> = {
-        let base = preamble.map(str::to_owned);
-        let instruction = match &resolved_mode {
-            OutputMode::Tool if augment_output_preamble => {
-                output_tool_name.as_deref().map(|name| {
-                    format!(
-                        "When you have gathered enough information to answer, call the `{name}` \
-                     tool exactly once with your final answer. Its arguments are the structured \
-                     result and must satisfy the required schema. Do not return the final answer \
-                     as plain text."
-                    )
-                })
-            }
-            OutputMode::Tool => None,
-            OutputMode::Prompted => output_schema.map(|schema| {
-                let schema_json = serde_json::to_string(schema.as_value()).unwrap_or_default();
-                format!(
-                    "Respond with ONLY a single JSON object that conforms to this JSON Schema. \
-                     Do not include any prose, explanation, or markdown code fences.\n{schema_json}"
-                )
-            }),
-            OutputMode::Native | OutputMode::Auto => None,
-        };
-        match (base, instruction) {
-            (Some(b), Some(i)) => Some(format!("{b}\n\n{i}")),
-            (Some(b), None) => Some(b),
-            (None, Some(i)) => Some(i),
-            (None, None) => None,
-        }
-    };
-
-    // A per-turn `history` patch replaces the prior messages sent to the provider
-    // *this turn only* (context-window compaction / summarization). The RAG query
-    // text above deliberately still derives from the original `chat_history`, so
-    // this changes only what is sent, never what is retrieved or persisted.
-    let messages_history: &[Message] = request_patch
-        .and_then(|o| o.history.as_deref())
-        .unwrap_or(chat_history);
-    let chat_history: Vec<Message> = if let Some(preamble) = &effective_preamble {
-        std::iter::once(Message::system(preamble.clone()))
-            .chain(messages_history.iter().cloned())
-            .collect()
-    } else {
-        messages_history.to_vec()
-    };
-
-    // In Tool mode, advertise the synthetic output tool to the provider (its name
-    // is added to `allowed_tool_names` below but never to `executable_tool_names`,
-    // so it is never dispatched to the tool server).
-    // `output_tool_name` is only `Some` when `output_schema` is `Some` (Tool mode
-    // requires a schema), so this match always fires in Tool mode.
-    if let (Some(name), Some(schema)) = (&output_tool_name, output_schema) {
-        tooldefs.push(crate::completion::ToolDefinition {
-            name: name.clone(),
-            description: output_tool_description
-                .unwrap_or(
-                    "Call this tool exactly once with your final answer when you are done. \
-                     Its arguments are the structured result and must satisfy the output schema.",
-                )
-                .to_string(),
-            parameters: schema.clone().to_value(),
-        });
-    }
-
-    let mut completion_request = model
-        .completion_request(prompt)
-        .messages(chat_history)
-        .temperature_opt(temperature)
-        .max_tokens_opt(max_tokens)
-        .additional_params_opt(additional_params)
-        .record_content_telemetry(record_telemetry_content)
-        .documents(static_context.to_vec())
-        .tools(tooldefs);
-
-    // Hook-supplied extra context documents (passive RAG) follow static context,
-    // with extras in hook registration order (they were merged in that order).
-    // Per-turn and non-sticky: the next turn re-resolves from the baseline.
-    if let Some(patch) = request_patch
-        && !patch.extra_context.is_empty()
-    {
-        completion_request = completion_request.documents(patch.extra_context.clone());
-    }
-
-    // Only Native mode sets the provider's native structured-output constraint.
-    if matches!(resolved_mode, OutputMode::Native) {
-        completion_request = completion_request.output_schema_opt(output_schema.cloned());
-    }
-
-    let completion_request = if let Some(tool_choice) = tool_choice {
-        completion_request.tool_choice(tool_choice.clone())
-    } else {
-        completion_request
-    };
-
-    // Validate the effective request locally (Required/Specific vs the effective
-    // advertised tool set, incl. the output tool) *before* building the send —
-    // so an impossible tool_choice/tool-set combination fails here with no
-    // provider round-trip, and names the `active_tools` filter when it caused it.
-    let mut allowed_tool_names = allowed_tool_names_for_choice(
-        &executable_tool_names,
-        tool_choice,
-        output_tool_name.as_deref(),
-        pre_filter_tool_names.as_ref(),
+    let prepared = crate::run::prepare::prepare_request(
+        &spec,
+        &model.capabilities(),
+        chat_history,
+        tool_snapshot.take_definitions(),
+        committed_output_tool,
+        request_patch,
     )?;
-    // The output tool must be allowed (so it isn't flagged as an invalid tool
-    // call) even though it is not executable.
-    if let Some(name) = &output_tool_name {
-        allowed_tool_names.insert(name.clone());
-    }
+
+    // Narrow dispatch to the tools actually advertised this turn (a per-turn
+    // `active_tools` allow-list), so the implementation behind every definition
+    // the provider received is the one that runs.
+    tool_snapshot.retain_names(&prepared.executable_tool_names);
+
+    let advertised_tools = prepared.tools.clone();
+    let executable_tool_names = prepared.executable_tool_names.clone();
+    let allowed_tool_names = prepared.allowed_tool_names.clone();
+    let output_tool_name = prepared.output_tool_name.clone();
+    let max_tokens = prepared.max_tokens;
+    let builder = prepared
+        .apply(CompletionRequestBuilder::unbound(prompt))
+        .record_content_telemetry(record_telemetry_content);
+    let telemetry_messages = if record_telemetry_content {
+        builder.messages_for_telemetry()
+    } else {
+        Vec::new()
+    };
+    // The agent records the input itself, so the request the provider sees
+    // carries the flag off: one span, no double recording.
+    let request = builder.record_content_telemetry(false).build();
+    // The same guard the builder's own `send`/`stream` apply: an empty
+    // history or content block is a local, named error, not a remote 400.
+    request.validate_message_content()?;
 
     Ok(PreparedCompletionRequest {
-        builder: completion_request,
+        request,
+        telemetry_messages,
+        model: model.clone(),
         tool_snapshot: Arc::new(tool_snapshot),
+        advertised_tools,
         executable_tool_names,
         allowed_tool_names,
         output_tool_name,
+        max_tokens,
     })
 }
 
-/// Struct representing an LLM agent. An agent is an LLM model combined with a preamble
-/// (i.e.: system prompt) and a static set of context documents and tools.
-/// All context documents and tools are always provided to the agent when prompted.
+/// Configured model, request settings, hooks, memory, and tool registry for runs.
+/// Per-run overrides and dynamic retrieval determine each turn's effective request.
 ///
 /// Default hooks attached with [`AgentBuilder::add_hook`](crate::agent::AgentBuilder::add_hook)
 /// are used for every prompt request, plus any added on the request or runner.
@@ -538,10 +167,11 @@ pub(crate) async fn build_prepared_completion_request(
 /// # Example
 /// ```no_run
 /// use rig_agent::prelude::*;
-/// use rig_core::{client::ProviderClient, providers::openai};
+/// use rig_core::providers::openai::{self, OpenAI};
+/// use rig_reqwest::prelude::*;
 ///
 /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-/// let openai = openai::Client::from_env()?;
+/// let openai = OpenAI::from_env()?.bound()?;
 ///
 /// let comedian_agent = openai
 ///     .agent(openai::GPT_5_2)
@@ -554,26 +184,22 @@ pub(crate) async fn build_prepared_completion_request(
 /// # }
 /// ```
 #[derive(Clone)]
-#[non_exhaustive]
 pub struct Agent {
     pub(crate) config: AgentConfig,
     pub(crate) tool_server_handle: ToolServerHandle,
 }
 
-/// Everything an [`AgentBuilder`](crate::agent::AgentBuilder) configures and the
-/// built [`Agent`] carries unchanged.
-///
-/// Building only moves this across and resolves the tool state into a
-/// [`ToolServerHandle`], so a new setting is declared once here instead of in
-/// two parallel field lists.
+/// Configuration shared by the builder and built agent, separate from tool state.
 #[derive(Clone)]
 pub(crate) struct AgentConfig {
     /// Name of the agent used for logging and debugging
     pub(crate) name: Option<String>,
     /// Agent description. Primarily useful when using sub-agents as part of an agent workflow and converting agents to other formats.
     pub(crate) description: Option<String>,
-    /// Completion model (e.g.: OpenAI's gpt-3.5-turbo-1106, Cohere's command-r)
-    pub(crate) model: ModelHandle,
+    /// The bus every run dispatches through.
+    pub(crate) bus: AgentBus,
+    /// The key of the default model on the bus.
+    pub(crate) model_key: Key<family::Completion>,
     /// System prompt
     pub(crate) preamble: Option<String>,
     /// Context documents always available to the agent
@@ -602,22 +228,33 @@ pub(crate) struct AgentConfig {
     /// Optional JSON Schema for structured output. When set, providers that support
     /// native structured outputs will constrain the model's response to match this schema.
     pub(crate) output_schema: Option<schemars::Schema>,
-    /// How `output_schema` is enforced — tool call, native structured output, or
-    /// prompt injection (see [`OutputMode`] and issue #1928).
+    /// How the schema is conveyed: output tool, native constraint, or prompt.
     pub(crate) output_mode: OutputMode,
     /// Optional conversation memory backend that loads/saves history per conversation id.
-    pub(crate) memory: Option<Arc<dyn rig_core::memory::ConversationMemory>>,
+    pub(crate) memory_key: Option<Key<family::Memory>>,
+    /// The models registered as routes at build (`model_route`), part of
+    /// the required row: a program that can select them needs them served.
+    pub(crate) route_keys: Vec<Key<family::Completion>>,
+    /// The dynamic-context indexes registered at build
+    /// (`dynamic_context`), part of the required row: every model call
+    /// queries them.
+    pub(crate) context_keys: Vec<Key<family::Retrieve>>,
     /// Optional conversation id used when none is set per-request.
-    pub(crate) conversation_id: Option<String>,
+    pub(crate) conversation_id: Option<ConversationId>,
+    /// The anonymous model this value selected ([`Agent::set_model`],
+    /// [`AgentRunner::using_model_value`]); its registration lives as long
+    /// as the values sharing it.
+    pub(crate) anonymous_model: Option<std::sync::Arc<super::drive::AnonymousModel>>,
 }
 
 impl AgentConfig {
     /// The unconfigured starting point for a builder over `model`.
-    pub(crate) fn new(model: ModelHandle) -> Self {
+    pub(crate) fn new(bus: AgentBus, model_key: Key<family::Completion>) -> Self {
         Self {
             name: None,
             description: None,
-            model,
+            bus,
+            model_key,
             preamble: None,
             static_context: vec![],
             additional_params: None,
@@ -627,15 +264,108 @@ impl AgentConfig {
             tool_choice: None,
             max_turns: 1,
             hooks: HookStack::new(),
+            route_keys: Vec::new(),
+            context_keys: Vec::new(),
             output_schema: None,
             output_mode: OutputMode::default(),
-            memory: None,
+            memory_key: None,
             conversation_id: None,
+            anonymous_model: None,
+        }
+    }
+
+    /// Bind the default model's typed view.
+    pub(crate) fn model_handle(&self) -> Result<ModelHandle, rig_core::error::ErrorReport> {
+        self.bus.dispatcher().bind(&self.model_key)
+    }
+
+    /// The default model's label as registered now (the key's tail when
+    /// nothing serves it).
+    pub(crate) fn model_ref(&self) -> ModelRef {
+        match self
+            .bus
+            .dispatcher()
+            .descriptor(self.model_key.raw())
+            .map(|descriptor| descriptor.family)
+        {
+            Some(rig_core::effect::FamilyDescriptor::Completion { model, .. }) => model,
+            Some(rig_core::effect::FamilyDescriptor::Tool { .. })
+            | Some(rig_core::effect::FamilyDescriptor::Embed { .. })
+            | Some(rig_core::effect::FamilyDescriptor::Memory {})
+            | Some(rig_core::effect::FamilyDescriptor::Retrieve {})
+            | Some(rig_core::effect::FamilyDescriptor::Rerank { .. })
+            | Some(rig_core::effect::FamilyDescriptor::Custom { .. })
+            | None => ModelRef::new(
+                self.bus
+                    .model_label(self.model_key.raw())
+                    .unwrap_or(self.model_key.as_str()),
+            ),
+        }
+    }
+
+    /// Bind the model registered under `label`.
+    pub(crate) fn model_by_ref(
+        &self,
+        label: &ModelRef,
+    ) -> Result<ModelHandle, rig_core::error::ErrorReport> {
+        self.bus
+            .dispatcher()
+            .bind(&self.bus.model_key(label.as_str()))
+    }
+
+    /// Bind the memory handle, when memory is configured.
+    pub(crate) fn memory_handle(
+        &self,
+    ) -> Option<Result<crate::bus::MemoryHandle, rig_core::error::ErrorReport>> {
+        self.memory_key
+            .as_ref()
+            .map(|key| self.bus.dispatcher().bind(key))
+    }
+}
+
+impl AgentConfig {
+    /// The protocol-facing half of this configuration as plain data: what a
+    /// driver needs to shape requests and budget a run, without the model,
+    /// hooks, memory or identity this config also carries.
+    pub(crate) fn run_spec(&self) -> crate::run::spec::RunSpec {
+        crate::run::spec::RunSpec {
+            preamble: self.preamble.clone(),
+            static_context: self.static_context.clone(),
+            additional_params: self.additional_params.clone(),
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            tool_choice: self.tool_choice.clone(),
+            max_turns: Some(self.max_turns),
+            max_invalid_tool_call_retries: 0,
+            output_schema: self
+                .output_schema
+                .as_ref()
+                .map(|schema| schema.as_value().clone()),
+            output_mode: self.output_mode.clone(),
+            output_tool_name: None,
+            output_tool_description: None,
+            augment_output_preamble: true,
+            unhandled_invalid_tool_call: crate::run::spec::UnhandledInvalidToolCall::Fail,
         }
     }
 }
 
 impl Agent {
+    /// Return serializable request settings and run policy, excluding live models,
+    /// tools, hooks, and memory.
+    pub fn run_spec(&self) -> crate::run::spec::RunSpec {
+        self.config.run_spec()
+    }
+}
+
+impl Agent {
+    /// The tool server this agent dispatches tool calls through. Cloning the
+    /// handle lets external tool sources (an MCP client handler, for example)
+    /// register and refresh tools the agent will see on its next turn.
+    pub fn tool_server_handle(&self) -> &crate::tool::server::ToolServerHandle {
+        &self.tool_server_handle
+    }
+
     /// Returns the configured agent name.
     pub fn name(&self) -> Option<&str> {
         self.config.name.as_deref()
@@ -650,44 +380,80 @@ impl Agent {
         self.name().unwrap_or(UNKNOWN_AGENT_NAME)
     }
 
-    /// Build a hook-aware [`AgentRunner`] for this agent, seeded with the
-    /// agent's default hook stack. Attach more hooks with
-    /// [`AgentRunner::add_hook`], then call [`AgentRunner::run`].
-    pub fn runner(&self, prompt: impl Into<Message>) -> AgentRunner {
-        AgentRunner::from_agent(self, prompt)
+    /// The key of this agent's default model on its bus (a completion key;
+    /// `.raw()` for the wire string).
+    pub fn model_key(&self) -> &Key<family::Completion> {
+        &self.config.model_key
     }
 
-    /// Returns the agent's current default model handle.
-    pub fn model_handle(&self) -> &ModelHandle {
-        &self.config.model
+    /// The descriptor of this agent's default model, as registered now.
+    pub fn model_descriptor(&self) -> Option<HandlerDescriptor> {
+        self.config
+            .bus
+            .dispatcher()
+            .descriptor(self.config.model_key.raw())
     }
 
-    /// Replace the default model used by runners created after this call.
-    ///
-    /// Existing runners retain their model snapshot, and replacing one cloned
-    /// agent does not mutate another clone. Model-selection hooks may replace
-    /// the captured default at each model-call boundary.
-    pub fn set_model_handle(&mut self, model: ModelHandle) {
-        self.config.model = model;
+    /// The label of this agent's default model, as registered now.
+    pub fn model_ref(&self) -> Option<ModelRef> {
+        self.model_descriptor()
+            .and_then(|descriptor| match descriptor.family {
+                rig_core::effect::FamilyDescriptor::Completion { model, .. } => Some(model),
+                rig_core::effect::FamilyDescriptor::Tool { .. }
+                | rig_core::effect::FamilyDescriptor::Embed { .. }
+                | rig_core::effect::FamilyDescriptor::Memory {}
+                | rig_core::effect::FamilyDescriptor::Retrieve {}
+                | rig_core::effect::FamilyDescriptor::Rerank { .. }
+                | rig_core::effect::FamilyDescriptor::Custom { .. } => None,
+            })
     }
 
-    /// Erase and install a typed completion model as this agent's new default.
+    /// Register `model` on this agent's bus under `label` and return the
+    /// label a run selects it by.
+    pub fn register_model<M>(&self, label: impl Into<ModelRef>, model: M) -> ModelRef
+    where
+        M: CompletionModel + 'static,
+    {
+        let label = label.into();
+        self.config.bus.register_model(&label, model);
+        label
+    }
+
+    /// Make the model registered under `label` this agent value's default.
+    /// Value semantics: clones of the agent keep their own default.
+    pub fn set_model_ref(&mut self, label: impl Into<ModelRef>) {
+        self.config.model_key = self.config.bus.model_key(label.into().as_str());
+        self.config.anonymous_model = None;
+    }
+
+    /// Register `model` under a generated label and make it this agent
+    /// value's default. The registration is scoped to the values that
+    /// select it (this agent, its clones, the runners it produces): it
+    /// leaves the bus when the last of them drops or selects another model.
     pub fn set_model<M>(&mut self, model: M)
     where
         M: CompletionModel + 'static,
     {
-        self.set_model_handle(ModelHandle::new(model));
+        let anonymous = self.config.bus.register_anonymous_model(model);
+        self.config.model_key = anonymous.key().clone();
+        self.config.anonymous_model = Some(anonymous);
     }
 
-    /// Return this agent with a replacement default model handle.
-    ///
-    /// Model-selection hooks may replace this default for individual calls.
-    pub fn with_model_handle(mut self, model: ModelHandle) -> Self {
-        self.set_model_handle(model);
+    /// The owner segment of the keys this agent minted
+    /// (`<owner>/model:<label>`, `<owner>/memory`, ...): the label given to
+    /// [`AgentBuilder::owner`](crate::agent::AgentBuilder::owner), else
+    /// `agent#<n>`.
+    pub fn owner(&self) -> &str {
+        self.config.bus.owner()
+    }
+
+    /// [`Agent::set_model_ref`] by value.
+    pub fn with_model_ref(mut self, label: impl Into<ModelRef>) -> Self {
+        self.set_model_ref(label);
         self
     }
 
-    /// Return this agent with an erased typed model as its new default.
+    /// [`Agent::set_model`] by value.
     pub fn with_model<M>(mut self, model: M) -> Self
     where
         M: CompletionModel + 'static,
@@ -696,512 +462,252 @@ impl Agent {
         self
     }
 
+    /// The effect row this program can dispatch to: its model, every tool
+    /// the registry serves, its memory backend and its retrieval indexes,
+    /// each with the family it needs, from the registry rather than what a
+    /// run happened to dispatch.
+    pub fn required_row(&self) -> rig_core::effect::EffectRow {
+        use rig_core::effect::EffectFamily;
+        let mut row = rig_core::effect::EffectRow::new();
+        row.insert(
+            self.config.model_key.raw().clone(),
+            EffectFamily::Completion,
+        );
+        for route in &self.config.route_keys {
+            row.insert(route.raw().clone(), EffectFamily::Completion);
+        }
+        if let Some(memory) = &self.config.memory_key {
+            row.insert(memory.raw().clone(), EffectFamily::Memory);
+        }
+        for (_, tool) in self.tool_server_handle.toolset().iter() {
+            row.insert(tool.key().raw().clone(), EffectFamily::Tool);
+        }
+        for key in self.tool_server_handle.retrieval_keys() {
+            row.insert(key, EffectFamily::Retrieve);
+        }
+        for context in &self.config.context_keys {
+            row.insert(context.raw().clone(), EffectFamily::Retrieve);
+        }
+        row
+    }
+
+    /// What decides on this agent's behalf: its hook stack's names, then
+    /// every layer on the bus's handlers (the handler table's order,
+    /// outermost in). The log's `hooks`; a replay under another stack of
+    /// either is refused.
+    pub fn program_names(&self) -> Vec<String> {
+        let mut names = self.config.hooks.names();
+        for descriptor in self.config.bus.dispatcher().descriptors() {
+            names.extend(descriptor.layers);
+        }
+        names
+    }
+
+    /// The policy this agent's own bus runs under; `None` over a host's bus.
+    pub fn bus_config(&self) -> Option<rig_core::serve::ServingPolicy> {
+        self.config.bus.config()
+    }
+
+    /// The descriptor currently registered under `key`, without access to dispatch.
+    pub fn handler_descriptor(&self, key: &HandlerKey) -> Option<HandlerDescriptor> {
+        self.config.bus.dispatcher().descriptor(key)
+    }
+
+    /// Whether this agent owns and drives its own bus driver.
+    pub fn owns_bus(&self) -> bool {
+        self.config.bus.owns_driver()
+    }
+
+    /// Take the agent apart: the dispatcher and the driver leave together,
+    /// so whoever gets the dispatcher also gets the duty to drive. Fails
+    /// when the agent was built over a host's bus or when another clone of
+    /// it still shares the driver.
+    pub fn into_parts(self) -> Result<AgentParts, Agent> {
+        let Agent {
+            mut config,
+            tool_server_handle,
+        } = self;
+        let detached = config.bus.detached();
+        let bus = std::mem::replace(&mut config.bus, detached);
+        let registrar = bus.registrar().clone();
+        match bus.try_into_parts() {
+            Ok((dispatcher, driver)) => Ok(AgentParts {
+                dispatcher,
+                registrar,
+                driver,
+                agent: Agent {
+                    config,
+                    tool_server_handle,
+                },
+            }),
+            Err(bus) => {
+                config.bus = bus;
+                Err(Agent {
+                    config,
+                    tool_server_handle,
+                })
+            }
+        }
+    }
+
     /// Resolve the provider-facing tool definitions available for a prompt.
     ///
     /// This read-only view does not expose tool dispatch. Agent execution and
-    /// tool lifecycle hooks remain owned by [`Self::runner`].
+    /// tool lifecycle hooks remain owned by [`Self::prompt`].
     pub async fn tool_definitions(
         &self,
         prompt: Option<String>,
     ) -> Result<Vec<ToolDefinition>, ToolServerError> {
-        self.tool_server_handle.get_tool_defs(prompt).await
+        self.tool_server_handle.tool_defs(prompt).await
     }
 }
 
-// Here, we need to ensure that usage of `.prompt` on agent uses these redefinitions on the opaque
-//  `Prompt` trait so that when `.prompt` is used at the call-site, it'll use the more specific
-//  `PromptRequest` implementation for `Agent`, making the builder's usage fluent.
-//
-// References:
-//  - https://github.com/rust-lang/rust/issues/121718 (refining_impl_trait)
-
-#[allow(refining_impl_trait)]
-impl Prompt for Agent {
-    fn prompt(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-    ) -> PromptRequest<prompt_request::Standard> {
-        PromptRequest::from_agent(self, prompt)
+impl Agent {
+    /// Start a run from `prompt`. The returned [`AgentRunner`] is the run:
+    /// configure it (history, turn budget, tool context, hooks, …), then pick
+    /// how to drive it. Nothing happens until it is driven.
+    ///
+    /// - `.await` (or [`run`](AgentRunner::run)) folds the whole loop to a
+    ///   [`PromptResponse`], whose `output` is the accepted assistant text.
+    /// - [`stream`](AgentRunner::stream) yields every provider delta, tool
+    ///   event and the final response as a stream.
+    /// - [`run_channel`](AgentRunner::run_channel) splits the run into a
+    ///   future and an event feed for a host with its own executor or tick.
+    ///
+    /// The medium is chosen by the terminal call alone: an awaited runner asks
+    /// the provider for a complete response, a streamed one for a stream.
+    /// Hooks, tools, memory and the resulting history are the same in each.
+    ///
+    /// ```rust,no_run
+    /// # use rig_agent::Agent;
+    /// # use futures::StreamExt;
+    /// # async fn example(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
+    /// let response = agent.prompt("What is 2 + 2?").max_turns(3).await?;
+    /// println!("{}", response.output);
+    ///
+    /// let mut stream = agent.prompt("And 3 + 3?").stream();
+    /// while let Some(item) = stream.next().await {
+    ///     let item = item?;
+    ///     // text deltas, tool calls and results, then `FinalResponse`
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn prompt(&self, prompt: impl Into<Message>) -> AgentRunner {
+        AgentRunner::from_agent(self, prompt)
     }
-}
 
-#[allow(refining_impl_trait)]
-impl Prompt for &Agent {
-    #[tracing::instrument(skip(self, prompt), fields(agent_name = self.name_or_default()))]
-    fn prompt(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-    ) -> PromptRequest<prompt_request::Standard> {
-        PromptRequest::from_agent(self, prompt)
+    /// Continue a persisted run instead of starting one from a prompt.
+    ///
+    /// The state a driver serialized between steps (see [`AgentRun`]) is
+    /// resumed under this agent's hooks, tools, and bus, executing pending tool
+    /// calls or requesting the next model turn.
+    /// The run is authoritative for what it persisted: its prompt, its
+    /// history, its turn budget and its invalid-tool-call retry budget, so
+    /// [`history`](AgentRunner::history) and [`max_turns`](AgentRunner::max_turns)
+    /// on the returned runner have no effect. Everything else still comes
+    /// from the agent and the runner: the request shape (preamble, documents,
+    /// sampling parameters, additional params, tool choice, output mode),
+    /// [`add_hook`](AgentRunner::add_hook),
+    /// [`tool_context`](AgentRunner::tool_context),
+    /// [`tool_concurrency`](AgentRunner::tool_concurrency), the model
+    /// selection and telemetry settings (inbound tool context is driver
+    /// state, never part of the persisted run). Two run-side values still show
+    /// through: the run's persisted tool choice is what invalid-call hooks
+    /// see and what gates a `Skip`, while the request's tool choice is the
+    /// runner's; and the output tool the run committed stays committed even
+    /// though the schema and mode advertising it are the runner's. The
+    /// unhandled-invalid-tool-call policy is the run's on the blocking path
+    /// and the runner's on the streamed path. Conversation memory is neither
+    /// loaded nor appended: the history is already in the run, and the driver
+    /// that persisted it owns memory persistence and appends the finished run's
+    /// `messages` itself, since a suspended run never reached the `Done`
+    /// append, so the response's `memory_append` is `None`. Pending tool
+    /// calls re-execute on resume: a tool that ran before the suspension and
+    /// answered nothing runs again. Drive it like any runner: `.await`,
+    /// [`stream`](AgentRunner::stream) or
+    /// [`run_channel`](AgentRunner::run_channel). The run must have been
+    /// suspended by the same rig version.
+    ///
+    /// ```rust,no_run
+    /// # use rig_agent::{Agent, AgentRun};
+    /// # async fn example(agent: Agent, saved: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// let run: AgentRun = serde_json::from_str(saved)?;
+    /// let response = agent.resume(run).tool_concurrency(4).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn resume(&self, run: AgentRun) -> AgentRunner {
+        AgentRunner::resuming(self, run)
     }
-}
 
-#[allow(refining_impl_trait)]
-impl Chat for Agent {
+    /// Run `prompt` against caller-owned history with the agent's defaults,
+    /// then append the messages the run committed to `chat_history`. This is
+    /// [`prompt`](Self::prompt) with [`history`](AgentRunner::history) plus
+    /// the write-back; the runner form is the one to configure or stream.
+    /// The returned [`PromptResponse`] keeps its `messages`.
+    ///
+    /// The caller's history is the run's input history, so conversation
+    /// memory is bypassed (no load, no append) and the caller owns
+    /// persistence. A run that fails appends nothing: the error carries the
+    /// history the run had, the caller's vector is unchanged.
     #[tracing::instrument(skip(self, prompt, chat_history), fields(agent_name = self.name_or_default()))]
-    async fn chat(
+    pub async fn chat(
         &self,
         prompt: impl Into<Message> + WasmCompatSend,
         chat_history: &mut Vec<Message>,
-    ) -> Result<String, PromptError> {
-        let response = PromptRequest::from_agent(self, prompt)
+    ) -> Result<PromptResponse, PromptError> {
+        let response = AgentRunner::from_agent(self, prompt)
             .history(chat_history.clone())
-            .extended_details()
             .await?;
-
-        if let Some(messages) = response.messages {
-            chat_history.extend(messages);
+        if let Some(messages) = &response.messages {
+            chat_history.extend(messages.iter().cloned());
         }
-
-        Ok(response.output)
+        Ok(response)
     }
-}
 
-impl StreamingPrompt for Agent {
-    fn stream_prompt(&self, prompt: impl Into<Message> + WasmCompatSend) -> StreamingPromptRequest {
-        StreamingPromptRequest::from_agent(self, prompt)
-    }
-}
-
-impl StreamingChat for Agent {
-    fn stream_chat<I, T>(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-        chat_history: I,
-    ) -> StreamingPromptRequest
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<Message>,
-    {
-        StreamingPromptRequest::from_agent(self, prompt).history(chat_history)
-    }
-}
-
-use crate::agent::prompt_request::TypedPromptRequest;
-use schemars::JsonSchema;
-use serde::de::DeserializeOwned;
-
-#[allow(refining_impl_trait)]
-impl TypedPrompt for Agent {
-    type TypedRequest<T>
-        = TypedPromptRequest<T, prompt_request::Standard>
-    where
-        T: JsonSchema + DeserializeOwned + WasmCompatSend + 'static;
-
-    /// Send a prompt and receive a typed structured response.
+    /// Run `prompt` and deserialize the accepted structured response as `T`.
     ///
-    /// The JSON schema for `T` is automatically generated and sent to the provider.
-    /// Providers that support native structured outputs will constrain the model's
-    /// response to match this schema.
+    /// The JSON schema for `T` is generated and sent to the provider as the
+    /// run's structured-output schema. Providers that support native structured
+    /// outputs constrain the model's response to match it.
     ///
-    /// # Example
-    /// ```rust,ignore
-    /// use rig_core::prelude::*;
-    /// use schemars::JsonSchema;
-    /// use serde::Deserialize;
-    ///
-    /// #[derive(Debug, Deserialize, JsonSchema)]
-    /// struct WeatherForecast {
-    ///     city: String,
-    ///     temperature_f: f64,
-    ///     conditions: String,
-    /// }
-    ///
-    /// let agent = client.agent("gpt-4o").build();
-    ///
-    /// // Type inferred from variable
-    /// let forecast: WeatherForecast = agent
-    ///     .prompt_typed("What's the weather in NYC?")
-    ///     .await?;
-    ///
-    /// // Or explicit turbofish syntax
+    /// ```no_run
+    /// # async fn example(agent: rig_agent::Agent) -> Result<(), Box<dyn std::error::Error>> {
+    /// #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+    /// struct WeatherForecast { city: String, temperature_f: f64 }
     /// let forecast = agent
     ///     .prompt_typed::<WeatherForecast>("What's the weather in NYC?")
     ///     .max_turns(3)
-    ///     .await?;
+    ///     .await?
+    ///     .output;
+    /// # Ok(())
+    /// # }
     /// ```
-    fn prompt_typed<T>(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-    ) -> TypedPromptRequest<T, prompt_request::Standard>
+    pub fn prompt_typed<T>(&self, prompt: impl Into<Message>) -> TypedRun<T>
     where
         T: JsonSchema + DeserializeOwned + WasmCompatSend,
     {
-        TypedPromptRequest::from_agent(self, prompt)
+        TypedRun::native(self, prompt)
     }
 }
 
-#[allow(refining_impl_trait)]
-impl TypedPrompt for &Agent {
-    type TypedRequest<T>
-        = TypedPromptRequest<T, prompt_request::Standard>
-    where
-        T: JsonSchema + DeserializeOwned + WasmCompatSend + 'static;
-
-    fn prompt_typed<T>(
-        &self,
-        prompt: impl Into<Message> + WasmCompatSend,
-    ) -> TypedPromptRequest<T, prompt_request::Standard>
-    where
-        T: JsonSchema + DeserializeOwned + WasmCompatSend,
-    {
-        TypedPromptRequest::from_agent(self, prompt)
-    }
-}
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod request_identity_tests;
 
-    fn tool_names(names: &[&str]) -> BTreeSet<String> {
-        names.iter().map(|name| (*name).to_string()).collect()
-    }
-
-    #[test]
-    fn allowed_tool_names_defaults_to_all_executable_tools() {
-        let executable = tool_names(&["add", "subtract"]);
-
-        assert_eq!(
-            allowed_tool_names_for_choice(&executable, None, None, None).unwrap(),
-            executable
-        );
-    }
-
-    #[test]
-    fn allowed_tool_names_auto_and_required_allow_all_executable_tools() {
-        let executable = tool_names(&["add", "subtract"]);
-
-        assert_eq!(
-            allowed_tool_names_for_choice(&executable, Some(&ToolChoice::Auto), None, None)
-                .unwrap(),
-            executable
-        );
-        assert_eq!(
-            allowed_tool_names_for_choice(&executable, Some(&ToolChoice::Required), None, None)
-                .unwrap(),
-            executable
-        );
-    }
-
-    #[test]
-    fn allowed_tool_names_none_allows_no_tools() {
-        let executable = tool_names(&["add", "subtract"]);
-
-        assert!(
-            allowed_tool_names_for_choice(&executable, Some(&ToolChoice::None), None, None)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn allowed_tool_names_specific_allows_requested_executable_tools() {
-        let executable = tool_names(&["add", "subtract"]);
-        let choice = ToolChoice::Specific {
-            function_names: vec!["add".to_string()],
-        };
-
-        assert_eq!(
-            allowed_tool_names_for_choice(&executable, Some(&choice), None, None).unwrap(),
-            tool_names(&["add"])
-        );
-    }
-
-    #[test]
-    fn allowed_tool_names_specific_rejects_missing_tools() {
-        let executable = tool_names(&["add"]);
-        let choice = ToolChoice::Specific {
-            function_names: vec!["missing".to_string()],
-        };
-
-        let err = allowed_tool_names_for_choice(&executable, Some(&choice), None, None)
-            .expect_err("missing specific tool should fail before provider request");
-
-        assert!(matches!(
-            err,
-            CompletionError::RequestError(err)
-                if err.to_string().contains("missing")
-                    && err.to_string().contains("add")
-        ));
-    }
-
-    #[test]
-    fn allowed_tool_names_specific_rejects_empty_names() {
-        let executable = tool_names(&["add"]);
-        let choice = ToolChoice::Specific {
-            function_names: vec![],
-        };
-
-        let err = allowed_tool_names_for_choice(&executable, Some(&choice), None, None)
-            .expect_err("empty specific tool choice should fail before provider request");
-
-        assert!(matches!(
-            err,
-            CompletionError::RequestError(err)
-                if err.to_string().contains("requires at least one function name")
-        ));
-    }
-
-    #[test]
-    fn output_tool_callable_honors_specific_naming_the_output_tool() {
-        // Auto / Required / no explicit choice all permit the output-tool call.
-        assert!(output_tool_callable(None, "final_result"));
-        assert!(output_tool_callable(
-            Some(&ToolChoice::Auto),
-            "final_result"
-        ));
-        assert!(output_tool_callable(
-            Some(&ToolChoice::Required),
-            "final_result"
-        ));
-        // A `Specific` set that NAMES the output tool can call it — the case the
-        // pinned Tool-mode stall warning must not flag (it is accepted by
-        // `allowed_tool_names_for_choice`, which advertises the output tool).
-        assert!(output_tool_callable(
-            Some(&ToolChoice::Specific {
-                function_names: vec!["final_result".to_string()],
-            }),
-            "final_result",
-        ));
-        // A `Specific` set that omits it — or `ToolChoice::None` — genuinely cannot
-        // finalize a pinned Tool-mode turn, so the warning should still fire there.
-        assert!(!output_tool_callable(
-            Some(&ToolChoice::Specific {
-                function_names: vec!["search".to_string()],
-            }),
-            "final_result",
-        ));
-        assert!(!output_tool_callable(
-            Some(&ToolChoice::None),
-            "final_result"
-        ));
-    }
-
-    #[test]
-    fn required_with_no_advertised_tool_is_local_error() {
-        let empty = tool_names(&[]);
-        let err = allowed_tool_names_for_choice(&empty, Some(&ToolChoice::Required), None, None)
-            .expect_err("Required with no advertised tool must fail locally");
-        assert!(matches!(
-            err,
-            CompletionError::RequestError(err) if err.to_string().contains("Required")
-        ));
-    }
-
-    #[test]
-    fn required_with_only_the_output_tool_is_allowed() {
-        // Structured-output Tool mode with no real tools: the model can still be
-        // forced to call the synthetic output tool, so Required is valid.
-        let empty = tool_names(&[]);
-        let allowed = allowed_tool_names_for_choice(
-            &empty,
-            Some(&ToolChoice::Required),
-            Some("final_result"),
-            None,
-        )
-        .expect("Required is satisfiable by the output tool");
-        // The output tool is added to the allowed set by the caller, so the
-        // executable-derived allowed set is empty here.
-        assert!(allowed.is_empty());
-    }
-
-    #[test]
-    fn required_with_active_tools_filter_names_the_filter_in_the_error() {
-        let empty = tool_names(&[]);
-        let err = allowed_tool_names_for_choice(
-            &empty,
-            Some(&ToolChoice::Required),
-            None,
-            Some(&tool_names(&["add"])),
-        )
-        .expect_err("Required after active_tools filtered everything must fail locally");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("active_tools"),
-            "error should name active_tools: {msg}"
-        );
-        assert!(
-            msg.contains("RequestPatch"),
-            "error should suggest RequestPatch: {msg}"
-        );
-    }
-
-    #[test]
-    fn specific_naming_a_filtered_out_tool_is_a_local_error_with_hint() {
-        // active_tools narrowed the advertised set to {add}; Specific still names
-        // the now-filtered-out `subtract`.
-        let executable = tool_names(&["add"]);
-        let choice = ToolChoice::Specific {
-            function_names: vec!["subtract".to_string()],
-        };
-        let err = allowed_tool_names_for_choice(
-            &executable,
-            Some(&choice),
-            None,
-            Some(&tool_names(&["add", "subtract"])),
-        )
-        .expect_err("Specific naming a filtered-out tool must fail locally");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("subtract"),
-            "error should name the missing tool: {msg}"
-        );
-        assert!(
-            msg.contains("active_tools"),
-            "error should name active_tools: {msg}"
-        );
-    }
-
-    #[test]
-    fn specific_may_name_the_output_tool() {
-        // The effective advertised set includes the synthetic output tool.
-        let empty = tool_names(&[]);
-        let choice = ToolChoice::Specific {
-            function_names: vec!["final_result".to_string()],
-        };
-        let allowed =
-            allowed_tool_names_for_choice(&empty, Some(&choice), Some("final_result"), None)
-                .expect("Specific naming the output tool is valid");
-        assert_eq!(allowed, tool_names(&["final_result"]));
-    }
-
-    #[test]
-    fn specific_typo_is_not_blamed_on_active_tools() {
-        // Specific names a tool that never existed (a typo), even though an
-        // active_tools filter was applied. The error must NOT blame active_tools,
-        // because the filter never had that tool to drop.
-        let executable = tool_names(&["add"]);
-        let choice = ToolChoice::Specific {
-            function_names: vec!["nonexistent".to_string()],
-        };
-        let err = allowed_tool_names_for_choice(
-            &executable,
-            Some(&choice),
-            None,
-            Some(&tool_names(&["add"])),
-        )
-        .expect_err("Specific naming a non-existent tool must fail locally");
-        let msg = err.to_string();
-        assert!(msg.contains("nonexistent"), "error names the typo: {msg}");
-        assert!(
-            !msg.contains("active_tools"),
-            "a plain typo must not be blamed on active_tools: {msg}"
-        );
-    }
-
-    #[test]
-    fn resolve_output_mode_without_schema_is_always_native() {
-        // No schema => nothing to enforce, regardless of the requested mode or tools.
-        for requested in [
-            OutputMode::Auto,
-            OutputMode::Tool,
-            OutputMode::Native,
-            OutputMode::Prompted,
-        ] {
-            assert_eq!(
-                resolve_output_mode(false, true, true, false, &requested),
-                OutputMode::Native,
-                "no schema should force Native for {requested:?}"
-            );
-            assert_eq!(
-                resolve_output_mode(false, false, true, false, &requested),
-                OutputMode::Native,
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_output_mode_auto_picks_tool_only_when_tools_present() {
-        // This is the #1928 fix: with tools on a provider that does NOT compose
-        // native output with tools, the schema must not be a native `format`
-        // constraint on every turn, so Auto routes to Tool.
-        assert_eq!(
-            resolve_output_mode(true, true, true, false, &OutputMode::Auto),
-            OutputMode::Tool,
-        );
-        // No tools => native structured output is safe and preferred.
-        assert_eq!(
-            resolve_output_mode(true, false, true, false, &OutputMode::Auto),
-            OutputMode::Native,
-        );
-    }
-
-    #[test]
-    fn resolve_output_mode_auto_keeps_native_when_provider_composes() {
-        // On providers that compose native structured output with tools (OpenAI,
-        // Anthropic), Auto keeps guaranteed native output even with tools present.
-        assert_eq!(
-            resolve_output_mode(true, true, true, true, &OutputMode::Auto),
-            OutputMode::Native,
-        );
-    }
-
-    #[test]
-    fn resolve_output_mode_honors_explicit_choice_with_schema() {
-        for (requested, expected) in [
-            (OutputMode::Tool, OutputMode::Tool),
-            (OutputMode::Native, OutputMode::Native),
-            (OutputMode::Prompted, OutputMode::Prompted),
-        ] {
-            // Explicit modes are honored regardless of tools or provider support.
-            assert_eq!(
-                resolve_output_mode(true, true, true, false, &requested),
-                expected
-            );
-            assert_eq!(
-                resolve_output_mode(true, false, true, true, &requested),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn resolve_output_mode_degrades_to_native_when_output_tool_not_callable() {
-        // Tool mode finalizes via the output-tool call; when the tool choice
-        // forbids it (None / Specific), structured output must still be enforced
-        // via Native rather than silently dropped (#1928 regression guard).
-        assert_eq!(
-            resolve_output_mode(true, true, false, false, &OutputMode::Auto),
-            OutputMode::Native,
-        );
-        assert_eq!(
-            resolve_output_mode(true, true, false, false, &OutputMode::Tool),
-            OutputMode::Native,
-        );
-        // Prompted does not rely on tools, so it is unaffected.
-        assert_eq!(
-            resolve_output_mode(true, true, false, false, &OutputMode::Prompted),
-            OutputMode::Prompted,
-        );
-    }
-
-    #[test]
-    fn tool_choice_permits_output_tool_only_for_auto_required_or_unset() {
-        assert!(tool_choice_permits_output_tool(None));
-        assert!(tool_choice_permits_output_tool(Some(&ToolChoice::Auto)));
-        assert!(tool_choice_permits_output_tool(Some(&ToolChoice::Required)));
-        assert!(!tool_choice_permits_output_tool(Some(&ToolChoice::None)));
-        assert!(!tool_choice_permits_output_tool(Some(
-            &ToolChoice::Specific {
-                function_names: vec!["add".to_string()],
-            }
-        )));
-    }
-
-    #[test]
-    fn pick_output_tool_name_defaults_when_unused() {
-        let executable = tool_names(&["add", "subtract"]);
-        assert_eq!(pick_output_tool_name(&executable), DEFAULT_OUTPUT_TOOL_NAME);
-    }
-
-    #[test]
-    fn pick_output_tool_name_avoids_collision_with_real_tools() {
-        // A user tool literally named `final_result` must not be shadowed, or
-        // the model's output call would be dispatched to the tool server.
-        let executable = tool_names(&["final_result"]);
-        assert_eq!(pick_output_tool_name(&executable), "final_result_1");
-
-        let executable = tool_names(&["final_result", "final_result_1"]);
-        assert_eq!(pick_output_tool_name(&executable), "final_result_2");
-    }
+/// An agent taken apart by [`Agent::into_parts`]: the same agent, now over
+/// the bus as a host would hold it, plus the dispatcher and the driver.
+pub struct AgentParts {
+    /// The bus's client half.
+    pub dispatcher: Dispatcher,
+    /// The bus's registration handle: register on the bus once the driver
+    /// is spawned.
+    pub registrar: crate::bus::Registrar,
+    /// The bus's serving half: spawn it or drive it, or the agent hangs.
+    pub driver: BusDriver,
+    /// The agent, now over the bus rather than owning it.
+    pub agent: Agent,
 }

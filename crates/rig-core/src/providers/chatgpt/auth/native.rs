@@ -1,11 +1,15 @@
 //! Native ChatGPT OAuth and token cache implementation.
 
 use super::{AuthContext, AuthError, DeviceCodeHandler, DeviceCodePrompt};
+use crate::http_client::HttpClientExt;
+use crate::providers::internal::auth::{request, send_json};
 use crate::providers::internal::device_auth::{
     emit_device_code_prompt, read_json_record, token_expired, write_json_record,
 };
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+use bytes::Bytes;
+use http::Method;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::PathBuf;
 
@@ -81,7 +85,10 @@ impl PlatformAuthenticator {
         }
     }
 
-    pub(super) async fn auth_context_oauth(&self) -> Result<AuthContext, AuthError> {
+    pub(super) async fn auth_context_oauth<H>(&self, http: &H) -> Result<AuthContext, AuthError>
+    where
+        H: HttpClientExt,
+    {
         let mut record: AuthRecord = read_json_record(self.auth_file.as_deref())?;
 
         if let Some(access_token) = record.access_token.clone()
@@ -93,21 +100,21 @@ impl PlatformAuthenticator {
                 .or_else(|| extract_account_id(record.id_token.as_deref()))
                 .or_else(|| extract_account_id(Some(&access_token)));
             if account_id != record.account_id {
-                record.account_id = account_id.clone();
+                record.account_id.clone_from(&account_id);
                 write_json_record(self.auth_file.as_deref(), &record)?;
             }
             return Ok(AuthContext {
-                access_token,
+                access_token: access_token.into(),
                 account_id,
             });
         }
 
         if let Some(refresh_token) = record.refresh_token.clone() {
-            match self.refresh_tokens(&refresh_token).await {
+            match self.refresh_tokens(http, &refresh_token).await {
                 Ok(refreshed) => {
                     write_json_record(self.auth_file.as_deref(), &refreshed)?;
                     return Ok(AuthContext {
-                        access_token: refreshed.access_token.unwrap_or_default(),
+                        access_token: refreshed.access_token.unwrap_or_default().into(),
                         account_id: refreshed.account_id,
                     });
                 }
@@ -123,24 +130,27 @@ impl PlatformAuthenticator {
             ));
         }
 
-        let fresh = self.login_device_flow().await?;
+        let fresh = self.login_device_flow(http).await?;
         write_json_record(self.auth_file.as_deref(), &fresh)?;
         Ok(AuthContext {
-            access_token: fresh.access_token.unwrap_or_default(),
+            access_token: fresh.access_token.unwrap_or_default().into(),
             account_id: fresh.account_id,
         })
     }
 
-    async fn login_device_flow(&self) -> Result<AuthRecord, AuthError> {
-        let client = reqwest::Client::new();
-        let device = client
-            .post(CHATGPT_DEVICE_CODE_URL)
-            .json(&serde_json::json!({ "client_id": CHATGPT_CLIENT_ID }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<DeviceCodeResponse>()
-            .await?;
+    async fn login_device_flow<H>(&self, http: &H) -> Result<AuthRecord, AuthError>
+    where
+        H: HttpClientExt,
+    {
+        let device: DeviceCodeResponse = send_json(
+            http,
+            request(Method::POST, CHATGPT_DEVICE_CODE_URL)
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(Bytes::from(serde_json::to_vec(
+                    &serde_json::json!({ "client_id": CHATGPT_CLIENT_ID }),
+                )?)),
+        )
+        .await?;
 
         emit_device_code_prompt(
             self.device_code_handler.0.as_ref(),
@@ -163,30 +173,39 @@ impl PlatformAuthenticator {
                 ));
             }
 
-            let response = client
-                .post(CHATGPT_DEVICE_TOKEN_URL)
-                .json(&serde_json::json!({
-                    "device_auth_id": device.device_auth_id,
-                    "user_code": device.user_code,
-                }))
-                .send()
-                .await?;
+            let poll = send_json::<_, DeviceTokenResponse>(
+                http,
+                request(Method::POST, CHATGPT_DEVICE_TOKEN_URL)
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Bytes::from(serde_json::to_vec(&serde_json::json!({
+                        "device_auth_id": device.device_auth_id,
+                        "user_code": device.user_code,
+                    }))?)),
+            )
+            .await;
 
-            if response.status().is_success() {
-                let token_response = response.json::<DeviceTokenResponse>().await?;
-                break token_response;
+            match poll {
+                Ok(token_response) => break token_response,
+                // Still pending: the endpoint answers 403/404 until the user
+                // completes authorization.
+                Err(AuthError::Http(err))
+                    if matches!(
+                        err.non_success_status().map(|status| status.as_u16()),
+                        Some(403 | 404)
+                    ) =>
+                {
+                    crate::wasm_compat::sleep(std::time::Duration::from_secs(interval)).await;
+                    continue;
+                }
+                Err(AuthError::Http(err)) if err.non_success_status().is_some() => {
+                    let status = err.non_success_status().unwrap_or_default();
+                    let text = err.non_success_body().unwrap_or_default();
+                    return Err(AuthError::Message(format!(
+                        "ChatGPT device authorization failed: {status} {text}"
+                    )));
+                }
+                Err(err) => return Err(err),
             }
-
-            let status = response.status();
-            if status.as_u16() == 403 || status.as_u16() == 404 {
-                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
-                continue;
-            }
-
-            let text = response.text().await.unwrap_or_default();
-            return Err(AuthError::Message(format!(
-                "ChatGPT device authorization failed: {status} {text}"
-            )));
         };
 
         let redirect_uri = format!("{CHATGPT_AUTH_BASE}/deviceauth/callback");
@@ -201,24 +220,28 @@ impl PlatformAuthenticator {
             .extend_pairs(form)
             .finish();
 
-        let tokens = client
-            .post(CHATGPT_OAUTH_TOKEN_URL)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .body(body)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<OAuthTokenResponse>()
-            .await?;
+        let tokens: OAuthTokenResponse = send_json(
+            http,
+            request(Method::POST, CHATGPT_OAUTH_TOKEN_URL)
+                .header(
+                    http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Bytes::from(body)),
+        )
+        .await?;
 
         Ok(build_auth_record(tokens, None))
     }
 
-    async fn refresh_tokens(&self, refresh_token: &str) -> Result<AuthRecord, RefreshTokensError> {
-        let client = reqwest::Client::new();
+    async fn refresh_tokens<H>(
+        &self,
+        http: &H,
+        refresh_token: &str,
+    ) -> Result<AuthRecord, RefreshTokensError>
+    where
+        H: HttpClientExt,
+    {
         let form = [
             ("client_id", CHATGPT_CLIENT_ID),
             ("grant_type", "refresh_token"),
@@ -230,29 +253,27 @@ impl PlatformAuthenticator {
             .extend_pairs(form)
             .finish();
 
-        let response = client
-            .post(CHATGPT_OAUTH_TOKEN_URL)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .body(body)
-            .send()
-            .await
-            .map_err(AuthError::from)
-            .map_err(RefreshTokensError::Auth)?;
+        let response = send_json::<_, OAuthTokenResponse>(
+            http,
+            request(Method::POST, CHATGPT_OAUTH_TOKEN_URL)
+                .header(
+                    http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Bytes::from(body)),
+        )
+        .await;
 
-        let status = response.status();
-        if status.is_success() {
-            let tokens = response
-                .json::<OAuthTokenResponse>()
-                .await
-                .map_err(AuthError::from)
-                .map_err(RefreshTokensError::Auth)?;
-            return Ok(build_auth_record(tokens, Some(refresh_token.to_owned())));
-        }
-
-        let body = response.text().await.unwrap_or_default();
+        let (status, body) = match response {
+            Ok(tokens) => {
+                return Ok(build_auth_record(tokens, Some(refresh_token.to_owned())));
+            }
+            Err(AuthError::Http(err)) if err.non_success_status().is_some() => (
+                err.non_success_status().unwrap_or_default(),
+                err.non_success_body().unwrap_or_default().to_owned(),
+            ),
+            Err(err) => return Err(RefreshTokensError::Auth(err)),
+        };
         let oauth_error = serde_json::from_str::<OAuthErrorResponse>(&body).ok();
         if should_reauthenticate_after_refresh(
             status,
@@ -315,18 +336,15 @@ fn decode_jwt_claims(token: &str) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
-fn should_reauthenticate_after_refresh(
-    status: reqwest::StatusCode,
-    error_code: Option<&str>,
-) -> bool {
+fn should_reauthenticate_after_refresh(status: http::StatusCode, error_code: Option<&str>) -> bool {
     matches!(
         status,
-        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNAUTHORIZED
+        http::StatusCode::BAD_REQUEST | http::StatusCode::UNAUTHORIZED
     ) && matches!(error_code, Some("invalid_grant"))
 }
 
 fn format_refresh_error(
-    status: reqwest::StatusCode,
+    status: http::StatusCode,
     oauth_error: Option<&OAuthErrorResponse>,
     body: &str,
 ) -> String {
@@ -384,105 +402,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        DeviceCodeHandler, DeviceCodeResponse, OAuthErrorResponse, OAuthTokenResponse,
-        PlatformAuthenticator, build_auth_record, format_refresh_error,
-        should_reauthenticate_after_refresh,
-    };
-    use reqwest::StatusCode;
-
-    #[test]
-    fn device_code_response_accepts_numeric_interval() {
-        let response: DeviceCodeResponse = serde_json::from_str(
-            r#"{
-                "device_auth_id": "deviceauth_123",
-                "user_code": "ABCD-EFGH",
-                "interval": 5
-            }"#,
-        )
-        .expect("device code response");
-
-        assert_eq!(response.interval, Some(5));
-    }
-
-    #[test]
-    fn device_code_response_accepts_string_interval() {
-        let response: DeviceCodeResponse = serde_json::from_str(
-            r#"{
-                "device_auth_id": "deviceauth_123",
-                "user_code": "ABCD-EFGH",
-                "interval": "5"
-            }"#,
-        )
-        .expect("device code response");
-
-        assert_eq!(response.interval, Some(5));
-    }
-
-    #[test]
-    fn refresh_reauth_only_on_invalid_grant() {
-        assert!(should_reauthenticate_after_refresh(
-            StatusCode::BAD_REQUEST,
-            Some("invalid_grant")
-        ));
-        assert!(should_reauthenticate_after_refresh(
-            StatusCode::UNAUTHORIZED,
-            Some("invalid_grant")
-        ));
-        assert!(!should_reauthenticate_after_refresh(
-            StatusCode::BAD_GATEWAY,
-            Some("invalid_grant")
-        ));
-        assert!(!should_reauthenticate_after_refresh(
-            StatusCode::BAD_REQUEST,
-            Some("invalid_request")
-        ));
-        assert!(!should_reauthenticate_after_refresh(
-            StatusCode::UNAUTHORIZED,
-            None
-        ));
-    }
-
-    #[tokio::test]
-    async fn noninteractive_oauth_requires_sign_in_instead_of_device_flow() {
-        let auth = PlatformAuthenticator::new(None, DeviceCodeHandler::default(), false);
-        let err = auth
-            .auth_context_oauth()
-            .await
-            .expect_err("missing cached auth should not start device flow")
-            .to_string();
-
-        assert!(err.contains("ChatGPT sign-in required"), "{err}");
-    }
-
-    #[test]
-    fn refresh_error_uses_oauth_description_when_present() {
-        let oauth_error = OAuthErrorResponse {
-            error: Some("temporarily_unavailable".into()),
-            error_description: Some("please retry".into()),
-        };
-
-        assert_eq!(
-            format_refresh_error(StatusCode::BAD_GATEWAY, Some(&oauth_error), ""),
-            "ChatGPT token refresh failed: 502 Bad Gateway temporarily_unavailable (please retry)"
-        );
-    }
-
-    #[test]
-    fn build_auth_record_preserves_existing_refresh_token_when_refresh_omits_one() {
-        let record = build_auth_record(
-            OAuthTokenResponse {
-                access_token: "access-token".into(),
-                refresh_token: None,
-                id_token: None,
-            },
-            Some("cached-refresh-token".into()),
-        );
-
-        assert_eq!(
-            record.refresh_token.as_deref(),
-            Some("cached-refresh-token")
-        );
-    }
-}
+mod tests;

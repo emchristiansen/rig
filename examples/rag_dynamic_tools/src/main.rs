@@ -1,10 +1,8 @@
 use anyhow::Result;
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
 use rig::{
-    completion::Prompt,
     embeddings::EmbeddingsBuilder,
-    providers::openai::Client,
     tool::{Tool, ToolEmbedding, ToolSet},
     vector_store::in_memory_store::InMemoryVectorStore,
 };
@@ -135,12 +133,13 @@ async fn main() -> Result<(), anyhow::Error> {
         .with_target(false)
         .init();
 
-    // Create OpenAI client
-    let openai_client = Client::from_env()?;
-    let embedding_model = openai_client.embedding_model(openai::TEXT_EMBEDDING_ADA_002);
+    // One OpenAI config serves both: completions go to the Responses API,
+    // embeddings to the shared REST surface.
+    let openai_client = OpenAI::from_env()?.bound()?;
+    let embedding_model = openai_client.embedding(openai::TEXT_EMBEDDING_ADA_002, None);
     let mut toolset = ToolSet::default();
-    toolset.add_retrieved_tool(Add);
-    toolset.add_retrieved_tool(Subtract);
+    toolset.add_retrieved_tool(Add)?;
+    toolset.add_retrieved_tool(Subtract)?;
     let embeddings = EmbeddingsBuilder::new(embedding_model.clone())
         .documents(toolset.schemas()?)?
         .build()
@@ -164,7 +163,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .build();
 
     // Prompt the agent and print the response
-    let response = calculator_rag.prompt("Calculate 3 - 7").await?;
+    let response = calculator_rag.prompt("Calculate 3 - 7").await?.output;
 
     println!("{response}");
 

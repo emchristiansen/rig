@@ -2,7 +2,7 @@
 //! Exercises the real agent loop code path with mocked LLM responses.
 
 use rig::agent::AgentBuilder;
-use rig::completion::{Chat, Message, Prompt, Usage};
+use rig::completion::{Message, Usage};
 use rig::message::{AssistantContent, UserContent};
 use rig_agent::test_utils::{MockAddTool, MockCompletionModel, MockTurn};
 
@@ -13,13 +13,10 @@ use rig_agent::test_utils::{MockAddTool, MockCompletionModel, MockTurn};
 fn simple_text_turn() -> MockTurn {
     MockTurn::text("hello from mock")
         .with_usage(Usage {
-            input_tokens: 10,
-            output_tokens: 5,
-            total_tokens: 15,
-            cached_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-            tool_use_prompt_tokens: 0,
-            reasoning_tokens: 0,
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            total_tokens: Some(15),
+            ..Default::default()
         })
         .with_message_id("msg_mock_1")
 }
@@ -32,24 +29,18 @@ fn tool_then_text_model() -> MockCompletionModel {
     MockCompletionModel::new([
         MockTurn::tool_call("tc_1", "add", serde_json::json!({"x": 2, "y": 3}))
             .with_usage(Usage {
-                input_tokens: 15,
-                output_tokens: 8,
-                total_tokens: 23,
-                cached_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-                tool_use_prompt_tokens: 0,
-                reasoning_tokens: 0,
+                input_tokens: Some(15),
+                output_tokens: Some(8),
+                total_tokens: Some(23),
+                ..Default::default()
             })
             .with_message_id("msg_tool"),
         MockTurn::text("The answer is 5")
             .with_usage(Usage {
-                input_tokens: 20,
-                output_tokens: 4,
-                total_tokens: 24,
-                cached_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-                tool_use_prompt_tokens: 0,
-                reasoning_tokens: 0,
+                input_tokens: Some(20),
+                output_tokens: Some(4),
+                total_tokens: Some(24),
+                ..Default::default()
             })
             .with_message_id("msg_text"),
     ])
@@ -63,35 +54,35 @@ fn always_tool_call_turn() -> MockTurn {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Test 1: Standard path still returns a plain String (backward compat).
+/// Test 1: `PromptResponse::output` is the accepted assistant text.
 #[tokio::test]
 async fn standard_prompt_returns_string() {
     let agent = AgentBuilder::new(simple_text_model(1)).build();
 
-    let result: String = agent.prompt("hi").await.expect("prompt should succeed");
+    let result: String = agent
+        .prompt("hi")
+        .await
+        .expect("prompt should succeed")
+        .output;
 
     assert_eq!(result, "hello from mock");
 }
 
-/// Test 2: `extended_details()` returns a `PromptResponse` with `messages: Some(...)`.
+/// Test 2: `prompt()` returns a `PromptResponse` with `messages: Some(...)`.
 #[tokio::test]
-async fn extended_details_populates_messages() {
+async fn prompt_response_populates_messages() {
     let agent = AgentBuilder::new(simple_text_model(1)).build();
 
-    let resp = agent
-        .prompt("hi")
-        .extended_details()
-        .await
-        .expect("prompt should succeed");
+    let resp = agent.prompt("hi").await.expect("prompt should succeed");
 
     assert_eq!(resp.output, "hello from mock");
-    assert_eq!(resp.usage.input_tokens, 10);
-    assert_eq!(resp.usage.output_tokens, 5);
+    assert_eq!(resp.usage.input_tokens, Some(10));
+    assert_eq!(resp.usage.output_tokens, Some(5));
 
     // Messages should be populated
     let messages = resp
         .messages
-        .expect("messages should be Some for extended_details");
+        .expect("messages should be Some on the prompt response");
 
     // Should contain: [User("hi"), Assistant("hello from mock")]
     assert_eq!(messages.len(), 2);
@@ -115,7 +106,7 @@ async fn extended_details_populates_messages() {
     }
 }
 
-/// Test 3: `with_history()` + `extended_details()` — the response messages
+/// Test 3: `with_history()` — the response messages
 /// should contain the full conversation including any provided history.
 #[tokio::test]
 async fn extended_with_history_both_populated() {
@@ -126,7 +117,6 @@ async fn extended_with_history_both_populated() {
     let resp = agent
         .prompt("hello")
         .history(&initial_history)
-        .extended_details()
         .await
         .expect("prompt should succeed");
 
@@ -162,10 +152,10 @@ async fn standard_with_history_works() {
         .await
         .expect("prompt should succeed");
 
-    assert_eq!(result, "hello from mock");
+    assert_eq!(result.output, "hello from mock");
 
     // Note: The input history is not mutated. To get the updated history,
-    // use `.extended_details()` and access `response.messages`.
+    // access `response.messages`.
 }
 
 /// Test 5: Multi-turn agent loop with tool calls — messages should contain the
@@ -179,7 +169,6 @@ async fn multi_turn_messages_include_tool_calls() {
     let resp = agent
         .prompt("What is 2 + 3?")
         .max_turns(5)
-        .extended_details()
         .await
         .expect("prompt should succeed");
 
@@ -229,8 +218,8 @@ async fn multi_turn_messages_include_tool_calls() {
     }
 
     // Usage should be aggregated across both turns
-    assert_eq!(resp.usage.input_tokens, 35); // 15 + 20
-    assert_eq!(resp.usage.output_tokens, 12); // 8 + 4
+    assert_eq!(resp.usage.input_tokens, Some(35)); // 15 + 20
+    assert_eq!(resp.usage.output_tokens, Some(12)); // 8 + 4
 }
 
 /// Test 6: `PromptResponse::new()` backward compatibility — 2-argument constructor
@@ -239,7 +228,7 @@ async fn multi_turn_messages_include_tool_calls() {
 async fn prompt_response_new_backward_compat() {
     use rig::agent::PromptResponse;
 
-    let resp = PromptResponse::new("output text", Usage::new());
+    let resp = PromptResponse::new("output text", Usage::default());
 
     assert_eq!(resp.output, "output text");
     assert!(resp.messages.is_none());
@@ -250,7 +239,7 @@ async fn prompt_response_new_backward_compat() {
 async fn prompt_response_display_shows_output() {
     use rig::agent::PromptResponse;
 
-    let resp = PromptResponse::new("the answer is 42", Usage::new());
+    let resp = PromptResponse::new("the answer is 42", Usage::default());
 
     assert_eq!(format!("{resp}"), "the answer is 42");
     // Also works with format args
@@ -264,7 +253,7 @@ async fn prompt_response_with_messages_builder() {
 
     let messages = vec![Message::user("hello"), Message::assistant("world")];
 
-    let resp = PromptResponse::new("output", Usage::new()).with_messages(messages.clone());
+    let resp = PromptResponse::new("output", Usage::default()).with_messages(messages);
 
     assert!(resp.messages.is_some());
     assert_eq!(resp.messages.as_ref().unwrap().len(), 2);
@@ -282,11 +271,7 @@ async fn max_turns_error_still_contains_history() {
     .tool(MockAddTool)
     .build();
 
-    let result = agent
-        .prompt("do something")
-        .max_turns(2)
-        .extended_details()
-        .await;
+    let result = agent.prompt("do something").max_turns(2).await;
 
     match result {
         Err(PromptError::MaxTurnsError {
@@ -306,10 +291,10 @@ async fn max_turns_error_still_contains_history() {
     }
 }
 
-/// Test 9: Extended details without `with_history()` — messages should still
+/// Test 9: A prompt response without `with_history()` — messages should still
 /// be populated (this is the core feature: no need for &mut borrow).
 #[tokio::test]
-async fn extended_details_works_without_with_history() {
+async fn prompt_response_works_without_with_history() {
     let agent = AgentBuilder::new(tool_then_text_model())
         .tool(MockAddTool)
         .build();
@@ -318,7 +303,6 @@ async fn extended_details_works_without_with_history() {
     let resp = agent
         .prompt("compute 2+3")
         .max_turns(5)
-        .extended_details()
         .await
         .expect("prompt should succeed");
 
@@ -331,23 +315,34 @@ async fn extended_details_works_without_with_history() {
     assert_eq!(resp.output, "The answer is 5");
 }
 
-/// Test 10: `Chat::chat` appends the prompt and response messages to the
+/// Test 10: `Agent::chat` appends the prompt and response messages to the
 /// caller-owned history.
 #[tokio::test]
 async fn chat_appends_prompt_and_assistant_to_history() {
     let agent = AgentBuilder::new(simple_text_model(2)).build();
     let mut history = Vec::<Message>::new();
 
-    let output = agent
+    let response = agent
         .chat("hi", &mut history)
         .await
         .expect("chat should succeed");
 
-    assert_eq!(output, "hello from mock");
+    assert_eq!(response.output, "hello from mock");
     assert_eq!(
         history.len(),
         2,
         "expected chat to append [User, Assistant], got: {history:#?}"
+    );
+    // `chat` returns the same response `prompt` does: the run's transcript
+    // is on it, and it is exactly what the caller's history gained.
+    assert_eq!(
+        response.messages.as_deref().map(<[Message]>::len),
+        Some(2),
+        "chat keeps the run's messages on the response"
+    );
+    assert_eq!(
+        response.memory_append, None,
+        "caller-owned history bypasses memory: nothing to acknowledge"
     );
 
     match &history[0] {
@@ -378,7 +373,7 @@ async fn chat_appends_prompt_and_assistant_to_history() {
     );
 }
 
-/// Test 11: `Chat::chat` appends every message produced by a tool roundtrip.
+/// Test 11: `Agent::chat` appends every message produced by a tool roundtrip.
 #[tokio::test]
 async fn chat_appends_tool_roundtrip_to_history() {
     let agent = AgentBuilder::new(tool_then_text_model())
@@ -390,7 +385,8 @@ async fn chat_appends_tool_roundtrip_to_history() {
     let output = agent
         .chat("What is 2 + 3?", &mut history)
         .await
-        .expect("chat should succeed");
+        .expect("chat should succeed")
+        .output;
 
     assert_eq!(output, "The answer is 5");
     assert_eq!(
@@ -436,13 +432,11 @@ async fn sequential_prompts_have_independent_histories() {
 
     let resp1 = agent
         .prompt("first")
-        .extended_details()
         .await
         .expect("first prompt should succeed");
 
     let resp2 = agent
         .prompt("second")
-        .extended_details()
         .await
         .expect("second prompt should succeed");
 
@@ -470,4 +464,45 @@ async fn sequential_prompts_have_independent_histories() {
         },
         other => panic!("unexpected: {other:?}"),
     }
+}
+
+/// `memory_append` is absent from a response without memory behind it, and
+/// round-trips through serde in both states when set by the driver.
+#[test]
+fn memory_append_is_absent_without_memory_and_round_trips_through_serde() {
+    use rig::agent::{MemoryAppend, PromptResponse};
+
+    let bare = PromptResponse::new("output", Usage::default());
+    assert_eq!(bare.memory_append, None);
+    let json = serde_json::to_value(&bare).expect("serializes");
+    assert!(
+        json.get("memory_append").is_none(),
+        "no memory, no field: {json}"
+    );
+
+    let acknowledged = bare
+        .clone()
+        .with_memory_append(Some(MemoryAppend::Acknowledged));
+    let json = serde_json::to_value(&acknowledged).expect("serializes");
+    assert_eq!(
+        json["memory_append"],
+        serde_json::json!({"status": "acknowledged"})
+    );
+    let restored: PromptResponse = serde_json::from_value(json).expect("deserializes");
+    assert_eq!(restored.memory_append, Some(MemoryAppend::Acknowledged));
+
+    let failed = bare.with_memory_append(Some(MemoryAppend::Failed {
+        report: rig::error::ErrorReport::new(rig::error::ErrorKind::MemoryBackend, "boom"),
+    }));
+    let json = serde_json::to_value(&failed).expect("serializes");
+    assert_eq!(json["memory_append"]["status"], "failed");
+    let restored: PromptResponse = serde_json::from_value(json).expect("deserializes");
+    assert_eq!(restored.memory_append, failed.memory_append);
+    assert_eq!(
+        restored
+            .memory_append()
+            .and_then(MemoryAppend::failure)
+            .map(|report| report.kind),
+        Some(rig::error::ErrorKind::MemoryBackend)
+    );
 }

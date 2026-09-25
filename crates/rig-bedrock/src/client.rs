@@ -1,8 +1,9 @@
 use crate::image::ImageGenerationModel;
 use crate::{completion::CompletionModel, embedding::EmbeddingModel};
 use aws_config::{BehaviorVersion, Region};
-use rig_core::client::Nothing;
-use rig_core::prelude::*;
+use rig_core::driver::CompletionProvider;
+use rig_core::embeddings::EmbeddingsBuilder;
+use rig_core::error::ProviderError;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -14,17 +15,15 @@ pub struct ClientBuilder<'a> {
 }
 
 impl<'a> ClientBuilder<'a> {
-    /// Make sure to verify model and region [compatibility]
-    ///
-    /// [compatibility]: https://docs.aws.amazon.com/bedrock/latest/userguide/models-regions.html
+    /// Sets the AWS region. The selected model must be
+    /// [available there](https://docs.aws.amazon.com/bedrock/latest/userguide/models-regions.html).
     pub fn region(mut self, region: &'a str) -> Self {
         self.region = region;
         self
     }
 
-    /// Make sure you have permissions to access [Amazon Bedrock foundation model]
-    ///
-    /// [ Amazon Bedrock foundation model]: <https://docs.aws.amazon.com/bedrock/latest/userguide/model-access-modify.html>
+    /// Loads AWS SDK configuration and constructs a client for the selected region.
+    /// Requests require permission to access the selected Bedrock model.
     pub async fn build(self) -> Client {
         let sdk_config = aws_config::defaults(BehaviorVersion::latest())
             .region(Region::new(String::from(self.region)))
@@ -77,7 +76,7 @@ impl Client {
         }
     }
 
-    pub async fn get_inner(&self) -> &aws_sdk_bedrockruntime::Client {
+    pub async fn inner(&self) -> &aws_sdk_bedrockruntime::Client {
         self.aws_client
             .get_or_init(|| async {
                 let config = if let Some(profile_name) = &self.profile_name {
@@ -94,62 +93,52 @@ impl Client {
     }
 }
 
-impl ProviderClient for Client {
-    type Input = Nothing;
-    type Error = rig_core::client::ProviderClientError;
-
-    fn from_env() -> Result<Self, Self::Error>
-    where
-        Self: Sized,
-    {
+impl Client {
+    /// Creates a client that loads AWS SDK configuration on first use.
+    /// Construction does not validate credentials and always succeeds.
+    pub fn from_env() -> Result<Self, rig_core::client::ProviderClientError> {
         Ok(Client::new())
     }
 
-    fn from_val(_: Nothing) -> Result<Self, Self::Error>
-    where
-        Self: Sized,
-    {
-        Err(rig_core::client::ProviderClientError::InvalidConfiguration(
-            "use `Client::from_env()` or `Client::with_profile_name(\"aws_profile\")` instead",
-        ))
-    }
-}
-
-impl CompletionClient for Client {
-    type CompletionModel = CompletionModel;
-
-    fn completion_model(&self, model: impl Into<String>) -> Self::CompletionModel {
-        CompletionModel::new(self.clone(), model)
-    }
-}
-
-impl EmbeddingsClient for Client {
-    type EmbeddingModel = EmbeddingModel;
-
-    fn embedding_model(&self, model: impl Into<String>) -> Self::EmbeddingModel {
-        EmbeddingModel::new(self.clone(), model, None)
+    /// This provider's embedding model for `model`, at `ndims` dimensions
+    /// when the caller named one rather than taking the model's default.
+    pub fn embedding(&self, model: impl Into<String>, ndims: Option<usize>) -> EmbeddingModel {
+        EmbeddingModel::new(self.clone(), model, ndims)
     }
 
-    fn embedding_model_with_ndims(
+    /// An embedding builder over this provider's `model`.
+    pub fn embeddings<D: rig_core::Embed>(
+        &self,
+        model: impl Into<String>,
+    ) -> EmbeddingsBuilder<EmbeddingModel, D> {
+        EmbeddingsBuilder::new(self.embedding(model, None))
+    }
+
+    /// An embedding builder over this provider's `model` at `ndims`
+    /// dimensions.
+    pub fn embeddings_with_ndims<D: rig_core::Embed>(
         &self,
         model: impl Into<String>,
         ndims: usize,
-    ) -> Self::EmbeddingModel {
-        EmbeddingModel::new(self.clone(), model, Some(ndims))
+    ) -> EmbeddingsBuilder<EmbeddingModel, D> {
+        EmbeddingsBuilder::new(self.embedding(model, Some(ndims)))
     }
-}
 
-impl ImageGenerationClient for Client {
-    type ImageGenerationModel = ImageGenerationModel;
-
-    fn image_generation_model(&self, model: impl Into<String>) -> Self::ImageGenerationModel {
+    /// This provider's image-generation model for `model`.
+    pub fn image_generation(&self, model: impl Into<String>) -> ImageGenerationModel {
         ImageGenerationModel::new(self.clone(), model)
     }
+
+    /// Returns success without making a request or validating credentials.
+    pub async fn verify(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }
 
-impl VerifyClient for Client {
-    async fn verify(&self) -> Result<(), VerifyError> {
-        // No API endpoint to verify the API key
-        Ok(())
+impl CompletionProvider for Client {
+    type Model = CompletionModel;
+
+    fn completion(&self, model: impl Into<String>) -> Self::Model {
+        CompletionModel::new(self.clone(), model)
     }
 }

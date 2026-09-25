@@ -2,9 +2,9 @@
 
 use futures::StreamExt;
 use rig::agent::AgentBuilder;
-use rig::completion::Prompt;
+use rig::completion::AssistantContent;
 use rig::prelude::*;
-use rig::streaming::StreamedAssistantContent;
+use rig::streaming::StreamEvent;
 use serde_json::json;
 
 use super::{
@@ -24,7 +24,7 @@ fn adaptive_thinking_params() -> serde_json::Value {
 #[ignore = "requires AWS credentials and Bedrock Anthropic adaptive-thinking model access"]
 async fn adaptive_thinking_prompt_caching_tool_roundtrip_regression() {
     let model = client()
-        .completion_model(anthropic_adaptive_model())
+        .completion(anthropic_adaptive_model())
         .with_prompt_caching();
     let agent = AgentBuilder::new(model)
         .preamble(
@@ -39,7 +39,8 @@ async fn adaptive_thinking_prompt_caching_tool_roundtrip_regression() {
     let response = agent
         .prompt("Call `lookup_harbor_label` exactly once, then answer with the exact tool output.")
         .await
-        .expect("adaptive-thinking prompt-caching tool roundtrip should succeed");
+        .expect("adaptive-thinking prompt-caching tool roundtrip should succeed")
+        .output;
 
     assert_contains_all_case_insensitive(&response, &[ALPHA_SIGNAL_OUTPUT]);
 }
@@ -47,7 +48,7 @@ async fn adaptive_thinking_prompt_caching_tool_roundtrip_regression() {
 #[tokio::test]
 #[ignore = "requires AWS credentials and Bedrock Anthropic adaptive-thinking model access"]
 async fn streaming_emits_signature_only_adaptive_reasoning_regression() {
-    let model = client().completion_model(anthropic_signature_only_model());
+    let model = client().completion(anthropic_signature_only_model());
     let request = model
         .completion_request("What is 2 + 2? Answer with only the number.")
         .max_tokens(2048)
@@ -65,7 +66,10 @@ async fn streaming_emits_signature_only_adaptive_reasoning_regression() {
 
     while let Some(item) = stream.next().await {
         match item.expect("adaptive-thinking Bedrock stream item should succeed") {
-            StreamedAssistantContent::Reasoning { reasoning, .. } => {
+            StreamEvent::BlockEnd {
+                block: Some(AssistantContent::Reasoning(reasoning)),
+                ..
+            } => {
                 reasoning_chunks += 1;
                 if reasoning.first_signature().is_some() {
                     signature_chunks += 1;
@@ -74,7 +78,7 @@ async fn streaming_emits_signature_only_adaptive_reasoning_regression() {
                     }
                 }
             }
-            StreamedAssistantContent::Final(_) => got_final = true,
+            StreamEvent::Final(_) => got_final = true,
             _ => {}
         }
     }

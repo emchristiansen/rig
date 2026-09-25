@@ -22,10 +22,10 @@
 
 use anyhow::Result;
 use rig::agent::{AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, RequestPatch};
-use rig::completion::{Prompt, PromptError};
+use rig::completion::PromptError;
 use rig::message::ToolChoice;
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
 use rig::tool::Tool;
 use serde::Deserialize;
 use serde_json::json;
@@ -121,7 +121,7 @@ impl AgentHook for ForceToolOnFirstTurn {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client = openai::Client::from_env()?;
+    let client = OpenAI::from_env()?.bound()?;
     // A fresh agent per run (both share the same tool and preamble).
     let make_agent = || {
         client
@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
         .add_hook(ForceToolEveryTurn)
         .await
     {
-        Ok(answer) => println!("(unexpected) got a final answer: {answer}\n"),
+        Ok(answer) => println!("(unexpected) got a final answer: {}\n", answer.output),
         Err(PromptError::MaxTurnsError { max_turns, .. }) => println!(
             "hit MaxTurnsError after {max_turns} model calls — every turn re-forced a tool call, so \
              the model never produced a final answer.\n"
@@ -157,7 +157,8 @@ async fn main() -> Result<()> {
         .prompt(PROMPT)
         .max_turns(4)
         .add_hook(ForceToolOnFirstTurn)
-        .await?;
+        .await?
+        .output;
     println!("final answer: {answer}");
 
     Ok(())

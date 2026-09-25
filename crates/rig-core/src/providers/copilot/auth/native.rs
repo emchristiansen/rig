@@ -1,7 +1,11 @@
 use super::{AuthContext, AuthError, DeviceCodeHandler, DeviceCodePrompt};
+use crate::http_client::HttpClientExt;
+use crate::providers::internal::auth::{request, send_json};
 use crate::providers::internal::device_auth::{
     emit_device_code_prompt, ensure_parent_dir, read_json_record, token_expired, write_json_record,
 };
+use bytes::Bytes;
+use http::Method;
 use serde::{Deserialize, Serialize};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
@@ -72,7 +76,10 @@ impl PlatformAuthenticator {
         }
     }
 
-    pub(super) async fn auth_context_oauth(&self) -> Result<AuthContext, AuthError> {
+    pub(super) async fn auth_context_oauth<H>(&self, http: &H) -> Result<AuthContext, AuthError>
+    where
+        H: HttpClientExt,
+    {
         let record: ApiKeyRecord = read_json_record(self.api_key_file.as_deref())?;
         let cached_access_token = self.read_access_token().ok().flatten();
         let api_base = record.api_base();
@@ -80,7 +87,7 @@ impl PlatformAuthenticator {
             && let Some(token) = record.token
         {
             return Ok(AuthContext {
-                api_key: token,
+                api_key: token.into(),
                 api_base,
             });
         }
@@ -91,14 +98,14 @@ impl PlatformAuthenticator {
                 from_cache: true,
             }
         } else {
-            self.access_token().await?
+            self.access_token(http).await?
         };
-        let record = match self.refresh_api_key(&access_token.token).await {
+        let record = match self.refresh_api_key(http, &access_token.token).await {
             Ok(record) => record.bind_to_bootstrap_token(&access_token.token),
             Err(err) if access_token.from_cache && should_retry_with_fresh_access_token(&err) => {
                 self.clear_access_token()?;
-                let fresh_access_token = self.reauthenticate_access_token().await?;
-                self.refresh_api_key(&fresh_access_token)
+                let fresh_access_token = self.reauthenticate_access_token(http).await?;
+                self.refresh_api_key(http, &fresh_access_token)
                     .await?
                     .bind_to_bootstrap_token(&fresh_access_token)
             }
@@ -107,39 +114,46 @@ impl PlatformAuthenticator {
         let api_base = record.api_base();
         write_json_record(self.api_key_file.as_deref(), &record)?;
         Ok(AuthContext {
-            api_key: record.token.unwrap_or_default(),
+            api_key: record.token.unwrap_or_default().into(),
             api_base,
         })
     }
 
-    pub(super) async fn auth_context_with_github_access_token(
+    pub(super) async fn auth_context_with_github_access_token<H>(
         &self,
+        http: &H,
         access_token: &str,
-    ) -> Result<AuthContext, AuthError> {
+    ) -> Result<AuthContext, AuthError>
+    where
+        H: HttpClientExt,
+    {
         let record: ApiKeyRecord = read_json_record(self.api_key_file.as_deref())?;
         let api_base = record.api_base();
         if record.can_reuse_for_bootstrap_token(access_token)
             && let Some(token) = record.token
         {
             return Ok(AuthContext {
-                api_key: token,
+                api_key: token.into(),
                 api_base,
             });
         }
 
         let record = self
-            .refresh_api_key(access_token)
+            .refresh_api_key(http, access_token)
             .await?
             .bind_to_bootstrap_token(access_token);
         let api_base = record.api_base();
         write_json_record(self.api_key_file.as_deref(), &record)?;
         Ok(AuthContext {
-            api_key: record.token.unwrap_or_default(),
+            api_key: record.token.unwrap_or_default().into(),
             api_base,
         })
     }
 
-    async fn access_token(&self) -> Result<AccessTokenState, AuthError> {
+    async fn access_token<H>(&self, http: &H) -> Result<AccessTokenState, AuthError>
+    where
+        H: HttpClientExt,
+    {
         if let Some(token) = self.read_access_token()? {
             return Ok(AccessTokenState {
                 token,
@@ -147,7 +161,7 @@ impl PlatformAuthenticator {
             });
         }
 
-        self.reauthenticate_access_token()
+        self.reauthenticate_access_token(http)
             .await
             .map(|token| AccessTokenState {
                 token,
@@ -155,26 +169,26 @@ impl PlatformAuthenticator {
             })
     }
 
-    async fn login_device_flow(&self) -> Result<String, AuthError> {
-        let client = reqwest::Client::new();
+    async fn login_device_flow<H>(&self, http: &H) -> Result<String, AuthError>
+    where
+        H: HttpClientExt,
+    {
         let body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("client_id", GITHUB_CLIENT_ID)
             .append_pair("scope", "read:user")
             .finish();
 
-        let device = client
-            .post(GITHUB_DEVICE_CODE_URL)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .body(body)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<DeviceCodeResponse>()
-            .await?;
+        let device: DeviceCodeResponse = send_json(
+            http,
+            request(Method::POST, GITHUB_DEVICE_CODE_URL)
+                .header(http::header::ACCEPT, "application/json")
+                .header(
+                    http::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Bytes::from(body)),
+        )
+        .await?;
 
         emit_device_code_prompt(
             self.device_code_handler.0.as_ref(),
@@ -201,19 +215,17 @@ impl PlatformAuthenticator {
                 .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
                 .finish();
 
-            let response = client
-                .post(GITHUB_ACCESS_TOKEN_URL)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header(
-                    reqwest::header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
-                .body(body)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<AccessTokenResponse>()
-                .await?;
+            let response: AccessTokenResponse = send_json(
+                http,
+                request(Method::POST, GITHUB_ACCESS_TOKEN_URL)
+                    .header(http::header::ACCEPT, "application/json")
+                    .header(
+                        http::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(Bytes::from(body)),
+            )
+            .await?;
 
             if let Some(access_token) = response.access_token {
                 return Ok(access_token);
@@ -224,7 +236,7 @@ impl PlatformAuthenticator {
                 response.error.as_deref(),
                 response.error_description.as_deref(),
             )?;
-            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+            crate::wasm_compat::sleep(std::time::Duration::from_secs(interval)).await;
         }
 
         Err(AuthError::Message(
@@ -232,23 +244,25 @@ impl PlatformAuthenticator {
         ))
     }
 
-    async fn refresh_api_key(&self, access_token: &str) -> Result<ApiKeyRecord, AuthError> {
-        let client = reqwest::Client::new();
-        let response = client
-            .get(GITHUB_API_KEY_URL)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header("editor-version", super::super::EDITOR_VERSION)
-            .header("editor-plugin-version", super::super::EDITOR_PLUGIN_VERSION)
-            .header("user-agent", super::super::USER_AGENT)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("token {access_token}"),
-            )
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<ApiKeyRecord>()
-            .await?;
+    async fn refresh_api_key<H>(
+        &self,
+        http: &H,
+        access_token: &str,
+    ) -> Result<ApiKeyRecord, AuthError>
+    where
+        H: HttpClientExt,
+    {
+        let response: ApiKeyRecord = send_json(
+            http,
+            request(Method::GET, GITHUB_API_KEY_URL)
+                .header(http::header::ACCEPT, "application/json")
+                .header("editor-version", super::super::EDITOR_VERSION)
+                .header("editor-plugin-version", super::super::EDITOR_PLUGIN_VERSION)
+                .header("user-agent", super::super::USER_AGENT)
+                .header(http::header::AUTHORIZATION, format!("token {access_token}"))
+                .body(Bytes::new()),
+        )
+        .await?;
 
         if response.token.is_none() {
             return Err(AuthError::Message(
@@ -300,14 +314,17 @@ impl PlatformAuthenticator {
         }
     }
 
-    async fn reauthenticate_access_token(&self) -> Result<String, AuthError> {
+    async fn reauthenticate_access_token<H>(&self, http: &H) -> Result<String, AuthError>
+    where
+        H: HttpClientExt,
+    {
         if !self.allow_device_flow {
             return Err(AuthError::Message(
                 "GitHub Copilot sign-in required. Reconnect Copilot in Settings before using this provider."
                     .into(),
             ));
         }
-        let token = self.login_device_flow().await?;
+        let token = self.login_device_flow(http).await?;
         self.write_access_token(&token)?;
         Ok(token)
     }
@@ -326,10 +343,7 @@ impl ApiKeyRecord {
             return false;
         }
 
-        match bootstrap_token {
-            Some(bootstrap_token) => self.matches_bootstrap_token(bootstrap_token),
-            None => true,
-        }
+        bootstrap_token.is_none_or(|bootstrap_token| self.matches_bootstrap_token(bootstrap_token))
     }
 
     fn can_reuse_for_bootstrap_token(&self, bootstrap_token: &str) -> bool {
@@ -401,148 +415,19 @@ fn format_oauth_error(prefix: &str, error: &str, description: Option<&str>) -> S
 
 fn should_retry_with_fresh_access_token(err: &AuthError) -> bool {
     match err {
-        AuthError::Http(err) => should_retry_with_fresh_access_token_status(err.status()),
+        AuthError::Http(err) => {
+            should_retry_with_fresh_access_token_status(err.non_success_status())
+        }
         _ => false,
     }
 }
 
-fn should_retry_with_fresh_access_token_status(status: Option<reqwest::StatusCode>) -> bool {
+fn should_retry_with_fresh_access_token_status(status: Option<http::StatusCode>) -> bool {
     matches!(
         status,
-        Some(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN)
+        Some(http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN)
     )
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        ApiKeyRecord, DeviceCodeHandler, PlatformAuthenticator, bootstrap_token_fingerprint,
-        next_poll_interval_seconds, normalize_poll_interval_seconds,
-        should_retry_with_fresh_access_token_status,
-    };
-    use reqwest::StatusCode;
-
-    #[test]
-    fn api_key_record_parses_dynamic_api_base() {
-        let record: ApiKeyRecord = serde_json::from_str(
-            r#"{
-                "token": "copilot-token",
-                "expires_at": 1775791135,
-                "endpoints": {
-                    "api": "https://api.individual.githubcopilot.com"
-                }
-            }"#,
-        )
-        .expect("parse api key record");
-
-        assert_eq!(
-            record.api_base().as_deref(),
-            Some("https://api.individual.githubcopilot.com")
-        );
-    }
-
-    #[tokio::test]
-    async fn noninteractive_oauth_requires_sign_in_instead_of_device_flow() {
-        let auth = PlatformAuthenticator::new(None, None, DeviceCodeHandler::default(), false);
-        let err = auth
-            .auth_context_oauth()
-            .await
-            .expect_err("missing cached auth should not start device flow")
-            .to_string();
-
-        assert!(err.contains("GitHub Copilot sign-in required"), "{err}");
-    }
-
-    #[test]
-    fn api_key_record_reuse_requires_matching_bootstrap_token_for_explicit_auth() {
-        let record = ApiKeyRecord {
-            token: Some("copilot-token".into()),
-            expires_at: Some(i64::MAX),
-            endpoints: None,
-            bootstrap_token_fingerprint: Some(bootstrap_token_fingerprint("github-token-a")),
-        };
-
-        assert!(record.can_reuse_for_bootstrap_token("github-token-a"));
-        assert!(!record.can_reuse_for_bootstrap_token("github-token-b"));
-    }
-
-    #[test]
-    fn api_key_record_oauth_reuse_requires_match_when_bootstrap_token_is_available() {
-        let record = ApiKeyRecord {
-            token: Some("copilot-token".into()),
-            expires_at: Some(i64::MAX),
-            endpoints: None,
-            bootstrap_token_fingerprint: Some(bootstrap_token_fingerprint("github-token-a")),
-        };
-
-        assert!(record.can_reuse_for_oauth(Some("github-token-a")));
-        assert!(!record.can_reuse_for_oauth(Some("github-token-b")));
-        assert!(record.can_reuse_for_oauth(None));
-    }
-
-    #[test]
-    fn legacy_api_key_record_without_fingerprint_forces_refresh_when_bootstrap_token_is_known() {
-        let record = ApiKeyRecord {
-            token: Some("copilot-token".into()),
-            expires_at: Some(i64::MAX),
-            endpoints: None,
-            bootstrap_token_fingerprint: None,
-        };
-
-        assert!(!record.can_reuse_for_bootstrap_token("github-token-a"));
-        assert!(!record.can_reuse_for_oauth(Some("github-token-a")));
-        assert!(record.can_reuse_for_oauth(None));
-    }
-
-    #[test]
-    fn poll_interval_defaults_and_clamps() {
-        assert_eq!(normalize_poll_interval_seconds(None), 5);
-        assert_eq!(normalize_poll_interval_seconds(Some(0)), 1);
-        assert_eq!(normalize_poll_interval_seconds(Some(9)), 9);
-    }
-
-    #[test]
-    fn poll_interval_handles_pending_and_slow_down() {
-        assert_eq!(
-            next_poll_interval_seconds(5, Some("authorization_pending"), None)
-                .expect("authorization pending interval"),
-            5
-        );
-        assert_eq!(
-            next_poll_interval_seconds(5, Some("slow_down"), None).expect("slow_down interval"),
-            10
-        );
-    }
-
-    #[test]
-    fn poll_interval_rejects_terminal_errors() {
-        let denied = next_poll_interval_seconds(5, Some("access_denied"), None)
-            .expect_err("access denied should fail");
-        assert_eq!(denied.to_string(), "GitHub device authorization was denied");
-
-        let unknown = next_poll_interval_seconds(
-            5,
-            Some("device_flow_disabled"),
-            Some("OAuth app device flow is disabled"),
-        )
-        .expect_err("device flow disabled should fail");
-        assert_eq!(
-            unknown.to_string(),
-            "GitHub device authorization failed: device_flow_disabled (OAuth app device flow is disabled)"
-        );
-    }
-
-    #[test]
-    fn stale_access_token_retries_only_on_auth_failures() {
-        assert!(should_retry_with_fresh_access_token_status(Some(
-            StatusCode::UNAUTHORIZED
-        )));
-        assert!(should_retry_with_fresh_access_token_status(Some(
-            StatusCode::FORBIDDEN
-        )));
-        assert!(!should_retry_with_fresh_access_token_status(Some(
-            StatusCode::BAD_GATEWAY
-        )));
-        assert!(!should_retry_with_fresh_access_token_status(None));
-    }
-}
+mod tests;

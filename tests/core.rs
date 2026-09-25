@@ -16,5 +16,5 @@
 
 #[path = "core/mod.rs"]
 mod core;
-#[path = "common/reasoning.rs"]
-mod reasoning;
+use rig_test_support::goldens;
+use rig_test_support::reasoning;

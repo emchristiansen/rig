@@ -1,3 +1,12 @@
+//! Configuration builder for the in-memory vector store.
+//!
+//! ```
+//! use rig_core::vector_store::builder::InMemoryVectorStoreBuilder;
+//!
+//! let store = InMemoryVectorStoreBuilder::<String>::new().build();
+//! # let _ = store;
+//! ```
+
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -6,10 +15,7 @@ use crate::embeddings::Embedding;
 use super::{IndexStrategy, in_memory_store::InMemoryVectorStore};
 
 /// Builder for creating an [`InMemoryVectorStore`] with custom configuration.
-pub struct InMemoryVectorStoreBuilder<D>
-where
-    D: Serialize,
-{
+pub struct InMemoryVectorStoreBuilder<D> {
     /// Embeddings of the documents.
     embeddings: HashMap<String, (D, Vec<Embedding>)>,
 
@@ -42,8 +48,6 @@ where
 
     /// Set the index strategy for the vector store.
     ///
-    /// # Examples
-    ///
     /// ```
     /// use rig_core::vector_store::{builder::InMemoryVectorStoreBuilder, IndexStrategy};
     ///
@@ -60,20 +64,23 @@ where
     }
 
     /// Add documents with auto-generated IDs.
-    /// IDs will have the form `"doc{n}"` where `n` is the index.
+    /// IDs have the form `"doc{n}"`, starting at the current document count and
+    /// skipping occupied IDs so existing documents are never overwritten.
     pub fn documents(mut self, documents: impl IntoIterator<Item = (D, Vec<Embedding>)>) -> Self {
-        let current_index = self.embeddings.len();
-        documents
-            .into_iter()
-            .enumerate()
-            .for_each(|(i, (doc, embeddings))| {
-                self.embeddings
-                    .insert(format!("doc{}", i + current_index), (doc, embeddings));
-            });
+        let mut index = self.embeddings.len();
+        for (doc, embeddings) in documents {
+            let mut id = format!("doc{index}");
+            while self.embeddings.contains_key(&id) {
+                index += 1;
+                id = format!("doc{index}");
+            }
+            self.embeddings.insert(id, (doc, embeddings));
+            index += 1;
+        }
         self
     }
 
-    /// Add documents with explicit IDs.
+    /// Adds documents with explicit IDs, replacing existing entries with matching IDs.
     pub fn documents_with_ids(
         mut self,
         documents: impl IntoIterator<Item = (impl ToString, D, Vec<Embedding>)>,

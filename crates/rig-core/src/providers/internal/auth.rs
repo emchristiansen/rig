@@ -1,6 +1,14 @@
-//! Authentication error shared by the OAuth-capable providers (ChatGPT,
-//! Copilot). Re-exported from each provider's `auth` module as `AuthError`.
+//! Shared OAuth errors, device-code callbacks, and authentication transport helpers.
+//!
+//! ```
+//! use rig_core::providers::chatgpt::auth::DeviceCodeHandler;
+//! let handler = DeviceCodeHandler::new(|prompt| {
+//!     println!("Visit {} and enter {}", prompt.verification_uri, prompt.user_code);
+//! });
+//! ```
 
+use crate::http_client::{self, HttpClientExt};
+use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use std::sync::Arc;
 
 /// Device authorization details surfaced to a provider callback.
@@ -12,15 +20,22 @@ pub struct DeviceCodePrompt {
     pub user_code: String,
 }
 
+/// Device-code callback with thread-safety bounds outside browser WASM.
+/// Browser WASM authenticators do not invoke it.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) type DeviceCodeCallback = dyn Fn(DeviceCodePrompt) + Send + Sync;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) type DeviceCodeCallback = dyn Fn(DeviceCodePrompt);
+
 /// Optional callback invoked when an OAuth device flow needs user action.
 #[derive(Clone, Default)]
-pub struct DeviceCodeHandler(pub(crate) Option<Arc<dyn Fn(DeviceCodePrompt) + Send + Sync>>);
+pub struct DeviceCodeHandler(pub(crate) Option<Arc<DeviceCodeCallback>>);
 
 impl DeviceCodeHandler {
     /// Wraps a device-code callback.
     pub fn new<F>(handler: F) -> Self
     where
-        F: Fn(DeviceCodePrompt) + Send + Sync + 'static,
+        F: Fn(DeviceCodePrompt) + WasmCompatSend + WasmCompatSync + 'static,
     {
         Self(Some(Arc::new(handler)))
     }
@@ -44,8 +59,44 @@ pub enum AuthError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    /// The HTTP transport failed. Non-success responses arrive as the
+    /// status-bearing [`http_client::Error`] variants (so the status is still
+    /// inspectable); response-less failures as [`http_client::Error::Instance`].
     #[error(transparent)]
-    Http(#[from] reqwest::Error),
+    Http(#[from] http_client::Error),
+}
+
+/// Build a request to an absolute authentication URL, independent of the API base.
+pub(crate) fn request(method: http::Method, url: &str) -> http::request::Builder {
+    http::Request::builder().method(method).uri(url)
+}
+
+/// Send `req` and decode its JSON response.
+/// Request and transport failures return [`AuthError::Http`], preserving HTTP
+/// status when available. Invalid JSON returns [`AuthError::Json`].
+pub(crate) async fn send_json<H, T>(
+    http: &H,
+    req: http::Result<http::Request<bytes::Bytes>>,
+) -> Result<T, AuthError>
+where
+    H: HttpClientExt,
+    T: serde::de::DeserializeOwned,
+{
+    let bytes = send_bytes(http, req).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+/// Send `req` through the transport and return the raw success body.
+pub(crate) async fn send_bytes<H>(
+    http: &H,
+    req: http::Result<http::Request<bytes::Bytes>>,
+) -> Result<bytes::Bytes, AuthError>
+where
+    H: HttpClientExt,
+{
+    let req = req.map_err(http_client::Error::Protocol)?;
+    let response = http.send::<_, bytes::Bytes>(req).await?;
+    Ok(response.into_body().await?)
 }
 
 /// Platform config directory used for on-disk OAuth/token caches

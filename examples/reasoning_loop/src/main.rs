@@ -1,10 +1,11 @@
+use rig::error::ProviderError;
 use rig::prelude::*;
 use rig::{
     agent::Agent,
-    completion::{CompletionError, Prompt, PromptError},
+    completion::PromptError,
     extractor::Extractor,
     message::Message,
-    providers::anthropic,
+    providers::anthropic::{self, wire::Anthropic},
     tool::Tool,
 };
 use schemars::JsonSchema;
@@ -26,8 +27,7 @@ struct ReasoningAgent {
     executor: Agent,
 }
 
-impl Prompt for ReasoningAgent {
-    #[allow(refining_impl_trait)]
+impl ReasoningAgent {
     async fn prompt(&self, prompt: impl Into<Message> + Send) -> Result<String, PromptError> {
         let prompt: Message = prompt.into();
         let chat_history = vec![prompt.clone()];
@@ -37,8 +37,9 @@ impl Prompt for ReasoningAgent {
             .await
             .map_err(|e| {
                 tracing::error!("Extraction error: {:?}", e);
-                CompletionError::ProviderError("".into())
-            })?;
+                ProviderError::Provider("".into())
+            })?
+            .output;
         if extracted.steps.is_empty() {
             return Ok("No reasoning steps provided.".into());
         }
@@ -51,7 +52,6 @@ impl Prompt for ReasoningAgent {
             .prompt(reasoning_prompt.as_str())
             .history(&chat_history)
             .max_turns(20)
-            .extended_details()
             .await?;
         if let Some(messages) = &response.messages {
             let history_vec: Vec<_> = messages.clone().into_iter().collect();
@@ -72,12 +72,12 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    // Create Anthropic client
-    let anthropic_client = anthropic::Client::from_env()?;
+    // Create the Anthropic provider, bound to the bundled transport
+    let anthropic_client = Anthropic::from_env()?.bound()?;
     let agent = ReasoningAgent {
         chain_of_thought_extractor: anthropic_client
             .extractor(anthropic::completion::CLAUDE_SONNET_4_6)
-            .preamble(CHAIN_OF_THOUGHT_PROMPT)
+            .append_preamble(CHAIN_OF_THOUGHT_PROMPT)
             .build(),
 
         executor: anthropic_client

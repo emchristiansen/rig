@@ -1,12 +1,10 @@
 use aws_sdk_bedrockruntime::types as aws_bedrock;
-use rig_core::{
-    completion::CompletionError,
-    message::{Document, DocumentSourceKind},
-};
+use rig_core::error::ProviderError;
+use rig_core::message::{Document, DocumentSourceKind};
 
 pub(crate) use crate::types::media_types::RigDocumentMediaType;
 use base64::{Engine, prelude::BASE64_STANDARD};
-use uuid::Uuid;
+use sha2::{Digest, Sha256};
 
 use super::converse_output::{DocumentBlock, DocumentSource};
 
@@ -14,7 +12,7 @@ use super::converse_output::{DocumentBlock, DocumentSource};
 pub struct RigDocument(pub Document);
 
 impl TryFrom<RigDocument> for aws_bedrock::DocumentBlock {
-    type Error = CompletionError;
+    type Error = ProviderError;
 
     fn try_from(
         RigDocument(Document {
@@ -29,37 +27,74 @@ impl TryFrom<RigDocument> for aws_bedrock::DocumentBlock {
             DocumentSourceKind::Base64(blob) => {
                 let bytes = BASE64_STANDARD
                     .decode(blob)
-                    .map_err(|e| CompletionError::RequestError(e.into()))?;
+                    .map_err(|e| ProviderError::Request(e.into()))?;
 
                 aws_bedrock::DocumentSource::Bytes(aws_smithy_types::Blob::new(bytes))
             }
-            // NOTE: until [aws-sdk-bedrockruntime DocumentSource bug #1365](https://github.com/awslabs/aws-sdk-rust/issues/1365)
-            // is resolved we will use this as a workaround
-            // DocumentSourceKind::String(str) => aws_bedrock::DocumentSource::Text(str),
+            // Use the byte source for string documents to avoid SDK text-source
+            // compatibility limitations.
             DocumentSourceKind::String(str) => {
                 aws_bedrock::DocumentSource::Bytes(aws_smithy_types::Blob::new(str.as_bytes()))
             }
             doc => {
-                return Err(CompletionError::RequestError(
+                return Err(ProviderError::Request(
                     format!("Unsupported document kind: {doc}").into(),
                 ));
             }
         };
 
-        let random_string = Uuid::new_v4().simple().to_string();
-        let document_name = format!("document-{random_string}");
+        let document_name = document_name(&document_source);
         let result = aws_bedrock::DocumentBlock::builder()
             .source(document_source)
             .name(document_name)
             .set_format(document_media_type)
             .build()
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(|e| ProviderError::Provider(e.to_string()))?;
         Ok(result)
     }
 }
 
+/// Bedrock requires a name on every document and Rig's `Document` carries
+/// none. Naming by content keeps a request byte-stable across turns and runs,
+/// which prompt-cache prefixes and recorded replays both rely on; names that
+/// repeat within one request are made unique by
+/// [`disambiguate_document_names`].
+fn document_name(source: &aws_bedrock::DocumentSource) -> String {
+    let bytes: &[u8] = match source {
+        aws_bedrock::DocumentSource::Bytes(blob) => blob.as_ref(),
+        aws_bedrock::DocumentSource::Text(text) => text.as_bytes(),
+        aws_bedrock::DocumentSource::S3Location(location) => location.uri().as_bytes(),
+        _ => &[],
+    };
+    let digest = Sha256::digest(bytes);
+    let hex: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("document-{hex}")
+}
+
+/// Suffix the second and later occurrences of a document name within one
+/// request (`document-ab12`, `document-ab12-2`, …), so the same content sent
+/// twice stays two distinct, deterministically named documents.
+pub(crate) fn disambiguate_document_names(messages: &mut [aws_bedrock::Message]) {
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    for message in messages {
+        for block in &mut message.content {
+            if let aws_bedrock::ContentBlock::Document(document) = block {
+                let count = seen.entry(document.name.clone()).or_insert(0);
+                *count += 1;
+                if *count > 1 {
+                    document.name = format!("{}-{count}", document.name);
+                }
+            }
+        }
+    }
+}
+
 impl TryFrom<DocumentBlock> for RigDocument {
-    type Error = CompletionError;
+    type Error = ProviderError;
 
     fn try_from(value: DocumentBlock) -> Result<Self, Self::Error> {
         let media_type: RigDocumentMediaType = value.format.try_into()?;
@@ -71,7 +106,7 @@ impl TryFrom<DocumentBlock> for RigDocument {
                 Ok(DocumentSourceKind::Base64(encoded_data))
             }
             Some(DocumentSource::Text(str)) => Ok(DocumentSourceKind::String(str)),
-            doc => Err(CompletionError::ProviderError(format!(
+            doc => Err(ProviderError::Provider(format!(
                 "Unsupported document type: {doc:?}"
             ))),
         }?;
@@ -85,129 +120,4 @@ impl TryFrom<DocumentBlock> for RigDocument {
 }
 
 #[cfg(test)]
-mod tests {
-    use aws_sdk_bedrockruntime::types as aws_bedrock;
-    use base64::{Engine, prelude::BASE64_STANDARD};
-    use rig_core::{
-        completion::CompletionError,
-        message::{Document, DocumentMediaType, DocumentSourceKind},
-    };
-
-    use crate::types::{converse_output::DocumentBlock, document::RigDocument};
-
-    /// The inbound path reads the mirror, but what Bedrock sends is the SDK
-    /// block, so the tests still start there and mirror it first.
-    fn mirrored(block: aws_bedrock::DocumentBlock) -> DocumentBlock {
-        block.try_into().expect("the SDK block mirrors")
-    }
-
-    #[test]
-    fn test_document_to_aws_document() {
-        let rig_document = RigDocument(Document {
-            data: DocumentSourceKind::Base64("data".into()),
-            media_type: Some(DocumentMediaType::PDF),
-            additional_params: None,
-        });
-
-        let aws_document: Result<aws_bedrock::DocumentBlock, _> = rig_document.clone().try_into();
-        assert!(aws_document.is_ok());
-
-        let aws_document = aws_document.unwrap();
-        assert_eq!(aws_document.format, aws_bedrock::DocumentFormat::Pdf);
-
-        let document_data = rig_document
-            .0
-            .data
-            .try_into_inner()
-            .unwrap()
-            .as_bytes()
-            .to_vec();
-
-        let document_data = BASE64_STANDARD.decode(document_data).unwrap();
-
-        let aws_document_bytes = aws_document
-            .source()
-            .unwrap()
-            .as_bytes()
-            .unwrap()
-            .as_ref()
-            .to_owned();
-
-        let doc_name = aws_document.name;
-        assert!(doc_name.starts_with("document-"));
-        assert_eq!(aws_document_bytes, document_data)
-    }
-
-    #[test]
-    fn test_base64_document_to_aws_document() {
-        let rig_document = RigDocument(Document {
-            data: DocumentSourceKind::Base64("data".into()),
-            media_type: Some(DocumentMediaType::PDF),
-            additional_params: None,
-        });
-
-        let aws_document: aws_bedrock::DocumentBlock = rig_document.clone().try_into().unwrap();
-        let document_data = BASE64_STANDARD
-            .decode(rig_document.0.data.try_into_inner().unwrap())
-            .unwrap();
-        let aws_document_bytes = aws_document
-            .source()
-            .unwrap()
-            .as_bytes()
-            .unwrap()
-            .as_ref()
-            .to_owned();
-        assert_eq!(aws_document_bytes, document_data)
-    }
-
-    #[test]
-    fn test_unsupported_document_to_aws_document() {
-        let rig_document = RigDocument(Document {
-            data: DocumentSourceKind::Base64("data".into()),
-            media_type: Some(DocumentMediaType::Javascript),
-            additional_params: None,
-        });
-        let aws_document: Result<aws_bedrock::DocumentBlock, _> = rig_document.clone().try_into();
-        assert_eq!(
-            aws_document.err().unwrap().to_string(),
-            CompletionError::ProviderError(
-                "Unsupported media type application/x-javascript".into()
-            )
-            .to_string()
-        )
-    }
-
-    #[test]
-    fn test_aws_document_to_rig_document() {
-        let data = aws_smithy_types::Blob::new("document_data");
-        let document_source = aws_bedrock::DocumentSource::Bytes(data);
-        let aws_document = aws_bedrock::DocumentBlock::builder()
-            .format(aws_bedrock::DocumentFormat::Pdf)
-            .name("Document")
-            .source(document_source)
-            .build()
-            .unwrap();
-        let rig_document: Result<RigDocument, _> = mirrored(aws_document).try_into();
-        assert!(rig_document.is_ok());
-        let rig_document = rig_document.unwrap().0;
-        assert_eq!(rig_document.media_type.unwrap(), DocumentMediaType::PDF)
-    }
-
-    #[test]
-    fn test_unsupported_aws_document_to_rig_document() {
-        let data = aws_smithy_types::Blob::new("document_data");
-        let document_source = aws_bedrock::DocumentSource::Bytes(data);
-        let aws_document = aws_bedrock::DocumentBlock::builder()
-            .format(aws_bedrock::DocumentFormat::Xlsx)
-            .name("Document")
-            .source(document_source)
-            .build()
-            .unwrap();
-        let rig_document: Result<RigDocument, _> = mirrored(aws_document).try_into();
-        assert!(rig_document.is_err());
-        assert_eq!(
-            rig_document.err().unwrap().to_string(),
-            CompletionError::ProviderError("Unsupported media type xlsx".into()).to_string()
-        )
-    }
-}
+mod tests;

@@ -1,0 +1,170 @@
+when:
+  path: /openai/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":4096,"messages":[{"content":[{"text":"You are a records assistant. Use the tools for every lookup and verification and never guess a code. When a tool reports a transient failure, call it again once. Answer briefly.","type":"text"}],"role":"system"},{"content":"Look up the alpha record and the beta record, verify each returned code, and report both codes with their verification status.","role":"user"}],"model":"openai/gpt-oss-20b","reasoning_format":"parsed","tools":[{"function":{"description":"Look up a record by name and return its code.","name":"lookup_record","parameters":{"properties":{"record":{"description":"alpha or beta","type":"string"}},"required":["record"],"type":"object"}},"type":"function"},{"function":{"description":"Verify a code returned by lookup_record. May fail transiently; retry once.","name":"verify_code","parameters":{"properties":{"code":{"description":"the code to verify","type":"string"}},"required":["code"],"type":"object"}},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  - name: x-request-id
+    value: req_01m36hbzx3eakrjtz2rfjddf57
+  body: '{"choices":[{"finish_reason":"tool_calls","index":0,"logprobs":null,"message":{"reasoning":"We need to use tool functions: lookup_record for alpha and beta. Then verify_code on each code. Possibly transient failures. The instruction: Use tool for lookup and verification, never guess a code. If transient failure, call again once.\n\nThus we must call lookup_record for alpha, then verify_code on code. Then lookup_record for beta, verify_code. Then report both codes with verification status. Likely output: Alpha code: XXX, status: verified. Beta code: YYY, status: verified. We must handle if verify_code fails transiently. We''ll attempt call, if failure, retry once.\n\nWe must produce answer. Use the function calls. Let''s call functions.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"alpha\"}","name":"lookup_record"},"id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70","type":"function"}]}}],"created":0,"id":"chatcmpl-d7c0d347-a92d-4eea-97fc-c0c9a76a5516","model":"openai/gpt-oss-20b","object":"chat.completion","service_tier":"on_demand","system_fingerprint":"fp_996f667773","usage":{"completion_time":0.194271249,"completion_tokens":161,"completion_tokens_details":{"reasoning_tokens":138},"prompt_time":0.013391172,"prompt_tokens":227,"queue_time":0.063209111,"total_time":0.207662421,"total_tokens":388},"usage_breakdown":null,"x_groq":{"id":"req_01m36hbzx3eakrjtz2rfjddf57","seed":314480354}}'
+---
+when:
+  path: /openai/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":4096,"messages":[{"content":[{"text":"You are a records assistant. Use the tools for every lookup and verification and never guess a code. When a tool reports a transient failure, call it again once. Answer briefly.","type":"text"}],"role":"system"},{"content":"Look up the alpha record and the beta record, verify each returned code, and report both codes with their verification status.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"alpha\"}","name":"lookup_record"},"id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70","type":"function"}]},{"content":"record alpha: code alpha-code-7431","role":"tool","tool_call_id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70"}],"model":"openai/gpt-oss-20b","reasoning_format":"parsed","tools":[{"function":{"description":"Look up a record by name and return its code.","name":"lookup_record","parameters":{"properties":{"record":{"description":"alpha or beta","type":"string"}},"required":["record"],"type":"object"}},"type":"function"},{"function":{"description":"Verify a code returned by lookup_record. May fail transiently; retry once.","name":"verify_code","parameters":{"properties":{"code":{"description":"the code to verify","type":"string"}},"required":["code"],"type":"object"}},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  - name: x-request-id
+    value: req_01m36hc08vet8tahjxqgdajz2v
+  body: '{"choices":[{"finish_reason":"tool_calls","index":0,"logprobs":null,"message":{"reasoning":"We have alpha record code alpha-code-7431. Next, beta.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"beta\"}","name":"lookup_record"},"id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c","type":"function"}]}}],"created":0,"id":"chatcmpl-01109fac-231e-44e5-91af-be38c86b41c3","model":"openai/gpt-oss-20b","object":"chat.completion","service_tier":"on_demand","system_fingerprint":"fp_8b41efc9a3","usage":{"completion_time":0.035984969,"completion_tokens":35,"completion_tokens_details":{"reasoning_tokens":16},"prompt_time":0.412322482,"prompt_tokens":261,"prompt_tokens_details":{"cached_tokens":256},"queue_time":0.119281696,"total_time":0.448307451,"total_tokens":296},"usage_breakdown":null,"x_groq":{"id":"req_01m36hc08vet8tahjxqgdajz2v","seed":711831647}}'
+---
+when:
+  path: /openai/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":4096,"messages":[{"content":[{"text":"You are a records assistant. Use the tools for every lookup and verification and never guess a code. When a tool reports a transient failure, call it again once. Answer briefly.","type":"text"}],"role":"system"},{"content":"Look up the alpha record and the beta record, verify each returned code, and report both codes with their verification status.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"alpha\"}","name":"lookup_record"},"id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70","type":"function"}]},{"content":"record alpha: code alpha-code-7431","role":"tool","tool_call_id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"beta\"}","name":"lookup_record"},"id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c","type":"function"}]},{"content":"record beta: code beta-code-2286","role":"tool","tool_call_id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c"}],"model":"openai/gpt-oss-20b","reasoning_format":"parsed","tools":[{"function":{"description":"Look up a record by name and return its code.","name":"lookup_record","parameters":{"properties":{"record":{"description":"alpha or beta","type":"string"}},"required":["record"],"type":"object"}},"type":"function"},{"function":{"description":"Verify a code returned by lookup_record. May fail transiently; retry once.","name":"verify_code","parameters":{"properties":{"code":{"description":"the code to verify","type":"string"}},"required":["code"],"type":"object"}},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  - name: x-request-id
+    value: req_01m36hc0y5eyfrkkeyswzvddhm
+  body: '{"choices":[{"finish_reason":"tool_calls","index":0,"logprobs":null,"message":{"reasoning":"We need to verify each code. Use verify_code. First alpha-code-7431.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"alpha-code-7431\"}","name":"verify_code"},"id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4","type":"function"}]}}],"created":0,"id":"chatcmpl-3d551424-bf98-44f6-803f-900356cfde7c","model":"openai/gpt-oss-20b","object":"chat.completion","service_tier":"on_demand","system_fingerprint":"fp_e594c51153","usage":{"completion_time":0.044540034,"completion_tokens":43,"completion_tokens_details":{"reasoning_tokens":19},"prompt_time":0.502646753,"prompt_tokens":295,"prompt_tokens_details":{"cached_tokens":256},"queue_time":0.02464324,"total_time":0.547186787,"total_tokens":338},"usage_breakdown":null,"x_groq":{"id":"req_01m36hc0y5eyfrkkeyswzvddhm","seed":1998848624}}'
+---
+when:
+  path: /openai/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":4096,"messages":[{"content":[{"text":"You are a records assistant. Use the tools for every lookup and verification and never guess a code. When a tool reports a transient failure, call it again once. Answer briefly.","type":"text"}],"role":"system"},{"content":"Look up the alpha record and the beta record, verify each returned code, and report both codes with their verification status.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"alpha\"}","name":"lookup_record"},"id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70","type":"function"}]},{"content":"record alpha: code alpha-code-7431","role":"tool","tool_call_id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"beta\"}","name":"lookup_record"},"id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c","type":"function"}]},{"content":"record beta: code beta-code-2286","role":"tool","tool_call_id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"alpha-code-7431\"}","name":"verify_code"},"id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4","type":"function"}]},{"content":"verified alpha-code-7431","role":"tool","tool_call_id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4"}],"model":"openai/gpt-oss-20b","reasoning_format":"parsed","tools":[{"function":{"description":"Look up a record by name and return its code.","name":"lookup_record","parameters":{"properties":{"record":{"description":"alpha or beta","type":"string"}},"required":["record"],"type":"object"}},"type":"function"},{"function":{"description":"Verify a code returned by lookup_record. May fail transiently; retry once.","name":"verify_code","parameters":{"properties":{"code":{"description":"the code to verify","type":"string"}},"required":["code"],"type":"object"}},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  - name: x-request-id
+    value: req_01m36hc1qye12sttzgpz7vvdj0
+  body: '{"choices":[{"finish_reason":"tool_calls","index":0,"logprobs":null,"message":{"reasoning":"We need verify beta as well.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174","type":"function"}]}}],"created":0,"id":"chatcmpl-fae64031-9ecb-4485-b7e0-91afaf75a06f","model":"openai/gpt-oss-20b","object":"chat.completion","service_tier":"on_demand","system_fingerprint":"fp_228717f27c","usage":{"completion_time":0.034063979,"completion_tokens":32,"completion_tokens_details":{"reasoning_tokens":8},"prompt_time":0.026313015,"prompt_tokens":330,"queue_time":0.133878673,"total_time":0.060376994,"total_tokens":362},"usage_breakdown":null,"x_groq":{"id":"req_01m36hc1qye12sttzgpz7vvdj0","seed":564613061}}'
+---
+when:
+  path: /openai/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":4096,"messages":[{"content":[{"text":"You are a records assistant. Use the tools for every lookup and verification and never guess a code. When a tool reports a transient failure, call it again once. Answer briefly.","type":"text"}],"role":"system"},{"content":"Look up the alpha record and the beta record, verify each returned code, and report both codes with their verification status.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"alpha\"}","name":"lookup_record"},"id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70","type":"function"}]},{"content":"record alpha: code alpha-code-7431","role":"tool","tool_call_id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"beta\"}","name":"lookup_record"},"id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c","type":"function"}]},{"content":"record beta: code beta-code-2286","role":"tool","tool_call_id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"alpha-code-7431\"}","name":"verify_code"},"id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4","type":"function"}]},{"content":"verified alpha-code-7431","role":"tool","tool_call_id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174","type":"function"}]},{"content":"the tool failed","role":"tool","tool_call_id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174"}],"model":"openai/gpt-oss-20b","reasoning_format":"parsed","tools":[{"function":{"description":"Look up a record by name and return its code.","name":"lookup_record","parameters":{"properties":{"record":{"description":"alpha or beta","type":"string"}},"required":["record"],"type":"object"}},"type":"function"},{"function":{"description":"Verify a code returned by lookup_record. May fail transiently; retry once.","name":"verify_code","parameters":{"properties":{"code":{"description":"the code to verify","type":"string"}},"required":["code"],"type":"object"}},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  - name: x-request-id
+    value: req_01m36hc207e0ta82xcen36wkfn
+  body: '{"choices":[{"finish_reason":"tool_calls","index":0,"logprobs":null,"message":{"reasoning":"We need to retry once because of transient failure. We should call verify_code again for beta.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_524a841e-bf26-40a1-bd03-4c7a432ede4a","type":"function"}]}}],"created":0,"id":"chatcmpl-29361ffe-db02-480f-a813-bf946f3a987d","model":"openai/gpt-oss-20b","object":"chat.completion","service_tier":"on_demand","system_fingerprint":"fp_a12402de73","usage":{"completion_time":0.044905493,"completion_tokens":44,"completion_tokens_details":{"reasoning_tokens":20},"prompt_time":0.007186071,"prompt_tokens":362,"prompt_tokens_details":{"cached_tokens":256},"queue_time":0.166206715,"total_time":0.052091564,"total_tokens":406},"usage_breakdown":null,"x_groq":{"id":"req_01m36hc207e0ta82xcen36wkfn","seed":267648768}}'
+---
+when:
+  path: /openai/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":4096,"messages":[{"content":[{"text":"You are a records assistant. Use the tools for every lookup and verification and never guess a code. When a tool reports a transient failure, call it again once. Answer briefly.","type":"text"}],"role":"system"},{"content":"Look up the alpha record and the beta record, verify each returned code, and report both codes with their verification status.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"alpha\"}","name":"lookup_record"},"id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70","type":"function"}]},{"content":"record alpha: code alpha-code-7431","role":"tool","tool_call_id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"beta\"}","name":"lookup_record"},"id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c","type":"function"}]},{"content":"record beta: code beta-code-2286","role":"tool","tool_call_id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"alpha-code-7431\"}","name":"verify_code"},"id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4","type":"function"}]},{"content":"verified alpha-code-7431","role":"tool","tool_call_id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174","type":"function"}]},{"content":"the tool failed","role":"tool","tool_call_id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_524a841e-bf26-40a1-bd03-4c7a432ede4a","type":"function"}]},{"content":"verified beta-code-2286","role":"tool","tool_call_id":"fc_524a841e-bf26-40a1-bd03-4c7a432ede4a"}],"model":"openai/gpt-oss-20b","reasoning_format":"parsed","tools":[{"function":{"description":"Look up a record by name and return its code.","name":"lookup_record","parameters":{"properties":{"record":{"description":"alpha or beta","type":"string"}},"required":["record"],"type":"object"}},"type":"function"},{"function":{"description":"Verify a code returned by lookup_record. May fail transiently; retry once.","name":"verify_code","parameters":{"properties":{"code":{"description":"the code to verify","type":"string"}},"required":["code"],"type":"object"}},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  - name: x-request-id
+    value: req_01m36hc292ehrv53pqvzz1ejsw
+  body: '{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"Alpha code: **alpha-code-7431** – Verified  \nBeta code: **beta-code-2286** – Verified","reasoning":"We have performed lookups and verification, including retry for beta. We should output brief answer: codes and verification status.","role":"assistant"}}],"created":0,"id":"chatcmpl-d04ab20d-d1ad-449c-a93d-0af771cbe953","model":"openai/gpt-oss-20b","object":"chat.completion","service_tier":"on_demand","system_fingerprint":"fp_4f7e7dc26e","usage":{"completion_time":0.063919606,"completion_tokens":59,"completion_tokens_details":{"reasoning_tokens":25},"prompt_time":0.020602751,"prompt_tokens":397,"queue_time":0.029786655,"total_time":0.084522357,"total_tokens":456},"usage_breakdown":null,"x_groq":{"id":"req_01m36hc292ehrv53pqvzz1ejsw","seed":555540026}}'
+---
+when:
+  path: /openai/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":4096,"messages":[{"content":[{"text":"You are a records assistant. Use the tools for every lookup and verification and never guess a code. When a tool reports a transient failure, call it again once. Answer briefly.","type":"text"}],"role":"system"},{"content":"Look up the alpha record and the beta record, verify each returned code, and report both codes with their verification status.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"alpha\"}","name":"lookup_record"},"id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70","type":"function"}]},{"content":"record alpha: code alpha-code-7431","role":"tool","tool_call_id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"beta\"}","name":"lookup_record"},"id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c","type":"function"}]},{"content":"record beta: code beta-code-2286","role":"tool","tool_call_id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"alpha-code-7431\"}","name":"verify_code"},"id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4","type":"function"}]},{"content":"verified alpha-code-7431","role":"tool","tool_call_id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174","type":"function"}]},{"content":"the tool failed","role":"tool","tool_call_id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_524a841e-bf26-40a1-bd03-4c7a432ede4a","type":"function"}]},{"content":"verified beta-code-2286","role":"tool","tool_call_id":"fc_524a841e-bf26-40a1-bd03-4c7a432ede4a"},{"content":[{"text":"Alpha code: **alpha-code-7431** – Verified  \nBeta code: **beta-code-2286** – Verified","type":"text"}],"role":"assistant"},{"content":"Verify the alpha code once more and confirm whether it is unchanged.","role":"user"}],"model":"openai/gpt-oss-20b","reasoning_format":"parsed","tools":[{"function":{"description":"Look up a record by name and return its code.","name":"lookup_record","parameters":{"properties":{"record":{"description":"alpha or beta","type":"string"}},"required":["record"],"type":"object"}},"type":"function"},{"function":{"description":"Verify a code returned by lookup_record. May fail transiently; retry once.","name":"verify_code","parameters":{"properties":{"code":{"description":"the code to verify","type":"string"}},"required":["code"],"type":"object"}},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  - name: x-request-id
+    value: req_01m36hc2epey4rkb7anamrajwa
+  body: '{"choices":[{"finish_reason":"tool_calls","index":0,"logprobs":null,"message":{"reasoning":"We need to verify the alpha code again. The tool can be called. We must use verify_code. The previous code was alpha-code-7431. We''ll call verify_code with that code.","role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"alpha-code-7431\"}","name":"verify_code"},"id":"fc_1975c888-2d88-461b-85ac-702ff2352337","type":"function"}]}}],"created":0,"id":"chatcmpl-eb013663-8c58-4048-af37-354546d3312a","model":"openai/gpt-oss-20b","object":"chat.completion","service_tier":"on_demand","system_fingerprint":"fp_a8c584dda7","usage":{"completion_time":0.095146238,"completion_tokens":63,"completion_tokens_details":{"reasoning_tokens":40},"prompt_time":0.027635071,"prompt_tokens":445,"queue_time":0.181056646,"total_time":0.122781309,"total_tokens":508},"usage_breakdown":null,"x_groq":{"id":"req_01m36hc2epey4rkb7anamrajwa","seed":314951776}}'
+---
+when:
+  path: /openai/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":4096,"messages":[{"content":[{"text":"You are a records assistant. Use the tools for every lookup and verification and never guess a code. When a tool reports a transient failure, call it again once. Answer briefly.","type":"text"}],"role":"system"},{"content":"Look up the alpha record and the beta record, verify each returned code, and report both codes with their verification status.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"alpha\"}","name":"lookup_record"},"id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70","type":"function"}]},{"content":"record alpha: code alpha-code-7431","role":"tool","tool_call_id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"beta\"}","name":"lookup_record"},"id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c","type":"function"}]},{"content":"record beta: code beta-code-2286","role":"tool","tool_call_id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"alpha-code-7431\"}","name":"verify_code"},"id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4","type":"function"}]},{"content":"verified alpha-code-7431","role":"tool","tool_call_id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174","type":"function"}]},{"content":"the tool failed","role":"tool","tool_call_id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_524a841e-bf26-40a1-bd03-4c7a432ede4a","type":"function"}]},{"content":"verified beta-code-2286","role":"tool","tool_call_id":"fc_524a841e-bf26-40a1-bd03-4c7a432ede4a"},{"content":[{"text":"Alpha code: **alpha-code-7431** – Verified  \nBeta code: **beta-code-2286** – Verified","type":"text"}],"role":"assistant"},{"content":"Verify the alpha code once more and confirm whether it is unchanged.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"alpha-code-7431\"}","name":"verify_code"},"id":"fc_1975c888-2d88-461b-85ac-702ff2352337","type":"function"}]},{"content":"verified alpha-code-7431","role":"tool","tool_call_id":"fc_1975c888-2d88-461b-85ac-702ff2352337"}],"model":"openai/gpt-oss-20b","reasoning_format":"parsed","tools":[{"function":{"description":"Look up a record by name and return its code.","name":"lookup_record","parameters":{"properties":{"record":{"description":"alpha or beta","type":"string"}},"required":["record"],"type":"object"}},"type":"function"},{"function":{"description":"Verify a code returned by lookup_record. May fail transiently; retry once.","name":"verify_code","parameters":{"properties":{"code":{"description":"the code to verify","type":"string"}},"required":["code"],"type":"object"}},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  - name: x-request-id
+    value: req_01m36hc2v1ec5t58btmf1t9jj0
+  body: '{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"The alpha code remains **alpha-code-7431** – unchanged and verified.","role":"assistant"}}],"created":0,"id":"chatcmpl-c8208d58-402a-4a31-9322-f0946b8e6856","model":"openai/gpt-oss-20b","object":"chat.completion","service_tier":"on_demand","system_fingerprint":"fp_a12402de73","usage":{"completion_time":0.020393066,"completion_tokens":20,"prompt_time":0.014350984,"prompt_tokens":480,"prompt_tokens_details":{"cached_tokens":256},"queue_time":0.166904202,"total_time":0.03474405,"total_tokens":500},"usage_breakdown":null,"x_groq":{"id":"req_01m36hc2v1ec5t58btmf1t9jj0","seed":1542182827}}'
+---
+when:
+  path: /openai/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":4096,"messages":[{"content":[{"text":"You are a records assistant. Use the tools for every lookup and verification and never guess a code. When a tool reports a transient failure, call it again once. Answer briefly.","type":"text"}],"role":"system"},{"content":"Look up the alpha record and the beta record, verify each returned code, and report both codes with their verification status.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"alpha\"}","name":"lookup_record"},"id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70","type":"function"}]},{"content":"record alpha: code alpha-code-7431","role":"tool","tool_call_id":"fc_5f7c1d1d-e709-4983-9000-0c42bfdd3d70"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"record\":\"beta\"}","name":"lookup_record"},"id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c","type":"function"}]},{"content":"record beta: code beta-code-2286","role":"tool","tool_call_id":"fc_4a32caec-2a50-48fb-8530-7c8f70a8858c"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"alpha-code-7431\"}","name":"verify_code"},"id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4","type":"function"}]},{"content":"verified alpha-code-7431","role":"tool","tool_call_id":"fc_7ba0e494-1814-4416-b349-362a2a0122f4"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174","type":"function"}]},{"content":"the tool failed","role":"tool","tool_call_id":"fc_8f74ef4b-08e8-4d62-8f70-9bbbdc030174"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"beta-code-2286\"}","name":"verify_code"},"id":"fc_524a841e-bf26-40a1-bd03-4c7a432ede4a","type":"function"}]},{"content":"verified beta-code-2286","role":"tool","tool_call_id":"fc_524a841e-bf26-40a1-bd03-4c7a432ede4a"},{"content":[{"text":"Alpha code: **alpha-code-7431** – Verified  \nBeta code: **beta-code-2286** – Verified","type":"text"}],"role":"assistant"},{"content":"Verify the alpha code once more and confirm whether it is unchanged.","role":"user"},{"role":"assistant","tool_calls":[{"function":{"arguments":"{\"code\":\"alpha-code-7431\"}","name":"verify_code"},"id":"fc_1975c888-2d88-461b-85ac-702ff2352337","type":"function"}]},{"content":"verified alpha-code-7431","role":"tool","tool_call_id":"fc_1975c888-2d88-461b-85ac-702ff2352337"},{"content":[{"text":"The alpha code remains **alpha-code-7431** – unchanged and verified.","type":"text"}],"role":"assistant"},{"content":"Repeat both codes exactly as reported earlier, separated by a comma, and nothing else.","role":"user"}],"model":"openai/gpt-oss-20b","reasoning_format":"parsed","tools":[{"function":{"description":"Look up a record by name and return its code.","name":"lookup_record","parameters":{"properties":{"record":{"description":"alpha or beta","type":"string"}},"required":["record"],"type":"object"}},"type":"function"},{"function":{"description":"Verify a code returned by lookup_record. May fail transiently; retry once.","name":"verify_code","parameters":{"properties":{"code":{"description":"the code to verify","type":"string"}},"required":["code"],"type":"object"}},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  - name: x-request-id
+    value: req_01m36hc34ce25a7scgrf2nv1dt
+  body: '{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"alpha-code-7431, beta-code-2286","reasoning":"We need to repeat both codes exactly as earlier: alpha-code-7431, beta-code-2286. No other text, no formatting. Just that string.","role":"assistant"}}],"created":0,"id":"chatcmpl-313ddaf6-845c-47c0-af84-8857ef532a50","model":"openai/gpt-oss-20b","object":"chat.completion","service_tier":"on_demand","system_fingerprint":"fp_e23fc997ca","usage":{"completion_time":0.056148423,"completion_tokens":54,"completion_tokens_details":{"reasoning_tokens":34},"prompt_time":0.016447451,"prompt_tokens":523,"prompt_tokens_details":{"cached_tokens":256},"queue_time":0.167718565,"total_time":0.072595874,"total_tokens":577},"usage_breakdown":null,"x_groq":{"id":"req_01m36hc34ce25a7scgrf2nv1dt","seed":259791283}}'

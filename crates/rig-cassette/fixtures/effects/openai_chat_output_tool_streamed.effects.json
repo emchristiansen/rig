@@ -1,0 +1,1022 @@
+{
+  "header": {
+    "run_spec": 17063702180001451641,
+    "handlers": [
+      {
+        "key": "golden/model:default",
+        "family": {
+          "family": "completion",
+          "model": "default",
+          "capabilities": {
+            "composes_native_output_with_tools": true
+          }
+        }
+      }
+    ],
+    "signature": {
+      "golden/model:default": "completion"
+    },
+    "hooks": [],
+    "required": {
+      "golden/model:default": "completion"
+    },
+    "bus": {
+      "command_capacity": 16,
+      "stream_capacity": 64,
+      "serial_per_handler": false
+    }
+  },
+  "records": [
+    {
+      "tool_output": null,
+      "id": 1,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a concise assistant. Answer directly.\n\nWhen you have gathered enough information to answer, call the `final_result` tool exactly once with your final answer. Its arguments are the structured result and must satisfy the required schema. Do not return the final answer as plain text."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Return a concise event object for a local Rust meetup in Seattle."
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "final_result",
+              "description": "Call this tool exactly once with your final answer when you are done. Its arguments are the structured result and must satisfy the output schema.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "category": {
+                    "type": "string"
+                  },
+                  "summary": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "category",
+                  "summary"
+                ]
+              }
+            }
+          ],
+          "temperature": null,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "call_TPhKfdv0JBZz64kdgR7pYGou"
+              },
+              "provider": {
+                "call_id": "call_TPhKfdv0JBZz64kdgR7pYGou"
+              },
+              "function": {
+                "name": "final_result",
+                "arguments": {
+                  "title": "Seattle Rust Meetup — Monthly",
+                  "category": "Meetup",
+                  "summary": "Monthly Seattle Rust Meetup — 2nd Wednesday, 6:30–8:30 PM at Impact Hub Seattle (Pioneer Square) with hybrid Zoom option. Agenda: 15‑minute lightning talks, one 45‑minute deep‑dive talk, open help desk and networking. Open to all Rust developers; RSVP at meetup.com/seattle-rust or email seattle-rust@example.org."
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          ],
+          "usage": {
+            "input_tokens": 224,
+            "output_tokens": 565,
+            "total_tokens": 789,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 448
+          },
+          "message_id": null,
+          "response_id": "chatcmpl-ERDCKIF5YUAtKKZVGendTPt3EY6YL",
+          "provider_request_id": "req_54014dcf423e4d2b929bc3300f9eaf11",
+          "finish_reason": "tool_calls",
+          "provider": "openai",
+          "model": "gpt-5-mini-2025-08-07",
+          "raw": {
+            "usage": {
+              "prompt_tokens": 224,
+              "completion_tokens": 565,
+              "total_tokens": 789,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 448
+              }
+            },
+            "finish_reason": "tool_calls",
+            "response_id": "chatcmpl-ERDCKIF5YUAtKKZVGendTPt3EY6YL",
+            "model": "gpt-5-mini-2025-08-07",
+            "additional_params": {
+              "created": 0,
+              "obfuscation": "R",
+              "object": "chat.completion.chunk",
+              "service_tier": "default",
+              "system_fingerprint": null
+            }
+          }
+        }
+      },
+      "events": [
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_name",
+            "name": "final_result"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "{\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "title"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "\":\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "Seattle"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Rust"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Meetup"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " —"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Monthly"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "\",\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "category"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "\":\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "Meet"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "up"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "\",\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "summary"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "\":\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "Monthly"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Seattle"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Rust"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Meetup"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " —"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " "
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "2"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "nd"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Wednesday"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " "
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "6"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ":"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "30"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "–"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "8"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ":"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "30"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " PM"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " at"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Impact"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Hub"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Seattle"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " ("
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "P"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "ioneer"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Square"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ")"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " with"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " hybrid"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Zoom"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " option"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "."
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Agenda"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ":"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " "
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "15"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "‑"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "minute"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " lightning"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " talks"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " one"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " "
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "45"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "‑"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "minute"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " deep"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "‑"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "d"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "ive"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " talk"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ","
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " open"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " help"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " desk"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " and"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " networking"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "."
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Open"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " to"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " all"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " Rust"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " developers"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ";"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " RSVP"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " at"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " meetup"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ".com"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "/se"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "attle"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "-r"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "ust"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " or"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " email"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": " se"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "attle"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "-r"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "ust"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "@example"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ".org"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": ".\""
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "}"
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:call_TPhKfdv0JBZz64kdgR7pYGou",
+          "end": {
+            "close": "tool_call",
+            "tool_id": "call_TPhKfdv0JBZz64kdgR7pYGou",
+            "on_unparseable": "error"
+          },
+          "block": {
+            "type": "toolcall",
+            "id": {
+              "origin": "explicit",
+              "id": "call_TPhKfdv0JBZz64kdgR7pYGou"
+            },
+            "provider": {
+              "call_id": "call_TPhKfdv0JBZz64kdgR7pYGou"
+            },
+            "function": {
+              "name": "final_result",
+              "arguments": {
+                "title": "Seattle Rust Meetup — Monthly",
+                "category": "Meetup",
+                "summary": "Monthly Seattle Rust Meetup — 2nd Wednesday, 6:30–8:30 PM at Impact Hub Seattle (Pioneer Square) with hybrid Zoom option. Agenda: 15‑minute lightning talks, one 45‑minute deep‑dive talk, open help desk and networking. Open to all Rust developers; RSVP at meetup.com/seattle-rust or email seattle-rust@example.org."
+              }
+            },
+            "signature": null,
+            "additional_params": null
+          }
+        },
+        {
+          "event": "final",
+          "usage": {
+            "input_tokens": 224,
+            "output_tokens": 565,
+            "total_tokens": 789,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 448
+          },
+          "finish_reason": "tool_calls",
+          "message_id": null,
+          "response_id": "chatcmpl-ERDCKIF5YUAtKKZVGendTPt3EY6YL",
+          "provider_request_id": "req_54014dcf423e4d2b929bc3300f9eaf11",
+          "provider": "openai",
+          "model": "gpt-5-mini-2025-08-07",
+          "raw": {
+            "usage": {
+              "prompt_tokens": 224,
+              "completion_tokens": 565,
+              "total_tokens": 789,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              },
+              "completion_tokens_details": {
+                "reasoning_tokens": 448
+              }
+            },
+            "finish_reason": "tool_calls",
+            "response_id": "chatcmpl-ERDCKIF5YUAtKKZVGendTPt3EY6YL",
+            "model": "gpt-5-mini-2025-08-07",
+            "additional_params": {
+              "created": 0,
+              "obfuscation": "R",
+              "object": "chat.completion.chunk",
+              "service_tier": "default",
+              "system_fingerprint": null
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -5,7 +5,11 @@ Vector store implementation for [ScyllaDB](https://www.scylladb.com/). This inte
 ## Usage
 
 ```rust
-use rig::{providers::openai, vector_store::VectorStoreIndex, Embed};
+use rig::{
+    Embed,
+    providers::openai,
+    vector_store::{VectorStoreIndex, request::VectorSearchRequest},
+};
 use rig_scylladb::{ScyllaDbVectorStore, create_session};
 
 #[derive(Embed, serde::Deserialize, serde::Serialize, Debug)]
@@ -20,9 +24,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create ScyllaDB session
     let session = create_session("127.0.0.1:9042").await?;
     
-    // Create OpenAI client and embedding model
-    let openai_client = openai::Client::from_env();
-    let model = openai_client.embedding_model(openai::TEXT_EMBEDDING_ADA_002);
+    // Bind OpenAI's embeddings wire to the bundled transport
+    let openai = openai::wire::OpenAI::from_env()?.bound()?;
+    let model = openai.embedding(openai::TEXT_EMBEDDING_ADA_002, None);
     
     // Create vector store
     let vector_store = ScyllaDbVectorStore::new(
@@ -34,9 +38,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ).await?;
     
     // Query the store
-    let results = vector_store
-        .top_n::<Document>("search query", 5)
-        .await?;
+    let req = VectorSearchRequest::builder()
+        .query("search query")
+        .samples(5)
+        .build();
+    let results = vector_store.top_n::<Document>(req).await?;
     
     for (score, id, doc) in results {
         println!("Score: {}, ID: {}, Document: {:?}", score, id, doc);

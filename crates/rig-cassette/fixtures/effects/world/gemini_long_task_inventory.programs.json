@@ -1,0 +1,4351 @@
+{
+  "golden/run#0": [
+    {
+      "command_capacity": 16,
+      "stream_capacity": 64,
+      "serial_per_handler": false
+    },
+    {
+      "format": 2,
+      "entities": [
+        {
+          "rig_ecs::bus::handlers::Bound": {
+            "key": "golden/model:default",
+            "descriptor": {
+              "key": "golden/model:default",
+              "family": {
+                "family": "completion",
+                "model": "default",
+                "capabilities": {
+                  "composes_native_output_with_tools": false
+                }
+              }
+            }
+          }
+        },
+        {
+          "rig_ecs::bus::handlers::Bound": {
+            "key": "golden/tool:task_operation#0",
+            "descriptor": {
+              "key": "golden/tool:task_operation#0",
+              "family": {
+                "family": "tool",
+                "name": "task_operation",
+                "description": "Read task source data, apply a structured integer update, validate one key or all, or request the inventory follow-up. Read index first. Check results describe actual state. Apply never implies validation success.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "read",
+                        "apply",
+                        "check",
+                        "revise"
+                      ]
+                    },
+                    "key": {
+                      "type": "string",
+                      "enum": [
+                        "index",
+                        "all",
+                        "depot/1",
+                        "depot/2",
+                        "depot/3",
+                        "depot/4",
+                        "depot/5",
+                        "depot/6"
+                      ]
+                    },
+                    "value": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "key",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        {
+          "rig_ecs::agent::AdditionalParams": {
+            "generationConfig": {
+              "thinkingConfig": {
+                "thinkingLevel": "low"
+              }
+            }
+          },
+          "rig_ecs::agent::DefaultMaxTurns": null,
+          "rig_ecs::agent::InvalidCalls": {
+            "retries": 0,
+            "unhandled": "Fail"
+          },
+          "rig_ecs::agent::MaxTokens": 2048,
+          "rig_ecs::agent::MaxTurns": 30,
+          "rig_ecs::agent::Output": {
+            "mode": "Auto",
+            "schema": null
+          },
+          "rig_ecs::agent::Owner": "golden",
+          "rig_ecs::agent::PolicyVersion": "ecs-matrix/v1:",
+          "rig_ecs::agent::Preamble": "You are a careful task-solving assistant. Use task_operation to inspect source facts, apply structured updates, and validate actual task state. Never invent tool results. Respect the requested sequence so each new operation uses the previous result. A returned validation error is recoverable: retry check. A failed validation is not success: inspect the referenced source and repair the state. Only answer done after check(all) reports passed for the latest revision.",
+          "rig_ecs::agent::ProviderRetries": 0,
+          "rig_ecs::agent::Temperature": 0.0,
+          "rig_ecs::agent::ToolChoiceSpec": null,
+          "rig_ecs::agent::UsesModel": 0
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 2,
+          "rig_ecs::agent::Grant": 1
+        },
+        {
+          "rig_ecs::agent::Cursor": {
+            "turn": 0
+          },
+          "rig_ecs::agent::InvalidRetries": 0,
+          "rig_ecs::agent::MaxTurns": 30,
+          "rig_ecs::agent::OutputRetries": 0,
+          "rig_ecs::agent::OutputToolName": null,
+          "rig_ecs::agent::ProviderRetried": 0,
+          "rig_ecs::agent::Ready": {},
+          "rig_ecs::agent::Run": {},
+          "rig_ecs::agent::RunOf": 2,
+          "rig_ecs::agent::RunPhase": "Assembling",
+          "rig_ecs::agent::RunSeq": 0,
+          "rig_ecs::agent::StreamRequested": false,
+          "rig_ecs::agent::ToolPolicy": {
+            "concurrency": 3
+          },
+          "rig_ecs::agent::Usage": {},
+          "rig_ecs::bus::effect::Scope": "golden/run#0"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 5,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Text": {
+              "text": "Build the six-depot inventory. Apply under the exact keys depot/1 through depot/6; never append /available or /reserved. Read index. Read each depot in a separate turn. Apply available = stock + inbound - damaged in THREE turns with TWO parallel applies each. Check all and answer done. Do not request a revision until the user asks. Set value to null except when applying an integer."
+            }
+          }
+        }
+      ],
+      "counters": {
+        "next_run": 1,
+        "next_id": 0
+      },
+      "binaries": []
+    }
+  ],
+  "golden/run#1": [
+    {
+      "command_capacity": 16,
+      "stream_capacity": 64,
+      "serial_per_handler": false
+    },
+    {
+      "format": 2,
+      "entities": [
+        {
+          "rig_ecs::bus::handlers::Bound": {
+            "key": "golden/model:default",
+            "descriptor": {
+              "key": "golden/model:default",
+              "family": {
+                "family": "completion",
+                "model": "default",
+                "capabilities": {
+                  "composes_native_output_with_tools": false
+                }
+              }
+            }
+          }
+        },
+        {
+          "rig_ecs::bus::handlers::Bound": {
+            "key": "golden/tool:task_operation#0",
+            "descriptor": {
+              "key": "golden/tool:task_operation#0",
+              "family": {
+                "family": "tool",
+                "name": "task_operation",
+                "description": "Read task source data, apply a structured integer update, validate one key or all, or request the inventory follow-up. Read index first. Check results describe actual state. Apply never implies validation success.",
+                "parameters": {
+                  "type": "object",
+                  "properties": {
+                    "action": {
+                      "type": "string",
+                      "enum": [
+                        "read",
+                        "apply",
+                        "check",
+                        "revise"
+                      ]
+                    },
+                    "key": {
+                      "type": "string",
+                      "enum": [
+                        "index",
+                        "all",
+                        "depot/1",
+                        "depot/2",
+                        "depot/3",
+                        "depot/4",
+                        "depot/5",
+                        "depot/6"
+                      ]
+                    },
+                    "value": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "key",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        {
+          "rig_ecs::agent::AdditionalParams": {
+            "generationConfig": {
+              "thinkingConfig": {
+                "thinkingLevel": "low"
+              }
+            }
+          },
+          "rig_ecs::agent::DefaultMaxTurns": null,
+          "rig_ecs::agent::InvalidCalls": {
+            "retries": 0,
+            "unhandled": "Fail"
+          },
+          "rig_ecs::agent::MaxTokens": 2048,
+          "rig_ecs::agent::MaxTurns": 30,
+          "rig_ecs::agent::Output": {
+            "mode": "Auto",
+            "schema": null
+          },
+          "rig_ecs::agent::Owner": "golden",
+          "rig_ecs::agent::PolicyVersion": "ecs-matrix/v1:",
+          "rig_ecs::agent::Preamble": "You are a careful task-solving assistant. Use task_operation to inspect source facts, apply structured updates, and validate actual task state. Never invent tool results. Respect the requested sequence so each new operation uses the previous result. A returned validation error is recoverable: retry check. A failed validation is not success: inspect the referenced source and repair the state. Only answer done after check(all) reports passed for the latest revision.",
+          "rig_ecs::agent::ProviderRetries": 0,
+          "rig_ecs::agent::Temperature": 0.0,
+          "rig_ecs::agent::ToolChoiceSpec": null,
+          "rig_ecs::agent::UsesModel": 0
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 2,
+          "rig_ecs::agent::Grant": 1
+        },
+        {
+          "rig_ecs::agent::Cursor": {
+            "turn": 12
+          },
+          "rig_ecs::agent::InvalidRetries": 0,
+          "rig_ecs::agent::MaxTurns": 30,
+          "rig_ecs::agent::OutputRetries": 0,
+          "rig_ecs::agent::OutputToolName": null,
+          "rig_ecs::agent::ProviderRetried": 0,
+          "rig_ecs::agent::Ready": {},
+          "rig_ecs::agent::Run": {},
+          "rig_ecs::agent::RunOf": 2,
+          "rig_ecs::agent::RunResult": "done",
+          "rig_ecs::agent::RunSeq": 0,
+          "rig_ecs::agent::Settled": {},
+          "rig_ecs::agent::StreamRequested": false,
+          "rig_ecs::agent::ToolPolicy": {
+            "concurrency": 3
+          },
+          "rig_ecs::agent::Usage": {
+            "input_tokens": 14279,
+            "output_tokens": 407,
+            "total_tokens": 15492,
+            "reasoning_tokens": 806
+          },
+          "rig_ecs::agent::UsesModel": 0,
+          "rig_ecs::bus::effect::Scope": "golden/run#0"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 5,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Text": {
+              "text": "Build the six-depot inventory. Apply under the exact keys depot/1 through depot/6; never append /available or /reserved. Read index. Read each depot in a separate turn. Apply available = stock + inbound - damaged in THREE turns with TWO parallel applies each. Check all and answer done. Do not request a revision until the user asks. Set value to null except when applying an integer."
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_619641"
+                },
+                "provider": {
+                  "call_id": "call_619641"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "read",
+                    "key": "index",
+                    "value": null
+                  }
+                },
+                "signature": "EoIFCv8EAWkUfRPWgIFf33ewIsWfFhysgSg1ezbE3HmwFq1+pLaM3afV0t7hT7GTCUGxLuPrTPtSgiYOQL1EzWJkgCiws/KZf0pP8omz67PWZstE60sNmxUabXgrVGoCy5ImL79o0YNk54E7NPL8yBobOgIARsoFtRvy7bqvQXRlZJnorg4ZpyQAfXEi4+MNLcEXv73WX7wgxbh/eLgMipFwUkfeK737p1B4ci2xMcZ/nLmqQ+2m5o8Bfj9hCTIPR7Mqskf8/5jO/sn+scI6GN1IDaPyTC7nzYjahx7OfPo2xl8v46ETRrVwHuqKzg0EvSY0KVnPxoQ9KebWrZtQkrCdufeOQXfv8N1O0Hoi0J1B+DDgJ4Ke5mTvPQ9io+0HOthGXa8ggKMoZaEv0vK1t6K1wvJYy0H3a5B4hnefUJutOzGV6fgP6BNIm4YAJBlTlhjtQGMojA+1CqW1SSaCwLF/vhfuhyAydrTPbyfviFbVW5C4byPH5yOube0LSVBgza0rEIFpmt0OZgUciahBgz3MEk55KozH6IvNrCO6upNUTDefZGlrDF57kVT29wpHJ8rJCfUM8GmUY7NUt4uIc/a9YDCll37KB82z5Wbi+xat6ikjDDkkCYmgQkWE8JOo8UpZp3kPhCidFxG2yvn5vgawCsq56eksz2PAkgK9XaMAADnvqx+kduZAMMczVqVxJREK1WgirfPdTR7UD0whBoFx07chsikH2wS+Q8lkqnH3bvwJMrSz+o5MagW7QkzMpa5wwLRA7NRL9iNclfQA9bO7DGzwy+EkRgwvaib33e47vLzJzI8F+7Pa3RByowIcJusu1dlt2ROYiZrVgN8ZCwf1DYOy",
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 1
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 11,
+          "rig_ecs::agent::checkpoint::TurnResults": 13,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 7,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 7,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_619641"
+                  },
+                  "provider": {
+                    "call_id": "call_619641"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "read",
+                      "key": "index",
+                      "value": null
+                    }
+                  },
+                  "signature": "EoIFCv8EAWkUfRPWgIFf33ewIsWfFhysgSg1ezbE3HmwFq1+pLaM3afV0t7hT7GTCUGxLuPrTPtSgiYOQL1EzWJkgCiws/KZf0pP8omz67PWZstE60sNmxUabXgrVGoCy5ImL79o0YNk54E7NPL8yBobOgIARsoFtRvy7bqvQXRlZJnorg4ZpyQAfXEi4+MNLcEXv73WX7wgxbh/eLgMipFwUkfeK737p1B4ci2xMcZ/nLmqQ+2m5o8Bfj9hCTIPR7Mqskf8/5jO/sn+scI6GN1IDaPyTC7nzYjahx7OfPo2xl8v46ETRrVwHuqKzg0EvSY0KVnPxoQ9KebWrZtQkrCdufeOQXfv8N1O0Hoi0J1B+DDgJ4Ke5mTvPQ9io+0HOthGXa8ggKMoZaEv0vK1t6K1wvJYy0H3a5B4hnefUJutOzGV6fgP6BNIm4YAJBlTlhjtQGMojA+1CqW1SSaCwLF/vhfuhyAydrTPbyfviFbVW5C4byPH5yOube0LSVBgza0rEIFpmt0OZgUciahBgz3MEk55KozH6IvNrCO6upNUTDefZGlrDF57kVT29wpHJ8rJCfUM8GmUY7NUt4uIc/a9YDCll37KB82z5Wbi+xat6ikjDDkkCYmgQkWE8JOo8UpZp3kPhCidFxG2yvn5vgawCsq56eksz2PAkgK9XaMAADnvqx+kduZAMMczVqVxJREK1WgirfPdTR7UD0whBoFx07chsikH2wS+Q8lkqnH3bvwJMrSz+o5MagW7QkzMpa5wwLRA7NRL9iNclfQA9bO7DGzwy+EkRgwvaib33e47vLzJzI8F+7Pa3RByowIcJusu1dlt2ROYiZrVgN8ZCwf1DYOy",
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 348,
+                "output_tokens": 26,
+                "total_tokens": 528,
+                "reasoning_tokens": 154
+              },
+              "message_id": null,
+              "response_id": "X2GzatnOOpCcz7IPoL7YuAM",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "read",
+                              "key": "index",
+                              "value": null
+                            },
+                            "id": "call_619641",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "EoIFCv8EAWkUfRPWgIFf33ewIsWfFhysgSg1ezbE3HmwFq1+pLaM3afV0t7hT7GTCUGxLuPrTPtSgiYOQL1EzWJkgCiws/KZf0pP8omz67PWZstE60sNmxUabXgrVGoCy5ImL79o0YNk54E7NPL8yBobOgIARsoFtRvy7bqvQXRlZJnorg4ZpyQAfXEi4+MNLcEXv73WX7wgxbh/eLgMipFwUkfeK737p1B4ci2xMcZ/nLmqQ+2m5o8Bfj9hCTIPR7Mqskf8/5jO/sn+scI6GN1IDaPyTC7nzYjahx7OfPo2xl8v46ETRrVwHuqKzg0EvSY0KVnPxoQ9KebWrZtQkrCdufeOQXfv8N1O0Hoi0J1B+DDgJ4Ke5mTvPQ9io+0HOthGXa8ggKMoZaEv0vK1t6K1wvJYy0H3a5B4hnefUJutOzGV6fgP6BNIm4YAJBlTlhjtQGMojA+1CqW1SSaCwLF/vhfuhyAydrTPbyfviFbVW5C4byPH5yOube0LSVBgza0rEIFpmt0OZgUciahBgz3MEk55KozH6IvNrCO6upNUTDefZGlrDF57kVT29wpHJ8rJCfUM8GmUY7NUt4uIc/a9YDCll37KB82z5Wbi+xat6ikjDDkkCYmgQkWE8JOo8UpZp3kPhCidFxG2yvn5vgawCsq56eksz2PAkgK9XaMAADnvqx+kduZAMMczVqVxJREK1WgirfPdTR7UD0whBoFx07chsikH2wS+Q8lkqnH3bvwJMrSz+o5MagW7QkzMpa5wwLRA7NRL9iNclfQA9bO7DGzwy+EkRgwvaib33e47vLzJzI8F+7Pa3RByowIcJusu1dlt2ROYiZrVgN8ZCwf1DYOy"
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "X2GzatnOOpCcz7IPoL7YuAM",
+                "usageMetadata": {
+                  "candidatesTokenCount": 26,
+                  "promptTokenCount": 348,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 348
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 154,
+                  "totalTokenCount": 528
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 0,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 0
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 7,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_619641"
+            },
+            "provider": {
+              "call_id": "call_619641"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "keys": [
+                        "depot/1",
+                        "depot/2",
+                        "depot/3",
+                        "depot/4",
+                        "depot/5",
+                        "depot/6"
+                      ],
+                      "task": "Inventory"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 1,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 1,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 11,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_619641"
+              },
+              "provider": {
+                "call_id": "call_619641"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "index",
+                  "value": null
+                }
+              },
+              "signature": "EoIFCv8EAWkUfRPWgIFf33ewIsWfFhysgSg1ezbE3HmwFq1+pLaM3afV0t7hT7GTCUGxLuPrTPtSgiYOQL1EzWJkgCiws/KZf0pP8omz67PWZstE60sNmxUabXgrVGoCy5ImL79o0YNk54E7NPL8yBobOgIARsoFtRvy7bqvQXRlZJnorg4ZpyQAfXEi4+MNLcEXv73WX7wgxbh/eLgMipFwUkfeK737p1B4ci2xMcZ/nLmqQ+2m5o8Bfj9hCTIPR7Mqskf8/5jO/sn+scI6GN1IDaPyTC7nzYjahx7OfPo2xl8v46ETRrVwHuqKzg0EvSY0KVnPxoQ9KebWrZtQkrCdufeOQXfv8N1O0Hoi0J1B+DDgJ4Ke5mTvPQ9io+0HOthGXa8ggKMoZaEv0vK1t6K1wvJYy0H3a5B4hnefUJutOzGV6fgP6BNIm4YAJBlTlhjtQGMojA+1CqW1SSaCwLF/vhfuhyAydrTPbyfviFbVW5C4byPH5yOube0LSVBgza0rEIFpmt0OZgUciahBgz3MEk55KozH6IvNrCO6upNUTDefZGlrDF57kVT29wpHJ8rJCfUM8GmUY7NUt4uIc/a9YDCll37KB82z5Wbi+xat6ikjDDkkCYmgQkWE8JOo8UpZp3kPhCidFxG2yvn5vgawCsq56eksz2PAkgK9XaMAADnvqx+kduZAMMczVqVxJREK1WgirfPdTR7UD0whBoFx07chsikH2wS+Q8lkqnH3bvwJMrSz+o5MagW7QkzMpa5wwLRA7NRL9iNclfQA9bO7DGzwy+EkRgwvaib33e47vLzJzI8F+7Pa3RByowIcJusu1dlt2ROYiZrVgN8ZCwf1DYOy",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 13,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_619641"
+              },
+              "provider": {
+                "call_id": "call_619641"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 14,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "keys": [
+                "depot/1",
+                "depot/2",
+                "depot/3",
+                "depot/4",
+                "depot/5",
+                "depot/6"
+              ],
+              "task": "Inventory"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_754123"
+                },
+                "provider": {
+                  "call_id": "call_754123"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "read",
+                    "key": "depot/1",
+                    "value": null
+                  }
+                },
+                "signature": "EowBCokBAWkUfRO1Y4lHMHU5CX2YpWUfJZghesdS1n/2gqTT8+zafoP1/qq2S59QoL/OBiyNcYcqOy+nzR5tFxN3fRQ3jEdFEtfiOgQ628YQrccnOyjA2/mkOswUPY9fi/1juBPATNvw7Zw2lX4Rh1n7JH3KsXHuEp/iK+2TiyGTa6HpglHpajj5T8LEY84=",
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 2
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 20,
+          "rig_ecs::agent::checkpoint::TurnResults": 22,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 16,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 16,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_754123"
+                  },
+                  "provider": {
+                    "call_id": "call_754123"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "read",
+                      "key": "depot/1",
+                      "value": null
+                    }
+                  },
+                  "signature": "EowBCokBAWkUfRO1Y4lHMHU5CX2YpWUfJZghesdS1n/2gqTT8+zafoP1/qq2S59QoL/OBiyNcYcqOy+nzR5tFxN3fRQ3jEdFEtfiOgQ628YQrccnOyjA2/mkOswUPY9fi/1juBPATNvw7Zw2lX4Rh1n7JH3KsXHuEp/iK+2TiyGTa6HpglHpajj5T8LEY84=",
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 588,
+                "output_tokens": 29,
+                "total_tokens": 627,
+                "reasoning_tokens": 10
+              },
+              "message_id": null,
+              "response_id": "YGGzaouSOY6fz7IPqPDC2AE",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "read",
+                              "key": "depot/1",
+                              "value": null
+                            },
+                            "id": "call_754123",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "EowBCokBAWkUfRO1Y4lHMHU5CX2YpWUfJZghesdS1n/2gqTT8+zafoP1/qq2S59QoL/OBiyNcYcqOy+nzR5tFxN3fRQ3jEdFEtfiOgQ628YQrccnOyjA2/mkOswUPY9fi/1juBPATNvw7Zw2lX4Rh1n7JH3KsXHuEp/iK+2TiyGTa6HpglHpajj5T8LEY84="
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "YGGzaouSOY6fz7IPqPDC2AE",
+                "usageMetadata": {
+                  "candidatesTokenCount": 29,
+                  "promptTokenCount": 588,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 588
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 10,
+                  "totalTokenCount": 627
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 2,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 2
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 16,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_754123"
+            },
+            "provider": {
+              "call_id": "call_754123"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "stock": 10,
+                      "inbound": 2,
+                      "damaged": 1,
+                      "reserved": 0,
+                      "instruction": "available = stock + inbound - damaged - reserved"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 3,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 3,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 20,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_754123"
+              },
+              "provider": {
+                "call_id": "call_754123"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/1",
+                  "value": null
+                }
+              },
+              "signature": "EowBCokBAWkUfRO1Y4lHMHU5CX2YpWUfJZghesdS1n/2gqTT8+zafoP1/qq2S59QoL/OBiyNcYcqOy+nzR5tFxN3fRQ3jEdFEtfiOgQ628YQrccnOyjA2/mkOswUPY9fi/1juBPATNvw7Zw2lX4Rh1n7JH3KsXHuEp/iK+2TiyGTa6HpglHpajj5T8LEY84=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 22,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_754123"
+              },
+              "provider": {
+                "call_id": "call_754123"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 23,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 10,
+              "inbound": 2,
+              "damaged": 1,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_537261"
+                },
+                "provider": {
+                  "call_id": "call_537261"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "read",
+                    "key": "depot/2",
+                    "value": null
+                  }
+                },
+                "signature": "EugECuUEAWkUfRNdCccVIQhk7ABWLPSWxwwQfueVLTP7xKfnPYf7PqABuOpsszGx6dgbRyJOeMYnRGUkEhPJjSe8FZOGICXH0SRpGOMloM5AqdjjEziZywnI1Ya7YlPVzbv4gGsrt9T1e1W6LglWeLAVP2BCu5bJK0YbU6ISVko6Qffl/fcsmUFG+Yb7LmXNoCdHutYtbN3kAFdlkilpQQadgFrMapKy9KXLfGEuHU9dLEvneSqHpO1bLO6nB/Fw0MlrrYue+/oUSmUvGRQt3lJ+BFgFDPzscmjP+kSo/nbCgcdMyczUjkI7XNW/KGw6+iCKgkHHmpQMraY4qHRXZkL9ZR/d/IPVsTmpHWoMBJ3wxaI2GTo3MeIF1IGLx3nLSEFLzJ6enVGH/ZbI75KZFzwV7ON/5ISh8IkBwDUM339zxQaikF0p3jDuCWlY4NmQtkzwRmXfVlH8K7CPXFcZDh34FFCGcAuVfvX8tmQlb0MF2gKc9y3dOhXqbc9bPZ7CV0L1bLEBGStDTrgB1/JvpSTCvRE3CUpRz42Ty69OevbXUXqt5o8KoH5k2m4diGhT7UGhrTTqiU1cIrds2Prz+KU9oY9LWmmBIYvtZHfm31fqGgWfZdya4WFjzHK/jebkrX3KG4vjJenw4PC7HdRnPWXZcGunIn+oRk8RslUB5a7LlWtus2Cm16VYk0tdNSbeStbd7x40hr4KNEq+9FJMLqTWCyTqZ+HeQbo/07F4ElZ5Fz2yXlMC2mDZXnGmvvFZt6Q5aC3DBPNtiX424E1EcUV4mXTaBOwmC6raEhV07mINhOjvDQcgzFpQYQ==",
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 3
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 29,
+          "rig_ecs::agent::checkpoint::TurnResults": 31,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 25,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 25,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_537261"
+                  },
+                  "provider": {
+                    "call_id": "call_537261"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "read",
+                      "key": "depot/2",
+                      "value": null
+                    }
+                  },
+                  "signature": "EugECuUEAWkUfRNdCccVIQhk7ABWLPSWxwwQfueVLTP7xKfnPYf7PqABuOpsszGx6dgbRyJOeMYnRGUkEhPJjSe8FZOGICXH0SRpGOMloM5AqdjjEziZywnI1Ya7YlPVzbv4gGsrt9T1e1W6LglWeLAVP2BCu5bJK0YbU6ISVko6Qffl/fcsmUFG+Yb7LmXNoCdHutYtbN3kAFdlkilpQQadgFrMapKy9KXLfGEuHU9dLEvneSqHpO1bLO6nB/Fw0MlrrYue+/oUSmUvGRQt3lJ+BFgFDPzscmjP+kSo/nbCgcdMyczUjkI7XNW/KGw6+iCKgkHHmpQMraY4qHRXZkL9ZR/d/IPVsTmpHWoMBJ3wxaI2GTo3MeIF1IGLx3nLSEFLzJ6enVGH/ZbI75KZFzwV7ON/5ISh8IkBwDUM339zxQaikF0p3jDuCWlY4NmQtkzwRmXfVlH8K7CPXFcZDh34FFCGcAuVfvX8tmQlb0MF2gKc9y3dOhXqbc9bPZ7CV0L1bLEBGStDTrgB1/JvpSTCvRE3CUpRz42Ty69OevbXUXqt5o8KoH5k2m4diGhT7UGhrTTqiU1cIrds2Prz+KU9oY9LWmmBIYvtZHfm31fqGgWfZdya4WFjzHK/jebkrX3KG4vjJenw4PC7HdRnPWXZcGunIn+oRk8RslUB5a7LlWtus2Cm16VYk0tdNSbeStbd7x40hr4KNEq+9FJMLqTWCyTqZ+HeQbo/07F4ElZ5Fz2yXlMC2mDZXnGmvvFZt6Q5aC3DBPNtiX424E1EcUV4mXTaBOwmC6raEhV07mINhOjvDQcgzFpQYQ==",
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 669,
+                "output_tokens": 29,
+                "total_tokens": 833,
+                "reasoning_tokens": 135
+              },
+              "message_id": null,
+              "response_id": "YWGzaoijKMWDz7IPkuHWmQ8",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "read",
+                              "key": "depot/2",
+                              "value": null
+                            },
+                            "id": "call_537261",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "EugECuUEAWkUfRNdCccVIQhk7ABWLPSWxwwQfueVLTP7xKfnPYf7PqABuOpsszGx6dgbRyJOeMYnRGUkEhPJjSe8FZOGICXH0SRpGOMloM5AqdjjEziZywnI1Ya7YlPVzbv4gGsrt9T1e1W6LglWeLAVP2BCu5bJK0YbU6ISVko6Qffl/fcsmUFG+Yb7LmXNoCdHutYtbN3kAFdlkilpQQadgFrMapKy9KXLfGEuHU9dLEvneSqHpO1bLO6nB/Fw0MlrrYue+/oUSmUvGRQt3lJ+BFgFDPzscmjP+kSo/nbCgcdMyczUjkI7XNW/KGw6+iCKgkHHmpQMraY4qHRXZkL9ZR/d/IPVsTmpHWoMBJ3wxaI2GTo3MeIF1IGLx3nLSEFLzJ6enVGH/ZbI75KZFzwV7ON/5ISh8IkBwDUM339zxQaikF0p3jDuCWlY4NmQtkzwRmXfVlH8K7CPXFcZDh34FFCGcAuVfvX8tmQlb0MF2gKc9y3dOhXqbc9bPZ7CV0L1bLEBGStDTrgB1/JvpSTCvRE3CUpRz42Ty69OevbXUXqt5o8KoH5k2m4diGhT7UGhrTTqiU1cIrds2Prz+KU9oY9LWmmBIYvtZHfm31fqGgWfZdya4WFjzHK/jebkrX3KG4vjJenw4PC7HdRnPWXZcGunIn+oRk8RslUB5a7LlWtus2Cm16VYk0tdNSbeStbd7x40hr4KNEq+9FJMLqTWCyTqZ+HeQbo/07F4ElZ5Fz2yXlMC2mDZXnGmvvFZt6Q5aC3DBPNtiX424E1EcUV4mXTaBOwmC6raEhV07mINhOjvDQcgzFpQYQ=="
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "YWGzaoijKMWDz7IPkuHWmQ8",
+                "usageMetadata": {
+                  "candidatesTokenCount": 29,
+                  "promptTokenCount": 669,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 669
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 135,
+                  "totalTokenCount": 833
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 4,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 4
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 25,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_537261"
+            },
+            "provider": {
+              "call_id": "call_537261"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "stock": 20,
+                      "inbound": 4,
+                      "damaged": 2,
+                      "reserved": 0,
+                      "instruction": "available = stock + inbound - damaged - reserved"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 5,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 5,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 29,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_537261"
+              },
+              "provider": {
+                "call_id": "call_537261"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/2",
+                  "value": null
+                }
+              },
+              "signature": "EugECuUEAWkUfRNdCccVIQhk7ABWLPSWxwwQfueVLTP7xKfnPYf7PqABuOpsszGx6dgbRyJOeMYnRGUkEhPJjSe8FZOGICXH0SRpGOMloM5AqdjjEziZywnI1Ya7YlPVzbv4gGsrt9T1e1W6LglWeLAVP2BCu5bJK0YbU6ISVko6Qffl/fcsmUFG+Yb7LmXNoCdHutYtbN3kAFdlkilpQQadgFrMapKy9KXLfGEuHU9dLEvneSqHpO1bLO6nB/Fw0MlrrYue+/oUSmUvGRQt3lJ+BFgFDPzscmjP+kSo/nbCgcdMyczUjkI7XNW/KGw6+iCKgkHHmpQMraY4qHRXZkL9ZR/d/IPVsTmpHWoMBJ3wxaI2GTo3MeIF1IGLx3nLSEFLzJ6enVGH/ZbI75KZFzwV7ON/5ISh8IkBwDUM339zxQaikF0p3jDuCWlY4NmQtkzwRmXfVlH8K7CPXFcZDh34FFCGcAuVfvX8tmQlb0MF2gKc9y3dOhXqbc9bPZ7CV0L1bLEBGStDTrgB1/JvpSTCvRE3CUpRz42Ty69OevbXUXqt5o8KoH5k2m4diGhT7UGhrTTqiU1cIrds2Prz+KU9oY9LWmmBIYvtZHfm31fqGgWfZdya4WFjzHK/jebkrX3KG4vjJenw4PC7HdRnPWXZcGunIn+oRk8RslUB5a7LlWtus2Cm16VYk0tdNSbeStbd7x40hr4KNEq+9FJMLqTWCyTqZ+HeQbo/07F4ElZ5Fz2yXlMC2mDZXnGmvvFZt6Q5aC3DBPNtiX424E1EcUV4mXTaBOwmC6raEhV07mINhOjvDQcgzFpQYQ==",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 31,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_537261"
+              },
+              "provider": {
+                "call_id": "call_537261"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 32,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 20,
+              "inbound": 4,
+              "damaged": 2,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_612583"
+                },
+                "provider": {
+                  "call_id": "call_612583"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "read",
+                    "key": "depot/3",
+                    "value": null
+                  }
+                },
+                "signature": "EowBCokBAWkUfRMbc0M//drsSqQJjgcsq6S5tJrthjQ/CSElv27zAo1cCc8B1C/VFsn9h55cBXDtQuPEkCndazNWHI2ZsSW1phmHjDu/6MC57A0R9PJo3LLtU4UicrVRAeu+AZt0od5u4iN5Q9XVC+8QaXAX9wCuYXobpIiuCqm4qhK6IkX63B/Mjh7qS8A=",
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 4
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 38,
+          "rig_ecs::agent::checkpoint::TurnResults": 40,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 34,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 34,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_612583"
+                  },
+                  "provider": {
+                    "call_id": "call_612583"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "read",
+                      "key": "depot/3",
+                      "value": null
+                    }
+                  },
+                  "signature": "EowBCokBAWkUfRMbc0M//drsSqQJjgcsq6S5tJrthjQ/CSElv27zAo1cCc8B1C/VFsn9h55cBXDtQuPEkCndazNWHI2ZsSW1phmHjDu/6MC57A0R9PJo3LLtU4UicrVRAeu+AZt0od5u4iN5Q9XVC+8QaXAX9wCuYXobpIiuCqm4qhK6IkX63B/Mjh7qS8A=",
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 875,
+                "output_tokens": 29,
+                "total_tokens": 914,
+                "reasoning_tokens": 10
+              },
+              "message_id": null,
+              "response_id": "YmGzapLdLfWdz7IPtZjquQM",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "read",
+                              "key": "depot/3",
+                              "value": null
+                            },
+                            "id": "call_612583",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "EowBCokBAWkUfRMbc0M//drsSqQJjgcsq6S5tJrthjQ/CSElv27zAo1cCc8B1C/VFsn9h55cBXDtQuPEkCndazNWHI2ZsSW1phmHjDu/6MC57A0R9PJo3LLtU4UicrVRAeu+AZt0od5u4iN5Q9XVC+8QaXAX9wCuYXobpIiuCqm4qhK6IkX63B/Mjh7qS8A="
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "YmGzapLdLfWdz7IPtZjquQM",
+                "usageMetadata": {
+                  "candidatesTokenCount": 29,
+                  "promptTokenCount": 875,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 875
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 10,
+                  "totalTokenCount": 914
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 6,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 6
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 34,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_612583"
+            },
+            "provider": {
+              "call_id": "call_612583"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "stock": 30,
+                      "inbound": 6,
+                      "damaged": 3,
+                      "reserved": 0,
+                      "instruction": "available = stock + inbound - damaged - reserved"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 7,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 7,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 38,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_612583"
+              },
+              "provider": {
+                "call_id": "call_612583"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/3",
+                  "value": null
+                }
+              },
+              "signature": "EowBCokBAWkUfRMbc0M//drsSqQJjgcsq6S5tJrthjQ/CSElv27zAo1cCc8B1C/VFsn9h55cBXDtQuPEkCndazNWHI2ZsSW1phmHjDu/6MC57A0R9PJo3LLtU4UicrVRAeu+AZt0od5u4iN5Q9XVC+8QaXAX9wCuYXobpIiuCqm4qhK6IkX63B/Mjh7qS8A=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 40,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_612583"
+              },
+              "provider": {
+                "call_id": "call_612583"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 41,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 30,
+              "inbound": 6,
+              "damaged": 3,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_469728"
+                },
+                "provider": {
+                  "call_id": "call_469728"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "read",
+                    "key": "depot/4",
+                    "value": null
+                  }
+                },
+                "signature": "EowBCokBAWkUfRPVlUIS1IxiMwr2OjGPa54107oQdGblZyKdRIJrUNQtIkt/bGZ/qQ6sC7ovDsQETcE2Jmd8c7ZVxhRzK28sPkoTDIfWQ1xXkXRGWIFtlQkZ9jJJeL15ZnwxZmQ+ZYRB8GTKMxxGl82E3h89i2P1G+4WzM5I6pLLAqEGeprKYnoA+SWr2cQ=",
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 5
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 47,
+          "rig_ecs::agent::checkpoint::TurnResults": 49,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 43,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 43,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_469728"
+                  },
+                  "provider": {
+                    "call_id": "call_469728"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "read",
+                      "key": "depot/4",
+                      "value": null
+                    }
+                  },
+                  "signature": "EowBCokBAWkUfRPVlUIS1IxiMwr2OjGPa54107oQdGblZyKdRIJrUNQtIkt/bGZ/qQ6sC7ovDsQETcE2Jmd8c7ZVxhRzK28sPkoTDIfWQ1xXkXRGWIFtlQkZ9jJJeL15ZnwxZmQ+ZYRB8GTKMxxGl82E3h89i2P1G+4WzM5I6pLLAqEGeprKYnoA+SWr2cQ=",
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 956,
+                "output_tokens": 29,
+                "total_tokens": 995,
+                "reasoning_tokens": 10
+              },
+              "message_id": null,
+              "response_id": "Y2GzaqCHLI_Xz7IPuI-28QE",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "read",
+                              "key": "depot/4",
+                              "value": null
+                            },
+                            "id": "call_469728",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "EowBCokBAWkUfRPVlUIS1IxiMwr2OjGPa54107oQdGblZyKdRIJrUNQtIkt/bGZ/qQ6sC7ovDsQETcE2Jmd8c7ZVxhRzK28sPkoTDIfWQ1xXkXRGWIFtlQkZ9jJJeL15ZnwxZmQ+ZYRB8GTKMxxGl82E3h89i2P1G+4WzM5I6pLLAqEGeprKYnoA+SWr2cQ="
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "Y2GzaqCHLI_Xz7IPuI-28QE",
+                "usageMetadata": {
+                  "candidatesTokenCount": 29,
+                  "promptTokenCount": 956,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 956
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 10,
+                  "totalTokenCount": 995
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 8,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 8
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 43,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_469728"
+            },
+            "provider": {
+              "call_id": "call_469728"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "stock": 40,
+                      "inbound": 8,
+                      "damaged": 4,
+                      "reserved": 0,
+                      "instruction": "available = stock + inbound - damaged - reserved"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 9,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 9,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 47,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_469728"
+              },
+              "provider": {
+                "call_id": "call_469728"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/4",
+                  "value": null
+                }
+              },
+              "signature": "EowBCokBAWkUfRPVlUIS1IxiMwr2OjGPa54107oQdGblZyKdRIJrUNQtIkt/bGZ/qQ6sC7ovDsQETcE2Jmd8c7ZVxhRzK28sPkoTDIfWQ1xXkXRGWIFtlQkZ9jJJeL15ZnwxZmQ+ZYRB8GTKMxxGl82E3h89i2P1G+4WzM5I6pLLAqEGeprKYnoA+SWr2cQ=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 49,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_469728"
+              },
+              "provider": {
+                "call_id": "call_469728"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 50,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 40,
+              "inbound": 8,
+              "damaged": 4,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_531596"
+                },
+                "provider": {
+                  "call_id": "call_531596"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "read",
+                    "key": "depot/5",
+                    "value": null
+                  }
+                },
+                "signature": "EowBCokBAWkUfRNFQJCsSe7mjY+1VmTsLrFniJTXRTFiw8S25CoAs3CWNZNP1jV/eiAKSawnqJlccBQwvcJ6ayYkGsbSMAKc4mvgso+KBc4JWRWftE1IZUzvkZS6iIE4fXcR2ev0svHec2nXNRzLQhcNeyNfpL1L5wbhdQreGvc7WLW61VT13CVPRjxhfJw=",
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 6
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 56,
+          "rig_ecs::agent::checkpoint::TurnResults": 58,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 52,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 52,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_531596"
+                  },
+                  "provider": {
+                    "call_id": "call_531596"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "read",
+                      "key": "depot/5",
+                      "value": null
+                    }
+                  },
+                  "signature": "EowBCokBAWkUfRNFQJCsSe7mjY+1VmTsLrFniJTXRTFiw8S25CoAs3CWNZNP1jV/eiAKSawnqJlccBQwvcJ6ayYkGsbSMAKc4mvgso+KBc4JWRWftE1IZUzvkZS6iIE4fXcR2ev0svHec2nXNRzLQhcNeyNfpL1L5wbhdQreGvc7WLW61VT13CVPRjxhfJw=",
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 1037,
+                "output_tokens": 29,
+                "total_tokens": 1076,
+                "reasoning_tokens": 10
+              },
+              "message_id": null,
+              "response_id": "ZGGzaonlLP6cz7IPn_n00AQ",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "read",
+                              "key": "depot/5",
+                              "value": null
+                            },
+                            "id": "call_531596",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "EowBCokBAWkUfRNFQJCsSe7mjY+1VmTsLrFniJTXRTFiw8S25CoAs3CWNZNP1jV/eiAKSawnqJlccBQwvcJ6ayYkGsbSMAKc4mvgso+KBc4JWRWftE1IZUzvkZS6iIE4fXcR2ev0svHec2nXNRzLQhcNeyNfpL1L5wbhdQreGvc7WLW61VT13CVPRjxhfJw="
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "ZGGzaonlLP6cz7IPn_n00AQ",
+                "usageMetadata": {
+                  "candidatesTokenCount": 29,
+                  "promptTokenCount": 1037,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 1037
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 10,
+                  "totalTokenCount": 1076
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 10,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 10
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 52,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_531596"
+            },
+            "provider": {
+              "call_id": "call_531596"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "stock": 50,
+                      "inbound": 10,
+                      "damaged": 5,
+                      "reserved": 0,
+                      "instruction": "available = stock + inbound - damaged - reserved"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 11,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 11,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 56,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_531596"
+              },
+              "provider": {
+                "call_id": "call_531596"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/5",
+                  "value": null
+                }
+              },
+              "signature": "EowBCokBAWkUfRNFQJCsSe7mjY+1VmTsLrFniJTXRTFiw8S25CoAs3CWNZNP1jV/eiAKSawnqJlccBQwvcJ6ayYkGsbSMAKc4mvgso+KBc4JWRWftE1IZUzvkZS6iIE4fXcR2ev0svHec2nXNRzLQhcNeyNfpL1L5wbhdQreGvc7WLW61VT13CVPRjxhfJw=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 58,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_531596"
+              },
+              "provider": {
+                "call_id": "call_531596"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 59,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 50,
+              "inbound": 10,
+              "damaged": 5,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_451867"
+                },
+                "provider": {
+                  "call_id": "call_451867"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "read",
+                    "key": "depot/6",
+                    "value": null
+                  }
+                },
+                "signature": "EowBCokBAWkUfRNwUdTd/yXZuczSboyGN9h9SjHjRGnH+QcRNkl7pgLMCgUs53yFIEICg8kV7kY/KsnN31ynHnXmdQTkRKlsSJ7mAd9iainrCyxSHxszr12/RpmH86wXL+8JSzOJtDXK0HkPkxQeGbRYw178WVous+dVhLDJvYYq5X4VXFzAeMgOZyvi66Q=",
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 7
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 65,
+          "rig_ecs::agent::checkpoint::TurnResults": 67,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 61,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 61,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_451867"
+                  },
+                  "provider": {
+                    "call_id": "call_451867"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "read",
+                      "key": "depot/6",
+                      "value": null
+                    }
+                  },
+                  "signature": "EowBCokBAWkUfRNwUdTd/yXZuczSboyGN9h9SjHjRGnH+QcRNkl7pgLMCgUs53yFIEICg8kV7kY/KsnN31ynHnXmdQTkRKlsSJ7mAd9iainrCyxSHxszr12/RpmH86wXL+8JSzOJtDXK0HkPkxQeGbRYw178WVous+dVhLDJvYYq5X4VXFzAeMgOZyvi66Q=",
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 1119,
+                "output_tokens": 29,
+                "total_tokens": 1158,
+                "reasoning_tokens": 10
+              },
+              "message_id": null,
+              "response_id": "ZWGzaqeMIZPQz7IPxvTtyAw",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "read",
+                              "key": "depot/6",
+                              "value": null
+                            },
+                            "id": "call_451867",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "EowBCokBAWkUfRNwUdTd/yXZuczSboyGN9h9SjHjRGnH+QcRNkl7pgLMCgUs53yFIEICg8kV7kY/KsnN31ynHnXmdQTkRKlsSJ7mAd9iainrCyxSHxszr12/RpmH86wXL+8JSzOJtDXK0HkPkxQeGbRYw178WVous+dVhLDJvYYq5X4VXFzAeMgOZyvi66Q="
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "ZWGzaqeMIZPQz7IPxvTtyAw",
+                "usageMetadata": {
+                  "candidatesTokenCount": 29,
+                  "promptTokenCount": 1119,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 1119
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 10,
+                  "totalTokenCount": 1158
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 12,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 12
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 61,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_451867"
+            },
+            "provider": {
+              "call_id": "call_451867"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "stock": 60,
+                      "inbound": 12,
+                      "damaged": 6,
+                      "reserved": 0,
+                      "instruction": "available = stock + inbound - damaged - reserved"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 13,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 13,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 65,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_451867"
+              },
+              "provider": {
+                "call_id": "call_451867"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/6",
+                  "value": null
+                }
+              },
+              "signature": "EowBCokBAWkUfRNwUdTd/yXZuczSboyGN9h9SjHjRGnH+QcRNkl7pgLMCgUs53yFIEICg8kV7kY/KsnN31ynHnXmdQTkRKlsSJ7mAd9iainrCyxSHxszr12/RpmH86wXL+8JSzOJtDXK0HkPkxQeGbRYw178WVous+dVhLDJvYYq5X4VXFzAeMgOZyvi66Q=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 67,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_451867"
+              },
+              "provider": {
+                "call_id": "call_451867"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 68,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 60,
+              "inbound": 12,
+              "damaged": 6,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_417435"
+                },
+                "provider": {
+                  "call_id": "call_417435"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "apply",
+                    "key": "depot/1",
+                    "value": 11
+                  }
+                },
+                "signature": "EtUICtIIAWkUfRPD5efLxXa5/bpIggmxViz9AiC89NBQ0P6PLPR55j9m6dvje4txzNetFXBOoeBNbTZy43D7jClBns7ONDoCHa657aJ591sKnwPmDL2U+0qrL0uEWTG8CMApDNvAoC+IIjmfDDEOYIfos/XdQnwtF7BLbr4AKnTjuUGuzUqYhjxFrM4gvmKGX1+O/mcI6J6V5tG15/J/Bw/HP8AX+Nsbve5rDknZetHL6SYakPaUrWve1yYM3pL1Ozfw5pSBqSKm8qv8MuUXJwpP4yCkOL8sDnqVMluakIiO89uu6jJGu71dYUizQT7yIH9geGNuYeY7+W+ycOkoXRELwBJUPQmM4e+RCztoONjJQF1DJhc/2MnTNNqKbdXHXv0h9JL1bFn2OHIn7XoiFlNH5J9fXsXbu+NXCLUlppSx74U1ZbOP2doNSS23wae02flbz9Ns+yVNBrGeadc9DgkE9/IBlrQq0+kIxawKFK8rwjHZ2Y4o63NiegzDT+NSV+MfE7iTo69ByB4Om6ZD15GnQhhKtd3A0ULOiI/oflhrF62Cukphx9TKnmR7mrB+SHJz2fS3u1h5Whfc92/niTq2fpvdHZ+VuQ+jA94lTUutE6S8zysIy6eggKykgUL5qxe5ylpmGEF056Rq1aglpgdd7iOur6pxH58DbK8z1zmrIf3Iv5ea6wBBs9W5haV34/dNU3ytHmN0CKFKN7ocOPupkzwPq4nWJI3An8s4Bt+3bCFQmiY10JJyzlvemMFyDEO6KD8S5zfqNAyetIP6VztAFXy+gCkb0ZCV1Pz78LXgULy54W0jPYRhGtc/tsStz7wlUvACwKFLzZqSQtjFzcftFvPcFLqFoxFwALaJ6LZSCGsl6thXRidJiJTAWtwZ1v/Yw07rsk5yxsHRnE7IK+LxY8IvKZ0uWisCChUzx3PVTtkUjsi337Ov9byOCnOIvYRn8d8uxK0RYRrOCi6Mz/y88AelhhRF8GHf4t/kzAFZr1chTxZ7LMvdpER0DtmEEVuQdqn4MGYYduokv97VFJvKBL69GT/WwnqcZD3L1h4UsJ7Gr6UYAYLF4OWUs1f5GEtZNg57Y6vomk0sXLFbUGknJuMNVDFaz99e8ZM9u9BFN7xph4NyCt6XADwZR+fH/ubRbOdm8/V4VkLDxQo2Dyd2DmcKLvjs3tC0VEvvmScxYe4HC2Rb2ythobXHR8sQKYet/Ieu7aa6Qv11pKPE6Ow2UqpHEBTeUt0lrDtjqD/XBv+NwsDsZNM0G7qhVoXvoXld5fdXpljMcTM+tIVqt6Qe6XwXy0/U2mAznUvm0bqZr7c6+PLqC7FoTohVHYrqu7ZbB7XH6kkboPAbckZA/2N7Irq3jdixVDitKJsDyxG5duIgzmTbevhEotjqT9oS6Ad3DPUmAgBBIzYS3zj3KQ2i5l1k6keC8vpwAzrZLJvNCVmAtMehglLqiCoFsIb3ErGdNE1YDBU=",
+                "additional_params": null
+              },
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_417436"
+                },
+                "provider": {
+                  "call_id": "call_417436"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "apply",
+                    "key": "depot/2",
+                    "value": 22
+                  }
+                },
+                "signature": null,
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 8
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 75,
+          "rig_ecs::agent::checkpoint::TurnResults": 78,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 70,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 70,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_417435"
+                  },
+                  "provider": {
+                    "call_id": "call_417435"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "apply",
+                      "key": "depot/1",
+                      "value": 11
+                    }
+                  },
+                  "signature": "EtUICtIIAWkUfRPD5efLxXa5/bpIggmxViz9AiC89NBQ0P6PLPR55j9m6dvje4txzNetFXBOoeBNbTZy43D7jClBns7ONDoCHa657aJ591sKnwPmDL2U+0qrL0uEWTG8CMApDNvAoC+IIjmfDDEOYIfos/XdQnwtF7BLbr4AKnTjuUGuzUqYhjxFrM4gvmKGX1+O/mcI6J6V5tG15/J/Bw/HP8AX+Nsbve5rDknZetHL6SYakPaUrWve1yYM3pL1Ozfw5pSBqSKm8qv8MuUXJwpP4yCkOL8sDnqVMluakIiO89uu6jJGu71dYUizQT7yIH9geGNuYeY7+W+ycOkoXRELwBJUPQmM4e+RCztoONjJQF1DJhc/2MnTNNqKbdXHXv0h9JL1bFn2OHIn7XoiFlNH5J9fXsXbu+NXCLUlppSx74U1ZbOP2doNSS23wae02flbz9Ns+yVNBrGeadc9DgkE9/IBlrQq0+kIxawKFK8rwjHZ2Y4o63NiegzDT+NSV+MfE7iTo69ByB4Om6ZD15GnQhhKtd3A0ULOiI/oflhrF62Cukphx9TKnmR7mrB+SHJz2fS3u1h5Whfc92/niTq2fpvdHZ+VuQ+jA94lTUutE6S8zysIy6eggKykgUL5qxe5ylpmGEF056Rq1aglpgdd7iOur6pxH58DbK8z1zmrIf3Iv5ea6wBBs9W5haV34/dNU3ytHmN0CKFKN7ocOPupkzwPq4nWJI3An8s4Bt+3bCFQmiY10JJyzlvemMFyDEO6KD8S5zfqNAyetIP6VztAFXy+gCkb0ZCV1Pz78LXgULy54W0jPYRhGtc/tsStz7wlUvACwKFLzZqSQtjFzcftFvPcFLqFoxFwALaJ6LZSCGsl6thXRidJiJTAWtwZ1v/Yw07rsk5yxsHRnE7IK+LxY8IvKZ0uWisCChUzx3PVTtkUjsi337Ov9byOCnOIvYRn8d8uxK0RYRrOCi6Mz/y88AelhhRF8GHf4t/kzAFZr1chTxZ7LMvdpER0DtmEEVuQdqn4MGYYduokv97VFJvKBL69GT/WwnqcZD3L1h4UsJ7Gr6UYAYLF4OWUs1f5GEtZNg57Y6vomk0sXLFbUGknJuMNVDFaz99e8ZM9u9BFN7xph4NyCt6XADwZR+fH/ubRbOdm8/V4VkLDxQo2Dyd2DmcKLvjs3tC0VEvvmScxYe4HC2Rb2ythobXHR8sQKYet/Ieu7aa6Qv11pKPE6Ow2UqpHEBTeUt0lrDtjqD/XBv+NwsDsZNM0G7qhVoXvoXld5fdXpljMcTM+tIVqt6Qe6XwXy0/U2mAznUvm0bqZr7c6+PLqC7FoTohVHYrqu7ZbB7XH6kkboPAbckZA/2N7Irq3jdixVDitKJsDyxG5duIgzmTbevhEotjqT9oS6Ad3DPUmAgBBIzYS3zj3KQ2i5l1k6keC8vpwAzrZLJvNCVmAtMehglLqiCoFsIb3ErGdNE1YDBU=",
+                  "additional_params": null
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_417436"
+                  },
+                  "provider": {
+                    "call_id": "call_417436"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "apply",
+                      "key": "depot/2",
+                      "value": 22
+                    }
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 1201,
+                "output_tokens": 60,
+                "total_tokens": 1649,
+                "reasoning_tokens": 388
+              },
+              "message_id": null,
+              "response_id": "ZmGzatuaEJmsz7IPvfaUgQQ",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "apply",
+                              "key": "depot/1",
+                              "value": 11
+                            },
+                            "id": "call_417435",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "EtUICtIIAWkUfRPD5efLxXa5/bpIggmxViz9AiC89NBQ0P6PLPR55j9m6dvje4txzNetFXBOoeBNbTZy43D7jClBns7ONDoCHa657aJ591sKnwPmDL2U+0qrL0uEWTG8CMApDNvAoC+IIjmfDDEOYIfos/XdQnwtF7BLbr4AKnTjuUGuzUqYhjxFrM4gvmKGX1+O/mcI6J6V5tG15/J/Bw/HP8AX+Nsbve5rDknZetHL6SYakPaUrWve1yYM3pL1Ozfw5pSBqSKm8qv8MuUXJwpP4yCkOL8sDnqVMluakIiO89uu6jJGu71dYUizQT7yIH9geGNuYeY7+W+ycOkoXRELwBJUPQmM4e+RCztoONjJQF1DJhc/2MnTNNqKbdXHXv0h9JL1bFn2OHIn7XoiFlNH5J9fXsXbu+NXCLUlppSx74U1ZbOP2doNSS23wae02flbz9Ns+yVNBrGeadc9DgkE9/IBlrQq0+kIxawKFK8rwjHZ2Y4o63NiegzDT+NSV+MfE7iTo69ByB4Om6ZD15GnQhhKtd3A0ULOiI/oflhrF62Cukphx9TKnmR7mrB+SHJz2fS3u1h5Whfc92/niTq2fpvdHZ+VuQ+jA94lTUutE6S8zysIy6eggKykgUL5qxe5ylpmGEF056Rq1aglpgdd7iOur6pxH58DbK8z1zmrIf3Iv5ea6wBBs9W5haV34/dNU3ytHmN0CKFKN7ocOPupkzwPq4nWJI3An8s4Bt+3bCFQmiY10JJyzlvemMFyDEO6KD8S5zfqNAyetIP6VztAFXy+gCkb0ZCV1Pz78LXgULy54W0jPYRhGtc/tsStz7wlUvACwKFLzZqSQtjFzcftFvPcFLqFoxFwALaJ6LZSCGsl6thXRidJiJTAWtwZ1v/Yw07rsk5yxsHRnE7IK+LxY8IvKZ0uWisCChUzx3PVTtkUjsi337Ov9byOCnOIvYRn8d8uxK0RYRrOCi6Mz/y88AelhhRF8GHf4t/kzAFZr1chTxZ7LMvdpER0DtmEEVuQdqn4MGYYduokv97VFJvKBL69GT/WwnqcZD3L1h4UsJ7Gr6UYAYLF4OWUs1f5GEtZNg57Y6vomk0sXLFbUGknJuMNVDFaz99e8ZM9u9BFN7xph4NyCt6XADwZR+fH/ubRbOdm8/V4VkLDxQo2Dyd2DmcKLvjs3tC0VEvvmScxYe4HC2Rb2ythobXHR8sQKYet/Ieu7aa6Qv11pKPE6Ow2UqpHEBTeUt0lrDtjqD/XBv+NwsDsZNM0G7qhVoXvoXld5fdXpljMcTM+tIVqt6Qe6XwXy0/U2mAznUvm0bqZr7c6+PLqC7FoTohVHYrqu7ZbB7XH6kkboPAbckZA/2N7Irq3jdixVDitKJsDyxG5duIgzmTbevhEotjqT9oS6Ad3DPUmAgBBIzYS3zj3KQ2i5l1k6keC8vpwAzrZLJvNCVmAtMehglLqiCoFsIb3ErGdNE1YDBU="
+                        },
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "apply",
+                              "key": "depot/2",
+                              "value": 22
+                            },
+                            "id": "call_417436",
+                            "name": "task_operation"
+                          }
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "ZmGzatuaEJmsz7IPvfaUgQQ",
+                "usageMetadata": {
+                  "candidatesTokenCount": 60,
+                  "promptTokenCount": 1201,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 1201
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 388,
+                  "totalTokenCount": 1649
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 14,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 14
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 70,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_417435"
+            },
+            "provider": {
+              "call_id": "call_417435"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "saved": "depot/1",
+                      "value": 11
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 15,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 15,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 70,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 1,
+            "id": {
+              "origin": "explicit",
+              "id": "call_417436"
+            },
+            "provider": {
+              "call_id": "call_417436"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "saved": "depot/2",
+                      "value": 22
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 16,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 16,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 75,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_417435"
+              },
+              "provider": {
+                "call_id": "call_417435"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/1",
+                  "value": 11
+                }
+              },
+              "signature": "EtUICtIIAWkUfRPD5efLxXa5/bpIggmxViz9AiC89NBQ0P6PLPR55j9m6dvje4txzNetFXBOoeBNbTZy43D7jClBns7ONDoCHa657aJ591sKnwPmDL2U+0qrL0uEWTG8CMApDNvAoC+IIjmfDDEOYIfos/XdQnwtF7BLbr4AKnTjuUGuzUqYhjxFrM4gvmKGX1+O/mcI6J6V5tG15/J/Bw/HP8AX+Nsbve5rDknZetHL6SYakPaUrWve1yYM3pL1Ozfw5pSBqSKm8qv8MuUXJwpP4yCkOL8sDnqVMluakIiO89uu6jJGu71dYUizQT7yIH9geGNuYeY7+W+ycOkoXRELwBJUPQmM4e+RCztoONjJQF1DJhc/2MnTNNqKbdXHXv0h9JL1bFn2OHIn7XoiFlNH5J9fXsXbu+NXCLUlppSx74U1ZbOP2doNSS23wae02flbz9Ns+yVNBrGeadc9DgkE9/IBlrQq0+kIxawKFK8rwjHZ2Y4o63NiegzDT+NSV+MfE7iTo69ByB4Om6ZD15GnQhhKtd3A0ULOiI/oflhrF62Cukphx9TKnmR7mrB+SHJz2fS3u1h5Whfc92/niTq2fpvdHZ+VuQ+jA94lTUutE6S8zysIy6eggKykgUL5qxe5ylpmGEF056Rq1aglpgdd7iOur6pxH58DbK8z1zmrIf3Iv5ea6wBBs9W5haV34/dNU3ytHmN0CKFKN7ocOPupkzwPq4nWJI3An8s4Bt+3bCFQmiY10JJyzlvemMFyDEO6KD8S5zfqNAyetIP6VztAFXy+gCkb0ZCV1Pz78LXgULy54W0jPYRhGtc/tsStz7wlUvACwKFLzZqSQtjFzcftFvPcFLqFoxFwALaJ6LZSCGsl6thXRidJiJTAWtwZ1v/Yw07rsk5yxsHRnE7IK+LxY8IvKZ0uWisCChUzx3PVTtkUjsi337Ov9byOCnOIvYRn8d8uxK0RYRrOCi6Mz/y88AelhhRF8GHf4t/kzAFZr1chTxZ7LMvdpER0DtmEEVuQdqn4MGYYduokv97VFJvKBL69GT/WwnqcZD3L1h4UsJ7Gr6UYAYLF4OWUs1f5GEtZNg57Y6vomk0sXLFbUGknJuMNVDFaz99e8ZM9u9BFN7xph4NyCt6XADwZR+fH/ubRbOdm8/V4VkLDxQo2Dyd2DmcKLvjs3tC0VEvvmScxYe4HC2Rb2ythobXHR8sQKYet/Ieu7aa6Qv11pKPE6Ow2UqpHEBTeUt0lrDtjqD/XBv+NwsDsZNM0G7qhVoXvoXld5fdXpljMcTM+tIVqt6Qe6XwXy0/U2mAznUvm0bqZr7c6+PLqC7FoTohVHYrqu7ZbB7XH6kkboPAbckZA/2N7Irq3jdixVDitKJsDyxG5duIgzmTbevhEotjqT9oS6Ad3DPUmAgBBIzYS3zj3KQ2i5l1k6keC8vpwAzrZLJvNCVmAtMehglLqiCoFsIb3ErGdNE1YDBU=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 75,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_417436"
+              },
+              "provider": {
+                "call_id": "call_417436"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/2",
+                  "value": 22
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 78,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_417435"
+              },
+              "provider": {
+                "call_id": "call_417435"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 79,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/1",
+              "value": 11
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 78,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_417436"
+              },
+              "provider": {
+                "call_id": "call_417436"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 81,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/2",
+              "value": 22
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_464011"
+                },
+                "provider": {
+                  "call_id": "call_464011"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "apply",
+                    "key": "depot/3",
+                    "value": 33
+                  }
+                },
+                "signature": "EpIBCo8BAWkUfROAiRIsj8QcfR21nvs7d69A7AhpGohpueBOvGZVYuNpNOfj4ipHFwdH9Xx7CsEkCFM8Rob3oegdL72xMtosLQrn13i5LEJ/Tbw6CEwtPCk/zx3LGnOrEqPb3w8aeYCpP1lwtfmvc37OPPvA3/dsJnSrKfTMtqDpabW9XoGsRSLg+itdsH76Rw3x0Go=",
+                "additional_params": null
+              },
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_464012"
+                },
+                "provider": {
+                  "call_id": "call_464012"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "apply",
+                    "key": "depot/4",
+                    "value": 44
+                  }
+                },
+                "signature": null,
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 9
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 88,
+          "rig_ecs::agent::checkpoint::TurnResults": 91,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 83,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 83,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_464011"
+                  },
+                  "provider": {
+                    "call_id": "call_464011"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "apply",
+                      "key": "depot/3",
+                      "value": 33
+                    }
+                  },
+                  "signature": "EpIBCo8BAWkUfROAiRIsj8QcfR21nvs7d69A7AhpGohpueBOvGZVYuNpNOfj4ipHFwdH9Xx7CsEkCFM8Rob3oegdL72xMtosLQrn13i5LEJ/Tbw6CEwtPCk/zx3LGnOrEqPb3w8aeYCpP1lwtfmvc37OPPvA3/dsJnSrKfTMtqDpabW9XoGsRSLg+itdsH76Rw3x0Go=",
+                  "additional_params": null
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_464012"
+                  },
+                  "provider": {
+                    "call_id": "call_464012"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "apply",
+                      "key": "depot/4",
+                      "value": 44
+                    }
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 1695,
+                "output_tokens": 60,
+                "total_tokens": 1775,
+                "reasoning_tokens": 20
+              },
+              "message_id": null,
+              "response_id": "aGGzau6bEaOez7IPveCJ8QQ",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "apply",
+                              "key": "depot/3",
+                              "value": 33
+                            },
+                            "id": "call_464011",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "EpIBCo8BAWkUfROAiRIsj8QcfR21nvs7d69A7AhpGohpueBOvGZVYuNpNOfj4ipHFwdH9Xx7CsEkCFM8Rob3oegdL72xMtosLQrn13i5LEJ/Tbw6CEwtPCk/zx3LGnOrEqPb3w8aeYCpP1lwtfmvc37OPPvA3/dsJnSrKfTMtqDpabW9XoGsRSLg+itdsH76Rw3x0Go="
+                        },
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "apply",
+                              "key": "depot/4",
+                              "value": 44
+                            },
+                            "id": "call_464012",
+                            "name": "task_operation"
+                          }
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "aGGzau6bEaOez7IPveCJ8QQ",
+                "usageMetadata": {
+                  "candidatesTokenCount": 60,
+                  "promptTokenCount": 1695,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 1695
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 20,
+                  "totalTokenCount": 1775
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 17,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 17
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 83,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_464011"
+            },
+            "provider": {
+              "call_id": "call_464011"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "saved": "depot/3",
+                      "value": 33
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 18,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 18,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 83,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 1,
+            "id": {
+              "origin": "explicit",
+              "id": "call_464012"
+            },
+            "provider": {
+              "call_id": "call_464012"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "saved": "depot/4",
+                      "value": 44
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 19,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 19,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 88,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_464011"
+              },
+              "provider": {
+                "call_id": "call_464011"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/3",
+                  "value": 33
+                }
+              },
+              "signature": "EpIBCo8BAWkUfROAiRIsj8QcfR21nvs7d69A7AhpGohpueBOvGZVYuNpNOfj4ipHFwdH9Xx7CsEkCFM8Rob3oegdL72xMtosLQrn13i5LEJ/Tbw6CEwtPCk/zx3LGnOrEqPb3w8aeYCpP1lwtfmvc37OPPvA3/dsJnSrKfTMtqDpabW9XoGsRSLg+itdsH76Rw3x0Go=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 88,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_464012"
+              },
+              "provider": {
+                "call_id": "call_464012"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/4",
+                  "value": 44
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 91,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_464011"
+              },
+              "provider": {
+                "call_id": "call_464011"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 92,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/3",
+              "value": 33
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 91,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_464012"
+              },
+              "provider": {
+                "call_id": "call_464012"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 94,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/4",
+              "value": 44
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_386313"
+                },
+                "provider": {
+                  "call_id": "call_386313"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "apply",
+                    "key": "depot/5",
+                    "value": 55
+                  }
+                },
+                "signature": "EpIBCo8BAWkUfRMgvLpN0xNSVgvggkrYrcJ9NWbKcCmd1SxUJ8fJh4fUtLj3hl+P/K6UreVdwDr8WnBAxu/D9IrdcDq0bF7lP+Z5lGxkSUar3E+z4J2aNeS3QBTuTEMhhOb6wi1SAShPhQPWaxXdHWHuvoKOU3ygufENSapHuOR0UMjLPhoA/PLpKH/b6WS7kYwM72k=",
+                "additional_params": null
+              },
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_386314"
+                },
+                "provider": {
+                  "call_id": "call_386314"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "apply",
+                    "key": "depot/6",
+                    "value": 66
+                  }
+                },
+                "signature": null,
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 10
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 101,
+          "rig_ecs::agent::checkpoint::TurnResults": 104,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 96,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 96,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_386313"
+                  },
+                  "provider": {
+                    "call_id": "call_386313"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "apply",
+                      "key": "depot/5",
+                      "value": 55
+                    }
+                  },
+                  "signature": "EpIBCo8BAWkUfRMgvLpN0xNSVgvggkrYrcJ9NWbKcCmd1SxUJ8fJh4fUtLj3hl+P/K6UreVdwDr8WnBAxu/D9IrdcDq0bF7lP+Z5lGxkSUar3E+z4J2aNeS3QBTuTEMhhOb6wi1SAShPhQPWaxXdHWHuvoKOU3ygufENSapHuOR0UMjLPhoA/PLpKH/b6WS7kYwM72k=",
+                  "additional_params": null
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_386314"
+                  },
+                  "provider": {
+                    "call_id": "call_386314"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "apply",
+                      "key": "depot/6",
+                      "value": 66
+                    }
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 1821,
+                "output_tokens": 60,
+                "total_tokens": 1901,
+                "reasoning_tokens": 20
+              },
+              "message_id": null,
+              "response_id": "aWGzapqQFMzVz7IPw8at0QE",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "apply",
+                              "key": "depot/5",
+                              "value": 55
+                            },
+                            "id": "call_386313",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "EpIBCo8BAWkUfRMgvLpN0xNSVgvggkrYrcJ9NWbKcCmd1SxUJ8fJh4fUtLj3hl+P/K6UreVdwDr8WnBAxu/D9IrdcDq0bF7lP+Z5lGxkSUar3E+z4J2aNeS3QBTuTEMhhOb6wi1SAShPhQPWaxXdHWHuvoKOU3ygufENSapHuOR0UMjLPhoA/PLpKH/b6WS7kYwM72k="
+                        },
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "apply",
+                              "key": "depot/6",
+                              "value": 66
+                            },
+                            "id": "call_386314",
+                            "name": "task_operation"
+                          }
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "aWGzapqQFMzVz7IPw8at0QE",
+                "usageMetadata": {
+                  "candidatesTokenCount": 60,
+                  "promptTokenCount": 1821,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 1821
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 20,
+                  "totalTokenCount": 1901
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 20,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 20
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 96,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_386313"
+            },
+            "provider": {
+              "call_id": "call_386313"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "saved": "depot/5",
+                      "value": 55
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 21,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 21,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 96,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 1,
+            "id": {
+              "origin": "explicit",
+              "id": "call_386314"
+            },
+            "provider": {
+              "call_id": "call_386314"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "saved": "depot/6",
+                      "value": 66
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 22,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 22,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 101,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_386313"
+              },
+              "provider": {
+                "call_id": "call_386313"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/5",
+                  "value": 55
+                }
+              },
+              "signature": "EpIBCo8BAWkUfRMgvLpN0xNSVgvggkrYrcJ9NWbKcCmd1SxUJ8fJh4fUtLj3hl+P/K6UreVdwDr8WnBAxu/D9IrdcDq0bF7lP+Z5lGxkSUar3E+z4J2aNeS3QBTuTEMhhOb6wi1SAShPhQPWaxXdHWHuvoKOU3ygufENSapHuOR0UMjLPhoA/PLpKH/b6WS7kYwM72k=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 101,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_386314"
+              },
+              "provider": {
+                "call_id": "call_386314"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/6",
+                  "value": 66
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 104,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_386313"
+              },
+              "provider": {
+                "call_id": "call_386313"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 105,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/5",
+              "value": 55
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 104,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_386314"
+              },
+              "provider": {
+                "call_id": "call_386314"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 107,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/6",
+              "value": 66
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "origin": "explicit",
+                  "id": "call_556749"
+                },
+                "provider": {
+                  "call_id": "call_556749"
+                },
+                "function": {
+                  "name": "task_operation",
+                  "arguments": {
+                    "action": "check",
+                    "key": "all",
+                    "value": null
+                  }
+                },
+                "signature": "Eu8BCuwBAWkUfRMipec4M9lzNUTQtiGyl8rJFSj+mhyKwfSPaKq1tKMbO6rXqYdlLpceAQPknx3KF/n3bxTgUhdfemgp+iBN2dqZRKN5HLwyGr6k+6Y6r1FZmWMEsEzK9lUiV36DjbLu/T/Ito3nL4SvQ8RP4Vc/z8S6DyIEdzIrTin+mkekV221+Vq0eLs1V729d2S53dLWEq3qhI3PGtjjPVQd2cEo6OsZyH1PWGi9n9xDIEr3ncJMqQ4bwu80itmi8T8fRHd1KAHHv5tlfSB9BfG5DNSLHaUnP2tHAjpafSZJjHHObrE+22vgYIn0cnI=",
+                "additional_params": null
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::agent::checkpoint::ToolTurnCommit": {
+            "turn": 11
+          },
+          "rig_ecs::agent::checkpoint::TurnAssistant": 113,
+          "rig_ecs::agent::checkpoint::TurnResults": 115,
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 109,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 109,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_556749"
+                  },
+                  "provider": {
+                    "call_id": "call_556749"
+                  },
+                  "function": {
+                    "name": "task_operation",
+                    "arguments": {
+                      "action": "check",
+                      "key": "all",
+                      "value": null
+                    }
+                  },
+                  "signature": "Eu8BCuwBAWkUfRMipec4M9lzNUTQtiGyl8rJFSj+mhyKwfSPaKq1tKMbO6rXqYdlLpceAQPknx3KF/n3bxTgUhdfemgp+iBN2dqZRKN5HLwyGr6k+6Y6r1FZmWMEsEzK9lUiV36DjbLu/T/Ito3nL4SvQ8RP4Vc/z8S6DyIEdzIrTin+mkekV221+Vq0eLs1V729d2S53dLWEq3qhI3PGtjjPVQd2cEo6OsZyH1PWGi9n9xDIEr3ncJMqQ4bwu80itmi8T8fRHd1KAHHv5tlfSB9BfG5DNSLHaUnP2tHAjpafSZJjHHObrE+22vgYIn0cnI=",
+                  "additional_params": null
+                }
+              ],
+              "usage": {
+                "input_tokens": 1947,
+                "output_tokens": 26,
+                "total_tokens": 2002,
+                "reasoning_tokens": 29
+              },
+              "message_id": null,
+              "response_id": "amGzaoz1LLfpz7IPnvD3gAg",
+              "finish_reason": "tool_calls",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "functionCall": {
+                            "args": {
+                              "action": "check",
+                              "key": "all",
+                              "value": null
+                            },
+                            "id": "call_556749",
+                            "name": "task_operation"
+                          },
+                          "thoughtSignature": "Eu8BCuwBAWkUfRMipec4M9lzNUTQtiGyl8rJFSj+mhyKwfSPaKq1tKMbO6rXqYdlLpceAQPknx3KF/n3bxTgUhdfemgp+iBN2dqZRKN5HLwyGr6k+6Y6r1FZmWMEsEzK9lUiV36DjbLu/T/Ito3nL4SvQ8RP4Vc/z8S6DyIEdzIrTin+mkekV221+Vq0eLs1V729d2S53dLWEq3qhI3PGtjjPVQd2cEo6OsZyH1PWGi9n9xDIEr3ncJMqQ4bwu80itmi8T8fRHd1KAHHv5tlfSB9BfG5DNSLHaUnP2tHAjpafSZJjHHObrE+22vgYIn0cnI="
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishMessage": "Model generated function call(s).",
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "amGzaoz1LLfpz7IPnvD3gAg",
+                "usageMetadata": {
+                  "candidatesTokenCount": 26,
+                  "promptTokenCount": 1947,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 1947
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 29,
+                  "totalTokenCount": 2002
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 23,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 23
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 109,
+          "rig_ecs::agent::ToolCallSlot": {
+            "index": 0,
+            "id": {
+              "origin": "explicit",
+              "id": "call_556749"
+            },
+            "provider": {
+              "call_id": "call_556749"
+            },
+            "name": "task_operation"
+          },
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "tool_result",
+              "result": {
+                "status": "success",
+                "value": [
+                  {
+                    "type": "json",
+                    "value": {
+                      "passed": true,
+                      "failures": [],
+                      "revision": 6
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 24,
+          "rig_ecs::bus::handlers::ServedBy": 1,
+          "rig_ecs::bus::effect::Seq": 24,
+          "rig_ecs::bus::effect::ToolInputs": {},
+          "rig_ecs::bus::effect::ToolOutputs": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 113,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_556749"
+              },
+              "provider": {
+                "call_id": "call_556749"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "check",
+                  "key": "all",
+                  "value": null
+                }
+              },
+              "signature": "Eu8BCuwBAWkUfRMipec4M9lzNUTQtiGyl8rJFSj+mhyKwfSPaKq1tKMbO6rXqYdlLpceAQPknx3KF/n3bxTgUhdfemgp+iBN2dqZRKN5HLwyGr6k+6Y6r1FZmWMEsEzK9lUiV36DjbLu/T/Ito3nL4SvQ8RP4Vc/z8S6DyIEdzIrTin+mkekV221+Vq0eLs1V729d2S53dLWEq3qhI3PGtjjPVQd2cEo6OsZyH1PWGi9n9xDIEr3ncJMqQ4bwu80itmi8T8fRHd1KAHHv5tlfSB9BfG5DNSLHaUnP2tHAjpafSZJjHHObrE+22vgYIn0cnI=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 115,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_556749"
+              },
+              "provider": {
+                "call_id": "call_556749"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          },
+          "rig_ecs::agent::content::parts::ToolResultStatus": "Ok"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 116,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "passed": true,
+              "failures": [],
+              "revision": 6
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Outputs": {
+            "content": [
+              {
+                "type": "text",
+                "text": "done",
+                "additional_params": {
+                  "gemini": {
+                    "thoughtSignature": "EpgBCpUBAWkUfRNuDlTP4JIfEIUPGGkHefO5ygD3SDHvkMjWLwx/HdSReQkxzRUf1IRiLZD7Qp3K93Gj0CJfF+I18AcRVS3r8UmGqAN6gIUbmEAGPQh3uHnq0duk4J/PFZ0cpt/t1cf5WG82nSEqsZQwPUh6gpOlT/QXn87ccbRaaMz69hpKcaLyAJgQVVSekcD3sDP3+Em4DTU="
+                  }
+                }
+              }
+            ],
+            "message_id": null,
+            "done": true,
+            "usage_recorded": true,
+            "stream_validated": 0
+          },
+          "rig_ecs::agent::ToolAccess": {
+            "executable": {
+              "task_operation": "golden/tool:task_operation#0"
+            },
+            "allowed": [
+              "task_operation"
+            ]
+          },
+          "rig_ecs::agent::Turn": {},
+          "rig_ecs::systems::Folded": "Native",
+          "rig_ecs::systems::Materialised": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 118,
+          "rig_ecs::agent::Advert": 1
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 118,
+          "rig_ecs::bus::effect::EffectOutcome": {
+            "Ok": {
+              "outcome": "completion",
+              "choice": [
+                {
+                  "type": "text",
+                  "text": "done",
+                  "additional_params": {
+                    "gemini": {
+                      "thoughtSignature": "EpgBCpUBAWkUfRNuDlTP4JIfEIUPGGkHefO5ygD3SDHvkMjWLwx/HdSReQkxzRUf1IRiLZD7Qp3K93Gj0CJfF+I18AcRVS3r8UmGqAN6gIUbmEAGPQh3uHnq0duk4J/PFZ0cpt/t1cf5WG82nSEqsZQwPUh6gpOlT/QXn87ccbRaaMz69hpKcaLyAJgQVVSekcD3sDP3+Em4DTU="
+                    }
+                  }
+                }
+              ],
+              "usage": {
+                "input_tokens": 2023,
+                "output_tokens": 1,
+                "total_tokens": 2034,
+                "reasoning_tokens": 10
+              },
+              "message_id": null,
+              "response_id": "bmGzaq_vINmcz7IPyq-VoQU",
+              "finish_reason": "stop",
+              "provider": "gcp.gemini",
+              "model": "gemini-3.8-flash",
+              "raw": {
+                "candidates": [
+                  {
+                    "content": {
+                      "parts": [
+                        {
+                          "text": "done",
+                          "thoughtSignature": "EpgBCpUBAWkUfRNuDlTP4JIfEIUPGGkHefO5ygD3SDHvkMjWLwx/HdSReQkxzRUf1IRiLZD7Qp3K93Gj0CJfF+I18AcRVS3r8UmGqAN6gIUbmEAGPQh3uHnq0duk4J/PFZ0cpt/t1cf5WG82nSEqsZQwPUh6gpOlT/QXn87ccbRaaMz69hpKcaLyAJgQVVSekcD3sDP3+Em4DTU="
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "finishReason": "STOP",
+                    "index": 0
+                  }
+                ],
+                "modelVersion": "gemini-3.8-flash",
+                "responseId": "bmGzaq_vINmcz7IPyq-VoQU",
+                "usageMetadata": {
+                  "candidatesTokenCount": 1,
+                  "promptTokenCount": 2023,
+                  "promptTokensDetails": [
+                    {
+                      "modality": "TEXT",
+                      "tokenCount": 2023
+                    }
+                  ],
+                  "serviceTier": "standard",
+                  "thoughtsTokenCount": 10,
+                  "totalTokenCount": 2034
+                }
+              }
+            }
+          },
+          "rig_ecs::bus::effect::Issued": 25,
+          "rig_ecs::bus::handlers::ServedBy": 0,
+          "rig_ecs::bus::effect::Seq": 25
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 4,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 121,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Text": {
+              "text": "done",
+              "additional_params": {
+                "gemini": {
+                  "thoughtSignature": "EpgBCpUBAWkUfRNuDlTP4JIfEIUPGGkHefO5ygD3SDHvkMjWLwx/HdSReQkxzRUf1IRiLZD7Qp3K93Gj0CJfF+I18AcRVS3r8UmGqAN6gIUbmEAGPQh3uHnq0duk4J/PFZ0cpt/t1cf5WG82nSEqsZQwPUh6gpOlT/QXn87ccbRaaMz69hpKcaLyAJgQVVSekcD3sDP3+Em4DTU="
+                }
+              }
+            }
+          }
+        },
+        {
+          "rig_ecs::agent::Cursor": {
+            "turn": 0
+          },
+          "rig_ecs::agent::InvalidRetries": 0,
+          "rig_ecs::agent::MaxTurns": 18,
+          "rig_ecs::agent::OutputRetries": 0,
+          "rig_ecs::agent::OutputToolName": null,
+          "rig_ecs::agent::ProviderRetried": 0,
+          "rig_ecs::agent::Ready": {},
+          "rig_ecs::agent::Run": {},
+          "rig_ecs::agent::RunOf": 2,
+          "rig_ecs::agent::RunPhase": "Assembling",
+          "rig_ecs::agent::RunSeq": 1,
+          "rig_ecs::agent::StreamRequested": false,
+          "rig_ecs::agent::ToolPolicy": {
+            "concurrency": 3
+          },
+          "rig_ecs::agent::Usage": {},
+          "rig_ecs::bus::effect::Scope": "golden/run#1"
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 124,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Text": {
+              "text": "Build the six-depot inventory. Apply under the exact keys depot/1 through depot/6; never append /available or /reserved. Read index. Read each depot in a separate turn. Apply available = stock + inbound - damaged in THREE turns with TWO parallel applies each. Check all and answer done. Do not request a revision until the user asks. Set value to null except when applying an integer."
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 126,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_619641"
+              },
+              "provider": {
+                "call_id": "call_619641"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "index",
+                  "value": null
+                }
+              },
+              "signature": "EoIFCv8EAWkUfRPWgIFf33ewIsWfFhysgSg1ezbE3HmwFq1+pLaM3afV0t7hT7GTCUGxLuPrTPtSgiYOQL1EzWJkgCiws/KZf0pP8omz67PWZstE60sNmxUabXgrVGoCy5ImL79o0YNk54E7NPL8yBobOgIARsoFtRvy7bqvQXRlZJnorg4ZpyQAfXEi4+MNLcEXv73WX7wgxbh/eLgMipFwUkfeK737p1B4ci2xMcZ/nLmqQ+2m5o8Bfj9hCTIPR7Mqskf8/5jO/sn+scI6GN1IDaPyTC7nzYjahx7OfPo2xl8v46ETRrVwHuqKzg0EvSY0KVnPxoQ9KebWrZtQkrCdufeOQXfv8N1O0Hoi0J1B+DDgJ4Ke5mTvPQ9io+0HOthGXa8ggKMoZaEv0vK1t6K1wvJYy0H3a5B4hnefUJutOzGV6fgP6BNIm4YAJBlTlhjtQGMojA+1CqW1SSaCwLF/vhfuhyAydrTPbyfviFbVW5C4byPH5yOube0LSVBgza0rEIFpmt0OZgUciahBgz3MEk55KozH6IvNrCO6upNUTDefZGlrDF57kVT29wpHJ8rJCfUM8GmUY7NUt4uIc/a9YDCll37KB82z5Wbi+xat6ikjDDkkCYmgQkWE8JOo8UpZp3kPhCidFxG2yvn5vgawCsq56eksz2PAkgK9XaMAADnvqx+kduZAMMczVqVxJREK1WgirfPdTR7UD0whBoFx07chsikH2wS+Q8lkqnH3bvwJMrSz+o5MagW7QkzMpa5wwLRA7NRL9iNclfQA9bO7DGzwy+EkRgwvaib33e47vLzJzI8F+7Pa3RByowIcJusu1dlt2ROYiZrVgN8ZCwf1DYOy",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 128,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_619641"
+              },
+              "provider": {
+                "call_id": "call_619641"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 129,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "keys": [
+                "depot/1",
+                "depot/2",
+                "depot/3",
+                "depot/4",
+                "depot/5",
+                "depot/6"
+              ],
+              "task": "Inventory"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 131,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_754123"
+              },
+              "provider": {
+                "call_id": "call_754123"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/1",
+                  "value": null
+                }
+              },
+              "signature": "EowBCokBAWkUfRO1Y4lHMHU5CX2YpWUfJZghesdS1n/2gqTT8+zafoP1/qq2S59QoL/OBiyNcYcqOy+nzR5tFxN3fRQ3jEdFEtfiOgQ628YQrccnOyjA2/mkOswUPY9fi/1juBPATNvw7Zw2lX4Rh1n7JH3KsXHuEp/iK+2TiyGTa6HpglHpajj5T8LEY84=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 133,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_754123"
+              },
+              "provider": {
+                "call_id": "call_754123"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 134,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 10,
+              "inbound": 2,
+              "damaged": 1,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 136,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_537261"
+              },
+              "provider": {
+                "call_id": "call_537261"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/2",
+                  "value": null
+                }
+              },
+              "signature": "EugECuUEAWkUfRNdCccVIQhk7ABWLPSWxwwQfueVLTP7xKfnPYf7PqABuOpsszGx6dgbRyJOeMYnRGUkEhPJjSe8FZOGICXH0SRpGOMloM5AqdjjEziZywnI1Ya7YlPVzbv4gGsrt9T1e1W6LglWeLAVP2BCu5bJK0YbU6ISVko6Qffl/fcsmUFG+Yb7LmXNoCdHutYtbN3kAFdlkilpQQadgFrMapKy9KXLfGEuHU9dLEvneSqHpO1bLO6nB/Fw0MlrrYue+/oUSmUvGRQt3lJ+BFgFDPzscmjP+kSo/nbCgcdMyczUjkI7XNW/KGw6+iCKgkHHmpQMraY4qHRXZkL9ZR/d/IPVsTmpHWoMBJ3wxaI2GTo3MeIF1IGLx3nLSEFLzJ6enVGH/ZbI75KZFzwV7ON/5ISh8IkBwDUM339zxQaikF0p3jDuCWlY4NmQtkzwRmXfVlH8K7CPXFcZDh34FFCGcAuVfvX8tmQlb0MF2gKc9y3dOhXqbc9bPZ7CV0L1bLEBGStDTrgB1/JvpSTCvRE3CUpRz42Ty69OevbXUXqt5o8KoH5k2m4diGhT7UGhrTTqiU1cIrds2Prz+KU9oY9LWmmBIYvtZHfm31fqGgWfZdya4WFjzHK/jebkrX3KG4vjJenw4PC7HdRnPWXZcGunIn+oRk8RslUB5a7LlWtus2Cm16VYk0tdNSbeStbd7x40hr4KNEq+9FJMLqTWCyTqZ+HeQbo/07F4ElZ5Fz2yXlMC2mDZXnGmvvFZt6Q5aC3DBPNtiX424E1EcUV4mXTaBOwmC6raEhV07mINhOjvDQcgzFpQYQ==",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 138,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_537261"
+              },
+              "provider": {
+                "call_id": "call_537261"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 139,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 20,
+              "inbound": 4,
+              "damaged": 2,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 141,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_612583"
+              },
+              "provider": {
+                "call_id": "call_612583"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/3",
+                  "value": null
+                }
+              },
+              "signature": "EowBCokBAWkUfRMbc0M//drsSqQJjgcsq6S5tJrthjQ/CSElv27zAo1cCc8B1C/VFsn9h55cBXDtQuPEkCndazNWHI2ZsSW1phmHjDu/6MC57A0R9PJo3LLtU4UicrVRAeu+AZt0od5u4iN5Q9XVC+8QaXAX9wCuYXobpIiuCqm4qhK6IkX63B/Mjh7qS8A=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 143,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_612583"
+              },
+              "provider": {
+                "call_id": "call_612583"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 144,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 30,
+              "inbound": 6,
+              "damaged": 3,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 146,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_469728"
+              },
+              "provider": {
+                "call_id": "call_469728"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/4",
+                  "value": null
+                }
+              },
+              "signature": "EowBCokBAWkUfRPVlUIS1IxiMwr2OjGPa54107oQdGblZyKdRIJrUNQtIkt/bGZ/qQ6sC7ovDsQETcE2Jmd8c7ZVxhRzK28sPkoTDIfWQ1xXkXRGWIFtlQkZ9jJJeL15ZnwxZmQ+ZYRB8GTKMxxGl82E3h89i2P1G+4WzM5I6pLLAqEGeprKYnoA+SWr2cQ=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 148,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_469728"
+              },
+              "provider": {
+                "call_id": "call_469728"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 149,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 40,
+              "inbound": 8,
+              "damaged": 4,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 151,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_531596"
+              },
+              "provider": {
+                "call_id": "call_531596"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/5",
+                  "value": null
+                }
+              },
+              "signature": "EowBCokBAWkUfRNFQJCsSe7mjY+1VmTsLrFniJTXRTFiw8S25CoAs3CWNZNP1jV/eiAKSawnqJlccBQwvcJ6ayYkGsbSMAKc4mvgso+KBc4JWRWftE1IZUzvkZS6iIE4fXcR2ev0svHec2nXNRzLQhcNeyNfpL1L5wbhdQreGvc7WLW61VT13CVPRjxhfJw=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 153,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_531596"
+              },
+              "provider": {
+                "call_id": "call_531596"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 154,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 50,
+              "inbound": 10,
+              "damaged": 5,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 156,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_451867"
+              },
+              "provider": {
+                "call_id": "call_451867"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "read",
+                  "key": "depot/6",
+                  "value": null
+                }
+              },
+              "signature": "EowBCokBAWkUfRNwUdTd/yXZuczSboyGN9h9SjHjRGnH+QcRNkl7pgLMCgUs53yFIEICg8kV7kY/KsnN31ynHnXmdQTkRKlsSJ7mAd9iainrCyxSHxszr12/RpmH86wXL+8JSzOJtDXK0HkPkxQeGbRYw178WVous+dVhLDJvYYq5X4VXFzAeMgOZyvi66Q=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 158,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_451867"
+              },
+              "provider": {
+                "call_id": "call_451867"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 159,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "stock": 60,
+              "inbound": 12,
+              "damaged": 6,
+              "reserved": 0,
+              "instruction": "available = stock + inbound - damaged - reserved"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 161,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_417435"
+              },
+              "provider": {
+                "call_id": "call_417435"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/1",
+                  "value": 11
+                }
+              },
+              "signature": "EtUICtIIAWkUfRPD5efLxXa5/bpIggmxViz9AiC89NBQ0P6PLPR55j9m6dvje4txzNetFXBOoeBNbTZy43D7jClBns7ONDoCHa657aJ591sKnwPmDL2U+0qrL0uEWTG8CMApDNvAoC+IIjmfDDEOYIfos/XdQnwtF7BLbr4AKnTjuUGuzUqYhjxFrM4gvmKGX1+O/mcI6J6V5tG15/J/Bw/HP8AX+Nsbve5rDknZetHL6SYakPaUrWve1yYM3pL1Ozfw5pSBqSKm8qv8MuUXJwpP4yCkOL8sDnqVMluakIiO89uu6jJGu71dYUizQT7yIH9geGNuYeY7+W+ycOkoXRELwBJUPQmM4e+RCztoONjJQF1DJhc/2MnTNNqKbdXHXv0h9JL1bFn2OHIn7XoiFlNH5J9fXsXbu+NXCLUlppSx74U1ZbOP2doNSS23wae02flbz9Ns+yVNBrGeadc9DgkE9/IBlrQq0+kIxawKFK8rwjHZ2Y4o63NiegzDT+NSV+MfE7iTo69ByB4Om6ZD15GnQhhKtd3A0ULOiI/oflhrF62Cukphx9TKnmR7mrB+SHJz2fS3u1h5Whfc92/niTq2fpvdHZ+VuQ+jA94lTUutE6S8zysIy6eggKykgUL5qxe5ylpmGEF056Rq1aglpgdd7iOur6pxH58DbK8z1zmrIf3Iv5ea6wBBs9W5haV34/dNU3ytHmN0CKFKN7ocOPupkzwPq4nWJI3An8s4Bt+3bCFQmiY10JJyzlvemMFyDEO6KD8S5zfqNAyetIP6VztAFXy+gCkb0ZCV1Pz78LXgULy54W0jPYRhGtc/tsStz7wlUvACwKFLzZqSQtjFzcftFvPcFLqFoxFwALaJ6LZSCGsl6thXRidJiJTAWtwZ1v/Yw07rsk5yxsHRnE7IK+LxY8IvKZ0uWisCChUzx3PVTtkUjsi337Ov9byOCnOIvYRn8d8uxK0RYRrOCi6Mz/y88AelhhRF8GHf4t/kzAFZr1chTxZ7LMvdpER0DtmEEVuQdqn4MGYYduokv97VFJvKBL69GT/WwnqcZD3L1h4UsJ7Gr6UYAYLF4OWUs1f5GEtZNg57Y6vomk0sXLFbUGknJuMNVDFaz99e8ZM9u9BFN7xph4NyCt6XADwZR+fH/ubRbOdm8/V4VkLDxQo2Dyd2DmcKLvjs3tC0VEvvmScxYe4HC2Rb2ythobXHR8sQKYet/Ieu7aa6Qv11pKPE6Ow2UqpHEBTeUt0lrDtjqD/XBv+NwsDsZNM0G7qhVoXvoXld5fdXpljMcTM+tIVqt6Qe6XwXy0/U2mAznUvm0bqZr7c6+PLqC7FoTohVHYrqu7ZbB7XH6kkboPAbckZA/2N7Irq3jdixVDitKJsDyxG5duIgzmTbevhEotjqT9oS6Ad3DPUmAgBBIzYS3zj3KQ2i5l1k6keC8vpwAzrZLJvNCVmAtMehglLqiCoFsIb3ErGdNE1YDBU=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 161,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_417436"
+              },
+              "provider": {
+                "call_id": "call_417436"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/2",
+                  "value": 22
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 164,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_417435"
+              },
+              "provider": {
+                "call_id": "call_417435"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 165,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/1",
+              "value": 11
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 164,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_417436"
+              },
+              "provider": {
+                "call_id": "call_417436"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 167,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/2",
+              "value": 22
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 169,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_464011"
+              },
+              "provider": {
+                "call_id": "call_464011"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/3",
+                  "value": 33
+                }
+              },
+              "signature": "EpIBCo8BAWkUfROAiRIsj8QcfR21nvs7d69A7AhpGohpueBOvGZVYuNpNOfj4ipHFwdH9Xx7CsEkCFM8Rob3oegdL72xMtosLQrn13i5LEJ/Tbw6CEwtPCk/zx3LGnOrEqPb3w8aeYCpP1lwtfmvc37OPPvA3/dsJnSrKfTMtqDpabW9XoGsRSLg+itdsH76Rw3x0Go=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 169,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_464012"
+              },
+              "provider": {
+                "call_id": "call_464012"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/4",
+                  "value": 44
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 172,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_464011"
+              },
+              "provider": {
+                "call_id": "call_464011"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 173,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/3",
+              "value": 33
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 172,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_464012"
+              },
+              "provider": {
+                "call_id": "call_464012"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 175,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/4",
+              "value": 44
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 177,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_386313"
+              },
+              "provider": {
+                "call_id": "call_386313"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/5",
+                  "value": 55
+                }
+              },
+              "signature": "EpIBCo8BAWkUfRMgvLpN0xNSVgvggkrYrcJ9NWbKcCmd1SxUJ8fJh4fUtLj3hl+P/K6UreVdwDr8WnBAxu/D9IrdcDq0bF7lP+Z5lGxkSUar3E+z4J2aNeS3QBTuTEMhhOb6wi1SAShPhQPWaxXdHWHuvoKOU3ygufENSapHuOR0UMjLPhoA/PLpKH/b6WS7kYwM72k=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 177,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_386314"
+              },
+              "provider": {
+                "call_id": "call_386314"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "apply",
+                  "key": "depot/6",
+                  "value": 66
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 180,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_386313"
+              },
+              "provider": {
+                "call_id": "call_386313"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 181,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/5",
+              "value": 55
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 180,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_386314"
+              },
+              "provider": {
+                "call_id": "call_386314"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 183,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "saved": "depot/6",
+              "value": 66
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 185,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolCall": {
+              "id": {
+                "origin": "explicit",
+                "id": "call_556749"
+              },
+              "provider": {
+                "call_id": "call_556749"
+              },
+              "function": {
+                "name": "task_operation",
+                "arguments": {
+                  "action": "check",
+                  "key": "all",
+                  "value": null
+                }
+              },
+              "signature": "Eu8BCuwBAWkUfRMipec4M9lzNUTQtiGyl8rJFSj+mhyKwfSPaKq1tKMbO6rXqYdlLpceAQPknx3KF/n3bxTgUhdfemgp+iBN2dqZRKN5HLwyGr6k+6Y6r1FZmWMEsEzK9lUiV36DjbLu/T/Ito3nL4SvQ8RP4Vc/z8S6DyIEdzIrTin+mkekV221+Vq0eLs1V729d2S53dLWEq3qhI3PGtjjPVQd2cEo6OsZyH1PWGi9n9xDIEr3ncJMqQ4bwu80itmi8T8fRHd1KAHHv5tlfSB9BfG5DNSLHaUnP2tHAjpafSZJjHHObrE+22vgYIn0cnI=",
+              "additional_params": null
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 187,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "ToolResult": {
+              "call": {
+                "origin": "explicit",
+                "id": "call_556749"
+              },
+              "provider": {
+                "call_id": "call_556749"
+              },
+              "name": "task_operation",
+              "answers": "function"
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 188,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Json": {
+              "passed": true,
+              "failures": [],
+              "revision": 6
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "Assistant",
+          "rig_ecs::agent::Utterance": {},
+          "rig_ecs::agent::content::parts::MessageId": null
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 190,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Text": {
+              "text": "done",
+              "additional_params": {
+                "gemini": {
+                  "thoughtSignature": "EpgBCpUBAWkUfRNuDlTP4JIfEIUPGGkHefO5ygD3SDHvkMjWLwx/HdSReQkxzRUf1IRiLZD7Qp3K93Gj0CJfF+I18AcRVS3r8UmGqAN6gIUbmEAGPQh3uHnq0duk4J/PFZ0cpt/t1cf5WG82nSEqsZQwPUh6gpOlT/QXn87ccbRaaMz69hpKcaLyAJgQVVSekcD3sDP3+Em4DTU="
+                }
+              }
+            }
+          }
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 123,
+          "rig_ecs::agent::Role": "User",
+          "rig_ecs::agent::Utterance": {}
+        },
+        {
+          "bevy_ecs::hierarchy::ChildOf": 192,
+          "rig_ecs::agent::content::parts::ContentPart": {
+            "Text": {
+              "text": "Revise the inventory: reserve five units at each depot. First call revise(all) to apply the new constraint. Update available quantities under the exact keys depot/1 through depot/6; do not create subkeys. Read each depot again in a separate turn, then apply the updated available amounts in THREE turns with TWO parallel applies each. Check all and answer done. Preserve the original stock and inbound facts from our earlier work."
+            }
+          }
+        }
+      ],
+      "counters": {
+        "next_run": 2,
+        "next_id": 26
+      },
+      "binaries": []
+    }
+  ]
+}

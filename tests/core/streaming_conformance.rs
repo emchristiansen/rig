@@ -20,13 +20,12 @@ use rig_core::test_utils::streaming_conformance::{
 /// in-crate fixtures apply; event frames are a fixture authoring error here).
 fn byte_chunks(
     chunks: conformance::WireChunks,
-) -> Result<Vec<rig_core::http_client::Result<bytes::Bytes>>, rig_core::completion::CompletionError>
-{
+) -> Result<Vec<rig_core::http_client::Result<bytes::Bytes>>, rig_core::error::ProviderError> {
     chunks
         .into_iter()
         .map(|chunk| match chunk {
             Ok(frame) => frame.as_bytes().cloned().map(Ok).ok_or_else(|| {
-                rig_core::completion::CompletionError::ProviderError(
+                rig_core::error::ProviderError::Provider(
                     "typed-event frame fed to a byte-transport driver".to_string(),
                 )
             }),
@@ -39,28 +38,27 @@ fn sse(frame: &serde_json::Value) -> conformance::WireInput {
     conformance::WireInput::Bytes(bytes::Bytes::from(format!("data: {frame}\n\n")))
 }
 
-/// xAI relays the OpenAI Responses SSE wire with
-/// `ResponsesProviderExt::EMITS_COMPLETE_TOOL_CALLS_IMMEDIATELY` set (completed
-/// tool calls are emitted the moment their done item arrives instead of
-/// buffering until the terminal). The wire frames are the shared Responses
-/// fixture's; only the pipeline under test differs.
+/// xAI relays the OpenAI Responses SSE wire through
+/// `ResponsesStreamOptions::strict_with_immediate_tool_calls` (completed tool
+/// calls are emitted the moment their done item arrives instead of buffering
+/// until the terminal). The wire frames are the shared Responses fixture's;
+/// only the pipeline under test differs.
 mod xai {
     use super::*;
-    use rig_core::client::CompletionClient as _;
     use rig_core::completion::CompletionModel as _;
     use rig_core::test_utils::SequencedStreamingHttpClient;
 
     fn driver() -> conformance::WireDriver {
         conformance::WireDriver::new("xai", |chunks| {
             Box::pin(async move {
-                let client = rig_core::providers::xai::Client::builder()
-                    .api_key("test-key")
-                    .http_client(SequencedStreamingHttpClient::new(byte_chunks(chunks)?))
-                    .build()
-                    .map_err(|error| {
-                        rig_core::completion::CompletionError::ProviderError(error.to_string())
-                    })?;
-                let model = client.completion_model(rig_core::providers::xai::completion::GROK_4);
+                let model = rig_core::driver::Bind::bind(
+                    rig_core::providers::openai::OpenAI::with_key(
+                        &rig_core::providers::xai::DIALECT,
+                        "test-key",
+                    ),
+                    SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
+                )
+                .completion(rig_core::providers::xai::GROK_4);
                 let request = model.completion_request("hello").build();
                 let stream = rig_core::completion::CompletionModel::stream(&model, request).await?;
                 Ok(conformance::fixtures::drain(stream).await)
@@ -82,21 +80,21 @@ mod xai {
 /// fixture frames with a Copilot pipeline driver.
 mod copilot {
     use super::*;
-    use rig_core::client::CompletionClient as _;
     use rig_core::completion::CompletionModel as _;
     use rig_core::test_utils::SequencedStreamingHttpClient;
 
     fn driver(provider: &'static str, model_name: &'static str) -> conformance::WireDriver {
         conformance::WireDriver::new(provider, move |chunks| {
             Box::pin(async move {
-                let client = rig_core::providers::copilot::Client::builder()
-                    .api_key("copilot-token")
-                    .http_client(SequencedStreamingHttpClient::new(byte_chunks(chunks)?))
-                    .build()
-                    .map_err(|error| {
-                        rig_core::completion::CompletionError::ProviderError(error.to_string())
-                    })?;
-                let model = client.completion_model(model_name);
+                // The route is a property of the model
+                // (`copilot::wire::routes_through_responses`), so naming the
+                // same two model ids keeps each fixture on the route it was
+                // recorded against.
+                let model = rig_core::driver::Bind::bind(
+                    rig_core::providers::copilot::wire::Copilot::new("copilot-token"),
+                    SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
+                )
+                .completion(model_name);
                 let request = model.completion_request("hello").build();
                 let stream = model.stream(request).await?;
                 Ok(conformance::fixtures::drain(stream).await)
@@ -128,24 +126,21 @@ mod copilot {
 /// shared Responses fixture's; only the pipeline under test differs.
 mod chatgpt {
     use super::*;
-    use rig_core::client::CompletionClient as _;
     use rig_core::completion::CompletionModel as _;
     use rig_core::test_utils::SequencedStreamingHttpClient;
 
     fn driver() -> conformance::WireDriver {
         conformance::WireDriver::new("chatgpt", |chunks| {
             Box::pin(async move {
-                let client = rig_core::providers::chatgpt::Client::builder()
-                    .api_key(rig_core::providers::chatgpt::ChatGPTAuth::AccessToken {
-                        access_token: "test-token".to_string(),
-                        account_id: Some("account-id".to_string()),
-                    })
-                    .http_client(SequencedStreamingHttpClient::new(byte_chunks(chunks)?))
-                    .build()
-                    .map_err(|error| {
-                        rig_core::completion::CompletionError::ProviderError(error.to_string())
-                    })?;
-                let model = client.completion_model("gpt-5.4");
+                let model = rig_core::driver::Bind::bind(
+                    rig_core::providers::openai::OpenAI::with_key(
+                        &rig_core::providers::chatgpt::DIALECT,
+                        "test-token",
+                    )
+                    .with_account_id("account-id"),
+                    SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
+                )
+                .completion("gpt-5.4");
                 let request = model.completion_request("hello").build();
                 let stream = model.stream(request).await?;
                 Ok(conformance::fixtures::drain(stream).await)
@@ -158,6 +153,37 @@ mod chatgpt {
             driver: driver(),
             ..openai_responses::fixture()
         }
+    }
+}
+
+/// The OpenAI Responses SSE pipeline with the incomplete-terminal opt-in set.
+///
+/// HTTP SSE refuses a terminal `response.incomplete` by default, and the
+/// shared `openai_responses::driver()` measures that default. The opt-in is
+/// per request, carried by the wire the request goes out on, so the one
+/// contract whose fixture *is* the incomplete shape drives it through this
+/// separate driver rather than flipping the shared one, which would silently
+/// stop every other scenario from measuring the strict default.
+mod openai_responses_opt_in {
+    use super::*;
+    use rig_core::completion::CompletionModel as _;
+    use rig_core::providers::openai::responses_api::streaming::IncompleteTerminal;
+    use rig_core::test_utils::SequencedStreamingHttpClient;
+
+    pub fn driver_tolerating_incomplete() -> conformance::WireDriver {
+        conformance::WireDriver::new("openai", |chunks| {
+            Box::pin(async move {
+                let model = rig_core::driver::Bind::bind(
+                    rig_core::providers::openai::OpenAI::new("test-key"),
+                    SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
+                )
+                .responses("gpt-5.4")
+                .map_wire(|wire| wire.with_streamed_incomplete(IncompleteTerminal::Accept));
+                let request = model.completion_request("hello").build();
+                let stream = model.stream(request).await?;
+                Ok(conformance::fixtures::drain(stream).await)
+            })
+        })
     }
 }
 
@@ -328,17 +354,16 @@ mod grammar_guards {
     /// pipeline must accept both frames (no `Corrupt` classification), end
     /// with a `Length` terminal, and — per the settled truncation policy —
     /// never fabricate a tool call from the partial arguments.
+    ///
+    /// Partial success is a per-request opt-in on HTTP SSE, so this drives the
+    /// opted-in pipeline; the strict default is pinned by
+    /// `incomplete_mid_tool_call_errors_without_the_opt_in`.
     #[tokio::test]
     async fn incomplete_mid_tool_call_ends_with_length_and_no_fabricated_call() {
         use rig_core::completion::FinishReason;
         use rig_core::message::AssistantContent;
 
-        // The merged crate keeps the fork's strict default, so a terminal
-        // `response.incomplete` is a per-request opt-in rather than the
-        // unconditional tolerance `U` had. This contract's fixture *is* that
-        // shape, so it opts in; every other OpenAI conformance scenario keeps
-        // the strict `driver()` and so still measures the default.
-        let driver = openai_responses::driver_tolerating_incomplete();
+        let driver = super::openai_responses_opt_in::driver_tolerating_incomplete();
         let drained = driver
             .drive(conformance::ok_chunks(
                 openai_responses::incomplete_mid_tool_call_frames(),
@@ -372,6 +397,30 @@ mod grammar_guards {
                 .iter()
                 .any(|content| matches!(content, AssistantContent::ToolCall(_))),
             "partial arguments must not fabricate an aggregated tool call"
+        );
+    }
+
+    /// The strict half of the same fixture: without the opt-in, HTTP SSE
+    /// ends the turn with an error rather than a terminal record, so the cut
+    /// turn is never presented as completed.
+    #[tokio::test]
+    async fn incomplete_mid_tool_call_errors_without_the_opt_in() {
+        let drained = openai_responses::driver()
+            .drive(conformance::ok_chunks(
+                openai_responses::incomplete_mid_tool_call_frames(),
+            ))
+            .await
+            .expect("stream should drive");
+
+        assert_eq!(
+            drained.error_count(),
+            1,
+            "the strict default must surface the incomplete terminal as one error: {:?}",
+            drained.items
+        );
+        assert!(
+            drained.response.is_none(),
+            "a refused incomplete terminal must not produce a terminal record"
         );
     }
 
@@ -432,12 +481,7 @@ mod grammar_guards {
             .collect();
         let shape: Vec<(&str, &serde_json::Value)> = calls
             .iter()
-            .map(|call| {
-                (
-                    call.function.name.as_str(),
-                    call.function.arguments.as_json().expect("JSON arguments"),
-                )
-            })
+            .map(|call| (call.function.name.as_str(), &call.function.arguments))
             .collect();
         assert_eq!(
             shape,
@@ -453,7 +497,7 @@ mod grammar_guards {
         // provider did not issue, and never leaves the id empty.
         for call in &calls {
             assert!(
-                !call.id.as_str().is_empty(),
+                call.id.is_generated(),
                 "id-less calls surface a minted durable id"
             );
             assert!(call.provider.is_none(), "no provider id was issued");
@@ -529,9 +573,6 @@ mod grammar_guards {
                 ReasoningContent::Text { text, .. } => text.clone(),
                 ReasoningContent::Encrypted(data) => data.clone(),
                 ReasoningContent::Redacted { data } => data.clone(),
-                // `ReasoningContent` is non-exhaustive; no other variant is
-                // reachable from these frames.
-                _ => String::new(),
             })
             .collect();
         assert_eq!(
@@ -686,7 +727,7 @@ mod interleaved_constant_id_reasoning {
     #[tokio::test]
     async fn ollama_two_calls_to_the_same_tool_stay_distinct() {
         use rig_core::message::AssistantContent;
-        use rig_core::streaming::StreamedAssistantContent;
+        use rig_core::streaming::StreamEvent;
         use serde_json::json;
 
         let ndjson = |frame: &serde_json::Value| {
@@ -722,27 +763,21 @@ mod interleaved_constant_id_reasoning {
         let mut minted_ids = Vec::new();
         let mut cities = Vec::new();
         for item in drained.items.iter().flatten() {
-            if let StreamedAssistantContent::ToolCall {
-                tool_call,
-                internal_call_id,
+            if let StreamEvent::BlockEnd {
+                id: block_id,
+                block: Some(AssistantContent::ToolCall(tool_call)),
+                ..
             } = item
             {
                 assert_eq!(tool_call.function.name, "get_weather");
                 assert!(
-                    !tool_call.id.as_str().is_empty(),
+                    tool_call.id.is_generated(),
                     "id-less calls surface a minted durable id"
                 );
                 assert_eq!(tool_call.provider, None, "no fabricated provider id");
-                internal_ids.push(internal_call_id.clone());
+                internal_ids.push(block_id.clone());
                 minted_ids.push(tool_call.id.clone());
-                cities.push(
-                    tool_call
-                        .function
-                        .arguments
-                        .as_json()
-                        .expect("JSON arguments")["city"]
-                        .clone(),
-                );
+                cities.push(tool_call.function.arguments["city"].clone());
             }
         }
         assert_eq!(cities, vec![json!("Tokyo"), json!("Paris")]);
@@ -750,7 +785,7 @@ mod interleaved_constant_id_reasoning {
         assert_eq!(
             internal_ids.len(),
             2,
-            "same-name calls must stay correlatable via distinct internal ids"
+            "same-name calls must stay correlatable via distinct block ids"
         );
         minted_ids.dedup();
         assert_eq!(minted_ids.len(), 2, "each id-less call mints a unique id");
@@ -822,7 +857,7 @@ mod interleaved_constant_id_reasoning {
     #[tokio::test]
     async fn interactions_two_id_less_calls_to_the_same_tool_stay_distinct() {
         use rig_core::message::AssistantContent;
-        use rig_core::streaming::StreamedAssistantContent;
+        use rig_core::streaming::StreamEvent;
         use serde_json::json;
 
         let sse = |frame: &serde_json::Value| {
@@ -864,30 +899,24 @@ mod interleaved_constant_id_reasoning {
         let mut minted_ids = Vec::new();
         let mut cities = Vec::new();
         for item in drained.items.iter().flatten() {
-            if let StreamedAssistantContent::ToolCall {
-                tool_call,
-                internal_call_id,
+            if let StreamEvent::BlockEnd {
+                id: block_id,
+                block: Some(AssistantContent::ToolCall(tool_call)),
+                ..
             } = item
             {
                 assert_eq!(tool_call.function.name, "get_weather");
                 assert!(
-                    !tool_call.id.as_str().is_empty(),
+                    tool_call.id.is_generated(),
                     "id-less calls surface with a minted durable id"
                 );
                 assert_eq!(
                     tool_call.provider, None,
                     "no name-as-id provider-id fallback"
                 );
-                internal_ids.push(internal_call_id.clone());
+                internal_ids.push(block_id.clone());
                 minted_ids.push(tool_call.id.clone());
-                cities.push(
-                    tool_call
-                        .function
-                        .arguments
-                        .as_json()
-                        .expect("JSON arguments")["city"]
-                        .clone(),
-                );
+                cities.push(tool_call.function.arguments["city"].clone());
             }
         }
         assert_eq!(cities, vec![json!("Tokyo"), json!("Paris")]);

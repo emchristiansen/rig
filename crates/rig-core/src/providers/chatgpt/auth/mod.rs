@@ -1,9 +1,17 @@
-//! Shared ChatGPT authentication types and target-specific dispatch.
+//! ChatGPT access-token configuration and native OAuth authentication.
+//!
+//! ```no_run
+//! use rig_core::providers::chatgpt::auth::{AuthSource, Authenticator, DeviceCodeHandler};
+//!
+//! let auth = Authenticator::new(AuthSource::OAuth, None, DeviceCodeHandler::default(), true);
+//! ```
 
+use crate::http_client::HttpClientExt;
+use crate::wire::Secret;
+use futures::lock::Mutex;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 pub use crate::providers::internal::auth::{DeviceCodeHandler, DeviceCodePrompt};
 
@@ -38,15 +46,15 @@ impl fmt::Debug for AuthSource {
 #[derive(Clone)]
 pub struct Authenticator {
     source: AuthSource,
-    platform: platform::PlatformAuthenticator,
-    state_lock: Arc<Mutex<()>>,
+    /// Shared cache access, locked across refresh to prevent concurrent updates.
+    platform: Arc<Mutex<platform::PlatformAuthenticator>>,
 }
 
 impl fmt::Debug for Authenticator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Authenticator")
             .field("source", &self.source)
-            .field("platform", &self.platform)
+            .field("platform", &"<serialized>")
             .finish()
     }
 }
@@ -55,7 +63,8 @@ pub use crate::providers::internal::auth::AuthError;
 
 #[derive(Debug, Clone)]
 pub struct AuthContext {
-    pub access_token: String,
+    /// Resolved credential. Use [`Secret::expose`] only when raw bytes are required.
+    pub access_token: Secret,
     pub account_id: Option<String>,
 }
 
@@ -68,28 +77,30 @@ impl Authenticator {
     ) -> Self {
         Self {
             source,
-            platform: platform::PlatformAuthenticator::new(
+            platform: Arc::new(Mutex::new(platform::PlatformAuthenticator::new(
                 auth_file,
                 device_code_handler,
                 allow_device_flow,
-            ),
-            state_lock: Arc::new(Mutex::new(())),
+            ))),
         }
     }
 
-    pub async fn auth_context(&self) -> Result<AuthContext, AuthError> {
+    /// Resolve the access token and account id, refreshing through `http` as needed.
+    /// Return cache, transport, or authorization errors. OAuth is unsupported
+    /// on WASM; explicit access tokens remain available.
+    pub async fn auth_context<H>(&self, http: &H) -> Result<AuthContext, AuthError>
+    where
+        H: HttpClientExt,
+    {
         match &self.source {
             AuthSource::AccessToken {
                 access_token,
                 account_id,
             } => Ok(AuthContext {
-                access_token: access_token.clone(),
+                access_token: access_token.clone().into(),
                 account_id: account_id.clone(),
             }),
-            AuthSource::OAuth => {
-                let _guard = self.state_lock.lock().await;
-                self.platform.auth_context_oauth().await
-            }
+            AuthSource::OAuth => self.platform.lock().await.auth_context_oauth(http).await,
         }
     }
 }

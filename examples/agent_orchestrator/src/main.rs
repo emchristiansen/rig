@@ -1,6 +1,6 @@
+use rig::extractor::ExtractorBuilder;
 use rig::prelude::*;
-use rig::providers::openai;
-use rig::providers::openai::client::Client;
+use rig::providers::openai::{self, OpenAI};
 use schemars::JsonSchema;
 
 #[derive(serde::Deserialize, JsonSchema, serde::Serialize, Debug)]
@@ -23,13 +23,14 @@ struct TaskResults {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // Create OpenAI client
-    let openai_client = Client::from_env()?;
+    // Bind the OpenAI Responses API to the default transport
+    let openai_client = OpenAI::from_env()?.bound()?;
+    let model = openai_client.completion(openai::GPT_4);
 
     // Note that you can also create your own semantic router for this
     // that uses a vector store under the hood
-    let classify_agent = openai_client.extractor::<Specification>(openai::GPT_4)
-        .preamble("
+    let classify_agent = ExtractorBuilder::<Specification>::new(model.clone())
+        .append_preamble("
             Analyze the given task and break it down into 2-3 distinct approaches.
 
             Provide an Analysis:
@@ -49,11 +50,10 @@ async fn main() -> Result<(), anyhow::Error> {
     let specification = classify_agent.extract("
         Write a product description for a new eco-friendly water bottle.
         The target_audience is environmentally conscious millennials and key product features are: plastic-free, insulated, lifetime warranty
-        ").await?;
+        ").await?.output;
 
-    let content_agent = openai_client
-        .extractor::<TaskResults>(openai::GPT_4)
-        .preamble(
+    let content_agent = ExtractorBuilder::<TaskResults>::new(model.clone())
+        .append_preamble(
             "
                 Generate content based on the original task, style, and guidelines.
 
@@ -65,7 +65,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut vec: Vec<TaskResults> = Vec::new();
     for task in specification.tasks {
         let results = content_agent
-            .extract(&format!(
+            .extract(format!(
                 "
             Task: {},
             Style: {},
@@ -73,13 +73,13 @@ async fn main() -> Result<(), anyhow::Error> {
             ",
                 task.original_task, task.style, task.guidelines
             ))
-            .await?;
+            .await?
+            .output;
         vec.push(results);
     }
 
-    let judge_agent = openai_client
-        .extractor::<Specification>(openai::GPT_4)
-        .preamble(
+    let judge_agent = ExtractorBuilder::<Specification>::new(model)
+        .append_preamble(
             "
             Analyze the given written materials and decide the best one, giving your reasoning.
 
@@ -89,7 +89,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .build();
 
     let task_results_raw_json = serde_json::to_string_pretty(&vec)?;
-    let results = judge_agent.extract(&task_results_raw_json).await?;
+    let results = judge_agent.extract(&task_results_raw_json).await?.output;
 
     println!("Results: {results:?}");
 

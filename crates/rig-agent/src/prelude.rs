@@ -1,28 +1,21 @@
 //! Common imports for Rig's classic runtime.
-
-pub use rig_core::client::ProviderClient;
-pub use rig_core::client::embeddings::EmbeddingsClient;
-pub use rig_core::client::model_listing::ModelListingClient;
-pub use rig_core::client::transcription::TranscriptionClient;
-pub use rig_core::client::verify::{VerifyClient, VerifyError};
-
-#[cfg(feature = "audio")]
-pub use rig_core::client::audio_generation::AudioGenerationClient;
-#[cfg(feature = "image")]
-pub use rig_core::client::image_generation::ImageGenerationClient;
+//!
+//! ```
+//! use rig_agent::prelude::*;
+//! fn assistant(model: impl CompletionModel + 'static) -> Agent {
+//!     model.into_agent_builder().build()
+//! }
+//! ```
 
 pub use crate::agent::{
-    Agent, AgentHook, HookContext, ModelHandle, ModelSelection, ModelSelectionAction,
-    MultiTurnStreamItem, StreamingResult,
+    Agent, AgentHook, HookContext, ModelHandle, ModelRef, ModelSelection, ModelSelectionAction,
+    MultiTurnStreamItem, RunEvents, StreamingResult,
 };
-pub use crate::client::{AgentClientExt, AgentModelExt};
-pub use crate::completion::{
-    Chat, CompletionError, CompletionModel, Message, Prompt, PromptError, StructuredOutputError,
-    TypedPrompt,
-};
-pub use crate::streaming::{StreamingChat, StreamingPrompt};
+pub use crate::client::{AgentModelExt, AgentProviderExt};
+pub use crate::completion::{CompletionModel, Message, PromptError, StructuredOutputError};
 pub use crate::tool::{Tool, ToolSet};
-pub use rig_core::client::completion::CompletionClient;
+pub use rig_core::driver::{Bind, Bound, CompletionProvider};
+pub use rig_core::error::ProviderError;
 
 pub use rig_core::Embed;
 pub use rig_core::embeddings::{EmbeddingModel, EmbeddingsBuilder};

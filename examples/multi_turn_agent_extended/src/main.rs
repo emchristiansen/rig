@@ -1,5 +1,6 @@
 use rig::prelude::*;
-use rig::{completion::Prompt, providers::anthropic, tool::Tool};
+use rig::providers::anthropic::{self, wire::Anthropic};
+use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -10,8 +11,8 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    // Create OpenAI client
-    let openai_client = anthropic::Client::from_env()?;
+    // Create Anthropic client
+    let openai_client = Anthropic::from_env()?.bound()?;
 
     // Create RAG agent with a single context prompt and a dynamic tool source
     let agent = openai_client
@@ -34,7 +35,6 @@ async fn main() -> anyhow::Result<()> {
     let result = agent
         .prompt("Calculate 5 - 2 = ?. Describe the result to me.")
         .max_turns(20)
-        .extended_details()
         .await?;
 
     println!("\n\nOpenAI Calculator Agent: {result:?}");
@@ -43,7 +43,6 @@ async fn main() -> anyhow::Result<()> {
     let result = agent
         .prompt("Calculate (3 + 5) / 9  = ?. Describe the result to me.")
         .max_turns(20)
-        .extended_details()
         .await?;
 
     println!("\n\nOpenAI Calculator Agent: {result:?}");
