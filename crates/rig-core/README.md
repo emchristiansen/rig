@@ -240,6 +240,20 @@ retargeted by an invalid handle. A 403 or 404 on an existing handle maps to
 also indicate credential or quota problems. Cache creation does not apply this
 mapping, so authorization failures do not become recreation loops.
 
+## Unknown stream event serialization
+
+`StreamEvent::Unknown(UnknownPayload)` serializes as
+`{"event":"unknown_v2","payload":<value>}`. The required `payload` member
+retains any JSON value, including null, arrays and objects containing their own
+`event` or `payload` keys. An omitted payload is a decode error. The standalone
+`UnknownPayload` type still serializes directly to its JSON value, and other
+`StreamEvent` variants retain their existing encodings.
+
+The earlier flattened `event:"unknown"` encoding is rejected. Existing logs
+using it remain historical evidence; this decoder provides no migration or
+compatibility reader. The format preserves JSON values and event sequence,
+not original provider wire bytes.
+
 ## Provider observations
 
 `observe::AdapterContext` carries a caller-owned operation identity and a
