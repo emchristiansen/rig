@@ -1252,3 +1252,38 @@ async fn a_streamed_request_reads_the_credential_source_when_it_is_sent() {
         Some("account-1")
     );
 }
+
+/// A failing source refuses a streamed request exactly as it refuses a unary
+/// one: the same named refusal, reported the same way, and nothing sent.
+#[tokio::test]
+async fn a_failing_credential_source_refuses_a_stream_as_it_refuses_a_unary_request() {
+    let provider = OpenAI::new("static-key").with_credential_source(RotatingSource::default());
+    let unary = Bound::new(
+        Chat::new(provider.clone(), "gpt-4o"),
+        RecordingHttpClient::new(CHAT_REPLY),
+    )
+    .completion(prompt("one"))
+    .await
+    .expect_err("the source has no credential");
+
+    let http = crate::test_utils::CapturingStreamingClient::default();
+    let mut response = Bound::new(Chat::new(provider, "gpt-4o"), http.clone())
+        .stream(prompt("one"))
+        .await
+        .expect("the stream opens");
+    let mut errors = Vec::new();
+    while let Some(item) = response.next().await {
+        if let Err(error) = item {
+            errors.push(error);
+        }
+    }
+
+    assert!(
+        http.requests.lock().expect("unpoisoned").is_empty(),
+        "nothing was sent"
+    );
+    let [streamed] = errors.as_slice() else {
+        panic!("expected exactly one refusal, got {errors:?}");
+    };
+    assert_eq!(streamed.to_string(), unary.to_string());
+}

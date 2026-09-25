@@ -599,6 +599,10 @@ where
 
     let http = http.clone();
     let authorizer = wire.authorizer();
+    // Read here for the same reason: a refusal reports the route the way
+    // the unary path does.
+    let wire_name = wire.name().to_owned();
+    let request_path = http_request.uri().path().to_owned();
     let observation = context.as_ref().map(|_| AdapterSlot::default());
     let mut driver =
         WireDriver::<W::Op, _>::observed(wire.decoder(Mode::Streaming), observation.clone());
@@ -614,7 +618,7 @@ where
         if let Some(authorizer) = &authorizer
             && let Err(error) = authorizer.authorize(http_request.headers_mut()).await
         {
-            driver.fail(error);
+            driver.fail(<W::Op as Operation>::with_route(error, &wire_name, &request_path));
             for item in driver.drain() {
                 yield item;
             }
