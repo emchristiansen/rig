@@ -2,7 +2,7 @@
 //!
 //! [`CodexWebSocketSession`] composes the Responses websocket session over the
 //! wire's own request shaping and a caller-chosen
-//! [`WebSocketClientExt`](crate::ws_client::WebSocketClientExt) backend. It adds
+//! [`WebSocketClientExt`] backend. It adds
 //! what the Codex gateway needs on top of the shared session:
 //!
 //! - **Root full sends never chain.** Codex runs full replay: [`send`] roots a

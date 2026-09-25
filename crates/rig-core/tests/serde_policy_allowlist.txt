@@ -16,6 +16,7 @@ providers/anthropic/streaming.rs | serde_json::from_str(&server_tool_use.input_j
 # --- openai Responses SSE: classifier-adjacent helpers ---------------------
 providers/openai/responses_api/streaming.rs | let mut value = serde_json::from_str::<serde_json::Value>(data).ok()?; | repair_envelope_less_frame: buffered-body envelope repair feeding the ONE classifier (classify_with_repair); documented F8 policy note at the fn doc.
 providers/openai/responses_api/streaming.rs | let kind = serde_json::from_str::<serde_json::Value>(&data) | Reads the `type` tag only to word the buffered-path Corrupt error message; the classification itself came from classify_with_repair.
+providers/openai/responses_api/streaming.rs | let mut frame = serde_json::from_str::<serde_json::Value>(raw).ok()?; | native_response_object: not triage — the frame was already recognized by classify_responses_frame and accepted by the typed decode, and this decides nothing about it. It keeps the provider's own `response` object as the native terminal evidence (StreamFinal.raw), which the typed CompletionResponse cannot reproduce: it has a fixed field set with no catch-all, so every unmodeled key and every echoed metadata value that does not fit its field is dropped, and re-serializing it would rewrite the evidence.
 # Single-file providers: unary/non-stream parses sharing a file with streaming code.
 
 # --- #[serde(untagged)] unions that are not frame triage --------------------
