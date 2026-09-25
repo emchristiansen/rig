@@ -27,6 +27,7 @@ use std::ops::Add;
 use std::str::FromStr;
 
 pub mod codex_identity;
+pub mod responses_lite;
 pub mod streaming;
 #[cfg(feature = "websocket")]
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
@@ -64,7 +65,7 @@ pub struct CompletionRequest {
     /// verbatim through `additional_params["tools"]`, then the wire's default tools.
     /// A declared tool is serialized as the JSON object the caller wrote; see
     /// [`ResponsesRequestTool`].
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ResponsesRequestTool>,
     /// Additional parameters
     #[serde(flatten)]
@@ -94,16 +95,40 @@ impl CompletionRequest {
 }
 
 /// An input item for [`CompletionRequest`].
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct InputItem {
     /// The role of an input item/message.
     /// Input messages should be Some(Role::User), and output messages should be Some(Role::Assistant).
     /// Everything else should be None.
-    #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<Role>,
     /// The input content itself.
-    #[serde(flatten)]
     input: InputContent,
+}
+
+impl<'de> Deserialize<'de> for InputItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let role = value
+            .get("role")
+            .cloned()
+            .map(serde_json::from_value::<Option<Role>>)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .flatten();
+        let input = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        let role = if matches!(
+            &input,
+            InputContent::Message(_) | InputContent::AdditionalTools { .. }
+        ) {
+            None
+        } else {
+            role
+        };
+        Ok(Self { role, input })
+    }
 }
 
 impl Serialize for InputItem {
@@ -176,6 +201,17 @@ pub enum Role {
     User,
     Assistant,
     System,
+    /// A provider-authored instruction item that participates in the input
+    /// sequence instead of the top-level `instructions` field.
+    Developer,
+}
+
+/// The only role accepted by a client-created Responses Lite prefix item.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum DeveloperRole {
+    /// Provider-level instructions and tool declarations.
+    Developer,
 }
 
 /// Content carried by an [`InputItem`].
@@ -183,6 +219,15 @@ pub enum Role {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputContent {
     Message(Message),
+    /// The Responses Lite tool declaration prefix.
+    AdditionalTools {
+        /// A stable item id derived from the thread and transmitted tools.
+        id: String,
+        /// Always [`DeveloperRole::Developer`].
+        role: DeveloperRole,
+        /// The exact JSON tool values transmitted in this item.
+        tools: Vec<Value>,
+    },
     Reasoning(OpenAIReasoning),
     FunctionCall(OutputFunctionCall),
     FunctionCallOutput(ToolResult),
@@ -321,8 +366,8 @@ pub enum ToolResultOutputContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         file_id: Option<String>,
         /// Provider image-detail preference.
-        #[serde(default)]
-        detail: ImageDetail,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
     },
 }
 
@@ -414,7 +459,7 @@ fn responses_tool_result_output(
                 rich_output.push(ToolResultOutputContent::InputImage {
                     image_url,
                     file_id,
-                    detail: detail.unwrap_or_default(),
+                    detail: Some(detail.unwrap_or_default()),
                 });
             }
         }
@@ -532,7 +577,7 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                             };
                             items.push(InputItem::user_content(UserContent::InputImage {
                                 image_url: url,
-                                detail: detail.unwrap_or_default(),
+                                detail: Some(detail.unwrap_or_default()),
                             }));
                         }
                         message => {
@@ -1450,6 +1495,7 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
                             InputContent::CustomToolCall(call) => Some(&mut call.call_id),
                             InputContent::CustomToolCallOutput(result) => Some(&mut result.call_id),
                             InputContent::Message(_)
+                            | InputContent::AdditionalTools { .. }
                             | InputContent::Reasoning(_)
                             | InputContent::Compaction(_) => None,
                         }),
@@ -2528,7 +2574,18 @@ pub enum OutputRole {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum Message {
-    #[serde(alias = "developer")]
+    /// A Responses Lite base-instruction item.
+    Developer {
+        /// A stable item id derived from the thread and instruction bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Instruction text represented as Responses input content.
+        #[serde(deserialize_with = "string_or_vec")]
+        content: Vec<SystemContent>,
+        /// The internal marker identifying model base instructions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+    },
     System {
         #[serde(deserialize_with = "string_or_vec")]
         content: Vec<SystemContent>,
@@ -2558,6 +2615,26 @@ pub enum Message {
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
+}
+
+/// Metadata carried by the Responses Lite developer instruction item.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct InternalChatMessageMetadataPassthrough {
+    content_item_kinds: Vec<InternalChatMessageContentKind>,
+}
+
+impl InternalChatMessageMetadataPassthrough {
+    pub(crate) fn base_instructions() -> Self {
+        Self {
+            content_item_kinds: vec![InternalChatMessageContentKind::BaseInstructions],
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+enum InternalChatMessageContentKind {
+    #[serde(rename = "model.base_instructions")]
+    BaseInstructions,
 }
 
 impl Message {
@@ -2849,8 +2926,8 @@ pub enum UserContent {
     },
     InputImage {
         image_url: String,
-        #[serde(default)]
-        detail: ImageDetail,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
     },
     InputFile {
         #[serde(skip_serializing_if = "Option::is_none")]

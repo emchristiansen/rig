@@ -45,7 +45,7 @@ fn wire_request(
     wire: &wire::Responses,
     request: completion::CompletionRequest,
 ) -> CompletionRequest {
-    wire.responses_request(request, false)
+    wire.responses_request(request, false, wire.codex_identity.as_ref())
         .expect("request should convert")
 }
 
@@ -3214,7 +3214,7 @@ fn a_custom_result_carrying_an_image_is_refused() {
         ..weather_tool_request()
     };
     let error = openai_wire("gpt-5.4")
-        .responses_request(request, false)
+        .responses_request(request, false, None)
         .expect_err("an image in a custom result must be refused");
     assert!(
         error.to_string().contains("custom_tool_call_output"),
@@ -3337,7 +3337,7 @@ fn the_retired_incomplete_tolerance_key_is_refused_by_name() {
         ..weather_tool_request()
     };
     let error = openai_wire("gpt-5.4")
-        .responses_request(request, false)
+        .responses_request(request, false, None)
         .expect_err("the retired key must be refused");
     assert!(
         error.to_string().contains("with_streamed_incomplete"),

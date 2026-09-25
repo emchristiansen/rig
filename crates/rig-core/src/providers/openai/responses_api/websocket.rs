@@ -684,7 +684,7 @@ impl ResponsesWebSocketSession {
         options: ResponsesWebSocketCreateOptions,
     ) -> Result<(), ProviderError> {
         self.ensure_can_send()?;
-        let request = self.prepare_request(completion_request, Chaining::Automatic)?;
+        let request = self.prepare_request(completion_request, Chaining::Automatic, None)?;
         let frame = encode_frame(&request, options.generate, |_| Ok(()))?;
         self.send_encoded(request, frame).await
     }
@@ -1004,11 +1004,14 @@ impl ResponsesWebSocketSession {
         &self,
         completion_request: crate::completion::CompletionRequest,
         chaining: Chaining,
+        identity: Option<&super::codex_identity::CodexIdentity>,
     ) -> Result<crate::providers::openai::responses_api::CompletionRequest, ProviderError> {
         // Direct session requests bypass builder validation.
         completion_request.validate_message_content()?;
 
-        let mut request = self.wire.responses_request(completion_request, false)?;
+        let mut request = self
+            .wire
+            .responses_request(completion_request, false, identity)?;
 
         // WebSocket mode is always event-driven, so these HTTP/SSE-specific flags
         // are ignored by the provider and only add noise to the payload.

@@ -1018,6 +1018,149 @@ fn a_codex_identity_names_every_http_request_with_the_callers_ids() {
     }
 }
 
+/// Lite is opt-in: Standard mode retains the existing top-level tools shape
+/// and does not add the internal HTTP marker.
+#[test]
+fn standard_request_shape_keeps_the_existing_codex_wire_body() {
+    let namespace = responses_lite_namespace();
+    let encoded = encoded_request(&chatgpt(), Mode::Unary);
+    assert!(
+        encoded
+            .headers()
+            .get(super::super::responses_lite::HTTP_HEADER)
+            .is_none()
+    );
+    let tools = sent_tools(
+        &chatgpt(),
+        turn_declaring(serde_json::json!([namespace.clone()])),
+    );
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0]["name"], "lookup");
+    assert_eq!(tools[1], namespace);
+}
+
+/// HTTP Lite uses the wire identity for its deterministic prefix, carries the
+/// marker only as an HTTP header, and removes top-level tools/instructions.
+#[test]
+fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
+    let wire = OpenAI::with_key(&CHATGPT, "test-token")
+        .with_instructions("provider base")
+        .responses("gpt-5.4")
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite")
+        .with_codex_identity(derived_identity())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    let mut encoded = wire
+        .encode(
+            turn(vec![Message::system("caller base"), Message::user("hello")]),
+            Mode::Streaming,
+        )
+        .expect("the Lite request encodes");
+    let request = encoded.requests.remove(0);
+
+    assert_eq!(
+        request.headers()[super::super::responses_lite::HTTP_HEADER],
+        "true"
+    );
+    let Body::Bytes(body) = request.body() else {
+        panic!("a Responses body is bytes");
+    };
+    let body: serde_json::Value = serde_json::from_slice(body).expect("the body is JSON");
+    assert_eq!(body["input"][0]["type"], "additional_tools");
+    assert_eq!(body["input"][0]["role"], "developer");
+    assert_eq!(body["input"][1]["type"], "message");
+    assert_eq!(body["input"][1]["role"], "developer");
+    assert_eq!(
+        body["input"][1]["content"][0]["text"],
+        "provider base\n\ncaller base"
+    );
+    assert_eq!(
+        body["input"][1]["id"], "msg_3333557a-9135-5aeb-b8f2-d31c4d718f4b",
+        "the developer id hashes the exact merged instruction bytes"
+    );
+    assert!(body.get("tools").is_none());
+    assert!(body.get("instructions").is_none());
+    assert_eq!(body["parallel_tool_calls"], false);
+    assert_eq!(body["tool_choice"], "auto");
+    assert_eq!(body["reasoning"]["context"], "all_turns");
+    assert_eq!(body["client_metadata"]["thread_id"], "thread-derived");
+
+    #[cfg(feature = "websocket")]
+    {
+        let handshake = derived_identity()
+            .handshake_request(&wire)
+            .expect("the handshake builds");
+        assert!(
+            handshake
+                .headers()
+                .get(super::super::responses_lite::HTTP_HEADER)
+                .is_none(),
+            "the HTTP Lite header must not reach the websocket handshake"
+        );
+    }
+}
+
+fn lite_refusal(error: EncodeError) -> super::super::responses_lite::ResponsesLiteError {
+    let crate::error::ProviderError::Request(reason) = crate::error::ProviderError::from(error)
+    else {
+        panic!("a Lite encode refusal is a request error");
+    };
+    reason
+        .downcast::<super::super::responses_lite::ResponsesLiteError>()
+        .map(|error| *error)
+        .unwrap_or_else(|reason| panic!("expected a named Lite refusal, got {reason}"))
+}
+
+/// Builder validation rejects non-Codex selection, while encode-time
+/// validation catches serde/public-field construction and missing identity.
+#[test]
+fn responses_lite_selection_is_revalidated_at_encode_time() {
+    use super::super::responses_lite::{CodexRequestShape, ResponsesLiteError};
+
+    assert!(matches!(
+        openai().with_responses_lite(),
+        Err(ResponsesLiteError::ResponsesLiteRequiresCodex { dialect: "openai" })
+    ));
+
+    let mut by_field = openai();
+    by_field.codex_request_shape = CodexRequestShape::ResponsesLite;
+    let mut serialized = serde_json::to_value(openai()).expect("the wire serializes");
+    serialized["codex_request_shape"] = serde_json::json!("responses_lite");
+    let by_serde: Responses = serde_json::from_value(serialized).expect("the wire deserializes");
+    for wire in [by_field, by_serde] {
+        let error = wire
+            .encode(prompt(), Mode::Unary)
+            .expect_err("a non-Codex Lite wire is refused");
+        assert!(matches!(
+            lite_refusal(error),
+            ResponsesLiteError::ResponsesLiteRequiresCodex { dialect: "openai" }
+        ));
+    }
+
+    let missing_identity = chatgpt()
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite")
+        .encode(prompt(), Mode::Unary)
+        .expect_err("HTTP Lite needs a stable identity");
+    assert!(matches!(
+        lite_refusal(missing_identity),
+        ResponsesLiteError::ResponsesLiteRequiresIdentity
+    ));
+
+    let input_system = chatgpt()
+        .with_system_instructions_as_messages()
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite")
+        .with_codex_identity(derived_identity())
+        .expect("the ChatGPT dialect speaks the Codex contract")
+        .encode(prompt(), Mode::Unary)
+        .expect_err("Lite refuses InputSystemMessages");
+    assert!(matches!(
+        lite_refusal(input_system),
+        ResponsesLiteError::InputSystemMessages
+    ));
+}
+
 /// Without an identity the ChatGPT dialect keeps sending a fresh
 /// `session_id` per request and no dashed identity.
 #[test]

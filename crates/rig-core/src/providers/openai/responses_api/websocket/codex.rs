@@ -16,6 +16,9 @@
 //!   the dashed `session-id` / `thread-id` handshake headers,
 //!   `x-client-request-id`, and the `prompt_cache_key` / `client_metadata`
 //!   body fields of every frame, so cache routing stays sticky across turns.
+//! - **Responses Lite is marked per frame.** An opted-in wire uses the shared
+//!   deterministic developer prefix on full sends and adds the Lite marker to
+//!   every frame's `client_metadata`; the upgrade handshake stays unchanged.
 //! - **Single in-flight custody**, inherited from the shared session.
 //!
 //! The handshake carries the wire's credential as it stands when the session
@@ -283,11 +286,14 @@ impl CodexWebSocketSession {
         options: ResponsesWebSocketCreateOptions,
     ) -> Result<(), ProviderError> {
         self.session.ensure_can_send()?;
-        let envelope = self
-            .session
-            .prepare_request(completion_request, Chaining::Root)?;
+        let envelope = self.session.prepare_request(
+            completion_request,
+            Chaining::Root,
+            Some(&self.identity),
+        )?;
+        let responses_lite = self.session.wire.codex_request_shape.is_lite();
         let frame = encode_frame(&envelope, options.generate, |body| {
-            self.identity.stamp(body)
+            stamp_frame(&self.identity, responses_lite, body)
         })?;
         self.session.send_encoded(envelope, frame).await
     }
@@ -314,7 +320,13 @@ impl CodexWebSocketSession {
         request.input = delta.into_vec();
         request.additional_parameters.previous_response_id = Some(tip.to_owned());
 
-        let frame = encode_frame(&request, None, |body| self.identity.stamp(body))?;
+        let responses_lite = self.session.wire.codex_request_shape.is_lite();
+        if responses_lite {
+            super::super::responses_lite::shape_delta(&mut request.input);
+        }
+        let frame = encode_frame(&request, None, |body| {
+            stamp_frame(&self.identity, responses_lite, body)
+        })?;
         // The captured envelope, not the delta request, is what a later
         // delta continues from.
         self.session.send_encoded(envelope, frame).await
@@ -358,6 +370,18 @@ impl CodexWebSocketSession {
     pub async fn close(&mut self) -> Result<(), ProviderError> {
         self.session.close().await
     }
+}
+
+fn stamp_frame(
+    identity: &CodexIdentity,
+    responses_lite: bool,
+    body: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<(), EncodeError> {
+    identity.stamp(body)?;
+    if responses_lite {
+        super::super::responses_lite::stamp_websocket_marker(body)?;
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for CodexWebSocketSession {
