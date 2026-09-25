@@ -85,12 +85,24 @@ fn exact_prefix_ids_are_stable_and_change_only_with_their_inputs() {
         vec![ResponsesToolDefinition::web_search().into()],
         "thread-a",
     );
+    // A non-empty tools array hashes its transmitted JSON, whose key order
+    // depends on whether `serde_json/preserve_order` is unified into the
+    // build (the workspace root enables it), so the exact UUID is not a
+    // constant here. Pin the derivation instead: the ID is the UUIDv5 of the
+    // transmitted tools bytes in the thread's namespace, as `openai/codex`
+    // derives it.
+    let thread_namespace = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"thread-a");
+    let transmitted_tools =
+        serde_json::to_vec(&changed_tools["input"][0]["tools"]).expect("tools serialize");
+    let (changed_tools_id, changed_tools_message_id) = prefix_ids(&changed_tools);
     assert_eq!(
-        prefix_ids(&changed_tools),
-        (
-            "at_d122644b-6449-51ae-9e51-3decd45e8ec0".to_owned(),
-            Some("msg_b16266e1-b752-5add-9796-139b2fb17ae0".to_owned())
-        )
+        changed_tools_id,
+        format!("at_{}", Uuid::new_v5(&thread_namespace, &transmitted_tools))
+    );
+    assert_ne!(changed_tools_id, prefix_ids(&base).0);
+    assert_eq!(
+        changed_tools_message_id,
+        Some("msg_b16266e1-b752-5add-9796-139b2fb17ae0".to_owned())
     );
 
     let changed_thread = shaped_json(Some("base"), Vec::new(), "thread-b");
