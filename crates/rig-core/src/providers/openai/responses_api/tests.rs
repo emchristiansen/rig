@@ -2614,7 +2614,7 @@ fn output_reasoning_round_trips_value_equal() {
         summary: vec![ReasoningSummary::SummaryText {
             text: "weighing options".to_string(),
         }],
-        content: vec!["private reasoning".to_string()],
+        content: vec!["private reasoning".into()],
         encrypted_content: Some("ENCRYPTED".to_string()),
         signature: None,
         status: Some(ToolStatus::Completed),
@@ -2632,7 +2632,7 @@ fn output_reasoning_conversion_omits_empty_encrypted_content() {
     let output = Output::Reasoning {
         id: "reasoning_1".to_string(),
         summary: vec![],
-        content: vec!["visible reasoning".to_string()],
+        content: vec!["visible reasoning".into()],
         encrypted_content: Some(String::new()),
         signature: None,
         status: Some(ToolStatus::Completed),
@@ -3047,7 +3047,13 @@ fn the_last_text_signature_is_the_items() {
     };
     let item = openai_reasoning_from_core(&reasoning).expect("identified reasoning replays");
     assert_eq!(item.signature.as_deref(), Some("final"));
-    assert_eq!(item.content, ["first", "second"]);
+    assert_eq!(
+        item.content,
+        [
+            ReasoningTextContent::from("first"),
+            ReasoningTextContent::from("second")
+        ]
+    );
 }
 
 // ── custom calls, namespaces, answers pairing, argument classification ───

@@ -494,6 +494,10 @@ async fn responses_lite_marks_every_frame_and_prefixes_only_full_sends() {
         .expect("root input is an array");
     assert_eq!(root_input[0]["type"], "additional_tools");
     assert_eq!(
+        root_input[1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        serde_json::json!(["model.base_instructions"])
+    );
+    assert_eq!(
         root_input[0]["id"],
         "at_59200608-af63-522d-81da-6eac30781e45"
     );

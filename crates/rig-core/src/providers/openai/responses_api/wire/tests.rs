@@ -1129,6 +1129,10 @@ fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
     assert_eq!(body["input"][1]["type"], "message");
     assert_eq!(body["input"][1]["role"], "developer");
     assert_eq!(
+        body["input"][1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        serde_json::json!(["model.base_instructions"])
+    );
+    assert_eq!(
         body["input"][1]["content"][0]["text"],
         "provider base\n\ncaller base"
     );

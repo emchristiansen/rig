@@ -1457,6 +1457,8 @@ pub async fn multi_part_same_id_reasoning_keeps_every_part(
             crate::message::ReasoningContent::Text { text, .. } => text.clone(),
             crate::message::ReasoningContent::Encrypted(data) => data.clone(),
             crate::message::ReasoningContent::Redacted { data } => data.clone(),
+            crate::message::ReasoningContent::OpaqueSummary(value)
+            | crate::message::ReasoningContent::OpaqueContent(value) => value.to_string(),
         })
         .collect();
     checks.require(observed == expected_parts, || {

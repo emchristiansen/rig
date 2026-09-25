@@ -22,6 +22,29 @@ pub mod tool_call_bridge;
 pub mod tool_call_ids;
 pub mod wire;
 
+/// Refuse opaque Responses parts before an unsupported wire converts them to text.
+#[doc(hidden)]
+pub fn refuse_opaque_responses_part(
+    part: &crate::message::AssistantContent,
+    wire: &'static str,
+) -> Result<(), crate::message::UnrepresentableOpaqueContent> {
+    let opaque = match part {
+        crate::message::AssistantContent::Text(text) => {
+            crate::providers::openai::responses_api::opaque_message_part(
+                text.additional_params.as_ref(),
+            )
+            .is_some()
+        }
+        crate::message::AssistantContent::Reasoning(reasoning) => reasoning.has_opaque_parts(),
+        _ => false,
+    };
+    if opaque {
+        Err(crate::message::UnrepresentableOpaqueContent::new(wire))
+    } else {
+        Ok(())
+    }
+}
+
 /// Fill empty tool-result names from preceding unmatched calls.
 /// Match local correlation handles before provider identifiers. Existing names
 /// disambiguate multiple matches; ambiguous or missing matches remain unchanged.

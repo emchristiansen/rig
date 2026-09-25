@@ -277,6 +277,23 @@ impl Responses {
         streaming: bool,
         identity: Option<&super::codex_identity::CodexIdentity>,
     ) -> Result<CompletionRequest, EncodeError> {
+        let issuers = self.replay_issuers(request.model.as_deref().or(Some(&self.model)));
+        for message in &request.chat_history {
+            if let crate::message::Message::Assistant { content, .. } = message {
+                for part in content {
+                    if let crate::message::AssistantContent::Reasoning(reasoning) = part
+                        && reasoning.has_opaque_parts()
+                        && !issuers.iter().any(|issuer| reasoning.replayable_to(issuer))
+                    {
+                        return Err(EncodeError::request(
+                            crate::message::UnrepresentableOpaqueContent::new(
+                                "OpenAI Responses with incompatible reasoning provenance",
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         let quirks = &self.provider.dialect.quirks.responses;
         let lite_identity = super::responses_lite::validate_activation(
             self.codex_request_shape,
