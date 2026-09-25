@@ -66,9 +66,10 @@ const GENERATE_SITES: &[(&str, &str)] = &[
         "a `session_id` transport header",
     ),
     (
-        "crates/rig-core/src/providers/openai/responses_api/websocket/codex.rs",
-        "the Codex websocket session identity: its handshake headers and the cache key \
-         and client metadata of that session's own frames, never a message or an effect record",
+        "crates/rig-core/src/providers/openai/responses_api/codex_identity.rs",
+        "the Codex conversation identity: its headers and the cache key and client \
+         metadata of that conversation's own frames and HTTP requests, never a message or an \
+         effect record",
     ),
 ];
 

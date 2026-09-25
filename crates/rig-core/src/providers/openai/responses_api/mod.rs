@@ -26,6 +26,7 @@ use std::convert::Infallible;
 use std::ops::Add;
 use std::str::FromStr;
 
+pub mod codex_identity;
 pub mod streaming;
 #[cfg(feature = "websocket")]
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]

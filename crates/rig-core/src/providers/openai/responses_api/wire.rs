@@ -21,6 +21,10 @@ use super::{
     SystemInstructionsPlacement,
 };
 
+/// The per-request session header the ChatGPT dialect sends when no Codex
+/// identity names the conversation.
+const SESSION_ID_PER_REQUEST_HEADER: &str = "session_id";
+
 /// The Responses wire: `POST /responses`, SSE when streamed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Responses {
@@ -41,6 +45,11 @@ pub struct Responses {
     /// policy, never a request parameter, so it does not reach the wire.
     #[serde(default)]
     pub streamed_incomplete: IncompleteTerminal,
+    /// The Codex conversation identity every HTTP request from this wire
+    /// carries, when set (see [`Self::with_codex_identity`]). `None` sends a
+    /// fresh `session_id` per request, as the dialect asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_identity: Option<super::codex_identity::CodexIdentity>,
 }
 
 impl Responses {
@@ -61,7 +70,7 @@ impl Responses {
         // the driver folds it.
         let codex = quirks.contract == ResponsesContract::Codex;
         let streaming = matches!(mode, Mode::Streaming) || codex;
-        let builder = headers(
+        let mut builder = headers(
             &self.provider,
             &request,
             http::Request::post(self.provider.uri(quirks.path, None)),
@@ -72,7 +81,28 @@ impl Responses {
             "Responses completion request",
             &request,
         );
-        let body = serde_json::to_vec(&request)?;
+        let body = match &self.codex_identity {
+            // The conversation's identity replaces the per-request session id:
+            // the same dashed headers and body fields its websocket frames
+            // carry, so both transports name one conversation alike.
+            Some(identity) => {
+                if let Some(headers) = builder.headers_mut() {
+                    headers.remove(SESSION_ID_PER_REQUEST_HEADER);
+                }
+                builder = identity.stamp_headers(builder);
+                let mut body = match serde_json::to_value(&request)? {
+                    serde_json::Value::Object(body) => body,
+                    other => {
+                        return Err(EncodeError::request(format!(
+                            "a Responses request must serialize to a JSON object, got {other}"
+                        )));
+                    }
+                };
+                identity.stamp(&mut body)?;
+                serde_json::to_vec(&body)?
+            }
+            None => serde_json::to_vec(&request)?,
+        };
 
         let request = builder
             .header(http::header::CONTENT_TYPE, "application/json")
@@ -93,6 +123,22 @@ impl Responses {
         })
     }
 
+    /// Name the Codex conversation every HTTP request from this wire belongs
+    /// to. Each request then carries `identity`'s dashed `session-id` and
+    /// `thread-id` headers, `x-client-request-id`, and its `prompt_cache_key`
+    /// and `client_metadata` body fields, exactly as a Codex websocket session
+    /// with the same identity does, instead of a fresh `session_id` header.
+    /// A request's own `prompt_cache_key` or metadata keys are kept. Refuses a
+    /// wire whose dialect does not speak the Codex contract.
+    pub fn with_codex_identity(
+        mut self,
+        identity: super::codex_identity::CodexIdentity,
+    ) -> Result<Self, super::codex_identity::NotACodexWire> {
+        super::codex_identity::require_codex(&self)?;
+        self.codex_identity = Some(identity);
+        Ok(self)
+    }
+
     /// Create a wire with the provider's instruction placement and dialect's
     /// strict-tool default, without additional tools.
     pub fn new(provider: OpenAI, model: impl Into<String>) -> Self {
@@ -103,6 +149,7 @@ impl Responses {
             model: model.into(),
             tools: Vec::new(),
             streamed_incomplete: IncompleteTerminal::default(),
+            codex_identity: None,
         }
     }
 

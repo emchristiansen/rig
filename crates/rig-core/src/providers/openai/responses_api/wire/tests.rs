@@ -955,3 +955,133 @@ fn the_codex_lane_sends_a_declared_namespace_verbatim_under_strict_mode() {
 
     assert_eq!(tools, vec![responses_lite_namespace()]);
 }
+
+// ── the Codex conversation identity on HTTP ──────────────────────────────
+
+fn derived_identity() -> super::super::codex_identity::CodexIdentity {
+    super::super::codex_identity::CodexIdentity::from_ids("session-derived", "thread-derived")
+        .expect("header-safe ids")
+}
+
+fn encoded_request(wire: &Responses, mode: Mode) -> http::Request<Body> {
+    let mut encoded = wire.encode(prompt(), mode).expect("the request encodes");
+    encoded.requests.remove(0)
+}
+
+fn header_names(request: &http::Request<Body>) -> Vec<&str> {
+    let mut names: Vec<&str> = request
+        .headers()
+        .keys()
+        .map(http::HeaderName::as_str)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// With a Codex identity, every HTTP request, unary or streamed, names the
+/// conversation with the caller's ids, exactly as given: dashed `session-id`
+/// and `thread-id`, `x-client-request-id`, and the body's `prompt_cache_key`
+/// and `client_metadata`. The per-request `session_id` is gone, and two
+/// requests carry the same identity.
+#[test]
+fn a_codex_identity_names_every_http_request_with_the_callers_ids() {
+    let wire = chatgpt()
+        .with_codex_identity(derived_identity())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    for mode in [Mode::Unary, Mode::Streaming, Mode::Unary] {
+        let request = encoded_request(&wire, mode);
+        assert_eq!(
+            header_names(&request),
+            [
+                "authorization",
+                "content-type",
+                "originator",
+                "session-id",
+                "thread-id",
+                "user-agent",
+                "x-client-request-id"
+            ],
+            "{mode:?}"
+        );
+        assert_eq!(request.headers()["session-id"], "session-derived");
+        assert_eq!(request.headers()["thread-id"], "thread-derived");
+        assert_eq!(request.headers()["x-client-request-id"], "thread-derived");
+        let Body::Bytes(body) = request.body() else {
+            panic!("a Responses body is bytes");
+        };
+        let body: serde_json::Value = serde_json::from_slice(body).expect("the body is JSON");
+        assert_eq!(body["prompt_cache_key"], "thread-derived");
+        assert_eq!(
+            body["client_metadata"],
+            serde_json::json!({"session_id": "session-derived", "thread_id": "thread-derived"})
+        );
+    }
+}
+
+/// Without an identity the ChatGPT dialect keeps sending a fresh
+/// `session_id` per request and no dashed identity.
+#[test]
+fn without_a_codex_identity_each_request_keeps_its_own_session_id() {
+    let first = encoded_request(&chatgpt(), Mode::Unary);
+    let second = encoded_request(&chatgpt(), Mode::Unary);
+    assert!(first.headers().get("session-id").is_none());
+    assert!(first.headers().get("thread-id").is_none());
+    assert_ne!(
+        first.headers()["session_id"],
+        second.headers()["session_id"]
+    );
+}
+
+/// A websocket handshake and an HTTP request carrying one identity name the
+/// conversation with the same three headers.
+#[cfg(feature = "websocket")]
+#[test]
+fn http_and_the_websocket_handshake_carry_one_identity_alike() {
+    let identity = derived_identity();
+    let wire = chatgpt()
+        .with_codex_identity(identity.clone())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+    let http = encoded_request(&wire, Mode::Streaming);
+    let handshake = identity
+        .handshake_request(&wire)
+        .expect("the handshake builds");
+    for name in ["session-id", "thread-id", "x-client-request-id"] {
+        assert_eq!(http.headers()[name], handshake.headers()[name], "{name}");
+    }
+}
+
+#[test]
+fn a_codex_identity_is_refused_on_a_wire_that_does_not_speak_the_codex_contract() {
+    let error = openai()
+        .with_codex_identity(derived_identity())
+        .expect_err("the OpenAI dialect is not Codex");
+    assert_eq!(error.dialect, "openai");
+}
+
+/// Caller-derived ids are sent verbatim, so an id no header can carry, or an
+/// empty one, is refused by name, both when built and when deserialized.
+#[test]
+fn a_codex_identity_refuses_ids_no_header_can_carry() {
+    use super::super::codex_identity::CodexIdentity;
+    let empty = CodexIdentity::from_ids("", "thread").expect_err("empty");
+    assert_eq!(empty.field, "session_id");
+    let broken = CodexIdentity::from_ids("session", "line\nbreak").expect_err("not header-safe");
+    assert_eq!(broken.field, "thread_id");
+
+    let identity = derived_identity();
+    let json = serde_json::to_value(&identity).expect("serializes");
+    assert_eq!(
+        json,
+        serde_json::json!({"session_id": "session-derived", "thread_id": "thread-derived"})
+    );
+    assert_eq!(
+        serde_json::from_value::<CodexIdentity>(json).expect("deserializes"),
+        identity
+    );
+    assert!(
+        serde_json::from_value::<CodexIdentity>(
+            serde_json::json!({"session_id": "", "thread_id": "t"})
+        )
+        .is_err()
+    );
+}

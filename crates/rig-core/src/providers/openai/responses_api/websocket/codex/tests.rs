@@ -987,3 +987,47 @@ async fn each_connect_reads_the_credential_source_once() {
         assert_eq!(handshake.get_all("authorization").iter().count(), 1);
     }
 }
+
+// --- caller-derived identity -------------------------------------------------
+
+/// A caller-derived identity reaches the websocket verbatim: the handshake
+/// headers when the wire names it, and every frame's cache key and metadata.
+#[tokio::test]
+async fn a_caller_derived_identity_names_the_handshake_and_every_frame() {
+    let identity =
+        CodexIdentity::from_ids("session-derived", "thread-derived").expect("header-safe ids");
+    let wire = codex_wire()
+        .with_codex_identity(identity.clone())
+        .expect("the ChatGPT dialect speaks the Codex contract");
+
+    let backend = HandshakeRecorder::default();
+    let session = CodexWebSocketSessionBuilder::new(wire.clone())
+        .expect("the ChatGPT dialect speaks the Codex contract")
+        .connect_with(&backend)
+        .await
+        .expect("the scripted connection opens");
+    assert_eq!(
+        session.identity(),
+        &identity,
+        "the wire's identity is the session's"
+    );
+    let handshake = backend.handshakes.lock().expect("unpoisoned")[0].clone();
+    assert_eq!(handshake["session-id"], "session-derived");
+    assert_eq!(handshake["thread-id"], "thread-derived");
+    assert_eq!(handshake["x-client-request-id"], "thread-derived");
+
+    let script = Script::new().turn([completed("resp_1")]);
+    let mut session =
+        CodexWebSocketSession::from_connection(wire, identity, script.connection(), None)
+            .expect("the ChatGPT dialect speaks the Codex contract");
+    session
+        .send(user_request("hello"))
+        .await
+        .expect("send should succeed");
+    let frame = &script.sent_json()[0];
+    assert_eq!(frame["prompt_cache_key"], "thread-derived");
+    assert_eq!(
+        frame["client_metadata"],
+        json!({"session_id": "session-derived", "thread_id": "thread-derived"})
+    );
+}
