@@ -1,0 +1,3125 @@
+{
+  "header": {
+    "deliveries": [
+      {
+        "batch": 14,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 3
+        }
+      },
+      {
+        "batch": 15,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 3
+        }
+      },
+      {
+        "batch": 16,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 3
+        }
+      },
+      {
+        "batch": 17,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 18,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 25,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 27,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 3
+        }
+      },
+      {
+        "batch": 30,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 40,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 40,
+        "id": 0,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 41,
+        "id": 1,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 52,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 53,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 54,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 55,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 57,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 58,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 59,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 62,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 74,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 74,
+        "id": 2,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 75,
+        "id": 3,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 96,
+        "id": 4,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 97,
+        "id": 4,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 99,
+        "id": 4,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 108,
+        "id": 4,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 108,
+        "id": 4,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 109,
+        "id": 5,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 130,
+        "id": 6,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 131,
+        "id": 6,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 134,
+        "id": 6,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 144,
+        "id": 6,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 144,
+        "id": 6,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 146,
+        "id": 7,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 167,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 168,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 169,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 170,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 171,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 172,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 173,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 174,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 175,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 176,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 177,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 178,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 179,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 180,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 181,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 182,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 183,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 187,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 198,
+        "id": 8,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 198,
+        "id": 8,
+        "kind": {
+          "delivery": "outcome"
+        }
+      }
+    ],
+    "handlers": [
+      {
+        "key": "parity/model",
+        "family": {
+          "family": "completion",
+          "model": "parity",
+          "capabilities": {
+            "composes_native_output_with_tools": false
+          }
+        }
+      },
+      {
+        "key": "parity/tool#0",
+        "family": {
+          "family": "tool",
+          "name": "ping_empty",
+          "description": "Return EMPTY-OK. This tool takes no arguments.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      },
+      {
+        "key": "parity/tool#1",
+        "family": {
+          "family": "tool",
+          "name": "inspect_manifest",
+          "description": "Validate a nested deployment manifest.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "project": {
+                "type": "string"
+              },
+              "flags": {
+                "type": "object",
+                "properties": {
+                  "critical": {
+                    "type": "boolean"
+                  },
+                  "retries": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "critical",
+                  "retries"
+                ]
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "weight": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "weight"
+                  ]
+                }
+              },
+              "note": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "project",
+              "flags",
+              "steps",
+              "note"
+            ]
+          }
+        }
+      },
+      {
+        "key": "parity/tool#2",
+        "family": {
+          "family": "tool",
+          "name": "join_labels",
+          "description": "Join label strings with the requested separator.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "labels": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "separator": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "labels",
+              "separator"
+            ]
+          }
+        }
+      },
+      {
+        "key": "parity/tool#3",
+        "family": {
+          "family": "tool",
+          "name": "escape_echo",
+          "description": "Echo a string containing escaping-sensitive characters.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ]
+          }
+        }
+      }
+    ],
+    "signature": {
+      "parity/model": "completion",
+      "parity/tool#0": "tool",
+      "parity/tool#1": "tool",
+      "parity/tool#2": "tool",
+      "parity/tool#3": "tool"
+    },
+    "hooks": [],
+    "required": {},
+    "programs": {
+      "parity/run#0": {
+        "required": {
+          "parity/model": "completion",
+          "parity/tool#0": "tool",
+          "parity/tool#1": "tool",
+          "parity/tool#2": "tool",
+          "parity/tool#3": "tool"
+        },
+        "policy": 16132150053142680601
+      }
+    }
+  },
+  "records": [
+    {
+      "tool_output": null,
+      "id": 0,
+      "key": "parity/model",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a deterministic xAI tool orchestration test harness. Use the tools instead of inventing values. For the production-readiness scenario, call exactly one tool at a time in this order: 1. ping_empty with an empty JSON object. 2. inspect_manifest with project rig-xai, flags critical=true and retries=2, steps plan weight=1 and verify weight=2, and the exact note from the user. 3. join_labels with labels [north, beta gamma, quote:\"delta\", slash\\path] and separator |. 4. escape_echo with the exact escaped text from the user. After all tool results are available, answer in one short sentence that includes EMPTY-OK, MANIFEST-OK, LABELS-OK, and ESCAPE-OK."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Run the production-readiness scenario. The manifest note is `line one; line two says \"hello\" and path C:\\rig\\xai`. The escaped text is `Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃`."
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "ping_empty",
+              "description": "Return EMPTY-OK. This tool takes no arguments.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+              }
+            },
+            {
+              "name": "inspect_manifest",
+              "description": "Validate a nested deployment manifest.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "project": {
+                    "type": "string"
+                  },
+                  "flags": {
+                    "type": "object",
+                    "properties": {
+                      "critical": {
+                        "type": "boolean"
+                      },
+                      "retries": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "critical",
+                      "retries"
+                    ]
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "weight": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "weight"
+                      ]
+                    }
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "project",
+                  "flags",
+                  "steps",
+                  "note"
+                ]
+              }
+            },
+            {
+              "name": "join_labels",
+              "description": "Join label strings with the requested separator.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "labels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "separator": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "labels",
+                  "separator"
+                ]
+              }
+            },
+            {
+              "name": "escape_echo",
+              "description": "Echo a string containing escaping-sensitive characters.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            }
+          ],
+          "temperature": null,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": {
+            "parallel_tool_calls": false
+          },
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "reasoning",
+              "id": "rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+              "content": [
+                {
+                  "type": "summary",
+                  "content": "Running the production-readiness scenario.\n\nThe manifest note and escaped text are noted. The harness will call ping_empty with an empty JSON object first, then inspect_manifest for project rig-xai with critical=true, retries=2, plan weight=1, verify weight=2, and the exact note."
+                }
+              ],
+              "provider": "xai"
+            },
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0"
+              },
+              "provider": {
+                "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+                "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
+              },
+              "function": {
+                "name": "ping_empty",
+                "arguments": {}
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          ],
+          "usage": {
+            "input_tokens": 743,
+            "output_tokens": 391,
+            "total_tokens": 1134,
+            "cached_input_tokens": 192,
+            "reasoning_tokens": 385
+          },
+          "message_id": null,
+          "response_id": "abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "provider_request_id": "abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "finish_reason": "tool_calls",
+          "provider": "xai",
+          "model": "grok-4.3",
+          "raw": {
+            "usage": {
+              "input_tokens": 743,
+              "input_tokens_details": {
+                "cached_tokens": 192
+              },
+              "output_tokens": 391,
+              "output_tokens_details": {
+                "reasoning_tokens": 385
+              },
+              "total_tokens": 1134
+            },
+            "reasoning_metadata": {
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "response_id": "abf917ce-adad-9183-9e42-ec55cb27eb62",
+            "model": "grok-4.3"
+          }
+        }
+      },
+      "events": [
+        {
+          "event": "block_start",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "kind": {
+            "kind": "reasoning",
+            "provider_id": "rs_abf917ce-adad-9183-9e42-ec55cb27eb62"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": "Running the production-readiness"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": " scenario."
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": "\n\nThe manifest note "
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": "and escaped text are"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": " noted. The harness "
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": "will call ping_empty"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": " with an empty JSON "
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": "object first, then inspect_manifest"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": " for project rig-xai"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": " with critical=true,"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "delta": {
+            "delta": "reasoning",
+            "text": " retries=2, plan weight=1, verify weight=2, and the exact note."
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "end": {
+            "close": "reasoning",
+            "reasoning": {
+              "id": "rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+              "content": [
+                {
+                  "type": "summary",
+                  "content": "Running the production-readiness scenario.\n\nThe manifest note and escaped text are noted. The harness will call ping_empty with an empty JSON object first, then inspect_manifest for project rig-xai with critical=true, retries=2, plan weight=1, verify weight=2, and the exact note."
+                }
+              ]
+            },
+            "wire_sent": true
+          },
+          "block": {
+            "type": "reasoning",
+            "id": "rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+            "content": [
+              {
+                "type": "summary",
+                "content": "Running the production-readiness scenario.\n\nThe manifest note and escaped text are noted. The harness will call ping_empty with an empty JSON object first, then inspect_manifest for project rig-xai with critical=true, retries=2, plan weight=1, verify weight=2, and the exact note."
+              }
+            ]
+          }
+        },
+        {
+          "event": "block_start",
+          "id": "wire:fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0",
+          "kind": {
+            "kind": "tool_call"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0",
+          "delta": {
+            "delta": "tool_name",
+            "name": "ping_empty"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "{}"
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0",
+          "end": {
+            "close": "tool_call",
+            "tool_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0",
+            "name": "ping_empty",
+            "arguments": {},
+            "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+            "on_unparseable": "drop"
+          },
+          "block": {
+            "type": "toolcall",
+            "id": {
+              "origin": "explicit",
+              "id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0"
+            },
+            "provider": {
+              "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+              "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
+            },
+            "function": {
+              "name": "ping_empty",
+              "arguments": {}
+            },
+            "signature": null,
+            "additional_params": null
+          }
+        },
+        {
+          "event": "final",
+          "usage": {
+            "input_tokens": 743,
+            "output_tokens": 391,
+            "total_tokens": 1134,
+            "cached_input_tokens": 192,
+            "reasoning_tokens": 385
+          },
+          "finish_reason": "tool_calls",
+          "message_id": null,
+          "response_id": "abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "provider_request_id": "abf917ce-adad-9183-9e42-ec55cb27eb62",
+          "provider": "xai",
+          "model": "grok-4.3",
+          "raw": {
+            "usage": {
+              "input_tokens": 743,
+              "input_tokens_details": {
+                "cached_tokens": 192
+              },
+              "output_tokens": 391,
+              "output_tokens_details": {
+                "reasoning_tokens": 385
+              },
+              "total_tokens": 1134
+            },
+            "reasoning_metadata": {
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "response_id": "abf917ce-adad-9183-9e42-ec55cb27eb62",
+            "model": "grok-4.3"
+          }
+        }
+      ],
+      "scope": "parity/run#0"
+    },
+    {
+      "tool_output": {},
+      "id": 1,
+      "key": "parity/tool#0",
+      "kind": {
+        "effect": "tool_call",
+        "name": "ping_empty",
+        "args": "{}"
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "tool_result",
+          "result": {
+            "status": "success",
+            "value": [
+              {
+                "type": "text",
+                "text": "EMPTY-OK"
+              }
+            ]
+          }
+        }
+      },
+      "scope": "parity/run#0"
+    },
+    {
+      "tool_output": null,
+      "id": 2,
+      "key": "parity/model",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a deterministic xAI tool orchestration test harness. Use the tools instead of inventing values. For the production-readiness scenario, call exactly one tool at a time in this order: 1. ping_empty with an empty JSON object. 2. inspect_manifest with project rig-xai, flags critical=true and retries=2, steps plan weight=1 and verify weight=2, and the exact note from the user. 3. join_labels with labels [north, beta gamma, quote:\"delta\", slash\\path] and separator |. 4. escape_echo with the exact escaped text from the user. After all tool results are available, answer in one short sentence that includes EMPTY-OK, MANIFEST-OK, LABELS-OK, and ESCAPE-OK."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Run the production-readiness scenario. The manifest note is `line one; line two says \"hello\" and path C:\\rig\\xai`. The escaped text is `Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃`."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "reasoning",
+                  "id": "rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+                  "content": [
+                    {
+                      "type": "summary",
+                      "content": "Running the production-readiness scenario.\n\nThe manifest note and escaped text are noted. The harness will call ping_empty with an empty JSON object first, then inspect_manifest for project rig-xai with critical=true, retries=2, plan weight=1, verify weight=2, and the exact note."
+                    }
+                  ],
+                  "provider": "xai"
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0"
+                  },
+                  "provider": {
+                    "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+                    "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
+                  },
+                  "function": {
+                    "name": "ping_empty",
+                    "arguments": {}
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0"
+                  },
+                  "provider": {
+                    "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+                    "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
+                  },
+                  "name": "ping_empty",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "EMPTY-OK"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "ping_empty",
+              "description": "Return EMPTY-OK. This tool takes no arguments.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+              }
+            },
+            {
+              "name": "inspect_manifest",
+              "description": "Validate a nested deployment manifest.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "project": {
+                    "type": "string"
+                  },
+                  "flags": {
+                    "type": "object",
+                    "properties": {
+                      "critical": {
+                        "type": "boolean"
+                      },
+                      "retries": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "critical",
+                      "retries"
+                    ]
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "weight": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "weight"
+                      ]
+                    }
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "project",
+                  "flags",
+                  "steps",
+                  "note"
+                ]
+              }
+            },
+            {
+              "name": "join_labels",
+              "description": "Join label strings with the requested separator.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "labels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "separator": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "labels",
+                  "separator"
+                ]
+              }
+            },
+            {
+              "name": "escape_echo",
+              "description": "Echo a string containing escaping-sensitive characters.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            }
+          ],
+          "temperature": null,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": {
+            "parallel_tool_calls": false
+          },
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "reasoning",
+              "id": "rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+              "content": [
+                {
+                  "type": "summary",
+                  "content": "The production-readiness scenario requires calling exactly one tool at a time in a specific order.\n\nping_empty returned EMPTY-OK. Now calling inspect_manifest."
+                }
+              ],
+              "provider": "xai"
+            },
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1"
+              },
+              "provider": {
+                "call_id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1",
+                "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
+              },
+              "function": {
+                "name": "inspect_manifest",
+                "arguments": {
+                  "project": "rig-xai",
+                  "flags": {
+                    "critical": true,
+                    "retries": 2
+                  },
+                  "steps": [
+                    {
+                      "name": "plan",
+                      "weight": 1
+                    },
+                    {
+                      "name": "verify",
+                      "weight": 2
+                    }
+                  ],
+                  "note": "line one; line two says \"hello\" and path C:\\rig\\xai"
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          ],
+          "usage": {
+            "input_tokens": 757,
+            "output_tokens": 364,
+            "total_tokens": 1121,
+            "cached_input_tokens": 192,
+            "reasoning_tokens": 291
+          },
+          "message_id": null,
+          "response_id": "4ac551d1-6cc0-9773-8ad6-11abae114707",
+          "provider_request_id": "4ac551d1-6cc0-9773-8ad6-11abae114707",
+          "finish_reason": "tool_calls",
+          "provider": "xai",
+          "model": "grok-4.3",
+          "raw": {
+            "usage": {
+              "input_tokens": 757,
+              "input_tokens_details": {
+                "cached_tokens": 192
+              },
+              "output_tokens": 364,
+              "output_tokens_details": {
+                "reasoning_tokens": 291
+              },
+              "total_tokens": 1121
+            },
+            "reasoning_metadata": {
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "response_id": "4ac551d1-6cc0-9773-8ad6-11abae114707",
+            "model": "grok-4.3"
+          }
+        }
+      },
+      "events": [
+        {
+          "event": "block_start",
+          "id": "wire:rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+          "kind": {
+            "kind": "reasoning",
+            "provider_id": "rs_4ac551d1-6cc0-9773-8ad6-11abae114707"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+          "delta": {
+            "delta": "reasoning",
+            "text": "The production-readiness"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+          "delta": {
+            "delta": "reasoning",
+            "text": " scenario requires calling"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+          "delta": {
+            "delta": "reasoning",
+            "text": " exactly one tool at"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+          "delta": {
+            "delta": "reasoning",
+            "text": " a time in a specific order.\n\nping_empty returned EMPTY-OK. Now calling inspect_manifest."
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+          "end": {
+            "close": "reasoning",
+            "reasoning": {
+              "id": "rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+              "content": [
+                {
+                  "type": "summary",
+                  "content": "The production-readiness scenario requires calling exactly one tool at a time in a specific order.\n\nping_empty returned EMPTY-OK. Now calling inspect_manifest."
+                }
+              ]
+            },
+            "wire_sent": true
+          },
+          "block": {
+            "type": "reasoning",
+            "id": "rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+            "content": [
+              {
+                "type": "summary",
+                "content": "The production-readiness scenario requires calling exactly one tool at a time in a specific order.\n\nping_empty returned EMPTY-OK. Now calling inspect_manifest."
+              }
+            ]
+          }
+        },
+        {
+          "event": "block_start",
+          "id": "wire:fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0",
+          "kind": {
+            "kind": "tool_call"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0",
+          "delta": {
+            "delta": "tool_name",
+            "name": "inspect_manifest"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "{\"project\":\"rig-xai\",\"flags\":{\"critical\":true,\"retries\":2},\"steps\":[{\"name\":\"plan\",\"weight\":1},{\"name\":\"verify\",\"weight\":2}],\"note\":\"line one; line two says \\\"hello\\\" and path C:\\\\rig\\\\xai\"}"
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0",
+          "end": {
+            "close": "tool_call",
+            "tool_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0",
+            "name": "inspect_manifest",
+            "arguments": {
+              "project": "rig-xai",
+              "flags": {
+                "critical": true,
+                "retries": 2
+              },
+              "steps": [
+                {
+                  "name": "plan",
+                  "weight": 1
+                },
+                {
+                  "name": "verify",
+                  "weight": 2
+                }
+              ],
+              "note": "line one; line two says \"hello\" and path C:\\rig\\xai"
+            },
+            "call_id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1",
+            "on_unparseable": "drop"
+          },
+          "block": {
+            "type": "toolcall",
+            "id": {
+              "origin": "explicit",
+              "id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1"
+            },
+            "provider": {
+              "call_id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1",
+              "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
+            },
+            "function": {
+              "name": "inspect_manifest",
+              "arguments": {
+                "project": "rig-xai",
+                "flags": {
+                  "critical": true,
+                  "retries": 2
+                },
+                "steps": [
+                  {
+                    "name": "plan",
+                    "weight": 1
+                  },
+                  {
+                    "name": "verify",
+                    "weight": 2
+                  }
+                ],
+                "note": "line one; line two says \"hello\" and path C:\\rig\\xai"
+              }
+            },
+            "signature": null,
+            "additional_params": null
+          }
+        },
+        {
+          "event": "final",
+          "usage": {
+            "input_tokens": 757,
+            "output_tokens": 364,
+            "total_tokens": 1121,
+            "cached_input_tokens": 192,
+            "reasoning_tokens": 291
+          },
+          "finish_reason": "tool_calls",
+          "message_id": null,
+          "response_id": "4ac551d1-6cc0-9773-8ad6-11abae114707",
+          "provider_request_id": "4ac551d1-6cc0-9773-8ad6-11abae114707",
+          "provider": "xai",
+          "model": "grok-4.3",
+          "raw": {
+            "usage": {
+              "input_tokens": 757,
+              "input_tokens_details": {
+                "cached_tokens": 192
+              },
+              "output_tokens": 364,
+              "output_tokens_details": {
+                "reasoning_tokens": 291
+              },
+              "total_tokens": 1121
+            },
+            "reasoning_metadata": {
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "response_id": "4ac551d1-6cc0-9773-8ad6-11abae114707",
+            "model": "grok-4.3"
+          }
+        }
+      ],
+      "scope": "parity/run#0"
+    },
+    {
+      "tool_output": {},
+      "id": 3,
+      "key": "parity/tool#1",
+      "kind": {
+        "effect": "tool_call",
+        "name": "inspect_manifest",
+        "args": "{\"project\":\"rig-xai\",\"flags\":{\"critical\":true,\"retries\":2},\"steps\":[{\"name\":\"plan\",\"weight\":1},{\"name\":\"verify\",\"weight\":2}],\"note\":\"line one; line two says \\\"hello\\\" and path C:\\\\rig\\\\xai\"}"
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "tool_result",
+          "result": {
+            "status": "success",
+            "value": [
+              {
+                "type": "text",
+                "text": "MANIFEST-OK project=rig-xai steps=2 retries=2"
+              }
+            ]
+          }
+        }
+      },
+      "scope": "parity/run#0"
+    },
+    {
+      "tool_output": null,
+      "id": 4,
+      "key": "parity/model",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a deterministic xAI tool orchestration test harness. Use the tools instead of inventing values. For the production-readiness scenario, call exactly one tool at a time in this order: 1. ping_empty with an empty JSON object. 2. inspect_manifest with project rig-xai, flags critical=true and retries=2, steps plan weight=1 and verify weight=2, and the exact note from the user. 3. join_labels with labels [north, beta gamma, quote:\"delta\", slash\\path] and separator |. 4. escape_echo with the exact escaped text from the user. After all tool results are available, answer in one short sentence that includes EMPTY-OK, MANIFEST-OK, LABELS-OK, and ESCAPE-OK."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Run the production-readiness scenario. The manifest note is `line one; line two says \"hello\" and path C:\\rig\\xai`. The escaped text is `Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃`."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "reasoning",
+                  "id": "rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+                  "content": [
+                    {
+                      "type": "summary",
+                      "content": "Running the production-readiness scenario.\n\nThe manifest note and escaped text are noted. The harness will call ping_empty with an empty JSON object first, then inspect_manifest for project rig-xai with critical=true, retries=2, plan weight=1, verify weight=2, and the exact note."
+                    }
+                  ],
+                  "provider": "xai"
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0"
+                  },
+                  "provider": {
+                    "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+                    "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
+                  },
+                  "function": {
+                    "name": "ping_empty",
+                    "arguments": {}
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0"
+                  },
+                  "provider": {
+                    "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+                    "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
+                  },
+                  "name": "ping_empty",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "EMPTY-OK"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "reasoning",
+                  "id": "rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+                  "content": [
+                    {
+                      "type": "summary",
+                      "content": "The production-readiness scenario requires calling exactly one tool at a time in a specific order.\n\nping_empty returned EMPTY-OK. Now calling inspect_manifest."
+                    }
+                  ],
+                  "provider": "xai"
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1"
+                  },
+                  "provider": {
+                    "call_id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1",
+                    "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
+                  },
+                  "function": {
+                    "name": "inspect_manifest",
+                    "arguments": {
+                      "project": "rig-xai",
+                      "flags": {
+                        "critical": true,
+                        "retries": 2
+                      },
+                      "steps": [
+                        {
+                          "name": "plan",
+                          "weight": 1
+                        },
+                        {
+                          "name": "verify",
+                          "weight": 2
+                        }
+                      ],
+                      "note": "line one; line two says \"hello\" and path C:\\rig\\xai"
+                    }
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1"
+                  },
+                  "provider": {
+                    "call_id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1",
+                    "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
+                  },
+                  "name": "inspect_manifest",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "MANIFEST-OK project=rig-xai steps=2 retries=2"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "ping_empty",
+              "description": "Return EMPTY-OK. This tool takes no arguments.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+              }
+            },
+            {
+              "name": "inspect_manifest",
+              "description": "Validate a nested deployment manifest.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "project": {
+                    "type": "string"
+                  },
+                  "flags": {
+                    "type": "object",
+                    "properties": {
+                      "critical": {
+                        "type": "boolean"
+                      },
+                      "retries": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "critical",
+                      "retries"
+                    ]
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "weight": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "weight"
+                      ]
+                    }
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "project",
+                  "flags",
+                  "steps",
+                  "note"
+                ]
+              }
+            },
+            {
+              "name": "join_labels",
+              "description": "Join label strings with the requested separator.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "labels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "separator": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "labels",
+                  "separator"
+                ]
+              }
+            },
+            {
+              "name": "escape_echo",
+              "description": "Echo a string containing escaping-sensitive characters.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            }
+          ],
+          "temperature": null,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": {
+            "parallel_tool_calls": false
+          },
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2"
+              },
+              "provider": {
+                "call_id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2",
+                "item_id": "fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0"
+              },
+              "function": {
+                "name": "join_labels",
+                "arguments": {
+                  "labels": [
+                    "north",
+                    "beta gamma",
+                    "quote:\"delta\"",
+                    "slash\\path"
+                  ],
+                  "separator": "|"
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          ],
+          "usage": {
+            "input_tokens": 841,
+            "output_tokens": 55,
+            "total_tokens": 896,
+            "cached_input_tokens": 704,
+            "reasoning_tokens": 25
+          },
+          "message_id": null,
+          "response_id": "642b692e-5f38-94ea-baf9-e65f6317e3a6",
+          "provider_request_id": "642b692e-5f38-94ea-baf9-e65f6317e3a6",
+          "finish_reason": "tool_calls",
+          "provider": "xai",
+          "model": "grok-4.3",
+          "raw": {
+            "usage": {
+              "input_tokens": 841,
+              "input_tokens_details": {
+                "cached_tokens": 704
+              },
+              "output_tokens": 55,
+              "output_tokens_details": {
+                "reasoning_tokens": 25
+              },
+              "total_tokens": 896
+            },
+            "reasoning_metadata": {
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "response_id": "642b692e-5f38-94ea-baf9-e65f6317e3a6",
+            "model": "grok-4.3"
+          }
+        }
+      },
+      "events": [
+        {
+          "event": "block_start",
+          "id": "wire:fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0",
+          "kind": {
+            "kind": "tool_call"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0",
+          "delta": {
+            "delta": "tool_name",
+            "name": "join_labels"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "{\"labels\":[\"north\",\"beta gamma\",\"quote:\\\"delta\\\"\",\"slash\\\\path\"],\"separator\":\"|\"}"
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0",
+          "end": {
+            "close": "tool_call",
+            "tool_id": "fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0",
+            "name": "join_labels",
+            "arguments": {
+              "labels": [
+                "north",
+                "beta gamma",
+                "quote:\"delta\"",
+                "slash\\path"
+              ],
+              "separator": "|"
+            },
+            "call_id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2",
+            "on_unparseable": "drop"
+          },
+          "block": {
+            "type": "toolcall",
+            "id": {
+              "origin": "explicit",
+              "id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2"
+            },
+            "provider": {
+              "call_id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2",
+              "item_id": "fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0"
+            },
+            "function": {
+              "name": "join_labels",
+              "arguments": {
+                "labels": [
+                  "north",
+                  "beta gamma",
+                  "quote:\"delta\"",
+                  "slash\\path"
+                ],
+                "separator": "|"
+              }
+            },
+            "signature": null,
+            "additional_params": null
+          }
+        },
+        {
+          "event": "final",
+          "usage": {
+            "input_tokens": 841,
+            "output_tokens": 55,
+            "total_tokens": 896,
+            "cached_input_tokens": 704,
+            "reasoning_tokens": 25
+          },
+          "finish_reason": "tool_calls",
+          "message_id": null,
+          "response_id": "642b692e-5f38-94ea-baf9-e65f6317e3a6",
+          "provider_request_id": "642b692e-5f38-94ea-baf9-e65f6317e3a6",
+          "provider": "xai",
+          "model": "grok-4.3",
+          "raw": {
+            "usage": {
+              "input_tokens": 841,
+              "input_tokens_details": {
+                "cached_tokens": 704
+              },
+              "output_tokens": 55,
+              "output_tokens_details": {
+                "reasoning_tokens": 25
+              },
+              "total_tokens": 896
+            },
+            "reasoning_metadata": {
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "response_id": "642b692e-5f38-94ea-baf9-e65f6317e3a6",
+            "model": "grok-4.3"
+          }
+        }
+      ],
+      "scope": "parity/run#0"
+    },
+    {
+      "tool_output": {},
+      "id": 5,
+      "key": "parity/tool#2",
+      "kind": {
+        "effect": "tool_call",
+        "name": "join_labels",
+        "args": "{\"labels\":[\"north\",\"beta gamma\",\"quote:\\\"delta\\\"\",\"slash\\\\path\"],\"separator\":\"|\"}"
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "tool_result",
+          "result": {
+            "status": "success",
+            "value": [
+              {
+                "type": "text",
+                "text": "LABELS-OK north|beta gamma|quote:\"delta\"|slash\\path"
+              }
+            ]
+          }
+        }
+      },
+      "scope": "parity/run#0"
+    },
+    {
+      "tool_output": null,
+      "id": 6,
+      "key": "parity/model",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a deterministic xAI tool orchestration test harness. Use the tools instead of inventing values. For the production-readiness scenario, call exactly one tool at a time in this order: 1. ping_empty with an empty JSON object. 2. inspect_manifest with project rig-xai, flags critical=true and retries=2, steps plan weight=1 and verify weight=2, and the exact note from the user. 3. join_labels with labels [north, beta gamma, quote:\"delta\", slash\\path] and separator |. 4. escape_echo with the exact escaped text from the user. After all tool results are available, answer in one short sentence that includes EMPTY-OK, MANIFEST-OK, LABELS-OK, and ESCAPE-OK."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Run the production-readiness scenario. The manifest note is `line one; line two says \"hello\" and path C:\\rig\\xai`. The escaped text is `Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃`."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "reasoning",
+                  "id": "rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+                  "content": [
+                    {
+                      "type": "summary",
+                      "content": "Running the production-readiness scenario.\n\nThe manifest note and escaped text are noted. The harness will call ping_empty with an empty JSON object first, then inspect_manifest for project rig-xai with critical=true, retries=2, plan weight=1, verify weight=2, and the exact note."
+                    }
+                  ],
+                  "provider": "xai"
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0"
+                  },
+                  "provider": {
+                    "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+                    "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
+                  },
+                  "function": {
+                    "name": "ping_empty",
+                    "arguments": {}
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0"
+                  },
+                  "provider": {
+                    "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+                    "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
+                  },
+                  "name": "ping_empty",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "EMPTY-OK"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "reasoning",
+                  "id": "rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+                  "content": [
+                    {
+                      "type": "summary",
+                      "content": "The production-readiness scenario requires calling exactly one tool at a time in a specific order.\n\nping_empty returned EMPTY-OK. Now calling inspect_manifest."
+                    }
+                  ],
+                  "provider": "xai"
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1"
+                  },
+                  "provider": {
+                    "call_id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1",
+                    "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
+                  },
+                  "function": {
+                    "name": "inspect_manifest",
+                    "arguments": {
+                      "project": "rig-xai",
+                      "flags": {
+                        "critical": true,
+                        "retries": 2
+                      },
+                      "steps": [
+                        {
+                          "name": "plan",
+                          "weight": 1
+                        },
+                        {
+                          "name": "verify",
+                          "weight": 2
+                        }
+                      ],
+                      "note": "line one; line two says \"hello\" and path C:\\rig\\xai"
+                    }
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1"
+                  },
+                  "provider": {
+                    "call_id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1",
+                    "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
+                  },
+                  "name": "inspect_manifest",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "MANIFEST-OK project=rig-xai steps=2 retries=2"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2"
+                  },
+                  "provider": {
+                    "call_id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2",
+                    "item_id": "fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0"
+                  },
+                  "function": {
+                    "name": "join_labels",
+                    "arguments": {
+                      "labels": [
+                        "north",
+                        "beta gamma",
+                        "quote:\"delta\"",
+                        "slash\\path"
+                      ],
+                      "separator": "|"
+                    }
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2"
+                  },
+                  "provider": {
+                    "call_id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2",
+                    "item_id": "fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0"
+                  },
+                  "name": "join_labels",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "LABELS-OK north|beta gamma|quote:\"delta\"|slash\\path"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "ping_empty",
+              "description": "Return EMPTY-OK. This tool takes no arguments.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+              }
+            },
+            {
+              "name": "inspect_manifest",
+              "description": "Validate a nested deployment manifest.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "project": {
+                    "type": "string"
+                  },
+                  "flags": {
+                    "type": "object",
+                    "properties": {
+                      "critical": {
+                        "type": "boolean"
+                      },
+                      "retries": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "critical",
+                      "retries"
+                    ]
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "weight": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "weight"
+                      ]
+                    }
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "project",
+                  "flags",
+                  "steps",
+                  "note"
+                ]
+              }
+            },
+            {
+              "name": "join_labels",
+              "description": "Join label strings with the requested separator.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "labels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "separator": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "labels",
+                  "separator"
+                ]
+              }
+            },
+            {
+              "name": "escape_echo",
+              "description": "Echo a string containing escaping-sensitive characters.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            }
+          ],
+          "temperature": null,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": {
+            "parallel_tool_calls": false
+          },
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "call-ed7cdb07-668e-4992-89c6-1cd04fcaebea-3"
+              },
+              "provider": {
+                "call_id": "call-ed7cdb07-668e-4992-89c6-1cd04fcaebea-3",
+                "item_id": "fc_88072a89-fca1-93f5-8620-e986d0bdaa2b_0"
+              },
+              "function": {
+                "name": "escape_echo",
+                "arguments": {
+                  "text": "Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃"
+                }
+              },
+              "signature": null,
+              "additional_params": null
+            }
+          ],
+          "usage": {
+            "input_tokens": 890,
+            "output_tokens": 124,
+            "total_tokens": 1014,
+            "cached_input_tokens": 832,
+            "reasoning_tokens": 97
+          },
+          "message_id": null,
+          "response_id": "88072a89-fca1-93f5-8620-e986d0bdaa2b",
+          "provider_request_id": "88072a89-fca1-93f5-8620-e986d0bdaa2b",
+          "finish_reason": "tool_calls",
+          "provider": "xai",
+          "model": "grok-4.3",
+          "raw": {
+            "usage": {
+              "input_tokens": 890,
+              "input_tokens_details": {
+                "cached_tokens": 832
+              },
+              "output_tokens": 124,
+              "output_tokens_details": {
+                "reasoning_tokens": 97
+              },
+              "total_tokens": 1014
+            },
+            "reasoning_metadata": {
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "response_id": "88072a89-fca1-93f5-8620-e986d0bdaa2b",
+            "model": "grok-4.3"
+          }
+        }
+      },
+      "events": [
+        {
+          "event": "block_start",
+          "id": "wire:fc_88072a89-fca1-93f5-8620-e986d0bdaa2b_0",
+          "kind": {
+            "kind": "tool_call"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:fc_88072a89-fca1-93f5-8620-e986d0bdaa2b_0",
+          "delta": {
+            "delta": "tool_name",
+            "name": "escape_echo"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:fc_88072a89-fca1-93f5-8620-e986d0bdaa2b_0",
+          "delta": {
+            "delta": "tool_arguments",
+            "arguments": "{\"text\":\"Line 1\\nLine \\\"2\\\" with backslash \\\\ and unicode snowman ☃\"}"
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:fc_88072a89-fca1-93f5-8620-e986d0bdaa2b_0",
+          "end": {
+            "close": "tool_call",
+            "tool_id": "fc_88072a89-fca1-93f5-8620-e986d0bdaa2b_0",
+            "name": "escape_echo",
+            "arguments": {
+              "text": "Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃"
+            },
+            "call_id": "call-ed7cdb07-668e-4992-89c6-1cd04fcaebea-3",
+            "on_unparseable": "drop"
+          },
+          "block": {
+            "type": "toolcall",
+            "id": {
+              "origin": "explicit",
+              "id": "call-ed7cdb07-668e-4992-89c6-1cd04fcaebea-3"
+            },
+            "provider": {
+              "call_id": "call-ed7cdb07-668e-4992-89c6-1cd04fcaebea-3",
+              "item_id": "fc_88072a89-fca1-93f5-8620-e986d0bdaa2b_0"
+            },
+            "function": {
+              "name": "escape_echo",
+              "arguments": {
+                "text": "Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃"
+              }
+            },
+            "signature": null,
+            "additional_params": null
+          }
+        },
+        {
+          "event": "final",
+          "usage": {
+            "input_tokens": 890,
+            "output_tokens": 124,
+            "total_tokens": 1014,
+            "cached_input_tokens": 832,
+            "reasoning_tokens": 97
+          },
+          "finish_reason": "tool_calls",
+          "message_id": null,
+          "response_id": "88072a89-fca1-93f5-8620-e986d0bdaa2b",
+          "provider_request_id": "88072a89-fca1-93f5-8620-e986d0bdaa2b",
+          "provider": "xai",
+          "model": "grok-4.3",
+          "raw": {
+            "usage": {
+              "input_tokens": 890,
+              "input_tokens_details": {
+                "cached_tokens": 832
+              },
+              "output_tokens": 124,
+              "output_tokens_details": {
+                "reasoning_tokens": 97
+              },
+              "total_tokens": 1014
+            },
+            "reasoning_metadata": {
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "response_id": "88072a89-fca1-93f5-8620-e986d0bdaa2b",
+            "model": "grok-4.3"
+          }
+        }
+      ],
+      "scope": "parity/run#0"
+    },
+    {
+      "tool_output": {},
+      "id": 7,
+      "key": "parity/tool#3",
+      "kind": {
+        "effect": "tool_call",
+        "name": "escape_echo",
+        "args": "{\"text\":\"Line 1\\nLine \\\"2\\\" with backslash \\\\ and unicode snowman ☃\"}"
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "tool_result",
+          "result": {
+            "status": "success",
+            "value": [
+              {
+                "type": "text",
+                "text": "ESCAPE-OK Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃"
+              }
+            ]
+          }
+        }
+      },
+      "scope": "parity/run#0"
+    },
+    {
+      "tool_output": null,
+      "id": 8,
+      "key": "parity/model",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a deterministic xAI tool orchestration test harness. Use the tools instead of inventing values. For the production-readiness scenario, call exactly one tool at a time in this order: 1. ping_empty with an empty JSON object. 2. inspect_manifest with project rig-xai, flags critical=true and retries=2, steps plan weight=1 and verify weight=2, and the exact note from the user. 3. join_labels with labels [north, beta gamma, quote:\"delta\", slash\\path] and separator |. 4. escape_echo with the exact escaped text from the user. After all tool results are available, answer in one short sentence that includes EMPTY-OK, MANIFEST-OK, LABELS-OK, and ESCAPE-OK."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Run the production-readiness scenario. The manifest note is `line one; line two says \"hello\" and path C:\\rig\\xai`. The escaped text is `Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃`."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "reasoning",
+                  "id": "rs_abf917ce-adad-9183-9e42-ec55cb27eb62",
+                  "content": [
+                    {
+                      "type": "summary",
+                      "content": "Running the production-readiness scenario.\n\nThe manifest note and escaped text are noted. The harness will call ping_empty with an empty JSON object first, then inspect_manifest for project rig-xai with critical=true, retries=2, plan weight=1, verify weight=2, and the exact note."
+                    }
+                  ],
+                  "provider": "xai"
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0"
+                  },
+                  "provider": {
+                    "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+                    "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
+                  },
+                  "function": {
+                    "name": "ping_empty",
+                    "arguments": {}
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0"
+                  },
+                  "provider": {
+                    "call_id": "call-6c3ed923-d119-47b7-a501-9dae090cc04f-0",
+                    "item_id": "fc_abf917ce-adad-9183-9e42-ec55cb27eb62_0"
+                  },
+                  "name": "ping_empty",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "EMPTY-OK"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "reasoning",
+                  "id": "rs_4ac551d1-6cc0-9773-8ad6-11abae114707",
+                  "content": [
+                    {
+                      "type": "summary",
+                      "content": "The production-readiness scenario requires calling exactly one tool at a time in a specific order.\n\nping_empty returned EMPTY-OK. Now calling inspect_manifest."
+                    }
+                  ],
+                  "provider": "xai"
+                },
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1"
+                  },
+                  "provider": {
+                    "call_id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1",
+                    "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
+                  },
+                  "function": {
+                    "name": "inspect_manifest",
+                    "arguments": {
+                      "project": "rig-xai",
+                      "flags": {
+                        "critical": true,
+                        "retries": 2
+                      },
+                      "steps": [
+                        {
+                          "name": "plan",
+                          "weight": 1
+                        },
+                        {
+                          "name": "verify",
+                          "weight": 2
+                        }
+                      ],
+                      "note": "line one; line two says \"hello\" and path C:\\rig\\xai"
+                    }
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1"
+                  },
+                  "provider": {
+                    "call_id": "call-cc3b5fc3-f003-46fa-8f5e-06b82ba8d788-1",
+                    "item_id": "fc_4ac551d1-6cc0-9773-8ad6-11abae114707_0"
+                  },
+                  "name": "inspect_manifest",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "MANIFEST-OK project=rig-xai steps=2 retries=2"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2"
+                  },
+                  "provider": {
+                    "call_id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2",
+                    "item_id": "fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0"
+                  },
+                  "function": {
+                    "name": "join_labels",
+                    "arguments": {
+                      "labels": [
+                        "north",
+                        "beta gamma",
+                        "quote:\"delta\"",
+                        "slash\\path"
+                      ],
+                      "separator": "|"
+                    }
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2"
+                  },
+                  "provider": {
+                    "call_id": "call-c463f29d-580c-4878-9e8f-c0994284225e-2",
+                    "item_id": "fc_642b692e-5f38-94ea-baf9-e65f6317e3a6_0"
+                  },
+                  "name": "join_labels",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "LABELS-OK north|beta gamma|quote:\"delta\"|slash\\path"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call-ed7cdb07-668e-4992-89c6-1cd04fcaebea-3"
+                  },
+                  "provider": {
+                    "call_id": "call-ed7cdb07-668e-4992-89c6-1cd04fcaebea-3",
+                    "item_id": "fc_88072a89-fca1-93f5-8620-e986d0bdaa2b_0"
+                  },
+                  "function": {
+                    "name": "escape_echo",
+                    "arguments": {
+                      "text": "Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃"
+                    }
+                  },
+                  "signature": null,
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call-ed7cdb07-668e-4992-89c6-1cd04fcaebea-3"
+                  },
+                  "provider": {
+                    "call_id": "call-ed7cdb07-668e-4992-89c6-1cd04fcaebea-3",
+                    "item_id": "fc_88072a89-fca1-93f5-8620-e986d0bdaa2b_0"
+                  },
+                  "name": "escape_echo",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "ESCAPE-OK Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "ping_empty",
+              "description": "Return EMPTY-OK. This tool takes no arguments.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+              }
+            },
+            {
+              "name": "inspect_manifest",
+              "description": "Validate a nested deployment manifest.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "project": {
+                    "type": "string"
+                  },
+                  "flags": {
+                    "type": "object",
+                    "properties": {
+                      "critical": {
+                        "type": "boolean"
+                      },
+                      "retries": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "critical",
+                      "retries"
+                    ]
+                  },
+                  "steps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "weight": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "weight"
+                      ]
+                    }
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "project",
+                  "flags",
+                  "steps",
+                  "note"
+                ]
+              }
+            },
+            {
+              "name": "join_labels",
+              "description": "Join label strings with the requested separator.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "labels": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "separator": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "labels",
+                  "separator"
+                ]
+              }
+            },
+            {
+              "name": "escape_echo",
+              "description": "Echo a string containing escaping-sensitive characters.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            }
+          ],
+          "temperature": null,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": {
+            "parallel_tool_calls": false
+          },
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "text",
+              "text": "Production readiness complete: EMPTY-OK MANIFEST-OK LABELS-OK ESCAPE-OK."
+            }
+          ],
+          "usage": {
+            "input_tokens": 944,
+            "output_tokens": 279,
+            "total_tokens": 1223,
+            "cached_input_tokens": 192,
+            "reasoning_tokens": 259
+          },
+          "message_id": "msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "response_id": "02c3b20b-920e-9b19-b525-25cc4643076c",
+          "provider_request_id": "02c3b20b-920e-9b19-b525-25cc4643076c",
+          "finish_reason": "stop",
+          "provider": "xai",
+          "model": "grok-4.3",
+          "raw": {
+            "usage": {
+              "input_tokens": 944,
+              "input_tokens_details": {
+                "cached_tokens": 192
+              },
+              "output_tokens": 279,
+              "output_tokens_details": {
+                "reasoning_tokens": 259
+              },
+              "total_tokens": 1223
+            },
+            "reasoning_metadata": {
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "message_id": "msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+            "response_id": "02c3b20b-920e-9b19-b525-25cc4643076c",
+            "model": "grok-4.3"
+          }
+        }
+      },
+      "events": [
+        {
+          "event": "block_start",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "kind": {
+            "kind": "text"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "Production"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": " readiness"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": " complete"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": ":"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": " EMPTY"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "-"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "OK"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": " MAN"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "IFEST"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "-"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "OK"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": " LABEL"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "S"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "-"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "OK"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": " ESC"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "APE"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "-"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "OK"
+          }
+        },
+        {
+          "event": "block_delta",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "delta": {
+            "delta": "text",
+            "text": "."
+          }
+        },
+        {
+          "event": "block_start",
+          "id": "wire:msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "kind": {
+            "kind": "message"
+          }
+        },
+        {
+          "event": "final",
+          "usage": {
+            "input_tokens": 944,
+            "output_tokens": 279,
+            "total_tokens": 1223,
+            "cached_input_tokens": 192,
+            "reasoning_tokens": 259
+          },
+          "finish_reason": "stop",
+          "message_id": "msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+          "response_id": "02c3b20b-920e-9b19-b525-25cc4643076c",
+          "provider_request_id": "02c3b20b-920e-9b19-b525-25cc4643076c",
+          "provider": "xai",
+          "model": "grok-4.3",
+          "raw": {
+            "usage": {
+              "input_tokens": 944,
+              "input_tokens_details": {
+                "cached_tokens": 192
+              },
+              "output_tokens": 279,
+              "output_tokens_details": {
+                "reasoning_tokens": 259
+              },
+              "total_tokens": 1223
+            },
+            "reasoning_metadata": {
+              "effort": null,
+              "summary": null
+            },
+            "status": "completed",
+            "message_id": "msg_02c3b20b-920e-9b19-b525-25cc4643076c",
+            "response_id": "02c3b20b-920e-9b19-b525-25cc4643076c",
+            "model": "grok-4.3"
+          }
+        }
+      ],
+      "scope": "parity/run#0"
+    }
+  ]
+}

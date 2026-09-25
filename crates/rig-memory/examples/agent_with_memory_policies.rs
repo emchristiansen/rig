@@ -14,10 +14,11 @@
 
 use anyhow::Result;
 use rig_agent::prelude::*;
-use rig_core::client::ProviderClient;
 use rig_core::completion::Message;
 use rig_core::providers::openai;
+use rig_core::providers::openai::OpenAI;
 use rig_memory::{InMemoryConversationMemory, IntoFilter, SlidingWindowMemory, TokenWindowMemory};
+use rig_reqwest::prelude::*;
 
 fn approx_token_count(message: &Message) -> usize {
     let text = match message {
@@ -44,7 +45,7 @@ fn approx_token_count(message: &Message) -> usize {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client = openai::Client::from_env()?;
+    let client = OpenAI::from_env()?.bound()?;
 
     let sliding_memory = InMemoryConversationMemory::new()
         .with_filter(SlidingWindowMemory::last_messages(20).into_filter());
@@ -58,7 +59,8 @@ async fn main() -> Result<()> {
     let reply = sliding_agent
         .prompt("Remember: my favorite color is teal.")
         .conversation("alice")
-        .await?;
+        .await?
+        .output;
     println!("[sliding] {reply}");
 
     let token_memory = InMemoryConversationMemory::new()
@@ -73,7 +75,8 @@ async fn main() -> Result<()> {
     let reply = token_agent
         .prompt("Plan a 3-day trip to Kyoto.")
         .conversation("alice")
-        .await?;
+        .await?
+        .output;
     println!("[token]   {reply}");
 
     Ok(())

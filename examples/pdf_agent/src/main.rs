@@ -1,14 +1,13 @@
 use anyhow::{Context, Result};
-use rig::client::Nothing;
 use rig::integrations::cli_chatbot::ChatBotBuilder;
 use rig::prelude::*;
-use rig::providers::ollama;
+use rig::providers::ollama::wire::Ollama;
 use rig::{
     Embed, embeddings::EmbeddingsBuilder, loaders::PdfFileLoader,
     vector_store::in_memory_store::InMemoryVectorStore,
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::Path;
 
 #[derive(Embed, Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 struct Document {
@@ -17,7 +16,7 @@ struct Document {
     content: String,
 }
 
-fn load_pdf(path: PathBuf) -> Result<Vec<String>> {
+fn load_pdf(path: &Path) -> Result<Vec<String>> {
     const CHUNK_SIZE: usize = 2000;
     let content_chunks = PdfFileLoader::with_glob(path.to_str().context("Invalid path")?)?
         .read()
@@ -54,21 +53,21 @@ fn load_pdf(path: PathBuf) -> Result<Vec<String>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize Ollama client
-    // because Ollama is local and does not require an api key, we pass in `Nothing`
-    let client = ollama::Client::builder()
-        .api_key(Nothing)
-        .base_url("http://localhost:11434/v1")
-        .build()?;
+    // Initialize the Ollama provider
+    // because Ollama is local and does not require an api key, we leave the
+    // credential unset
+    let client = Ollama::new()
+        .with_base_url("http://localhost:11434/v1")
+        .bound()?;
 
     // Load PDFs using Rig's built-in PDF loader
     let documents_dir = std::env::current_dir()?.join("examples/documents");
     let pdf_chunks =
-        load_pdf(documents_dir.join("deepseek_r1.pdf")).context("Failed to load pdf documents")?;
+        load_pdf(&documents_dir.join("deepseek_r1.pdf")).context("Failed to load pdf documents")?;
     println!("Successfully loaded and chunked PDF documents");
 
     // Create embedding model
-    let model = client.embedding_model("bge-m3");
+    let model = client.embedding("bge-m3", None);
 
     // Create embeddings builder
     let mut builder = EmbeddingsBuilder::new(model.clone());

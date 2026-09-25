@@ -1,15 +1,11 @@
-// ================================================================
-//! Together AI Completion Integration
-//! From [Together AI Reference](https://docs.together.ai/docs/chat-overview)
-// ================================================================
-
-use crate::providers::openai;
-
-use super::client::TogetherExt;
-
-// ================================================================
-// Together Completion Models
-// ================================================================
+//! Together AI's completion model identifiers.
+//!
+//! ```no_run
+//! use rig_core::providers::{together, openai::wire::{OpenAI, TOGETHER}};
+//! let wire = OpenAI::from_env_with(&TOGETHER)?
+//!     .chat(together::MIXTRAL_8X7B_INSTRUCT_V0_1);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 pub const YI_34B_CHAT: &str = "zero-one-ai/Yi-34B-Chat";
 pub const OLMO_7B_INSTRUCT: &str = "allenai/OLMo-7B-Instruct";
@@ -115,92 +111,3 @@ pub const TOPPY_M_7B: &str = "Undi95/Toppy-M-7B";
 pub const SOLAR_10_7B_INSTRUCT_V1: &str = "upstage/SOLAR-10.7B-Instruct-v1.0";
 pub const SOLAR_10_7B_INSTRUCT_V1_INT4: &str = "togethercomputer/SOLAR-10.7B-Instruct-v1.0-int4";
 pub const WIZARDLM_13B_V1_2: &str = "WizardLM/WizardLM-13B-V1.2";
-
-// =================================================================
-// Rig Implementation Types
-// =================================================================
-
-/// Together AI completion model, driven by the shared OpenAI Chat Completions path.
-pub type CompletionModel<H = reqwest::Client> =
-    openai::completion::GenericCompletionModel<TogetherExt, H>;
-
-#[cfg(test)]
-mod tests {
-    use crate::client::CompletionClient;
-    use crate::completion::{CompletionError, CompletionModel};
-    use crate::message;
-    use crate::providers::openai::completion::{
-        CompletionRequest as OpenAICompletionRequest, OpenAIRequestParams,
-    };
-    use crate::test_utils::RecordingHttpClient;
-
-    use super::super::client::Client;
-
-    #[tokio::test]
-    async fn completion_preserves_raw_provider_error_json_on_api_error_envelope() {
-        let body = r#"{"error":"model unavailable","code":"model_overloaded"}"#;
-        let http_client =
-            RecordingHttpClient::with_error_response(http::StatusCode::ACCEPTED, body);
-        let client = Client::builder()
-            .api_key("test-key")
-            .http_client(http_client)
-            .build()
-            .expect("build client");
-        let model = client.completion_model("meta-llama/Meta-Llama-3-70B-Instruct-Turbo");
-        let request = model.completion_request("hello").build();
-
-        let error = model
-            .completion(request)
-            .await
-            .expect_err("completion should fail with provider error envelope");
-
-        match &error {
-            CompletionError::ProviderResponse(stored) => {
-                assert_eq!(stored.body, body);
-                assert_eq!(stored.status, Some(http::StatusCode::ACCEPTED));
-                assert_eq!(error.provider_response_body(), Some(body));
-                assert_eq!(
-                    error.provider_response_status(),
-                    Some(http::StatusCode::ACCEPTED)
-                );
-                let json = error
-                    .provider_response_json()
-                    .expect("raw body should be valid JSON")
-                    .expect("parsed JSON should be present");
-                assert_eq!(json["code"], "model_overloaded");
-                assert_eq!(json["error"], "model unavailable");
-            }
-            other => panic!("expected ProviderResponse, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn together_request_conversion_errors_when_all_messages_are_filtered() {
-        let request = crate::completion::CompletionRequest {
-            preamble: None,
-            chat_history: vec![message::Message::Assistant {
-                id: None,
-                content: vec![message::AssistantContent::reasoning("hidden")],
-            }],
-            documents: vec![],
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            model: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        };
-
-        let result = OpenAICompletionRequest::try_from(OpenAIRequestParams {
-            model: "meta-llama/test-model".to_string(),
-            request,
-            strict_tools: false,
-            tool_result_array_content: false,
-            supports_response_format: false,
-            supports_tools: true,
-        });
-        assert!(matches!(result, Err(CompletionError::RequestError(_))));
-    }
-}

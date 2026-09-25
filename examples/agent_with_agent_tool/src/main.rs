@@ -1,6 +1,7 @@
 use anyhow::Result;
 use rig::prelude::*;
-use rig::{completion::Prompt, providers, tool::Tool};
+use rig::providers::openai::OpenAI;
+use rig::{providers, tool::Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -102,8 +103,8 @@ async fn main() -> Result<(), anyhow::Error> {
         .with_target(false)
         .init();
 
-    // Create OpenAI client
-    let openai_client = providers::openai::Client::from_env()?;
+    // Bind the OpenAI Responses API to the default transport
+    let openai_client = OpenAI::from_env()?.bound()?;
 
     // Create agent with a single context prompt and two tools
     let calculator_agent = openai_client
@@ -129,7 +130,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     println!(
         "OpenAI Agent-Using Agent: {}",
-        agent_using_agent.prompt("Calculate 2 - 5").await?
+        agent_using_agent.prompt("Calculate 2 - 5").await?.output
     );
 
     Ok(())

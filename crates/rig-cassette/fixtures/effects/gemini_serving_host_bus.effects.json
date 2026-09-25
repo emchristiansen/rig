@@ -1,0 +1,373 @@
+{
+  "header": {
+    "run_spec": 9072754608376111302,
+    "handlers": [
+      {
+        "key": "golden/model:default",
+        "family": {
+          "family": "completion",
+          "model": "default",
+          "capabilities": {
+            "composes_native_output_with_tools": false
+          }
+        }
+      },
+      {
+        "key": "golden/tool:add#0",
+        "family": {
+          "family": "tool",
+          "name": "add",
+          "description": "Add x and y together",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number",
+                "description": "The first number to add"
+              },
+              "y": {
+                "type": "number",
+                "description": "The second number to add"
+              }
+            },
+            "required": [
+              "x",
+              "y"
+            ]
+          }
+        }
+      }
+    ],
+    "signature": {
+      "golden/model:default": "completion",
+      "golden/tool:add#0": "tool"
+    },
+    "hooks": [],
+    "required": {
+      "golden/model:default": "completion",
+      "golden/tool:add#0": "tool"
+    }
+  },
+  "records": [
+    {
+      "tool_output": null,
+      "id": 1,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a calculator here to help the user perform arithmetic operations. Use the tools provided to answer the user's question."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Use the add tool to add 17 and 25, then reply with just the number."
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "add",
+              "description": "Add x and y together",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "description": "The first number to add"
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "The second number to add"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ]
+              }
+            }
+          ],
+          "temperature": 0.0,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": false
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "toolcall",
+              "id": {
+                "origin": "explicit",
+                "id": "call_296835"
+              },
+              "provider": {
+                "call_id": "call_296835"
+              },
+              "function": {
+                "name": "add",
+                "arguments": {
+                  "x": 17,
+                  "y": 25
+                }
+              },
+              "signature": "EqMCCqACAWkUfRPXxP/Y2ci83dKIA7tKkN0/vuXiWy7luGzzm3qkDYIcGOor27i6AP/z4+atiiXqHFAUcYSwaChOjlxncTVBlRAPjYnIUYV4E2FEl2Yz3hr16C6fF2EUSqvXvolDLYrCd7bKnXnGwPH9Iuxwq0U+eY0qOtp3DeimLUej9QDjuGsXDnzlsI/3AKWSRhcWo7KrvKIN+CQDP6PUbtBLA6NnoY21oPbE5yy4Vid8u4m4V+SWNGGZ8mx1F5jQQPTIcTPqIeXp3kS8gvHia1NyjnSTKqaMSLzT1zXsa0soSaq5ihzHiZ6BXc1fWVt9TwzNThVQqD8CgpP/EFeAv87esvrO7HAitQ3/NAVeRh4Lf50M7MYhf/ftgUpC5NhW3Qu4",
+              "additional_params": null
+            }
+          ],
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 18,
+            "total_tokens": 198,
+            "reasoning_tokens": 60
+          },
+          "message_id": null,
+          "response_id": "tK2yao7SDYjZqtsPu-PO6AM",
+          "finish_reason": "tool_calls",
+          "provider": "gcp.gemini",
+          "model": "gemini-3-flash-preview",
+          "raw": {
+            "candidates": [
+              {
+                "content": {
+                  "parts": [
+                    {
+                      "functionCall": {
+                        "args": {
+                          "x": 17,
+                          "y": 25
+                        },
+                        "id": "call_296835",
+                        "name": "add"
+                      },
+                      "thoughtSignature": "EqMCCqACAWkUfRPXxP/Y2ci83dKIA7tKkN0/vuXiWy7luGzzm3qkDYIcGOor27i6AP/z4+atiiXqHFAUcYSwaChOjlxncTVBlRAPjYnIUYV4E2FEl2Yz3hr16C6fF2EUSqvXvolDLYrCd7bKnXnGwPH9Iuxwq0U+eY0qOtp3DeimLUej9QDjuGsXDnzlsI/3AKWSRhcWo7KrvKIN+CQDP6PUbtBLA6NnoY21oPbE5yy4Vid8u4m4V+SWNGGZ8mx1F5jQQPTIcTPqIeXp3kS8gvHia1NyjnSTKqaMSLzT1zXsa0soSaq5ihzHiZ6BXc1fWVt9TwzNThVQqD8CgpP/EFeAv87esvrO7HAitQ3/NAVeRh4Lf50M7MYhf/ftgUpC5NhW3Qu4"
+                    }
+                  ],
+                  "role": "model"
+                },
+                "finishMessage": "Model generated function call(s).",
+                "finishReason": "STOP",
+                "index": 0
+              }
+            ],
+            "modelVersion": "gemini-3-flash-preview",
+            "responseId": "tK2yao7SDYjZqtsPu-PO6AM",
+            "usageMetadata": {
+              "candidatesTokenCount": 18,
+              "promptTokenCount": 120,
+              "promptTokensDetails": [
+                {
+                  "modality": "TEXT",
+                  "tokenCount": 120
+                }
+              ],
+              "serviceTier": "standard",
+              "thoughtsTokenCount": 60,
+              "totalTokenCount": 198
+            }
+          }
+        }
+      }
+    },
+    {
+      "tool_output": {},
+      "id": 2,
+      "key": "golden/tool:add#0",
+      "kind": {
+        "effect": "tool_call",
+        "name": "add",
+        "args": "{\"x\":17,\"y\":25}"
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "tool_result",
+          "result": {
+            "status": "success",
+            "value": [
+              {
+                "type": "json",
+                "value": 42
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "tool_output": null,
+      "id": 3,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a calculator here to help the user perform arithmetic operations. Use the tools provided to answer the user's question."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Use the add tool to add 17 and 25, then reply with just the number."
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "id": null,
+              "content": [
+                {
+                  "type": "toolcall",
+                  "id": {
+                    "origin": "explicit",
+                    "id": "call_296835"
+                  },
+                  "provider": {
+                    "call_id": "call_296835"
+                  },
+                  "function": {
+                    "name": "add",
+                    "arguments": {
+                      "x": 17,
+                      "y": 25
+                    }
+                  },
+                  "signature": "EqMCCqACAWkUfRPXxP/Y2ci83dKIA7tKkN0/vuXiWy7luGzzm3qkDYIcGOor27i6AP/z4+atiiXqHFAUcYSwaChOjlxncTVBlRAPjYnIUYV4E2FEl2Yz3hr16C6fF2EUSqvXvolDLYrCd7bKnXnGwPH9Iuxwq0U+eY0qOtp3DeimLUej9QDjuGsXDnzlsI/3AKWSRhcWo7KrvKIN+CQDP6PUbtBLA6NnoY21oPbE5yy4Vid8u4m4V+SWNGGZ8mx1F5jQQPTIcTPqIeXp3kS8gvHia1NyjnSTKqaMSLzT1zXsa0soSaq5ihzHiZ6BXc1fWVt9TwzNThVQqD8CgpP/EFeAv87esvrO7HAitQ3/NAVeRh4Lf50M7MYhf/ftgUpC5NhW3Qu4",
+                  "additional_params": null
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "toolresult",
+                  "call": {
+                    "origin": "explicit",
+                    "id": "call_296835"
+                  },
+                  "provider": {
+                    "call_id": "call_296835"
+                  },
+                  "name": "add",
+                  "answers": "function",
+                  "content": [
+                    {
+                      "type": "json",
+                      "value": 42
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [
+            {
+              "name": "add",
+              "description": "Add x and y together",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number",
+                    "description": "The first number to add"
+                  },
+                  "y": {
+                    "type": "number",
+                    "description": "The second number to add"
+                  }
+                },
+                "required": [
+                  "x",
+                  "y"
+                ]
+              }
+            }
+          ],
+          "temperature": 0.0,
+          "max_tokens": null,
+          "tool_choice": null,
+          "additional_params": null,
+          "output_schema": null
+        },
+        "stream": false
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "text",
+              "text": "42",
+              "additional_params": {
+                "gemini": {
+                  "thoughtSignature": "Eq0BCqoBAWkUfRPdvqagSyCl+jzth2WMs62wKU2illzQepYogQRlAuoX89PkknVqgdgft0EFnlKzRd8OPKaZ+Q+Hkb0iEysRb2nYNAZnSHs/EPOOoMdn0I9nIwfhdcnTuaH9javk3VPdfA71EHrl0oyE/ehpHUPmaw9+stMR25JTmi0zjWpzP9G22kvIFVhGSyNcu4NnkZvbTFxcIYksH1waiQv4jmmN6+bmqqsEwRw="
+                }
+              }
+            }
+          ],
+          "usage": {
+            "input_tokens": 209,
+            "output_tokens": 2,
+            "total_tokens": 228,
+            "reasoning_tokens": 17
+          },
+          "message_id": null,
+          "response_id": "ta2yasylA5edqtsPw4Cy6Ag",
+          "finish_reason": "stop",
+          "provider": "gcp.gemini",
+          "model": "gemini-3-flash-preview",
+          "raw": {
+            "candidates": [
+              {
+                "content": {
+                  "parts": [
+                    {
+                      "text": "42",
+                      "thoughtSignature": "Eq0BCqoBAWkUfRPdvqagSyCl+jzth2WMs62wKU2illzQepYogQRlAuoX89PkknVqgdgft0EFnlKzRd8OPKaZ+Q+Hkb0iEysRb2nYNAZnSHs/EPOOoMdn0I9nIwfhdcnTuaH9javk3VPdfA71EHrl0oyE/ehpHUPmaw9+stMR25JTmi0zjWpzP9G22kvIFVhGSyNcu4NnkZvbTFxcIYksH1waiQv4jmmN6+bmqqsEwRw="
+                    }
+                  ],
+                  "role": "model"
+                },
+                "finishReason": "STOP",
+                "index": 0
+              }
+            ],
+            "modelVersion": "gemini-3-flash-preview",
+            "responseId": "ta2yasylA5edqtsPw4Cy6Ag",
+            "usageMetadata": {
+              "candidatesTokenCount": 2,
+              "promptTokenCount": 209,
+              "promptTokensDetails": [
+                {
+                  "modality": "TEXT",
+                  "tokenCount": 209
+                }
+              ],
+              "serviceTier": "standard",
+              "thoughtsTokenCount": 17,
+              "totalTokenCount": 228
+            }
+          }
+        }
+      }
+    }
+  ]
+}

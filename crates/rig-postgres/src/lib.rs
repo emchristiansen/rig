@@ -1,14 +1,11 @@
-//! PostgreSQL and pgvector integration for Rig.
+//! PostgreSQL and pgvector vector store for Rig.
 //!
-//! This crate provides [`PostgresVectorStore`], a Rig vector store backed by a
-//! PostgreSQL table with a `pgvector` embedding column. It supports the distance
-//! functions represented by [`PgVectorDistanceFunction`] and query filters via
-//! [`PgSearchFilter`].
-//!
-//! The root `rig` facade re-exports this crate as `rig::postgres` when the
-//! `postgres` feature is enabled.
+//! [`PostgresVectorStore`] searches a table holding a `pgvector` embedding
+//! column using a [`PgVectorDistanceFunction`] and optional [`PgSearchFilter`]
+//! conditions. The `rig` facade re-exports this crate as `rig::postgres` under
+//! the `postgres` feature.
 
-use std::{fmt::Display, ops::RangeInclusive};
+use std::{fmt::Display, fmt::Write as _, ops::RangeInclusive};
 
 use rig_core::{
     Embed,
@@ -17,27 +14,24 @@ use rig_core::{
         InsertDocuments, VectorStoreError, VectorStoreIndex,
         request::{SearchFilter, SqlCondition, VectorSearchRequest},
     },
+    wasm_compat::WasmCompatSend,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, postgres::PgArguments, query::QueryAs};
 use uuid::Uuid;
 
-pub struct PostgresVectorStore<Model: EmbeddingModel> {
-    model: Model,
+/// Vector store over a Postgres table. Queries are embedded with the same model
+/// `M` that populated the table, so results are meaningless under another model.
+pub struct PostgresVectorStore<M> {
+    model: M,
     pg_pool: PgPool,
     documents_table: String,
     distance_function: PgVectorDistanceFunction,
 }
 
-/* PgVector supported distances
-<-> - L2 distance
-<#> - (negative) inner product
-<=> - cosine distance
-<+> - L1 distance (added in 0.7.0)
-<~> - Hamming distance (binary vectors, added in 0.7.0)
-<%> - Jaccard distance (binary vectors, added in 0.7.0)
- */
+/// pgvector distance operators. `Hamming` and `Jaccard` apply to binary vectors,
+/// and all operators except L2, inner product, and cosine require pgvector 0.7.
 pub enum PgVectorDistanceFunction {
     L2,
     InnerProduct,
@@ -60,13 +54,29 @@ impl Display for PgVectorDistanceFunction {
     }
 }
 
-/// Placeholder token emitted for every bind parameter. `search_query` rewrites
-/// each occurrence into its numbered form (`$3`, `$4`, ...), so every constructor
-/// below must use this token and nothing else — a stray `?` would reach Postgres
-/// verbatim.
+impl PgVectorDistanceFunction {
+    /// Builds a SQL expression increasing with similarity so a minimum-similarity
+    /// threshold applies as `score >= $n`. `embedding` and `query` are spliced
+    /// verbatim and must not carry untrusted input.
+    fn score_expression(&self, embedding: &str, query: &str) -> String {
+        match self {
+            PgVectorDistanceFunction::Cosine | PgVectorDistanceFunction::Jaccard => {
+                format!("1 - ({embedding} {self} {query})")
+            }
+            PgVectorDistanceFunction::InnerProduct
+            | PgVectorDistanceFunction::L2
+            | PgVectorDistanceFunction::L1
+            | PgVectorDistanceFunction::Hamming => format!("-({embedding} {self} {query})"),
+        }
+    }
+}
+
+/// Bind placeholder token. Query rendering renumbers each occurrence, so filter
+/// constructors must emit this token and no other placeholder syntax.
 const PLACEHOLDER: &str = "$";
 
-/// Postgres query filter: a `WHERE` fragment plus the values to bind to it.
+/// Postgres `WHERE` fragment with its bind values. Keys, patterns, and range
+/// bounds are spliced into SQL verbatim; only values are bound.
 #[derive(Clone, Default, Serialize, Deserialize, Debug)]
 pub struct PgSearchFilter(SqlCondition<serde_json::Value>);
 
@@ -99,28 +109,29 @@ impl PgSearchFilter {
         self.0.into_parts()
     }
 
-    #[allow(clippy::should_implement_trait)]
     pub fn not(self) -> Self {
         Self(self.0.not())
     }
 
-    pub fn gte(key: String, value: <Self as SearchFilter>::Value) -> Self {
+    pub fn gte(key: impl Into<String>, value: <Self as SearchFilter>::Value) -> Self {
+        let key = key.into();
         Self(SqlCondition::binary(key, ">=", PLACEHOLDER, value))
     }
 
-    pub fn lte(key: String, value: <Self as SearchFilter>::Value) -> Self {
+    pub fn lte(key: impl Into<String>, value: <Self as SearchFilter>::Value) -> Self {
+        let key = key.into();
         Self(SqlCondition::binary(key, "<=", PLACEHOLDER, value))
     }
 
-    pub fn is_null(key: String) -> Self {
+    pub fn is_null(key: &str) -> Self {
         Self(SqlCondition::raw(format!("{key} is null")))
     }
 
-    pub fn is_not_null(key: String) -> Self {
+    pub fn is_not_null(key: &str) -> Self {
         Self(SqlCondition::raw(format!("{key} is not null")))
     }
 
-    pub fn between<T>(key: String, range: RangeInclusive<T>) -> Self
+    pub fn between<T>(key: &str, range: RangeInclusive<T>) -> Self
     where
         T: std::fmt::Display + Into<serde_json::Number> + Copy,
     {
@@ -130,21 +141,21 @@ impl PgSearchFilter {
         Self(SqlCondition::raw(format!("{key} between {lo} and {hi}")))
     }
 
-    pub fn member(key: String, values: Vec<<Self as SearchFilter>::Value>) -> Self {
-        Self(SqlCondition::list(key, "is in", PLACEHOLDER, values))
+    pub fn member(key: &str, values: Vec<<Self as SearchFilter>::Value>) -> Self {
+        Self(SqlCondition::list(key, "IN", PLACEHOLDER, values))
     }
 
     // String matching ops
 
-    /// Tests whether the value at `key` matches the (case-sensitive) pattern
-    /// `pattern` should be a valid SQL string pattern, with '%' and '_' as wildcards
-    pub fn like(key: String, pattern: &'static str) -> Self {
+    /// Case-sensitive SQL `LIKE` match. `pattern` is spliced verbatim, so it must
+    /// include its own quoting, with `%` and `_` as wildcards.
+    pub fn like(key: &str, pattern: &'static str) -> Self {
         Self(SqlCondition::raw(format!("{key} like {pattern}")))
     }
 
-    /// Tests whether the value at `key` matches the SQL regex pattern
-    /// `pattern` should be a valid regex
-    pub fn similar_to(key: String, pattern: &'static str) -> Self {
+    /// SQL `SIMILAR TO` match. `pattern` is spliced verbatim and must include its
+    /// own quoting.
+    pub fn similar_to(key: &str, pattern: &'static str) -> Self {
         Self(SqlCondition::raw(format!("{key} similar to {pattern}")))
     }
 }
@@ -185,7 +196,6 @@ fn bind_value<S>(
                 builder.bind(Value::Array(xs))
             }
         }
-        // Will always be JSONB
         object => builder.bind(object),
     }
 }
@@ -194,7 +204,6 @@ fn bind_value<S>(
 pub struct SearchResult {
     id: Uuid,
     document: Value,
-    //embedded_text: String,
     distance: f64,
 }
 
@@ -212,12 +221,9 @@ impl SearchResult {
     }
 }
 
-impl<Model> PostgresVectorStore<Model>
-where
-    Model: EmbeddingModel,
-{
+impl<M: EmbeddingModel> PostgresVectorStore<M> {
     pub fn new(
-        model: Model,
+        model: M,
         pg_pool: PgPool,
         documents_table: Option<String>,
         distance_function: PgVectorDistanceFunction,
@@ -225,17 +231,17 @@ where
         Self {
             model,
             pg_pool,
-            documents_table: documents_table.unwrap_or(String::from("documents")),
+            documents_table: documents_table.unwrap_or_else(|| String::from("documents")),
             distance_function,
         }
     }
 
-    pub fn with_defaults(model: Model, pg_pool: PgPool) -> Self {
+    pub fn with_defaults(model: M, pg_pool: PgPool) -> Self {
         Self::new(model, pg_pool, None, PgVectorDistanceFunction::Cosine)
     }
 
-    /// Validates the sample count, embeds the query, and runs the similarity
-    /// search, returning one row per result.
+    /// Embeds the query and runs the search, returning one row per result.
+    /// Errors when the requested sample count exceeds `i64::MAX`.
     async fn run_search<R>(
         &self,
         req: &VectorSearchRequest<PgSearchFilter>,
@@ -245,13 +251,10 @@ where
         R: for<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> + Send + Unpin,
     {
         if req.samples() > i64::MAX as u64 {
-            return Err(VectorStoreError::DatastoreError(
-                format!(
-                    "The maximum amount of samples to return with the `rig` Postgres integration cannot be larger than {}",
-                    i64::MAX
-                )
-                .into(),
-            ));
+            return Err(VectorStoreError::BuilderError(format!(
+                "The maximum amount of samples to return with the `rig` Postgres integration cannot be larger than {}",
+                i64::MAX
+            )));
         }
 
         let embedded_query: pgvector::Vector = self
@@ -282,41 +285,64 @@ where
         with_document: bool,
         req: &VectorSearchRequest<PgSearchFilter>,
     ) -> (String, Vec<serde_json::Value>) {
-        let document = if with_document { ", document" } else { "" };
+        render_search_query(
+            &self.distance_function,
+            &self.documents_table,
+            with_document,
+            req,
+        )
+    }
+}
 
-        let thresh = req
-            .threshold()
-            .map(|t| PgSearchFilter::gt("distance", t.into()));
-        let filter = match (thresh, req.filter()) {
-            (Some(thresh), Some(filt)) => Some(thresh.and(filt.clone())),
-            (Some(thresh), _) => Some(thresh),
-            (_, Some(filt)) => Some(filt.clone()),
-            _ => None,
-        };
-        let (where_clause, params) = match filter {
-            Some(f) => {
-                let (expr, params) = f.into_clause();
-                (String::from("WHERE") + &expr, params)
-            }
-            None => (Default::default(), Default::default()),
-        };
+/// Renders the search SQL and the values bound after `$1` (query vector) and
+/// `$2` (limit).
+///
+/// The threshold filters on a similarity expression inside the inner `SELECT`,
+/// since the `distance` alias is only visible to the outer query. Returned
+/// scores remain raw distances ordered ascending regardless of threshold.
+fn render_search_query(
+    distance_function: &PgVectorDistanceFunction,
+    documents_table: &str,
+    with_document: bool,
+    req: &VectorSearchRequest<PgSearchFilter>,
+) -> (String, Vec<serde_json::Value>) {
+    let document = if with_document { ", document" } else { "" };
 
-        let mut counter = 3;
-        let mut buf = String::with_capacity(where_clause.len() * 2);
+    // Threshold binds before filter values, and its `$1` reference must remain
+    // the query vector rather than being renumbered.
+    let mut params = Vec::new();
+    let mut conditions = Vec::new();
+    let mut counter = 3;
 
-        for c in where_clause.chars() {
+    if let Some(threshold) = req.threshold() {
+        let score = distance_function.score_expression("embedding", "$1");
+        conditions.push(format!("({score} >= ${counter})"));
+        params.push(serde_json::Value::from(threshold));
+        counter += 1;
+    }
+
+    if let Some(filter) = req.filter() {
+        let (expr, filter_params) = filter.clone().into_clause();
+        let mut buf = String::with_capacity(expr.len() * 2);
+        for c in expr.chars() {
             buf.push(c);
-
             if c == '$' {
-                buf.push_str(counter.to_string().as_str());
+                let _ = write!(buf, "{counter}");
                 counter += 1;
             }
         }
+        conditions.push(format!("({buf})"));
+        params.extend(filter_params);
+    }
 
-        let where_clause = buf;
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
 
-        let query = format!(
-            "
+    let query = format!(
+        "
             SELECT id{}, distance FROM ( \
               SELECT DISTINCT ON (id) id{}, embedding {} $1 as distance \
               FROM {} \
@@ -325,18 +351,14 @@ where
             ) as d \
             ORDER BY distance \
             LIMIT $2",
-            document, document, self.distance_function, self.documents_table
-        );
+        document, document, distance_function, documents_table
+    );
 
-        (query, params)
-    }
+    (query, params)
 }
 
-impl<Model> InsertDocuments for PostgresVectorStore<Model>
-where
-    Model: EmbeddingModel + Send + Sync,
-{
-    async fn insert_documents<Doc: Serialize + Embed + Send>(
+impl<M: EmbeddingModel> InsertDocuments for PostgresVectorStore<M> {
+    async fn insert_documents<Doc: Serialize + Embed + WasmCompatSend>(
         &self,
         documents: Vec<(Doc, Vec<Embedding>)>,
     ) -> Result<(), VectorStoreError> {
@@ -366,15 +388,12 @@ where
     }
 }
 
-impl<Model> VectorStoreIndex for PostgresVectorStore<Model>
-where
-    Model: EmbeddingModel,
-{
+impl<M: EmbeddingModel> VectorStoreIndex for PostgresVectorStore<M> {
     type Filter = PgSearchFilter;
 
-    /// Get the top n documents based on the distance to the given query.
-    /// The result is a list of tuples of the form (score, id, document)
-    async fn top_n<T: for<'a> Deserialize<'a> + Send>(
+    /// Returns up to `samples` documents as `(distance, id, document)` ordered by
+    /// ascending distance. Rows whose documents fail to deserialize are skipped.
+    async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<PgSearchFilter>,
     ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
@@ -388,7 +407,7 @@ where
         Ok(rows)
     }
 
-    /// Same as `top_n` but returns the document ids only.
+    /// Like `top_n` but returns `(distance, id)` without deserializing documents.
     async fn top_n_ids(
         &self,
         req: VectorSearchRequest<PgSearchFilter>,
@@ -405,29 +424,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{PgSearchFilter, SearchFilter};
-    use serde_json::json;
-
-    /// `gte`/`lte`/`member` previously emitted `?` placeholders while
-    /// `eq`/`gt`/`lt` emitted `$`; the query renumbering only rewrites `$`, so
-    /// any `?` would reach Postgres verbatim and break the query.
-    #[test]
-    fn every_parameterised_operator_uses_dollar_placeholders() {
-        let gte = PgSearchFilter::gte("price".into(), json!(5));
-        let lte = PgSearchFilter::lte("price".into(), json!(10));
-
-        let (cond, values) = gte.and(lte).into_clause();
-        assert_eq!(cond, "(price >= $) AND (price <= $)");
-        assert!(!cond.contains('?'));
-        assert_eq!(cond.matches('$').count(), values.len());
-
-        let member = PgSearchFilter::member("id".into(), vec![json!(1), json!(2)]);
-        let (cond, values) = PgSearchFilter::eq("kind", json!("fruit"))
-            .and(member)
-            .into_clause();
-        assert_eq!(cond, "(kind = $) AND (id is in ($, $))");
-        assert!(!cond.contains('?'));
-        assert_eq!(cond.matches('$').count(), values.len());
-    }
-}
+mod tests;

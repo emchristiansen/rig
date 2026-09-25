@@ -1,9 +1,5 @@
 use rig::prelude::*;
-
-use rig::completion::Prompt;
-
-use rig::providers::openai;
-use rig::providers::openai::client::Client;
+use rig::providers::openai::{self, OpenAI};
 
 use schemars::JsonSchema;
 
@@ -26,8 +22,8 @@ All operations should be O(1).
 ";
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // Create OpenAI client
-    let openai_client = Client::from_env()?;
+    // Bind the OpenAI Responses API to the default transport
+    let openai_client = OpenAI::from_env()?.bound()?;
 
     let generator_agent = openai_client
         .agent(openai::GPT_4)
@@ -48,7 +44,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .build();
 
     let evaluator_agent = openai_client.extractor::<Evaluation>(openai::GPT_4)
-        .preamble("
+        .append_preamble("
             Evaluate this following code implementation for:
             1. code correctness
             2. time complexity
@@ -65,18 +61,19 @@ async fn main() -> Result<(), anyhow::Error> {
         .build();
 
     let mut memories: Vec<String> = Vec::new();
-    let mut response = generator_agent.prompt(TASK).await?;
+    let mut response = generator_agent.prompt(TASK).await?.output;
     memories.push(response.clone());
 
     loop {
         let eval_result = evaluator_agent
-            .extract(&format!("{TASK}\n\n{response}"))
-            .await?;
+            .extract(format!("{TASK}\n\n{response}"))
+            .await?
+            .output;
         if eval_result.evaluation_status == EvalStatus::Pass {
             break;
         } else {
             let context = format!("{TASK}\n\n{}", eval_result.feedback);
-            response = generator_agent.prompt(context).await?;
+            response = generator_agent.prompt(context).await?.output;
             memories.push(response.clone());
         }
     }

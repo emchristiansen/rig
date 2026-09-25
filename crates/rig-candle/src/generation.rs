@@ -1,4 +1,10 @@
 //! Generation configuration, sampling, incremental decoding, and inference sessions.
+//!
+//! ```
+//! use rig_candle::GenerationConfig;
+//!
+//! let config = GenerationConfig { temperature: 0.0, ..Default::default() };
+//! ```
 
 use candle_transformers::generation::Sampling;
 use rig_core::completion::CompletionRequest;
@@ -82,31 +88,24 @@ struct RequestGenerationOverrides {
     repeat_last_n: Option<usize>,
 }
 
-fn override_or<T>(value: Option<T>, default: T) -> T {
-    match value {
-        Some(value) => value,
-        None => default,
-    }
-}
-
 pub(crate) fn effective_generation(
     request: &CompletionRequest,
     defaults: &GenerationConfig,
     vocab_size: usize,
 ) -> Result<GenerationConfig, CandleError> {
     let overrides = match &request.additional_params {
-        Some(value) => serde_json::from_value::<RequestGenerationOverrides>(value.clone())
+        Some(value) => RequestGenerationOverrides::deserialize(value)
             .map_err(|error| CandleError::InvalidGeneration(error.to_string()))?,
         None => RequestGenerationOverrides::default(),
     };
     let generation = GenerationConfig {
-        max_tokens: override_or(request.max_tokens, defaults.max_tokens),
-        temperature: override_or(request.temperature, defaults.temperature),
+        max_tokens: request.max_tokens.unwrap_or(defaults.max_tokens),
+        temperature: request.temperature.unwrap_or(defaults.temperature),
         top_k: overrides.top_k.resolve(defaults.top_k),
         top_p: overrides.top_p.resolve(defaults.top_p),
-        seed: override_or(overrides.seed, defaults.seed),
-        repeat_penalty: override_or(overrides.repeat_penalty, defaults.repeat_penalty),
-        repeat_last_n: override_or(overrides.repeat_last_n, defaults.repeat_last_n),
+        seed: overrides.seed.unwrap_or(defaults.seed),
+        repeat_penalty: overrides.repeat_penalty.unwrap_or(defaults.repeat_penalty),
+        repeat_last_n: overrides.repeat_last_n.unwrap_or(defaults.repeat_last_n),
     };
     validate_generation(&generation, Some(vocab_size))?;
     Ok(generation)
@@ -233,7 +232,8 @@ use candle_transformers::models::quantized_llama::ModelWeights as QuantizedLlama
 use candle_transformers::models::quantized_qwen3::ModelWeights as QuantizedQwen3;
 use candle_transformers::utils::apply_repeat_penalty;
 use rig_core::completion::{AssistantContent, CompletionResponse};
-use rig_core::streaming::{RawStreamingChoice, RawStreamingToolCall};
+use rig_core::message::ReasoningContent;
+use rig_core::streaming::{BlockId, MintKind, ToolCallEnd, non_empty_id};
 use tokenizers::tokenizer::DecodeStream;
 use tokenizers::{
     DecoderWrapper, ModelWrapper, NormalizerWrapper, PostProcessorWrapper, PreTokenizerWrapper,
@@ -242,7 +242,7 @@ use tokenizers::{
 use web_time::{Duration, Instant};
 
 use crate::loader::{LoadedModel, LoadedWeights};
-use crate::profile::ModelFamily;
+use crate::profile::ConversationProtocol;
 use crate::runtime::{CancellationSignal, check_cancellation};
 use crate::types::{CandleCompletionResponse, FinishReason};
 
@@ -367,12 +367,12 @@ impl SessionWeights<'_> {
 impl<'a> GenerationSession<'a> {
     pub(crate) fn new(
         loaded: &'a LoadedModel,
-        request: CompletionRequest,
+        request: &CompletionRequest,
         cancellation: &'a CancellationSignal,
     ) -> Result<Self, CandleError> {
-        let prompt = crate::protocol::render_prompt(&request, loaded.profile.definition.protocol)?;
+        let prompt = crate::protocol::render_prompt(request, loaded.profile.definition.protocol)?;
         let generation =
-            effective_generation(&request, &loaded.generation, loaded.profile.vocab_size)?;
+            effective_generation(request, &loaded.generation, loaded.profile.vocab_size)?;
         let encoding = loaded
             .tokenizer
             .encode(prompt, false)
@@ -530,7 +530,7 @@ fn duration_millis(duration: Duration) -> u64 {
 
 pub(crate) fn generate(
     loaded: &LoadedModel,
-    request: CompletionRequest,
+    request: &CompletionRequest,
     cancellation: &CancellationSignal,
     mut emit: impl FnMut(String) -> Result<(), CandleError>,
 ) -> Result<CandleCompletionResponse, CandleError> {
@@ -555,37 +555,25 @@ pub(crate) fn generate(
 
 pub(crate) fn infer(
     loaded: &LoadedModel,
-    request: CompletionRequest,
+    request: &CompletionRequest,
     cancellation: &CancellationSignal,
 ) -> Result<InferredCompletion, CandleError> {
-    let parse_request = request.clone();
     let mut raw_response = generate(loaded, request, cancellation, |_| Ok(()))?;
     let parsed = crate::protocol::parse_assistant(
         &raw_response.text,
-        &parse_request,
+        request,
         loaded.profile.definition.protocol,
     )?;
     raw_response.text = parsed.visible_text;
-    // No emptiness guard here on purpose. One existed, but it was unreachable:
-    // the parser fabricated an empty-text part whenever it had nothing, so
-    // `items` was never empty. Made reachable, it would reject a real outcome —
-    // a model that emits EOS immediately, or only whitespace, which `push_text`
-    // trims away — and turn a degenerate-but-successful local generation into a
-    // hard error. An empty assistant turn is legal everywhere else now; it is
-    // legal here too.
+    // Immediate EOS or trimmed whitespace may produce a valid empty assistant turn.
     Ok(InferredCompletion {
         response: raw_response,
         choice: parsed.items,
     })
 }
 
-/// One local generation, kept in both the shapes callers need.
-///
-/// The assistant protocol is parsed exactly once: `response.text` is the
-/// visible text with protocol markup stripped, and `choice` holds the items
-/// that parse produced. Re-parsing `response.text` would find no tool calls,
-/// since stripping already removed them — so both the raw and the normalized
-/// path read from this single result.
+/// Local response metadata and assistant content from one protocol parse.
+/// `response.text` has markup removed; use `choice` to retain parsed tool calls.
 pub(crate) struct InferredCompletion {
     /// The local model's own response record.
     pub(crate) response: CandleCompletionResponse,
@@ -594,75 +582,122 @@ pub(crate) struct InferredCompletion {
 }
 
 impl InferredCompletion {
-    /// Normalize into rig's completion response.
-    pub(crate) fn into_normalized(self) -> CompletionResponse {
+    /// Normalizes content and metadata, serializing the local response as `raw`.
+    /// Returns serialization errors.
+    pub(crate) fn into_normalized(self) -> Result<CompletionResponse, serde_json::Error> {
         let usage = (&self.response).into();
         let finish_reason = self.response.finish_reason.into();
-        CompletionResponse::new(self.choice, usage, crate::types::PROVIDER_NAME)
-            .with_finish_reason(finish_reason)
+        let raw = serde_json::to_value(&self.response)?;
+        Ok(
+            CompletionResponse::new(self.choice, usage, crate::types::PROVIDER_NAME, raw)
+                .with_finish_reason(finish_reason),
+        )
     }
+}
+
+/// One event of a local generation, as the generator hands it to the
+/// streaming adapter.
+///
+/// The in-process wire's typed frame: the generator sends these over the
+/// streaming channel and [`crate::stream_from_events`] drives them through
+/// the shared driver, which maps each onto the canonical stream vocabulary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GenerationEvent {
+    /// A fragment of visible text.
+    Text(String),
+    /// A whole tool call parsed out of the buffered turn, keyed by its
+    /// wire-issued id; arguments never stream.
+    ToolCall {
+        /// The call's block identity for the life of the stream.
+        id: BlockId,
+        /// The authoritative call: name, parsed arguments, and decorations.
+        end: ToolCallEnd,
+    },
+    /// A whole reasoning block parsed out of the buffered turn.
+    Reasoning {
+        /// The block identity: the wire id when the parse carried one, else
+        /// a per-stream constant minted identity.
+        id: BlockId,
+        /// The provider-issued reasoning id, when the parse carried one.
+        provider_id: Option<String>,
+        /// The block's content.
+        content: ReasoningContent,
+    },
+    /// The terminal record: generation finished.
+    Final(CandleCompletionResponse),
 }
 
 pub(crate) fn stream_generate(
     loaded: &LoadedModel,
-    request: CompletionRequest,
+    request: &CompletionRequest,
     cancellation: &CancellationSignal,
-    mut emit: impl FnMut(RawStreamingChoice<CandleCompletionResponse>) -> Result<(), CandleError>,
+    mut emit: impl FnMut(GenerationEvent) -> Result<(), CandleError>,
 ) -> Result<CandleCompletionResponse, CandleError> {
-    if loaded.profile.definition.protocol != ModelFamily::Qwen3 {
+    if loaded.profile.definition.protocol != ConversationProtocol::Qwen3 {
         return generate(loaded, request, cancellation, |fragment| {
-            emit(RawStreamingChoice::Message(fragment))
+            emit(GenerationEvent::Text(fragment))
         });
     }
 
-    let parse_request = request.clone();
     // Qwen tool syntax can straddle arbitrary token boundaries. Buffer one
     // model turn so control markup is never leaked as assistant text; complete
     // tool calls are still delivered through Rig's streaming agent driver.
     let mut response = generate(loaded, request, cancellation, |_| Ok(()))?;
     let parsed = crate::protocol::parse_assistant(
         &response.text,
-        &parse_request,
+        request,
         loaded.profile.definition.protocol,
     )?;
     response.text = parsed.visible_text;
-    for item in parsed.items {
+    emit_parsed_items(parsed.items, emit)?;
+    Ok(response)
+}
+
+fn emit_parsed_items(
+    items: Vec<AssistantContent>,
+    mut emit: impl FnMut(GenerationEvent) -> Result<(), CandleError>,
+) -> Result<(), CandleError> {
+    for item in items {
         match item {
-            AssistantContent::Text(text) => emit(RawStreamingChoice::Message(text.text))?,
+            AssistantContent::Text(text) => emit(GenerationEvent::Text(text.text))?,
             AssistantContent::ToolCall(call) => {
-                // The envelope-parsed call always carries a wire-issued id
-                // (`from_wire` adopted it), so key the stream by it.
-                let mut raw = RawStreamingToolCall::new(
-                    call.id.as_str().to_owned(),
-                    call.function.name,
-                    call.function.arguments,
-                );
-                raw.call_id = None;
-                raw.signature = call.signature;
-                raw.additional_params = call.additional_params;
-                emit(RawStreamingChoice::ToolCall(raw))?;
+                let id = if let Some(provider) = &call.provider {
+                    BlockId::wire(provider.call_id.clone())
+                } else {
+                    call.id.generated().cloned().ok_or_else(|| {
+                        CandleError::Inference(
+                            "id-less parsed call has no normalized block identity".into(),
+                        )
+                    })?
+                };
+                let mut end = ToolCallEnd::whole(call.function.name, call.function.arguments)
+                    .with_durable_id(call.id)
+                    .with_signature(call.signature)
+                    .with_additional_params(call.additional_params);
+                if let Some(provider) = call.provider {
+                    end = end.with_tool_id(provider.call_id);
+                }
+                emit(GenerationEvent::ToolCall { id, end })?;
+            }
+            // The local parsers only produce function calls.
+            AssistantContent::CustomToolCall(_) => {
+                return Err(CandleError::Inference(
+                    "the local output parser produced a custom tool call, which it never emits"
+                        .into(),
+                ));
             }
             AssistantContent::Reasoning(reasoning) => {
-                // Same constant-id full-block shape as the gemini adapter's
-                // signed-thinking chunk (#2258 F1), but benign here: candle
-                // never emits `ReasoningDelta`, so a full block under the
-                // shared id has no delta buffer to replace-and-discard.
+                // Whole reasoning blocks share an identity without replacing
+                // accumulated deltas because local generation emits no reasoning deltas.
                 for content in reasoning.content {
-                    emit(RawStreamingChoice::Reasoning {
+                    emit(GenerationEvent::Reasoning {
                         // Local generation has no wire id; fall back to a
                         // per-stream constant minted identity.
                         id: reasoning
                             .id
                             .clone()
-                            .map(rig_core::streaming::StreamPartId::wire)
-                            .unwrap_or(rig_core::streaming::StreamPartId::minted(
-                                rig_core::streaming::MintKind::Reasoning,
-                                0,
-                            )),
-                        provider_id: reasoning
-                            .id
-                            .clone()
-                            .and_then(rig_core::streaming::WireId::new),
+                            .map_or(BlockId::minted(MintKind::Reasoning, 0), BlockId::wire),
+                        provider_id: reasoning.id.clone().and_then(non_empty_id),
                         content,
                     })?;
                 }
@@ -674,5 +709,9 @@ pub(crate) fn stream_generate(
             }
         }
     }
-    Ok(response)
+    Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests;

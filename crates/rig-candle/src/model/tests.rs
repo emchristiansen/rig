@@ -6,6 +6,8 @@ use futures::StreamExt;
 use rig_core::completion::{CompletionModel, Document, ToolDefinition};
 use rig_core::message::{AudioMediaType, ImageDetail, ImageMediaType, ToolChoice};
 #[cfg(not(target_family = "wasm"))]
+use rig_core::streaming::{Delta, StreamEvent};
+#[cfg(not(target_family = "wasm"))]
 use safetensors::tensor::{Dtype, View, serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -19,7 +21,7 @@ use tokenizers::{AddedToken, TokenizerBuilder};
 use super::*;
 
 #[cfg(not(target_family = "wasm"))]
-type ControlledModel = (LlamaModel, Arc<TestControl>, Arc<tokio::sync::Semaphore>);
+type ControlledModel = (CandleModel, Arc<TestControl>, Arc<tokio::sync::Semaphore>);
 
 struct TestTensor {
     dtype: Dtype,
@@ -229,7 +231,6 @@ fn config_with(
 fn request(messages: Vec<Message>) -> CompletionRequest {
     CompletionRequest {
         model: None,
-        preamble: None,
         chat_history: if messages.is_empty() {
             vec![Message::user("hello")]
         } else {
@@ -248,20 +249,25 @@ fn request(messages: Vec<Message>) -> CompletionRequest {
 
 #[cfg(not(target_family = "wasm"))]
 async fn collect_stream(
-    model: &LlamaModel,
+    model: &CandleModel,
     request: CompletionRequest,
 ) -> Result<(String, CandleCompletionResponse), Box<dyn std::error::Error + Send + Sync>> {
-    let mut response = model.raw_stream(request).await?;
+    let mut response = model.stream(request).await?;
     let mut text = String::new();
-    let mut final_response = None;
     while let Some(item) = response.next().await {
-        match item? {
-            RawStreamingChoice::Message(fragment) => text.push_str(&fragment),
-            RawStreamingChoice::FinalResponse(raw) => final_response = Some(raw),
-            _ => {}
+        if let StreamEvent::BlockDelta {
+            delta: Delta::Text { text: fragment },
+            ..
+        } = item?
+        {
+            text.push_str(&fragment);
         }
     }
-    let raw = final_response.ok_or("stream did not emit a final response")?;
+    let terminal = response
+        .response
+        .ok_or("stream did not emit a final response")?;
+    // The local record rides the terminal's `raw`, typed back here.
+    let raw: CandleCompletionResponse = serde_json::from_value(terminal.raw)?;
     Ok((text, raw))
 }
 
@@ -281,7 +287,7 @@ fn controlled_model(
     let concurrency = Arc::clone(&loaded.concurrency);
     loaded.test_control = Some(Arc::clone(&control));
     Ok((
-        LlamaModel {
+        CandleModel {
             state: Arc::new(loaded),
         },
         control,
@@ -317,7 +323,7 @@ fn rejects_empty_and_malformed_artifacts() -> Result<(), Box<dyn std::error::Err
             },
         ),
     ] {
-        let error = LlamaModel::from_safetensors(data)
+        let error = CandleModel::from_safetensors(data)
             .err()
             .ok_or("expected empty-buffer error")?;
         assert!(
@@ -328,19 +334,19 @@ fn rejects_empty_and_malformed_artifacts() -> Result<(), Box<dyn std::error::Err
     let mut data = model_data()?;
     data.config = b"not json".to_vec();
     assert!(matches!(
-        LlamaModel::from_safetensors(data),
+        CandleModel::from_safetensors(data),
         Err(CandleError::Configuration(_))
     ));
     let mut data = model_data()?;
     data.tokenizer = b"not json".to_vec();
     assert!(matches!(
-        LlamaModel::from_safetensors(data),
+        CandleModel::from_safetensors(data),
         Err(CandleError::TokenizerLoading(_))
     ));
     let mut data = model_data()?;
     data.weights = b"not safetensors".to_vec();
     assert!(matches!(
-        LlamaModel::from_safetensors(data),
+        CandleModel::from_safetensors(data),
         Err(CandleError::InvalidCheckpoint(_))
     ));
     Ok(())
@@ -413,7 +419,7 @@ fn validates_tensor_shapes_dtypes_and_tied_embeddings()
         &checkpoint_custom(true, tensor(&[8, 4]), false)?,
         &tied_config,
     )?;
-    let model = LlamaModel::from_safetensors(ModelData {
+    let model = CandleModel::from_safetensors(ModelData {
         config: config_with("tie_word_embeddings", true.into())?,
         tokenizer: tiny_tokenizer()?,
         weights: checkpoint_custom(true, tensor(&[8, 4]), false)?,
@@ -433,7 +439,7 @@ fn validates_tokenizer_vocabulary_special_tokens_and_configured_ids()
         weights: checkpoint(true)?,
     };
     assert!(matches!(
-        LlamaModel::from_safetensors(data),
+        CandleModel::from_safetensors(data),
         Err(CandleError::TokenizerVocabularyMismatch {
             expected: 9,
             actual: 8
@@ -442,8 +448,8 @@ fn validates_tokenizer_vocabulary_special_tokens_and_configured_ids()
 
     let config: LlamaConfig = serde_json::from_slice(&tiny_config())?;
     let config = config.into_config(false);
-    let llama = definition_for(ModelFamily::Llama3, ArtifactFormat::Safetensors)?;
-    let smollm2 = definition_for(ModelFamily::SmolLm2, ArtifactFormat::Gguf)?;
+    let llama = definition_for(ConversationProtocol::Llama3, ArtifactFormat::Safetensors)?;
+    let smollm2 = definition_for(ConversationProtocol::SmolLm2, ArtifactFormat::Gguf)?;
     let tokenizer = Tokenizer::from_bytes(tiny_tokenizer_with_end_header("<other>", true)?)?;
     assert!(matches!(
         validate_tokenizer(&config, &tokenizer, llama),
@@ -472,7 +478,7 @@ fn validates_tokenizer_vocabulary_special_tokens_and_configured_ids()
         weights: checkpoint(true)?,
     };
     assert!(matches!(
-        LlamaModel::from_safetensors(data),
+        CandleModel::from_safetensors(data),
         Err(CandleError::TokenIdOutOfRange { token, id: 8, .. }) if token == "bos_token_id"
     ));
     let data = ModelData {
@@ -481,7 +487,7 @@ fn validates_tokenizer_vocabulary_special_tokens_and_configured_ids()
         weights: checkpoint(true)?,
     };
     assert!(matches!(
-        LlamaModel::from_safetensors(data),
+        CandleModel::from_safetensors(data),
         Err(CandleError::TokenIdOutOfRange { token, id: 9, .. }) if token == "eos_token_id"
     ));
     for (field, value) in [("bos_token_id", 7.into()), ("eos_token_id", 3.into())] {
@@ -491,7 +497,7 @@ fn validates_tokenizer_vocabulary_special_tokens_and_configured_ids()
             weights: checkpoint(true)?,
         };
         assert!(matches!(
-            LlamaModel::from_safetensors(data),
+            CandleModel::from_safetensors(data),
             Err(CandleError::ArtifactMismatch { artifact, .. }) if artifact == field
         ));
     }
@@ -501,7 +507,7 @@ fn validates_tokenizer_vocabulary_special_tokens_and_configured_ids()
         weights: checkpoint(true)?,
     };
     assert!(matches!(
-        LlamaModel::from_safetensors(data),
+        CandleModel::from_safetensors(data),
         Err(CandleError::InvalidConfigurationValue {
             field: "eos_token_id",
             ..
@@ -642,7 +648,7 @@ fn context_limit_boundaries_clamp_and_detect_conversion_overflow() {
 
 #[test]
 fn loads_entirely_from_owned_bytes() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let model = LlamaModel::from_safetensors(model_data()?)?;
+    let model = CandleModel::from_safetensors(model_data()?)?;
     let loaded = &model.state;
     assert!(loaded.runtime.is_consistent_cpu());
     assert_eq!(
@@ -653,7 +659,10 @@ fn loads_entirely_from_owned_bytes() -> Result<(), Box<dyn std::error::Error + S
         loaded.profile.definition.artifact_format,
         ArtifactFormat::Safetensors
     );
-    assert_eq!(model.conversation_protocol(), Some(ModelFamily::Llama3));
+    assert_eq!(
+        model.conversation_protocol(),
+        Some(ConversationProtocol::Llama3)
+    );
     assert_eq!(model.quantization(), None);
     Ok(())
 }
@@ -666,7 +675,7 @@ fn borrowed_gguf_builder_keeps_borrowed_artifacts_and_all_settings() {
         weights: b"weights",
     };
     let builder = CandleModel::builder_from_gguf_bytes(data)
-        .conversation_protocol(ModelFamily::SmolLm2)
+        .conversation_protocol(ConversationProtocol::SmolLm2)
         .max_tokens(17)
         .temperature(0.25)
         .top_k(Some(4))
@@ -679,7 +688,7 @@ fn borrowed_gguf_builder_keeps_borrowed_artifacts_and_all_settings() {
     assert!(
         matches!(builder.source, ModelSource::BorrowedGguf(actual) if actual.weights.as_ptr() == data.weights.as_ptr())
     );
-    assert_eq!(builder.family, Some(ModelFamily::SmolLm2));
+    assert_eq!(builder.family, Some(ConversationProtocol::SmolLm2));
     assert_eq!(builder.generation.max_tokens, 17);
     assert_eq!(builder.generation.temperature, 0.25);
     assert_eq!(builder.generation.top_k, Some(4));
@@ -695,7 +704,10 @@ fn borrowed_gguf_builder_keeps_borrowed_artifacts_and_all_settings() {
 async fn async_loading_succeeds_and_preserves_builder_settings()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let direct = CandleModel::from_safetensors_async(model_data()?).await?;
-    assert_eq!(direct.conversation_protocol(), Some(ModelFamily::Llama3));
+    assert_eq!(
+        direct.conversation_protocol(),
+        Some(ConversationProtocol::Llama3)
+    );
 
     let configured = CandleModel::builder(model_data()?)
         .max_tokens(17)
@@ -749,17 +761,17 @@ fn typed_gguf_and_family_errors_preserve_the_failure_kind()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let data = model_data()?;
     assert!(matches!(
-        LlamaModel::builder(data)
-            .conversation_protocol(ModelFamily::SmolLm2)
+        CandleModel::builder(data)
+            .conversation_protocol(ConversationProtocol::SmolLm2)
             .build(),
         Err(CandleError::ModelFamilyMismatch {
-            selected: ModelFamily::SmolLm2,
-            detected: ModelFamily::Llama3,
+            selected: ConversationProtocol::SmolLm2,
+            detected: ConversationProtocol::Llama3,
         })
     ));
 
     assert!(matches!(
-        LlamaModel::from_gguf(model_data()?),
+        CandleModel::from_gguf(model_data()?),
         Err(CandleError::UnsupportedModelFamily(_))
     ));
     Ok(())
@@ -777,7 +789,7 @@ fn gguf_metadata_shapes_and_tensor_encodings_are_validated_before_loading()
         tensor_data_offset: 0,
     };
     let tokenizer = Tokenizer::from_bytes(tiny_tokenizer()?)?;
-    let definition = definition_for(ModelFamily::SmolLm2, ArtifactFormat::Gguf)?;
+    let definition = definition_for(ConversationProtocol::SmolLm2, ArtifactFormat::Gguf)?;
     assert!(matches!(
         validate_gguf_metadata(&content, &config, &tokenizer, definition),
         Err(CandleError::ArtifactMismatch {
@@ -816,11 +828,11 @@ fn gguf_metadata_shapes_and_tensor_encodings_are_validated_before_loading()
 #[cfg(not(target_family = "wasm"))]
 #[test]
 fn loaded_model_works_with_agent_builder() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use rig_agent::{agent::AgentBuilder, completion::Prompt};
+    use rig_agent::agent::AgentBuilder;
 
     let runtime = tokio::runtime::Builder::new_current_thread().build()?;
     runtime.block_on(async {
-        let model = LlamaModel::builder(model_data()?)
+        let model = CandleModel::builder(model_data()?)
             .temperature(0.0)
             .max_tokens(1)
             .build()?;
@@ -835,7 +847,7 @@ fn loaded_model_works_with_agent_builder() -> Result<(), Box<dyn std::error::Err
 #[tokio::test(flavor = "current_thread")]
 async fn buffered_and_streaming_generation_are_equivalent()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let model = LlamaModel::builder(model_data()?)
+    let model = CandleModel::builder(model_data()?)
         .temperature(0.0)
         .max_tokens(3)
         .build()?;
@@ -866,7 +878,7 @@ async fn streaming_reports_eos_and_excludes_the_stop_token()
     let mut loaded = load_model(model_data()?, GenerationConfig::default(), 1)?;
     loaded.generation.temperature = 0.0;
     loaded.profile.stop_tokens.insert(0);
-    let model = LlamaModel {
+    let model = CandleModel {
         state: Arc::new(loaded),
     };
     let (text, raw) = collect_stream(&model, request(vec![Message::user("hello")])).await?;
@@ -874,7 +886,10 @@ async fn streaming_reports_eos_and_excludes_the_stop_token()
     assert!(raw.text.is_empty());
     assert_eq!(raw.finish_reason, FinishReason::Eos);
     assert_eq!(raw.generated_tokens, 1);
-    assert_eq!(rig_core::completion::Usage::from(&raw).output_tokens, 1);
+    assert_eq!(
+        rig_core::completion::Usage::from(&raw).output_tokens,
+        Some(1)
+    );
     Ok(())
 }
 
@@ -889,7 +904,7 @@ async fn streaming_clamps_context_and_rejects_bad_request_options()
     let prompt = render_prompt(&completion_request)?;
     let prompt_tokens = loaded.tokenizer.encode(prompt, false)?.len();
     loaded.profile.context_limit = prompt_tokens + 2;
-    let model = LlamaModel {
+    let model = CandleModel {
         state: Arc::new(loaded),
     };
     let (_, raw) = collect_stream(&model, completion_request).await?;
@@ -903,7 +918,7 @@ async fn streaming_clamps_context_and_rejects_bad_request_options()
     ] {
         let mut bad_request = request(vec![Message::user("hello")]);
         bad_request.additional_params = Some(additional_params);
-        let mut stream = model.raw_stream(bad_request).await?;
+        let mut stream = model.stream(bad_request).await?;
         let item = stream
             .next()
             .await
@@ -988,19 +1003,18 @@ fn inference_clamps_context_and_uses_fresh_generation_state()
     let prompt_tokens = loaded.tokenizer.encode(prompt, false)?.len();
     loaded.profile.context_limit = prompt_tokens + 2;
 
-    let first = infer(
-        &loaded,
-        completion_request.clone(),
-        &CancellationSignal::default(),
-    )?;
-    let second = infer(&loaded, completion_request, &CancellationSignal::default())?;
+    let first = infer(&loaded, &completion_request, &CancellationSignal::default())?;
+    let second = infer(&loaded, &completion_request, &CancellationSignal::default())?;
     let (first, second) = (first.response, second.response);
     assert_eq!(first.text, second.text);
     assert_eq!(first.generated_tokens, 2);
     assert_eq!(first.requested_max_tokens, 10);
     assert_eq!(first.effective_max_tokens, 2);
     assert_eq!(first.finish_reason, FinishReason::MaxTokens);
-    assert_eq!(rig_core::completion::Usage::from(&first).output_tokens, 2);
+    assert_eq!(
+        rig_core::completion::Usage::from(&first).output_tokens,
+        Some(2)
+    );
     assert!(!first.text.contains("hello"));
     Ok(())
 }
@@ -1012,12 +1026,12 @@ fn eos_is_counted_but_excluded_from_decoded_text()
     loaded.profile.stop_tokens.insert(0);
     let mut completion_request = request(vec![Message::user("hello")]);
     completion_request.temperature = Some(0.0);
-    let response = infer(&loaded, completion_request, &CancellationSignal::default())?.response;
+    let response = infer(&loaded, &completion_request, &CancellationSignal::default())?.response;
     assert_eq!(response.finish_reason, FinishReason::Eos);
     assert_eq!(response.generated_tokens, 1);
     assert_eq!(
         rig_core::completion::Usage::from(&response).output_tokens,
-        1
+        Some(1)
     );
     assert!(response.text.is_empty());
     Ok(())
@@ -1074,7 +1088,7 @@ fn qwen3_4b_configuration_is_exactly_scoped() -> Result<(), CandleError> {
         }"#,
     )
     .map_err(|error| CandleError::Configuration(error.to_string()))?;
-    let definition = definition_for(ModelFamily::Qwen3, ArtifactFormat::Gguf)?;
+    let definition = definition_for(ConversationProtocol::Qwen3, ArtifactFormat::Gguf)?;
     validate_qwen3_config(&config, definition)?;
 
     config.model_type = "qwen2".to_string();
@@ -1099,7 +1113,7 @@ fn qwen3_4b_configuration_is_exactly_scoped() -> Result<(), CandleError> {
 fn concurrency_limit_and_cancellation_are_deterministic()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     assert!(matches!(
-        LlamaModel::builder(model_data()?)
+        CandleModel::builder(model_data()?)
             .max_concurrent_requests(0)
             .build(),
         Err(CandleError::InvalidConcurrencyLimit)
@@ -1120,7 +1134,7 @@ fn concurrency_limit_and_cancellation_are_deterministic()
     let signal = CancellationSignal::default();
     signal.cancel();
     assert!(matches!(
-        infer(&loaded, request(vec![Message::user("hello")]), &signal),
+        infer(&loaded, &request(vec![Message::user("hello")]), &signal),
         Err(CandleError::Cancelled)
     ));
     Ok(())
@@ -1130,7 +1144,7 @@ fn concurrency_limit_and_cancellation_are_deterministic()
 #[tokio::test(flavor = "current_thread")]
 async fn concurrent_completions_have_independent_caches_and_samplers()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let model = LlamaModel::builder(model_data()?)
+    let model = CandleModel::builder(model_data()?)
         .temperature(0.0)
         .max_tokens(2)
         .max_concurrent_requests(2)
@@ -1167,7 +1181,7 @@ async fn concurrent_completions_have_independent_caches_and_samplers()
 #[tokio::test(flavor = "current_thread")]
 async fn closed_admission_controller_fails_public_operations()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let model = LlamaModel::builder(model_data()?).build()?;
+    let model = CandleModel::builder(model_data()?).build()?;
     let loaded = &model.state;
     loaded.concurrency.close();
     let completion_error = model
@@ -1225,9 +1239,7 @@ async fn dropping_buffered_completion_retains_permit_until_worker_exits()
 async fn dropping_stream_cancels_worker_before_queued_request_runs()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (model, control, concurrency) = controlled_model(true, false, 2)?;
-    let stream = model
-        .raw_stream(request(vec![Message::user("hello")]))
-        .await?;
+    let stream = model.stream(request(vec![Message::user("hello")])).await?;
     control.wait_until_entered().await;
 
     let queued = model.raw_completion(request(vec![Message::user("hello")]));
@@ -1271,9 +1283,7 @@ async fn streaming_channel_applies_bounded_backpressure()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (model, control, concurrency) =
         controlled_model(false, false, (STREAM_CHANNEL_CAPACITY + 4) as u64)?;
-    let stream = model
-        .raw_stream(request(vec![Message::user("hello")]))
-        .await?;
+    let stream = model.stream(request(vec![Message::user("hello")])).await?;
     control
         .wait_for_delivery_attempts(STREAM_CHANNEL_CAPACITY + 1)
         .await;
@@ -1301,9 +1311,7 @@ async fn blocking_task_panic_maps_to_typed_completion_error()
     assert!(error.to_string().contains("Candle blocking task failed"));
 
     let (model, _, _) = controlled_model(false, true, 1)?;
-    let mut stream = model
-        .raw_stream(request(vec![Message::user("hello")]))
-        .await?;
+    let mut stream = model.stream(request(vec![Message::user("hello")])).await?;
     let error = stream
         .next()
         .await
@@ -1317,7 +1325,7 @@ async fn blocking_task_panic_maps_to_typed_completion_error()
 #[test]
 fn builder_rejects_invalid_generation_defaults() {
     assert!(matches!(
-        LlamaModel::builder(ModelData {
+        CandleModel::builder(ModelData {
             config: Vec::new(),
             tokenizer: Vec::new(),
             weights: Vec::new(),
@@ -1327,7 +1335,7 @@ fn builder_rejects_invalid_generation_defaults() {
         Err(CandleError::InvalidGeneration(_))
     ));
     assert!(matches!(
-        LlamaModel::builder(ModelData {
+        CandleModel::builder(ModelData {
             config: Vec::new(),
             tokenizer: Vec::new(),
             weights: Vec::new(),
@@ -1337,7 +1345,7 @@ fn builder_rejects_invalid_generation_defaults() {
         Err(CandleError::InvalidGeneration(_))
     ));
     assert!(matches!(
-        LlamaModel::builder(ModelData {
+        CandleModel::builder(ModelData {
             config: Vec::new(),
             tokenizer: Vec::new(),
             weights: Vec::new(),
@@ -1347,7 +1355,7 @@ fn builder_rejects_invalid_generation_defaults() {
         Err(CandleError::InvalidGeneration(_))
     ));
     assert!(matches!(
-        LlamaModel::builder(ModelData {
+        CandleModel::builder(ModelData {
             config: Vec::new(),
             tokenizer: Vec::new(),
             weights: Vec::new(),
@@ -1393,13 +1401,13 @@ fn renders_smollm2_history_default_system_and_generation_suffix()
         Message::user("follow-up"),
     ]);
     assert_eq!(
-        render_prompt_for(&with_system, ModelFamily::SmolLm2)?,
+        render_prompt_for(&with_system, ConversationProtocol::SmolLm2)?,
         "<|im_start|>system\nrules<|im_end|>\n<|im_start|>user\nquestion<|im_end|>\n<|im_start|>assistant\nanswer<|im_end|>\n<|im_start|>user\nfollow-up<|im_end|>\n<|im_start|>assistant\n"
     );
 
     let without_system = request(vec![Message::user("hello")]);
     assert_eq!(
-        render_prompt_for(&without_system, ModelFamily::SmolLm2)?,
+        render_prompt_for(&without_system, ConversationProtocol::SmolLm2)?,
         "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n"
     );
     Ok(())
@@ -1513,9 +1521,9 @@ fn converts_finish_reason_and_usage() -> Result<(), CandleError> {
         tokens_per_second: Some(100.0),
     };
     let usage = rig_core::completion::Usage::from(&response);
-    assert_eq!(usage.input_tokens, 5);
-    assert_eq!(usage.output_tokens, 2);
-    assert_eq!(usage.total_tokens, 7);
+    assert_eq!(usage.input_tokens, Some(5));
+    assert_eq!(usage.output_tokens, Some(2));
+    assert_eq!(usage.total_tokens, Some(7));
     assert_eq!(response.finish_reason, FinishReason::Eos);
     assert_eq!(response.text, "done");
     assert_eq!(response.requested_max_tokens, 4);
@@ -1524,5 +1532,193 @@ fn converts_finish_reason_and_usage() -> Result<(), CandleError> {
     assert_eq!(response.time_to_first_token_ms, Some(10));
     assert_eq!(response.generation_duration_ms, 20);
     assert_eq!(response.tokens_per_second, Some(100.0));
+    Ok(())
+}
+
+/// The load-bearing property behind `CompletionResponse::raw` and
+/// `StreamFinal::raw` for this crate: the captured value is
+/// `serde_json::to_value(&CandleCompletionResponse)` — the local record
+/// `raw_completion` returns — and a consumer must be able to read it back as
+/// the same type and get the same JSON, with the local generation metrics rig
+/// never normalizes (timings, tokens/second, the local finish reason) intact.
+/// There is no cassette harness for a local model, so this is the unit-form
+/// pin, independent of any model load.
+#[test]
+fn candle_completion_response_round_trips_through_serde_json_value()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let raw = CandleCompletionResponse {
+        text: "done".to_string(),
+        prompt_tokens: 5,
+        generated_tokens: 2,
+        requested_max_tokens: 4,
+        effective_max_tokens: 3,
+        finish_reason: FinishReason::MaxTokens,
+        prefill_duration_ms: 8,
+        time_to_first_token_ms: Some(10),
+        generation_duration_ms: 20,
+        tokens_per_second: Some(100.5),
+    };
+
+    let value = serde_json::to_value(&raw)?;
+    assert_eq!(
+        value.pointer("/tokens_per_second"),
+        Some(&serde_json::json!(100.5))
+    );
+    assert_eq!(
+        value.pointer("/finish_reason"),
+        Some(&serde_json::json!("max_tokens"))
+    );
+
+    let back: CandleCompletionResponse = serde_json::from_value(value.clone())?;
+    assert_eq!(
+        serde_json::to_value(&back)?,
+        value,
+        "the capture must read back into CandleCompletionResponse and re-serialize identically"
+    );
+    assert_eq!(back, raw);
+    Ok(())
+}
+
+/// The events-first seam captures like the request-driven one: its terminal
+/// `raw` is the same `CandleCompletionResponse` the model's `stream()` would
+/// attach, because both funnel through the adapter's `terminal_record`.
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test(flavor = "current_thread")]
+async fn stream_from_events_terminal_carries_raw()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let terminal_record = CandleCompletionResponse {
+        text: "hi".to_string(),
+        prompt_tokens: 3,
+        generated_tokens: 1,
+        requested_max_tokens: 4,
+        effective_max_tokens: 4,
+        finish_reason: FinishReason::Eos,
+        prefill_duration_ms: 1,
+        time_to_first_token_ms: Some(1),
+        generation_duration_ms: 2,
+        tokens_per_second: Some(500.0),
+    };
+    let mut stream = stream_from_events(futures::stream::iter(vec![
+        Ok(GenerationEvent::Text("hi".to_string())),
+        Ok(GenerationEvent::Final(terminal_record.clone())),
+    ]));
+    while let Some(item) = stream.next().await {
+        item?;
+    }
+    let terminal = stream
+        .response
+        .ok_or("stream did not emit a terminal record")?;
+
+    assert!(
+        !terminal.raw.is_null(),
+        "a provider-backed terminal always carries raw"
+    );
+    let raw = &terminal.raw;
+    let typed: CandleCompletionResponse = serde_json::from_value(raw.clone())?;
+    assert_eq!(typed, terminal_record);
+    assert_eq!(terminal.usage.total_tokens, Some(4));
+    Ok(())
+}
+
+/// Raw capture through the real `CompletionModel::completion` path on the
+/// tiny in-crate model (greedy, so two runs generate the same tokens): `raw`
+/// deserializes back into `CandleCompletionResponse`, re-serializes
+/// identically, and reports the same text and token counts `raw_completion`
+/// returns for the same request — and the normalized usage agrees with it.
+/// Timings are wall-clock and so are compared only through the round-trip,
+/// never across runs.
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test(flavor = "current_thread")]
+async fn completion_raw_round_trips_into_the_local_record()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let model = CandleModel::builder(model_data()?)
+        .temperature(0.0)
+        .max_tokens(2)
+        .build()?;
+
+    let response = model
+        .completion(request(vec![Message::user("hello")]))
+        .await?;
+    let escape_hatch = model
+        .raw_completion(request(vec![Message::user("hello")]))
+        .await?;
+
+    assert!(
+        !response.raw.is_null(),
+        "a provider-backed completion always carries raw"
+    );
+    let raw = &response.raw;
+    let typed: CandleCompletionResponse = serde_json::from_value(raw.clone())?;
+    assert_eq!(
+        serde_json::to_value(&typed)?,
+        *raw,
+        "the capture must be exactly what the local record serializes to"
+    );
+    assert_eq!(typed.text, escape_hatch.text);
+    assert_eq!(typed.prompt_tokens, escape_hatch.prompt_tokens);
+    assert_eq!(typed.generated_tokens, escape_hatch.generated_tokens);
+    assert_eq!(typed.finish_reason, escape_hatch.finish_reason);
+    assert_eq!(typed.generated_tokens, 2);
+
+    assert_eq!(response.usage.input_tokens, Some(typed.prompt_tokens));
+    assert_eq!(response.usage.output_tokens, Some(typed.generated_tokens));
+    assert_eq!(response.usage.output_tokens, Some(2));
+    Ok(())
+}
+
+/// The streaming twin through the real `CompletionModel::stream` path: the
+/// terminal `StreamFinal.raw` is the local record the generator's `Final`
+/// event carries — it round-trips into `CandleCompletionResponse`, agrees
+/// with a second stream's terminal on text and token counts, and
+/// re-normalizing it through the events-first seam reproduces every
+/// normalized field.
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test(flavor = "current_thread")]
+async fn stream_terminal_raw_round_trips_into_the_local_record()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let model = CandleModel::builder(model_data()?)
+        .temperature(0.0)
+        .max_tokens(2)
+        .build()?;
+
+    let mut stream = model.stream(request(vec![Message::user("hello")])).await?;
+    while let Some(item) = stream.next().await {
+        item?;
+    }
+    let terminal = stream
+        .response
+        .ok_or("stream did not emit a terminal record")?;
+    let (_, streamed) = collect_stream(&model, request(vec![Message::user("hello")])).await?;
+
+    assert!(
+        !terminal.raw.is_null(),
+        "a provider-backed terminal always carries raw"
+    );
+    let raw = &terminal.raw;
+    let typed: CandleCompletionResponse = serde_json::from_value(raw.clone())?;
+    assert_eq!(
+        serde_json::to_value(&typed)?,
+        *raw,
+        "the capture must be exactly what the terminal record serializes to"
+    );
+    assert_eq!(typed.text, streamed.text);
+    assert_eq!(typed.prompt_tokens, streamed.prompt_tokens);
+    assert_eq!(typed.generated_tokens, streamed.generated_tokens);
+    assert_eq!(typed.finish_reason, streamed.finish_reason);
+
+    let mut renormalized = stream_from_events(futures::stream::iter(vec![Ok(
+        GenerationEvent::Final(typed),
+    )]));
+    while let Some(item) = renormalized.next().await {
+        item?;
+    }
+    let renormalized = renormalized
+        .response
+        .ok_or("re-normalizing the capture did not emit a terminal record")?;
+    assert_eq!(terminal.identity(), renormalized.identity());
+    assert_eq!(terminal.finish_reason, renormalized.finish_reason);
+    assert_eq!(terminal.model, renormalized.model);
+    assert_eq!(terminal.usage, renormalized.usage);
+    assert_eq!(terminal.usage.output_tokens, Some(2));
     Ok(())
 }

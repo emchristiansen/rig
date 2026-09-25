@@ -1,4 +1,12 @@
-#![doc = include_str!("../README.md")]
+//! Local CPU inference from caller-supplied, validated model artifacts.
+//! Supports selected Llama, SmolLM2, and Qwen3 checkpoints without performing
+//! filesystem or network access. WASM inference is synchronous; use a worker.
+//!
+//! ```
+//! use rig_candle::ConversationProtocol;
+//!
+//! let protocol = ConversationProtocol::Qwen3;
+//! ```
 
 mod artifacts;
 mod generation;
@@ -11,9 +19,9 @@ mod types;
 mod validation;
 
 pub use artifacts::{GgufModelData, ModelArtifacts, ModelData};
-pub use generation::GenerationConfig;
-pub use model::{CandleModel, CandleModelBuilder, LlamaModel, stream_from_events};
-pub use profile::{ConversationProtocol, ModelArchitecture, ModelFamily, Quantization};
+pub use generation::{GenerationConfig, GenerationEvent};
+pub use model::{CandleModel, CandleModelBuilder, stream_from_events};
+pub use profile::{ConversationProtocol, ModelArchitecture, Quantization};
 pub use types::{CandleCompletionResponse, CandleError, FinishReason};
 
 pub(crate) use profile::{

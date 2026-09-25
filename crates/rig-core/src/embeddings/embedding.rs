@@ -1,140 +1,78 @@
-//! The module defines the [EmbeddingModel] and [ImageEmbeddingModel] traits, which represent
-//! embedding models that can generate embeddings for text documents and images.
+//! Text and image embedding models, responses, and input identifiers.
 //!
-//! The module also defines the [Embedding] struct, which represents a single document embedding.
+//! ```no_run
+//! use rig_core::embeddings::EmbeddingModel;
 //!
-//! Finally, the module defines the [EmbeddingError] enum, which represents various errors that
-//! can occur during embedding generation or processing.
+//! # async fn example(model: impl EmbeddingModel) -> Result<(), Box<dyn std::error::Error>> {
+//! let embedding = model.embed_text("A document").await?;
+//! # let _ = embedding;
+//! # Ok(())
+//! # }
+//! ```
 
+use crate::error::ProviderError;
 use crate::{
-    completion::Usage,
+    completion::{ResponseIdentity, Usage},
     wasm_compat::{WasmCompatSend, WasmCompatSync},
 };
 use serde::{Deserialize, Serialize};
 
-crate::provider_response::provider_error_enum!(
-    EmbeddingError, "embedding" {
-    /// URL construction or parsing failed while preparing a provider request.
-    #[error("UrlError: {0}")]
-    UrlError(#[from] url::ParseError),
-
-    #[cfg(not(target_family = "wasm"))]
-    /// Error processing the document for embedding
-    #[error("DocumentError: {0}")]
-    DocumentError(Box<dyn std::error::Error + Send + Sync + 'static>),
-
-    #[cfg(target_family = "wasm")]
-    /// Error processing the document for embedding
-    #[error("DocumentError: {0}")]
-    DocumentError(Box<dyn std::error::Error + 'static>),
-    } {
-    /// The provider does not support an embedding request parameter configured on the model.
-    #[error("{provider} embeddings do not support the `{parameter}` parameter")]
-    UnsupportedParameter {
-        /// Provider whose embedding API rejected the parameter.
-        provider: &'static str,
-        /// Unsupported request parameter.
-        parameter: &'static str,
-    },
-
-    /// A provider request parameter was configured with a value outside the
-    /// provider's supported range.
-    #[error("{provider} embeddings require `{parameter}` {requirement}")]
-    InvalidParameterValue {
-        /// Provider whose embedding API constrains the parameter.
-        provider: &'static str,
-        /// Request parameter with the invalid value.
-        parameter: &'static str,
-        /// Concise description of the accepted values.
-        requirement: &'static str,
-    },
-
-    /// Rig cannot decode the requested provider response encoding.
-    #[error("Rig cannot decode {provider} embedding responses encoded as `{encoding_format}`")]
-    UnsupportedResponseEncoding {
-        /// Provider whose response encoding was requested.
-        provider: &'static str,
-        /// Response encoding that Rig cannot decode.
-        encoding_format: &'static str,
-    },
-
-    /// A provider that guarantees embedding usage omitted it from the response.
-    #[error("{provider} embedding response omitted required usage")]
-    MissingUsage {
-        /// Provider whose response omitted usage.
-        provider: &'static str,
-    },
-    }
-);
-
 /// Trait for embedding models that can generate embeddings for documents.
 pub trait EmbeddingModel: WasmCompatSend + WasmCompatSync {
-    /// The maximum number of documents that can be embedded in a single request.
-    const MAX_DOCUMENTS: usize;
-
-    /// Provider client type used to construct this embedding model.
-    type Client;
-
-    /// Construct a model handle from a provider client, model identifier, and optional dimensions.
-    fn make(client: &Self::Client, model: impl Into<String>, dims: Option<usize>) -> Self;
+    /// The maximum number of documents accepted in a single request.
+    fn max_documents(&self) -> usize;
 
     /// The number of dimensions in the embedding vector.
     fn ndims(&self) -> usize;
 
-    /// Embed multiple text documents in a single request
+    /// Embed multiple text documents in a single request and return the full
+    /// normalized response: embeddings, usage, provider, and identity.
+    ///
+    /// Implementations must preserve input order in the returned embeddings.
+    fn embed_texts_response(
+        &self,
+        texts: impl IntoIterator<Item = String> + WasmCompatSend,
+    ) -> impl std::future::Future<Output = Result<EmbeddingResponse, ProviderError>> + WasmCompatSend;
+
+    /// Embed multiple text documents in a single request.
+    ///
+    /// The convenience form of [`EmbeddingModel::embed_texts_response`] for
+    /// callers who want only the vectors.
     fn embed_texts(
         &self,
         texts: impl IntoIterator<Item = String> + WasmCompatSend,
-    ) -> impl std::future::Future<Output = Result<Vec<Embedding>, EmbeddingError>> + WasmCompatSend;
+    ) -> impl std::future::Future<Output = Result<Vec<Embedding>, ProviderError>> + WasmCompatSend
+    {
+        async { Ok(self.embed_texts_response(texts).await?.embeddings) }
+    }
 
-    /// Embed a single text document.
+    /// Embeds one text, returning the last vector or an error if none is returned.
     fn embed_text(
         &self,
         text: &str,
-    ) -> impl std::future::Future<Output = Result<Embedding, EmbeddingError>> + WasmCompatSend {
+    ) -> impl std::future::Future<Output = Result<Embedding, ProviderError>> + WasmCompatSend {
         async {
             let mut embeddings = self.embed_texts(vec![text.to_string()]).await?;
             embeddings.pop().ok_or_else(|| {
-                EmbeddingError::ResponseError(
+                ProviderError::Response(
                     "embedding provider returned an empty response for embed_text".to_string(),
                 )
             })
         }
     }
 
-    /// Embed multiple text documents in a single request and return token usage.
-    ///
-    /// The default implementation delegates to [`EmbeddingModel::embed_texts`] and returns
-    /// zero-valued usage. Providers that expose usage information from their embedding API
-    /// should override this method.
-    fn embed_texts_with_usage(
-        &self,
-        texts: impl IntoIterator<Item = String> + WasmCompatSend,
-    ) -> impl std::future::Future<Output = Result<EmbeddingResponse, EmbeddingError>> + WasmCompatSend
-    {
-        async {
-            let embeddings = self.embed_texts(texts).await?;
-            Ok(EmbeddingResponse {
-                embeddings,
-                usage: Usage::default(),
-            })
-        }
-    }
-
-    /// Embed a single text document and return token usage.
-    ///
-    /// The default implementation delegates to
-    /// [`EmbeddingModel::embed_texts_with_usage`].
-    fn embed_text_with_usage(
+    /// Embeds one text and returns the normalized response, rejecting an empty
+    /// embedding list.
+    fn embed_text_response(
         &self,
         text: &str,
-    ) -> impl std::future::Future<Output = Result<EmbeddingResponse, EmbeddingError>> + WasmCompatSend
+    ) -> impl std::future::Future<Output = Result<EmbeddingResponse, ProviderError>> + WasmCompatSend
     {
         async {
-            let response = self.embed_texts_with_usage(vec![text.to_string()]).await?;
+            let response = self.embed_texts_response(vec![text.to_string()]).await?;
             if response.embeddings.is_empty() {
-                return Err(EmbeddingError::ResponseError(
-                    "embedding provider returned an empty response for embed_text_with_usage"
+                return Err(ProviderError::Response(
+                    "embedding provider returned an empty response for embed_text_response"
                         .to_string(),
                 ));
             }
@@ -143,42 +81,167 @@ pub trait EmbeddingModel: WasmCompatSend + WasmCompatSync {
     }
 }
 
-/// Response from an embedding request containing the embeddings and token usage.
-#[derive(Debug, Clone)]
+/// Text embeddings and normalized provider metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingResponse {
-    /// The embeddings returned by the provider, one per input text.
+    /// The embeddings returned by the provider, one per input text, in input order.
     pub embeddings: Vec<Embedding>,
-    /// Token usage for this embedding request.
+    /// Token usage for this request; every counter is `None` when the
+    /// provider reported none (see [`Usage`]).
+    #[serde(default)]
     pub usage: Usage,
+    /// Stable descriptor name of the provider that produced this response,
+    /// for example `"openai"`. Always populated.
+    pub provider: String,
+    /// Provider-reported model identifier, when the wire response named one.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Provider-assigned response-scoped identifier, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    /// Transport request identifier from HTTP response headers, or `None` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
+    /// Provider response payload, or null when no raw payload was attached.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub raw: serde_json::Value,
 }
 
+impl EmbeddingResponse {
+    /// Create a response from its required parts; optional metadata starts
+    /// unset and is filled in with the `with_*` helpers.
+    pub fn new(embeddings: Vec<Embedding>, provider: impl Into<String>) -> Self {
+        Self {
+            embeddings,
+            usage: Usage::default(),
+            provider: provider.into(),
+            model: None,
+            response_id: None,
+            provider_request_id: None,
+            raw: serde_json::Value::Null,
+        }
+    }
+
+    /// This response's identity metadata as one [`ResponseIdentity`] carrier.
+    /// `message_id` is always `None`: nothing here is replayed as an
+    /// assistant message.
+    pub fn identity(&self) -> ResponseIdentity {
+        ResponseIdentity {
+            message_id: None,
+            response_id: self.response_id.clone(),
+            provider_request_id: self.provider_request_id.clone(),
+        }
+    }
+}
+
+crate::provider_response::modality_response_metadata_setters!(EmbeddingResponse);
+
+/// Normalizes embedding payloads using the supplied provider name and input documents.
+pub trait NormalizeEmbeddingResponse {
+    /// Normalize this payload, attributing it to `provider`. `documents` are
+    /// the inputs in request order, for [`Embedding::document`].
+    fn normalize(
+        self,
+        provider: &str,
+        documents: Vec<String>,
+    ) -> Result<EmbeddingResponse, ProviderError>;
+}
+
+/// Image embeddings and normalized provider metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageEmbeddingResponse {
+    /// The embeddings returned by the provider, one per input image, in input order.
+    pub embeddings: Vec<Embedding>,
+    /// Token usage for this request; every counter is `None` when the
+    /// provider reported none (see [`Usage`]).
+    #[serde(default)]
+    pub usage: Usage,
+    /// Stable descriptor name of the provider that produced this response,
+    /// for example `"openai"`. Always populated.
+    pub provider: String,
+    /// Provider-reported model identifier, when the wire response named one.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Provider-assigned response-scoped identifier, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
+    /// Transport request identifier from HTTP response headers, or `None` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
+    /// Provider response payload, or null when no raw payload was attached.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub raw: serde_json::Value,
+}
+
+impl ImageEmbeddingResponse {
+    /// Create a response from its required parts; optional metadata starts
+    /// unset and is filled in with the `with_*` helpers.
+    pub fn new(embeddings: Vec<Embedding>, provider: impl Into<String>) -> Self {
+        Self {
+            embeddings,
+            usage: Usage::default(),
+            provider: provider.into(),
+            model: None,
+            response_id: None,
+            provider_request_id: None,
+            raw: serde_json::Value::Null,
+        }
+    }
+
+    /// This response's identity metadata as one [`ResponseIdentity`] carrier.
+    /// `message_id` is always `None`: nothing here is replayed as an
+    /// assistant message.
+    pub fn identity(&self) -> ResponseIdentity {
+        ResponseIdentity {
+            message_id: None,
+            response_id: self.response_id.clone(),
+            provider_request_id: self.provider_request_id.clone(),
+        }
+    }
+}
+
+crate::provider_response::modality_response_metadata_setters!(ImageEmbeddingResponse);
+
 /// Trait for embedding models that can generate embeddings for images.
-pub trait ImageEmbeddingModel: Clone + WasmCompatSend + WasmCompatSync {
+pub trait ImageEmbeddingModel: WasmCompatSend + WasmCompatSync {
     /// The maximum number of images the provider accepts in one request.
-    const MAX_DOCUMENTS: usize;
+    fn max_documents(&self) -> usize;
 
     /// The number of dimensions in the embedding vector.
     fn ndims(&self) -> usize;
 
-    /// Embed a batch of images from their encoded file bytes.
+    /// Embed a batch of images from their encoded file bytes and return the
+    /// full normalized response. This is the method a provider implements;
+    /// [`ImageEmbeddingModel::embed_images`] and
+    /// [`ImageEmbeddingModel::embed_image`] derive from it.
     ///
     /// Implementations must preserve input order in the returned embeddings.
     /// The returned [`Embedding::document`] should identify the input without
     /// retaining the raw image or a reversible encoding of it.
+    fn embed_images_response(
+        &self,
+        images: impl IntoIterator<Item = Vec<u8>> + WasmCompatSend,
+    ) -> impl std::future::Future<Output = Result<ImageEmbeddingResponse, ProviderError>> + WasmCompatSend;
+
+    /// Embed a batch of images from their encoded file bytes.
     fn embed_images(
         &self,
         images: impl IntoIterator<Item = Vec<u8>> + WasmCompatSend,
-    ) -> impl std::future::Future<Output = Result<Vec<Embedding>, EmbeddingError>> + WasmCompatSend;
+    ) -> impl std::future::Future<Output = Result<Vec<Embedding>, ProviderError>> + WasmCompatSend
+    {
+        async { Ok(self.embed_images_response(images).await?.embeddings) }
+    }
 
-    /// Embed a single image from its encoded file bytes.
-    fn embed_image<'a>(
-        &'a self,
-        bytes: &'a [u8],
-    ) -> impl std::future::Future<Output = Result<Embedding, EmbeddingError>> + WasmCompatSend {
+    /// Embeds one encoded image, returning the last vector or an error if none
+    /// is returned.
+    fn embed_image(
+        &self,
+        bytes: &[u8],
+    ) -> impl std::future::Future<Output = Result<Embedding, ProviderError>> + WasmCompatSend {
         async move {
             let mut embeddings = self.embed_images(vec![bytes.to_owned()]).await?;
             embeddings.pop().ok_or_else(|| {
-                EmbeddingError::ResponseError(
+                ProviderError::Response(
                     "embedding provider returned an empty response for embed_image".to_string(),
                 )
             })
@@ -186,7 +249,8 @@ pub trait ImageEmbeddingModel: Clone + WasmCompatSend + WasmCompatSync {
     }
 }
 
-/// Struct that holds a single document and its embedding.
+/// A document identifier and its vector. Equality compares only the document,
+/// not vector values.
 #[derive(Clone, Default, Deserialize, Serialize, Debug)]
 pub struct Embedding {
     /// The text that was embedded, or a non-sensitive input identifier for
@@ -205,74 +269,36 @@ impl PartialEq for Embedding {
 impl Eq for Embedding {}
 
 #[cfg(test)]
-mod provider_response_tests {
-    use super::*;
-    use crate::{http_client, provider_response};
-    use http::StatusCode;
+mod provider_response_tests;
 
-    #[test]
-    fn embedding_error_provider_response_helpers_with_preserved_json_body() {
-        let body = r#"{"error":{"message":"rate limited"}}"#;
-        let error = EmbeddingError::ProviderResponse(provider_response::ProviderResponseError {
-            status: None,
-            body: body.to_string(),
-            provider_request_id: None,
-        });
-
-        assert_eq!(error.provider_response_body(), Some(body));
-        assert_eq!(error.provider_response_status(), None);
-        assert_eq!(
-            error.provider_response_json().expect("valid JSON"),
-            Some(serde_json::json!({ "error": { "message": "rate limited" } }))
-        );
+/// The media type of an encoded image, sniffed from its magic bytes.
+///
+/// The image-embedding wires need it twice: once to reject a format the
+/// provider does not accept, and once to name the vector's input.
+pub fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP".as_slice()) {
+        Some("image/webp")
+    } else {
+        None
     }
+}
 
-    #[test]
-    fn embedding_error_provider_error_is_not_a_provider_response() {
-        let error = EmbeddingError::ProviderError("internal diagnostic".to_string());
-
-        assert_eq!(error.provider_response_body(), None);
-        assert_eq!(error.provider_response_status(), None);
-        assert_eq!(error.provider_response_json().expect("no body"), None);
-    }
-
-    #[test]
-    fn embedding_error_provider_response_helpers_with_http_non_success() {
-        let body = r#"{"error":{"message":"bad request"}}"#;
-        let error = EmbeddingError::HttpError(http_client::Error::InvalidStatusCodeWithMessage(
-            StatusCode::BAD_REQUEST,
-            body.to_string(),
-        ));
-
-        assert_eq!(error.provider_response_body(), Some(body));
-        assert_eq!(
-            error.provider_response_status(),
-            Some(StatusCode::BAD_REQUEST)
-        );
-        assert_eq!(
-            error.provider_response_json().expect("valid JSON"),
-            Some(serde_json::json!({ "error": { "message": "bad request" } }))
-        );
-    }
-
-    #[test]
-    fn embedding_error_provider_response_helpers_with_preserved_plain_text_body() {
-        let error = EmbeddingError::ProviderResponse(provider_response::ProviderResponseError {
-            status: None,
-            body: "not json".to_string(),
-            provider_request_id: None,
-        });
-
-        assert_eq!(error.provider_response_body(), Some("not json"));
-        assert!(error.provider_response_json().is_err());
-    }
-
-    #[test]
-    fn embedding_error_provider_response_helpers_with_unrelated_variant() {
-        let error = EmbeddingError::ResponseError("parse failed".to_string());
-
-        assert_eq!(error.provider_response_body(), None);
-        assert_eq!(error.provider_response_status(), None);
-        assert_eq!(error.provider_response_json().expect("no body"), None);
-    }
+/// Identifies image bytes by media type and a URL-safe, unpadded SHA-256 digest,
+/// without retaining the image or a reversible encoding. Unknown formats use
+/// `application/octet-stream`; this function does not validate provider support.
+pub fn image_document(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let media_type = image_media_type(bytes).unwrap_or("application/octet-stream");
+    let digest = sha2::Sha256::digest(bytes);
+    format!(
+        "{media_type};sha256={}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    )
 }

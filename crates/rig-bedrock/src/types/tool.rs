@@ -1,16 +1,14 @@
 use aws_sdk_bedrockruntime::types as aws_bedrock;
 
 use super::{converse_output::ToolResultContentBlock, image::RigImage, json::AwsDocument};
-use rig_core::{
-    completion::CompletionError,
-    message::{Text, ToolResultContent},
-};
+use rig_core::error::ProviderError;
+use rig_core::message::{Text, ToolResultContent};
 use serde_json::Value;
 
 pub struct RigToolResultContent(pub ToolResultContent);
 
 impl TryFrom<RigToolResultContent> for aws_bedrock::ToolResultContentBlock {
-    type Error = CompletionError;
+    type Error = ProviderError;
 
     fn try_from(value: RigToolResultContent) -> Result<Self, Self::Error> {
         match value.0 {
@@ -22,10 +20,8 @@ impl TryFrom<RigToolResultContent> for aws_bedrock::ToolResultContentBlock {
                 Ok(aws_bedrock::ToolResultContentBlock::Image(image))
             }
             ToolResultContent::Json { value } => {
-                // Bedrock's Converse API accepts only an object in the JSON
-                // tool-result field for models such as Nova. Preserve object
-                // outputs unchanged and keep every other JSON type structured
-                // under a stable wrapper instead of falling back to text.
+                // Object-only tool-result schemas require a wrapper for other
+                // JSON shapes without converting structured data to text.
                 let value = match value {
                     Value::Object(_) => value,
                     value => serde_json::json!({ "result": value }),
@@ -38,7 +34,7 @@ impl TryFrom<RigToolResultContent> for aws_bedrock::ToolResultContentBlock {
 }
 
 impl TryFrom<ToolResultContentBlock> for RigToolResultContent {
-    type Error = CompletionError;
+    type Error = ProviderError;
 
     fn try_from(value: ToolResultContentBlock) -> Result<Self, Self::Error> {
         match value {
@@ -52,7 +48,7 @@ impl TryFrom<ToolResultContentBlock> for RigToolResultContent {
             ToolResultContentBlock::Text(text) => Ok(RigToolResultContent(
                 ToolResultContent::Text(Text::new(text)),
             )),
-            _ => Err(CompletionError::ProviderError(
+            _ => Err(ProviderError::Provider(
                 "ToolResultContentBlock contains unsupported variant".into(),
             )),
         }
@@ -60,123 +56,4 @@ impl TryFrom<ToolResultContentBlock> for RigToolResultContent {
 }
 
 #[cfg(test)]
-mod tests {
-    use aws_sdk_bedrockruntime::types as aws_bedrock;
-    use base64::{Engine, prelude::BASE64_STANDARD};
-    use rig_core::{
-        completion::CompletionError,
-        message::{DocumentSourceKind, Image, ImageMediaType, Text, ToolResultContent},
-    };
-
-    use crate::types::{converse_output::ToolResultContentBlock, tool::RigToolResultContent};
-
-    /// The inbound path reads the mirror, but what Bedrock sends is the SDK
-    /// block, so the tests still start there and mirror it first.
-    fn mirrored(block: aws_bedrock::ToolResultContentBlock) -> ToolResultContentBlock {
-        block.try_into().expect("the SDK block mirrors")
-    }
-
-    #[test]
-    fn rig_tool_text_to_aws_tool() {
-        let tool = RigToolResultContent(ToolResultContent::Text(Text::new("42")));
-        let aws_tool: Result<aws_bedrock::ToolResultContentBlock, _> = tool.try_into();
-        assert!(aws_tool.is_ok());
-        assert_eq!(
-            String::from(aws_tool.unwrap().as_text().unwrap()),
-            String::from("42")
-        );
-    }
-
-    #[test]
-    fn rig_tool_image_to_aws_tool() {
-        let encoded_str = BASE64_STANDARD.encode("img_data");
-        let image = Image {
-            data: DocumentSourceKind::Base64(encoded_str),
-            media_type: Some(ImageMediaType::JPEG),
-            detail: None,
-            additional_params: None,
-        };
-        let tool = RigToolResultContent(ToolResultContent::Image(image));
-        let aws_tool: Result<aws_bedrock::ToolResultContentBlock, _> = tool.try_into();
-        assert!(aws_tool.is_ok());
-        assert!(aws_tool.unwrap().is_image())
-    }
-
-    #[test]
-    fn rig_tool_json_maps_to_native_aws_json() {
-        let expected = serde_json::json!({ "answer": -3, "exact": true });
-        let tool = RigToolResultContent(ToolResultContent::Json {
-            value: expected.clone(),
-        });
-
-        let aws_tool: aws_bedrock::ToolResultContentBlock = tool
-            .try_into()
-            .expect("JSON should render at the AWS boundary");
-        let document = match aws_tool {
-            aws_bedrock::ToolResultContentBlock::Json(document) => document,
-            other => panic!("expected Bedrock JSON tool result, got {other:?}"),
-        };
-        let actual: serde_json::Value = crate::types::json::AwsDocument(document).into();
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn rig_tool_non_object_json_is_wrapped_for_bedrock() {
-        for value in [
-            serde_json::Value::Null,
-            serde_json::json!(true),
-            serde_json::json!(-3),
-            serde_json::json!("literal text"),
-            serde_json::json!([1, 2, 3]),
-        ] {
-            let tool = RigToolResultContent(ToolResultContent::Json {
-                value: value.clone(),
-            });
-
-            let aws_tool: aws_bedrock::ToolResultContentBlock = tool
-                .try_into()
-                .expect("JSON should render at the AWS boundary");
-            let document = match aws_tool {
-                aws_bedrock::ToolResultContentBlock::Json(document) => document,
-                other => panic!("expected Bedrock JSON tool result, got {other:?}"),
-            };
-            let actual: serde_json::Value = crate::types::json::AwsDocument(document).into();
-            assert_eq!(actual, serde_json::json!({ "result": value }));
-        }
-    }
-
-    #[test]
-    fn aws_tool_to_rig_tool() {
-        let aws_tool = mirrored(aws_bedrock::ToolResultContentBlock::Text("txt".into()));
-        let tool: Result<RigToolResultContent, _> = aws_tool.try_into();
-        assert!(tool.is_ok());
-        let tool = match tool.unwrap().0 {
-            ToolResultContent::Text(text) => Ok(text),
-            _ => Err("tool doesn't contain text"),
-        };
-        assert!(tool.is_ok());
-        assert_eq!(tool.unwrap().text, String::from("txt"))
-    }
-
-    #[test]
-    fn aws_tool_to_unsupported_rig_tool() {
-        let document_source =
-            aws_bedrock::DocumentSource::Bytes(aws_smithy_types::Blob::new("document_data"));
-        let aws_document = aws_bedrock::DocumentBlock::builder()
-            .format(aws_bedrock::DocumentFormat::Pdf)
-            .name("Document")
-            .source(document_source)
-            .build()
-            .unwrap();
-        let aws_tool = mirrored(aws_bedrock::ToolResultContentBlock::Document(aws_document));
-        let tool: Result<RigToolResultContent, _> = aws_tool.try_into();
-        assert!(tool.is_err());
-        assert_eq!(
-            tool.err().unwrap().to_string(),
-            CompletionError::ProviderError(
-                "ToolResultContentBlock contains unsupported variant".into()
-            )
-            .to_string()
-        )
-    }
-}
+mod tests;

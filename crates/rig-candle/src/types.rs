@@ -1,14 +1,21 @@
-//! Public errors and response metadata.
+//! Local inference errors, finish reasons, and response metadata.
+//!
+//! ```
+//! use rig_candle::FinishReason;
+//!
+//! assert_eq!(serde_json::to_string(&FinishReason::Eos)?, "\"eos\"");
+//! # Ok::<(), serde_json::Error>(())
+//! ```
 
-use rig_core::completion::{CompletionError, Usage};
+use rig_core::completion::Usage;
+use rig_core::error::ProviderError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::profile::ModelFamily;
+use crate::profile::ConversationProtocol;
 
 /// Why a local Candle completion failed.
 #[derive(Debug, Error, Clone)]
-#[non_exhaustive]
 pub enum CandleError {
     /// A required artifact buffer was empty.
     #[error("the {artifact} buffer is empty")]
@@ -34,9 +41,9 @@ pub enum CandleError {
     #[error("selected model family {selected:?} does not match detected family {detected:?}")]
     ModelFamilyMismatch {
         /// Family requested by the caller.
-        selected: ModelFamily,
+        selected: ConversationProtocol,
         /// Family detected from the tokenizer.
-        detected: ModelFamily,
+        detected: ConversationProtocol,
     },
     /// Independently supplied model artifacts disagree with one another.
     #[error("{artifact} does not match the selected model artifacts: {reason}")]
@@ -94,6 +101,10 @@ pub enum CandleError {
     /// A message contains content that the selected text-only prompt renderer cannot represent.
     #[error("unsupported prompt content: {0}")]
     UnsupportedPromptContent(&'static str),
+    /// A historical tool call the local prompt formats cannot express: a
+    /// namespaced call or a custom call. The shared JSON-only wire refusal.
+    #[error(transparent)]
+    UnrepresentableToolCall(#[from] rig_core::message::UnrepresentableToolCall),
     /// Caller-controlled content contains a delimiter reserved by the selected chat template.
     #[error("{field} contains reserved protocol marker `{marker}`")]
     ReservedProtocolMarker {
@@ -209,9 +220,14 @@ pub enum CandleError {
     StreamingChannelClosed,
 }
 
-impl From<CandleError> for CompletionError {
+impl From<CandleError> for ProviderError {
     fn from(error: CandleError) -> Self {
-        CompletionError::ProviderError(error.to_string())
+        match error {
+            // A request the local prompt format cannot express, refused
+            // before any inference: a request failure, as on every other wire.
+            CandleError::UnrepresentableToolCall(refusal) => ProviderError::Request(refusal.into()),
+            error => ProviderError::Provider(error.to_string()),
+        }
     }
 }
 
@@ -256,12 +272,14 @@ pub const PROVIDER_NAME: &str = "candle";
 impl From<&CandleCompletionResponse> for Usage {
     fn from(response: &CandleCompletionResponse) -> Self {
         Usage {
-            input_tokens: response.prompt_tokens,
-            output_tokens: response.generated_tokens,
-            total_tokens: response
-                .prompt_tokens
-                .saturating_add(response.generated_tokens),
-            ..Usage::new()
+            input_tokens: Some(response.prompt_tokens),
+            output_tokens: Some(response.generated_tokens),
+            total_tokens: Some(
+                response
+                    .prompt_tokens
+                    .saturating_add(response.generated_tokens),
+            ),
+            ..Usage::default()
         }
     }
 }

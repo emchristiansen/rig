@@ -1,101 +1,112 @@
-//! Shared provider infrastructure: the wire-adapter contract, its
-//! single-policy-site driver, and the decode-then-validate classify layer.
+//! Shared frame classification, tool-call identity, and reasoning lifecycle helpers.
+//! Companion providers use these helpers from [`Decoder`](crate::wire::Decoder)
+//! implementations that emit into [`AdapterOutput`](crate::operation::AdapterOutput).
 //!
-//! [`adapter`], [`wire`], [`tool_call_bridge`], and [`chunk_lifecycle`] are
-//! public so out-of-tree providers implement [`adapter::WireAdapter`] and
-//! inherit the shared driver, frame-triage policy, index→identity tool-call
-//! bridging, and the boundary-less reasoning lifecycle derivation instead of
-//! hand-rolling per-provider assemblers; the remaining helpers are
-//! crate-private.
+//! ```
+//! use rig_core::providers::internal::resolve_empty_tool_result_names;
+//! let mut history = Vec::new();
+//! resolve_empty_tool_result_names(&mut history);
+//! ```
 
-pub mod adapter;
-pub(crate) mod anthropic_compatible;
-#[cfg(feature = "audio")]
-pub(crate) mod audio_generation;
 pub(crate) mod auth;
 pub mod chunk_lifecycle;
-pub(crate) mod completion_send;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) mod device_auth;
-pub(crate) mod envelope;
-#[cfg(feature = "image")]
-pub(crate) mod image_generation;
-pub(crate) mod model_listing;
 pub(crate) mod openai_chat_completions_compatible;
 pub(crate) mod schema;
-#[cfg(any(test, debug_assertions))]
-pub(crate) mod sequence_law;
-pub(crate) mod sse_transport;
+/// The debug-mode sequence-law validator. Public only because it is the
+/// completion sink's `Laws` type; its checks run under `debug_assertions`.
+#[doc(hidden)]
+pub mod sequence_law;
 pub mod tool_call_bridge;
-pub(crate) mod transcription;
+pub mod tool_call_ids;
 pub mod wire;
 
-/// Fill empty [`ToolResult::name`](crate::message::ToolResult::name)s from
-/// the calls they answer, for wires that key the replay on the tool name
-/// (Gemini `functionResponse.name`, Ollama tool messages, Vertex AI,
-/// gemini-grpc, Interactions).
-///
-/// `ToolResult::name` is required data, but rig's own inbound converters
-/// cannot supply it: Anthropic, OpenAI-chat, Cohere, and Bedrock tool
-/// messages carry no name on their wires, so a cross-provider ingested
-/// transcript arrives with `name: ""`. The name lives on the paired
-/// assistant call in the same history — match by rig's correlation handle
-/// first, then by provider identifiers. A result matching no call keeps
-/// its empty name: the transcript genuinely lacks the data, and the wire's
-/// own rejection is the honest failure.
-///
-/// `pub` (not `pub(crate)`) because sibling serializer crates that speak a
-/// name-keyed tool-result wire (rig-vertexai, rig-gemini-grpc) carry the
-/// same contract; it is not part of rig-core's stable public API.
+/// Fill empty tool-result names from preceding unmatched calls.
+/// Match local correlation handles before provider identifiers. Existing names
+/// disambiguate multiple matches; ambiguous or missing matches remain unchanged.
+/// This helper is available to companion serializers but is not a stable public API.
 pub fn resolve_empty_tool_result_names(history: &mut [crate::message::Message]) {
-    use std::collections::HashMap;
+    use crate::message::{AssistantContent, Message, ProviderCallId, ToolCallId, UserContent};
 
-    let mut names_by_id: HashMap<String, String> = HashMap::new();
-    for message in history.iter() {
-        let crate::message::Message::Assistant { content, .. } = message else {
-            continue;
-        };
-        for item in content.iter() {
-            let crate::message::AssistantContent::ToolCall(call) = item else {
-                continue;
-            };
-            names_by_id.insert(call.id.as_str().to_owned(), call.function.name.clone());
-            if let Some(provider) = &call.provider {
-                names_by_id.insert(provider.call_id.clone(), call.function.name.clone());
-                if let Some(item_id) = &provider.item_id {
-                    names_by_id.insert(item_id.clone(), call.function.name.clone());
+    /// An outstanding call of either kind: what a result is matched against.
+    struct PendingCall {
+        id: ToolCallId,
+        provider: Option<ProviderCallId>,
+        name: String,
+    }
+
+    // IDs are completion-local. Resolve only against preceding outstanding
+    // calls, never a future turn that happens to reuse the same generated key.
+    let mut pending: Vec<PendingCall> = Vec::new();
+    for message in history {
+        match message {
+            Message::Assistant { content, .. } => {
+                pending.extend(content.iter().filter_map(|item| match item {
+                    AssistantContent::ToolCall(call) => Some(PendingCall {
+                        id: call.id.clone(),
+                        provider: call.provider.clone(),
+                        name: call.function.name.clone(),
+                    }),
+                    AssistantContent::CustomToolCall(call) => Some(PendingCall {
+                        id: call.id.clone(),
+                        provider: call.provider.clone(),
+                        name: call.name.clone(),
+                    }),
+                    AssistantContent::Text(_)
+                    | AssistantContent::Reasoning(_)
+                    | AssistantContent::Image(_) => None,
+                }));
+            }
+            Message::User { content } => {
+                for item in content {
+                    let UserContent::ToolResult(result) = item else {
+                        continue;
+                    };
+                    let local: Vec<_> = pending
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, call)| call.id == result.call)
+                        .map(|(index, _)| index)
+                        .collect();
+                    let mut candidates = if local.is_empty() {
+                        // Provider aliases are their own namespace, not strings
+                        // inserted alongside generated correlation keys.
+                        pending
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, call)| match (&call.provider, &result.provider) {
+                                (Some(call), Some(result)) => {
+                                    call.call_id == result.call_id
+                                        || call.item_id.as_ref().is_some_and(|id| {
+                                            id == &result.call_id
+                                                || result.item_id.as_ref() == Some(id)
+                                        })
+                                        || result.item_id.as_ref() == Some(&call.call_id)
+                                }
+                                _ => false,
+                            })
+                            .map(|(index, _)| index)
+                            .collect()
+                    } else {
+                        local
+                    };
+                    if candidates.len() > 1 && !result.name.is_empty() {
+                        candidates.retain(|index| {
+                            pending
+                                .get(*index)
+                                .is_some_and(|call| call.name == result.name)
+                        });
+                    }
+                    if let [index] = candidates.as_slice() {
+                        let call = pending.remove(*index);
+                        if result.name.is_empty() {
+                            result.name = call.name;
+                        }
+                    }
                 }
             }
-        }
-    }
-    if names_by_id.is_empty() {
-        return;
-    }
-
-    for message in history.iter_mut() {
-        let crate::message::Message::User { content } = message else {
-            continue;
-        };
-        for item in content.iter_mut() {
-            let crate::message::UserContent::ToolResult(result) = item else {
-                continue;
-            };
-            if !result.name.is_empty() {
-                continue;
-            }
-            let resolved = names_by_id.get(result.call.as_str()).or_else(|| {
-                result.provider.as_ref().and_then(|provider| {
-                    names_by_id.get(&provider.call_id).or_else(|| {
-                        provider
-                            .item_id
-                            .as_ref()
-                            .and_then(|item_id| names_by_id.get(item_id))
-                    })
-                })
-            });
-            if let Some(name) = resolved {
-                result.name = name.clone();
-            }
+            Message::System { .. } => {}
         }
     }
 }
@@ -104,7 +115,8 @@ pub fn resolve_empty_tool_result_names(history: &mut [crate::message::Message]) 
 /// `tracing` targets must be literals, so the dispatch is total by
 /// construction.
 #[derive(Clone, Copy)]
-pub(crate) enum LogTarget {
+#[doc(hidden)]
+pub enum LogTarget {
     Completions,
     Streaming,
 }
@@ -112,7 +124,8 @@ pub(crate) enum LogTarget {
 /// Trace-log `value` as pretty-printed JSON under one of rig's logging
 /// targets. Infallible: does nothing when TRACE is disabled for the target or
 /// the value fails to serialize.
-pub(crate) fn trace_json(target: LogTarget, label: &str, value: &impl serde::Serialize) {
+#[doc(hidden)]
+pub fn trace_json(target: LogTarget, label: &str, value: &impl serde::Serialize) {
     macro_rules! emit {
         ($target:literal) => {
             if tracing::enabled!(target: $target, tracing::Level::TRACE) {
@@ -128,135 +141,73 @@ pub(crate) fn trace_json(target: LogTarget, label: &str, value: &impl serde::Ser
     }
 }
 
-pub(crate) fn completion_usage(
-    input_tokens: u64,
-    output_tokens: u64,
-    total_tokens: u64,
-    cached_input_tokens: u64,
-) -> crate::completion::Usage {
-    crate::completion::Usage {
-        input_tokens,
-        output_tokens,
-        total_tokens,
-        cached_input_tokens,
-        cache_creation_input_tokens: 0,
-        tool_use_prompt_tokens: 0,
-        reasoning_tokens: 0,
+/// Serde for a dialect that is a registered `const`: the name is the whole
+/// wire format, so a host storing a wire cannot reconstitute a dialect
+/// with somebody else's base URL, and an unknown name is an error rather
+/// than a silent default.
+pub(crate) mod named_dialect {
+    /// Write the dialect's name, refusing a value that is not the registered
+    /// constant of that name: writing only its name would silently lose
+    /// its payload.
+    pub(crate) fn serialize<S: serde::Serializer>(
+        serializer: S,
+        family: &str,
+        name: &str,
+        registered: bool,
+    ) -> Result<S::Ok, S::Error> {
+        if !registered {
+            return Err(serde::ser::Error::custom(format!(
+                "an unregistered or modified {family} dialect cannot be persisted by name; \
+                 use configuration overrides"
+            )));
+        }
+        serializer.serialize_str(name)
+    }
+
+    /// Read a name and look the dialect up among the family's constants.
+    pub(crate) fn deserialize<'de, D, T>(
+        deserializer: D,
+        family: &str,
+        by_name: impl FnOnce(&str) -> Option<T>,
+    ) -> Result<T, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let name = <String as serde::Deserialize>::deserialize(deserializer)?;
+        by_name(&name).ok_or_else(|| {
+            serde::de::Error::custom(format!("`{name}` is not a registered {family} dialect"))
+        })
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::message::{
-        AssistantContent, Message, ToolCall, ToolFunction, ToolResultContent, UserContent,
-    };
+mod tests;
 
-    fn call(wire_id: &str, name: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall::from_wire(
-                wire_id,
-                ToolFunction {
-                    name: name.to_owned(),
-                    arguments: serde_json::json!({}),
-                },
-            ))],
-        }
-    }
+#[cfg(test)]
+mod tool_call_id_tests;
 
-    fn nameless_result(wire_id: &str) -> Message {
-        Message::User {
-            content: vec![UserContent::tool_result_from_wire(
-                wire_id,
-                "",
-                vec![ToolResultContent::text("out")],
-            )],
-        }
-    }
+/// Reads the provider's transport request id off a response's headers, when
+/// the provider names such a header and the response carries a non-empty
+/// value. `None` is the documented "not reported" outcome.
+pub(crate) fn request_id_from_headers(
+    headers: &http::HeaderMap,
+    request_id_header: Option<&str>,
+) -> Option<String> {
+    request_id_header.and_then(|header| {
+        headers
+            .get(header)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
 
-    fn result_names(history: &[Message]) -> Vec<String> {
-        history
-            .iter()
-            .filter_map(|message| match message {
-                Message::User { content } => content.iter().next().and_then(|item| match item {
-                    UserContent::ToolResult(result) => Some(result.name.clone()),
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .collect()
+/// Append `pairs` to `path` as a percent-encoded query string.
+/// Encoding preserves cursor delimiters and prevents query-parameter injection.
+pub(crate) fn with_query_pairs(path: &str, pairs: &[(&str, &str)]) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in pairs {
+        serializer.append_pair(name, value);
     }
-
-    /// An ingested cross-provider transcript (converters stamp `name: ""`)
-    /// resolves each result's name from its paired call — by provider id
-    /// here, since `from_wire` on both sides shares it.
-    #[test]
-    fn empty_names_resolve_from_the_paired_call() {
-        let mut history = vec![
-            call("toolu_1", "get_weather"),
-            nameless_result("toolu_1"),
-            call("toolu_2", "get_time"),
-            nameless_result("toolu_2"),
-        ];
-        super::resolve_empty_tool_result_names(&mut history);
-        assert_eq!(result_names(&history), ["get_weather", "get_time"]);
-    }
-
-    /// A result no call in the history answers keeps its empty name: the
-    /// transcript genuinely lacks the data, and inventing one would ship a
-    /// fabricated name to a name-keyed wire.
-    #[test]
-    fn an_unmatched_result_keeps_its_empty_name() {
-        let mut history = vec![call("toolu_1", "get_weather"), nameless_result("toolu_9")];
-        super::resolve_empty_tool_result_names(&mut history);
-        assert_eq!(result_names(&history), [""]);
-    }
-
-    /// An established name is data, never overwritten — a repair hook may
-    /// have renamed the executed tool relative to the model's call.
-    #[test]
-    fn an_established_name_is_never_overwritten() {
-        let mut history = vec![
-            call("toolu_1", "add"),
-            Message::User {
-                content: vec![UserContent::tool_result_from_wire(
-                    "toolu_1",
-                    "sum",
-                    vec![ToolResultContent::text("3")],
-                )],
-            },
-        ];
-        super::resolve_empty_tool_result_names(&mut history);
-        assert_eq!(result_names(&history), ["sum"]);
-    }
-
-    /// Matching falls through the identifier tiers: rig's correlation
-    /// handle first (a driver-built result answering an id-less call),
-    /// then the provider identifiers.
-    #[test]
-    fn a_handle_only_result_resolves_from_an_id_less_call() {
-        let id_less = ToolCall::new(
-            crate::message::ToolCallId::mint(),
-            ToolFunction {
-                name: "lookup".to_owned(),
-                arguments: serde_json::json!({}),
-            },
-        );
-        let handle = id_less.id.as_str().to_owned();
-        let mut history = vec![
-            Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::ToolCall(id_less)],
-            },
-            Message::User {
-                content: vec![UserContent::tool_result(
-                    handle,
-                    "",
-                    vec![ToolResultContent::text("out")],
-                )],
-            },
-        ];
-        super::resolve_empty_tool_result_names(&mut history);
-        assert_eq!(result_names(&history), ["lookup"]);
-    }
+    format!("{path}?{}", serializer.finish())
 }

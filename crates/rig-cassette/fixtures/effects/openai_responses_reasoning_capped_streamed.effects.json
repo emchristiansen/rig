@@ -1,0 +1,211 @@
+{
+  "header": {
+    "run_spec": 15910933439985602989,
+    "handlers": [
+      {
+        "key": "golden/model:default",
+        "family": {
+          "family": "completion",
+          "model": "default",
+          "capabilities": {
+            "composes_native_output_with_tools": true
+          }
+        }
+      }
+    ],
+    "signature": {
+      "golden/model:default": "completion"
+    },
+    "hooks": [
+      "RecordSettled"
+    ],
+    "required": {
+      "golden/model:default": "completion"
+    },
+    "bus": {
+      "command_capacity": 16,
+      "stream_capacity": 64,
+      "serial_per_handler": false
+    }
+  },
+  "records": [
+    {
+      "tool_output": null,
+      "id": 1,
+      "key": "golden/model:default",
+      "kind": {
+        "effect": "completion",
+        "request": {
+          "model": null,
+          "chat_history": [
+            {
+              "role": "system",
+              "content": "You are a concise assistant. Answer directly."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "In one or two sentences, explain what Rust programming language is and why memory safety matters."
+                }
+              ]
+            }
+          ],
+          "documents": [],
+          "tools": [],
+          "temperature": null,
+          "max_tokens": 16,
+          "tool_choice": null,
+          "additional_params": {
+            "reasoning": {
+              "effort": "low",
+              "summary": "auto"
+            },
+            "include": [
+              "reasoning.encrypted_content"
+            ]
+          },
+          "output_schema": null
+        },
+        "stream": true
+      },
+      "outcome": {
+        "Ok": {
+          "outcome": "completion",
+          "choice": [
+            {
+              "type": "reasoning",
+              "id": "rs_082af6be0dd7a3df006ab2b47ddac887d081de7ee875330187",
+              "content": [
+                {
+                  "type": "encrypted",
+                  "content": "gAAAAABqsrR-sofHfSQVkO31lLcKXlC1J87HvcqYFySAXUkzJhuJhV1YhnZnYiLSwl7ddvYhLnTrpPepPFMDx0mDcD8G-D_S706agtJ6FxrR5McKoHu-irCJVBfovbaB6Yyc2rryjxEmuCa4BwU_NnmT7wOCSkU5WYs7eDxJ99Xg7GnQzLUYxMOu_1ELOH6MGOI_VDZhPubo4lPGUJ46VkCTVJ3g_MkL-Z0co1waGP9dRpNV44iucdGixudRA7nUSzYxbENGuOzuNiIqPcFOy8lGFyAkkNshBXdcdwwBEByywRqcXuIz4TNz6ZEWPDWWs1wl6MulbSo2obVqKd4oP0DYQC93B0j_D45-RdMxj-DiM_-piwLS6RWhJy5245AKT3TGeht6Xc79_vneQZ15_8SGRyV6zrIk9Jcl3hLX5qjv8Ob1FsbcKbD2KCQUrVf3KkFIS1Epn1NzL8hkaVbs6OX7uqsmW_MA_HCQ4TxRBGRJCALo3viaEpMje3mU6pFcw06Iej4reBBiYXowxOw41YvnrJSHFbbja6-AgsEAtWlsEmt2cb2GsZtPGZzd5rekvNpfoHGYgCRbyuMPYs0YP3lMdto2TOAczuVdmYCdRF_POk5RfC-w8oBtimgsgzYsuqqQftkU1evKek7stknY_RqWmHfduBNpIgG81rZGXzSKeKL-zMpkbLFmfeYYutFMPg6RU1_DyLTQT6Ph-z7Df2Lx7ilH4Cp3epNzCaXe9rVUG3o16m2qPwASzGuFpmzC41hSEjsXKG_2NKeARhdjHHytMrf3m4R7iKAL2tEYgtF32zDPjjsIqEYfUV8075iO6nbO-O3sk7VrKf74j76TkA7BcPJvRJdGVAn6635D4rlrGS0H3hfi0MUOb9Y0Q7UaDq8mwM-y1q_APGbZYeVBNDU1V2iQDxOs_eFWJUlmnq-MdvcP0z6K-S063LTbJxLU_urnNGMDsdgnAHTtcZGDhq1d0MvSH69-fPwPleZCDpTiFC_VrbT4LeBNoiDwsQks3cdlVJABRToTq48aB401QiHn6waC0B-C-CZAqm4Ku0HgBU_qKeurSP0u5rGFhwVyJMlW8ja6WZdFJsWJZe2TcMUH7huuWJVciLxCQyBIaju_DwU1LKhSFry65TQKh0ogahoFExs7ZlKd0ZMzaxUJ2Zz2BMppVXS9tzlj-8aW49uvB-TH5grOhyoZ1SWSsCvKPcdNI8P63IU_L7Q2n8e2HrKZE4pHfGhpL5CXh9vLtamGZCKREAlJfitn4RhjU9vOafP_ye8O6bc4"
+                }
+              ],
+              "provider": "openai"
+            }
+          ],
+          "usage": {
+            "input_tokens": 37,
+            "output_tokens": 0,
+            "total_tokens": 37,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "message_id": null,
+          "response_id": "resp_082af6be0dd7a3df006ab2b47d009087d08d8a318071f82f01",
+          "provider_request_id": "req_754c1faf9b714535a2165baef9aa63e3",
+          "finish_reason": "length",
+          "provider": "openai",
+          "model": "gpt-5-mini-2025-08-07",
+          "raw": {
+            "usage": {
+              "input_tokens": 37,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 0,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 37
+            },
+            "reasoning_metadata": {
+              "context": "current_turn",
+              "effort": "low",
+              "mode": "standard",
+              "summary": "detailed"
+            },
+            "reasoning_context": "current_turn",
+            "status": "incomplete",
+            "incomplete_details": {
+              "reason": "max_output_tokens"
+            },
+            "response_id": "resp_082af6be0dd7a3df006ab2b47d009087d08d8a318071f82f01",
+            "model": "gpt-5-mini-2025-08-07"
+          }
+        }
+      },
+      "events": [
+        {
+          "event": "block_start",
+          "id": "wire:rs_082af6be0dd7a3df006ab2b47ddac887d081de7ee875330187",
+          "kind": {
+            "kind": "reasoning",
+            "provider_id": "rs_082af6be0dd7a3df006ab2b47ddac887d081de7ee875330187"
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:rs_082af6be0dd7a3df006ab2b47ddac887d081de7ee875330187",
+          "end": {
+            "close": "reasoning",
+            "reasoning": {
+              "id": "rs_082af6be0dd7a3df006ab2b47ddac887d081de7ee875330187",
+              "content": [
+                {
+                  "type": "encrypted",
+                  "content": "gAAAAABqsrR-sofHfSQVkO31lLcKXlC1J87HvcqYFySAXUkzJhuJhV1YhnZnYiLSwl7ddvYhLnTrpPepPFMDx0mDcD8G-D_S706agtJ6FxrR5McKoHu-irCJVBfovbaB6Yyc2rryjxEmuCa4BwU_NnmT7wOCSkU5WYs7eDxJ99Xg7GnQzLUYxMOu_1ELOH6MGOI_VDZhPubo4lPGUJ46VkCTVJ3g_MkL-Z0co1waGP9dRpNV44iucdGixudRA7nUSzYxbENGuOzuNiIqPcFOy8lGFyAkkNshBXdcdwwBEByywRqcXuIz4TNz6ZEWPDWWs1wl6MulbSo2obVqKd4oP0DYQC93B0j_D45-RdMxj-DiM_-piwLS6RWhJy5245AKT3TGeht6Xc79_vneQZ15_8SGRyV6zrIk9Jcl3hLX5qjv8Ob1FsbcKbD2KCQUrVf3KkFIS1Epn1NzL8hkaVbs6OX7uqsmW_MA_HCQ4TxRBGRJCALo3viaEpMje3mU6pFcw06Iej4reBBiYXowxOw41YvnrJSHFbbja6-AgsEAtWlsEmt2cb2GsZtPGZzd5rekvNpfoHGYgCRbyuMPYs0YP3lMdto2TOAczuVdmYCdRF_POk5RfC-w8oBtimgsgzYsuqqQftkU1evKek7stknY_RqWmHfduBNpIgG81rZGXzSKeKL-zMpkbLFmfeYYutFMPg6RU1_DyLTQT6Ph-z7Df2Lx7ilH4Cp3epNzCaXe9rVUG3o16m2qPwASzGuFpmzC41hSEjsXKG_2NKeARhdjHHytMrf3m4R7iKAL2tEYgtF32zDPjjsIqEYfUV8075iO6nbO-O3sk7VrKf74j76TkA7BcPJvRJdGVAn6635D4rlrGS0H3hfi0MUOb9Y0Q7UaDq8mwM-y1q_APGbZYeVBNDU1V2iQDxOs_eFWJUlmnq-MdvcP0z6K-S063LTbJxLU_urnNGMDsdgnAHTtcZGDhq1d0MvSH69-fPwPleZCDpTiFC_VrbT4LeBNoiDwsQks3cdlVJABRToTq48aB401QiHn6waC0B-C-CZAqm4Ku0HgBU_qKeurSP0u5rGFhwVyJMlW8ja6WZdFJsWJZe2TcMUH7huuWJVciLxCQyBIaju_DwU1LKhSFry65TQKh0ogahoFExs7ZlKd0ZMzaxUJ2Zz2BMppVXS9tzlj-8aW49uvB-TH5grOhyoZ1SWSsCvKPcdNI8P63IU_L7Q2n8e2HrKZE4pHfGhpL5CXh9vLtamGZCKREAlJfitn4RhjU9vOafP_ye8O6bc4"
+                }
+              ]
+            },
+            "wire_sent": true
+          },
+          "block": {
+            "type": "reasoning",
+            "id": "rs_082af6be0dd7a3df006ab2b47ddac887d081de7ee875330187",
+            "content": [
+              {
+                "type": "encrypted",
+                "content": "gAAAAABqsrR-sofHfSQVkO31lLcKXlC1J87HvcqYFySAXUkzJhuJhV1YhnZnYiLSwl7ddvYhLnTrpPepPFMDx0mDcD8G-D_S706agtJ6FxrR5McKoHu-irCJVBfovbaB6Yyc2rryjxEmuCa4BwU_NnmT7wOCSkU5WYs7eDxJ99Xg7GnQzLUYxMOu_1ELOH6MGOI_VDZhPubo4lPGUJ46VkCTVJ3g_MkL-Z0co1waGP9dRpNV44iucdGixudRA7nUSzYxbENGuOzuNiIqPcFOy8lGFyAkkNshBXdcdwwBEByywRqcXuIz4TNz6ZEWPDWWs1wl6MulbSo2obVqKd4oP0DYQC93B0j_D45-RdMxj-DiM_-piwLS6RWhJy5245AKT3TGeht6Xc79_vneQZ15_8SGRyV6zrIk9Jcl3hLX5qjv8Ob1FsbcKbD2KCQUrVf3KkFIS1Epn1NzL8hkaVbs6OX7uqsmW_MA_HCQ4TxRBGRJCALo3viaEpMje3mU6pFcw06Iej4reBBiYXowxOw41YvnrJSHFbbja6-AgsEAtWlsEmt2cb2GsZtPGZzd5rekvNpfoHGYgCRbyuMPYs0YP3lMdto2TOAczuVdmYCdRF_POk5RfC-w8oBtimgsgzYsuqqQftkU1evKek7stknY_RqWmHfduBNpIgG81rZGXzSKeKL-zMpkbLFmfeYYutFMPg6RU1_DyLTQT6Ph-z7Df2Lx7ilH4Cp3epNzCaXe9rVUG3o16m2qPwASzGuFpmzC41hSEjsXKG_2NKeARhdjHHytMrf3m4R7iKAL2tEYgtF32zDPjjsIqEYfUV8075iO6nbO-O3sk7VrKf74j76TkA7BcPJvRJdGVAn6635D4rlrGS0H3hfi0MUOb9Y0Q7UaDq8mwM-y1q_APGbZYeVBNDU1V2iQDxOs_eFWJUlmnq-MdvcP0z6K-S063LTbJxLU_urnNGMDsdgnAHTtcZGDhq1d0MvSH69-fPwPleZCDpTiFC_VrbT4LeBNoiDwsQks3cdlVJABRToTq48aB401QiHn6waC0B-C-CZAqm4Ku0HgBU_qKeurSP0u5rGFhwVyJMlW8ja6WZdFJsWJZe2TcMUH7huuWJVciLxCQyBIaju_DwU1LKhSFry65TQKh0ogahoFExs7ZlKd0ZMzaxUJ2Zz2BMppVXS9tzlj-8aW49uvB-TH5grOhyoZ1SWSsCvKPcdNI8P63IU_L7Q2n8e2HrKZE4pHfGhpL5CXh9vLtamGZCKREAlJfitn4RhjU9vOafP_ye8O6bc4"
+              }
+            ]
+          }
+        },
+        {
+          "event": "final",
+          "usage": {
+            "input_tokens": 37,
+            "output_tokens": 0,
+            "total_tokens": 37,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0
+          },
+          "finish_reason": "length",
+          "message_id": null,
+          "response_id": "resp_082af6be0dd7a3df006ab2b47d009087d08d8a318071f82f01",
+          "provider_request_id": "req_754c1faf9b714535a2165baef9aa63e3",
+          "provider": "openai",
+          "model": "gpt-5-mini-2025-08-07",
+          "raw": {
+            "usage": {
+              "input_tokens": 37,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 0,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 37
+            },
+            "reasoning_metadata": {
+              "context": "current_turn",
+              "effort": "low",
+              "mode": "standard",
+              "summary": "detailed"
+            },
+            "reasoning_context": "current_turn",
+            "status": "incomplete",
+            "incomplete_details": {
+              "reason": "max_output_tokens"
+            },
+            "response_id": "resp_082af6be0dd7a3df006ab2b47d009087d08d8a318071f82f01",
+            "model": "gpt-5-mini-2025-08-07"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,12 +1,7 @@
+use crate::error::ProviderError;
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, str::FromStr};
 use thiserror::Error;
-
-use super::CompletionError;
-
-// ================================================================
-// Message models
-// ================================================================
 
 /// A provider-agnostic chat message.
 ///
@@ -32,44 +27,15 @@ pub enum Message {
     },
 }
 
-/// The shared wording for a response whose converted choice is empty.
-///
-/// Every provider decode rejects that state through
-/// [`require_non_empty_response`]; sharing the literal keeps a wording
-/// change from silently forking the error text across wires. A guard
-/// rejecting a *different* state (a role mismatch, a missing message) keeps
-/// its own text instead.
+/// Shared error text for an invalid empty response choice.
+/// Provider decoders must exempt legal empty outcomes, including recognized
+/// output truncation, before calling [`require_non_empty_response`].
 pub const EMPTY_RESPONSE_ERROR: &str = "Response contained no message or tool call (empty)";
 
-/// Reject an empty content list, with the error the call site chose.
-///
-/// Message content is a `Vec`, so "no content" is representable in the type.
-/// Most wires nevertheless reject it — a completion that carried no message and
-/// no tool call is a provider defect, and a history message with no blocks has
-/// nothing to send — and at least one call site depends on that rejection as
-/// control flow rather than as a diagnostic.
-///
-/// These guards used to be a side effect of the non-empty container's
-/// constructor, which meant every site borrowed the same context-free "cannot
-/// create with an empty vector". Stated explicitly here, each site keeps its own
-/// message, which is where the useful detail lives.
-///
-/// Two rules for anyone extending this:
-///
-/// - It is **mostly** a guard for the **response** direction. Empty assistant
-///   content is legal at the rig level — a tool-call-only turn, a truncated
-///   stream — but a provider returning nothing where its protocol promises
-///   content is malformed, and that is what most of these call sites detect.
-///   Request-direction emptiness at the rig level is rejected once, at the
-///   request boundary — but a few request-conversion sites also use this guard,
-///   because non-empty rig content can still convert to zero *wire* blocks
-///   (e.g. assistant content whose only parts have no representation on that
-///   wire), and only the provider's own conversion can see that. If your
-///   request `TryFrom` can drop parts, guard the converted list too.
-/// - The check is on the **whole list**, never on individual items. A visibly
-///   empty block can still carry data that must survive a round trip: reasoning
-///   signatures and encrypted reasoning attach to blocks whose text is empty.
-///   Emptiness is a property of the list, not of its members.
+/// Returns `items` unchanged unless the list is empty, then calls `error` once.
+/// Does not inspect individual items: empty text can carry replay signatures.
+/// Request conversions that discard content must validate the converted list
+/// when their wire requires at least one block.
 pub fn require_non_empty<T, E>(items: Vec<T>, error: impl FnOnce() -> E) -> Result<Vec<T>, E> {
     if items.is_empty() {
         return Err(error());
@@ -77,32 +43,84 @@ pub fn require_non_empty<T, E>(items: Vec<T>, error: impl FnOnce() -> E) -> Resu
     Ok(items)
 }
 
-/// [`require_non_empty`] with the shared response-direction rejection — the
-/// one-line guard for a provider decode whose converted choice is empty.
-/// Pairing the guard with [`EMPTY_RESPONSE_ERROR`] here keeps the wording
-/// from forking per wire. A decode with a *legal* empty case (anthropic's
-/// documented empty `end_turn`) branches around the guard for that case and
-/// still routes every other empty through it.
-pub fn require_non_empty_response<T>(items: Vec<T>) -> Result<Vec<T>, CompletionError> {
+/// Returns a response error using [`EMPTY_RESPONSE_ERROR`] for an empty list.
+/// Callers must handle provider-legal empty outcomes before invoking this guard.
+pub fn require_non_empty_response<T>(items: Vec<T>) -> Result<Vec<T>, ProviderError> {
     require_non_empty(items, || {
-        CompletionError::ResponseError(EMPTY_RESPONSE_ERROR.to_owned())
+        ProviderError::Response(EMPTY_RESPONSE_ERROR.to_owned())
     })
 }
 
-/// The `Option` sibling of [`require_non_empty`]: `None` for an empty list,
-/// `Some(items)` otherwise.
-///
-/// This is the one home for the "an empty list means absent" rule, wherever a
-/// list is being placed into an `Option`-shaped slot (an optional response
-/// content, an optional message) rather than validated. The same whole-list
-/// rule applies: never decide emptiness per item.
+/// Returns `None` for an empty list or `Some(items)` otherwise.
+/// Individual items are not inspected.
 pub fn non_empty<T>(items: Vec<T>) -> Option<Vec<T>> {
     if items.is_empty() { None } else { Some(items) }
 }
 
-/// Describes the content of a message, which can be text, a tool result, an image, audio, or
-///  a document. Dependent on provider supporting the content type. Multimedia content is generally
-///  base64 (defined by it's format) encoded but additionally supports urls (for some providers).
+/// Concatenates reasoning, text, and trailing content in that order without
+/// dropping items. Each group's input order is preserved.
+pub fn ordered_assistant_content(
+    reasoning_items: impl IntoIterator<Item = Reasoning>,
+    text_items: impl IntoIterator<Item = AssistantContent>,
+    trailing_items: impl IntoIterator<Item = AssistantContent>,
+) -> Vec<AssistantContent> {
+    let mut content_items = reasoning_items
+        .into_iter()
+        .map(AssistantContent::Reasoning)
+        .collect::<Vec<_>>();
+    content_items.extend(text_items);
+    content_items.extend(trailing_items);
+    content_items
+}
+
+/// Returns whether the choice contains no nonempty text, tool call, or image.
+/// Reasoning alone is not an answer, even when retained in history.
+pub fn turn_delivered_no_answer(choice: &[AssistantContent]) -> bool {
+    !choice.iter().any(|content| match content {
+        // Real text is an answer; an empty block delivers nothing.
+        AssistantContent::Text(text) => !text.text.is_empty(),
+        AssistantContent::ToolCall(_) => true,
+        AssistantContent::CustomToolCall(_) => true,
+        AssistantContent::Image(_) => true,
+        // The one exclusion: scratch work, not an answer.
+        AssistantContent::Reasoning(_) => false,
+    })
+}
+
+/// Groups streamed choices as reasoning, text, tool calls, then images,
+/// preserving order within each group. Choices without reasoning or tool calls
+/// retain their original order.
+pub fn canonical_streamed_choice(choice: Vec<AssistantContent>) -> Vec<AssistantContent> {
+    let regroup = choice.iter().any(|part| {
+        matches!(
+            part,
+            AssistantContent::Reasoning(_)
+                | AssistantContent::ToolCall(_)
+                | AssistantContent::CustomToolCall(_)
+        )
+    });
+    if !regroup {
+        return choice;
+    }
+    let mut reasoning = Vec::new();
+    let mut text = Vec::new();
+    let mut calls = Vec::new();
+    let mut images = Vec::new();
+    for part in choice {
+        match part {
+            AssistantContent::Reasoning(block) => reasoning.push(block),
+            AssistantContent::Text(_) => text.push(part),
+            AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => {
+                calls.push(part);
+            }
+            AssistantContent::Image(_) => images.push(part),
+        }
+    }
+    ordered_assistant_content(reasoning, text, calls.into_iter().chain(images))
+}
+
+/// User text, tool results, or media. Supported source kinds and media types
+/// depend on the target provider.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum UserContent {
@@ -120,19 +138,23 @@ pub enum UserContent {
     Document(Document),
 }
 
-/// Describes responses from a provider which is either text or a tool call.
-///
-/// Tagged with `"type"`, exactly like [`UserContent`]. The tag is required on
-/// deserialize — there is no fallback to the tagless shape 0.41 serialized,
-/// so a bare `{"text": …}` block does not load; see MIGRATING for the
-/// tag-insertion recipe.
+/// Assistant text, tool calls, reasoning, or images.
+/// Deserialization requires the lowercase `type` tag.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AssistantContent {
     /// Plain assistant text.
     Text(Text),
-    /// Tool call requested by the assistant.
+    /// Function tool call requested by the assistant: JSON arguments.
     ToolCall(ToolCall),
+    /// Custom tool call requested by the assistant: verbatim, non-JSON input
+    /// (the OpenAI Responses `custom_tool_call` item). Serialized with the
+    /// `"type": "customtoolcall"` tag.
+    ///
+    /// A distinct variant rather than a kind of [`ToolFunction::arguments`],
+    /// so raw input can never be read as JSON arguments and a JSON value can
+    /// never be mistaken for raw input.
+    CustomToolCall(CustomToolCall),
     /// Structured reasoning emitted by the assistant.
     Reasoning(Reasoning),
     /// Image content emitted by the assistant.
@@ -141,7 +163,6 @@ pub enum AssistantContent {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
-#[non_exhaustive]
 /// A typed reasoning block used by providers that emit structured thinking data.
 pub enum ReasoningContent {
     /// Plain reasoning text with an optional provider signature.
@@ -159,13 +180,44 @@ pub enum ReasoningContent {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[non_exhaustive]
 /// Assistant reasoning payload with an optional provider-supplied identifier.
 pub struct Reasoning {
     /// Provider reasoning identifier, when supplied by the upstream API.
     pub id: Option<String>,
     /// Ordered reasoning content blocks.
     pub content: Vec<ReasoningContent>,
+    /// The service that issued this reasoning, stamped when a completion is
+    /// decoded: the wire's [`Wire::name`](crate::wire::Wire::name), or the
+    /// model vendor where several transports serve the same models (Claude
+    /// on Bedrock records `anthropic`). Signatures, encrypted and redacted
+    /// payloads and reasoning ids only mean something to their issuer, so a
+    /// request elsewhere omits them ([`retain_replayable_reasoning`]).
+    /// `None` is unknown provenance (reasoning built by hand, or history
+    /// serialized before provenance existed) and is replayed as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+/// Drop reasoning none of `issuers` issued from `history`, before a request
+/// that accepts reasoning from `issuers` is encoded. Signatures, encrypted
+/// and redacted payloads and reasoning ids only mean something to the
+/// service that issued them. Reasoning of unknown provenance is kept. An
+/// assistant turn that held nothing else is dropped with it rather than sent
+/// empty, which leaves the user turns around it adjacent.
+pub fn retain_replayable_reasoning(history: &mut Vec<Message>, issuers: &[&str]) {
+    history.retain_mut(|message| {
+        let Message::Assistant { content, .. } = message else {
+            return true;
+        };
+        let before = content.len();
+        content.retain(|part| match part {
+            AssistantContent::Reasoning(reasoning) => {
+                issuers.iter().any(|issuer| reasoning.replayable_to(issuer))
+            }
+            _ => true,
+        });
+        before == 0 || !content.is_empty()
+    });
 }
 
 impl Reasoning {
@@ -177,12 +229,29 @@ impl Reasoning {
     /// Create a new reasoning item from a single text item and optional signature.
     pub fn new_with_signature(input: &str, signature: Option<String>) -> Self {
         Self {
+            provider: None,
             id: None,
             content: vec![ReasoningContent::Text {
                 text: input.to_string(),
                 signature,
             }],
         }
+    }
+
+    /// Record the wire that issued this reasoning.
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
+
+    /// Whether this reasoning may be replayed to `issuer`: it was issued
+    /// there, or its provenance is unknown. An `issuer` ending in `/` names a
+    /// family and accepts every issuer under it (`openrouter/` accepts
+    /// `openrouter/openai`).
+    pub fn replayable_to(&self, issuer: &str) -> bool {
+        self.provider.as_deref().is_none_or(|provider| {
+            provider == issuer || (issuer.ends_with('/') && provider.starts_with(issuer))
+        })
     }
 
     /// Set a provider reasoning ID.
@@ -194,6 +263,7 @@ impl Reasoning {
     /// Create reasoning content from multiple text blocks.
     pub fn multi(input: Vec<String>) -> Self {
         Self {
+            provider: None,
             id: None,
             content: input
                 .into_iter()
@@ -208,6 +278,7 @@ impl Reasoning {
     /// Create a redacted reasoning block.
     pub fn redacted(data: impl Into<String>) -> Self {
         Self {
+            provider: None,
             id: None,
             content: vec![ReasoningContent::Redacted { data: data.into() }],
         }
@@ -216,6 +287,7 @@ impl Reasoning {
     /// Create an encrypted reasoning block.
     pub fn encrypted(data: impl Into<String>) -> Self {
         Self {
+            provider: None,
             id: None,
             content: vec![ReasoningContent::Encrypted(data.into())],
         }
@@ -224,6 +296,7 @@ impl Reasoning {
     /// Create one reasoning block containing summary items.
     pub fn summaries(input: Vec<String>) -> Self {
         Self {
+            provider: None,
             id: None,
             content: input.into_iter().map(ReasoningContent::Summary).collect(),
         }
@@ -271,42 +344,68 @@ impl Reasoning {
     }
 }
 
+/// Which kind of tool call a [`ToolResult`] answers.
+///
+/// A wire offering more than one result item shape chooses between them by
+/// this value. The OpenAI Responses wire pairs `custom_tool_call` only with
+/// `custom_tool_call_output`, so a result answering a [`CustomToolCall`] sent
+/// back as a function output leaves that call unanswered and the turn
+/// unpaired. Wires with a single result shape read nothing from it.
+///
+/// No `Default`, and no serde default on [`ToolResult::answers`], deliberately:
+/// defaulting to `Function` would make the mispairing this type prevents the
+/// silent outcome of forgetting to state a kind. Where the answered call is in
+/// hand, derive the kind from it ([`ToolCall::answered_by`],
+/// [`CustomToolCall::answered_by`]); a site that does not hold the call states
+/// it through [`UserContent::tool_result_answering`].
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AnsweredToolCall {
+    /// Answers a function call ([`AssistantContent::ToolCall`]), whose
+    /// arguments were JSON.
+    Function,
+    /// Answers a custom tool call ([`AssistantContent::CustomToolCall`]),
+    /// whose input was verbatim text.
+    Custom,
+}
+
 /// Tool result content containing information about a tool call and it's resulting content.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolResult {
-    /// Which call this result answers — rig's correlation handle, always
-    /// present. Copied from the answered [`ToolCall::id`], which is minted
-    /// at the provider boundary when the provider issued no identifier.
+    /// Correlation handle copied from the answered [`ToolCall::id`].
     pub call: ToolCallId,
-    /// What the provider issued for the answered call, if anything — the
-    /// only identifiers that may travel back on that provider's wire.
+    /// Provider-issued replay identifiers copied from the answered call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderCallId>,
-    /// Name of the tool that produced this result — the *executed* tool,
-    /// which can differ from the model's call when a hook repaired it.
-    ///
-    /// Required: several wires key the replay on it (Gemini's
-    /// `functionResponse.name`, Ollama's tool messages), and an identifier
-    /// is not a name — rig used to smuggle the name through the id, which
-    /// collided two calls to the same tool and misnamed cross-provider
-    /// replays (review 84a43e9e #5).
+    /// Executed tool name, which may differ from the model-requested name after
+    /// hook repair. Required for provider replay independently of call identity.
     pub name: String,
+    /// Which kind of call this answers, and therefore which result item a wire
+    /// carrying more than one shape must emit for it. Required on
+    /// deserialization: a result that does not say what it answers is
+    /// rejected rather than guessed.
+    pub answers: AnsweredToolCall,
     /// One or more content items produced by the tool.
     pub content: Vec<ToolResultContent>,
 }
 
 impl ToolResult {
-    /// The identifier for a wire whose call-id slot is *required*: the
-    /// provider-issued `call_id` when the provider issued one, else rig's
-    /// minted handle — always non-empty.
+    /// A non-empty candidate for a required wire call-ID slot: the exact
+    /// provider handle when present, otherwise the local identity's wire hint.
+    ///
+    /// This single-item helper cannot reserve future provider IDs or pair
+    /// repeated turns. Full request adapters must use
+    /// [`ToolCallIds`](crate::providers::internal::tool_call_ids::ToolCallIds)
+    /// to assign collision-free synthetic references consistently to both legs.
     ///
     /// Wires whose id slot is *optional* (Gemini REST, gRPC) must read
     /// [`ToolResult::provider`] directly instead: minted handles never
     /// travel upstream there.
-    pub fn wire_call_id(&self) -> &str {
-        self.provider
-            .as_ref()
-            .map_or(self.call.as_str(), |provider| provider.call_id.as_str())
+    pub fn wire_call_id(&self) -> std::borrow::Cow<'_, str> {
+        self.provider.as_ref().map_or_else(
+            || self.call.wire_hint(),
+            |provider| std::borrow::Cow::Borrowed(provider.call_id.as_str()),
+        )
     }
 }
 
@@ -353,7 +452,7 @@ impl ToolResultContent {
         T: serde::de::DeserializeOwned,
     {
         match self {
-            Self::Json { value } => serde_json::from_value(value.clone()),
+            Self::Json { value } => T::deserialize(value),
             Self::Text(text) => serde_json::from_str(&text.text),
             Self::Image(_) => Err(<serde_json::Error as serde::de::Error>::custom(
                 "cannot decode image tool-result content as JSON",
@@ -362,120 +461,156 @@ impl ToolResultContent {
     }
 }
 
-/// Error adopting the empty string as a tool-call identifier.
-///
-/// Absence is `None` on [`ToolCall::provider`] (or a minted [`ToolCallId`]),
-/// never `""` — the empty-string sentinel is unrepresentable on these types.
+/// Error when adopting an empty explicit tool-call identifier.
+/// Represent absent provider identity with [`ToolCall::provider`] set to `None`.
 #[derive(Debug, thiserror::Error)]
 #[error("a tool-call identifier cannot be the empty string; absence is `None` or a minted id")]
 pub struct EmptyToolCallId;
 
-/// Rig's tool-call correlation handle: non-empty by construction, minted at
-/// the provider boundary when the provider issued no identifier.
+/// Rig's correlation identity for a tool call within one assistant completion.
 ///
-/// Mirrors the streaming layer's `WireId` idiom — one idiom, not two —
-/// except that it is *required and minted* rather than optional: correlation
-/// must always work, since a [`ToolResult`] must always name the call it
-/// answers. Provider provenance lives on [`ToolCall::provider`], so a
-/// consumer can still see that the provider issued nothing.
+/// Explicit handles and generated assembly keys occupy disjoint namespaces:
+/// an explicit `tool-0` never equals a generated tool key at index zero. Provider
+/// provenance is separate and lives only on [`ToolCall::provider`]. Applications
+/// may also choose explicit handles without claiming provider provenance.
+///
+/// Generated positions restart for each completion. State spanning completions
+/// must pair this identity with the owning turn or effect, or match call/result
+/// occurrences chronologically. Results copy their answered call's identity.
+///
+/// Serialization preserves an explicit origin tag and rejects legacy bare
+/// strings. Display is diagnostic text, not a provider handle or lookup key.
+///
+/// Keep the typed value as a map key and copy it into the corresponding result.
+/// Use [`Self::explicit`] or [`Self::generated`] to inspect its origin; outbound
+/// adapters separately assign protocol handles for complete call/result histories.
+///
+/// ```
+/// use rig_core::message::ToolCallId;
+///
+/// let explicit = ToolCallId::new("tool-0").ok_or("empty handle")?;
+/// let generated = ToolCallId::minted(0);
+/// assert_ne!(explicit, generated);
+/// assert_eq!(explicit.explicit(), Some("tool-0"));
+/// assert!(generated.is_generated());
+/// assert_eq!(
+///     serde_json::to_value(&generated)?,
+///     serde_json::json!({"origin": "generated", "id": "minted:tool:0"}),
+/// );
+/// let restored: ToolCallId = serde_json::from_value(serde_json::to_value(&generated)?)?;
+/// assert_eq!(restored, generated);
+/// assert!(serde_json::from_value::<ToolCallId>(serde_json::json!("tool-0")).is_err());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct ToolCallId(String);
+#[serde(try_from = "ToolCallIdWire", into = "ToolCallIdWire")]
+pub struct ToolCallId(ToolCallIdWire);
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "origin", content = "id", rename_all = "snake_case")]
+enum ToolCallIdWire {
+    Explicit(String),
+    Generated(crate::streaming::BlockId),
+}
 
 impl ToolCallId {
-    /// Adopt a provider-issued identifier. `None` for the empty string:
-    /// absence is not an id.
+    /// Adopt a nonempty explicit correlation handle. This constructor alone
+    /// does not claim that any provider issued it; see [`ToolCall::provider`].
     pub fn new(id: impl Into<String>) -> Option<Self> {
         let id = id.into();
-        if id.is_empty() { None } else { Some(Self(id)) }
+        (!id.is_empty()).then_some(Self(ToolCallIdWire::Explicit(id)))
     }
 
-    /// Mint a fresh, unique handle (21-character URL-safe id).
-    pub fn mint() -> Self {
-        Self(crate::id::generate())
+    /// Generates a deterministic completion-local identity. Cross-turn maps
+    /// must pair it with a turn identifier because indices restart each turn.
+    pub fn minted(index: u64) -> Self {
+        Self::from_block(&crate::streaming::BlockId::minted(
+            crate::streaming::MintKind::Tool,
+            index,
+        ))
     }
 
-    /// Adopt `id` when non-empty, mint otherwise — the boundary guard for
-    /// wires that may omit the identifier.
-    pub fn new_or_mint(id: impl Into<String>) -> Self {
-        Self::new(id).unwrap_or_else(Self::mint)
+    /// Derive an identity from the complete typed assembly key. A wire-shaped
+    /// assembly key and a minted key with the same display text stay distinct.
+    pub fn from_block(block: &crate::streaming::BlockId) -> Self {
+        Self(ToolCallIdWire::Generated(block.clone()))
     }
 
-    /// The correlation handle for the given provider identity: the
-    /// provider's `call_id` when the provider issued one, minted when it
-    /// did not. The single derivation the message and streaming layers
-    /// share — a result correlates with its call because both derive the
-    /// handle from the same provider identity.
-    ///
-    /// (`ProviderCallId`'s constructors reject the empty string, but its
-    /// fields are public, so an empty `call_id` from a literal
-    /// construction still mints rather than producing an empty handle.)
-    pub fn for_provider(provider: Option<&ProviderCallId>) -> Self {
+    /// Adopt a nonempty explicit handle, otherwise generate at `index`.
+    pub fn new_or_minted(id: impl Into<String>, index: u64) -> Self {
+        Self::new(id).unwrap_or_else(|| Self::minted(index))
+    }
+
+    /// Derive an explicit handle from provider metadata, or retain the supplied
+    /// generated identity when no nonempty provider call identifier exists.
+    pub fn for_provider_or(provider: Option<&ProviderCallId>, minted: Self) -> Self {
         provider
             .and_then(|provider| Self::new(provider.call_id.clone()))
-            .unwrap_or_else(Self::mint)
+            .unwrap_or(minted)
     }
 
-    /// Borrow the identifier.
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// Whether this identity was generated from an assembly key.
+    pub fn is_generated(&self) -> bool {
+        matches!(self.0, ToolCallIdWire::Generated(_))
     }
 
-    /// Consume into the underlying string.
-    pub fn into_string(self) -> String {
-        self.0
+    /// The explicitly chosen handle, if any. This is not proof of provider
+    /// provenance and must not be used to compare differently typed identities.
+    pub fn explicit(&self) -> Option<&str> {
+        match &self.0 {
+            ToolCallIdWire::Explicit(id) => Some(id),
+            ToolCallIdWire::Generated(_) => None,
+        }
+    }
+
+    /// The typed assembly origin of a generated identity, if any. Explicit
+    /// identities have no generated origin, even when their text resembles one.
+    pub fn generated(&self) -> Option<&crate::streaming::BlockId> {
+        match &self.0 {
+            ToolCallIdWire::Generated(block) => Some(block),
+            ToolCallIdWire::Explicit(_) => None,
+        }
+    }
+
+    /// A candidate spelling for protocols requiring string handles. It is not
+    /// unique across namespaces: request adapters must reserve actual provider
+    /// handles and allocate aliases for colliding call/result occurrences.
+    pub fn wire_hint(&self) -> std::borrow::Cow<'_, str> {
+        match &self.0 {
+            ToolCallIdWire::Explicit(id) => std::borrow::Cow::Borrowed(id),
+            ToolCallIdWire::Generated(block) => std::borrow::Cow::Owned(block.to_string()),
+        }
     }
 }
 
 impl std::fmt::Display for ToolCallId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        match &self.0 {
+            ToolCallIdWire::Explicit(id) => write!(f, "explicit:{id}"),
+            ToolCallIdWire::Generated(crate::streaming::BlockId::Wire(id)) => {
+                write!(f, "generated:wire:{id}")
+            }
+            ToolCallIdWire::Generated(crate::streaming::BlockId::Minted { kind, index }) => {
+                write!(f, "generated:minted:{}:{index}", kind.as_str())
+            }
+        }
     }
 }
 
-impl AsRef<str> for ToolCallId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::ops::Deref for ToolCallId {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::borrow::Borrow<str> for ToolCallId {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for ToolCallId {
+impl TryFrom<ToolCallIdWire> for ToolCallId {
     type Error = EmptyToolCallId;
 
-    fn try_from(id: String) -> Result<Self, Self::Error> {
-        Self::new(id).ok_or(EmptyToolCallId)
+    fn try_from(id: ToolCallIdWire) -> Result<Self, Self::Error> {
+        match id {
+            ToolCallIdWire::Explicit(id) => Self::new(id).ok_or(EmptyToolCallId),
+            generated @ ToolCallIdWire::Generated(_) => Ok(Self(generated)),
+        }
     }
 }
 
-impl From<ToolCallId> for String {
+impl From<ToolCallId> for ToolCallIdWire {
     fn from(id: ToolCallId) -> Self {
         id.0
-    }
-}
-
-impl PartialEq<str> for ToolCallId {
-    fn eq(&self, other: &str) -> bool {
-        self.0 == other
-    }
-}
-
-impl PartialEq<&str> for ToolCallId {
-    fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
     }
 }
 
@@ -488,14 +623,9 @@ struct ProviderCallIdWire {
     item_id: Option<String>,
 }
 
-/// What the provider issued for a call — the only identifiers that may
-/// travel back on that provider's wire.
-///
-/// Dual-identifier wires need both: OpenAI Responses issues an item id
-/// (`fc_…`) *and* a `call_id` (`call_…`), and expects the right one in each
-/// position. Single-identifier wires carry their id in `call_id` and leave
-/// `item_id` empty.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Provider-issued identifiers for replay. Single-ID protocols use `call_id`;
+/// dual-ID protocols also use `item_id`. Keep each identifier in its protocol slot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "ProviderCallIdWire")]
 pub struct ProviderCallId {
     /// The call-correlation identifier the provider expects echoed back.
@@ -528,19 +658,10 @@ impl ProviderCallId {
         self
     }
 
-    /// Derive the provider identity from a streaming part's optional wire
-    /// handles. A dual wire carries `(call_id, item id)`; a single wire's id
-    /// arrives as the tool/part id alone and becomes the `call_id`; with
-    /// neither, the identity is absent. The empty-string filtering is
-    /// load-bearing: [`ProviderCallId::new`] returns `None` on empty, so an
-    /// empty `call_id` must fall through to the single-id arm rather than
-    /// erase a real tool id.
-    ///
-    /// Both streaming surfaces (the parts accumulator and the raw
-    /// `ToolCall` lift) derive through here so they cannot disagree.
-    /// [`ToolCall::from_dual_wire`] is deliberately different — a dual wire
-    /// that omits its `call_id` has no single-id fallback — and stays
-    /// separate.
+    /// Uses a nonempty `call_id` as the correlator and `tool_id` as the item ID.
+    /// Without a nonempty `call_id`, uses a nonempty `tool_id` as the correlator.
+    /// Returns `None` if neither supplies an identifier. For dual-ID protocols
+    /// that forbid this fallback, use [`ToolCall::from_dual_wire`].
     pub fn from_optional_wire(call_id: Option<String>, tool_id: Option<String>) -> Option<Self> {
         let call_id = call_id.filter(|call_id| !call_id.is_empty());
         match (call_id, tool_id) {
@@ -574,23 +695,13 @@ pub struct ToolCall {
     /// Rig's correlation handle. Always present; minted when the provider
     /// issued none.
     pub id: ToolCallId,
-    /// What the provider issued, if anything — the only identifiers that
-    /// may go back on the wire as *that provider's* handles. `None` means
-    /// the provider issued no id (id-less wires such as Gemini REST or
-    /// older Ollama daemons).
+    /// Provider-issued replay identifiers, or `None` when none were supplied.
+    /// Local correlation handles do not establish provider provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderCallId>,
     /// Function name and JSON arguments requested by the model.
     pub function: ToolFunction,
-    /// Optional cryptographic signature for the tool call.
-    ///
-    /// This field is used by some providers (e.g., Google) to provide a signature
-    /// that can verify the authenticity and integrity of the tool call. When present,
-    /// it allows verification that the tool call was actually generated by the model
-    /// and has not been tampered with.
-    ///
-    /// This is an optional, provider-specific feature and will be `None` for providers
-    /// that don't support tool call signatures.
+    /// Opaque provider signature preserved for replay. Rig does not verify it.
     #[serde(default)]
     pub signature: Option<String>,
     /// Additional provider-specific parameters to be sent to the completion model provider
@@ -598,10 +709,36 @@ pub struct ToolCall {
     pub additional_params: Option<serde_json::Value>,
 }
 
+/// Assign deterministic completion-local handles to id-less provider calls.
+///
+/// A missing handle uses its tool-call position, counting function and custom
+/// calls alike so no two id-less calls share one. Generated and explicit handles
+/// occupy separate namespaces, so a later explicit provider string never forces
+/// renumbering. Provider metadata and the existing explicit-duplicate policy are
+/// preserved. Use only at inbound provider boundaries, not on application
+/// messages with chosen local IDs or already-published streaming identities.
+pub fn normalize_missing_tool_call_ids(content: &mut [AssistantContent]) {
+    for (position, (id, provider)) in content
+        .iter_mut()
+        .filter_map(|item| match item {
+            AssistantContent::ToolCall(call) => Some((&mut call.id, &call.provider)),
+            AssistantContent::CustomToolCall(call) => Some((&mut call.id, &call.provider)),
+            AssistantContent::Text(_)
+            | AssistantContent::Reasoning(_)
+            | AssistantContent::Image(_) => None,
+        })
+        .enumerate()
+    {
+        if provider.is_none() {
+            *id = ToolCallId::minted(position as u64);
+        }
+    }
+}
+
 impl ToolCall {
-    fn assemble(provider: Option<ProviderCallId>, function: ToolFunction) -> Self {
+    fn assemble(provider: Option<ProviderCallId>, index: u64, function: ToolFunction) -> Self {
         Self {
-            id: ToolCallId::for_provider(provider.as_ref()),
+            id: ToolCallId::for_provider_or(provider.as_ref(), ToolCallId::minted(index)),
             provider,
             function,
             signature: None,
@@ -613,14 +750,28 @@ impl ToolCall {
     pub fn new(id: ToolCallId, function: ToolFunction) -> Self {
         Self {
             id,
-            ..Self::assemble(None, function)
+            ..Self::assemble(None, 0, function)
         }
     }
 
-    /// The single-identifier provider boundary: adopt the wire's id when it
-    /// issued one, mint when it did not (empty or absent ids mint).
+    /// The single-identifier provider boundary for a response's *only*
+    /// call: adopt the wire's id when it issued one, mint at index zero
+    /// when it did not (empty or absent ids mint). A converter that walks
+    /// a response's parts uses [`ToolCall::from_wire_indexed`] with the
+    /// call's position, otherwise two id-less calls in one turn mint the
+    /// same handle.
     pub fn from_wire(wire_id: impl Into<String>, function: ToolFunction) -> Self {
-        Self::assemble(ProviderCallId::new(wire_id), function)
+        Self::from_wire_indexed(wire_id, 0, function)
+    }
+
+    /// Adopts a provider ID or generates [`ToolCallId::minted`] at `index` when
+    /// the ID is empty. Supply distinct positions for id-less calls in one turn.
+    pub fn from_wire_indexed(
+        wire_id: impl Into<String>,
+        index: u64,
+        function: ToolFunction,
+    ) -> Self {
+        Self::assemble(ProviderCallId::new(wire_id), index, function)
     }
 
     /// The dual-identifier provider boundary (OpenAI Responses): `item_id`
@@ -633,7 +784,7 @@ impl ToolCall {
     ) -> Self {
         let provider =
             ProviderCallId::new(call_id).map(|provider| provider.with_item_id(item_id.into()));
-        Self::assemble(provider, function)
+        Self::assemble(provider, 0, function)
     }
 
     /// Attach provider-issued identifiers.
@@ -642,17 +793,22 @@ impl ToolCall {
         self
     }
 
-    /// The identifier for a wire whose call-id slot is *required*: the
-    /// provider-issued `call_id` when the provider issued one, else rig's
-    /// minted handle — always non-empty.
+    /// A non-empty candidate for a required wire call-ID slot: the exact
+    /// provider handle when present, otherwise the local identity's wire hint.
+    ///
+    /// This single-item helper cannot reserve future provider IDs or pair
+    /// repeated turns. Full request adapters must use
+    /// [`ToolCallIds`](crate::providers::internal::tool_call_ids::ToolCallIds)
+    /// to assign collision-free synthetic references consistently to both legs.
     ///
     /// Wires whose id slot is *optional* (Gemini REST, gRPC) must read
     /// [`ToolCall::provider`] directly instead: minted handles never travel
     /// upstream there.
-    pub fn wire_call_id(&self) -> &str {
-        self.provider
-            .as_ref()
-            .map_or(self.id.as_str(), |provider| provider.call_id.as_str())
+    pub fn wire_call_id(&self) -> std::borrow::Cow<'_, str> {
+        self.provider.as_ref().map_or_else(
+            || self.id.wire_hint(),
+            |provider| std::borrow::Cow::Borrowed(provider.call_id.as_str()),
+        )
     }
 
     pub fn with_signature(mut self, signature: Option<String>) -> Self {
@@ -664,6 +820,138 @@ impl ToolCall {
         self.additional_params = additional_params;
         self
     }
+
+    /// Attach (or clear) the namespace the provider qualified this call with.
+    pub fn with_namespace(mut self, namespace: Option<String>) -> Self {
+        self.function.namespace = namespace;
+        self
+    }
+
+    /// The result kind that answers this call: always [`AnsweredToolCall::Function`].
+    pub fn answered_by(&self) -> AnsweredToolCall {
+        AnsweredToolCall::Function
+    }
+
+    /// This call as name-keyed dispatch may run it: unchanged when it carries
+    /// no namespace, otherwise [`UndispatchableToolCall::Namespaced`]. The
+    /// function-call half of [`name_dispatchable_call`].
+    pub fn name_dispatchable(&self) -> Result<&Self, UndispatchableToolCall> {
+        match &self.function.namespace {
+            None => Ok(self),
+            Some(namespace) => Err(UndispatchableToolCall::Namespaced {
+                id: self.id.clone(),
+                name: self.function.name.clone(),
+                namespace: namespace.clone(),
+            }),
+        }
+    }
+
+    /// This call as a wire that has no namespace concept may encode it: the
+    /// call unchanged when it carries no namespace, otherwise
+    /// [`UnrepresentableToolCall::Namespace`].
+    ///
+    /// Every JSON-only provider wire applies this one rule on encode. `Some`
+    /// is refused whatever it spells — including `""` and `"functions"` —
+    /// because no such wire here has evidence that it treats any spelling as
+    /// its default namespace; a wire that gains such evidence documents it
+    /// and applies it locally instead of calling this.
+    pub fn for_json_only_wire(&self, wire: &'static str) -> Result<&Self, UnrepresentableToolCall> {
+        match &self.function.namespace {
+            None => Ok(self),
+            Some(namespace) => Err(UnrepresentableToolCall::Namespace {
+                wire,
+                name: self.function.name.clone(),
+                namespace: namespace.clone(),
+            }),
+        }
+    }
+}
+
+/// The one encode rule for a wire whose tool calls carry JSON arguments and
+/// no namespace: pass a function call without a namespace through, refuse a
+/// namespaced call and every [`CustomToolCall`], and ignore content that is
+/// not a tool call.
+///
+/// Returns the function call to encode, `None` for non-call content.
+pub fn json_only_wire_tool_call<'a>(
+    wire: &'static str,
+    content: &'a AssistantContent,
+) -> Result<Option<&'a ToolCall>, UnrepresentableToolCall> {
+    match content {
+        AssistantContent::ToolCall(call) => call.for_json_only_wire(wire).map(Some),
+        AssistantContent::CustomToolCall(call) => Err(call.refused_by_json_only_wire(wire)),
+        AssistantContent::Text(_) | AssistantContent::Reasoning(_) | AssistantContent::Image(_) => {
+            Ok(None)
+        }
+    }
+}
+
+/// A model-emitted tool call that name-keyed dispatch cannot run without
+/// erasing what it is.
+///
+/// Rig's agent loop and ECS runtime authorize, dispatch
+/// (`EffectKind::ToolCall { name, args }`), and expose calls to hooks by tool
+/// name and JSON argument text alone. A namespaced call dispatched by its bare
+/// name would run a different tool than the one the model called, and a
+/// custom call's raw input is not JSON arguments — even when its text happens
+/// to parse as JSON. Both runtimes refuse such a call through
+/// [`name_dispatchable_call`] before authorization, effect construction, or
+/// any hook sees it.
+#[derive(Clone, Debug, PartialEq, Eq, Error, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UndispatchableToolCall {
+    /// A function call qualified by a namespace.
+    #[error(
+        "tool call `{name}` is qualified by namespace `{namespace}`, which name-keyed tool dispatch cannot honor"
+    )]
+    Namespaced {
+        /// The call's correlation handle.
+        id: ToolCallId,
+        /// The callable's name.
+        name: String,
+        /// The namespace, verbatim.
+        namespace: String,
+    },
+    /// A custom tool call, whose input is raw text rather than JSON arguments.
+    #[error(
+        "custom tool call `{name}` carries raw input, which JSON-argument tool dispatch cannot run"
+    )]
+    Custom {
+        /// The call's correlation handle.
+        id: ToolCallId,
+        /// The custom tool's name.
+        name: String,
+        /// The namespace, verbatim, when the call had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        namespace: Option<String>,
+    },
+}
+
+/// The one dispatch rule for runtimes that run tools by name with JSON
+/// arguments: an unqualified function call is dispatchable; a namespaced call
+/// and every custom call are refused ([`UndispatchableToolCall`]); content that
+/// is not a tool call yields `None`.
+pub fn name_dispatchable_call(
+    content: &AssistantContent,
+) -> Result<Option<&ToolCall>, UndispatchableToolCall> {
+    match content {
+        AssistantContent::ToolCall(call) => call.name_dispatchable().map(Some),
+        AssistantContent::CustomToolCall(call) => Err(UndispatchableToolCall::Custom {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            namespace: call.namespace.clone(),
+        }),
+        AssistantContent::Text(_) | AssistantContent::Reasoning(_) | AssistantContent::Image(_) => {
+            Ok(None)
+        }
+    }
+}
+
+/// The first call in `content` that [`name_dispatchable_call`] refuses, if any.
+pub fn first_undispatchable_call(content: &[AssistantContent]) -> Option<UndispatchableToolCall> {
+    content
+        .iter()
+        .find_map(|item| name_dispatchable_call(item).err())
 }
 
 /// Describes a tool function to call with a name and arguments, generally produced by a provider.
@@ -671,45 +959,153 @@ impl ToolCall {
 pub struct ToolFunction {
     /// Tool/function name to invoke.
     pub name: String,
+    /// The namespace the provider qualified this callable with, verbatim;
+    /// `None` when the provider sent none. Omitted from serialization when
+    /// absent.
+    ///
+    /// Carried exactly as the provider item spelled it. No spelling (`""`,
+    /// `"functions"`) is normalized to absence here: whether a destination
+    /// treats one as its default namespace is that destination's evidence to
+    /// supply, and a wire that cannot represent a namespace refuses the call
+    /// ([`ToolCall::for_json_only_wire`]) rather than dropping it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     /// JSON arguments for the tool/function.
     pub arguments: serde_json::Value,
 }
 
 impl ToolFunction {
-    /// Create a tool function call payload.
+    /// Create a tool function call payload with no namespace.
     pub fn new(name: String, arguments: serde_json::Value) -> Self {
-        Self { name, arguments }
+        Self {
+            name,
+            namespace: None,
+            arguments,
+        }
+    }
+
+    /// Attach (or clear) the namespace the provider qualified this callable with.
+    pub fn with_namespace(mut self, namespace: Option<String>) -> Self {
+        self.namespace = namespace;
+        self
     }
 }
 
-// ================================================================
-// Base content models
-// ================================================================
+/// A custom tool call: a named callable whose input is verbatim text rather
+/// than JSON arguments (the OpenAI Responses `custom_tool_call` item, e.g. a
+/// grammar-constrained tool).
+///
+/// Held in [`AssistantContent::CustomToolCall`]. The input is preserved byte
+/// for byte and is never parsed, even when it happens to be valid JSON: text
+/// that parses is still not a function call's arguments.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct CustomToolCall {
+    /// Rig's correlation handle, as on [`ToolCall::id`].
+    pub id: ToolCallId,
+    /// Provider-issued replay identifiers (`call_id`, and the output-item id
+    /// on dual-identifier wires), or `None` when none were supplied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderCallId>,
+    /// Tool name to invoke.
+    pub name: String,
+    /// The namespace the provider qualified this callable with, verbatim;
+    /// omitted from serialization when absent. See [`ToolFunction::namespace`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// The model's verbatim input.
+    pub input: String,
+}
 
-/// Provider extras on a content block: a non-empty JSON object, by
-/// construction.
+impl CustomToolCall {
+    /// The dual-identifier provider boundary (OpenAI Responses): `item_id` is
+    /// the output-item handle (`ctc_…`), `call_id` the correlator (`call_…`).
+    /// The correlator drives rig's id; an empty `call_id` records no provider
+    /// identity and mints at index zero.
+    pub fn from_dual_wire(
+        item_id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        namespace: Option<String>,
+        input: impl Into<String>,
+    ) -> Self {
+        let provider =
+            ProviderCallId::new(call_id).map(|provider| provider.with_item_id(item_id.into()));
+        Self {
+            id: ToolCallId::for_provider_or(provider.as_ref(), ToolCallId::minted(0)),
+            provider,
+            name: name.into(),
+            namespace,
+            input: input.into(),
+        }
+    }
+
+    /// The result kind that answers this call: always [`AnsweredToolCall::Custom`].
+    pub fn answered_by(&self) -> AnsweredToolCall {
+        AnsweredToolCall::Custom
+    }
+
+    /// A non-empty candidate for a required wire call-ID slot; see
+    /// [`ToolCall::wire_call_id`].
+    pub fn wire_call_id(&self) -> std::borrow::Cow<'_, str> {
+        self.provider.as_ref().map_or_else(
+            || self.id.wire_hint(),
+            |provider| std::borrow::Cow::Borrowed(provider.call_id.as_str()),
+        )
+    }
+
+    /// The refusal a wire whose tool calls carry JSON arguments only returns
+    /// for this call. See [`UnrepresentableToolCall::CustomCall`].
+    pub fn refused_by_json_only_wire(&self, wire: &'static str) -> UnrepresentableToolCall {
+        UnrepresentableToolCall::CustomCall {
+            wire,
+            name: self.name.clone(),
+        }
+    }
+}
+
+/// A tool call reached a destination wire that cannot represent it.
 ///
-/// The serialized form is the bare object (`#[serde(transparent)]`), so the
-/// wire shape of an `additional_params` field is a named key carrying an
-/// object — never flattened into the block's own key namespace. The type
-/// carries the whole params contract, so no call-site convention is needed:
-///
-/// - `Some(AdditionalParams)` always carries data. The constructors collapse
-///   an empty map to `None` and the inner map is private, so emptiness checks
-///   on a params field are a plain `is_none()`/`is_some()` — no tolerant
-///   shim, in-tree or out.
-/// - A non-object params value is unrepresentable in memory, so serialization
-///   can never emit a value deserialization rejects: what a live run writes,
-///   a restored run loads.
-/// - On decode, `null` and `{}` canonicalize to an absent field (see
-///   [`optional_additional_params`]) and any other non-object value is a loud
-///   error.
-///
-/// The block structs themselves follow the complementary tolerance doctrine:
-/// a known field with the wrong shape is a loud decode error, an *unknown*
-/// key on a block is ignored (never captured, never replayed), and an unknown
-/// content-block tag is a loud error. The params are provider-specific: a
-/// serializer replays only params it recognizes as its own wire's.
+/// The shared refusal every JSON-only provider wire applies on encode, so no
+/// wire drops a call (which would orphan its result), wraps raw input as a
+/// JSON string, or silently strips a namespace. Converts into
+/// [`MessageError`], [`crate::error::EncodeError`], and therefore
+/// [`ProviderError::Request`].
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum UnrepresentableToolCall {
+    /// A [`CustomToolCall`] was replayed to a wire whose tool calls carry JSON
+    /// arguments only. No JSON value stands for the raw input: a JSON string
+    /// would present it as a parsed argument, and dropping the call would
+    /// leave its result unanswered.
+    #[error(
+        "{wire} carries JSON tool arguments only, so custom tool call `{name}` and its raw input cannot be sent on it"
+    )]
+    CustomCall {
+        /// The destination wire.
+        wire: &'static str,
+        /// The custom tool's name.
+        name: String,
+    },
+    /// A namespace-qualified call was replayed to a wire that has no way to
+    /// express the qualifier. Sending the bare name would call a different
+    /// tool than the one the model called.
+    #[error(
+        "{wire} cannot represent tool namespaces, so call `{name}` qualified by namespace `{namespace}` cannot be sent on it"
+    )]
+    Namespace {
+        /// The destination wire.
+        wire: &'static str,
+        /// The callable's name.
+        name: String,
+        /// The namespace the wire cannot express, verbatim.
+        namespace: String,
+    },
+}
+
+/// Nonempty JSON object of provider-specific content metadata, serialized as
+/// an object under a named `additional_params` field rather than flattened.
+/// Constructors return `None` for empty maps. Bare deserialization rejects
+/// empty or non-object values; [`optional_additional_params`] maps null and
+/// empty objects to absence. Providers must replay only their own metadata.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct AdditionalParams(serde_json::Map<String, serde_json::Value>);
@@ -760,9 +1156,6 @@ impl AdditionalParams {
     /// citation deltas), objects merge recursively, scalars take the
     /// incoming value.
     pub fn merge(&mut self, incoming: Self) {
-        // One merge routine at every depth: the top level delegates to the
-        // same map merge the nested Object case uses, so the semantics
-        // cannot drift between single-level and nested params.
         fn merge_maps(
             existing: &mut serde_json::Map<String, serde_json::Value>,
             incoming: serde_json::Map<String, serde_json::Value>,
@@ -792,15 +1185,8 @@ impl AdditionalParams {
         merge_maps(&mut self.0, incoming.0);
     }
 
-    /// The extras stored under a wire's own key, when present — the
-    /// replay-side gate: a serializer asks for its key and never sees
-    /// another wire's extras (capture is unconditional at ingest; replay is
-    /// gated here). A non-object value under the key yields `None` (it is
-    /// not that wire's extras); a caller that must *distinguish* malformed
-    /// from absent — a warn path — pairs this with [`Self::get`]. Never a
-    /// hard error: extras were written by a previous turn, and failing
-    /// serialization over them would turn a persistence blemish into a
-    /// broken conversation.
+    /// Returns the object under the provider's own key, or `None` for absent
+    /// or non-object values. Use [`Self::get`] to diagnose malformed values.
     pub fn wire_extras(
         &self,
         wire_key: &str,
@@ -821,10 +1207,8 @@ impl AdditionalParams {
         }
     }
 
-    /// Build from a JSON value: `Ok(None)` for `null` and the empty object
-    /// (canonical absence), `Ok(Some)` for a non-empty object, and `Err`
-    /// handing the value back otherwise — a non-object is never silently
-    /// swallowed; the caller decides loud versus lossy.
+    /// Returns absence for null or empty objects, metadata for nonempty objects,
+    /// or the original value as an error for other shapes.
     pub fn try_from_value(value: serde_json::Value) -> Result<Option<Self>, serde_json::Value> {
         match value {
             serde_json::Value::Null => Ok(None),
@@ -843,8 +1227,10 @@ impl From<AdditionalParams> for serde_json::Value {
 impl std::ops::Index<&str> for AdditionalParams {
     type Output = serde_json::Value;
 
-    /// Panics when the key is absent — the mirror of `serde_json::Map`'s
-    /// `Index`, for test assertions and quick extraction.
+    /// Returns the value under `key`.
+    ///
+    /// # Panics
+    /// Panics if the key is absent.
     #[allow(clippy::indexing_slicing)]
     fn index(&self, key: &str) -> &serde_json::Value {
         &self.0[key]
@@ -872,25 +1258,10 @@ impl<'de> Deserialize<'de> for AdditionalParams {
     }
 }
 
-/// Migration verification: every key path present in `original` (with a
-/// non-`null` value) that is missing or unequal after a tolerant
-/// load-and-reserialize round trip.
-///
-/// The runtime load path ignores unknown keys on content blocks, so a 0.41
-/// history whose flattened provider extras were never re-nested under
-/// `additional_params` loads *silently minus those keys*. This is the opt-in
-/// detector MIGRATING's recipe runs over persisted history once, at
-/// migration time: load a message tolerantly, re-serialize it, and every
-/// dropped key surfaces here by path. An empty result means the history
-/// survives the round trip; keys the current writer *adds* (defaults such as
-/// an explicit `null`) are not differences, and neither is a value the
-/// loader canonicalizes to absence (`null`, the empty object).
-///
-/// # Example
-///
-/// MIGRATING's verification recipe, compiled here so the documented snippet
-/// and the behavior cannot drift — run it once over persisted history at
-/// migration time:
+/// Returns dot-separated paths whose original values are missing or changed
+/// after a round trip. Ignores added keys, null object members, and missing
+/// object members whose original value was an empty object. Array positions
+/// are compared individually.
 ///
 /// ```
 /// use rig_core::message;
@@ -930,10 +1301,7 @@ pub fn keys_lost_in_round_trip(
                     path.push_str(key);
                     match round_map.get(key) {
                         Some(round_value) => walk(original_value, round_value, path, lost),
-                        // A missing key whose original value the loader
-                        // canonicalizes to absence (the empty object —
-                        // MIGRATING's blessed `"additional_params": {}`
-                        // spelling; `null` is skipped above) is not a loss.
+                        // Empty objects may canonicalize to absent metadata.
                         None => {
                             if !original_value
                                 .as_object()
@@ -973,13 +1341,8 @@ pub fn keys_lost_in_round_trip(
     lost
 }
 
-/// Serde route for `Option<AdditionalParams>` fields: an explicit `null` or
-/// `{}` decodes as `None`, exactly like an absent field — a mechanically
-/// migrated block that wrote `"additional_params": {}` classifies identically
-/// to one that omitted the key. Any other non-object value is a loud decode
-/// error: extras are a keyed namespace (every producer stores an object,
-/// every extractor `get`s a key), so a mis-migrated `[]` or bare string is
-/// malformed data, not a phantom annotation no reader can see.
+/// Deserializes optional metadata, mapping null and empty objects to `None`.
+/// Nonempty objects produce metadata; other shapes return a deserialization error.
 pub fn optional_additional_params<'de, D>(
     deserializer: D,
 ) -> Result<Option<AdditionalParams>, D::Error>
@@ -994,16 +1357,8 @@ where
     }
 }
 
-/// Basic text content.
-///
-/// `additional_params` carries provider-specific fields that arrive on text
-/// content blocks (e.g. Anthropic returns citation metadata on assistant text
-/// blocks). It is a **named** field in the serialized form — never flattened
-/// into the block's own key namespace, so a stray key can neither shadow the
-/// enum tag nor be silently captured, and an absent field decodes as `None`
-/// (no empty-map artifact). An unknown key on the block itself is ignored on
-/// decode — tolerated, never captured — so histories written by a newer rig
-/// stay loadable; [`AdditionalParams`] documents the full doctrine.
+/// Text with optional provider metadata under the named `additional_params` key.
+/// Unknown sibling fields are ignored on decode, not captured for replay.
 #[derive(Default, Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Text {
     /// Text content.
@@ -1062,7 +1417,6 @@ pub struct Image {
 /// The kind of image source (to be used).
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 #[serde(tag = "type", content = "value", rename_all = "camelCase")]
-#[non_exhaustive]
 pub enum DocumentSourceKind {
     /// A file URL/URI.
     Url(String),
@@ -1173,7 +1527,7 @@ pub struct Document {
     pub additional_params: Option<AdditionalParams>,
 }
 
-/// Describes the format of the content, which can be base64 or string.
+/// Content representation as base64, text, or a URL.
 #[derive(Default, Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ContentFormat {
@@ -1268,13 +1622,8 @@ pub enum ImageDetail {
     Auto,
 }
 
-// ================================================================
-// Impl. for message models
-// ================================================================
-
 impl Message {
-    /// This helper method is primarily used to extract the first string prompt from a `Message`.
-    /// Since `Message` might have more than just text content, we need to find the first text.
+    /// Clones the first text block of a user message, or returns `None`.
     pub fn rag_text(&self) -> Option<String> {
         match self {
             Message::User { content } => {
@@ -1290,21 +1639,21 @@ impl Message {
         }
     }
 
-    /// Helper constructor to make creating system messages easier.
+    /// Creates a system instruction message.
     pub fn system(text: impl Into<String>) -> Self {
         Message::System {
             content: text.into(),
         }
     }
 
-    /// Helper constructor to make creating user messages easier.
+    /// Creates a user message containing one text block.
     pub fn user(text: impl Into<String>) -> Self {
         Message::User {
             content: vec![UserContent::text(text)],
         }
     }
 
-    /// Helper constructor to make creating assistant messages easier.
+    /// Creates an assistant message containing one text block and no provider ID.
     pub fn assistant(text: impl Into<String>) -> Self {
         Message::Assistant {
             id: None,
@@ -1312,11 +1661,11 @@ impl Message {
         }
     }
 
-    /// Helper constructor to make creating tool result messages easier.
-    /// `call` is the answered call's correlation handle — echo
-    /// [`ToolCall::id`]; it is never recorded as a provider-issued
-    /// identifier (see [`UserContent::tool_result`]). `name` is the
-    /// executed tool's name.
+    /// Creates a user message containing a text tool result.
+    /// `call` is an explicit local handle and does not establish provider
+    /// provenance. To answer an existing call while preserving its typed identity
+    /// and provider metadata, use [`UserContent::tool_result_for`] inside a user
+    /// message. `name` is the executed tool's name.
     pub fn tool_result(
         call: impl Into<String>,
         name: impl Into<String>,
@@ -1332,10 +1681,7 @@ impl Message {
     }
 }
 
-// The media helper constructors differ only in the wrapped content variant,
-// the `DocumentSourceKind` constructor, and the accepted data type; the macro
-// stamps them out while keeping each method's public signature and rustdoc
-// intact. `Image(...)` rows additionally take the `detail` parameter.
+/// Generates media constructors without fetching or decoding source data.
 macro_rules! media_ctors {
     () => {};
     (
@@ -1374,38 +1720,37 @@ macro_rules! media_ctors {
 }
 
 impl UserContent {
-    /// Helper constructor to make creating user text content easier.
+    /// Creates user text content.
     pub fn text(text: impl Into<String>) -> Self {
         UserContent::Text(text.into().into())
     }
 
     media_ctors! {
-        /// Helper constructor to make creating user image content easier.
+        /// Creates user image content from base64-encoded data.
         image_base64 => Image(Base64: String);
-        /// Helper constructor to make creating user image content from raw unencoded bytes easier.
+        /// Creates user image content from unencoded bytes.
         image_raw => Image(Raw: Vec<u8>);
-        /// Helper constructor to make creating user image content easier.
+        /// Creates user image content referencing a URL.
         image_url => Image(Url: String);
-        /// Helper constructor to make creating user audio content easier.
+        /// Creates user audio content from base64-encoded data.
         audio => Audio(AudioMediaType, Base64: String);
-        /// Helper constructor to make creating user audio content from raw unencoded bytes easier.
+        /// Creates user audio content from unencoded bytes.
         audio_raw => Audio(AudioMediaType, Raw: Vec<u8>);
-        /// Helper to create an audio resource from a URL
+        /// Creates user audio content referencing a URL.
         audio_url => Audio(AudioMediaType, Url: String);
-        /// Helper constructor to make creating user video content easier.
+        /// Creates user video content from base64-encoded data.
         video => Video(VideoMediaType, Base64: String);
-        /// Helper constructor to make creating user video content from raw unencoded bytes easier.
+        /// Creates user video content from unencoded bytes.
         video_raw => Video(VideoMediaType, Raw: Vec<u8>);
-        /// Helper to create a video resource from a URL
+        /// Creates user video content referencing a URL.
         video_url => Video(VideoMediaType, Url: String);
-        /// Helper to create a document from raw unencoded bytes
+        /// Creates user document content from unencoded bytes.
         document_raw => Document(DocumentMediaType, Raw: Vec<u8>);
-        /// Helper to create a document from a URL
+        /// Creates user document content referencing a URL.
         document_url => Document(DocumentMediaType, Url: String);
     }
 
-    /// Helper constructor to make creating user document content easier.
-    /// This creates a document that assumes the data being passed in is a raw string.
+    /// Creates document content from a string without decoding or fetching it.
     pub fn document(data: impl Into<String>, media_type: Option<DocumentMediaType>) -> Self {
         let data: String = data.into();
         UserContent::Document(Document {
@@ -1415,94 +1760,142 @@ impl UserContent {
         })
     }
 
-    /// Helper constructor to make creating user tool result content easier.
-    ///
-    /// `call` is the answered call's correlation handle — echo
-    /// [`ToolCall::id`] (an empty string mints a fresh handle). It is
-    /// recorded as the handle only, never as a provider-issued identifier:
-    /// a bare string cannot prove provider provenance, and stamping a
-    /// minted handle as one would send it upstream on wires whose id slot
-    /// is optional. When you hold provider identifiers, use
-    /// [`UserContent::tool_result_for`] (from an executed [`ToolCall`]) or
-    /// [`UserContent::tool_result_from_wire`] (from the provider's wire).
-    /// `name` is the executed tool's name (required — several wires key
-    /// the replay on it).
+    /// Creates a result with an explicit local handle and no provider identity.
+    /// An empty `call` generates the handle at index zero. To preserve an
+    /// existing call's typed identity and provenance, use [`Self::tool_result_for`].
+    /// `name` must identify the executed tool.
     pub fn tool_result(
         call: impl Into<String>,
         name: impl Into<String>,
         content: Vec<ToolResultContent>,
     ) -> Self {
         UserContent::ToolResult(ToolResult {
-            call: ToolCallId::new_or_mint(call),
+            call: ToolCallId::new_or_minted(call, 0),
             provider: None,
             name: name.into(),
+            // A rig `Tool` is a function tool: this constructor answers a
+            // function call. A custom call's result is built through
+            // `tool_result_answering` or `tool_result_for_custom_call`.
+            answers: AnsweredToolCall::Function,
             content,
         })
     }
 
-    /// Tool result content at the single-identifier provider boundary —
-    /// the inbound-converter form, mirroring [`ToolCall::from_wire`]:
-    /// `wire_id` came off the provider's wire, so it is recorded as the
-    /// provider-issued identifier (empty records none and mints the
-    /// handle).
+    /// Creates a result answering a function call from a provider-issued ID.
+    /// An empty ID records no provider identity and generates a local handle
+    /// at index zero.
     pub fn tool_result_from_wire(
         wire_id: impl Into<String>,
         name: impl Into<String>,
         content: Vec<ToolResultContent>,
     ) -> Self {
         let provider = ProviderCallId::new(wire_id);
-        let call = ToolCallId::for_provider(provider.as_ref());
+        let call = ToolCallId::for_provider_or(provider.as_ref(), ToolCallId::minted(0));
         Self::tool_result_for(call, provider, name, content)
     }
 
-    /// Tool result content answering a specific call — the form the agent
-    /// drivers use: `call`/`provider` come from the executed [`ToolCall`],
-    /// `name` is the *executed* tool's name (which can differ from the
-    /// model's call when a hook repaired it).
+    /// Creates a result answering a function call, using the executed call's
+    /// identity and provider metadata. `name` identifies the executed tool,
+    /// including any hook-repaired name.
     pub fn tool_result_for(
         call: ToolCallId,
         provider: Option<ProviderCallId>,
         name: impl Into<String>,
         content: Vec<ToolResultContent>,
     ) -> Self {
+        Self::tool_result_for_answering(call, provider, name, AnsweredToolCall::Function, content)
+    }
+
+    /// [`Self::tool_result_for`] stating which kind of call it answers, for a
+    /// site that holds the answered call's identity but not the call itself.
+    pub fn tool_result_for_answering(
+        call: ToolCallId,
+        provider: Option<ProviderCallId>,
+        name: impl Into<String>,
+        answers: AnsweredToolCall,
+        content: Vec<ToolResultContent>,
+    ) -> Self {
         UserContent::ToolResult(ToolResult {
             call,
             provider,
             name: name.into(),
+            answers,
             content,
         })
     }
 
-    /// Tool result content for a dual-identifier wire (OpenAI Responses):
-    /// `item_id` is the output-item handle (`fc_…`), `call_id` the
-    /// correlator (`call_…`). Empty ids record no provider id and mint.
+    /// Creates the result answering `call`, copying its identity and provider
+    /// metadata; the answered kind is derived from the call.
+    pub fn tool_result_for_call(call: &ToolCall, content: Vec<ToolResultContent>) -> Self {
+        Self::tool_result_for_answering(
+            call.id.clone(),
+            call.provider.clone(),
+            call.function.name.clone(),
+            call.answered_by(),
+            content,
+        )
+    }
+
+    /// Creates the result answering a custom tool `call`, copying its identity
+    /// and provider metadata; the answered kind is derived from the call.
+    pub fn tool_result_for_custom_call(
+        call: &CustomToolCall,
+        content: Vec<ToolResultContent>,
+    ) -> Self {
+        Self::tool_result_for_answering(
+            call.id.clone(),
+            call.provider.clone(),
+            call.name.clone(),
+            call.answered_by(),
+            content,
+        )
+    }
+
+    /// Tool result content answering a function call on a dual-identifier
+    /// wire (OpenAI Responses): `item_id` is the output-item handle (`fc_…`),
+    /// `call_id` the correlator (`call_…`). Empty ids record no provider id
+    /// and mint.
     pub fn tool_result_with_call_id(
         item_id: impl Into<String>,
         call_id: impl Into<String>,
         name: impl Into<String>,
         content: Vec<ToolResultContent>,
     ) -> Self {
+        Self::tool_result_answering(item_id, call_id, name, AnsweredToolCall::Function, content)
+    }
+
+    /// Dual-identifier result that states which kind of call it answers.
+    ///
+    /// The form a relay uses when it rebuilds a turn from its own records and
+    /// the answered call may have been a custom tool rather than a function:
+    /// the provider pairs `custom_tool_call` only with
+    /// `custom_tool_call_output`, so the kind must be stated, not guessed.
+    pub fn tool_result_answering(
+        item_id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        answers: AnsweredToolCall,
+        content: Vec<ToolResultContent>,
+    ) -> Self {
         let provider = ProviderCallId::new(call_id).map(|provider| provider.with_item_id(item_id));
-        let call = ToolCallId::for_provider(provider.as_ref());
-        Self::tool_result_for(call, provider, name, content)
+        let call = ToolCallId::for_provider_or(provider.as_ref(), ToolCallId::minted(0));
+        Self::tool_result_for_answering(call, provider, name, answers, content)
     }
 }
 
 impl AssistantContent {
-    /// Helper constructor to make creating assistant text content easier.
+    /// Creates assistant text content.
     pub fn text(text: impl Into<String>) -> Self {
         AssistantContent::Text(text.into().into())
     }
 
     media_ctors! {
-        /// Helper constructor to make creating assistant image content easier.
+        /// Creates assistant image content from base64-encoded data.
         image_base64 => Image(Base64: String);
     }
 
-    /// Helper constructor to make creating assistant tool call content easier.
-    ///
-    /// `id` is the provider-issued identifier when one exists; an empty
-    /// `id` records no provider id and mints the correlation handle.
+    /// Creates a tool call from a provider-issued ID, name, and arguments.
+    /// An empty ID records no provider identity and generates a handle at index zero.
     pub fn tool_call(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -1510,10 +1903,7 @@ impl AssistantContent {
     ) -> Self {
         AssistantContent::ToolCall(ToolCall::from_wire(
             id,
-            ToolFunction {
-                name: name.into(),
-                arguments,
-            },
+            ToolFunction::new(name.into(), arguments),
         ))
     }
 
@@ -1525,13 +1915,37 @@ impl AssistantContent {
         name: impl Into<String>,
         arguments: serde_json::Value,
     ) -> Self {
+        Self::tool_call_with_namespace(id, call_id, name, None, arguments)
+    }
+
+    /// Dual-identifier function call carrying the namespace the provider
+    /// qualified the callable with (OpenAI Responses namespaced tools).
+    pub fn tool_call_with_namespace(
+        id: impl Into<String>,
+        call_id: String,
+        name: impl Into<String>,
+        namespace: Option<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
         AssistantContent::ToolCall(ToolCall::from_dual_wire(
             id,
             call_id,
-            ToolFunction {
-                name: name.into(),
-                arguments,
-            },
+            ToolFunction::new(name.into(), arguments).with_namespace(namespace),
+        ))
+    }
+
+    /// Dual-identifier custom tool call (OpenAI Responses `custom_tool_call`):
+    /// `id` is the output-item handle, `call_id` the correlator, and `input`
+    /// the model's verbatim input.
+    pub fn custom_tool_call(
+        id: impl Into<String>,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        namespace: Option<String>,
+        input: impl Into<String>,
+    ) -> Self {
+        AssistantContent::CustomToolCall(CustomToolCall::from_dual_wire(
+            id, call_id, name, namespace, input,
         ))
     }
 
@@ -1541,22 +1955,22 @@ impl AssistantContent {
 }
 
 impl ToolResultContent {
-    /// Helper constructor to make creating tool result text content easier.
+    /// Creates literal text tool-result content.
     pub fn text(text: impl Into<String>) -> Self {
         ToolResultContent::Text(text.into().into())
     }
 
-    /// Helper constructor for structured JSON tool-result content.
+    /// Creates structured JSON tool-result content.
     pub fn json(value: serde_json::Value) -> Self {
         ToolResultContent::Json { value }
     }
 
     media_ctors! {
-        /// Helper constructor to make tool result images from a base64-encoded string.
+        /// Creates tool-result image content from base64-encoded data.
         image_base64 => Image(Base64: String);
-        /// Helper constructor to make tool result images from a base64-encoded string.
+        /// Creates tool-result image content from raw, unencoded bytes.
         image_raw => Image(Raw: Vec<u8>);
-        /// Helper constructor to make tool result images from a URL.
+        /// Creates tool-result image content referencing a URL.
         image_url => Image(Url: String);
     }
 }
@@ -1667,10 +2081,6 @@ impl std::str::FromStr for ImageDetail {
     }
 }
 
-// ================================================================
-// FromStr, From<String>, and From<&str> impls
-// ================================================================
-
 /// `From` impls for [`Text`] from string-like types.
 macro_rules! text_from {
     ($($src:ty),+ $(,)?) => {$(
@@ -1737,6 +2147,7 @@ single_content_message_from!(User {
 
 single_content_message_from!(Assistant {
     ToolCall => ToolCall,
+    CustomToolCall => CustomToolCall,
 });
 
 impl FromStr for Text {
@@ -1782,19 +2193,6 @@ impl From<Vec<UserContent>> for Message {
     }
 }
 
-impl From<ToolResultContent> for Message {
-    fn from(tool_result_content: ToolResultContent) -> Self {
-        Message::User {
-            content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::mint(),
-                provider: None,
-                name: String::new(),
-                content: vec![tool_result_content],
-            })],
-        }
-    }
-}
-
 #[derive(Default, Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolChoice {
@@ -1807,351 +2205,89 @@ pub enum ToolChoice {
     },
 }
 
-// ================================================================
-// Error types
-// ================================================================
-
 /// Error type to represent issues with converting messages to and from specific provider messages.
 #[derive(Debug, Error)]
 pub enum MessageError {
     #[error("Message conversion error: {0}")]
     ConversionError(String),
+    /// A tool call the destination wire cannot represent.
+    #[error(transparent)]
+    UnrepresentableToolCall(#[from] UnrepresentableToolCall),
 }
 
-impl From<MessageError> for CompletionError {
+impl From<MessageError> for ProviderError {
     fn from(error: MessageError) -> Self {
-        CompletionError::RequestError(error.into())
+        ProviderError::Request(error.into())
+    }
+}
+
+/// Assistant turns every JSON-only wire must refuse, for the per-wire
+/// refusal tests: one namespaced function call, one custom call.
+#[cfg(test)]
+pub(crate) fn unrepresentable_turns() -> [(Message, &'static str); 2] {
+    [
+        (
+            Message::Assistant {
+                id: None,
+                content: vec![AssistantContent::tool_call_with_namespace(
+                    "fc_1",
+                    "call_1".to_owned(),
+                    "add",
+                    Some("math".to_owned()),
+                    serde_json::json!({"x": 1}),
+                )],
+            },
+            "namespace",
+        ),
+        (
+            Message::Assistant {
+                id: None,
+                content: vec![AssistantContent::custom_tool_call(
+                    "ctc_1",
+                    "call_2",
+                    "apply_patch",
+                    None,
+                    r#"{"x": 1}"#,
+                )],
+            },
+            "custom",
+        ),
+    ]
+}
+
+/// Assert `refusal` is the shared JSON-only refusal of the `kind` turn from
+/// [`unrepresentable_turns`] on `wire`.
+#[cfg(test)]
+pub(crate) fn assert_refused(refusal: &UnrepresentableToolCall, kind: &str, wire: &str) {
+    match (kind, refusal) {
+        (
+            "namespace",
+            UnrepresentableToolCall::Namespace {
+                wire: got,
+                name,
+                namespace,
+            },
+        ) => {
+            assert_eq!(
+                (*got, name.as_str(), namespace.as_str()),
+                (wire, "add", "math")
+            );
+        }
+        ("custom", UnrepresentableToolCall::CustomCall { wire: got, name }) => {
+            assert_eq!((*got, name.as_str()), (wire, "apply_patch"));
+        }
+        _ => panic!("expected the {kind} refusal on {wire}, got {refusal:?}"),
+    }
+}
+
+/// [`assert_refused`] through a [`MessageError`].
+#[cfg(test)]
+pub(crate) fn assert_message_refused(error: &MessageError, kind: &str, wire: &str) {
+    match error {
+        MessageError::UnrepresentableToolCall(refusal) => assert_refused(refusal, kind, wire),
+        other => panic!("expected the {kind} refusal on {wire}, got {other:?}"),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use serde::{Deserialize, Serialize};
-
-    use super::{AdditionalParams, Message, Reasoning, ReasoningContent, Text, ToolResultContent};
-
-    mod vec_content_serde {
-        use super::super::{AssistantContent, Message, UserContent};
-
-        #[test]
-        fn message_content_still_serializes_as_a_plain_sequence() {
-            // The removed container serialized as a bare sequence, which is why
-            // this migration changes no persisted history and no recorded
-            // provider fixture. Pin the wire shape so that stays true.
-            let message = Message::User {
-                content: vec![UserContent::text("hi")],
-            };
-            let json = serde_json::to_value(&message).expect("serialize");
-            assert_eq!(
-                json,
-                serde_json::json!({
-                    "role": "user",
-                    "content": [{"type": "text", "text": "hi"}],
-                })
-            );
-        }
-
-        #[test]
-        fn message_content_round_trips_byte_identically() {
-            let message = Message::Assistant {
-                id: Some("msg_1".to_owned()),
-                content: vec![AssistantContent::text("hello")],
-            };
-            let encoded = serde_json::to_string(&message).expect("serialize");
-            let decoded: Message = serde_json::from_str(&encoded).expect("deserialize");
-            assert_eq!(
-                serde_json::to_string(&decoded).expect("re-serialize"),
-                encoded
-            );
-        }
-
-        #[test]
-        fn an_empty_content_array_now_deserializes() {
-            // The container's `Deserialize` implemented only `visit_seq` and
-            // rejected `[]`. That is the single input whose behaviour this
-            // migration changes: it was an error, and it is now an empty list.
-            let message: Message =
-                serde_json::from_value(serde_json::json!({"role": "user", "content": []}))
-                    .expect("an empty content list is representable now");
-            let Message::User { content } = message else {
-                panic!("expected a user message");
-            };
-            assert!(content.is_empty());
-        }
-    }
-
-    #[test]
-    fn reasoning_constructors_and_accessors_work() {
-        let single = Reasoning::new("think");
-        assert_eq!(single.first_text(), Some("think"));
-        assert_eq!(single.first_signature(), None);
-
-        let signed = Reasoning::new_with_signature("signed", Some("sig-1".to_string()));
-        assert_eq!(signed.first_text(), Some("signed"));
-        assert_eq!(signed.first_signature(), Some("sig-1"));
-
-        let multi = Reasoning::multi(vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(multi.display_text(), "a\nb");
-        assert_eq!(multi.first_text(), Some("a"));
-
-        let redacted = Reasoning::redacted("redacted-value");
-        assert_eq!(redacted.display_text(), "redacted-value");
-        assert_eq!(redacted.first_text(), None);
-
-        let encrypted = Reasoning::encrypted("enc");
-        assert_eq!(encrypted.encrypted_content(), Some("enc"));
-        assert_eq!(encrypted.display_text(), "");
-
-        let summaries = Reasoning::summaries(vec!["s1".to_string(), "s2".to_string()]);
-        assert_eq!(summaries.display_text(), "s1\ns2");
-        assert_eq!(summaries.encrypted_content(), None);
-    }
-
-    #[test]
-    fn reasoning_content_serde_roundtrip() {
-        let variants = vec![
-            ReasoningContent::Text {
-                text: "plain".to_string(),
-                signature: Some("sig".to_string()),
-            },
-            ReasoningContent::Encrypted("opaque".to_string()),
-            ReasoningContent::Redacted {
-                data: "redacted".to_string(),
-            },
-            ReasoningContent::Summary("summary".to_string()),
-        ];
-
-        for variant in variants {
-            let json = serde_json::to_string(&variant).expect("serialize");
-            let roundtrip: ReasoningContent = serde_json::from_str(&json).expect("deserialize");
-            assert_eq!(roundtrip, variant);
-        }
-    }
-
-    #[test]
-    fn system_message_constructor_and_serde_roundtrip() {
-        let message = Message::system("You are concise.");
-
-        match &message {
-            Message::System { content } => assert_eq!(content, "You are concise."),
-            _ => panic!("Expected system message"),
-        }
-
-        let json = serde_json::to_string(&message).expect("serialize");
-        let roundtrip: Message = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(roundtrip, message);
-    }
-
-    #[test]
-    fn current_schema_tool_call_json_round_trips_without_provider_promotion() {
-        // A minted handle with no provider must stay provider-less —
-        // nothing in the round trip may invent provider provenance.
-        let call = super::ToolCall::new(
-            super::ToolCallId::new("minted-handle").expect("non-empty"),
-            super::ToolFunction {
-                name: "add".to_string(),
-                arguments: serde_json::json!({}),
-            },
-        );
-
-        let json = serde_json::to_value(&call).expect("serialize");
-        assert!(json.get("call_id").is_none());
-        let roundtrip: super::ToolCall = serde_json::from_value(json).expect("deserialize");
-        assert_eq!(roundtrip.provider, None);
-        assert_eq!(roundtrip, call);
-    }
-
-    #[test]
-    fn empty_params_canonicalize_to_none_in_both_serde_directions() {
-        // The `AdditionalParams` contract, pinned where it lives. One
-        // fixture, every direction: canonicalization, round-trip, tolerance,
-        // and rejection.
-
-        // An explicit `{}` or `null` decodes as `None` exactly like an
-        // absent field.
-        for empty_spelling in [serde_json::json!({}), serde_json::Value::Null] {
-            let text: Text = serde_json::from_value(
-                serde_json::json!({"text": "x", "additional_params": empty_spelling}),
-            )
-            .expect("deserialize");
-            assert_eq!(text.additional_params, None);
-        }
-
-        // Data survives a round trip value-identically, and `Some` params
-        // always carry data — `AdditionalParams` has no empty value, so the
-        // old uncanonicalized-`Some({})` hazard is unrepresentable rather
-        // than tolerated.
-        let text: Text = serde_json::from_value(
-            serde_json::json!({"text": "x", "additional_params": {"citations": [1]}}),
-        )
-        .expect("deserialize");
-        assert_eq!(
-            text.additional_params,
-            AdditionalParams::from_entries([("citations", serde_json::json!([1]))])
-        );
-        assert_eq!(
-            text.additional_params
-                .as_ref()
-                .and_then(|params| params.get("citations")),
-            Some(&serde_json::json!([1]))
-        );
-        let round: Text = serde_json::from_value(serde_json::to_value(&text).expect("serialize"))
-            .expect("round trip");
-        assert_eq!(round, text);
-
-        // The empty map canonicalizes to `None` at the constructor, so it
-        // never reaches serialization at all.
-        assert_eq!(AdditionalParams::new(serde_json::Map::new()), None);
-        assert_eq!(
-            AdditionalParams::try_from_value(serde_json::json!({})).expect("object"),
-            None
-        );
-
-        // An unknown key on the block itself is tolerated and dropped —
-        // never an error, never captured into params — so histories written
-        // by a newer rig (or 0.41 flattened extras that were never
-        // re-nested) still load; MIGRATING's strict-decode recipe is the
-        // opt-in detector for the dropped keys.
-        let tolerant: Text = serde_json::from_value(
-            serde_json::json!({"text": "x", "citations": ["stray"], "future_field": 1}),
-        )
-        .expect("unknown keys on a block must not fail the decode");
-        assert_eq!(tolerant.text, "x");
-        assert_eq!(tolerant.additional_params, None);
-
-        // Extras are a keyed namespace: a non-object carrier (the shape a
-        // mis-firing migration script writes) is malformed data and fails
-        // loudly instead of loading as a phantom annotation no extractor
-        // can read.
-        for malformed in [serde_json::json!([]), serde_json::json!("title")] {
-            let err = serde_json::from_value::<Text>(
-                serde_json::json!({"text": "x", "additional_params": malformed}),
-            )
-            .expect_err("non-object params must be a decode error");
-            assert!(
-                err.to_string().contains("must be a JSON object"),
-                "unexpected error: {err}"
-            );
-            assert!(
-                AdditionalParams::try_from_value(serde_json::json!([])).is_err(),
-                "try_from_value must hand a non-object back, not swallow it"
-            );
-        }
-    }
-
-    #[test]
-    fn round_trip_diff_recipe_detects_every_dropped_key() {
-        // Pins MIGRATING's opt-in verification recipe: the runtime load
-        // path tolerates unknown keys (see the tolerance case in
-        // `empty_params_canonicalize_to_none_in_both_serde_directions`),
-        // and a migration script detects what tolerance dropped by loading,
-        // re-serializing, and asking `keys_lost_in_round_trip` — a
-        // serde_ignored-based recipe cannot serve here, because the
-        // internally tagged enums buffer their content and hide ignored
-        // keys from its callback.
-        let migrated = serde_json::json!({
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "cited", "citations": ["not re-nested"]},
-                {"type": "text", "text": "clean",
-                 "additional_params": {"citations": ["re-nested"]}},
-            ],
-        });
-        let loaded: Message =
-            serde_json::from_value(migrated.clone()).expect("tolerant decode must succeed");
-        let reserialized = serde_json::to_value(&loaded).expect("serialize");
-        assert_eq!(
-            super::keys_lost_in_round_trip(&migrated, &reserialized),
-            vec!["content.0.citations".to_string()],
-            "every dropped key must be reported by path, and only dropped keys \
-             — writer-added defaults are not differences"
-        );
-
-        // A fully re-nested history survives whole: the recipe's success
-        // condition is an empty list. MIGRATING's blessed
-        // `"additional_params": {}` spelling canonicalizes to absence and
-        // must not read as a loss.
-        let clean = serde_json::json!({
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "clean",
-                 "additional_params": {"citations": ["re-nested"]}},
-                {"type": "text", "text": "mechanically migrated",
-                 "additional_params": {}},
-            ],
-        });
-        let loaded: Message = serde_json::from_value(clean.clone()).expect("decode");
-        let reserialized = serde_json::to_value(&loaded).expect("serialize");
-        assert_eq!(
-            super::keys_lost_in_round_trip(&clean, &reserialized),
-            Vec::<String>::new(),
-            "clean history must survive the round trip whole"
-        );
-    }
-
-    #[test]
-    fn legacy_call_id_key_is_ignored_not_lifted() {
-        // The pre-provider-split lift is deleted: a legacy `call_id` key is
-        // an unknown field, so it deserializes with the key ignored — `id`
-        // is read as rig's handle and `provider` stays absent. Pinned so a
-        // future change (e.g. making the key a hard error) is a decision,
-        // not an accident; the hand-migration recipe lives in MIGRATING.
-        let legacy = serde_json::json!({
-            "id": "fc_123",
-            "call_id": "call_abc",
-            "function": {"name": "add", "arguments": {"x": 1}},
-        });
-
-        let call: super::ToolCall = serde_json::from_value(legacy).expect("deserialize");
-        assert_eq!(call.id, "fc_123");
-        assert_eq!(call.provider, None);
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    struct ExecutorLikeResponse {
-        output: serde_json::Value,
-        logs: Vec<String>,
-        execution_time_ms: u64,
-    }
-
-    #[test]
-    fn tool_result_content_decodes_structured_and_legacy_json() {
-        let response = ExecutorLikeResponse {
-            output: serde_json::json!({"answer": 42}),
-            logs: vec!["computed".to_string()],
-            execution_time_ms: 7,
-        };
-        let value = serde_json::to_value(&response).expect("serialize response");
-
-        let structured = ToolResultContent::json(value.clone());
-        assert_eq!(structured.as_json(), Some(&value));
-        assert_eq!(structured.as_text(), None);
-        assert_eq!(
-            structured
-                .deserialize_json::<ExecutorLikeResponse>()
-                .expect("decode structured response"),
-            response
-        );
-
-        let legacy_json = value.to_string();
-        let legacy_text = ToolResultContent::Text(Text::new(legacy_json.clone()));
-        assert_eq!(legacy_text.as_text(), Some(legacy_json.as_str()));
-        assert_eq!(legacy_text.as_json(), None);
-        assert_eq!(
-            legacy_text
-                .deserialize_json::<ExecutorLikeResponse>()
-                .expect("decode legacy response"),
-            response
-        );
-
-        let image = ToolResultContent::image_url("https://example.com/result.png", None, None);
-        let image_error = image.deserialize_json::<ExecutorLikeResponse>();
-        assert!(image_error.is_err());
-        if let Err(error) = image_error {
-            assert_eq!(
-                error.to_string(),
-                "cannot decode image tool-result content as JSON"
-            );
-        }
-    }
-}
+mod tests;

@@ -1,21 +1,14 @@
-//! Types that replace the AWS Bedrock Runtime SDK's `ConverseOutput` type.
-//! This is required so that we can impl Serialize and Deserialize.
+//! Serializable representations of Bedrock Converse responses.
+//! Guardrail trace, performance configuration, and service tier remain SDK types
+//! available in process but omitted from serialization.
 //!
-//! Rig's normalized [`CompletionResponse`](rig_core::completion::CompletionResponse)
-//! reads only part of the Converse response, but this type is what
-//! `raw_completion` hands back — the escape hatch whose whole purpose is that
-//! nothing the provider sent has been thrown away. Model-specific extras
-//! (`additional_model_response_fields`) are carried as plain
-//! [`serde_json::Value`].
+//! ```
+//! use rig_bedrock::types::converse_output::StopReason;
 //!
-//! The guardrail trace, performance configuration and service tier keep the
-//! SDK's own types rather than gaining hand-written mirrors: they are deeply
-//! nested (a guardrail assessment alone is a dozen types), and a mirror that
-//! drifts from the SDK would reintroduce exactly the silent loss this exists
-//! to prevent. Those three are `#[serde(skip)]` because the SDK types are not
-//! `Serialize`, so a serialized `InternalConverseOutput` — a cassette fixture,
-//! a persisted response — omits them while an in-process caller reads them in
-//! full.
+//! let value = serde_json::to_value(StopReason::EndTurn)?;
+//! assert_eq!(value, "EndTurn");
+//! # Ok::<(), serde_json::Error>(())
+//! ```
 use std::fmt;
 
 use aws_sdk_bedrockruntime::types as aws_bedrock;
@@ -24,8 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::errors::TypeConversionError;
 use super::json::AwsDocument;
 
-/// Our own implementation of the AWS Bedrock runtime "converse" operation output.
-/// The reason why we need to implement this is that we need to impl Deserialize/Serialize on top of this.
+/// Converse response with serializable content and in-process SDK metadata.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct InternalConverseOutput {
     /// <p>The result from the call to <code>Converse</code>.</p>
@@ -38,18 +30,11 @@ pub struct InternalConverseOutput {
     pub metrics: Option<ConverseMetrics>,
     /// <p>Additional fields in the response that are unique to the model.</p>
     pub additional_model_response_fields: Option<serde_json::Value>,
-    /// The AWS request id, taken from the response's `x-amzn-RequestId`
-    /// header. Always present on a successful call, and the identifier AWS
-    /// support asks for.
+    /// AWS request ID from response metadata, when supplied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    /// <p>A trace object that contains information about the Guardrail behavior.</p>
-    ///
-    /// Populated when the request carried a guardrail configuration with
-    /// tracing enabled (see
-    /// [`CompletionModel::with_guardrail`](crate::completion::CompletionModel::with_guardrail));
-    /// it is the only place Bedrock explains *why* a turn stopped with
-    /// [`StopReason::GuardrailIntervened`].
+    /// Guardrail assessment returned when tracing is enabled.
+    /// Omitted from serialization and absent after deserialization.
     #[serde(skip)]
     pub trace: Option<aws_bedrock::ConverseTrace>,
     /// <p>Model performance settings for the request.</p>
@@ -89,13 +74,8 @@ impl TryFrom<aws_sdk_bedrockruntime::operation::converse::ConverseOutput>
         let request_id =
             aws_sdk_bedrockruntime::operation::RequestId::request_id(&value).map(str::to_string);
 
-        // `ConverseOutput` is `#[non_exhaustive]` and hides `_request_id`, so
-        // the rest pattern is mandatory and cannot be traded for a
-        // compile-time guard: every field the SDK adds arrives here silently.
-        // That is how the guardrail trace, performance config and service tier
-        // came to be dropped, so the list below is checked against the SDK
-        // type when the dependency moves, and `converse_output_carries_every_
-        // sdk_field` pins the ones known today.
+        // The non-exhaustive SDK output requires a rest pattern; dependency
+        // upgrades need a field audit because additions cannot fail this match.
         let aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
             output,
             stop_reason,
@@ -109,10 +89,10 @@ impl TryFrom<aws_sdk_bedrockruntime::operation::converse::ConverseOutput>
         } = value;
 
         Ok(Self {
-            output: output.map(|x| x.try_into()).transpose()?,
+            output: output.map(std::convert::TryInto::try_into).transpose()?,
             stop_reason: stop_reason.try_into()?,
-            usage: usage.map(|x| x.try_into()).transpose()?,
-            metrics: metrics.map(|x| x.try_into()).transpose()?,
+            usage: usage.map(std::convert::TryInto::try_into).transpose()?,
+            metrics: metrics.map(std::convert::TryInto::try_into).transpose()?,
             additional_model_response_fields: additional_model_response_fields
                 .map(|doc| AwsDocument(doc).into()),
             request_id,
@@ -204,7 +184,6 @@ pub enum ContentBlock {
     ToolResult(ToolResultBlock),
     ToolUse(ToolUseBlock),
     Video(VideoBlock),
-    #[non_exhaustive]
     Unknown,
 }
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -247,7 +226,6 @@ pub enum CitationLocation {
     DocumentChar(DocumentCharLocation),
     DocumentChunk(DocumentChunkLocation),
     DocumentPage(DocumentPageLocation),
-    #[non_exhaustive]
     Unknown,
 }
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -296,7 +274,6 @@ pub enum DocumentSource {
     Content(Vec<DocumentContentBlock>),
     S3Location(S3Location),
     Text(String),
-    #[non_exhaustive]
     Unknown,
 }
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -338,7 +315,6 @@ pub enum GuardrailConverseImageFormat {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum GuardrailConverseImageSource {
     Bytes(Blob),
-    #[non_exhaustive]
     Unknown,
 }
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -370,7 +346,6 @@ pub enum ImageFormat {
 pub enum ImageSource {
     Bytes(Blob),
     S3Location(S3Location),
-    #[non_exhaustive]
     Unknown,
 }
 
@@ -378,7 +353,6 @@ pub enum ImageSource {
 pub enum ReasoningContentBlock {
     ReasoningText(ReasoningTextBlock),
     RedactedContent(Blob),
-    #[non_exhaustive]
     Unknown,
 }
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -401,7 +375,6 @@ pub enum ToolResultContentBlock {
     Json(serde_json::Value),
     Text(String),
     Video(VideoBlock),
-    #[non_exhaustive]
     Unknown,
 }
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -426,7 +399,6 @@ pub enum VideoFormat {
 pub enum VideoSource {
     Bytes(Blob),
     S3Location(S3Location),
-    #[non_exhaustive]
     Unknown,
 }
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -438,19 +410,12 @@ pub struct ToolUseBlock {
 
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub enum ToolResultStatus {
-    /// Renamed due to linting
+    /// Tool execution failed.
     #[serde(rename = "Error")]
     IsError,
     Success,
     Unknown(UnknownVariantValue),
 }
-
-// TryFrom<T> implementations
-//
-// The AWS SDK's "string enums" (unit variants only) and unions (one payload
-// per variant) mirror mechanically, so the impls are macro-generated. The
-// error strings match the historical hand-written impls exactly:
-// `Unknown variant for TYPE: {invalid:?}`.
 
 /// Mirror a unit-variant AWS enum: emits owned + borrowed `TryFrom<aws>`
 /// impls. Unlisted variants (including this crate's `Unknown`) fall through to
@@ -658,8 +623,6 @@ impl TryFrom<aws_bedrock::ToolResultContentBlock> for ToolResultContentBlock {
         }
     }
 }
-
-// Struct conversions.
 
 impl TryFrom<aws_bedrock::TokenUsage> for TokenUsage {
     type Error = TypeConversionError;
@@ -895,178 +858,4 @@ impl TryFrom<aws_bedrock::ToolUseBlock> for ToolUseBlock {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    /// The escape hatch's contract is that nothing the provider sent was
-    /// dropped, and the SDK's output type is `#[non_exhaustive]`, so the
-    /// conversion's rest pattern hides every field added upstream. This pins
-    /// the ones known today — `trace`, `performance_config` and `service_tier`
-    /// were all silently discarded before.
-    #[test]
-    fn converse_output_carries_every_sdk_field() {
-        let sdk_output = aws_sdk_bedrockruntime::operation::converse::ConverseOutput::builder()
-            .stop_reason(aws_bedrock::StopReason::GuardrailIntervened)
-            .output(aws_bedrock::ConverseOutput::Message(
-                aws_bedrock::Message::builder()
-                    .role(aws_bedrock::ConversationRole::Assistant)
-                    .content(aws_bedrock::ContentBlock::Text("blocked".into()))
-                    .build()
-                    .unwrap(),
-            ))
-            .usage(
-                aws_bedrock::TokenUsage::builder()
-                    .input_tokens(1)
-                    .output_tokens(2)
-                    .total_tokens(3)
-                    .build()
-                    .unwrap(),
-            )
-            .metrics(
-                aws_bedrock::ConverseMetrics::builder()
-                    .latency_ms(4)
-                    .build()
-                    .unwrap(),
-            )
-            .trace(
-                aws_bedrock::ConverseTrace::builder()
-                    .guardrail(aws_bedrock::GuardrailTraceAssessment::builder().build())
-                    .build(),
-            )
-            .performance_config(
-                aws_bedrock::PerformanceConfiguration::builder()
-                    .latency(aws_bedrock::PerformanceConfigLatency::Standard)
-                    .build(),
-            )
-            .service_tier(
-                aws_bedrock::ServiceTier::builder()
-                    .r#type(aws_bedrock::ServiceTierType::Default)
-                    .build()
-                    .unwrap(),
-            )
-            .build()
-            .unwrap();
-
-        let mirrored = InternalConverseOutput::try_from(sdk_output).unwrap();
-
-        assert!(mirrored.output.is_some());
-        assert_eq!(mirrored.stop_reason, StopReason::GuardrailIntervened);
-        assert!(mirrored.usage.is_some());
-        assert!(mirrored.metrics.is_some());
-        assert!(
-            mirrored.trace().is_some(),
-            "the guardrail trace must survive the conversion"
-        );
-        assert!(
-            mirrored.performance_config.is_some(),
-            "the performance configuration must survive the conversion"
-        );
-        assert!(
-            mirrored.service_tier.is_some(),
-            "the service tier must survive the conversion"
-        );
-    }
-
-    /// The SDK types behind `trace`, `performance_config` and `service_tier`
-    /// are not `Serialize`, so they are `#[serde(skip)]`: serializing must
-    /// still succeed and must not invent values on the way back.
-    #[test]
-    fn skipped_provider_fields_round_trip_as_absent() {
-        let output = InternalConverseOutput {
-            output: None,
-            stop_reason: StopReason::EndTurn,
-            usage: None,
-            metrics: None,
-            additional_model_response_fields: None,
-            request_id: Some("req-1".to_string()),
-            trace: None,
-            performance_config: None,
-            service_tier: None,
-        };
-
-        let json = serde_json::to_string(&output).unwrap();
-        let restored: InternalConverseOutput = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(restored.request_id(), Some("req-1"));
-        assert!(restored.trace().is_none());
-        assert!(restored.performance_config.is_none());
-        assert!(restored.service_tier.is_none());
-    }
-
-    #[test]
-    fn mirror_enum_converts_known_variants() {
-        assert_eq!(
-            StopReason::try_from(aws_bedrock::StopReason::EndTurn).unwrap(),
-            StopReason::EndTurn
-        );
-        // Borrowed impl.
-        assert_eq!(
-            StopReason::try_from(&aws_bedrock::StopReason::ToolUse).unwrap(),
-            StopReason::ToolUse
-        );
-        // A renamed pairing (aws `Error` -> ours `IsError`).
-        assert_eq!(
-            ToolResultStatus::try_from(aws_bedrock::ToolResultStatus::Error).unwrap(),
-            ToolResultStatus::IsError
-        );
-    }
-
-    #[test]
-    fn mirror_enum_unknown_variant_preserves_error_string() {
-        let unknown = aws_bedrock::StopReason::from("weird_stop");
-        let err = StopReason::try_from(unknown.clone()).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            format!("Unknown variant for StopReason: {unknown:?}")
-        );
-
-        let err =
-            ConversationRole::try_from(aws_bedrock::ConversationRole::from("nope")).unwrap_err();
-        assert!(
-            err.to_string()
-                .starts_with("Unknown variant for ConversationRole:")
-        );
-    }
-
-    #[test]
-    fn additional_model_response_fields_survive_as_json() {
-        let doc: AwsDocument = json!({"reasoning_effort": "low", "depth": 3}).into();
-        let output = aws_sdk_bedrockruntime::operation::converse::ConverseOutput::builder()
-            .stop_reason(aws_bedrock::StopReason::EndTurn)
-            .additional_model_response_fields(doc.0)
-            .build()
-            .unwrap();
-
-        let internal = InternalConverseOutput::try_from(output).unwrap();
-        assert_eq!(
-            internal.additional_model_response_fields,
-            Some(json!({"reasoning_effort": "low", "depth": 3}))
-        );
-
-        // The whole normalized output stays serializable and the extras
-        // survive a serde round trip.
-        let value = serde_json::to_value(&internal).unwrap();
-        assert_eq!(
-            value.get("additional_model_response_fields"),
-            Some(&json!({"reasoning_effort": "low", "depth": 3}))
-        );
-        let back: InternalConverseOutput = serde_json::from_value(value).unwrap();
-        assert_eq!(back, internal);
-    }
-
-    #[test]
-    fn tool_use_input_decodes_into_json_value() {
-        let aws_block = aws_bedrock::ToolUseBlock::builder()
-            .tool_use_id("call_1")
-            .name("add")
-            .input(AwsDocument::from(json!({"x": 1, "y": 2})).0)
-            .build()
-            .unwrap();
-
-        let ours = ToolUseBlock::try_from(aws_block).unwrap();
-        assert_eq!(ours.tool_use_id, "call_1");
-        assert_eq!(ours.name, "add");
-        assert_eq!(ours.input, json!({"x": 1, "y": 2}));
-    }
-}
+mod tests;

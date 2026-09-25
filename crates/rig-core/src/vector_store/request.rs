@@ -1,8 +1,13 @@
-//! Types for constructing vector search queries.
+//! Vector-search requests and composable metadata filters.
 //!
-//! - [`VectorSearchRequest`]: Query parameters (text, result count, threshold, filters).
-//! - [`SearchFilter`]: Trait for backend-agnostic filter expressions.
-//! - [`Filter`]: Canonical, serializable filter representation.
+//! ```
+//! use rig_core::vector_store::request::{VectorSearchRequest, Filter, SearchFilter};
+//!
+//! let request: VectorSearchRequest = VectorSearchRequest::builder()
+//!     .query("guide").samples(5)
+//!     .filter(Filter::eq("category", serde_json::json!("manual"))).build();
+//! assert_eq!(request.samples(), 5);
+//! ```
 
 use serde::{Deserialize, Serialize};
 
@@ -126,13 +131,9 @@ pub trait SearchFilter {
 
 /// A rendered SQL-style condition together with its positional bind parameters.
 ///
-/// Shared by the SQL-flavoured vector stores, whose filter algebra differs only
-/// in the parameter type `P` and in the placeholder token their driver expects
-/// (`$` for Postgres, `?` for CQL). The placeholder is therefore supplied by the
-/// caller on every leaf constructor rather than baked into this type.
-///
-/// Parameters are collected left to right in the order their placeholders appear
-/// in [`SqlCondition::condition`], which is the order drivers bind them in.
+/// Parameters retain left-to-right placeholder order. Keys, operators, and
+/// placeholders are interpolated verbatim; callers must validate or quote them
+/// for the target backend. Only values are separated as bind parameters.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SqlCondition<P> {
     condition: String,
@@ -190,7 +191,6 @@ impl<P> SqlCondition<P> {
     }
 
     /// Negates the condition as `NOT (condition)`, keeping its parameters.
-    #[allow(clippy::should_implement_trait)]
     pub fn not(self) -> Self {
         Self {
             condition: format!("NOT ({})", self.condition),
@@ -226,7 +226,7 @@ impl<P> SqlCondition<P> {
 ///
 /// JSON-valued [`SearchFilter`] implementations receive this automatically.
 /// Backends with native value types implement the conversion once here rather
-/// than hand-writing both [`VectorStoreIndexDyn`](super::VectorStoreIndexDyn)
+/// than hand-writing both the bus's `RetrieveAdapter`
 /// methods.
 pub trait DynamicSearchFilter: SearchFilter + Sized {
     /// Converts a canonical dynamic filter into this backend's filter type.
@@ -234,9 +234,9 @@ pub trait DynamicSearchFilter: SearchFilter + Sized {
 
     /// Normalizes a document returned through the type-erased search surface.
     ///
-    /// Native backend filters retain their documents exactly. JSON-valued
-    /// filters override this to preserve the dynamic surface's historical
-    /// payload pruning.
+    /// The default retains documents unchanged. The JSON-valued blanket
+    /// implementation recursively removes arrays longer than 400 elements;
+    /// a removed root array becomes null.
     fn normalize_dynamic_document(document: serde_json::Value) -> serde_json::Value {
         document
     }
@@ -294,7 +294,7 @@ where
 
 impl<V> SearchFilter for Filter<V>
 where
-    V: std::fmt::Debug + Clone + Serialize + for<'de> Deserialize<'de>,
+    V: std::fmt::Debug + Clone + Serialize + serde::de::DeserializeOwned,
 {
     type Value = V;
 
@@ -367,10 +367,10 @@ where
 impl Filter<serde_json::Value> {
     /// Tests whether a JSON document satisfies this filter.
     ///
-    /// Leaf filters (`Eq`/`Gt`/`Lt`) look their key up in `value` (expected to be
-    /// a JSON object) and compare the resulting field against the filter operand.
-    /// A missing field, or an operand that is not order-comparable with the field,
-    /// never satisfies the leaf. `And`/`Or` combine leaf results.
+    /// Looks up top-level object fields. Missing fields fail all leaves.
+    /// Equality accepts numeric comparison or structural JSON equality; ordering
+    /// compares only number, string, boolean, or null pairs of the same kind.
+    /// `And` and `Or` short-circuit.
     pub fn satisfies(&self, value: &serde_json::Value) -> bool {
         use Filter::*;
         use serde_json::{Value, Value::*};
@@ -378,9 +378,8 @@ impl Filter<serde_json::Value> {
 
         fn compare_pair(l: &Value, r: &Value) -> Option<Ordering> {
             match (l, r) {
-                // Compare integers exactly; fall back to f64 only for floats or
-                // mixed int/float operands. Trying `as_f64` first (as the old
-                // code did) would lose precision for integers beyond 2^53.
+                // Prefer shared integer representations to avoid losing precision
+                // beyond 2^53; other numeric pairs fall back to f64.
                 (Number(l), Number(r)) => {
                     if let (Some(l), Some(r)) = (l.as_i64(), r.as_i64()) {
                         Some(l.cmp(&r))
@@ -477,7 +476,7 @@ where
         self
     }
 
-    /// Sets backend-specific parameters.
+    /// Replaces backend-specific parameters. Accepts any JSON value without validation.
     pub fn additional_params(
         mut self,
         params: serde_json::Value,
@@ -493,9 +492,8 @@ where
     }
 }
 
-/// Only implement `build()` when both `query` and `samples` have been provided.
 impl<F> VectorSearchRequestBuilder<F, Provided<String>, Provided<u64>> {
-    /// Builds the request
+    /// Builds without validating query emptiness, sample count, or threshold.
     pub fn build(self) -> VectorSearchRequest<F> {
         VectorSearchRequest {
             query: self.query.0,
@@ -508,95 +506,4 @@ impl<F> VectorSearchRequestBuilder<F, Provided<String>, Provided<u64>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Filter, SearchFilter};
-    use serde_json::json;
-
-    type F = Filter<serde_json::Value>;
-
-    #[test]
-    fn eq_matches_field_within_multi_field_document() {
-        let doc = json!({ "category": "fruit", "text": "banana" });
-        assert!(F::eq("category", json!("fruit")).satisfies(&doc));
-        assert!(!F::eq("category", json!("veg")).satisfies(&doc));
-        // A field that does not exist never matches.
-        assert!(!F::eq("missing", json!("fruit")).satisfies(&doc));
-    }
-
-    #[test]
-    fn gt_and_lt_compare_the_named_field() {
-        let doc = json!({ "price": 10, "text": "banana" });
-        assert!(F::gt("price", json!(5)).satisfies(&doc));
-        assert!(!F::gt("price", json!(10)).satisfies(&doc));
-        assert!(F::lt("price", json!(20)).satisfies(&doc));
-        assert!(!F::lt("price", json!(10)).satisfies(&doc));
-        // Missing / non-comparable fields never satisfy an ordering filter.
-        assert!(!F::gt("missing", json!(1)).satisfies(&doc));
-        assert!(!F::gt("text", json!(1)).satisfies(&doc));
-    }
-
-    #[test]
-    fn eq_matches_integer_and_float_representations() {
-        // A field stored as a float still matches an integer operand and vice
-        // versa, consistent with Gt/Lt numeric coercion.
-        assert!(F::eq("score", json!(5)).satisfies(&json!({ "score": 5.0 })));
-        assert!(F::eq("score", json!(5.0)).satisfies(&json!({ "score": 5 })));
-        assert!(!F::eq("score", json!(6)).satisfies(&json!({ "score": 5.0 })));
-        // Non-numeric fields still use structural equality.
-        assert!(F::eq("tag", json!("a")).satisfies(&json!({ "tag": "a" })));
-        assert!(F::eq("tags", json!(["a", "b"])).satisfies(&json!({ "tags": ["a", "b"] })));
-        assert!(!F::eq("tags", json!(["a"])).satisfies(&json!({ "tags": ["a", "b"] })));
-    }
-
-    #[test]
-    fn ordering_compares_large_integers_exactly() {
-        // Integers beyond 2^53 must not collapse to the same f64.
-        let doc = json!({ "id": 9007199254740993_u64 }); // 2^53 + 1
-        assert!(F::gt("id", json!(9007199254740992_u64)).satisfies(&doc)); // > 2^53
-        assert!(!F::gt("id", json!(9007199254740993_u64)).satisfies(&doc));
-        assert!(F::lt("id", json!(9007199254740994_u64)).satisfies(&doc));
-    }
-
-    #[test]
-    fn and_or_combine_leaf_filters() {
-        let doc = json!({ "category": "fruit", "price": 10 });
-        let both = F::eq("category", json!("fruit")).and(F::gt("price", json!(5)));
-        assert!(both.satisfies(&doc));
-
-        let missing_branch = F::eq("category", json!("fruit")).and(F::gt("price", json!(50)));
-        assert!(!missing_branch.satisfies(&doc));
-
-        let either = F::eq("category", json!("veg")).or(F::lt("price", json!(50)));
-        assert!(either.satisfies(&doc));
-    }
-
-    #[test]
-    fn try_interpret_converts_nested_leaf_values() {
-        let f: Filter<i64> =
-            Filter::Eq("a".into(), 1).and(Filter::Gt("b".into(), 2).or(Filter::Lt("c".into(), 3)));
-        let out: Filter<String> = f
-            .try_interpret(|v| Ok::<_, std::convert::Infallible>(v.to_string()))
-            .unwrap();
-        match out {
-            Filter::And(lhs, rhs) => {
-                assert!(matches!(*lhs, Filter::Eq(ref k, ref v) if k == "a" && v == "1"));
-                match *rhs {
-                    Filter::Or(l, r) => {
-                        assert!(matches!(*l, Filter::Gt(ref k, ref v) if k == "b" && v == "2"));
-                        assert!(matches!(*r, Filter::Lt(ref k, ref v) if k == "c" && v == "3"));
-                    }
-                    other => panic!("expected Or, got {other:?}"),
-                }
-            }
-            other => panic!("expected And, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn try_interpret_propagates_conversion_errors() {
-        let f: Filter<i64> = Filter::Eq("a".into(), 1).and(Filter::Gt("b".into(), -2));
-        let out: Result<Filter<u64>, String> =
-            f.try_interpret(|v| u64::try_from(v).map_err(|e| e.to_string()));
-        assert!(out.is_err());
-    }
-}
+mod tests;

@@ -1,20 +1,20 @@
+//! Mistral chat model identifiers and typed responses with service-tier and audio usage.
+//!
+//! ```no_run
+//! use rig_core::providers::{mistral, openai::wire::{MISTRAL, OpenAI}};
+//! let wire = OpenAI::from_env_with(&MISTRAL)?.chat(mistral::MISTRAL_SMALL);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::client::{MistralExt, Usage};
+use crate::json_utils;
 use crate::providers::openai;
-use crate::{
-    completion::{self, CompletionError},
-    json_utils,
-};
 
 /// The latest version of the `codestral` Mistral model
 pub const CODESTRAL: &str = "codestral-latest";
 /// The latest version of the `mistral-large` Mistral model
 pub const MISTRAL_LARGE: &str = "mistral-large-latest";
-/// The latest version of the `pixtral-large` Mistral multimodal model
-pub const PIXTRAL_LARGE: &str = "pixtral-large-latest";
-/// The latest version of the `mistral` Mistral multimodal model, trained on datasets from the Middle East & South Asia
-pub const MISTRAL_SABA: &str = "mistral-saba-latest";
 /// The latest version of the `mistral-3b` Mistral completions model
 pub const MINISTRAL_3B: &str = "ministral-3b-latest";
 /// The latest version of the `mistral-8b` Mistral completions model
@@ -22,27 +22,6 @@ pub const MINISTRAL_8B: &str = "ministral-8b-latest";
 
 /// The latest version of the `mistral-small` Mistral completions model
 pub const MISTRAL_SMALL: &str = "mistral-small-latest";
-/// The `24-09` version of the `pixtral-small` Mistral multimodal model
-pub const PIXTRAL_SMALL: &str = "pixtral-12b-2409";
-/// The `open-mistral-nemo` model
-pub const MISTRAL_NEMO: &str = "open-mistral-nemo";
-/// The `open-mistral-mamba` model
-pub const CODESTRAL_MAMBA: &str = "open-codestral-mamba";
-
-/// Mistral completion model, driven by the shared OpenAI Chat Completions path.
-pub type CompletionModel<H = reqwest::Client> =
-    openai::completion::GenericCompletionModel<MistralExt, H>;
-
-/// Mistral's provider-native terminal streaming record: the value carried by
-/// the final item of the stream returned by `CompletionModel::raw_stream`.
-/// Shared with the OpenAI Chat Completions path but carrying Mistral's own
-/// usage payload (cached-token fallbacks).
-pub type MistralStreamingCompletionResponse =
-    openai::StreamingCompletionResponse<super::client::Usage>;
-
-// =================================================================
-// Rig Implementation Types
-// =================================================================
 
 fn mistral_content_value_to_text(value: serde_json::Value) -> String {
     match value {
@@ -131,249 +110,53 @@ pub struct CompletionResponse {
     pub created: u64,
     pub model: String,
     pub system_fingerprint: Option<String>,
+    #[serde(
+        deserialize_with = "crate::providers::internal::openai_chat_completions_compatible::deserialize_choices_dropping_incomplete_tool_calls"
+    )]
     pub choices: Vec<Choice>,
     pub usage: Option<Usage>,
 }
 
-impl crate::telemetry::ProviderResponseExt for CompletionResponse {
-    type Usage = Usage;
-
-    fn get_response_id(&self) -> Option<String> {
-        Some(self.id.clone())
-    }
-
-    fn get_response_model_name(&self) -> Option<String> {
-        Some(self.model.clone())
-    }
-
-    fn get_text_response(&self) -> Option<String> {
-        let res = self
-            .choices
-            .iter()
-            .filter_map(|choice| match choice.message {
-                Message::Assistant { ref content, .. } => {
-                    if content.is_empty() {
-                        None
-                    } else {
-                        Some(content.to_string())
-                    }
-                }
-                _ => None,
-            })
-            .collect::<Vec<String>>()
-            .join("\n");
-
-        if res.is_empty() { None } else { Some(res) }
-    }
-
-    fn get_usage(&self) -> Option<Self::Usage> {
-        self.usage.clone()
-    }
+/// In-depth details on prompt tokens.
+///
+/// Mirrors Mistral's `PromptTokensDetails` schema.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PromptTokensDetails {
+    /// Number of tokens served from the prompt cache.
+    #[serde(default)]
+    pub cached_tokens: u64,
+    /// Input audio tokens, separate from `prompt_tokens`; both contribute to total usage.
+    #[serde(default)]
+    pub audio_tokens: u64,
 }
 
-/// Normalize a Mistral chat completion response.
+/// Token usage returned by Mistral's chat completions and embeddings endpoints.
 ///
-/// The provider descriptor name is an *input* rather than a constant so the
-/// shared OpenAI-compatible completion path labels the response with the
-/// descriptor that actually produced it.
-impl crate::completion::NormalizeCompletionResponse for CompletionResponse {
-    fn normalize(self, provider: &str) -> Result<completion::CompletionResponse, CompletionError> {
-        use crate::providers::internal::openai_chat_completions_compatible as compat;
-
-        let usage = self
-            .usage
-            .as_ref()
-            .map(completion::Usage::from)
-            .unwrap_or_default();
-        compat::normalize_openai_response(
-            provider,
-            &self.choices,
-            Some(self.id.as_str()),
-            Some(self.model.as_str()),
-            usage,
-            |choice| choice.finish_reason.as_str(),
-            |choice| match &choice.message {
-                Message::Assistant {
-                    content,
-                    tool_calls,
-                    ..
-                } => Some(compat::text_then_tool_calls(
-                    content,
-                    content.is_empty(),
-                    tool_calls.iter().map(|call| {
-                        (
-                            call.id.as_str(),
-                            call.function.name.as_str(),
-                            call.function.arguments.clone(),
-                        )
-                    }),
-                )),
-                _ => None,
-            },
-        )
-    }
+/// See <https://docs.mistral.ai/api/> (`UsageInfo` schema). The three counts are
+/// always present; the remaining fields are populated by Mistral on a best-effort
+/// basis (e.g. cached-token information appears once a prompt is large enough to
+/// be cached).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct Usage {
+    pub completion_tokens: usize,
+    pub prompt_tokens: usize,
+    pub total_tokens: usize,
+    /// Capacity tier that served the request, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// Duration in seconds of audio tokens in the prompt (audio-input models only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_audio_seconds: Option<u64>,
+    /// Total cached prompt tokens reported at the top level. Some Mistral
+    /// responses populate this in addition to (or instead of)
+    /// `prompt_tokens_details.cached_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_cached_tokens: Option<u64>,
+    /// Prompt token breakdown. The singular `prompt_token_details` key is not an
+    /// alias because responses may contain both spellings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::providers::openai::completion::OpenAICompatibleProvider;
-
-    #[test]
-    fn deserializes_response_with_array_and_null_content() {
-        let data = r#"{
-            "id": "cmpl-1",
-            "object": "chat.completion",
-            "created": 1,
-            "model": "mistral-small-latest",
-            "system_fingerprint": null,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": " world"}]
-                    },
-                    "logprobs": null,
-                    "finish_reason": "stop"
-                },
-                {
-                    "index": 1,
-                    "message": {
-                        "role": "assistant",
-                        "content": null,
-                        "tool_calls": [{
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {"name": "add", "arguments": "{\"x\":1,\"y\":2}"}
-                        }]
-                    },
-                    "logprobs": null,
-                    "finish_reason": "tool_calls"
-                }
-            ],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
-        }"#;
-
-        let response: CompletionResponse =
-            serde_json::from_str(data).expect("response should deserialize");
-        match &response.choices[0].message {
-            Message::Assistant { content, .. } => assert_eq!(content, "Hello world"),
-            _ => panic!("expected assistant message"),
-        }
-        match &response.choices[1].message {
-            Message::Assistant {
-                content,
-                tool_calls,
-                ..
-            } => {
-                assert_eq!(content, "");
-                assert_eq!(tool_calls[0].function.name, "add");
-            }
-            _ => panic!("expected assistant message"),
-        }
-    }
-
-    #[test]
-    fn usage_prefers_structured_cached_tokens_and_falls_back() {
-        let structured: Usage = serde_json::from_value(serde_json::json!({
-            "prompt_tokens": 10,
-            "completion_tokens": 5,
-            "total_tokens": 15,
-            "num_cached_tokens": 2,
-            "prompt_tokens_details": {"cached_tokens": 7}
-        }))
-        .expect("usage should deserialize");
-        assert_eq!(structured.cached_tokens(), 7);
-
-        let fallback: Usage = serde_json::from_value(serde_json::json!({
-            "prompt_tokens": 10,
-            "completion_tokens": 5,
-            "total_tokens": 15,
-            "num_cached_tokens": 2
-        }))
-        .expect("usage should deserialize");
-        assert_eq!(fallback.cached_tokens(), 2);
-
-        // The singular alias form used by some Mistral responses.
-        let aliased: Usage = serde_json::from_value(serde_json::json!({
-            "prompt_tokens": 10,
-            "completion_tokens": 5,
-            "total_tokens": 15,
-            "prompt_token_details": {"cached_tokens": 4}
-        }))
-        .expect("usage should deserialize");
-        assert_eq!(aliased.cached_tokens(), 4);
-    }
-
-    #[test]
-    fn finalize_rewrites_required_tool_choice_to_any() {
-        let mut body = serde_json::json!({
-            "model": "mistral-small-latest",
-            "messages": [{"role": "user", "content": "hi"}],
-            "tool_choice": "required"
-        });
-
-        MistralExt
-            .finalize_request_body(&mut body)
-            .expect("finalize should succeed");
-
-        assert_eq!(body["tool_choice"], "any");
-    }
-
-    #[test]
-    fn finalize_preserves_specific_function_tool_choice() {
-        let mut body = serde_json::json!({
-            "model": "mistral-small-latest",
-            "messages": [{"role": "user", "content": "hi"}],
-            "tool_choice": {"type": "function", "function": {"name": "beta"}}
-        });
-
-        MistralExt
-            .finalize_request_body(&mut body)
-            .expect("finalize should succeed");
-
-        assert_eq!(
-            body["tool_choice"],
-            serde_json::json!({"type": "function", "function": {"name": "beta"}})
-        );
-    }
-
-    #[test]
-    fn finalize_flattens_assistant_history_and_adds_prefix() {
-        let mut body = serde_json::json!({
-            "model": "mistral-small-latest",
-            "messages": [
-                {"role": "system", "content": [{"type": "text", "text": "Be brief."}]},
-                {"role": "user", "content": "hi"},
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": "Hello."}],
-                    "reasoning_content": "hidden thoughts"
-                },
-                {
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "add", "arguments": "{}"}
-                    }]
-                }
-            ]
-        });
-
-        MistralExt
-            .finalize_request_body(&mut body)
-            .expect("finalize should succeed");
-
-        assert_eq!(body["messages"][0]["content"], "Be brief.");
-        assert_eq!(body["messages"][2]["content"], "Hello.");
-        assert_eq!(body["messages"][2]["prefix"], false);
-        assert!(
-            body["messages"][2].get("reasoning_content").is_none(),
-            "Mistral rejects unknown assistant fields; reasoning must be stripped"
-        );
-        assert_eq!(body["messages"][3]["content"], "");
-        assert_eq!(body["messages"][3]["prefix"], false);
-    }
-}
+mod tests;

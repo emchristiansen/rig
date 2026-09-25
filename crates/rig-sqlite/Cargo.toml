@@ -12,7 +12,7 @@ workspace = true
 doctest = true
 
 [dependencies]
-rig-core = { path = "../rig-core", version = "0.41.0", default-features = false, features = [
+rig-core = { path = "../rig-core", version = "0.42.0", default-features = false, features = [
   "derive",
 ] }
 rusqlite = { workspace = true, features = ["bundled"] }
@@ -22,10 +22,9 @@ sqlite-vec = { workspace = true }
 thiserror = { workspace = true }
 tokio-rusqlite = { workspace = true, features = ["bundled"] }
 tracing = { workspace = true }
-zerocopy = { workspace = true }
-chrono = { workspace = true }
 
 [dev-dependencies]
+rig-reqwest = { path = "../rig-reqwest", version = "0.42.0" }
 anyhow = { workspace = true }
 httpmock = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -1,9 +1,4 @@
-//! Single authority for how Rig's crates are reachable from the expanding crate.
-//!
-//! Every path the macros emit and every fully qualified type they recognize is
-//! derived from one [`CrateRefs`] resolved once per expansion. Nothing else in
-//! the crate may call [`proc_macro_crate::crate_name`] or hardcode a Rig crate
-//! name.
+//! Resolves Rig dependency paths and recognized context-type paths for macro expansion.
 
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream;
@@ -54,13 +49,9 @@ pub(crate) struct CrateRefs {
     /// re-exports `serde`, `serde_json`, and `schemars`, so all generated code
     /// resolves those through it instead of assuming the caller's Cargo.toml.
     pub(crate) core: TokenStream,
-    /// Path to the classic runtime root (the crate exposing
-    /// `tool::{Tool, ToolContext}`): `rig-agent` or the `rig` facade. `None`
-    /// when neither is a dependency, in which case contextual tools cannot be
-    /// generated and get a targeted error instead of an unresolved-crate one.
-    pub(crate) agent: Option<TokenStream>,
     /// First path segments under which `<root>::tool::ToolContext` names the
-    /// runtime context in the expanding crate.
+    /// dispatch context in the expanding crate: `rig-core` (which owns it),
+    /// and `rig-agent` / the `rig` facade (which re-export it).
     context_roots: Vec<String>,
     /// First path segments under which `<root>::agent::tool::ToolContext`
     /// names the runtime context (the facade's explicit runtime module).
@@ -78,10 +69,11 @@ impl CrateRefs {
             .or_else(|| root_tokens(&agent_dep).map(|root| quote!(#root::core)))
             .unwrap_or_else(|| quote!(::rig_core));
 
-        let agent = root_tokens(&agent_dep).or_else(|| root_tokens(&facade_dep));
-
         let mut context_roots = Vec::new();
         let mut facade_roots = Vec::new();
+        if let Some(name) = root_name(&core_dep) {
+            context_roots.push(name);
+        }
         if let Some(name) = root_name(&agent_dep) {
             context_roots.push(name);
         }
@@ -92,15 +84,13 @@ impl CrateRefs {
 
         Self {
             core,
-            agent,
             context_roots,
             facade_roots,
         }
     }
 
-    /// Whether `segments` is an unambiguous fully qualified path to the
-    /// runtime `ToolContext` under any name the crates resolve to in this
-    /// build — including Cargo renames and `crate` self-references.
+    /// Recognizes qualified context paths using resolved dependency names,
+    /// including Cargo renames and `crate` self-references.
     pub(crate) fn is_context_path(&self, segments: &[String]) -> bool {
         match segments {
             [root, tool, context] => {

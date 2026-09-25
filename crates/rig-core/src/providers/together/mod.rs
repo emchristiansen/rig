@@ -1,21 +1,23 @@
-//! Together AI API client and Rig integration
+//! Together AI's model identifiers.
 //!
-//! # Example
+//! Configure requests with [`crate::providers::openai::wire::TOGETHER`],
+//! using `TOGETHER_API_KEY`.
+//!
 //! ```no_run
-//! use rig_core::{client::EmbeddingsClient, providers::together};
+//! use rig_core::providers::openai::wire::{OpenAI, TOGETHER};
+//! use rig_core::providers::together;
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = together::Client::new("YOUR_API_KEY")?;
-//!
-//! let together_embedding_model = client.embedding_model(together::BGE_BASE_EN_V1_5);
+//! let together = OpenAI::from_env_with(&TOGETHER)?;
+//! let embedding = together.embeddings(together::BGE_BASE_EN_V1_5, None);
+//! let chat = together.chat(together::MIXTRAL_8X7B_INSTRUCT_V0_1);
+//! # let _ = (embedding, chat);
 //! # Ok(())
 //! # }
 //! ```
 
-pub mod client;
 pub mod completion;
 pub mod embedding;
 
-pub use client::Client;
 pub use completion::*;
 pub use embedding::*;

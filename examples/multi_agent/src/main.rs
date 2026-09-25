@@ -1,11 +1,10 @@
 use anyhow::Result;
 use rig::integrations::cli_chatbot::ChatBotBuilder;
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
 use rig::{
     agent::{Agent, AgentBuilder},
-    completion::{Chat, Message},
-    providers::openai::Client as OpenAIClient,
+    completion::Message,
     tool::Tool,
 };
 use serde::Deserialize;
@@ -57,8 +56,8 @@ impl Tool for TranslatorTool {
         let mut empty_history = Vec::<Message>::new();
         match self.0.chat(&args.prompt, &mut empty_history).await {
             Ok(response) => {
-                println!("Translated prompt: {response}");
-                Ok(response)
+                println!("Translated prompt: {}", response.output);
+                Ok(response.output)
             }
             Err(e) => Err(e),
         }
@@ -73,8 +72,8 @@ impl Tool for TranslatorTool {
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     // Create OpenAI client
-    let openai_client = OpenAIClient::from_env()?;
-    let model = openai_client.completion_model(openai::GPT_4O);
+    let openai_client = OpenAI::from_env()?.bound()?;
+    let model = openai_client.completion(openai::GPT_4O);
 
     let translator_agent = AgentBuilder::new(model.clone())
                 .preamble(
@@ -86,12 +85,11 @@ async fn main() -> Result<(), anyhow::Error> {
     let translator_tool = TranslatorTool(translator_agent);
 
     let multi_agent_system = AgentBuilder::new(model)
-        .preamble(&format!(
+        .preamble(format!(
             "You are a helpful assistant that can work with text in any language. \
             When you receive input that is not in English, or contains grammatical errors \
-            use the {} tool first to ensure proper English, then provide your response. \
-            Always show both the translated text and your final response.",
-            TRANSLATOR_TOOL_NAME
+            use the {TRANSLATOR_TOOL_NAME} tool first to ensure proper English, then provide your response. \
+            Always show both the translated text and your final response."
         ))
         .tool(translator_tool)
         .build();

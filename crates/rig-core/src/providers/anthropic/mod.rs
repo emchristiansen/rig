@@ -1,20 +1,23 @@
-//! Anthropic API client and Rig integration
+//! Anthropic provider configuration and Messages-format endpoint wires.
 //!
-//! # Example
 //! ```no_run
-//! use rig_core::{client::CompletionClient, providers::anthropic};
+//! use rig_core::providers::anthropic;
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = anthropic::Client::new("YOUR_API_KEY")?;
+//! let provider = anthropic::Anthropic::from_env()?;
 //!
-//! let sonnet = client.completion_model(anthropic::completion::CLAUDE_SONNET_4_6);
+//! let sonnet = provider.messages(anthropic::completion::CLAUDE_SONNET_4_6);
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! Bind a wire with `.bind(transport)` to obtain a [`Bound`](crate::driver::Bound)
+//! implementing the consumer-facing model traits.
 
-pub mod client;
 pub mod completion;
-pub mod model_listing;
 pub mod streaming;
+pub mod wire;
 
-pub use client::{Client, ClientBuilder};
+pub use wire::{
+    ANTHROPIC, Anthropic, Dialect, MaxTokens, Messages, Models, Quirks, Verify, compatible,
+};

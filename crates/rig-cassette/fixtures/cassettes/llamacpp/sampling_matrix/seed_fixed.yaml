@@ -1,0 +1,16 @@
+when:
+  path: /v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":32,"messages":[{"content":"/no_think Say ok.","role":"user"}],"model":"Qwen3-1.7B-Q4_K_M","seed":7}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json; charset=utf-8
+  body: '{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"Okay, I''m ready. What would you like me to do?","role":"assistant"}}],"created":0,"id":"chatcmpl-lV23RufQU35P1JZ3ZOinrA3W1rv2JW1m","model":"/REDACTED_PATH/Qwen3-1.7B-Q4_K_M.gguf","object":"chat.completion","system_fingerprint":"b10964-b29c606e2","timings":{"cache_n":13,"predicted_ms":123.056,"predicted_n":19,"predicted_per_second":146.27486672734366,"predicted_per_token_ms":6.836444444444444,"prompt_ms":8.14,"prompt_n":1,"prompt_per_second":122.85012285012284,"prompt_per_token_ms":8.14},"usage":{"completion_tokens":19,"prompt_tokens":14,"prompt_tokens_details":{"cached_tokens":13},"total_tokens":33}}'

@@ -1,51 +1,18 @@
-//! Model listing types and error handling.
+//! Provider model metadata and listing interfaces.
 //!
-//! This module provides types for representing available models from providers.
-//! All models are returned in a single list; providers with pagination
-//! handle fetching all pages internally.
+//! ```
+//! use rig_core::model::{Model, ModelList};
+//!
+//! let models = ModelList::new(vec![Model::new("example", "Example model")]);
+//! assert_eq!(models.len(), 1);
+//! ```
 
+use crate::error::ProviderError;
+use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Represents a single model available from a provider.
-///
-/// This struct is designed to be flexible enough to accommodate the varying
-/// responses from different LLM providers while providing a common interface.
-///
-/// # Fields
-///
-/// - `id`: The unique identifier for the model (required)
-/// - `name`: A human-readable name for the model
-/// - `description`: A detailed description of the model's capabilities
-/// - `r#type`: The type of model (e.g., "chat", "completion", "embedding")
-/// - `created_at`: Timestamp when the model was created
-/// - `owned_by`: The organization or entity that owns the model
-/// - `context_length`: The maximum context window size for the model
-/// - `max_output_tokens`: The maximum tokens the model may generate per response
-///
-/// # Example
-///
-/// ```rust
-/// use rig_core::model::Model;
-///
-/// // Create a model with just an ID
-/// let model = Model::from_id("gpt-4");
-///
-/// // Create a model with ID and name
-/// let model = Model::new("gpt-4", "GPT-4");
-///
-/// // Create a model with all fields
-/// let model = Model {
-///     id: "gpt-4".to_string(),
-///     name: Some("GPT-4".to_string()),
-///     description: Some("A large language model...".to_string()),
-///     r#type: Some("chat".to_string()),
-///     created_at: Some(1677610600),
-///     owned_by: Some("openai".to_string()),
-///     context_length: Some(8192),
-///     max_output_tokens: Some(4096),
-/// };
-/// ```
+/// Provider-advertised model identifier and optional metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Model {
     /// The unique identifier for the model (required)
@@ -76,38 +43,14 @@ pub struct Model {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
 
-    /// The maximum number of tokens the model may generate in one response.
-    ///
-    /// Distinct from [`Self::context_length`]: that is the input window, this
-    /// is the output ceiling, and for most models the output ceiling is far
-    /// smaller (Gemini 2.5 Flash: 1,048,576 in, 65,536 out).
-    ///
-    /// `None` means the provider's listing does not report one — never a
-    /// default rig invented. Rig does **not** send this value on requests:
-    /// omitting an output limit lets the provider apply its own per-model
-    /// default, and populating it from here would reintroduce a rig-chosen cap
-    /// by another route (rig#2322). It is for callers and diagnostics.
+    /// Provider-reported output-token ceiling, or `None` when unreported.
+    /// Distinct from context length and not automatically applied to requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
 }
 
 impl Model {
-    /// Creates a new Model with the given ID and name.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The unique identifier for the model
-    /// * `name` - A human-readable name for the model
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use rig_core::model::Model;
-    ///
-    /// let model = Model::new("gpt-4", "GPT-4");
-    /// assert_eq!(model.id, "gpt-4");
-    /// assert_eq!(model.name, Some("GPT-4".to_string()));
-    /// ```
+    /// Creates a model with an ID and display name; other metadata is absent.
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -121,21 +64,7 @@ impl Model {
         }
     }
 
-    /// Creates a new Model with only the required ID field.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The unique identifier for the model
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use rig_core::model::Model;
-    ///
-    /// let model = Model::from_id("gpt-4");
-    /// assert_eq!(model.id, "gpt-4");
-    /// assert_eq!(model.name, None);
-    /// ```
+    /// Creates a model with an ID and no optional metadata.
     pub fn from_id(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -149,22 +78,7 @@ impl Model {
         }
     }
 
-    /// Returns a reference to the model's name, or the ID if no name is set.
-    ///
-    /// This is useful for display purposes when you want to show the most
-    /// human-readable identifier available.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use rig_core::model::Model;
-    ///
-    /// let model_with_name = Model::new("gpt-4", "GPT-4");
-    /// assert_eq!(model_with_name.display_name(), "GPT-4");
-    ///
-    /// let model_without_name = Model::from_id("gpt-4");
-    /// assert_eq!(model_without_name.display_name(), "gpt-4");
-    /// ```
+    /// Returns the name when present, otherwise the ID.
     pub fn display_name(&self) -> &str {
         self.name.as_ref().unwrap_or(&self.id)
     }
@@ -176,108 +90,30 @@ impl fmt::Display for Model {
     }
 }
 
-/// Represents a complete list of models from a provider.
-///
-/// This struct contains all available models from a provider. Providers that
-/// support pagination internally handle fetching all pages before returning results.
-///
-/// # Fields
-///
-/// - `data`: The complete list of available models
-///
-/// # Example
-///
-/// ```rust
-/// use rig_core::model::{Model, ModelList};
-///
-/// let list = ModelList::new(vec![
-///     Model::from_id("gpt-4"),
-///     Model::from_id("gpt-3.5-turbo"),
-/// ]);
-///
-/// println!("Found {} models", list.len());
-/// for model in list.iter() {
-///     println!("- {}", model.display_name());
-/// }
-/// ```
+/// Ordered provider model entries. May represent one page or an aggregated listing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelList {
-    /// The complete list of available models
+    /// Model entries in returned order.
     pub data: Vec<Model>,
 }
 
 impl ModelList {
-    /// Creates a new ModelList with the given models.
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - The list of models
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use rig_core::model::{Model, ModelList};
-    ///
-    /// let list = ModelList::new(vec![
-    ///     Model::from_id("gpt-4"),
-    ///     Model::from_id("gpt-3.5-turbo"),
-    /// ]);
-    /// assert_eq!(list.len(), 2);
-    /// ```
+    /// Wraps model entries without sorting or deduplicating them.
     pub fn new(data: Vec<Model>) -> Self {
         Self { data }
     }
 
-    /// Returns true if the list is empty.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use rig_core::model::ModelList;
-    ///
-    /// let empty = ModelList::new(vec![]);
-    /// assert!(empty.is_empty());
-    ///
-    /// let non_empty = ModelList::new(vec![rig_core::model::Model::from_id("gpt-4")]);
-    /// assert!(!non_empty.is_empty());
-    /// ```
+    /// Returns whether the list has no entries.
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
-    /// Returns the number of models in this list.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use rig_core::model::{Model, ModelList};
-    ///
-    /// let list = ModelList::new(vec![
-    ///     Model::from_id("gpt-4"),
-    ///     Model::from_id("gpt-3.5-turbo"),
-    /// ]);
-    /// assert_eq!(list.len(), 2);
-    /// ```
+    /// Returns the number of entries.
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
-    /// Returns an iterator over the models in this list.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use rig_core::model::{Model, ModelList};
-    ///
-    /// let list = ModelList::new(vec![
-    ///     Model::from_id("gpt-4"),
-    ///     Model::from_id("gpt-3.5-turbo"),
-    /// ]);
-    ///
-    /// for model in list.iter() {
-    ///     println!("Model: {}", model.display_name());
-    /// }
-    /// ```
+    /// Borrows entries in list order.
     pub fn iter(&self) -> std::slice::Iter<'_, Model> {
         self.data.iter()
     }
@@ -301,41 +137,11 @@ impl<'a> IntoIterator for &'a ModelList {
     }
 }
 
-/// Errors that can occur when listing models from a provider.
-///
-/// This enum represents the various error conditions that may arise when
-/// attempting to retrieve the list of available models from an LLM provider.
-#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
-pub enum ModelListingError {
-    /// The provider returned an error response with a status code
-    #[error("API error (status {status_code}): {message}")]
-    ApiError {
-        /// HTTP status code
-        status_code: u16,
-        /// Error message from the provider
-        message: String,
-    },
-
-    /// Failed to send the request to the provider
-    #[error("Request error: {message}")]
-    RequestError {
-        /// Description of the request error
-        message: String,
-    },
-
-    /// Failed to parse the provider's response
-    #[error("Parse error: {message}")]
-    ParseError {
-        /// Description of the parsing error
-        message: String,
-    },
-
-    /// Authentication failed (invalid API key, etc.)
-    #[error("Authentication error: {message}")]
-    AuthError {
-        /// Authentication error details
-        message: String,
-    },
+/// Retrieves provider model metadata. Wire-backed implementations follow
+/// pagination within the driver's repeated-cursor and page-count limits.
+pub trait ModelLister: WasmCompatSend + WasmCompatSync {
+    /// Every model the provider offers.
+    fn list_all(&self) -> impl Future<Output = Result<ModelList, ProviderError>> + WasmCompatSend;
 }
 
 const RESPONSE_BODY_PREVIEW_LIMIT: usize = 2048;
@@ -368,282 +174,40 @@ fn format_response_context(
     )
 }
 
-impl ModelListingError {
-    /// Creates a new ApiError with the given status code and message.
-    pub fn api_error(status_code: u16, message: impl Into<String>) -> Self {
-        Self::ApiError {
-            status_code,
-            message: message.into(),
-        }
-    }
-
-    /// Creates a new RequestError with the given message.
-    pub fn request_error(message: impl Into<String>) -> Self {
-        Self::RequestError {
-            message: message.into(),
-        }
-    }
-
-    /// Creates a new ParseError with the given message.
-    pub fn parse_error(message: impl Into<String>) -> Self {
-        Self::ParseError {
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn api_error_with_context(
-        provider: &str,
-        path: &str,
-        status_code: u16,
-        body: &[u8],
-    ) -> Self {
-        let message =
-            format_response_context(provider, path, format_args!("status={status_code}"), body);
-        Self::api_error(status_code, message)
-    }
-
-    pub(crate) fn parse_error_with_context(
-        provider: &str,
-        path: &str,
-        error: &serde_json::Error,
-        body: &[u8],
-    ) -> Self {
-        let message =
-            format_response_context(provider, path, format_args!("parse_error={error}"), body);
-        Self::parse_error(message)
-    }
-
-    pub(crate) fn parse_error_with_details(
-        provider: &str,
-        path: &str,
-        details: impl fmt::Display,
-        body: &[u8],
-    ) -> Self {
-        let message = format_response_context(provider, path, details, body);
-        Self::parse_error(message)
-    }
+/// A listing page that did not parse, with the request context and a bounded
+/// preview of the body.
+pub(crate) fn parse_error(
+    provider: &str,
+    path: &str,
+    details: impl fmt::Display,
+    body: &[u8],
+) -> ProviderError {
+    ProviderError::Response(format_response_context(provider, path, details, body))
 }
 
-impl From<crate::http_client::Error> for ModelListingError {
-    fn from(e: crate::http_client::Error) -> Self {
-        Self::request_error(e.to_string())
-    }
-}
-
-impl From<http::Error> for ModelListingError {
-    fn from(e: http::Error) -> Self {
-        Self::request_error(e.to_string())
-    }
-}
-
-impl From<serde_json::Error> for ModelListingError {
-    fn from(e: serde_json::Error) -> Self {
-        Self::parse_error(e.to_string())
+/// Adds the provider and request path to a failed listing: a preserved reply
+/// records them as its route, and a decode failure names them in its message.
+pub(crate) fn with_route(error: ProviderError, provider: &str, path: &str) -> ProviderError {
+    match error {
+        ProviderError::ProviderResponse(mut response) => {
+            response.route = Some(format!("provider={provider} path={path}"));
+            ProviderError::ProviderResponse(response)
+        }
+        ProviderError::Json(error) => parse_error(
+            provider,
+            path,
+            format_args!("parse_error"),
+            error.to_string().as_bytes(),
+        ),
+        ProviderError::Response(message) => parse_error(
+            provider,
+            path,
+            format_args!("parse_error"),
+            message.as_bytes(),
+        ),
+        other => other,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_model_from_id() {
-        let model = Model::from_id("gpt-4");
-        assert_eq!(model.id, "gpt-4");
-        assert_eq!(model.name, None);
-        assert_eq!(model.description, None);
-        assert_eq!(model.r#type, None);
-        assert_eq!(model.created_at, None);
-        assert_eq!(model.owned_by, None);
-        assert_eq!(model.context_length, None);
-    }
-
-    #[test]
-    fn test_model_new() {
-        let model = Model::new("gpt-4", "GPT-4");
-        assert_eq!(model.id, "gpt-4");
-        assert_eq!(model.name, Some("GPT-4".to_string()));
-    }
-
-    #[test]
-    fn test_model_display_name() {
-        let model_with_name = Model::new("gpt-4", "GPT-4");
-        assert_eq!(model_with_name.display_name(), "GPT-4");
-
-        let model_without_name = Model::from_id("gpt-4");
-        assert_eq!(model_without_name.display_name(), "gpt-4");
-    }
-
-    #[test]
-    fn test_model_display() {
-        let model = Model::new("gpt-4", "GPT-4");
-        assert_eq!(format!("{}", model), "GPT-4");
-    }
-
-    #[test]
-    fn test_model_list_new() {
-        let list = ModelList::new(vec![Model::from_id("gpt-4")]);
-        assert_eq!(list.len(), 1);
-    }
-
-    #[test]
-    fn test_model_list_empty() {
-        let list = ModelList::new(vec![]);
-        assert!(list.is_empty());
-        assert_eq!(list.len(), 0);
-    }
-
-    #[test]
-    fn test_model_list_iter() {
-        let list = ModelList::new(vec![
-            Model::from_id("gpt-4"),
-            Model::from_id("gpt-3.5-turbo"),
-        ]);
-        let models: Vec<_> = list.iter().collect();
-        assert_eq!(models.len(), 2);
-    }
-
-    #[test]
-    fn test_model_list_into_iter() {
-        let list = ModelList::new(vec![
-            Model::from_id("gpt-4"),
-            Model::from_id("gpt-3.5-turbo"),
-        ]);
-        let models: Vec<_> = list.into_iter().collect();
-        assert_eq!(models.len(), 2);
-    }
-
-    #[test]
-    fn test_model_listing_error_display() {
-        let error = ModelListingError::api_error(404, "Not found");
-        assert_eq!(error.to_string(), "API error (status 404): Not found");
-
-        let error = ModelListingError::request_error("Connection failed");
-        assert_eq!(error.to_string(), "Request error: Connection failed");
-
-        let error = ModelListingError::parse_error("Invalid JSON");
-        assert_eq!(error.to_string(), "Parse error: Invalid JSON");
-
-        let error = ModelListingError::AuthError {
-            message: "Invalid API key".to_string(),
-        };
-        assert_eq!(error.to_string(), "Authentication error: Invalid API key");
-    }
-
-    #[test]
-    fn test_model_serde() {
-        let model = Model {
-            id: "gpt-4".to_string(),
-            name: Some("GPT-4".to_string()),
-            description: None,
-            r#type: Some("chat".to_string()),
-            created_at: Some(1677610600),
-            owned_by: Some("openai".to_string()),
-            context_length: Some(8192),
-            max_output_tokens: Some(4096),
-        };
-
-        let json = serde_json::to_string(&model).unwrap();
-        assert!(json.contains("gpt-4"));
-        assert!(json.contains("GPT-4"));
-
-        let deserialized: Model = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.id, "gpt-4");
-        assert_eq!(deserialized.name, Some("GPT-4".to_string()));
-    }
-
-    #[test]
-    fn test_model_list_serde() {
-        let list = ModelList {
-            data: vec![Model::from_id("gpt-4")],
-        };
-
-        let json = serde_json::to_string(&list).unwrap();
-        assert!(json.contains("gpt-4"));
-
-        let deserialized: ModelList = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.len(), 1);
-    }
-
-    #[test]
-    fn test_model_listing_error_serde() {
-        let error = ModelListingError::api_error(404, "Not found");
-
-        let json = serde_json::to_string(&error).unwrap();
-        assert!(json.contains("ApiError"));
-
-        let deserialized: ModelListingError = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            ModelListingError::ApiError {
-                status_code,
-                message,
-            } => {
-                assert_eq!(status_code, 404);
-                assert_eq!(message, "Not found");
-            }
-            _ => panic!("Expected ApiError"),
-        }
-    }
-
-    #[test]
-    fn test_format_response_body_preview_without_truncation() {
-        let preview = format_response_body_preview(br#"{"ok":true}"#);
-        assert_eq!(preview, r#"{"ok":true}"#);
-    }
-
-    #[test]
-    fn test_format_response_body_preview_with_truncation() {
-        let body = vec![b'a'; RESPONSE_BODY_PREVIEW_LIMIT + 3];
-        let preview = format_response_body_preview(&body);
-
-        assert!(preview.starts_with(&"a".repeat(RESPONSE_BODY_PREVIEW_LIMIT)));
-        assert!(preview.ends_with("\n...<truncated 3 bytes>"));
-    }
-
-    #[test]
-    fn test_api_error_with_context_includes_provider_path_and_preview() {
-        let error = ModelListingError::api_error_with_context(
-            "Gemini",
-            "/v1beta/models?pageSize=1000",
-            500,
-            br#"{"error":"boom"}"#,
-        );
-
-        match error {
-            ModelListingError::ApiError {
-                status_code,
-                message,
-            } => {
-                assert_eq!(status_code, 500);
-                assert!(message.contains("provider=Gemini"));
-                assert!(message.contains("path=/v1beta/models?pageSize=1000"));
-                assert!(message.contains("status=500"));
-                assert!(message.contains(r#"{"error":"boom"}"#));
-            }
-            _ => panic!("Expected ApiError"),
-        }
-    }
-
-    #[test]
-    fn test_parse_error_with_context_includes_parse_error_and_preview() {
-        let body = br#"{"models":[{"displayName":"broken"}]}"#;
-        let parse_error = serde_json::from_slice::<serde_json::Value>(b"{")
-            .expect_err("expected malformed JSON to fail");
-        let error = ModelListingError::parse_error_with_context(
-            "Gemini",
-            "/v1beta/models?pageSize=1000",
-            &parse_error,
-            body,
-        );
-
-        match error {
-            ModelListingError::ParseError { message } => {
-                assert!(message.contains("provider=Gemini"));
-                assert!(message.contains("path=/v1beta/models?pageSize=1000"));
-                assert!(message.contains("parse_error=EOF while parsing an object"));
-                assert!(message.contains(r#"{"models":[{"displayName":"broken"}]}"#));
-            }
-            _ => panic!("Expected ParseError"),
-        }
-    }
-}
+mod tests;

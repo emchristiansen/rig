@@ -1,4 +1,5 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![deny(missing_docs)]
 #![cfg_attr(
     test,
     allow(
@@ -9,81 +10,74 @@
         clippy::unreachable
     )
 )]
-//! Rig's classic agent runtime.
+//! Rig's classic agent runtime: builders, serializable run state, hooks, tools,
+//! memory orchestration, and typed extraction.
 //!
-//! This crate owns the mature builder, run state machine, typed hook system,
-//! contextual tool registry, memory orchestration, extraction, and shared
-//! blocking/streaming driver. Portable provider, message, tool, and storage
-//! contracts remain in [`rig_core`] and are reachable here through the
-//! explicit [`core`] namespace; this crate's root deliberately exports only
-//! runtime-owned items. The comprehensive end-user facade is the root `rig`
-//! crate.
+//! Portable contracts are available through [`core`]; recording accepts
+//! [`rig_core::serve::Recorder`], with concrete replay adapters in `rig-cassette`.
+//! Native and browser WASM targets are supported; WASI is not. MCP integration
+//! is provided by the native-only `rig-rmcp` crate.
 //!
-//! # Target support
-//!
-//! Native targets are fully supported. `wasm32-unknown-unknown` (browser) is
-//! supported with no feature flags to set — the relaxed async bounds follow
-//! from the target alone.
-//!
-//! The `rmcp` feature is unavailable on wasm: rmcp's `ClientHandler` requires
-//! `Send + Sync` unconditionally, which this crate's wasm tool registry cannot
-//! satisfy, so asking for it there raises a targeted `compile_error!`. WASI
-//! (`wasm32-wasip1`/`wasip2`) is **not supported**: the dependency graph does
-//! not build for it. See the crate README for the full matrix and the
-//! reasoning.
+//! ```
+//! use rig_agent::{Agent, AgentBuilder, core::completion::CompletionModel};
+//! fn assistant(model: impl CompletionModel + 'static) -> Agent {
+//!     AgentBuilder::new(model).preamble("Be concise.").build()
+//! }
+//! ```
 
 extern crate self as rig;
 
-/// Direct access to portable provider, data, memory, and tool contracts.
-///
-/// This explicit namespace is also the stable expansion root for portable
-/// `#[rig_tool]` functions in crates that depend on `rig-agent` without a
-/// separate direct `rig-core` dependency.
-///
-/// Portable `rig-core` root items are reachable here, but deliberately *not*
-/// at the `rig_agent` crate root — adding a root export to `rig-core` must not
-/// silently add one to `rig-agent`. A stable `rig-core` root export
-/// ([`rig_core::Embed`]) demonstrates both halves of that invariant (the
-/// two doctests below enforce it):
+/// Portable provider, data, memory, and tool contracts, also used as the expansion
+/// root for portable `#[rig_tool]` functions. These exports are not forwarded to
+/// the `rig_agent` crate root.
 ///
 /// ```
-/// // Reachable through the explicit `core` namespace.
 /// use rig_agent::core::Embed;
-/// fn _reachable<T: Embed>() {}
-/// ```
-///
-/// ```compile_fail
-/// // NOT reachable at the `rig_agent` crate root.
-/// use rig_agent::Embed as _;
+/// fn accepts_embeddings<T: Embed>() {}
 /// ```
 pub mod core {
     pub use rig_core::*;
 }
 
 pub mod agent;
+pub mod bus;
 pub mod client;
 pub mod completion;
 pub mod extractor;
+/// Ready-made integrations: the CLI chatbot.
 pub mod integrations;
-// Shared JSON helpers live in rig-core; re-export so call sites stay
-// `json_utils::merge` / `json_utils::serialize_json_value`.
 pub(crate) use rig_core::json_utils;
 pub mod prelude;
+pub mod run;
 pub mod streaming;
+pub(crate) mod sync;
 #[cfg(any(test, feature = "test-utils"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "test-utils")))]
 pub mod test_utils;
 pub mod tool;
 
+pub use agent::TypedPromptResponse;
 pub use agent::{
-    Agent, AgentBuilder, AgentHook, AgentRun, AgentRunner, HookContext, ModelHandle,
+    Agent, AgentBuilder, AgentHook, AgentRun, AgentRunner, HookContext, ModelHandle, ModelRef,
     ModelSelection, ModelSelectionAction,
 };
-pub use extractor::ExtractionResponse;
 
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use rig_derive::rig_tool;
-#[cfg(feature = "derive")]
-#[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
-pub use rig_derive::rig_tool as tool_macro;
+
+// Compile-time thread-safety contract: the agent surface must be safe to hold
+// in shared host state (worker pools, ECS resources) on native targets.
+#[cfg(not(target_family = "wasm"))]
+const _: fn() = || {
+    fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+    assert_send_sync_static::<Agent>();
+    assert_send_sync_static::<AgentRunner>();
+    assert_send_sync_static::<ModelHandle>();
+    assert_send_sync_static::<agent::MultiTurnStreamItem>();
+    assert_send_sync_static::<agent::RunEvents>();
+    assert_send_sync_static::<agent::PromptResponse>();
+    assert_send_sync_static::<tool::server::ToolServerHandle>();
+    assert_send_sync_static::<tool::ToolSet>();
+    assert_send_sync_static::<tool::ToolCatalog>();
+};

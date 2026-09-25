@@ -33,7 +33,7 @@ use rig::agent::run::{AgentRun, AgentRunStep, ModelTurn, ModelTurnOutcome};
 use rig::completion::CompletionModel;
 use rig::message::{ToolResultContent, UserContent};
 use rig::prelude::*;
-use rig::providers::openai;
+use rig::providers::openai::{self, OpenAI};
 use rig::tool::{Tool, ToolSet};
 use serde::Deserialize;
 use serde_json::json;
@@ -148,13 +148,13 @@ async fn main() -> Result<()> {
     // A serializable `AgentRun` is a sans-IO protocol primitive. This example
     // intentionally supplies raw model transport and tool dispatch explicitly;
     // configured `Agent` execution instead always goes through `AgentRunner`.
-    let model = openai::Client::from_env()?.completion_model(openai::GPT_4O);
+    let model = OpenAI::from_env()?.bound()?.completion(openai::GPT_4O);
     let preamble = "You are a banking assistant. Use the tools to carry out the user's request. \
                     Call one tool at a time.";
     let mut tools = ToolSet::default();
     tools.add_tool(GetBalance);
     tools.add_tool(TransferFunds);
-    let tool_definitions = tools.get_tool_definitions();
+    let tool_definitions = tools.tool_definitions();
 
     let prompt = "Check the balance of account A-1, then transfer $500 to account B-2.";
     println!("User: {prompt}");
@@ -190,6 +190,7 @@ async fn main() -> Result<()> {
                     response.usage,
                     tool_names.clone(),
                     tool_names,
+                    response.raw.clone(),
                 ))?;
                 while let ModelTurnOutcome::NeedsResolution(context) = outcome {
                     eprintln!("model called unknown tool `{}`", context.tool_name);

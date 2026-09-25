@@ -1,9 +1,9 @@
-use rig_agent::completion::Prompt;
 use rig_agent::prelude::*;
-use rig_core::client::ProviderClient;
 use rig_core::providers;
+use rig_core::providers::openai::OpenAI;
 use rig_core::tool::ToolExecutionError;
 use rig_derive::rig_tool;
+use rig_reqwest::prelude::*;
 use std::time::Duration;
 
 /// A tool that simulates an async operation
@@ -27,7 +27,8 @@ async fn async_operation(
 async fn main() -> Result<(), anyhow::Error> {
     tracing_subscriber::fmt().pretty().init();
 
-    let async_agent = providers::openai::Client::from_env()?
+    let async_agent = OpenAI::from_env()?
+        .bound()?
         .agent(providers::openai::GPT_4O)
         .preamble("You are an agent with tools access, always use the tools")
         .max_tokens(1024)
@@ -48,7 +49,7 @@ async fn main() -> Result<(), anyhow::Error> {
         "Process the text 'error handling' with a delay of 'not a number'",
     ] {
         println!("User: {prompt}");
-        println!("Agent: {}", async_agent.prompt(prompt).await?);
+        println!("Agent: {}", async_agent.prompt(prompt).await?.output);
     }
 
     Ok(())

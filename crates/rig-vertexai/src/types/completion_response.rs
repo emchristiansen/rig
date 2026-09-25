@@ -1,7 +1,8 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use google_cloud_aiplatform_v1 as vertexai;
-use rig_core::completion::{CompletionError, CompletionResponse, Usage};
+use rig_core::completion::{CompletionResponse, Usage};
+use rig_core::error::ProviderError;
 use rig_core::message::{
     AssistantContent, ImageDetail, ImageMediaType, MediaType, MimeType, Reasoning, Text, ToolCall,
     ToolFunction,
@@ -9,18 +10,27 @@ use rig_core::message::{
 use rig_core::providers::gemini::completion::gemini_api_types::map_google_finish_reason;
 use serde::{Deserialize, Serialize};
 
+/// Vertex AI's SDK reply, returned by
+/// [`CompletionModel::raw_completion`](crate::completion::CompletionModel::raw_completion).
+///
+/// It can also be recovered from a normalized [`CompletionResponse::raw`].
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VertexGenerateContentOutput(pub vertexai::model::GenerateContentResponse);
 
 /// Stable descriptor name reported on normalized Vertex AI responses.
 pub const PROVIDER_NAME: &str = "vertexai";
 
+/// The text-block `AdditionalParams` key holding Vertex AI extras for that
+/// text, today the `thoughtSignature` Vertex put on the answer part. Only the
+/// Vertex codec reads it, so the signature returns only to Vertex.
+pub const VERTEX_TEXT_EXTRAS_KEY: &str = "vertexai";
+
 /// Map Vertex AI's `finishReason` onto rig's normalized vocabulary.
 ///
 /// Unmapped values are carried verbatim in their wire SCREAMING_SNAKE spelling
 /// so a reason Vertex adds later surfaces instead of reading as a natural stop.
 pub fn map_finish_reason(
-    reason: vertexai::model::candidate::FinishReason,
+    reason: &vertexai::model::candidate::FinishReason,
 ) -> Option<rig_core::completion::FinishReason> {
     // `name()` yields the wire form (`MALFORMED_FUNCTION_CALL`) the shared
     // Google table keys on; a value the SDK does not model falls back to
@@ -28,52 +38,55 @@ pub fn map_finish_reason(
     // `Debug` would silently drop the underscores.
     let wire_name = reason
         .name()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| reason.to_string());
+        .map_or_else(|| reason.to_string(), ToOwned::to_owned);
 
     map_google_finish_reason(&wire_name)
 }
 
 impl TryFrom<VertexGenerateContentOutput> for CompletionResponse {
-    type Error = CompletionError;
+    type Error = ProviderError;
 
     fn try_from(value: VertexGenerateContentOutput) -> Result<Self, Self::Error> {
         let response = &value.0;
+        // The provider's own document, captured before the response is
+        // consumed into normalized content.
+        let raw = serde_json::to_value(response)?;
 
-        let candidate = response.candidates.first().ok_or_else(|| {
-            CompletionError::ProviderError("No candidates in response".to_string())
-        })?;
+        let candidate = response
+            .candidates
+            .first()
+            .ok_or_else(|| ProviderError::Provider("No candidates in response".to_string()))?;
 
         let content = candidate
             .content
             .as_ref()
-            .ok_or_else(|| CompletionError::ProviderError("No content in candidate".to_string()))?;
+            .ok_or_else(|| ProviderError::Provider("No content in candidate".to_string()))?;
 
         let mut assistant_contents = Vec::new();
+        // Vertex function calls carry no id: the `index`-th call of the
+        // response mints its own handle, so two calls in one turn never
+        // share one (the position pass below is then a no-op).
+        let mut tool_index = 0u64;
 
-        // vertexai internally uses a wkt::Struct (serde_json::Map<String, serde_json::Value>) in
-        // function calling args. We need to convert that to serde_json::Value for rig_core::completion type matching
         for part in content.parts.iter() {
-            // Gemini "thinking" models attach an opaque `thoughtSignature` to (usually) the
-            // functionCall part. It must be echoed back verbatim on subsequent turns or Vertex
-            // rejects the request with INVALID_ARGUMENT ("missing a thought_signature"). We carry
-            // it through rig-core's `ToolCall.signature` (base64, since it is raw bytes).
+            // Preserve opaque signature bytes as base64 for exact replay.
             let signature = (!part.thought_signature.is_empty())
                 .then(|| BASE64.encode(&part.thought_signature));
 
             if let Some(function_call) = part.function_call() {
-                let args_json = function_call
-                    .args
-                    .as_ref()
-                    .map(|s| serde_json::Value::Object(s.clone()))
-                    .unwrap_or_else(|| serde_json::json!({}));
+                let args_json = function_call.args.as_ref().map_or_else(
+                    || serde_json::json!({}),
+                    |s| serde_json::Value::Object(s.clone()),
+                );
 
-                // Vertex function calls carry no identifier: mint the
-                // correlation handle — never name-as-id, which collides two
-                // same-tool calls in one turn.
+                // Mint by call index, not name, so repeated calls to one tool
+                // retain distinct correlation handles.
+                let index = tool_index;
+                tool_index += 1;
                 assistant_contents.push(AssistantContent::ToolCall(
-                    ToolCall::from_wire(
+                    ToolCall::from_wire_indexed(
                         "",
+                        index,
                         ToolFunction::new(function_call.name.clone(), args_json),
                     )
                     .with_signature(signature),
@@ -81,14 +94,23 @@ impl TryFrom<VertexGenerateContentOutput> for CompletionResponse {
             } else if let Some(text) = part.text() {
                 if part.thought {
                     assistant_contents.push(AssistantContent::Reasoning(
-                        Reasoning::new_with_signature(text, signature),
+                        Reasoning::new_with_signature(text, signature).with_provider(PROVIDER_NAME),
                     ));
                 } else {
-                    assistant_contents.push(AssistantContent::Text(Text::new(text.clone())));
+                    // A signature on answer text returns on that text part.
+                    assistant_contents.push(AssistantContent::Text(Text {
+                        text: text.clone(),
+                        additional_params: signature.clone().and_then(|signature| {
+                            rig_core::providers::gemini::text_signature_extras(
+                                VERTEX_TEXT_EXTRAS_KEY,
+                                signature,
+                            )
+                        }),
+                    }));
                 }
             } else if let Some(inline_data) = part.inline_data() {
                 if signature.is_some() {
-                    return Err(CompletionError::ResponseError(
+                    return Err(ProviderError::Response(
                         "Vertex inline images with thought_signature cannot be replayed through assistant history"
                             .to_string(),
                     ));
@@ -116,21 +138,20 @@ impl TryFrom<VertexGenerateContentOutput> for CompletionResponse {
                         ));
                     }
                     Some(MediaType::Image(media_type)) => {
-                        return Err(CompletionError::ResponseError(format!(
+                        return Err(ProviderError::Response(format!(
                             "Unsupported Vertex inline image media type {media_type:?}; it cannot be replayed through assistant history"
                         )));
                     }
                     _ => {
-                        return Err(CompletionError::ResponseError(format!(
+                        return Err(ProviderError::Response(format!(
                             "Unsupported Vertex inline media type {:?}",
                             inline_data.mime_type
                         )));
                     }
                 }
             } else if signature.is_some() {
-                // A signature-bearing part that is neither a function call nor text (e.g. a
-                // standalone "thinking" part). rig-core has no carrier for it, so it is dropped —
-                // log it so a later INVALID_ARGUMENT can be traced back here rather than being silent.
+                // Unrepresentable signatures cannot survive replay; warn without
+                // exposing their contents.
                 tracing::warn!(
                     "Vertex response part carries a thought_signature but is neither a function \
                      call nor text; signature dropped (no rig-core carrier)."
@@ -138,26 +159,29 @@ impl TryFrom<VertexGenerateContentOutput> for CompletionResponse {
             }
         }
 
+        rig_core::message::normalize_missing_tool_call_ids(&mut assistant_contents);
         let choice = rig_core::message::require_non_empty_response(assistant_contents)?;
 
         let usage = response
             .usage_metadata
             .as_ref()
             .map(|usage| Usage {
-                input_tokens: usage.prompt_token_count as u64,
-                output_tokens: usage.candidates_token_count as u64,
-                total_tokens: usage.total_token_count as u64,
-                cached_input_tokens: usage.cached_content_token_count as u64,
-                cache_creation_input_tokens: 0,
-                tool_use_prompt_tokens: 0,
-                reasoning_tokens: 0,
+                input_tokens: Some(usage.prompt_token_count as u64),
+                output_tokens: Some(usage.candidates_token_count as u64),
+                total_tokens: Some(usage.total_token_count as u64),
+                // Cached tokens are already included in prompt_token_count.
+                cached_input_tokens: Some(usage.cached_content_token_count as u64),
+                // Vertex reports no cache-write counter.
+                cache_creation_input_tokens: None,
+                tool_use_prompt_tokens: None,
+                reasoning_tokens: Some(usage.thoughts_token_count as u64),
             })
             .unwrap_or_default();
 
-        let finish_reason = map_finish_reason(candidate.finish_reason.clone());
+        let finish_reason = map_finish_reason(&candidate.finish_reason);
         let model = Some(response.model_version.clone()).filter(|model| !model.is_empty());
 
-        Ok(CompletionResponse::new(choice, usage, PROVIDER_NAME)
+        Ok(CompletionResponse::new(choice, usage, PROVIDER_NAME, raw)
             .with_optional_finish_reason(finish_reason)
             .with_optional_model(model)
             .with_optional_response_id(
@@ -167,337 +191,7 @@ impl TryFrom<VertexGenerateContentOutput> for CompletionResponse {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use google_cloud_aiplatform_v1 as vertexai;
-    use rig_core::message::{
-        AssistantContent, DocumentSourceKind, ImageDetail, ImageMediaType, Text, ToolCall,
-    };
+mod tests;
 
-    fn create_text_response(text: &str) -> VertexGenerateContentOutput {
-        let part = vertexai::model::Part::new().set_text(text.to_string());
-        let content = vertexai::model::Content::new()
-            .set_role("model")
-            .set_parts([part]);
-        let candidate = vertexai::model::Candidate::new()
-            .set_content(content)
-            .set_finish_reason(vertexai::model::candidate::FinishReason::Stop);
-        let response = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
-        VertexGenerateContentOutput(response)
-    }
-
-    fn create_parts_response(
-        parts: impl IntoIterator<Item = vertexai::model::Part>,
-    ) -> VertexGenerateContentOutput {
-        let content = vertexai::model::Content::new()
-            .set_role("model")
-            .set_parts(parts);
-        let candidate = vertexai::model::Candidate::new().set_content(content);
-        let response = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
-        VertexGenerateContentOutput(response)
-    }
-
-    fn inline_data_part(mime_type: &str, data: Vec<u8>) -> vertexai::model::Part {
-        vertexai::model::Part::new().set_inline_data(
-            vertexai::model::Blob::new()
-                .set_mime_type(mime_type)
-                .set_data(data),
-        )
-    }
-
-    fn create_tool_call_response(
-        function_name: &str,
-        args: serde_json::Value,
-    ) -> VertexGenerateContentOutput {
-        let struct_args = match args {
-            serde_json::Value::Object(map) => map,
-            _ => panic!("Expected JSON object for Struct conversion"),
-        };
-        let function_call = vertexai::model::FunctionCall::new()
-            .set_name(function_name.to_string())
-            .set_args(struct_args);
-        let part = vertexai::model::Part::new().set_function_call(function_call);
-        let content = vertexai::model::Content::new()
-            .set_role("model")
-            .set_parts([part]);
-        let candidate = vertexai::model::Candidate::new()
-            .set_content(content)
-            .set_finish_reason(vertexai::model::candidate::FinishReason::Stop);
-        let response = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
-        VertexGenerateContentOutput(response)
-    }
-
-    fn create_signed_tool_call_response(
-        function_name: &str,
-        signature: &[u8],
-    ) -> VertexGenerateContentOutput {
-        let function_call = vertexai::model::FunctionCall::new()
-            .set_name(function_name.to_string())
-            .set_args(serde_json::Map::new());
-        let part = vertexai::model::Part::new()
-            .set_function_call(function_call)
-            .set_thought_signature(signature.to_vec());
-        let content = vertexai::model::Content::new()
-            .set_role("model")
-            .set_parts([part]);
-        let candidate = vertexai::model::Candidate::new().set_content(content);
-        let response = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
-        VertexGenerateContentOutput(response)
-    }
-
-    #[test]
-    fn test_tool_call_response_captures_thought_signature() {
-        let raw = b"\x00\x01\x02thinking-sig\xff";
-        let response: CompletionResponse = create_signed_tool_call_response("add", raw)
-            .try_into()
-            .unwrap();
-        match response.choice.first() {
-            Some(AssistantContent::ToolCall(tc)) => {
-                assert_eq!(tc.signature, Some(BASE64.encode(raw)))
-            }
-            _ => panic!("Expected ToolCall"),
-        }
-    }
-
-    #[test]
-    fn test_tool_call_response_without_signature_is_none() {
-        let response: CompletionResponse =
-            create_tool_call_response("add", serde_json::json!({"x": 1}))
-                .try_into()
-                .unwrap();
-        match response.choice.first() {
-            Some(AssistantContent::ToolCall(tc)) => assert_eq!(tc.signature, None),
-            _ => panic!("Expected ToolCall"),
-        }
-    }
-
-    #[test]
-    fn test_thought_text_response_captures_thought_signature() {
-        let raw = b"\x00\x01\x02thinking-text-sig\xff";
-        let part = vertexai::model::Part::new()
-            .set_text("thinking text".to_string())
-            .set_thought(true)
-            .set_thought_signature(raw.to_vec());
-        let content = vertexai::model::Content::new()
-            .set_role("model")
-            .set_parts([part]);
-        let candidate = vertexai::model::Candidate::new().set_content(content);
-        let response = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
-
-        let response: CompletionResponse =
-            VertexGenerateContentOutput(response).try_into().unwrap();
-
-        match response.choice.first() {
-            Some(AssistantContent::Reasoning(reasoning)) => {
-                assert_eq!(reasoning.display_text(), "thinking text");
-                assert_eq!(
-                    reasoning.first_signature(),
-                    Some(BASE64.encode(raw).as_str())
-                );
-            }
-            _ => panic!("Expected Reasoning"),
-        }
-    }
-
-    #[test]
-    fn test_text_response_conversion() {
-        let vertex_output = create_text_response("Hello, world!");
-        let completion_response: Result<CompletionResponse, _> = vertex_output.try_into();
-
-        assert!(completion_response.is_ok());
-        let response = completion_response.unwrap();
-        assert_eq!(
-            response.choice,
-            vec![AssistantContent::Text(Text::new(
-                "Hello, world!".to_string()
-            ))]
-        );
-    }
-
-    #[test]
-    fn test_tool_call_response_conversion() {
-        let args = serde_json::json!({
-            "x": 5,
-            "y": 3
-        });
-        let vertex_output = create_tool_call_response("add", args.clone());
-        let completion_response: Result<CompletionResponse, _> = vertex_output.try_into();
-
-        assert!(completion_response.is_ok());
-        let response = completion_response.unwrap();
-
-        match response.choice.first() {
-            Some(AssistantContent::ToolCall(ToolCall {
-                id,
-                provider,
-                function,
-                ..
-            })) => {
-                // Vertex issues no call ids: the decode mints a unique
-                // non-empty handle (never the function name) and records
-                // that the provider issued nothing.
-                assert!(!id.as_str().is_empty());
-                assert_ne!(id, "add");
-                assert_eq!(provider, &None);
-                assert_eq!(function.name, "add");
-                assert_eq!(function.arguments, args);
-            }
-            _ => panic!("Expected ToolCall"),
-        }
-    }
-
-    #[test]
-    fn inline_image_response_converts_raw_bytes_to_base64_with_mime_type() {
-        let raw = vec![0, 1, 2, 255];
-        let response: CompletionResponse =
-            create_parts_response([inline_data_part("image/png", raw.clone())])
-                .try_into()
-                .expect("image response should convert");
-
-        match response.choice.first() {
-            Some(AssistantContent::Image(image)) => {
-                assert_eq!(image.data, DocumentSourceKind::Base64(BASE64.encode(raw)));
-                assert_eq!(image.media_type, Some(ImageMediaType::PNG));
-                assert_eq!(image.detail, Some(ImageDetail::default()));
-            }
-            _ => panic!("Expected Image"),
-        }
-    }
-
-    #[test]
-    fn mixed_text_and_image_response_preserves_part_order() {
-        let raw = vec![1, 2, 3];
-        let response: CompletionResponse = create_parts_response([
-            vertexai::model::Part::new().set_text("before"),
-            inline_data_part("image/jpeg", raw.clone()),
-            vertexai::model::Part::new().set_text("after"),
-        ])
-        .try_into()
-        .expect("mixed response should convert");
-
-        let contents: Vec<_> = response.choice.iter().collect();
-        assert!(matches!(contents[0], AssistantContent::Text(text) if text.text == "before"));
-        match contents[1] {
-            AssistantContent::Image(image) => {
-                assert_eq!(image.data, DocumentSourceKind::Base64(BASE64.encode(raw)));
-                assert_eq!(image.media_type, Some(ImageMediaType::JPEG));
-            }
-            _ => panic!("Expected Image"),
-        }
-        assert!(matches!(contents[2], AssistantContent::Text(text) if text.text == "after"));
-    }
-
-    #[test]
-    fn mixed_text_and_thought_image_response_keeps_only_visible_text_in_order() {
-        let response: CompletionResponse = create_parts_response([
-            vertexai::model::Part::new().set_text("before"),
-            inline_data_part("image/png", vec![1, 2, 3]).set_thought(true),
-            vertexai::model::Part::new().set_text("after"),
-        ])
-        .try_into()
-        .expect("thought image should be skipped");
-
-        let contents: Vec<_> = response.choice.iter().collect();
-        assert_eq!(contents.len(), 2);
-        assert!(matches!(contents[0], AssistantContent::Text(text) if text.text == "before"));
-        assert!(matches!(contents[1], AssistantContent::Text(text) if text.text == "after"));
-    }
-
-    #[test]
-    fn thought_image_only_response_fails_without_visible_assistant_content() {
-        let result = CompletionResponse::try_from(create_parts_response([inline_data_part(
-            "image/png",
-            vec![1, 2, 3],
-        )
-        .set_thought(true)]));
-
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("thought-image-only response must fail"),
-        };
-        // Rejected with the shared empty-response wording via
-        // `require_non_empty_response`, like every other wire.
-        assert!(matches!(
-            error,
-            CompletionError::ResponseError(message)
-                if message == rig_core::message::EMPTY_RESPONSE_ERROR
-        ));
-    }
-
-    #[test]
-    fn inline_audio_and_non_image_media_are_rejected() {
-        for mime_type in ["audio/wav", "application/pdf", "application/octet-stream"] {
-            let result = CompletionResponse::try_from(create_parts_response([inline_data_part(
-                mime_type,
-                vec![0],
-            )]));
-            let error = match result {
-                Err(error) => error,
-                Ok(_) => panic!("unsupported inline media must fail"),
-            };
-            assert!(matches!(error, CompletionError::ResponseError(_)));
-            assert!(error.to_string().contains(mime_type));
-        }
-    }
-
-    #[test]
-    fn inline_gif_and_svg_images_are_rejected() {
-        for mime_type in ["image/gif", "image/svg+xml"] {
-            let result = CompletionResponse::try_from(create_parts_response([inline_data_part(
-                mime_type,
-                vec![0],
-            )]));
-            let error = match result {
-                Err(error) => error,
-                Ok(_) => panic!("non-replayable inline image must fail"),
-            };
-            assert!(matches!(error, CompletionError::ResponseError(_)));
-            assert!(
-                error
-                    .to_string()
-                    .contains("Unsupported Vertex inline image media type")
-            );
-        }
-    }
-
-    #[test]
-    fn signed_inline_image_is_rejected() {
-        let part = inline_data_part("image/png", vec![0]).set_thought_signature(vec![1, 2, 3]);
-        let result = CompletionResponse::try_from(create_parts_response([part]));
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("signed inline image must fail"),
-        };
-        assert!(matches!(error, CompletionError::ResponseError(_)));
-        assert!(error.to_string().contains("thought_signature"));
-    }
-
-    #[test]
-    fn test_usage_metadata_conversion() {
-        let mut response = create_text_response("test").0;
-        let usage_metadata = vertexai::model::generate_content_response::UsageMetadata::new()
-            .set_prompt_token_count(10)
-            .set_candidates_token_count(20)
-            .set_total_token_count(30);
-        response = response.set_usage_metadata(usage_metadata);
-
-        let vertex_output = VertexGenerateContentOutput(response);
-        let completion_response: Result<CompletionResponse, _> = vertex_output.try_into();
-
-        assert!(completion_response.is_ok());
-        let response = completion_response.unwrap();
-        assert_eq!(response.usage.input_tokens, 10);
-        assert_eq!(response.usage.output_tokens, 20);
-        assert_eq!(response.usage.total_tokens, 30);
-    }
-
-    #[test]
-    fn test_empty_response_error() {
-        // Create a response with no candidates
-        let response = vertexai::model::GenerateContentResponse::new();
-        let vertex_output = VertexGenerateContentOutput(response);
-        let completion_response: Result<CompletionResponse, _> = vertex_output.try_into();
-
-        assert!(completion_response.is_err());
-    }
-}
+#[cfg(test)]
+mod vertex_usage_mapping_tests;

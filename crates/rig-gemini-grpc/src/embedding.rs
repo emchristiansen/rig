@@ -1,11 +1,19 @@
-// ================================================================
-//! Google Gemini gRPC Embedding Integration
-// ================================================================
+//! Text embeddings through Gemini's gRPC API.
+//!
+//! ```no_run
+//! use rig_gemini_grpc::{Client, embedding::EMBEDDING_004};
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+//! let model = Client::new("API_KEY").await?.embedding(EMBEDDING_004, None);
+//! # Ok(())
+//! # }
+//! ```
 
 /// `text-embedding-004` embedding model
 pub const EMBEDDING_004: &str = "text-embedding-004";
 
-use rig_core::embeddings::{self, EmbeddingError};
+use rig_core::embeddings;
+use rig_core::error::ProviderError;
 
 use super::Client;
 use super::proto::{self, EmbedContentRequest};
@@ -27,37 +35,27 @@ impl EmbeddingModel {
     }
 }
 
-impl embeddings::EmbeddingModel for EmbeddingModel {
-    const MAX_DOCUMENTS: usize = 100;
-
-    type Client = super::Client;
-
-    fn make(client: &Self::Client, model: impl Into<String>, dims: Option<usize>) -> Self {
-        Self::new(client.clone(), model, dims)
-    }
-
-    fn ndims(&self) -> usize {
-        self.ndims
-    }
-
-    async fn embed_texts(
+impl EmbeddingModel {
+    /// Embeds texts sequentially and returns native responses in input order.
+    /// Stops at the first client or RPC error without returning partial results.
+    pub async fn raw_embed_texts(
         &self,
         documents: impl IntoIterator<Item = String> + rig_core::wasm_compat::WasmCompatSend,
-    ) -> Result<Vec<embeddings::Embedding>, EmbeddingError> {
+    ) -> Result<Vec<proto::EmbedContentResponse>, ProviderError> {
         let documents_vec: Vec<String> = documents.into_iter().collect();
-        let mut embeddings = Vec::new();
+        let mut responses = Vec::with_capacity(documents_vec.len());
 
         let mut grpc_client = self
             .client
             .grpc_client()
-            .map_err(|e| EmbeddingError::ProviderError(e.to_string()))?;
+            .map_err(|e| ProviderError::Provider(e.to_string()))?;
 
         for doc in documents_vec {
             let request = EmbedContentRequest {
                 model: format!("models/{}", self.model),
                 content: Some(proto::Content {
                     parts: vec![proto::Part {
-                        data: Some(proto::part::Data::Text(doc.clone())),
+                        data: Some(proto::part::Data::Text(doc)),
                         thought: false,
                         thought_signature: Vec::new(),
                         part_metadata: None,
@@ -72,51 +70,69 @@ impl embeddings::EmbeddingModel for EmbeddingModel {
             let response = grpc_client
                 .embed_content(request)
                 .await
-                .map_err(rpc_error)?
+                .map_err(|status| rpc_error(&status))?
                 .into_inner();
 
-            if let Some(embedding) = response.embedding {
-                embeddings.push(embeddings::Embedding {
-                    document: doc,
-                    vec: embedding.values.into_iter().map(|v| v as f64).collect(),
-                });
-            } else {
-                return Err(EmbeddingError::ResponseError(
-                    "No embedding in response".to_string(),
-                ));
-            }
+            responses.push(response);
         }
 
-        Ok(embeddings)
+        Ok(responses)
     }
 }
 
-// Map a failed gRPC call into an `EmbeddingError` that preserves the provider's
-// error payload verbatim. gRPC is a non-HTTP transport, so there is no
-// `http::StatusCode`; the body is preserved via `from_provider_body` (status:
-// None) rather than a Rig-prefixed `ProviderError` diagnostic. Note: tonic does
-// not distinguish a server-returned gRPC error from a transport/connection
-// failure, so a pure connection error is also preserved here rather than gated
-// out as a Rig diagnostic the way Bedrock's typed service errors are.
-fn rpc_error(status: tonic::Status) -> EmbeddingError {
-    EmbeddingError::from_provider_body(status.to_string())
+impl embeddings::EmbeddingModel for EmbeddingModel {
+    fn max_documents(&self) -> usize {
+        100
+    }
+
+    fn ndims(&self) -> usize {
+        self.ndims
+    }
+
+    async fn embed_texts_response(
+        &self,
+        documents: impl IntoIterator<Item = String> + rig_core::wasm_compat::WasmCompatSend,
+    ) -> Result<embeddings::EmbeddingResponse, ProviderError> {
+        rig_core::telemetry::instrument_modality::<rig_core::operation::Embedding, _>(
+            super::completion::PROVIDER_NAME,
+            &self.model,
+            async {
+                let documents_vec: Vec<String> = documents.into_iter().collect();
+                let responses = self.raw_embed_texts(documents_vec.clone()).await?;
+                let mut embeddings = Vec::with_capacity(responses.len());
+                for (response, doc) in responses.into_iter().zip(documents_vec) {
+                    if let Some(embedding) = response.embedding {
+                        embeddings.push(embeddings::Embedding {
+                            document: doc,
+                            vec: embedding.values.into_iter().map(|v| v as f64).collect(),
+                        });
+                    } else {
+                        return Err(ProviderError::Response(
+                            "No embedding in response".to_string(),
+                        ));
+                    }
+                }
+
+                // gRPC: the native answers are prost messages, not JSON, and
+                // `EmbedContent` reports no usage or response id. `raw` stays `Null`;
+                // `raw_embed_texts` is the typed route.
+                Ok(embeddings::EmbeddingResponse::new(
+                    embeddings,
+                    super::completion::PROVIDER_NAME,
+                ))
+            },
+        )
+        .await
+    }
+}
+
+/// Preserves tonic status display text as an error body with RPC code and retry
+/// classification. Transport failures use the same representation.
+fn rpc_error(status: &tonic::Status) -> ProviderError {
+    ProviderError::from_provider_body(status.to_string())
+        .with_provider_code(Some(super::completion::grpc_code_name(status.code())))
+        .with_transient(Some(super::completion::transient_grpc_code(status.code())))
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rpc_error_preserves_status_text_without_http_status() {
-        let status = tonic::Status::unavailable("boom");
-        let expected = status.to_string();
-
-        let err = rpc_error(status);
-
-        // The raw provider error text is preserved verbatim, and there is no
-        // HTTP status because gRPC is a non-HTTP transport.
-        assert_eq!(err.provider_response_body(), Some(expected.as_str()));
-        assert_eq!(err.provider_response_status(), None);
-    }
-}
+mod tests;

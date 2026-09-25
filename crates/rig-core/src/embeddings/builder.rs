@@ -1,59 +1,33 @@
-//! The module defines the [EmbeddingsBuilder] struct which accumulates objects to be embedded
-//! and batch generates the embeddings for each object when built.
-//! Only types that implement the [Embed] trait can be added to the [EmbeddingsBuilder].
+//! Batched embedding generation for documents implementing [`Embed`].
+//!
+//! ```no_run
+//! use rig_core::embeddings::{EmbeddingModel, EmbeddingsBuilder};
+//!
+//! # async fn example(model: impl EmbeddingModel) -> Result<(), Box<dyn std::error::Error>> {
+//! let documents = EmbeddingsBuilder::new(model)
+//!     .documents(["first document", "second document"])?
+//!     .build().await?;
+//! # let _ = documents;
+//! # Ok(())
+//! # }
+//! ```
 
-use std::{cmp::max, collections::HashMap};
+use std::{cmp::max, ops::Range};
 
 use futures::{StreamExt, stream};
 
+use crate::error::ProviderError;
 use crate::{
     completion::Usage,
     embeddings::{
-        Embed, EmbedError, Embedding, EmbeddingError, EmbeddingModel, EmbeddingResponse,
-        embed::TextEmbedder,
+        Embed, EmbedError, Embedding, EmbeddingModel, EmbeddingResponse, embed::TextEmbedder,
     },
 };
 
-/// Builder for creating embeddings from one or more documents of type `T`.
-/// Note: `T` can be any type that implements the [Embed] trait.
-///
-/// Using the builder is preferred over using [EmbeddingModel::embed_text] directly as
-/// it will batch the documents in a single request to the model provider.
-///
-/// # Example
-/// ```no_run
-/// use rig_core::{
-///     client::{EmbeddingsClient, ProviderClient},
-///     embeddings::EmbeddingsBuilder,
-///     providers::openai,
-/// };
-///
-/// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-/// // Create OpenAI client
-/// let openai_client = openai::Client::from_env()?;
-///
-/// let model = openai_client.embedding_model(openai::TEXT_EMBEDDING_3_SMALL);
-///
-/// let embeddings = EmbeddingsBuilder::new(model.clone())
-///     .documents(vec![
-///         "1. *flurbo* (noun): A green alien that lives on cold planets.".to_string(),
-///         "2. *flurbo* (noun): A fictional digital currency.".to_string(),
-///         "1. *glarb-glarb* (noun): An ancient tool used by the ancestors of the inhabitants of planet Jiro to farm the land.".to_string(),
-///         "2. *glarb-glarb* (noun): A fictional creature from marshlands.".to_string(),
-///         "1. *linlingdong* (noun): A term used by inhabitants of the sombrero galaxy to describe humans.".to_string(),
-///         "2. *linlingdong* (noun): A rare instrument.".to_string(),
-///     ])?
-///     .build()
-///     .await?;
-/// # Ok(())
-/// # }
-/// ```
-#[non_exhaustive]
-pub struct EmbeddingsBuilder<M, T>
-where
-    M: EmbeddingModel,
-    T: Embed,
-{
+/// Accumulates documents and embeds their extracted texts in provider-sized batches.
+/// Text extraction occurs when documents are added; requests start when built.
+#[must_use = "an embeddings builder does nothing until built"]
+pub struct EmbeddingsBuilder<M, T> {
     model: M,
     documents: Vec<(T, Vec<String>)>,
 }
@@ -86,7 +60,7 @@ where
     pub fn documents(self, documents: impl IntoIterator<Item = T>) -> Result<Self, EmbedError> {
         let builder = documents
             .into_iter()
-            .try_fold(self, |builder, doc| builder.document(doc))?;
+            .try_fold(self, EmbeddingsBuilder::document)?;
 
         Ok(builder)
     }
@@ -95,13 +69,21 @@ where
 impl<M, T> EmbeddingsBuilder<M, T>
 where
     M: EmbeddingModel,
-    T: Embed + Send,
+    T: Embed + crate::wasm_compat::WasmCompatSend,
 {
     /// Generate embeddings for all documents in the builder.
     ///
     /// Returns `(document, embeddings)` pairs. A document may produce one or many
     /// embeddings depending on how its [`Embed`] implementation uses [`TextEmbedder`].
-    pub async fn build(self) -> Result<Vec<(T, Vec<Embedding>)>, EmbeddingError> {
+    ///
+    /// Preserves document insertion order and each document's text order,
+    /// regardless of batch completion order. Providers must return embeddings
+    /// in input order within each batch; this is not checked.
+    ///
+    /// Propagates provider and transport errors. Returns an error identifying
+    /// the document if it produces no text or a batch returns too few embeddings.
+    /// Empty embedded collections produce no text. Surplus embeddings are ignored.
+    pub async fn build(self) -> Result<Vec<(T, Vec<Embedding>)>, ProviderError> {
         let (result, _usage) = self.build_with_usage().await?;
         Ok(result)
     }
@@ -111,258 +93,101 @@ where
     /// Returns `(document, embeddings)` pairs and the total token usage across all
     /// batches. A document may produce one or many embeddings depending on how its
     /// [`Embed`] implementation uses [`TextEmbedder`].
-    pub async fn build_with_usage(
+    ///
+    /// Ordering is guaranteed at both levels, and the same two errors originate
+    /// here; both are described on [`Self::build`].
+    pub(crate) async fn build_with_usage(
         self,
-    ) -> Result<(Vec<(T, Vec<Embedding>)>, Usage), EmbeddingError> {
+    ) -> Result<(Vec<(T, Vec<Embedding>)>, Usage), ProviderError> {
         use stream::TryStreamExt;
 
-        // Store the documents and their texts in a HashMap for easy access.
-        let mut docs = HashMap::new();
-        let mut texts = Vec::new();
+        // Per-text slots preserve order even when a document spans batches
+        // that finish out of order.
+        let mut docs: Vec<T> = Vec::with_capacity(self.documents.len());
+        let mut spans: Vec<Range<usize>> = Vec::with_capacity(self.documents.len());
+        let mut texts: Vec<String> = Vec::new();
 
-        // Iterate over all documents in the builder and insert their docs and texts into the lookup stores.
-        for (i, (doc, doc_texts)) in self.documents.into_iter().enumerate() {
-            docs.insert(i, doc);
-            texts.push((i, doc_texts));
+        for (doc, doc_texts) in self.documents {
+            let start = texts.len();
+            texts.extend(doc_texts);
+            spans.push(start..texts.len());
+            docs.push(doc);
         }
 
-        // Compute the embeddings.
-        let (mut embeddings, usage) = stream::iter(texts.into_iter())
-            // Merge the texts of each document into a single list of texts.
-            .flat_map(|(i, texts)| stream::iter(texts.into_iter().map(move |text| (i, text))))
-            // Chunk them into batches. Each batch size is at most the embedding API limit per request.
-            .chunks(M::MAX_DOCUMENTS)
-            // Generate the embeddings for each batch with usage tracking.
-            .map(|text| async {
-                let (ids, docs): (Vec<_>, Vec<_>) = text.into_iter().unzip();
+        let total_texts = texts.len();
+        let max_documents = max(1, self.model.max_documents());
 
-                let response: EmbeddingResponse = self.model.embed_texts_with_usage(docs).await?;
-                Ok::<_, EmbeddingError>((
-                    ids.into_iter().zip(response.embeddings).collect::<Vec<_>>(),
+        let (slots, usage) = stream::iter(texts.into_iter().enumerate())
+            .chunks(max_documents)
+            .map(|chunk| async {
+                let (slots, batch): (Vec<usize>, Vec<String>) = chunk.into_iter().unzip();
+
+                let response: EmbeddingResponse = self.model.embed_texts_response(batch).await?;
+                Ok::<_, ProviderError>((
+                    slots
+                        .into_iter()
+                        .zip(response.embeddings)
+                        .collect::<Vec<_>>(),
                     response.usage,
                 ))
             })
-            // Parallelize the embeddings generation over 10 concurrent requests
-            .buffer_unordered(max(1, 1024 / M::MAX_DOCUMENTS))
-            // Collect the embeddings into a HashMap and accumulate usage.
+            .buffer_unordered(max(1, 1024 / max_documents))
             .try_fold(
-                (HashMap::<usize, Vec<Embedding>>::new(), Usage::default()),
-                |(mut acc, mut usage_acc), (chunk_embeddings, chunk_usage)| async move {
-                    chunk_embeddings.into_iter().for_each(|(i, embedding)| {
-                        acc.entry(i).or_default().push(embedding);
-                    });
+                (
+                    (0..total_texts)
+                        .map(|_| None)
+                        .collect::<Vec<Option<Embedding>>>(),
+                    Usage::default(),
+                ),
+                |(mut slots, mut usage_acc), (chunk_embeddings, chunk_usage)| async move {
+                    for (slot, embedding) in chunk_embeddings {
+                        // Enumerated slots remain in range; zip discards any
+                        // surplus provider embeddings.
+                        if let Some(place) = slots.get_mut(slot) {
+                            *place = Some(embedding);
+                        }
+                    }
                     usage_acc += chunk_usage;
-                    Ok((acc, usage_acc))
+                    Ok((slots, usage_acc))
                 },
             )
             .await?;
 
-        // Merge the embeddings with their respective documents
-        let result = docs
-            .into_iter()
-            .map(|(i, doc)| {
-                let embedding = embeddings.remove(&i).ok_or_else(|| {
-                    crate::embeddings::EmbeddingError::ResponseError(
-                        "missing embedding for document after batch merge".to_string(),
-                    )
+        let mut slots = slots.into_iter();
+        let mut result = Vec::with_capacity(docs.len());
+
+        for (index, (doc, span)) in docs.into_iter().zip(spans).enumerate() {
+            if span.is_empty() {
+                return Err(crate::error::ProviderError::Response(format!(
+                    "document {index} produced no text to embed, so it has no \
+                     embeddings to return; an empty collection in an `#[embed]` \
+                     field embeds nothing"
+                )));
+            }
+
+            // Missing slots identify short provider responses without silently
+            // dropping a document's texts.
+            let embeddings = slots
+                .by_ref()
+                .take(span.len())
+                .collect::<Option<Vec<Embedding>>>()
+                .ok_or_else(|| {
+                    crate::error::ProviderError::Response(format!(
+                        "provider returned fewer embeddings than texts sent: \
+                         document {index} is missing at least one of its {} texts \
+                         (slots {}..{} of {total_texts})",
+                        span.len(),
+                        span.start,
+                        span.end
+                    ))
                 })?;
-                Ok::<_, crate::embeddings::EmbeddingError>((doc, embedding))
-            })
-            .collect::<Result<Vec<_>, crate::embeddings::EmbeddingError>>()?;
+
+            result.push((doc, embeddings));
+        }
 
         Ok((result, usage))
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::test_utils::{MockEmbeddingModel, MockMultiTextDocument, MockTextDocument};
-
-    use super::EmbeddingsBuilder;
-
-    fn definitions_multiple_text() -> Vec<MockMultiTextDocument> {
-        vec![
-            MockMultiTextDocument::new(
-                "doc0",
-                [
-                    "A green alien that lives on cold planets.",
-                    "A fictional digital currency that originated in the animated series Rick and Morty.",
-                ],
-            ),
-            MockMultiTextDocument::new(
-                "doc1",
-                [
-                    "An ancient tool used by the ancestors of the inhabitants of planet Jiro to farm the land.",
-                    "A fictional creature found in the distant, swampy marshlands of the planet Glibbo in the Andromeda galaxy.",
-                ],
-            ),
-        ]
-    }
-
-    fn definitions_multiple_text_2() -> Vec<MockMultiTextDocument> {
-        vec![
-            MockMultiTextDocument::new("doc2", ["Another fake definitions"]),
-            MockMultiTextDocument::new("doc3", ["Some fake definition"]),
-        ]
-    }
-
-    fn definitions_single_text() -> Vec<MockTextDocument> {
-        vec![
-            MockTextDocument::new("doc0", "A green alien that lives on cold planets."),
-            MockTextDocument::new(
-                "doc1",
-                "An ancient tool used by the ancestors of the inhabitants of planet Jiro to farm the land.",
-            ),
-        ]
-    }
-
-    #[tokio::test]
-    async fn test_build_multiple_text() {
-        let fake_definitions = definitions_multiple_text();
-
-        let fake_model = MockEmbeddingModel;
-        let mut result = EmbeddingsBuilder::new(fake_model)
-            .documents(fake_definitions)
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
-
-        result.sort_by(|(fake_definition_1, _), (fake_definition_2, _)| {
-            fake_definition_1.id.cmp(&fake_definition_2.id)
-        });
-
-        assert_eq!(result.len(), 2);
-
-        let first_definition = &result[0];
-        assert_eq!(first_definition.0.id, "doc0");
-        assert_eq!(first_definition.1.len(), 2);
-        assert_eq!(
-            first_definition.1.first().map(|e| e.document.as_str()),
-            Some("A green alien that lives on cold planets.")
-        );
-
-        let second_definition = &result[1];
-        assert_eq!(second_definition.0.id, "doc1");
-        assert_eq!(second_definition.1.len(), 2);
-        assert_eq!(
-            second_definition.1.get(1).map(|e| e.document.as_str()),
-            Some(
-                "A fictional creature found in the distant, swampy marshlands of the planet Glibbo in the Andromeda galaxy."
-            )
-        )
-    }
-
-    #[tokio::test]
-    async fn test_build_single_text() {
-        let fake_definitions = definitions_single_text();
-
-        let fake_model = MockEmbeddingModel;
-        let mut result = EmbeddingsBuilder::new(fake_model)
-            .documents(fake_definitions)
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
-
-        result.sort_by(|(fake_definition_1, _), (fake_definition_2, _)| {
-            fake_definition_1.id.cmp(&fake_definition_2.id)
-        });
-
-        assert_eq!(result.len(), 2);
-
-        let first_definition = &result[0];
-        assert_eq!(first_definition.0.id, "doc0");
-        assert_eq!(first_definition.1.len(), 1);
-        assert_eq!(
-            first_definition.1.first().map(|e| e.document.as_str()),
-            Some("A green alien that lives on cold planets.")
-        );
-
-        let second_definition = &result[1];
-        assert_eq!(second_definition.0.id, "doc1");
-        assert_eq!(second_definition.1.len(), 1);
-        assert_eq!(
-            second_definition.1.first().map(|e| e.document.as_str()),
-            Some(
-                "An ancient tool used by the ancestors of the inhabitants of planet Jiro to farm the land."
-            )
-        )
-    }
-
-    #[tokio::test]
-    async fn test_build_multiple_and_single_text() {
-        let fake_definitions = definitions_multiple_text();
-        let fake_definitions_single = definitions_multiple_text_2();
-
-        let fake_model = MockEmbeddingModel;
-        let mut result = EmbeddingsBuilder::new(fake_model)
-            .documents(fake_definitions)
-            .unwrap()
-            .documents(fake_definitions_single)
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
-
-        result.sort_by(|(fake_definition_1, _), (fake_definition_2, _)| {
-            fake_definition_1.id.cmp(&fake_definition_2.id)
-        });
-
-        assert_eq!(result.len(), 4);
-
-        let second_definition = &result[1];
-        assert_eq!(second_definition.0.id, "doc1");
-        assert_eq!(second_definition.1.len(), 2);
-        assert_eq!(
-            second_definition.1.first().map(|e| e.document.as_str()),
-            Some(
-                "An ancient tool used by the ancestors of the inhabitants of planet Jiro to farm the land."
-            )
-        );
-
-        let third_definition = &result[2];
-        assert_eq!(third_definition.0.id, "doc2");
-        assert_eq!(third_definition.1.len(), 1);
-        assert_eq!(
-            third_definition.1.first().map(|e| e.document.as_str()),
-            Some("Another fake definitions")
-        )
-    }
-
-    #[tokio::test]
-    async fn test_build_string() {
-        let bindings = definitions_multiple_text();
-        let fake_definitions = bindings.iter().map(|def| def.texts.clone());
-
-        let fake_model = MockEmbeddingModel;
-        let mut result = EmbeddingsBuilder::new(fake_model)
-            .documents(fake_definitions)
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
-
-        result.sort_by(|(fake_definition_1, _), (fake_definition_2, _)| {
-            fake_definition_1.cmp(fake_definition_2)
-        });
-
-        assert_eq!(result.len(), 2);
-
-        let first_definition = &result[0];
-        assert_eq!(first_definition.1.len(), 2);
-        assert_eq!(
-            first_definition.1.first().map(|e| e.document.as_str()),
-            Some("A green alien that lives on cold planets.")
-        );
-
-        let second_definition = &result[1];
-        assert_eq!(second_definition.1.len(), 2);
-        assert_eq!(
-            second_definition.1.get(1).map(|e| e.document.as_str()),
-            Some(
-                "A fictional creature found in the distant, swampy marshlands of the planet Glibbo in the Andromeda galaxy."
-            )
-        )
-    }
-}
+mod tests;

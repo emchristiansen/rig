@@ -8,9 +8,8 @@
 use std::sync::Arc;
 
 use rig::{
-    completion::Prompt,
     prelude::*,
-    providers::openai,
+    providers::openai::{self, OpenAI},
     tool::{rmcp::McpClientHandler, server::ToolServer},
 };
 use rmcp::{
@@ -262,14 +261,14 @@ async fn main() -> anyhow::Result<()> {
     let server_info = mcp_service.peer_info();
     tracing::info!("Connected to server: {server_info:#?}");
 
-    let openai_client = openai::Client::from_env()?;
+    let openai_client = OpenAI::from_env()?.bound()?;
     let agent = openai_client
         .agent(openai::GPT_4O)
         .preamble("You are a helpful assistant who has access to a number of tools from an MCP server designed to be used for incrementing and decrementing a counter.")
         .tool_server_handle(tool_server_handle)
         .build();
 
-    let res = agent.prompt("What is 2+5?").max_turns(2).await?;
+    let res = agent.prompt("What is 2+5?").max_turns(2).await?.output;
 
     println!("GPT-4o: {res}");
 

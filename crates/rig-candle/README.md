@@ -5,7 +5,7 @@ and agent APIs. The crate receives byte buffers and performs no filesystem or
 network access itself.
 
 ```rust,no_run
-use rig_agent::{agent::AgentBuilder, completion::Prompt};
+use rig_agent::agent::AgentBuilder;
 use rig_candle::{CandleModel, ModelData};
 
 #[tokio::main(flavor = "current_thread")]
@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = AgentBuilder::new(model)
         .preamble("You are a concise assistant.")
         .build();
-    println!("{}", agent.prompt("Explain ownership briefly.").await?);
+    println!("{}", agent.prompt("Explain ownership briefly.").await?.output);
     Ok(())
 }
 ```
@@ -74,9 +74,9 @@ schemas, arguments, and results containing reserved chat-template delimiters
 are rejected before rendering so they cannot create structural prompt content.
 
 Qwen tool syntax can cross token boundaries, so streaming buffers one model
-turn, parses it, then emits ordered text/reasoning items and complete
-`RawStreamingChoice::ToolCall` values followed by `FinalResponse`. It does not
-currently emit tool-call deltas. This keeps model XML out of user-visible text
+turn, parses it, then emits ordered text/reasoning items and whole tool calls
+(a `BlockStart`/`BlockEnd` pair per call on the stream) followed by the
+terminal record. It does not currently emit tool-call deltas. This keeps model XML out of user-visible text
 while preserving cancellation, bounded backpressure, and the same parsed result
 as buffered completion.
 

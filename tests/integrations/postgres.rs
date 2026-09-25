@@ -1,14 +1,7 @@
-#![allow(
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    clippy::unwrap_used,
-    clippy::unreachable
-)]
-
-use rig::client::EmbeddingsClient;
-use rig::postgres::PostgresVectorStore;
+use rig::client::DefaultTransport as _;
+use rig::postgres::{PgSearchFilter, PostgresVectorStore};
 use rig::providers::openai;
+use rig::vector_store::request::SearchFilter;
 use rig::vector_store::request::VectorSearchRequest;
 use rig::{
     Embed,
@@ -64,7 +57,7 @@ async fn vector_search_test() {
     let pg_pool = connect_to_postgres(host, port).await;
 
     // run migrations on Postgres
-    sqlx::migrate!("./tests/migrations")
+    sqlx::migrate!("../../tests/migrations")
         .run(&pg_pool)
         .await
         .expect("Failed to run migrations");
@@ -73,13 +66,12 @@ async fn vector_search_test() {
 
     // init fake openai service
     let openai_mock = create_openai_mock_service().await;
-    let openai_client = openai::Client::builder()
-        .api_key("TEST")
-        .base_url(openai_mock.base_url())
-        .build()
+    let openai_client = openai::wire::OpenAI::new("TEST")
+        .with_base_url(openai_mock.base_url())
+        .bound()
         .unwrap();
 
-    let model = openai_client.embedding_model(openai::TEXT_EMBEDDING_3_SMALL);
+    let model = openai_client.embedding(openai::TEXT_EMBEDDING_3_SMALL, None);
 
     // create test documents with mocked embeddings
     let words = vec![
@@ -163,6 +155,58 @@ async fn vector_search_test() {
     println!("Distance: {distance}, id: {id}");
 
     assert_eq!(id, full_query_id);
+
+    // rig#2376: a single-condition filter, a `member` filter and a threshold
+    // each used to render SQL Postgres rejects (`WHEREprice`, `is in`,
+    // `column "distance" does not exist`), and the threshold compared a
+    // distance with `>` although it is documented as a minimum similarity.
+    // The best match's cosine similarity is `1 - distance`; a threshold just
+    // below it must keep that row, one just above it must drop every row.
+    let best_similarity = 1.0 - distance;
+    let filtered = VectorSearchRequest::builder()
+        .query(query)
+        .samples(3)
+        .threshold(best_similarity - 0.05)
+        .filter(
+            PgSearchFilter::eq("document->>'name'", json!("glarb-glarb")).and(
+                PgSearchFilter::member(
+                    "document->>'name'",
+                    vec![json!("glarb-glarb"), json!("flurbo")],
+                ),
+            ),
+        )
+        .build();
+    let results = vector_store
+        .top_n::<Word>(filtered)
+        .await
+        .expect("filtered + thresholded search must be valid SQL");
+    assert_eq!(results.len(), 1, "only glarb-glarb passes the filter");
+    assert_eq!(results[0].2.name, "glarb-glarb");
+
+    let single_condition = VectorSearchRequest::builder()
+        .query(query)
+        .samples(3)
+        .filter(PgSearchFilter::eq("document->>'name'", json!("flurbo")))
+        .build();
+    let results = vector_store
+        .top_n_ids(single_condition)
+        .await
+        .expect("a single-condition filter must render `WHERE <cond>`");
+    assert_eq!(results.len(), 1);
+
+    let too_similar = VectorSearchRequest::builder()
+        .query(query)
+        .samples(3)
+        .threshold(best_similarity + 0.05)
+        .build();
+    let results = vector_store
+        .top_n_ids(too_similar)
+        .await
+        .expect("a threshold-only search must be valid SQL");
+    assert!(
+        results.is_empty(),
+        "a threshold above the best similarity must drop every row, got {results:?}"
+    );
 }
 
 async fn start_container() -> ContainerAsync<GenericImage> {

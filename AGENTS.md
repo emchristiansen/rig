@@ -1,241 +1,130 @@
 # AGENTS.md
 
-Operational instructions for AI coding agents working in Rig.
-
-For contributor-facing policy, PR expectations, and accountability guidance, see
-`CONTRIBUTING.md`. This file is for repository-specific engineering rules that
-agents must follow while reading, editing, testing, and documenting code.
+Operational instructions for AI coding agents working in Rig. Contributor
+policy and PR etiquette live in [CONTRIBUTING.md](CONTRIBUTING.md); verification,
+review, and publication in [DEVELOPING.md](DEVELOPING.md); test conventions and
+commands in [tests/README.md](tests/README.md).
+This file states rules, not APIs: read the code and manifests for names,
+signatures, module paths, and feature flags.
 
 ## First Principles
 
 - Read the existing implementation before changing code.
 - Keep changes scoped to the user's request.
 - Prefer existing Rig traits, builders, modules, and error types over new abstractions.
-- Do not add TODOs, stubs, placeholder implementations, or speculative APIs.
-- Do not make commits, stage changes, push branches, or open PRs unless the user explicitly asks.
+- Do not add TODOs, stubs, placeholder implementations, speculative APIs, or backwards compatibility shims.
+- Do not make commits, comments, stage changes, push branches, or open PRs unless the user explicitly asks.
 - Do not discard user changes.
+
+## Efficient Investigation
+
+- Reuse instructions and unchanged source already in context. Read the relevant
+  sections of linked documents, not every document for every task.
+- Use the repository map below to narrow searches to the owning crate or test
+  target. Read complete relevant constructs; widen only when needed.
+- Check actual signatures and existing test conventions before writing examples
+  or smoke programs, rather than discovering APIs through compiler errors.
+- Keep commands and edits on the intended worktree. Confirm the language server
+  indexes it before trusting references; empty results outside its workspace
+  are not proof of no callers. Inspect native/WASM branches explicitly.
+- Request only decision-relevant output. Recover missing diagnostic context from
+  truncated output rather than dumping or fetching the entire log again.
 
 ## Repository Shape
 
-- Root facade crate: `rig`
+- Root facade crate: `rig` (re-exports the core crate, exposes companion crates behind feature flags)
 - Core crate: `crates/rig-core`
-- Companion provider and vector-store crates: `crates/rig-*`
+- Companion provider, vector-store, memory, and integration crates: `crates/rig-*`
 - Derive macros: `crates/rig-derive`
-- Workspace example packages: `examples/*`
-- Per-crate examples: `crates/<crate>/examples/`
+- Verification planner and source-tree checks: `xtask/`
+- Workspace example packages: `examples/*`; per-crate examples: `crates/<crate>/examples/`
 - Root integration test targets: `tests/*.rs`
-- Provider test modules: `tests/providers/<provider>/`
-- Provider cassette fixtures: `tests/cassettes/<provider>/`
+- Record/replay home: `crates/rig-cassette` — the engine (`src/`), the provider cassette corpus (`fixtures/cassettes/<provider>/`), the effect-log golden corpus (`fixtures/effects/`), every cassette-backed provider target (`tests/<provider>.rs` with `tests/providers/<provider>/` and the shared drivers in `tests/common/`), the cache-prefix guard, and the effect-bus verification targets `verify` and `world_replay`. Corpora and `tests/` are excluded from the published package.
+- Live-only provider test modules stay in the facade: `tests/providers/<provider>/`, driven by `tests/<provider>.rs`
 - External-service integration tests: `tests/integrations/`
+- Unpublished vector-store test runner: `test-support/service-tests`
 
-The root `rig` crate re-exports `rig-core` and exposes companion crates behind
-feature flags. Check `Cargo.toml` and `src/lib.rs` before documenting or changing
-exposed features, integrations, or module paths. If adding or exposing a
-companion provider/vector-store crate, update the root dependency, feature,
-facade re-export, examples, README, and crate docs as applicable.
-
-## Core Architecture
-
-Rig is built around provider-agnostic traits:
-
-- `CompletionModel` for text completion and chat models
-- `EmbeddingModel` for embedding generation
-- `VectorStoreIndex` for vector similarity search
-- `Tool` for callable tools
-
-Use these traits instead of creating parallel abstractions.
-
-Configurable public types should follow Rig's builder style:
-
-```rust
-let agent = client
-    .agent(openai::GPT_5_2)
-    .preamble("System prompt")
-    .tool(my_tool)
-    .temperature(0.8)
-    .build();
-```
-
-Provider clients use the generic client architecture:
-
-```rust
-pub struct Client<Ext = Nothing, H = reqwest::Client> {
-    // ...
-}
-```
-
-Providers declare capabilities explicitly with `Capable<T>` and `Nothing`.
+Check the root manifest and facade source before documenting or changing
+exposed features, integrations, or module paths. When adding or exposing a
+companion crate, update the root dependency, feature, facade re-export,
+examples, README, and crate docs as applicable.
 
 ## WASM Compatibility
 
-Rig supports WebAssembly targets.
-
-Use `WasmCompatSend` and `WasmCompatSync` in trait bounds instead of raw `Send`
-and `Sync`.
-
-Use `WasmBoxedFuture` for boxed futures.
-
-When an error type stores boxed errors, use platform-specific bounds:
-
-```rust
-#[cfg(not(target_family = "wasm"))]
-Box<dyn std::error::Error + Send + Sync + 'static>
-
-#[cfg(target_family = "wasm")]
-Box<dyn std::error::Error + 'static>
-```
+Rig supports WebAssembly targets. Use Rig's WASM-compatible `WasmSend`/`WasmSync`
+alias bounds instead of raw `Send` and `Sync`, and its WASM-compatible boxed
+future alias for boxed futures. When an error type stores boxed errors, gate
+the `Send + Sync` bound on `target_family = "wasm"` the way existing error
+types do.
 
 ## Error Handling
 
-- Do not use `String` as an error type for new fallible APIs.
-- Use explicit error enums with `thiserror`.
-- Do not use `.unwrap()` or `.expect()` on fallible operations unless the condition is genuinely impossible and obvious from the code.
+- Do not use `String` as an error type for new fallible APIs;
+- Workspace clippy lints forbid `unwrap`, `expect`, `todo`, and `unimplemented`.
 - Prefer `?` and meaningful error conversions.
 
 ## Documentation
 
-- Add `///` docs to new public items.
-- Add `//!` docs to new public modules.
-- Keep examples current with actual APIs, model constants, module paths, and feature flags.
-- Mark examples `no_run` when they require external credentials or services.
+- Keep examples current with actual APIs, model constants, module paths, and feature flags; mark examples `no_run` when they require external credentials or services.
 - Do not document integrations, features, model constants, or crate paths without checking the code and manifests.
 - Keep root README, crate READMEs, and crate-level Rust docs consistent when changing public-facing behavior.
 
+## Release Documents Are Generated
+
+- Never edit `CHANGELOG.md`, `crates/*/CHANGELOG.md`, `MIGRATING.md`, or `docs/migrations/`. CI rejects the PR.
+- Put changelog bullets and migration notes in the PR description under `## Changelog` and `## Migration`, following the PR template. When the user asks to "update the changelog" or "add a migration note", that is what it means. The repository squash-merges, so those sections become the merge commit body.
+- These files are regenerated on the release PR by `scripts/release-notes.sh` and the editorial pass in `scripts/release-notes-prompt.md`. Only touch them when the user explicitly says the branch is a release PR.
+
 ## Provider Changes
 
-Before implementing or modifying a provider, study the closest existing provider
-implementation. For OpenAI-compatible chat APIs, start with:
-
-`crates/rig-core/src/providers/openai/`
-
-Provider implementations should include:
-
-- Provider extension and builder types
-- `Provider` implementation
-- `Capabilities` declaration
-- `ProviderBuilder` implementation
-- `ProviderClient::{from_env, from_val}`
-- public `Client` and `ClientBuilder` aliases; the `ClientBuilder` API-key generic must match `ProviderBuilder::ApiKey`
-- explicit API-key marker/auth types with redacted debug behavior for credential-bearing values
-- model constants where useful
-- request conversion from Rig request types
-- response conversion into Rig response types
-- streaming support when the provider supports streaming
-- provider-response error preservation through the relevant Rig error helpers
-- `ProviderResponseExt` and telemetry spans following existing GenAI conventions
-- tests or examples appropriate to the provider
-
-Do not add request or response fields that do not exist in the provider's real API.
-
-For provider bug fixes or behavior changes, add or update regression coverage in
-one of these places, preferring the smallest reliable scope:
-
-- unit tests near the implementation in `crates/rig-core/src/providers/...`;
-- cassette-backed provider tests in `tests/providers/<provider>/cassette/`;
-- ignored live tests only when cassette replay is unsuitable.
+Before implementing or modifying a provider, study the closest existing
+provider implementation and mirror it. Providers whose wire format is a
+dialect of an existing one (OpenAI-chat-compatible, Anthropic-compatible) MUST
+reuse the shared generic completion model for that dialect and express their
+differences through its extension hooks — never a hand-rolled completion
+model, request struct, or message conversion.
 
 ## Vector Store Changes
 
-Vector stores should live in companion crates unless there is a strong reason to
-place them in `rig-core`.
-
-Implement both:
-
-- `top_n`
-- `top_n_ids`
-
-Use an appropriate backend-specific filter type.
-
-Return `VectorStoreError` variants instead of ad hoc string errors.
-
-Use `WasmCompatSend` and `WasmCompatSync` bounds.
-
-## Agent Hook Changes
-
-Agent hooks are per-run lifecycle observers and steerers. `AgentHook` exposes
-one method per lifecycle event, and every method receives the run-scoped
-`HookContext` (run id, turn, streaming flag, agent name, shared `Scratchpad`).
-Each method returns an event-specific action type, so unsupported combinations
-are rejected by the compiler.
-
-Composition through `HookStack` remains event-dependent:
-
-- **Completion calls accumulate and merge.** Every
-  `CompletionCallAction::Patch(RequestPatch)` is merged in registration order;
-  `Stop` short-circuits the stack.
-- **Tool calls and results chain.** `ToolCallAction::Rewrite` and
-  `ToolResultAction::Rewrite` are threaded into later hooks. A tool-call `Skip`
-  or either event's `Stop` is terminal.
-- **Invalid tool calls** return `InvalidToolCallAction` (`Fail`, `Retry`,
-  `Repair`, `Skip`, or `Stop`).
-- **Observe-only events** return `ObservationAction` (`Continue` or `Stop`).
-
-Register observe-only hooks before steering hooks because stop actions
-short-circuit. Nested `HookStack`s must preserve merge and chaining semantics.
-`RequestPatch` remains per-turn and non-sticky; its documented merge rules are
-append `extra_context`, shallow-merge `additional_params`, intersect
-`active_tools`, and last-writer-wins scalars/history with a warning.
-
-Every hook semantic must behave identically on streaming and non-streaming
-surfaces (`AgentRunner::stream` and `AgentRunner::run` share `drive_agent`).
+Vector stores should live in companion crates. Implement both the scored-document and the
+id-only search methods, use an appropriate backend-specific filter type,
+return the vector-store error enum's variants instead of ad hoc string
+errors, and use the WASM-compatible bounds.
 
 ## Style
 
-- Use full `where` clauses for complex trait bounds.
-- Comments should explain why, not restate what the code does.
+- Module docs state the module's purpose in at most three paragraphs and include
+  one short example when there is a public entry point. No headers, tables,
+  history, or rhetorical phrasing.
+- Item docs state the contract, inputs, outputs, errors, and caller invariants.
+  Allow one sentence of non-obvious rationale. No issue numbers, bug narratives,
+  or comparisons with other providers.
+- Inline comments explain a non-obvious why in one or two sentences. Delete
+  restated code, control-flow narration, and design discussions.
+- Use short sentences and no em-dashes. Keep true `# Safety` and `# Panics`
+  sections. Doc examples must compile with current APIs; use `no_run` for
+  credentials, network access, or services.
+- Move needed design rationale to the crate's CONTRACT.md or README, checking
+  for and merging existing coverage rather than duplicating it.
 - Follow local naming, module layout, and test patterns.
+- Test modules are sibling files, never inline blocks: write
+  `#[cfg(test)] mod tests;` and put the body in `foo/tests.rs` (for `foo.rs`)
+  or `tests.rs` beside `mod.rs`/`lib.rs`. `cargo xtask check-test-layout`
+  enforces this in CI.
 - Avoid unrelated refactors.
+- Prefer the cleanest implementation.
+- Break things if the result is better.
 
 ## Cassette Regression Tests
 
-Provider regressions should usually include cassette-backed tests. Read
-`tests/README.md` before adding, updating, or running provider tests.
-
-- Test code lives under `tests/providers/<provider>/cassette/`.
-- Fixtures live under `tests/cassettes/<provider>/...`.
-- Replay cassettes by default; this should not require provider API keys.
-- Record mode requires the relevant provider API key and overwrites fixtures.
-- Keep record runs targeted to the provider and test being changed.
-
-Replay examples:
-
-```bash
-cargo test -p rig --all-features --test openai openai::cassette -- --nocapture --test-threads=1
-cargo test -p rig --all-features --test anthropic anthropic::cassette -- --nocapture --test-threads=1
-cargo test -p rig --all-features --test gemini gemini::cassette -- --nocapture --test-threads=1
-```
-
-Record example:
-
-```bash
-RIG_PROVIDER_TEST_MODE=record \
-  cargo test -p rig --all-features --test openai openai::cassette -- --nocapture --test-threads=1
-```
-
-Review cassette diffs carefully. They must not contain API keys, bearer tokens,
-cookies, provider account identifiers, or unrelated request/response churn. The
-repo includes cassette scrub/safety checks in `tests/common/cassette_safety.rs`,
-but agents are still responsible for inspecting generated fixtures before
-presenting changes.
+Provider regressions should usually include cassette-backed tests. Follow
+[tests/README.md](tests/README.md#cassette-provider-tests) for replay/record
+commands and fixture safety review; never record or rewrite fixtures merely
+to make verification pass.
 
 ## Verification
 
-Run the smallest useful checks first, then broaden as needed. For tests, prefer
-the targeted commands in `tests/README.md` before running broad workspace checks.
-
-Before considering code complete, run when feasible:
-
-```bash
-cargo fmt
-cargo clippy --all-targets --all-features
-cargo test
-```
-
-For documentation changes, also consider:
-
-```bash
-cargo doc --workspace --no-deps
-```
-
-If a command cannot be run, say why and tell the user exactly what remains
-unverified.
+Follow [DEVELOPING.md](DEVELOPING.md) for check selection, independent review,
+and authorized publication. Run the smallest useful local check; docs-only
+edits get diff and link review, not Rust builds. Keep progress reports outside
+the repository and never claim merge readiness with required checks pending.

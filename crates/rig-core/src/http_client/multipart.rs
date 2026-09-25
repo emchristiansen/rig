@@ -1,3 +1,13 @@
+//! Transport-neutral multipart fields and byte encoding.
+//!
+//! ```
+//! use rig_core::http_client::multipart::MultipartForm;
+//!
+//! let (boundary, body) = MultipartForm::new().text("model", "example").encode();
+//! assert!(!boundary.is_empty());
+//! assert!(!body.is_empty());
+//! ```
+
 use bytes::Bytes;
 use mime::Mime;
 use std::borrow::Cow;
@@ -11,9 +21,12 @@ pub struct Part {
     content_type: Option<Mime>,
 }
 
+/// The payload of a multipart [`Part`].
 #[derive(Clone, Debug)]
-enum PartContent {
+pub enum PartContent {
+    /// A text field.
     Text(String),
+    /// Binary data (e.g. a file upload).
     Binary(Bytes),
 }
 
@@ -63,6 +76,17 @@ impl Part {
     /// Get the content type if set
     pub fn get_content_type(&self) -> Option<&Mime> {
         self.content_type.as_ref()
+    }
+
+    /// The part's payload.
+    pub fn content(&self) -> &PartContent {
+        &self.content
+    }
+
+    /// Split the part into its owned pieces: `(name, content, filename, content_type)`.
+    /// Transports use this to render the part in their native multipart type.
+    pub fn into_pieces(self) -> (String, PartContent, Option<String>, Option<Mime>) {
+        (self.name, self.content, self.filename, self.content_type)
     }
 }
 
@@ -116,6 +140,12 @@ impl MultipartForm {
         &self.parts
     }
 
+    /// Consume the form, yielding its parts in order. Transports use this to
+    /// render the form in their native multipart type.
+    pub fn into_parts(self) -> Vec<Part> {
+        self.parts
+    }
+
     /// Generate a boundary string
     fn generate_boundary() -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -123,7 +153,7 @@ impl MultipartForm {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        format!("----boundary{}", timestamp)
+        format!("----boundary{timestamp}")
     }
 
     /// Get or generate boundary
@@ -134,7 +164,10 @@ impl MultipartForm {
         }
     }
 
-    /// Encode the multipart form to bytes with the given boundary
+    /// Encodes parts in insertion order, returning the boundary and body bytes.
+    /// Uses the configured boundary or generates one for this call. Names,
+    /// filenames, and boundaries are inserted verbatim; callers must ensure they
+    /// are safe for multipart headers and that the boundary does not occur in data.
     pub fn encode(&self) -> (String, Bytes) {
         let boundary = self.get_boundary();
         let mut body = Vec::new();
@@ -144,7 +177,6 @@ impl MultipartForm {
             body.extend_from_slice(boundary.as_bytes());
             body.extend_from_slice(b"\r\n");
 
-            // Content-Disposition header
             body.extend_from_slice(b"Content-Disposition: form-data; name=\"");
             body.extend_from_slice(part.name.as_bytes());
             body.extend_from_slice(b"\"");
@@ -156,7 +188,6 @@ impl MultipartForm {
             }
             body.extend_from_slice(b"\r\n");
 
-            // Content-Type header if specified
             if let Some(content_type) = &part.content_type {
                 body.extend_from_slice(b"Content-Type: ");
                 body.extend_from_slice(content_type.as_ref().as_bytes());
@@ -165,7 +196,6 @@ impl MultipartForm {
 
             body.extend_from_slice(b"\r\n");
 
-            // Content
             match &part.content {
                 PartContent::Text(text) => body.extend_from_slice(text.as_bytes()),
                 PartContent::Binary(bytes) => body.extend_from_slice(bytes),
@@ -174,7 +204,6 @@ impl MultipartForm {
             body.extend_from_slice(b"\r\n");
         }
 
-        // Final boundary
         body.extend_from_slice(b"--");
         body.extend_from_slice(boundary.as_bytes());
         body.extend_from_slice(b"--\r\n");
@@ -183,69 +212,5 @@ impl MultipartForm {
     }
 }
 
-impl From<MultipartForm> for reqwest::multipart::Form {
-    fn from(value: MultipartForm) -> Self {
-        let mut form = reqwest::multipart::Form::new();
-
-        for part in value.parts {
-            match part.content {
-                PartContent::Text(text) => {
-                    form = form.text(part.name, text);
-                }
-                PartContent::Binary(bytes) => {
-                    let mut req_part = if let Some(content_type) = part.content_type.as_ref() {
-                        reqwest::multipart::Part::bytes(bytes.to_vec())
-                            .mime_str(content_type.as_ref())
-                            .unwrap_or_else(|_| reqwest::multipart::Part::bytes(bytes.to_vec()))
-                    } else {
-                        reqwest::multipart::Part::bytes(bytes.to_vec())
-                    };
-
-                    if let Some(filename) = part.filename {
-                        req_part = req_part.file_name(filename);
-                    }
-
-                    form = form.part(part.name, req_part);
-                }
-            }
-        }
-
-        form
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_multipart_encoding() {
-        let form = MultipartForm::new()
-            .text("field1", "value1")
-            .text("field2", "value2");
-
-        let (boundary, body) = form.encode();
-        let body_str = String::from_utf8_lossy(&body);
-
-        assert!(body_str.contains("field1"));
-        assert!(body_str.contains("value1"));
-        assert!(body_str.contains(&boundary));
-    }
-
-    #[test]
-    fn test_file_part() {
-        let form = MultipartForm::new().file(
-            "upload",
-            "test.txt",
-            "text/plain".parse().unwrap(),
-            Bytes::from("file contents"),
-        );
-
-        let (_, body) = form.encode();
-        let body_str = String::from_utf8_lossy(&body);
-
-        assert!(body_str.contains("filename=\"test.txt\""));
-        assert!(body_str.contains("Content-Type: text/plain"));
-        assert!(body_str.contains("file contents"));
-    }
-}
+mod tests;

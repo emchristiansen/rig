@@ -1,4 +1,11 @@
-//! Canonical model-visible tool output.
+//! Canonical text, JSON, and multimodal tool output.
+//!
+//! ```
+//! use rig_core::tool::ToolOutput;
+//!
+//! let output = ToolOutput::text("done");
+//! assert_eq!(output.as_text(), Some("done"));
+//! ```
 
 use std::{any::Any, fmt};
 
@@ -18,6 +25,22 @@ use crate::{message::ToolResultContent, tool::ToolExecutionError};
 #[derive(Clone, PartialEq)]
 pub struct ToolOutput {
     content: Vec<ToolResultContent>,
+}
+
+// Serde is the content list itself; deserialization goes through
+// [`ToolOutput::content`] so an empty list is rejected at the boundary, the
+// same as at construction.
+impl Serialize for ToolOutput {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.content.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ToolOutput {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let content = Vec::<ToolResultContent>::deserialize(deserializer)?;
+        Self::content(content).map_err(serde::de::Error::custom)
+    }
 }
 
 impl fmt::Debug for ToolOutput {
@@ -53,17 +76,8 @@ impl ToolOutput {
         Self::one(ToolResultContent::json(value))
     }
 
-    /// Construct explicit model content.
-    ///
-    /// Rejects an empty list. On `main` the argument type made emptiness
-    /// unrepresentable; as a `Vec` the check lives here instead, because this
-    /// is the one funnel every multi-block construction passes through —
-    /// tools returning [`ToolOutput`] directly and hooks rewriting one
-    /// included. A zero-block tool result cannot be sent (the request
-    /// boundary rejects it), so rejecting at construction surfaces the
-    /// defect where it is made rather than one request later. A tool with a
-    /// genuinely empty result returns one empty text block ([`Self::text`]
-    /// with `""`).
+    /// Constructs explicit model content, rejecting an empty block list.
+    /// Use [`Self::text`] with `""` to represent an empty text result.
     pub fn content(content: Vec<ToolResultContent>) -> Result<Self, ToolExecutionError> {
         let content = crate::message::require_non_empty(content, || {
             ToolExecutionError::other(
@@ -163,10 +177,6 @@ impl From<ToolResultContent> for ToolOutput {
 impl TryFrom<Vec<ToolResultContent>> for ToolOutput {
     type Error = ToolExecutionError;
 
-    // `From` on `main` — the source type was non-empty by construction, so the
-    // conversion could not fail. With `Vec` the emptiness check makes it
-    // fallible; a `From` here would be the unguarded bypass around
-    // [`ToolOutput::content`].
     fn try_from(content: Vec<ToolResultContent>) -> Result<Self, Self::Error> {
         Self::content(content)
     }
@@ -186,60 +196,25 @@ pub trait IntoToolOutput {
 }
 
 #[cfg(test)]
-mod debug_tests {
-    use crate::message::ImageMediaType;
-
-    use super::*;
-
-    #[test]
-    fn debug_reports_shape_without_tool_content() {
-        let output = ToolOutput::content(vec![
-            ToolResultContent::text("Bearer secret-tool-output"),
-            ToolResultContent::json(serde_json::json!({
-                "credential": "secret-json-output"
-            })),
-            ToolResultContent::image_base64("secret-image-output", Some(ImageMediaType::PNG), None),
-        ])
-        .expect("fixture content is non-empty");
-
-        let debug = format!("{output:?}");
-        assert!(debug.contains("content_count: 3"));
-        assert!(debug.contains("text"));
-        assert!(debug.contains("json"));
-        assert!(debug.contains("image"));
-        for secret in [
-            "secret-tool-output",
-            "secret-json-output",
-            "secret-image-output",
-        ] {
-            assert!(!debug.contains(secret));
-        }
-    }
-}
+mod debug_tests;
 
 impl<T> IntoToolOutput for T
 where
     T: Serialize + 'static,
 {
     fn into_tool_output(self) -> Result<ToolOutput, ToolExecutionError> {
-        // `ToolResultContent` and `Vec<ToolResultContent>` are serializable
-        // because they also serve as transcript types. They nevertheless mean
-        // explicit rich output here; serializing them through the fallback would
-        // silently turn an image into a JSON object. Stable Rust cannot express
-        // a blanket `Serialize` impl with negative exceptions, so preserve these
-        // two canonical rich types before taking the serialization path.
+        // Preserve explicit content types before the serialization fallback so
+        // multimodal blocks are not converted into JSON objects.
         let value = &self as &dyn Any;
+        if let Some(output) = value.downcast_ref::<ToolOutput>() {
+            return Ok(output.clone());
+        }
         if let Some(content) = value.downcast_ref::<ToolResultContent>() {
             return Ok(ToolOutput::one(content.clone()));
         }
         if let Some(content) = value.downcast_ref::<Vec<ToolResultContent>>() {
-            // `ToolOutput::content` rejects an empty list, so an empty
-            // rich-content return surfaces here as a normal tool failure the
-            // agent feeds back to the model, instead of a zero-block result
-            // entering history and aborting the whole run at the next
-            // request's boundary validation. Deliberately not normalized to
-            // an empty text block: inventing content the tool never produced
-            // is the fabrication this crate removed.
+            // Reject empty rich output as a tool failure rather than inventing
+            // text or allowing an invalid result into history.
             return ToolOutput::content(content.clone());
         }
         let is_explicit_json = value.is::<serde_json::Value>();
@@ -256,117 +231,5 @@ where
     }
 }
 
-impl IntoToolOutput for ToolOutput {
-    fn into_tool_output(self) -> Result<ToolOutput, ToolExecutionError> {
-        Ok(self)
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use crate::message::{DocumentSourceKind, ImageMediaType};
-
-    use super::*;
-
-    #[test]
-    fn an_empty_content_list_cannot_become_a_tool_output() {
-        // A zero-block tool result cannot be sent — the request boundary
-        // rejects it — so the failure surfaces at construction as an ordinary
-        // tool error instead of aborting the run one request later. Every
-        // route is closed: the rich-content tool return, the explicit
-        // constructor, and the fallible conversion. One empty text block, by
-        // contrast, is a legitimate empty result and passes.
-        let error = Vec::<ToolResultContent>::new()
-            .into_tool_output()
-            .expect_err("an empty rich-content list must not become a ToolOutput");
-        assert!(error.to_string().contains("no content blocks"));
-
-        assert!(ToolOutput::content(Vec::new()).is_err());
-        assert!(ToolOutput::try_from(Vec::<ToolResultContent>::new()).is_err());
-
-        let output = vec![ToolResultContent::text("")]
-            .into_tool_output()
-            .unwrap();
-        assert_eq!(output, ToolOutput::text(""));
-    }
-
-    #[test]
-    fn json_shaped_strings_remain_literal_text() {
-        let text = r#"{"type":"image","data":"not-an-envelope"}"#.to_string();
-        let output = text.clone().into_tool_output().unwrap();
-
-        assert_eq!(output, ToolOutput::text(text.clone()));
-        let content = output.into_content();
-        assert!(
-            matches!(content.first(), Some(ToolResultContent::Text(value)) if value.text == text)
-        );
-    }
-
-    #[test]
-    fn structured_values_remain_json_until_terminal_rendering() {
-        let value = serde_json::json!({"status": "ok", "count": 2});
-        let output = value.clone().into_tool_output().unwrap();
-
-        assert_eq!(output, ToolOutput::json(value.clone()));
-        assert_eq!(output.render(), value.to_string());
-        let content = output.into_content();
-        assert!(matches!(
-            content.first(),
-            Some(ToolResultContent::Json { value: content_value }) if *content_value == value
-        ));
-    }
-
-    #[test]
-    fn explicit_json_string_is_distinct_from_literal_text() {
-        let explicit = serde_json::Value::String("hello".to_string());
-
-        let json_output = explicit.clone().into_tool_output().unwrap();
-        let text_output = "hello".to_string().into_tool_output().unwrap();
-
-        assert_eq!(json_output, ToolOutput::json(explicit.clone()));
-        assert_eq!(json_output.as_json(), Some(&explicit));
-        assert_eq!(json_output.as_text(), None);
-        assert_eq!(text_output, ToolOutput::text("hello"));
-        assert_eq!(text_output.as_text(), Some("hello"));
-    }
-
-    #[test]
-    fn explicit_image_content_preserves_its_type() {
-        let image =
-            ToolResultContent::image_base64("base64data==", Some(ImageMediaType::JPEG), None);
-        let output = image.into_tool_output().unwrap();
-
-        let content = output.into_content();
-        assert!(matches!(
-            content.first(),
-            Some(ToolResultContent::Image(image))
-                if image.media_type == Some(ImageMediaType::JPEG)
-                    && matches!(&image.data, DocumentSourceKind::Base64(data) if data == "base64data==")
-        ));
-    }
-
-    #[test]
-    fn direct_ordered_content_is_not_serialized_as_json() {
-        let content = vec![
-            ToolResultContent::text("before"),
-            ToolResultContent::image_base64("base64data==", Some(ImageMediaType::PNG), None),
-            ToolResultContent::json(serde_json::json!({"after": true})),
-        ];
-
-        let output = content.clone().into_tool_output().unwrap();
-
-        assert_eq!(output.as_content(), &content);
-    }
-
-    #[test]
-    fn singleton_plain_content_has_one_canonical_representation() {
-        assert_eq!(
-            ToolOutput::text("hello"),
-            ToolOutput::one(ToolResultContent::text("hello"))
-        );
-        assert_eq!(
-            ToolOutput::json(serde_json::json!({"ok": true})),
-            ToolOutput::one(ToolResultContent::json(serde_json::json!({"ok": true})))
-        );
-    }
-}
+mod tests;

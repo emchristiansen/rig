@@ -1,51 +1,47 @@
-//! Classic runtime construction extensions for portable completion clients and models.
+//! Classic runtime construction extensions for portable completion providers and models.
+//!
+//! ```
+//! use rig_agent::{Agent, client::AgentModelExt};
+//! use rig_core::completion::CompletionModel;
+//! fn assistant(model: impl CompletionModel + 'static) -> Agent {
+//!     model.into_agent_builder().preamble("Be concise.").build()
+//! }
+//! ```
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{agent::AgentBuilder, extractor::ExtractorBuilder};
+use rig_core::driver::CompletionProvider;
 use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
 
-/// Classic-runtime construction sugar layered on any portable completion client.
-///
-/// Builds on `completion_model` / `CompletionModel` from its supertrait bound
-/// [`rig_core::client::completion::CompletionClient`] and adds the classic
-/// runtime's `agent` and `extractor` builders. The supertrait bound is what lets
-/// the default bodies call `self.completion_model(..)`, so nothing needs
-/// re-forwarding if the portable trait grows a method.
-///
-/// Provider authors implement the portable
-/// [`rig_core::client::completion::CompletionClient`]; this extension trait is
-/// blanket-implemented for every type that does. Callers need *both* traits in
-/// scope to use the full surface — importing `AgentClientExt` alone does not
-/// bring `completion_model` into method-resolution scope, since that method
-/// belongs to the supertrait. `use rig::prelude::*;` brings both in at once for
-/// the full `completion_model` + `agent` + `extractor` surface.
-pub trait AgentClientExt: rig_core::client::completion::CompletionClient {
+/// Construct classic agents and typed extractors from any completion provider.
+/// The provider must produce a model with a `'static` lifetime.
+pub trait AgentProviderExt: CompletionProvider {
     /// Construct a classic agent builder for `model`.
     fn agent(&self, model: impl Into<String>) -> AgentBuilder
     where
-        Self::CompletionModel: 'static,
+        Self::Model: 'static,
     {
-        AgentBuilder::new(self.completion_model(model))
+        AgentBuilder::new(self.completion(model))
     }
 
     /// Construct a classic typed extractor builder for `model`.
     fn extractor<T>(&self, model: impl Into<String>) -> ExtractorBuilder<T>
     where
         T: JsonSchema
-            + for<'de> Deserialize<'de>
+            + serde::de::DeserializeOwned
             + Serialize
             + WasmCompatSend
             + WasmCompatSync
             + 'static,
-        Self::CompletionModel: 'static,
+        Self::Model: 'static,
     {
-        ExtractorBuilder::new(self.completion_model(model))
+        ExtractorBuilder::new(self.completion(model))
     }
 }
 
-impl<C: rig_core::client::completion::CompletionClient> AgentClientExt for C {}
+impl<P: CompletionProvider> AgentProviderExt for P {}
 
 /// Adds classic agent construction to every portable completion model.
 pub trait AgentModelExt: rig_core::completion::CompletionModel + Sized {
