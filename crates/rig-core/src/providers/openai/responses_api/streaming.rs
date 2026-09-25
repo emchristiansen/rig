@@ -357,6 +357,11 @@ pub struct RawChoiceAccumulator {
     /// A protocol refusal raised mid-event, taken by the decoder, which ends the
     /// reply after the usual pre-error flush.
     refusal: Option<ProviderError>,
+    /// Message slots whose text a delta delivered. Their item and terminal
+    /// snapshots carry no phase to the stream: that keeps the recorded
+    /// replay requests of streamed turns byte-identical. Unary and
+    /// terminal-only messages keep their phase.
+    delta_message_slots: std::collections::HashSet<u64>,
 }
 
 /// The item kind that owns a slot's content parts.
@@ -423,9 +428,12 @@ fn message_snapshot_metadata(
             match old.get(key) {
                 Some(prior) if prior == value => {}
                 Some(Value::Array(prior)) => match value {
-                    Value::Array(next) if next.starts_with(prior) => {
-                        delta.insert(key.clone(), Value::Array(next[prior.len()..].to_vec()));
-                    }
+                    Value::Array(next) => match next.strip_prefix(prior.as_slice()) {
+                        Some(suffix) => {
+                            delta.insert(key.clone(), Value::Array(suffix.to_vec()));
+                        }
+                        None => replacement = true,
+                    },
                     _ => replacement = true,
                 },
                 Some(Value::Object(_)) => replacement = true,
@@ -573,6 +581,7 @@ impl RawChoiceAccumulator {
             parent_kinds: Default::default(),
             undecided_parts: Default::default(),
             refusal: None,
+            delta_message_slots: Default::default(),
         }
     }
 
@@ -659,6 +668,7 @@ impl RawChoiceAccumulator {
         out: &mut AdapterOutput,
     ) {
         self.bind_message(output_index, item_id, out);
+        self.delta_message_slots.insert(output_index);
         if self
             .message_parts
             .get(&(output_index, content_index))
@@ -677,6 +687,11 @@ impl RawChoiceAccumulator {
             .then(super::refusal_marker)
             .flatten();
         part.refusal_marked |= refusal;
+        // The marker a delta delivered is the part's metadata, so a later
+        // snapshot of the same refusal does not restate it.
+        if part.metadata.is_none() {
+            part.metadata = marker.clone();
+        }
         part.text.push_str(&delta);
         let key = part.key.clone();
         if self.active_message_part.as_ref() != Some(&key) || marker.is_some() {
@@ -727,12 +742,22 @@ impl RawChoiceAccumulator {
             return;
         }
         let key = part.key.clone();
+        // A refusal block carries its marker from its start, as its deltas'
+        // block would.
+        let start_marker = (refusal && !part.refusal_marked)
+            .then(super::refusal_marker)
+            .flatten();
         if self.active_message_part.as_ref() != Some(&key) {
-            out.text_start(key.clone(), None);
+            out.text_start(key.clone(), start_marker.clone());
             self.active_message_part = Some(key);
+        } else if let Some(marker) = start_marker.clone() {
+            out.text_meta(marker);
         }
         let part = self.message_part(output_index, content_index, item_id, refusal);
         part.refusal_marked |= refusal;
+        if start_marker.is_some() && part.metadata.is_none() {
+            part.metadata = start_marker;
+        }
         // A restatement may complete a prefix, but never repeats delivered text.
         if let Some(suffix) = text.text.strip_prefix(&part.text) {
             if !suffix.is_empty() {
@@ -768,6 +793,11 @@ impl RawChoiceAccumulator {
         out: &mut AdapterOutput,
     ) {
         self.bind_message(output_index, Some(&message.id), out);
+        // Only a message no delta delivered takes its snapshot phase.
+        let phase = message
+            .phase
+            .as_deref()
+            .filter(|_| !self.delta_message_slots.contains(&output_index));
         for (index, content) in message.content.iter().cloned().enumerate() {
             if self.refusal.is_some() {
                 return;
@@ -777,7 +807,7 @@ impl RawChoiceAccumulator {
                 index as u64,
                 Some(&message.id),
                 content,
-                message.phase.as_deref(),
+                phase,
                 out,
             );
         }
@@ -823,7 +853,11 @@ impl RawChoiceAccumulator {
                 .content
                 .insert(content_index, ReasoningTextContent::Unknown(value));
         }
-        if let Some(id) = item_id.filter(|id| !id.is_empty()) {
+        // Like its ciphertext and signature, the provider ID the item's
+        // completion stated stands; a later snapshot only fills a missing one.
+        if let Some(id) = item_id.filter(|id| !id.is_empty())
+            && (!parts.wire_sent || parts.id.is_none())
+        {
             parts.id = Some(id.to_owned());
         }
         parts

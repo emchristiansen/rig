@@ -4162,3 +4162,51 @@ fn a_part_restated_as_the_other_kind_is_refused_before_any_mutation() {
         }
     }
 }
+
+#[test]
+fn a_streamed_message_takes_no_phase_from_its_snapshots_while_unary_keeps_it() {
+    // Known issue: the stream keeps ca81's replay bytes, so a streamed
+    // message replays without the phase a unary reply of it carries.
+    let mut item = opaque_message_fixture(json!([{"type":"output_text","text":"A"}]));
+    item["phase"] = json!("final_answer");
+    let streamed = folded_body_with(ResponsesStreamOptions::strict(), &[
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"delta":"A"}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":item}),
+        completed_with_output(json!([item])),
+    ])
+    .unwrap();
+    let replay = replay_opaque_choice(streamed.choice);
+    assert_eq!(
+        replay[0]["content"],
+        json!([{"type":"output_text","text":"A"}])
+    );
+    assert!(replay[0].get("phase").is_none(), "{replay}");
+
+    // A message only the terminal states keeps its phase, as at ca81.
+    let terminal_only = folded_body_with(
+        ResponsesStreamOptions::strict(),
+        &[completed_with_output(json!([item]))],
+    )
+    .unwrap();
+    assert_eq!(
+        replay_opaque_choice(terminal_only.choice)[0]["phase"],
+        "final_answer"
+    );
+
+    let whole: super::super::Output = serde_json::from_value(item.clone()).unwrap();
+    let unary = replay_opaque_choice(super::super::tests::folded_choice(vec![whole]));
+    assert_eq!(unary[0]["phase"], "final_answer");
+}
+
+#[test]
+fn reasoning_completion_keeps_its_authoritative_provider_id() {
+    let item =
+        |id: &str| json!({"type":"reasoning","id":id,"summary":[],"encrypted_content":"cipher"});
+    let response = folded_body_with(ResponsesStreamOptions::strict(), &[
+        json!({"type":"response.output_item.added","output_index":0,"sequence_number":0,"item":item("rs_added")}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":item("rs_done")}),
+        completed_with_output(json!([item("rs_terminal")])),
+    ])
+    .unwrap();
+    assert_eq!(replay_opaque_choice(response.choice)[0]["id"], "rs_done");
+}

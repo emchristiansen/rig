@@ -222,7 +222,10 @@ fn openai_responses_reasoning_output_preserves_reasoning_text_content() {
     };
     assert_eq!(id, "rs_text_1");
     assert!(summary.is_empty());
-    assert_eq!(content, &[rig::providers::openai::responses_api::ReasoningTextContent::from("visible reasoning")]);
+    assert_eq!(
+        content,
+        &[rig::providers::openai::responses_api::ReasoningTextContent::from("visible reasoning")]
+    );
 }
 
 #[test]

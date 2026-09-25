@@ -254,8 +254,10 @@ impl AdapterOutput {
         // A late declaration cannot excuse a boundary-less block already
         // emitted in this batch (including raw deltas without a start).
         if self.opened.contains(id)
-            || self.items.iter().any(|item| matches!(item, Ok(event)
-                if event.block_id() == Some(id) && Self::is_reasoning_event(event)))
+            || self.items.iter().any(|item| {
+                matches!(item, Ok(event)
+                if event.block_id() == Some(id) && Self::is_reasoning_event(event))
+            })
         {
             return;
         }

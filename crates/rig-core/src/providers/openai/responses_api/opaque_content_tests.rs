@@ -284,7 +284,16 @@ fn opaque_neutral_parts_round_trip_without_becoming_display_text() {
     };
     assert_eq!(reasoning.display_text(), "known");
     let serialized = serde_json::to_value(&reasoning).unwrap();
-    assert_eq!(serialized["content"][1], json!({"type":"opaque_summary","content":raw()}));
-    assert_eq!(serialized["content"][2], json!({"type":"opaque_content","content":raw()}));
-    assert_eq!(serde_json::from_value::<message::Reasoning>(serialized).unwrap(), reasoning);
+    assert_eq!(
+        serialized["content"][1],
+        json!({"type":"opaque_summary","content":raw()})
+    );
+    assert_eq!(
+        serialized["content"][2],
+        json!({"type":"opaque_content","content":raw()})
+    );
+    assert_eq!(
+        serde_json::from_value::<message::Reasoning>(serialized).unwrap(),
+        reasoning
+    );
 }
