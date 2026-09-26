@@ -89,9 +89,13 @@ where
 
     /// Feed one frame.
     ///
-    /// A decoder reads a byte frame that is not UTF-8 lossily, as text; a
-    /// corrupt frame it reports from one carries the frame's exact bytes
-    /// instead, never the replacement text.
+    /// A decoder reads a [`WireFrame::Bytes`] that is not UTF-8 lossily, as
+    /// text; a corrupt frame it reports from one carries the frame's exact
+    /// bytes instead, never the replacement text. The driver recognizes only
+    /// a frame whose type is [`WireFrame`] itself: a custom frame type that
+    /// wraps one (`Wrap(WireFrame)`, `Box<WireFrame>`) must keep its own
+    /// fidelity, for example by passing the `WireFrame` to the driver
+    /// unwrapped.
     pub fn push(&mut self, frame: F) {
         self.push_framed(frame, false);
     }
