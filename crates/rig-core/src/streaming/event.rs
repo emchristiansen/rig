@@ -58,7 +58,40 @@ pub enum StreamEvent {
     /// last among the content events.
     Final(StreamFinal),
     /// Unmodeled provider data, passed through without joining the aggregated choice.
-    Unknown(UnknownPayload),
+    #[serde(rename = "unknown_v2")]
+    Unknown(#[serde(with = "unknown_event_payload")] UnknownPayload),
+}
+
+/// Keeps arbitrary unknown data below a required `payload` member instead of
+/// flattening object keys into [`StreamEvent`]'s internally tagged envelope.
+mod unknown_event_payload {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::UnknownPayload;
+
+    #[derive(Serialize)]
+    struct Ref<'a> {
+        payload: &'a UnknownPayload,
+    }
+
+    #[derive(Deserialize)]
+    struct Owned {
+        payload: UnknownPayload,
+    }
+
+    pub(super) fn serialize<S>(payload: &UnknownPayload, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        Ref { payload }.serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<UnknownPayload, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Owned::deserialize(deserializer)?.payload)
+    }
 }
 
 /// What kind of block a [`StreamEvent::BlockStart`] opened.

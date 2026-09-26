@@ -832,3 +832,126 @@ async fn an_error_envelope_on_a_success_fails_the_xai_call() {
         "the provider's own message must survive: {error}"
     );
 }
+
+// ── declared tools on the outgoing body ─────────────────────────────────
+
+/// The Codex Responses-lite `functions` namespace: its description is the
+/// empty string, and neither it nor its member is a typed Rig tool.
+fn responses_lite_namespace() -> serde_json::Value {
+    serde_json::json!({
+        "type": "namespace",
+        "name": "functions",
+        "description": "",
+        "tools": [{
+            "type": "function",
+            "name": "exec_command",
+            "description": "",
+            "strict": false,
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+        }]
+    })
+}
+
+/// A declared function whose `strict` is an explicit `false` and whose
+/// description is empty.
+fn declared_function() -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "name": "post_to_bus",
+        "description": "",
+        "strict": false,
+        "parameters": {"type": "object", "properties": {"body": {"type": "string"}}}
+    })
+}
+
+fn lookup_tool() -> completion::ToolDefinition {
+    completion::ToolDefinition {
+        name: "lookup".to_string(),
+        description: "Look something up".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"q": {"type": "string"}}
+        }),
+    }
+}
+
+/// A turn carrying one typed tool and `declared` in `additional_params["tools"]`.
+fn turn_declaring(declared: serde_json::Value) -> CompletionRequest {
+    CompletionRequest {
+        tools: vec![lookup_tool()],
+        additional_params: Some(serde_json::json!({ "tools": declared })),
+        ..prompt()
+    }
+}
+
+/// The body's `tools` array, as sent.
+fn sent_tools(wire: &Responses, request: CompletionRequest) -> Vec<serde_json::Value> {
+    encoded_body_of(wire, request, Mode::Unary)["tools"]
+        .as_array()
+        .expect("tools serialize as an array")
+        .clone()
+}
+
+/// On the HTTP body, declared tools are the JSON values the caller wrote, in
+/// place between the typed request tools and the wire's default tools. Typed
+/// tools keep their typed serialization, `strict: false` included.
+#[test]
+fn declared_tools_reach_the_http_body_as_the_caller_wrote_them() {
+    let wire = openai().with_tool(ResponsesToolDefinition::hosted("web_search"));
+    let declared = serde_json::json!([responses_lite_namespace(), declared_function()]);
+
+    let tools = sent_tools(&wire, turn_declaring(declared.clone()));
+
+    assert_eq!(
+        tools.len(),
+        4,
+        "typed, two declared, one default: {tools:?}"
+    );
+    assert_eq!(tools[0]["name"], "lookup");
+    assert_eq!(
+        tools[0]["strict"],
+        serde_json::Value::Bool(false),
+        "a typed tool always states `strict`"
+    );
+    assert_eq!(
+        serde_json::Value::Array(tools[1..3].to_vec()),
+        declared,
+        "declared tools must reach the provider as the same JSON values, including \
+         the empty descriptions and the explicit `strict: false`"
+    );
+    assert_eq!(tools[3]["type"], "web_search");
+}
+
+/// Under strict mode a declared namespace is sent verbatim: no `strict` is
+/// added to it or to its member, and the empty description survives. Only
+/// the typed tool and the declared top-level function take strict mode.
+#[test]
+fn a_declared_namespace_reaches_the_http_body_verbatim_under_strict_mode() {
+    let wire = openai().with_strict_tools();
+    let declared = serde_json::json!([responses_lite_namespace(), declared_function()]);
+
+    let tools = sent_tools(&wire, turn_declaring(declared));
+
+    assert_eq!(tools.len(), 3);
+    assert_eq!(tools[0]["strict"], serde_json::Value::Bool(true));
+    assert_eq!(tools[1], responses_lite_namespace());
+    assert_eq!(tools[2]["strict"], serde_json::Value::Bool(true));
+    assert_eq!(tools[2]["description"], "");
+}
+
+/// The Codex contract, with strict tools, sends a declared Responses-lite
+/// namespace exactly as written on the HTTP lane.
+#[test]
+fn the_codex_lane_sends_a_declared_namespace_verbatim_under_strict_mode() {
+    let wire = chatgpt().with_strict_tools();
+    let request = CompletionRequest {
+        additional_params: Some(serde_json::json!({
+            "tools": [responses_lite_namespace()]
+        })),
+        ..prompt()
+    };
+
+    let tools = sent_tools(&wire, request);
+
+    assert_eq!(tools, vec![responses_lite_namespace()]);
+}

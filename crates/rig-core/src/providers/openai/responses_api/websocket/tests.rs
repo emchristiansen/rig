@@ -991,3 +991,71 @@ async fn an_unknown_event_mid_turn_is_returned_with_its_tag() {
             .is_terminal()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Declared tools on the `response.create` frame.
+// ---------------------------------------------------------------------------
+
+/// A tool declared through `additional_params["tools"]` reaches the
+/// `response.create` frame as the same JSON values the caller wrote, on a
+/// strict wire: the empty namespace description survives, the namespace and
+/// its member gain no `strict`, and the declared function keeps its empty
+/// description while taking strict mode's own transformation. A Responses-lite
+/// client declares exactly such a namespace, and a provider that requires
+/// `description` refuses the frame if it is dropped.
+#[tokio::test]
+async fn a_declared_tool_reaches_the_response_create_frame_as_written() {
+    let namespace = json!({
+        "type": "namespace",
+        "name": "functions",
+        "description": "",
+        "tools": [{
+            "type": "function",
+            "name": "exec_command",
+            "description": "",
+            "strict": false,
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+        }]
+    });
+    let function = json!({
+        "type": "function",
+        "name": "post_to_bus",
+        "description": "",
+        "strict": false,
+        "parameters": {"type": "object", "properties": {"body": {"type": "string"}}}
+    });
+    let script = Script::new().turn([completed_event("resp_1")]);
+    let mut session = ResponsesWebSocketSession::from_connection(
+        test_wire("https://api.openai.com/v1").with_strict_tools(),
+        script.connection(),
+        None,
+    );
+
+    let mut request = user_request("hello");
+    request.additional_params = Some(json!({ "tools": [namespace.clone(), function.clone()] }));
+    session
+        .completion(request)
+        .await
+        .expect("the turn should complete");
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 1, "one frame for the turn: {frames:?}");
+    let frame = &frames[0];
+    assert_eq!(frame["type"], json!("response.create"));
+    let tools = frame["tools"].as_array().expect("the frame carries tools");
+    assert_eq!(tools.len(), 2);
+    assert_eq!(
+        tools[0], namespace,
+        "the namespace reaches the frame verbatim"
+    );
+    let mut untouched = tools[1].as_object().expect("a tool is an object").clone();
+    assert_eq!(untouched.remove("strict"), Some(json!(true)));
+    untouched.remove("parameters");
+    let mut expected = function.as_object().expect("fixture is an object").clone();
+    expected.remove("strict");
+    expected.remove("parameters");
+    assert_eq!(
+        untouched, expected,
+        "every other declared member is as written"
+    );
+}

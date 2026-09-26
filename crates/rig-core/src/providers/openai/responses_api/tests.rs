@@ -927,7 +927,7 @@ fn responses_request_conversion_keeps_tools_non_strict_by_default() {
     let req = CompletionRequest::try_from(("gpt-4o-mini".to_string(), weather_tool_request()))
         .expect("request should convert");
 
-    let tool = &req.tools[0];
+    let tool = req.tools[0].definition();
     assert!(!tool.strict);
     assert_eq!(tool.parameters["required"], json!(["location"]));
     assert!(tool.parameters.get("additionalProperties").is_none());
@@ -960,7 +960,7 @@ fn responses_wire_strict_tools_opt_in_sanitizes_all_function_tools() {
     let req = wire_request(&wire, request);
 
     assert_eq!(req.tools.len(), 3);
-    for tool in &req.tools {
+    for tool in req.tools.iter().map(ResponsesRequestTool::definition) {
         assert!(tool.strict, "{} should be strict", tool.name);
         assert_eq!(tool.parameters["additionalProperties"], json!(false));
     }
@@ -983,7 +983,7 @@ fn responses_wire_default_preserves_all_function_tools_as_constructed() {
     let req = wire_request(&wire, request);
 
     assert_eq!(req.tools.len(), 3);
-    for tool in &req.tools {
+    for tool in req.tools.iter().map(ResponsesRequestTool::definition) {
         assert!(!tool.strict, "{} should not be strict", tool.name);
         assert!(tool.parameters.get("additionalProperties").is_none());
     }
@@ -999,11 +999,170 @@ fn responses_explicit_strict_tool_stays_strict_on_a_default_wire() {
 
     let req = wire_request(&wire, weather_tool_request());
 
-    assert!(!req.tools[0].strict);
-    assert!(req.tools[1].strict);
+    assert!(!req.tools[0].definition().strict);
+    assert!(req.tools[1].definition().strict);
     assert_eq!(
-        req.tools[1].parameters["additionalProperties"],
+        req.tools[1].definition().parameters["additionalProperties"],
         json!(false)
+    );
+}
+
+/// The declarations a Codex Responses-lite client sends: a `functions`
+/// namespace whose description is the empty string, with a function member,
+/// and a top-level function whose `strict` is an explicit `false` and whose
+/// description is empty.
+fn declared_tools_payload() -> Value {
+    json!([
+        {
+            "type": "namespace",
+            "name": "functions",
+            "description": "",
+            "tools": [{
+                "type": "function",
+                "name": "exec_command",
+                "description": "",
+                "strict": false,
+                "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+            }]
+        },
+        {
+            "type": "function",
+            "name": "post_to_bus",
+            "description": "",
+            "strict": false,
+            "parameters": {"type": "object", "properties": {"body": {"type": "string"}}}
+        }
+    ])
+}
+
+/// Declared tools stay declarations through the conversion, after the typed
+/// request tools, and serialize as the JSON values the caller wrote.
+#[test]
+fn declared_tools_convert_to_declarations_after_the_typed_tools() {
+    let mut request = weather_tool_request();
+    request.additional_params = Some(json!({ "tools": declared_tools_payload() }));
+    let req = CompletionRequest::try_from(("gpt-4o-mini".to_string(), request))
+        .expect("request should convert");
+
+    assert_eq!(req.tools.len(), 3);
+    assert!(matches!(req.tools[0], ResponsesRequestTool::Defined(_)));
+    assert!(matches!(req.tools[1], ResponsesRequestTool::Declared(_)));
+    assert!(matches!(req.tools[2], ResponsesRequestTool::Declared(_)));
+    let tools = serde_json::to_value(&req.tools).expect("tools should serialize");
+    let tools = tools.as_array().expect("tools serialize as an array");
+    assert_eq!(Value::Array(tools[1..].to_vec()), declared_tools_payload());
+    // The typed view of a declaration is still available to inspect.
+    assert_eq!(req.tools[1].definition().kind, "namespace");
+    assert_eq!(req.tools[2].definition().name, "post_to_bus");
+}
+
+/// Strict mode applies its own transformation, `strict: true` and the
+/// sanitized schema, to a declared function, and nothing else: an empty
+/// description, explicit nulls and falses, and members the typed view does not
+/// model stay as written. A declared namespace or hosted tool is untouched and
+/// gains no `strict`.
+#[test]
+fn strict_tools_apply_only_their_own_transformation_to_declared_tools() {
+    let wire = openai_wire("gpt-4o-mini").with_strict_tools();
+
+    let function = json!({
+        "type": "function",
+        "name": "post_to_bus",
+        "description": "",
+        "strict": false,
+        "defer_loading": false,
+        "x_vendor_hint": null,
+        "parameters": {"type": "object", "properties": {"body": {"type": "string"}}}
+    });
+    let hosted = json!({"type": "web_search", "search_context_size": "low"});
+    let mut declared = declared_tools_payload();
+    declared[1] = function.clone();
+    declared
+        .as_array_mut()
+        .expect("the fixture is an array")
+        .push(hosted.clone());
+
+    let mut request = weather_tool_request();
+    request.additional_params = Some(json!({ "tools": declared.clone() }));
+    let req = wire_request(&wire, request);
+    let tools = serde_json::to_value(&req.tools).expect("tools should serialize");
+
+    // Neither the namespace nor the hosted tool is a function, so strict mode
+    // has nothing to change; in particular it adds no `strict`.
+    assert_eq!(tools[1], declared[0]);
+    assert_eq!(tools[3], hosted);
+
+    // The declared function stays a declaration, gains exactly strict mode's
+    // transformation, and keeps every other member it was written with.
+    assert!(matches!(req.tools[2], ResponsesRequestTool::Declared(_)));
+    let rewritten = tools[2].as_object().expect("a declared tool is an object");
+    assert_eq!(rewritten["strict"], json!(true));
+    assert_eq!(
+        rewritten["parameters"]["additionalProperties"],
+        json!(false)
+    );
+    let mut untouched = rewritten.clone();
+    untouched.remove("strict");
+    untouched.remove("parameters");
+    let mut expected = function.as_object().expect("fixture is an object").clone();
+    expected.remove("strict");
+    expected.remove("parameters");
+    assert_eq!(
+        untouched, expected,
+        "strict mode must leave the empty description, the explicit null and \
+         false, and the unmodelled member exactly as declared"
+    );
+
+    // The typed view agrees with what is serialized.
+    let definition = req.tools[2].definition();
+    assert!(definition.strict);
+    assert_eq!(definition.parameters, rewritten["parameters"]);
+
+    // Strict mode is idempotent on a declared tool.
+    let again = req.tools[2].clone().with_strict();
+    assert_eq!(again, req.tools[2]);
+}
+
+#[test]
+fn a_malformed_tools_payload_is_still_refused() {
+    for payload in [
+        json!({"type": "function"}),
+        json!(["not a tool object"]),
+        json!([{"name": "missing_type"}]),
+    ] {
+        let mut request = weather_tool_request();
+        request.additional_params = Some(json!({ "tools": payload.clone() }));
+        let err = CompletionRequest::try_from(("gpt-4o-mini".to_string(), request))
+            .expect_err("a malformed tools payload must be refused");
+        assert!(
+            err.to_string()
+                .contains("Invalid OpenAI Responses tools payload in additional_params"),
+            "{payload}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_tools_array_survives_a_serialize_deserialize_round_trip() {
+    let mut request = weather_tool_request();
+    request.additional_params = Some(json!({ "tools": declared_tools_payload() }));
+    let req = CompletionRequest::try_from(("gpt-4o-mini".to_string(), request))
+        .expect("request should convert");
+
+    // The whole request does not round-trip (its `input` items are
+    // serialize-only), so the property is asserted on the `tools` array: a
+    // deserialized tool is kept as the JSON it was, and writes back unchanged.
+    let tools = serde_json::to_value(&req.tools).expect("tools should serialize");
+    let reparsed: Vec<ResponsesRequestTool> =
+        serde_json::from_value(tools.clone()).expect("tools should deserialize");
+    assert!(
+        reparsed
+            .iter()
+            .all(|tool| matches!(tool, ResponsesRequestTool::Declared(_)))
+    );
+    assert_eq!(
+        serde_json::to_value(&reparsed).expect("tools should serialize"),
+        tools
     );
 }
 

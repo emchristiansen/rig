@@ -854,3 +854,89 @@ fn the_streamed_incomplete_opt_in_is_a_responses_route_option() {
         chat.wire
     );
 }
+
+/// Copilot's Responses route states strict tools by default. That applies to
+/// the typed tools Rig builds and to a declared function's own `strict` and
+/// schema; a declared Responses-lite namespace reaches the body exactly as the
+/// caller wrote it, empty description included and no `strict` added.
+#[test]
+fn the_responses_route_sends_declared_tools_as_written_under_its_strict_default() {
+    let namespace = serde_json::json!({
+        "type": "namespace",
+        "name": "functions",
+        "description": "",
+        "tools": [{
+            "type": "function",
+            "name": "exec_command",
+            "description": "",
+            "strict": false,
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+        }]
+    });
+    let function = serde_json::json!({
+        "type": "function",
+        "name": "post_to_bus",
+        "description": "",
+        "strict": false,
+        "parameters": {"type": "object", "properties": {"body": {"type": "string"}}}
+    });
+    let request = CompletionRequest {
+        tools: vec![crate::completion::ToolDefinition {
+            name: "lookup".to_string(),
+            description: "Look something up".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"q": {"type": "string"}}
+            }),
+        }],
+        additional_params: Some(serde_json::json!({
+            "tools": [namespace.clone(), function.clone()]
+        })),
+        ..prompt()
+    };
+
+    let wire = copilot().completion(super::super::GPT_5_3_CODEX);
+    let mut encoded = wire
+        .encode(request, Mode::Unary)
+        .expect("the request encodes");
+    let request = encoded.requests.remove(0);
+    assert_eq!(request.uri().path(), "/responses");
+    let Body::Bytes(bytes) = request.into_body() else {
+        panic!("a Responses body is bytes");
+    };
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("the body is JSON");
+    let tools = body["tools"]
+        .as_array()
+        .expect("tools serialize as an array");
+
+    assert_eq!(
+        tools.len(),
+        3,
+        "typed, then the two declarations: {tools:?}"
+    );
+    assert_eq!(tools[0]["name"], "lookup");
+    assert_eq!(tools[0]["strict"], serde_json::Value::Bool(true));
+    assert_eq!(
+        tools[1], namespace,
+        "the declared namespace is sent verbatim"
+    );
+    // Strict mode's transformation of the declared function, computed by the
+    // typed shape that defines it: `strict: true` and the sanitized schema.
+    let strict = crate::providers::openai::responses_api::ResponsesToolDefinition::function(
+        "post_to_bus",
+        "",
+        function["parameters"].clone(),
+    )
+    .with_strict();
+    let mut expected = function;
+    expected["strict"] = serde_json::Value::Bool(true);
+    expected["parameters"] = strict.parameters;
+    assert_eq!(
+        expected["parameters"]["additionalProperties"],
+        serde_json::Value::Bool(false)
+    );
+    assert_eq!(
+        tools[2], expected,
+        "a declared function takes exactly strict mode's transformation"
+    );
+}

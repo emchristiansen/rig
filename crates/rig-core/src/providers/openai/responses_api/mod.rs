@@ -58,8 +58,13 @@ pub struct CompletionRequest {
     tool_choice: Option<ToolChoice>,
     /// The tools you want to use. This supports both function tools and hosted tools
     /// such as `web_search`, `file_search`, and `computer_use`.
+    ///
+    /// Tools rig builds from typed definitions come first, then any tools declared
+    /// verbatim through `additional_params["tools"]`, then the wire's default tools.
+    /// A declared tool is serialized as the JSON object the caller wrote; see
+    /// [`ResponsesRequestTool`].
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<ResponsesToolDefinition>,
+    pub tools: Vec<ResponsesRequestTool>,
     /// Additional parameters
     #[serde(flatten)]
     pub additional_parameters: AdditionalParameters,
@@ -68,7 +73,7 @@ pub struct CompletionRequest {
 impl CompletionRequest {
     /// Appends a function or provider-hosted tool to the request.
     pub fn with_tool(mut self, tool: impl Into<ResponsesToolDefinition>) -> Self {
-        self.tools.push(tool.into());
+        self.tools.push(ResponsesRequestTool::Defined(tool.into()));
         self
     }
 
@@ -78,7 +83,11 @@ impl CompletionRequest {
         I: IntoIterator<Item = Tool>,
         Tool: Into<ResponsesToolDefinition>,
     {
-        self.tools.extend(tools.into_iter().map(Into::into));
+        self.tools.extend(
+            tools
+                .into_iter()
+                .map(|tool| ResponsesRequestTool::Defined(tool.into())),
+        );
         self
     }
 }
@@ -854,10 +863,6 @@ impl ResponsesToolDefinition {
         self.config.insert(key.into(), value);
         self
     }
-
-    fn normalize(self) -> Self {
-        self.with_strict()
-    }
 }
 
 impl From<completion::ToolDefinition> for ResponsesToolDefinition {
@@ -869,6 +874,163 @@ impl From<completion::ToolDefinition> for ResponsesToolDefinition {
         } = value;
 
         Self::function(name, description, parameters)
+    }
+}
+
+/// One entry of a Responses request's `tools` array.
+///
+/// Rig builds most tools from typed [`ResponsesToolDefinition`]s, and those
+/// serialize exactly as the typed shape says, `strict` included. A tool supplied
+/// through `additional_params["tools"]` is different: it is the caller's own
+/// declaration, and the provider must receive the JSON values the caller wrote.
+/// Round-tripping it through [`ResponsesToolDefinition`] changes it: the typed
+/// shape omits an empty `name` or `description` and a null `parameters`, and it
+/// always writes `strict`, so an explicit `"description": ""` on a namespace
+/// disappears and a namespace or hosted tool written without `strict` gains one.
+/// A provider that requires the member, or rejects the added one, then refuses
+/// the request. So a declared tool keeps its original JSON object and serializes
+/// that object, while its typed view stays available to code that inspects or
+/// normalizes the request.
+///
+/// A declared tool is preserved except for a transformation the caller asked
+/// for: strict mode sets `strict` and sanitizes `parameters` on a declared
+/// function, and leaves every other member as written. A declared namespace or
+/// hosted tool is never changed. The fidelity is of JSON values, not of bytes:
+/// key order and whitespace may change when the object is serialized again.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponsesRequestTool {
+    /// A tool rig built from a typed definition.
+    Defined(ResponsesToolDefinition),
+    /// A tool declared verbatim through `additional_params["tools"]`.
+    Declared(DeclaredResponsesTool),
+}
+
+/// A caller-declared tool: the JSON object as written, and its typed view.
+///
+/// Both are fixed at construction and cannot be changed independently, so the
+/// object that is serialized is always the one the typed view was parsed from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredResponsesTool {
+    value: Map<String, Value>,
+    definition: ResponsesToolDefinition,
+}
+
+impl DeclaredResponsesTool {
+    /// Parse one declared tool, keeping the object it came from.
+    ///
+    /// The typed parse still runs, so a declaration that is not a tool object is
+    /// refused as it was before: a non-object, a missing `type`, or a member of
+    /// the wrong JSON type.
+    pub fn from_value(value: Value) -> Result<Self, serde_json::Error> {
+        let Value::Object(object) = value else {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "a Responses tool declaration must be a JSON object",
+            ));
+        };
+        let definition =
+            serde_json::from_value::<ResponsesToolDefinition>(Value::Object(object.clone()))?;
+        Ok(Self {
+            value: object,
+            definition,
+        })
+    }
+
+    /// The JSON object the caller declared, which is what gets serialized.
+    pub fn value(&self) -> &Map<String, Value> {
+        &self.value
+    }
+
+    /// The typed view of the declaration.
+    pub fn definition(&self) -> &ResponsesToolDefinition {
+        &self.definition
+    }
+}
+
+/// The tools declared in `additional_params["tools"]`, each kept as written.
+fn declared_tools(raw: Value) -> Result<Vec<ResponsesRequestTool>, serde_json::Error> {
+    let Value::Array(items) = raw else {
+        return Err(<serde_json::Error as serde::de::Error>::custom(
+            "`tools` must be a JSON array of tool declarations",
+        ));
+    };
+    items
+        .into_iter()
+        .map(|item| DeclaredResponsesTool::from_value(item).map(ResponsesRequestTool::Declared))
+        .collect()
+}
+
+impl ResponsesRequestTool {
+    /// The typed view of this tool, whichever way it was supplied.
+    pub fn definition(&self) -> &ResponsesToolDefinition {
+        match self {
+            Self::Defined(definition) => definition,
+            Self::Declared(declared) => &declared.definition,
+        }
+    }
+
+    /// Enables strict mode, as [`ResponsesToolDefinition::with_strict`] does.
+    ///
+    /// A declared tool stays a declaration. Strict mode's own transformation,
+    /// `strict: true` and the sanitized `parameters` schema, is written into the
+    /// declared object, and every other member the caller wrote is kept as it was.
+    /// That includes an empty `description` and members the typed view does not
+    /// model. Only a function tool changes; a hosted tool or a namespace comes back
+    /// untouched, with no `strict` added. Applying it twice changes nothing further.
+    pub fn with_strict(self) -> Self {
+        match self {
+            Self::Defined(definition) => Self::Defined(definition.with_strict()),
+            Self::Declared(mut declared) => {
+                let rewritten = declared.definition.clone().with_strict();
+                if rewritten.strict != declared.definition.strict {
+                    declared
+                        .value
+                        .insert("strict".to_string(), Value::Bool(rewritten.strict));
+                }
+                if rewritten.parameters != declared.definition.parameters {
+                    declared
+                        .value
+                        .insert("parameters".to_string(), rewritten.parameters.clone());
+                }
+                declared.definition = rewritten;
+                Self::Declared(declared)
+            }
+        }
+    }
+
+    pub(crate) fn normalize(self) -> Self {
+        self.with_strict()
+    }
+}
+
+impl From<ResponsesToolDefinition> for ResponsesRequestTool {
+    fn from(definition: ResponsesToolDefinition) -> Self {
+        Self::Defined(definition)
+    }
+}
+
+impl Serialize for ResponsesRequestTool {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Defined(definition) => definition.serialize(serializer),
+            Self::Declared(declared) => declared.value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ResponsesRequestTool {
+    /// A deserialized request's tools are the JSON a caller wrote, so each one is
+    /// kept as a declaration rather than re-derived from its typed view.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        DeclaredResponsesTool::from_value(value)
+            .map(Self::Declared)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -1336,10 +1498,8 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
                 )));
             }
             if let Some(raw_tools) = additional_params_map.remove("tools") {
-                additional_tools = serde_json::from_value::<Vec<ResponsesToolDefinition>>(
-                    raw_tools,
-                )
-                .map_err(|err| {
+                // Declared tools keep their JSON objects; see `ResponsesRequestTool`.
+                additional_tools = declared_tools(raw_tools).map_err(|err| {
                     EncodeError::request(format!(
                         "Invalid OpenAI Responses tools payload in additional_params: {err}"
                     ))
@@ -1383,10 +1543,11 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
         }
 
         let tool_choice = req.tool_choice.map(ToolChoice::try_from).transpose()?;
-        let mut tools: Vec<ResponsesToolDefinition> = req
+        let mut tools: Vec<ResponsesRequestTool> = req
             .tools
             .into_iter()
             .map(ResponsesToolDefinition::from)
+            .map(ResponsesRequestTool::Defined)
             .collect();
         tools.append(&mut additional_tools);
 

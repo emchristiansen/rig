@@ -778,3 +778,43 @@ async fn keepalive_between_turns_keeps_the_continuation_eligible() {
     finish_turn(&mut session).await;
     assert_eq!(script.sent_json()[1]["previous_response_id"], "resp_1");
 }
+
+/// The Codex websocket lane, with strict tools, sends a declared
+/// Responses-lite `functions` namespace on the `response.create` frame
+/// exactly as written: the empty description survives and no `strict` is
+/// added to the namespace or its member.
+#[tokio::test]
+async fn a_declared_namespace_reaches_the_codex_frame_verbatim_under_strict_mode() {
+    let namespace = json!({
+        "type": "namespace",
+        "name": "functions",
+        "description": "",
+        "tools": [{
+            "type": "function",
+            "name": "exec_command",
+            "description": "",
+            "strict": false,
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+        }]
+    });
+    let script = Script::new().turn([completed("resp_1")]);
+    let mut session = CodexWebSocketSession::from_connection(
+        codex_wire().with_strict_tools(),
+        CodexIdentity::generate(),
+        script.connection(),
+        None,
+    )
+    .expect("the ChatGPT dialect speaks the Codex contract");
+
+    let mut request = user_request("hello");
+    request.additional_params = Some(json!({ "tools": [namespace.clone()] }));
+    session
+        .completion(request)
+        .await
+        .expect("the turn should complete");
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 1, "one frame for the turn: {frames:?}");
+    assert_eq!(frames[0]["type"], "response.create");
+    assert_eq!(frames[0]["tools"], json!([namespace]));
+}

@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use super::streaming::{IncompleteTerminal, ResponsesDecoder, ResponsesStreamOptions};
 use super::{
-    CompletionRequest, ResponsesRequestParams, ResponsesToolDefinition, SystemInstructionsPlacement,
+    CompletionRequest, ResponsesRequestParams, ResponsesRequestTool, ResponsesToolDefinition,
+    SystemInstructionsPlacement,
 };
 
 /// The Responses wire: `POST /responses`, SSE when streamed.
@@ -196,12 +197,20 @@ impl Responses {
             request,
             system_instructions_placement: self.system_instructions,
         })?;
-        request.tools.extend(self.tools.clone());
+        // Typed request tools, then declared tools, then this wire's defaults.
+        request.tools.extend(
+            self.tools
+                .iter()
+                .cloned()
+                .map(ResponsesRequestTool::Defined),
+        );
         if self.strict_tools {
+            // Strict mode rewrites a declared tool only by its own
+            // transformation; see `ResponsesRequestTool::with_strict`.
             request.tools = request
                 .tools
                 .into_iter()
-                .map(ResponsesToolDefinition::normalize)
+                .map(ResponsesRequestTool::normalize)
                 .collect();
         }
         if let Some(instructions) = &self.provider.instructions {
