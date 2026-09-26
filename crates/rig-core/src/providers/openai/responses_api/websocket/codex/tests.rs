@@ -347,8 +347,9 @@ async fn root_sends_never_chain_and_carry_one_identity() {
                 "thread_id": identity.thread_id(),
             })
         );
-        // Websocket mode is event-driven: the SSE-only flags stay off the wire.
-        assert!(frame.get("stream").is_none(), "got {frame}");
+        // The official client states `stream: true` on every frame; the
+        // SSE-only `background` stays off the wire.
+        assert_eq!(frame["stream"], json!(true), "got {frame}");
         assert!(frame.get("background").is_none(), "got {frame}");
         assert!(frame.get("generate").is_none(), "got {frame}");
     }
@@ -419,6 +420,7 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
         openapi_schema::assert_valid(Schema::WebSocketResponseCreate, frame);
         assert_eq!(frame["type"], "response.create");
         assert_eq!(frame["store"], json!(false), "store is stated: {frame}");
+        assert_eq!(frame["stream"], json!(true), "stream is stated: {frame}");
         for unset in ["top_p", "temperature", "max_output_tokens"] {
             assert!(
                 frame.get(unset).is_none(),

@@ -1180,8 +1180,10 @@ impl ResponsesWebSocketSession {
                 .responses_request(completion_request, false, identity, input_requirement)?;
 
         // WebSocket mode is always event-driven, so these HTTP/SSE-specific flags
-        // are ignored by the provider and only add noise to the payload.
-        request.stream = None;
+        // are ignored by the provider and only add noise to the payload. A
+        // Codex session, the only caller with an identity, states
+        // `stream: true` instead, as the official client does on every frame.
+        request.stream = identity.map(|_| true);
         request.additional_parameters.background = None;
 
         match chaining {
