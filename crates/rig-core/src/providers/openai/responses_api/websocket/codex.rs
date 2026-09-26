@@ -390,10 +390,11 @@ impl CodexWebSocketSession {
     ///
     /// The Codex backend's `x-codex-turn-state` sticky-routing token is such
     /// a value. The backend hands it over in the `headers` of a
-    /// `response.metadata` event, which this session yields as
-    /// [`ResponsesWebSocketEvent::Unknown`] with its complete payload, and
-    /// the official client sends it back on every later frame of that turn,
-    /// never across turns.
+    /// `response.metadata` event, which [`Self::next_event`] yields as
+    /// [`ResponsesWebSocketEvent::Unknown`] with its complete payload (a
+    /// streamed turn passes it on as `StreamEvent::Unknown`; the folded reply
+    /// of [`Self::completion`] does not carry it), and the official client
+    /// sends it back on every later frame of that turn, never across turns.
     pub fn set_frame_metadata(
         &mut self,
         key: impl Into<String>,
