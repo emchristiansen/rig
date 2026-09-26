@@ -702,6 +702,11 @@ impl ResponsesWebSocketSessionBuilder {
 /// Sequential Responses session with automatic response-ID chaining.
 /// Completed and incomplete responses update the chain unless a request supplies
 /// its own `previous_response_id`. Call [`Self::close`] to perform a close handshake.
+///
+/// Over a Codex-contract wire this session is not an emulation of the official
+/// client: its frames carry the wire's Codex shaping, such as `store: false`,
+/// but not the members only a [`codex::CodexWebSocketSession`] states, such as
+/// `stream: true`. Use that session for the official client's frames.
 pub struct ResponsesWebSocketSession {
     wire: Responses,
     previous_response_id: Option<String>,
@@ -713,6 +718,9 @@ pub struct ResponsesWebSocketSession {
     /// drain dropped at any suspension point cannot destroy them.
     recovered: Vec<UnrecognizedEvent>,
     socket: BoxedWebSocketConnection,
+    /// The first Codex `x-codex-turn-state` token a `response.metadata` event
+    /// of an in-flight turn handed the session, until the caller takes it.
+    turn_state: Option<String>,
     in_flight: bool,
     event_timeout: Option<Duration>,
     closed: bool,
@@ -753,7 +761,58 @@ impl ResponsesWebSocketSession {
             event_timeout,
             closed: false,
             failed: false,
+            turn_state: None,
         }
+    }
+
+    /// Record the Codex sticky-routing token a `response.metadata` event
+    /// carries in its `headers`, when the session holds none: the first
+    /// token wins until it is taken, as the official client keeps the first
+    /// one of a turn. A name is matched case-insensitively and a value is a
+    /// string, or the first string of an array, as the official client
+    /// reads them.
+    fn observe_turn_state(&mut self, event: &ResponsesWebSocketEvent) {
+        fn first_string(value: &serde_json::Value) -> Option<&str> {
+            match value {
+                serde_json::Value::String(value) => Some(value),
+                serde_json::Value::Array(items) => items.first().and_then(first_string),
+                _ => None,
+            }
+        }
+        if self.turn_state.is_some() {
+            return;
+        }
+        let ResponsesWebSocketEvent::Unknown(event) = event else {
+            return;
+        };
+        if event.kind != RESPONSE_METADATA_EVENT {
+            return;
+        }
+        let Some(headers) = event
+            .payload
+            .value()
+            .get("headers")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return;
+        };
+        // Like the official client, a name whose value is not a string does
+        // not end the search: another spelling of the name may carry one.
+        self.turn_state = headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(codex::TURN_STATE_METADATA_KEY))
+            .find_map(|(_, value)| first_string(value))
+            .map(str::to_owned);
+    }
+
+    /// The Codex turn-state token recorded since it was last taken.
+    pub(crate) fn turn_state(&self) -> Option<&str> {
+        self.turn_state.as_deref()
+    }
+
+    /// Take the recorded Codex turn-state token, so the next one is recorded.
+    pub(crate) fn take_turn_state(&mut self) -> Option<String> {
+        self.turn_state.take()
     }
 
     /// Return the response ID retained for automatic chaining, if any.
@@ -789,7 +848,12 @@ impl ResponsesWebSocketSession {
         options: ResponsesWebSocketCreateOptions,
     ) -> Result<(), ProviderError> {
         self.ensure_can_send()?;
-        let request = self.prepare_request(completion_request, Chaining::Automatic, None)?;
+        let request = self.prepare_request(
+            completion_request,
+            Chaining::Automatic,
+            None,
+            super::InputRequirement::for_create(&options),
+        )?;
         let frame = encode_frame(&request, options.generate, |_| Ok(()))?;
         self.send_encoded(request, frame).await
     }
@@ -892,6 +956,7 @@ impl ResponsesWebSocketSession {
                 Ok(None) => continue,
                 Err(error) => return Err(self.fail_session(error)),
             };
+            self.observe_turn_state(&event);
             if let ResponsesWebSocketEvent::Done(done) = &event {
                 // OpenAI may emit `response.done` after the turn has already ended at
                 // `response.completed`. Ignore that trailing event on the next turn.
@@ -1110,17 +1175,20 @@ impl ResponsesWebSocketSession {
         completion_request: crate::completion::CompletionRequest,
         chaining: Chaining,
         identity: Option<&super::codex_identity::CodexIdentity>,
+        input_requirement: super::InputRequirement,
     ) -> Result<crate::providers::openai::responses_api::CompletionRequest, ProviderError> {
         // Direct session requests bypass builder validation.
         completion_request.validate_message_content()?;
 
-        let mut request = self
-            .wire
-            .responses_request(completion_request, false, identity)?;
+        let mut request =
+            self.wire
+                .responses_request(completion_request, false, identity, input_requirement)?;
 
         // WebSocket mode is always event-driven, so these HTTP/SSE-specific flags
-        // are ignored by the provider and only add noise to the payload.
-        request.stream = None;
+        // are ignored by the provider and only add noise to the payload. A
+        // Codex session, the only caller with an identity, states
+        // `stream: true` instead, as the official client does on every frame.
+        request.stream = identity.map(|_| true);
         request.additional_parameters.background = None;
 
         match chaining {
@@ -1510,6 +1578,10 @@ fn header_map_from_json(headers: &Map<String, Value>) -> http::HeaderMap {
         })
         .collect()
 }
+
+/// The unmodelled Responses event carrying server-supplied headers, among
+/// them the Codex turn-state token.
+const RESPONSE_METADATA_EVENT: &str = "response.metadata";
 
 /// Decode WebSocket error and done events or delegate to Responses classification.
 /// Return parsing and triage errors; preserve unknown payloads with their tag.
