@@ -61,6 +61,7 @@ impl<Op, D, F> WireDriver<Op, D, F>
 where
     Op: Operation,
     D: Decoder<Op, F>,
+    F: 'static,
 {
     /// A driver over one reply, without observation.
     pub fn new(decoder: D) -> Self {
@@ -87,12 +88,34 @@ where
     }
 
     /// Feed one frame.
+    ///
+    /// A decoder reads a byte frame that is not UTF-8 lossily, as text; a
+    /// corrupt frame it reports from one carries the frame's exact bytes
+    /// instead, never the replacement text.
     pub fn push(&mut self, frame: F) {
+        self.push_framed(frame, false);
+    }
+
+    /// Feed one frame whose text the framer may already have decoded with
+    /// U+FFFD replacement (`replaced_invalid_utf8`), so that a corrupt frame
+    /// from it is labelled as replacement-decoded rather than as received.
+    fn push_framed(&mut self, frame: F, replaced_invalid_utf8: bool) {
         if self.done {
             return;
         }
         let analysis_only = self.observation.is_some() && self.decoder.is_analysis_only(&frame);
-        let classified = self.decoder.classify(frame);
+        let received_bytes = inexact_byte_frame(&frame);
+        let classified = match self.decoder.classify(frame) {
+            WireEvent::Corrupt(mut corrupt) => {
+                if let Some(bytes) = &received_bytes {
+                    corrupt.set_received_bytes(bytes);
+                } else if replaced_invalid_utf8 {
+                    corrupt.mark_replacement_decoded();
+                }
+                WireEvent::Corrupt(corrupt)
+            }
+            classified => classified,
+        };
         // Never exempt a corrupt frame, even when the provider's metadata
         // predicate accepts its shape.
         let corrupt = matches!(classified, WireEvent::Corrupt(_));
@@ -215,27 +238,11 @@ where
     /// One payload at a time, because a streamed reply yields between them:
     /// a consumer that stops reading must not have facts recorded for the
     /// frames it never saw.
-    ///
-    /// A decoder reads a payload that is not exact UTF-8 text lossily, so a
-    /// corrupt frame it reports is relabelled here with what the reply
-    /// actually carried: the exact bytes, or text marked as
-    /// replacement-decoded. It is never passed off as the frame received.
     fn absorb(&mut self, payload: Framed) {
         self.project(payload.payload());
-        let lossy = payload.lossy_evidence();
+        let replaced_invalid_utf8 = payload.replaced_invalid_utf8;
         if let Some(frame) = payload.into_frame() {
-            let first_new = self.ready.len();
-            self.push(frame);
-            if let Some(lossy) = lossy {
-                for item in self.ready.iter_mut().skip(first_new) {
-                    if let Err(ProviderError::CorruptFrame(corrupt)) = item {
-                        match &lossy {
-                            LossyPayload::ReplacementDecoded => corrupt.mark_replacement_decoded(),
-                            LossyPayload::NotUtf8(bytes) => corrupt.set_received_bytes(bytes),
-                        }
-                    }
-                }
-            }
+            self.push_framed(frame, replaced_invalid_utf8);
         }
     }
 }
@@ -954,18 +961,6 @@ impl Framed {
         &self.payload
     }
 
-    /// How a corrupt frame decoded from this payload must be labelled, when
-    /// its decoder could only read it lossily.
-    fn lossy_evidence(&self) -> Option<LossyPayload> {
-        if self.replaced_invalid_utf8 {
-            Some(LossyPayload::ReplacementDecoded)
-        } else if std::str::from_utf8(&self.payload).is_err() {
-            Some(LossyPayload::NotUtf8(self.payload.clone()))
-        } else {
-            None
-        }
-    }
-
     fn into_frame(self) -> Option<WireFrame> {
         self.frame.then(|| match String::from_utf8(self.payload) {
             Ok(text) => WireFrame::Text(text),
@@ -974,12 +969,15 @@ impl Framed {
     }
 }
 
-/// A payload a decoder can read only lossily, as text.
-enum LossyPayload {
-    /// The framer already replaced invalid UTF-8 with U+FFFD.
-    ReplacementDecoded,
-    /// The payload, exactly as received, is not UTF-8.
-    NotUtf8(Vec<u8>),
+/// The exact bytes of a [`WireFrame::Bytes`] that is not UTF-8, which a
+/// decoder can read only lossily as text. `None` for any other frame,
+/// including a frame of another type: the driver's own frame type is the
+/// only one it knows to be read that way.
+fn inexact_byte_frame<F: 'static>(frame: &F) -> Option<Vec<u8>> {
+    match (frame as &dyn std::any::Any).downcast_ref::<WireFrame>()? {
+        WireFrame::Bytes(bytes) if std::str::from_utf8(bytes).is_err() => Some(bytes.clone()),
+        _ => None,
+    }
 }
 
 /// The framer for one reply's bytes.

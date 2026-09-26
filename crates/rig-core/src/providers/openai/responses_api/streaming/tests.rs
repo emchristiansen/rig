@@ -5979,3 +5979,44 @@ async fn a_corrupt_frame_from_replacement_decoded_sse_is_labelled_decoded() {
     assert_eq!(event_type.as_deref(), Some("response.content_part.added"));
     assert_eq!(evidence, &FrameEvidence::Decoded(decoded));
 }
+
+/// A byte frame that is not UTF-8, pushed straight into a driver or a
+/// framed-event stream rather than framed by the HTTP driver, still reports
+/// its exact bytes, not the text the decoder read lossily.
+#[tokio::test]
+async fn a_corrupt_byte_frame_keeps_its_exact_bytes_on_every_driver_entrypoint() {
+    use crate::error::FrameEvidence;
+    use crate::wire::{Mode, Wire};
+
+    let received = vec![0x7b, 0xff];
+
+    let wire = OpenAI::new("test-key").responses("gpt-5.4");
+    let mut driver: WireDriver<Completion, _> = WireDriver::new(wire.decoder(Mode::Streaming));
+    driver.push(WireFrame::Bytes(received.clone()));
+    driver.finish();
+    let error = driver
+        .drain()
+        .find_map(Result::err)
+        .expect("the frame cannot decode");
+    let ProviderError::CorruptFrame(corrupt) = &error else {
+        panic!("expected a corrupt frame, got {error:?}");
+    };
+    assert_eq!(corrupt.evidence(), &FrameEvidence::Bytes(received.clone()));
+
+    let mut stream = crate::driver::run_wire_stream(
+        futures::stream::iter([Ok(WireFrame::Bytes(received.clone()))]),
+        ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()),
+    );
+    let mut error = None;
+    while let Some(item) = stream.next().await {
+        if let Err(found) = item {
+            error = Some(found);
+            break;
+        }
+    }
+    let error = error.expect("the frame cannot decode");
+    let ProviderError::CorruptFrame(corrupt) = &error else {
+        panic!("expected a corrupt frame, got {error:?}");
+    };
+    assert_eq!(corrupt.evidence(), &FrameEvidence::Bytes(received));
+}
