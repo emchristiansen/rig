@@ -264,7 +264,7 @@ fn opaque_reasoning_survives_provenance_filter_and_responses_refuses_foreign_iss
     request.chat_history = history;
     let wire = crate::providers::openai::OpenAI::new("test").responses("gpt-test");
     assert!(
-        wire.responses_request(request, false, None)
+        wire.responses_request(request, false, None, InputRequirement::NonEmpty)
             .unwrap_err()
             .to_string()
             .contains("opaque")

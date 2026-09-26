@@ -460,6 +460,7 @@ impl CodexWebSocketSession {
             completion_request,
             Chaining::Root,
             Some(&self.identity),
+            super::super::InputRequirement::for_create(&options),
         )?;
         let responses_lite = self.session.wire.codex_request_shape.is_lite();
         let frame = encode_frame(&envelope, options.generate, |body| {
@@ -513,7 +514,22 @@ impl CodexWebSocketSession {
         self.session.keepalive().await
     }
 
-    /// Send a root warmup turn (`generate: false`) and return its response ID.
+    /// Send a root warmup turn (`generate: false`), wait for it to complete,
+    /// and return its response ID. The completed warmup is the live tip, so
+    /// [`Self::send_incremental`] continues it.
+    ///
+    /// A warmup generates nothing, so its request may carry no conversation
+    /// at all: only its instructions (system messages) and tools, sent with
+    /// an empty `input`. That is the Codex client's session-start prewarm:
+    /// the warmup of the request the session's first turn will make, before
+    /// that turn's items exist. The first turn then goes out as a
+    /// [`send_incremental`](Self::send_incremental) of its items, chaining
+    /// the warmup's response ID and reusing its model, instructions, tools
+    /// and other properties. When the first turn needs different properties,
+    /// it is a full [`send`](Self::send) instead, as the official client
+    /// falls back to a full request when they do not match. Set the frame
+    /// metadata and the wire's request headers for the warmup before calling
+    /// it, and the turn's own before the first turn.
     pub async fn warmup(
         &mut self,
         completion_request: completion::CompletionRequest,
