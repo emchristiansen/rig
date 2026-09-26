@@ -1233,3 +1233,279 @@ async fn with_identity_overrides_the_wire_identity_for_the_session_only() {
         "the prefix namespace must use the wrapper-selected identity"
     );
 }
+
+// ── the caller-supplied identity mechanisms ─────────────────────────────
+
+/// A caller identity, the `version` header and caller request headers.
+fn official_wire() -> Responses {
+    OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_account_id(ACCOUNT_ID)
+        .with_caller_identity(
+            crate::providers::openai::wire::CallerIdentity::new(
+                "client_exec",
+                "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)",
+                Some("1.2.3".to_owned()),
+            )
+            .expect("a valid caller identity"),
+        )
+        .responses(chatgpt::GPT_5_3_CODEX)
+        .with_request_headers(
+            crate::providers::openai::responses_api::request_headers::RequestHeaders::new()
+                .with("x-codex-window-id", "thread-1:0")
+                .expect("a valid header")
+                .with("x-codex-beta-features", "remote_compaction_v2")
+                .expect("a valid header"),
+        )
+}
+
+/// The handshake carries the caller identity exactly as given, its `version`
+/// header, and the wire's request headers, beside the Codex set, and nothing
+/// else.
+#[test]
+fn the_handshake_carries_the_caller_identity_its_version_and_the_request_headers() {
+    let identity = CodexIdentity::generate();
+    let request = identity
+        .handshake_request(&official_wire())
+        .expect("handshake request should build");
+    let mut headers: Vec<(String, String)> = request
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                value.to_str().expect("ascii header").to_owned(),
+            )
+        })
+        .collect();
+    headers.sort();
+    let mut expected = vec![
+        ("authorization".to_owned(), format!("Bearer {ACCESS_TOKEN}")),
+        ("chatgpt-account-id".to_owned(), ACCOUNT_ID.to_owned()),
+        ("originator".to_owned(), "client_exec".to_owned()),
+        (
+            "user-agent".to_owned(),
+            "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)".to_owned(),
+        ),
+        ("version".to_owned(), "1.2.3".to_owned()),
+        (
+            "openai-beta".to_owned(),
+            "responses_websockets=2026-02-06".to_owned(),
+        ),
+        ("session-id".to_owned(), identity.session_id().to_owned()),
+        ("thread-id".to_owned(), identity.thread_id().to_owned()),
+        (
+            "x-client-request-id".to_owned(),
+            identity.thread_id().to_owned(),
+        ),
+        ("x-codex-window-id".to_owned(), "thread-1:0".to_owned()),
+        (
+            "x-codex-beta-features".to_owned(),
+            "remote_compaction_v2".to_owned(),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(headers, expected);
+}
+
+/// Frame metadata reaches every frame, full and incremental, over the
+/// envelope's own value for the key; a changed value reaches the next frame
+/// and a removed key stops.
+#[tokio::test]
+async fn frame_metadata_is_stamped_on_every_frame_over_the_envelopes_values() {
+    let script = Script::new()
+        .turn([completed("resp_1")])
+        .turn([completed("resp_2")])
+        .turn([completed("resp_3")]);
+    let mut session = session_over(&script);
+    session
+        .set_frame_metadata("x-codex-turn-state", "state-1")
+        .expect("a caller key");
+
+    let mut request = user_request("root");
+    request.additional_params = Some(json!({
+        "client_metadata": { "x-codex-turn-state": "stale", "turn_id": "turn-1" }
+    }));
+    session
+        .completion(request)
+        .await
+        .expect("root turn should complete");
+
+    session
+        .set_frame_metadata("x-codex-turn-state", "state-2")
+        .expect("a caller key");
+    session
+        .send_incremental(delta("first delta"))
+        .await
+        .expect("incremental turn should send");
+    finish_turn(&mut session).await;
+
+    assert_eq!(
+        session
+            .remove_frame_metadata("x-codex-turn-state")
+            .as_deref(),
+        Some("state-2")
+    );
+    assert!(session.frame_metadata().is_empty());
+    session
+        .send_incremental(delta("second delta"))
+        .await
+        .expect("a second incremental turn should send");
+    finish_turn(&mut session).await;
+
+    let identity = session.identity().clone();
+    let frames = script.sent_json();
+    assert_eq!(
+        frames[0]["client_metadata"],
+        json!({
+            "session_id": identity.session_id(),
+            "thread_id": identity.thread_id(),
+            "turn_id": "turn-1",
+            "x-codex-turn-state": "state-1",
+        }),
+        "the frame metadata wins over the request's own value"
+    );
+    assert_eq!(
+        frames[1]["client_metadata"]["x-codex-turn-state"], "state-2",
+        "an incremental frame carries the current value, not the captured envelope's"
+    );
+    assert_eq!(
+        frames[2]["client_metadata"]["x-codex-turn-state"], "stale",
+        "once the key is removed, a frame carries the request's own value: frame \
+         metadata is stamped per frame, never into the captured envelope"
+    );
+    for frame in &frames {
+        openapi_schema::assert_valid(Schema::WebSocketResponseCreate, frame);
+    }
+}
+
+/// A key the session stamps itself cannot be set as frame metadata.
+#[test]
+fn a_frame_metadata_key_the_session_stamps_itself_is_refused() {
+    let mut session = session_over(&Script::new());
+    for key in [
+        SESSION_ID_METADATA_KEY,
+        THREAD_ID_METADATA_KEY,
+        "ws_request_header_x_openai_internal_codex_responses_lite",
+        WS_STREAM_REQUEST_START_MS_METADATA_KEY,
+    ] {
+        assert_eq!(
+            session.set_frame_metadata(key, "value"),
+            Err(ReservedFrameMetadataKey {
+                key: key.to_owned()
+            })
+        );
+        assert!(
+            CodexWebSocketSessionBuilder::new(codex_wire())
+                .expect("a Codex wire")
+                .with_frame_metadata(key, "value")
+                .is_err(),
+            "the builder refuses `{key}` too"
+        );
+    }
+    assert!(session.frame_metadata().is_empty());
+}
+
+/// A clock the test controls: each read returns the next instant.
+struct SteppingClock(std::sync::atomic::AtomicU64);
+
+impl FrameClock for SteppingClock {
+    fn unix_millis(&self) -> u64 {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// With a clock, every frame carries the instant it was encoded at, read
+/// from the clock once per frame; without one, no instant is stamped.
+#[tokio::test]
+async fn the_send_instant_is_read_from_the_injected_clock_once_per_frame() {
+    let script = Script::new()
+        .turn([completed("resp_1")])
+        .turn([completed("resp_2")])
+        .turn([completed("resp_3")]);
+    let mut session = session_over(&script);
+    let clock = Arc::new(SteppingClock(std::sync::atomic::AtomicU64::new(
+        1_790_000_000_000,
+    )));
+    session.set_request_start_ms_stamp(Some(clock.clone()));
+    session
+        .completion(user_request("root"))
+        .await
+        .expect("root turn should complete");
+    session
+        .send_incremental(delta("delta"))
+        .await
+        .expect("incremental turn should send");
+    finish_turn(&mut session).await;
+    session.set_request_start_ms_stamp(None);
+    session
+        .send_incremental(delta("unstamped delta"))
+        .await
+        .expect("a second incremental turn should send");
+    finish_turn(&mut session).await;
+
+    let frames = script.sent_json();
+    assert_eq!(
+        frames[0]["client_metadata"][WS_STREAM_REQUEST_START_MS_METADATA_KEY],
+        "1790000000000"
+    );
+    assert_eq!(
+        frames[1]["client_metadata"][WS_STREAM_REQUEST_START_MS_METADATA_KEY],
+        "1790000000001"
+    );
+    assert!(
+        frames[2]["client_metadata"]
+            .get(WS_STREAM_REQUEST_START_MS_METADATA_KEY)
+            .is_none(),
+        "without a clock no instant is stamped, got {}",
+        frames[2]
+    );
+    assert_eq!(
+        clock.0.load(std::sync::atomic::Ordering::SeqCst),
+        1_790_000_000_002,
+        "the clock is read once per stamped frame"
+    );
+}
+
+/// The builder's clock reaches the session it connects.
+#[tokio::test]
+async fn the_builders_clock_and_frame_metadata_reach_the_connected_session() {
+    let script = Script::new().turn([completed("resp_1")]);
+    let backend = ScriptBackend(script.clone());
+    let mut session = CodexWebSocketSessionBuilder::new(codex_wire())
+        .expect("a Codex wire")
+        .with_frame_metadata("x-codex-turn-state", "state-1")
+        .expect("a caller key")
+        .with_request_start_ms_stamp(Arc::new(SteppingClock(std::sync::atomic::AtomicU64::new(
+            7,
+        ))))
+        .connect_with(&backend)
+        .await
+        .expect("connects");
+    session
+        .completion(user_request("root"))
+        .await
+        .expect("root turn should complete");
+    let frame = &script.sent_json()[0];
+    assert_eq!(frame["client_metadata"]["x-codex-turn-state"], "state-1");
+    assert_eq!(
+        frame["client_metadata"][WS_STREAM_REQUEST_START_MS_METADATA_KEY],
+        "7"
+    );
+}
+
+/// A backend that hands out the script's connection.
+#[derive(Clone)]
+struct ScriptBackend(Script);
+
+impl crate::ws_client::WebSocketClientExt for ScriptBackend {
+    fn connect(
+        &self,
+        _request: crate::http_client::Request<crate::http_client::NoBody>,
+        _options: crate::ws_client::ConnectOptions,
+    ) -> impl std::future::Future<
+        Output = crate::http_client::Result<crate::ws_client::BoxedWebSocketConnection>,
+    > + crate::wasm_compat::WasmCompatSend {
+        let connection = self.0.connection();
+        async move { Ok(connection) }
+    }
+}

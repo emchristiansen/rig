@@ -19,6 +19,13 @@
 //! - **Responses Lite is marked per frame.** An opted-in wire uses the shared
 //!   deterministic developer prefix on full sends and adds the Lite marker to
 //!   every frame's `client_metadata`; the upgrade handshake stays unchanged.
+//! - **Caller frame metadata is stamped on every frame.** Keys the caller
+//!   sets ([`CodexWebSocketSession::set_frame_metadata`]), such as a turn's
+//!   `x-codex-turn-state`, go into the `client_metadata` of every frame, full
+//!   and incremental alike; an incremental send would otherwise repeat the
+//!   captured envelope's stale values. A session given a [`FrameClock`] also
+//!   stamps each frame's send instant as
+//!   [`WS_STREAM_REQUEST_START_MS_METADATA_KEY`]. Rig reads no clock itself.
 //! - **Single in-flight custody**, inherited from the shared session.
 //!
 //! The handshake carries the wire's credential as it stands when the session
@@ -64,7 +71,10 @@ use crate::completion;
 use crate::error::{EncodeError, ProviderError};
 use crate::http_client::{self, NoBody};
 use crate::providers::openai::responses_api::wire::Responses;
+use crate::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use crate::ws_client::{BoxedWebSocketConnection, WebSocketClientExt};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The handshake header carrying the ChatGPT subscription account id.
@@ -75,6 +85,92 @@ pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 
 /// The Codex Responses websocket beta value.
 pub const RESPONSES_WEBSOCKETS_BETA_VALUE: &str = "responses_websockets=2026-02-06";
+
+/// The `client_metadata` key carrying a frame's send instant, in milliseconds
+/// since the Unix epoch, stamped when the session has a [`FrameClock`].
+pub const WS_STREAM_REQUEST_START_MS_METADATA_KEY: &str = "x-codex-ws-stream-request-start-ms";
+
+/// The instant a Codex websocket frame is sent, as the caller keeps time.
+///
+/// Rig never reads a clock itself: a session stamps
+/// [`WS_STREAM_REQUEST_START_MS_METADATA_KEY`] only when given one of these
+/// ([`CodexWebSocketSessionBuilder::with_request_start_ms_stamp`]), and asks
+/// it once per frame, while encoding that frame.
+pub trait FrameClock: WasmCompatSend + WasmCompatSync {
+    /// Milliseconds since the Unix epoch, now.
+    fn unix_millis(&self) -> u64;
+}
+
+/// Frame metadata keys a caller may not set, because the session stamps each
+/// from the source that owns it.
+const RESERVED_FRAME_METADATA_KEYS: &[&str] = &[
+    SESSION_ID_METADATA_KEY,
+    THREAD_ID_METADATA_KEY,
+    super::super::responses_lite::WS_METADATA_KEY,
+    WS_STREAM_REQUEST_START_MS_METADATA_KEY,
+];
+
+/// A frame metadata key the session stamps itself: the identity's session
+/// and thread ids, the Responses Lite marker, or the send instant.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("`{key}` is a frame metadata key the Codex session stamps itself")]
+pub struct ReservedFrameMetadataKey {
+    /// The key as supplied.
+    pub key: String,
+}
+
+impl From<ReservedFrameMetadataKey> for ProviderError {
+    fn from(error: ReservedFrameMetadataKey) -> Self {
+        ProviderError::Request(Box::new(error))
+    }
+}
+
+/// What a session stamps on every frame besides its identity: the caller's
+/// frame metadata and, when it has a clock, the send instant.
+#[derive(Clone, Default)]
+struct FrameStamps {
+    metadata: BTreeMap<String, String>,
+    clock: Option<Arc<dyn FrameClock>>,
+}
+
+impl FrameStamps {
+    fn set(&mut self, key: String, value: String) -> Result<(), ReservedFrameMetadataKey> {
+        if RESERVED_FRAME_METADATA_KEYS.contains(&key.as_str()) {
+            return Err(ReservedFrameMetadataKey { key });
+        }
+        self.metadata.insert(key, value);
+        Ok(())
+    }
+
+    /// Stamp the frame metadata over the frame's own `client_metadata`
+    /// values, then the send instant. The identity has already made
+    /// `client_metadata` an object.
+    fn stamp(
+        &self,
+        body: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), EncodeError> {
+        if self.metadata.is_empty() && self.clock.is_none() {
+            return Ok(());
+        }
+        let Some(serde_json::Value::Object(metadata)) =
+            body.get_mut(super::super::codex_identity::CLIENT_METADATA_FIELD)
+        else {
+            return Err(EncodeError::request(
+                "a Codex frame's `client_metadata` must be a JSON object to carry frame metadata",
+            ));
+        };
+        for (key, value) in &self.metadata {
+            metadata.insert(key.clone(), serde_json::Value::String(value.clone()));
+        }
+        if let Some(clock) = &self.clock {
+            metadata.insert(
+                WS_STREAM_REQUEST_START_MS_METADATA_KEY.to_owned(),
+                serde_json::Value::String(clock.unix_millis().to_string()),
+            );
+        }
+        Ok(())
+    }
+}
 
 // The identity itself lives beside the HTTP wire that also stamps it; its
 // public path here is kept.
@@ -89,10 +185,11 @@ impl CodexIdentity {
     /// identity: `GET {base_url}/responses` on the websocket scheme, with the
     /// wire's credential, its caller identity (`originator` and `user-agent`,
     /// exactly as its HTTP requests carry them) when it has one, its account
-    /// id when set, the dashed identity headers, `x-client-request-id`, and
-    /// the `OpenAI-Beta` opt-in. Nothing else: the per-request `session_id`
-    /// HTTP header is not sent, because the dashed pair is the session
-    /// identity here.
+    /// id when set, the dashed identity headers, `x-client-request-id`, the
+    /// `OpenAI-Beta` opt-in, and last the wire's
+    /// [request headers](Responses::with_request_headers). Nothing else: the
+    /// per-request `session_id` HTTP header is not sent, because the dashed
+    /// pair is the session identity here.
     ///
     /// Public so a caller that opens its own connection can open it with the
     /// same identity the session will stamp on every frame. It stamps the
@@ -115,8 +212,11 @@ impl CodexIdentity {
         if let Some(account_id) = &wire.provider.account_id {
             builder = builder.header(CHATGPT_ACCOUNT_ID_HEADER, account_id);
         }
-        self.stamp_headers(builder)
-            .header(OPENAI_BETA_HEADER, RESPONSES_WEBSOCKETS_BETA_VALUE)
+        wire.request_headers
+            .stamp(
+                self.stamp_headers(builder)
+                    .header(OPENAI_BETA_HEADER, RESPONSES_WEBSOCKETS_BETA_VALUE),
+            )
             .body(NoBody)
             .map_err(|error| {
                 EncodeError::request(format!("Failed to build Codex websocket request: {error}"))
@@ -131,6 +231,7 @@ impl CodexIdentity {
 pub struct CodexWebSocketSessionBuilder {
     wire: Responses,
     identity: CodexIdentity,
+    frame_stamps: FrameStamps,
     connect_timeout: Option<Duration>,
     event_timeout: Option<Duration>,
 }
@@ -150,6 +251,7 @@ impl CodexWebSocketSessionBuilder {
         Ok(Self {
             wire,
             identity,
+            frame_stamps: FrameStamps::default(),
             connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
             event_timeout: None,
         })
@@ -166,6 +268,28 @@ impl CodexWebSocketSessionBuilder {
     #[must_use]
     pub fn with_identity(mut self, identity: CodexIdentity) -> Self {
         self.identity = identity;
+        self
+    }
+
+    /// Stamp `key: value` into the `client_metadata` of every frame the
+    /// session sends, over the frame's own value; see
+    /// [`CodexWebSocketSession::set_frame_metadata`]. Refuses a key the
+    /// session stamps itself.
+    pub fn with_frame_metadata(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, ReservedFrameMetadataKey> {
+        self.frame_stamps.set(key.into(), value.into())?;
+        Ok(self)
+    }
+
+    /// Stamp every frame's send instant, read from `clock` while the frame is
+    /// encoded, as [`WS_STREAM_REQUEST_START_MS_METADATA_KEY`] in its
+    /// `client_metadata`. Without a clock no instant is stamped.
+    #[must_use]
+    pub fn with_request_start_ms_stamp(mut self, clock: Arc<dyn FrameClock>) -> Self {
+        self.frame_stamps.clock = Some(clock);
         self
     }
 
@@ -214,6 +338,7 @@ impl CodexWebSocketSessionBuilder {
                 self.event_timeout,
             ),
             identity: self.identity,
+            frame_stamps: self.frame_stamps,
         })
     }
 }
@@ -225,6 +350,7 @@ impl CodexWebSocketSessionBuilder {
 pub struct CodexWebSocketSession {
     session: ResponsesWebSocketSession,
     identity: CodexIdentity,
+    frame_stamps: FrameStamps,
 }
 
 impl CodexWebSocketSession {
@@ -241,6 +367,7 @@ impl CodexWebSocketSession {
         Ok(Self {
             session: ResponsesWebSocketSession::from_connection(wire, connection, event_timeout),
             identity,
+            frame_stamps: FrameStamps::default(),
         })
     }
 
@@ -248,6 +375,49 @@ impl CodexWebSocketSession {
     #[must_use]
     pub fn identity(&self) -> &CodexIdentity {
         &self.identity
+    }
+
+    /// Stamp `key: value` into the `client_metadata` of every frame this
+    /// session sends from now on, full and incremental alike, over any value
+    /// the frame itself carries for `key`: for a value that belongs to the
+    /// current turn rather than to one request. Replaces the key's earlier
+    /// value. Refuses a key the session stamps itself.
+    ///
+    /// The stamp is applied as each frame is encoded and is never stored in
+    /// the envelope an incremental send reuses, so a turn-scoped key belongs
+    /// here and never in a request's own `client_metadata`: once removed, a
+    /// later incremental frame would carry the request's value again.
+    ///
+    /// The Codex backend's `x-codex-turn-state` sticky-routing token is such
+    /// a value. The backend hands it over in the `headers` of a
+    /// `response.metadata` event, which [`Self::next_event`] yields as
+    /// [`ResponsesWebSocketEvent::Unknown`] with its complete payload (a
+    /// streamed turn passes it on as `StreamEvent::Unknown`; the folded reply
+    /// of [`Self::completion`] does not carry it), and the official client
+    /// sends it back on every later frame of that turn, never across turns.
+    pub fn set_frame_metadata(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<(), ReservedFrameMetadataKey> {
+        self.frame_stamps.set(key.into(), value.into())
+    }
+
+    /// Stop stamping `key`, returning the value it had.
+    pub fn remove_frame_metadata(&mut self, key: &str) -> Option<String> {
+        self.frame_stamps.metadata.remove(key)
+    }
+
+    /// The frame metadata this session stamps on every frame.
+    #[must_use]
+    pub fn frame_metadata(&self) -> &BTreeMap<String, String> {
+        &self.frame_stamps.metadata
+    }
+
+    /// Stamp each frame's send instant from `clock`, or stop stamping it with
+    /// `None`; see [`CodexWebSocketSessionBuilder::with_request_start_ms_stamp`].
+    pub fn set_request_start_ms_stamp(&mut self, clock: Option<Arc<dyn FrameClock>>) {
+        self.frame_stamps.clock = clock;
     }
 
     /// The ID of the last response a turn on this session produced, if any.
@@ -293,7 +463,7 @@ impl CodexWebSocketSession {
         )?;
         let responses_lite = self.session.wire.codex_request_shape.is_lite();
         let frame = encode_frame(&envelope, options.generate, |body| {
-            stamp_frame(&self.identity, responses_lite, body)
+            stamp_frame(&self.identity, responses_lite, &self.frame_stamps, body)
         })?;
         self.session.send_encoded(envelope, frame).await
     }
@@ -325,7 +495,7 @@ impl CodexWebSocketSession {
             super::super::responses_lite::shape_delta(&mut request.input);
         }
         let frame = encode_frame(&request, None, |body| {
-            stamp_frame(&self.identity, responses_lite, body)
+            stamp_frame(&self.identity, responses_lite, &self.frame_stamps, body)
         })?;
         // The captured envelope, not the delta request, is what a later
         // delta continues from.
@@ -375,19 +545,21 @@ impl CodexWebSocketSession {
 fn stamp_frame(
     identity: &CodexIdentity,
     responses_lite: bool,
+    frame_stamps: &FrameStamps,
     body: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), EncodeError> {
     identity.stamp(body)?;
     if responses_lite {
         super::super::responses_lite::stamp_websocket_marker(body)?;
     }
-    Ok(())
+    frame_stamps.stamp(body)
 }
 
 impl std::fmt::Debug for CodexWebSocketSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CodexWebSocketSession")
             .field("identity", &self.identity)
+            .field("frame_metadata", &self.frame_stamps.metadata)
             .field("previous_response_id", &self.previous_response_id())
             .finish_non_exhaustive()
     }

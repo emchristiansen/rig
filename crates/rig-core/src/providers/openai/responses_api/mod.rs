@@ -27,6 +27,8 @@ use std::ops::Add;
 use std::str::FromStr;
 
 pub mod codex_identity;
+pub mod request_compression;
+pub mod request_headers;
 pub mod responses_lite;
 pub mod streaming;
 #[cfg(feature = "websocket")]
