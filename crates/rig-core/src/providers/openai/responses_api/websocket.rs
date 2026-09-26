@@ -702,6 +702,11 @@ impl ResponsesWebSocketSessionBuilder {
 /// Sequential Responses session with automatic response-ID chaining.
 /// Completed and incomplete responses update the chain unless a request supplies
 /// its own `previous_response_id`. Call [`Self::close`] to perform a close handshake.
+///
+/// Over a Codex-contract wire this session is not an emulation of the official
+/// client: its frames carry the wire's Codex shaping, such as `store: false`,
+/// but not the members only a [`codex::CodexWebSocketSession`] states, such as
+/// `stream: true`. Use that session for the official client's frames.
 pub struct ResponsesWebSocketSession {
     wire: Responses,
     previous_response_id: Option<String>,

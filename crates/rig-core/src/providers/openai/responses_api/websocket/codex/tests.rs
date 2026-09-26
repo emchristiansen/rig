@@ -1733,6 +1733,8 @@ async fn the_lite_prewarm_carries_only_the_prefix_and_the_first_turn_only_its_it
     let (prewarm, turn) = (&frames[0], &frames[1]);
     for frame in &frames {
         openapi_schema::assert_valid(Schema::LiteWebSocketResponseCreate, frame);
+        // The warmup and the delta state it too, as every Codex frame does.
+        assert_eq!(frame["stream"], json!(true), "got {frame}");
     }
 
     assert_eq!(prewarm["generate"], false);
