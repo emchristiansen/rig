@@ -713,6 +713,9 @@ pub struct ResponsesWebSocketSession {
     /// drain dropped at any suspension point cannot destroy them.
     recovered: Vec<UnrecognizedEvent>,
     socket: BoxedWebSocketConnection,
+    /// The first Codex `x-codex-turn-state` token a `response.metadata` event
+    /// of an in-flight turn handed the session, until the caller takes it.
+    turn_state: Option<String>,
     in_flight: bool,
     event_timeout: Option<Duration>,
     closed: bool,
@@ -753,7 +756,56 @@ impl ResponsesWebSocketSession {
             event_timeout,
             closed: false,
             failed: false,
+            turn_state: None,
         }
+    }
+
+    /// Record the Codex sticky-routing token a `response.metadata` event
+    /// carries in its `headers`, when the session holds none: the first
+    /// token wins until it is taken, as the official client keeps the first
+    /// one of a turn. A name is matched case-insensitively and a value is a
+    /// string, or the first string of an array, as the official client
+    /// reads them.
+    fn observe_turn_state(&mut self, event: &ResponsesWebSocketEvent) {
+        fn first_string(value: &serde_json::Value) -> Option<&str> {
+            match value {
+                serde_json::Value::String(value) => Some(value),
+                serde_json::Value::Array(items) => items.first().and_then(first_string),
+                _ => None,
+            }
+        }
+        if self.turn_state.is_some() {
+            return;
+        }
+        let ResponsesWebSocketEvent::Unknown(event) = event else {
+            return;
+        };
+        if event.kind != RESPONSE_METADATA_EVENT {
+            return;
+        }
+        let Some(headers) = event
+            .payload
+            .value()
+            .get("headers")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return;
+        };
+        self.turn_state = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(codex::TURN_STATE_METADATA_KEY))
+            .and_then(|(_, value)| first_string(value))
+            .map(str::to_owned);
+    }
+
+    /// The Codex turn-state token recorded since it was last taken.
+    pub(crate) fn turn_state(&self) -> Option<&str> {
+        self.turn_state.as_deref()
+    }
+
+    /// Take the recorded Codex turn-state token, so the next one is recorded.
+    pub(crate) fn take_turn_state(&mut self) -> Option<String> {
+        self.turn_state.take()
     }
 
     /// Return the response ID retained for automatic chaining, if any.
@@ -897,6 +949,7 @@ impl ResponsesWebSocketSession {
                 Ok(None) => continue,
                 Err(error) => return Err(self.fail_session(error)),
             };
+            self.observe_turn_state(&event);
             if let ResponsesWebSocketEvent::Done(done) = &event {
                 // OpenAI may emit `response.done` after the turn has already ended at
                 // `response.completed`. Ignore that trailing event on the next turn.
@@ -1519,6 +1572,10 @@ fn header_map_from_json(headers: &Map<String, Value>) -> http::HeaderMap {
 
 /// Decode WebSocket error and done events or delegate to Responses classification.
 /// Return parsing and triage errors; preserve unknown payloads with their tag.
+/// The unmodelled Responses event carrying server-supplied headers, among
+/// them the Codex turn-state token.
+const RESPONSE_METADATA_EVENT: &str = "response.metadata";
+
 fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, ProviderError> {
     #[derive(Deserialize)]
     struct EventType {

@@ -1532,7 +1532,7 @@ fn prewarm_request() -> completion::CompletionRequest {
 #[tokio::test]
 async fn the_codex_prewarm_sequence_is_a_warmup_then_an_incremental_first_turn() {
     let script = Script::new()
-        .turn([completed("resp_prewarm")])
+        .turn([turn_state_event("ts-prewarm"), completed("resp_prewarm")])
         .turn([completed("resp_turn_1")]);
     let mut session = session_over(&script);
 
@@ -1547,6 +1547,15 @@ async fn the_codex_prewarm_sequence_is_a_warmup_then_an_incremental_first_turn()
         .await
         .expect("the prewarm completes");
     assert_eq!(prewarm_id, "resp_prewarm");
+    // The prewarm's turn-state token belongs to the first turn, as it does in
+    // the official client.
+    let turn_state = session
+        .take_received_turn_state()
+        .expect("the prewarm handed over a turn-state token");
+    assert_eq!(turn_state, "ts-prewarm");
+    session
+        .set_frame_metadata(TURN_STATE_METADATA_KEY, turn_state)
+        .expect("a caller key");
 
     session
         .set_frame_metadata("turn_id", "turn-1")
@@ -1578,6 +1587,16 @@ async fn the_codex_prewarm_sequence_is_a_warmup_then_an_incremental_first_turn()
     let input = serde_json::to_string(&turn["input"]).expect("input serializes");
     assert!(input.contains("FIRST_TURN_MARKER"), "got {input}");
     assert_eq!(turn["client_metadata"]["turn_id"], "turn-1");
+    assert_eq!(
+        turn["client_metadata"][TURN_STATE_METADATA_KEY],
+        "ts-prewarm"
+    );
+    assert!(
+        prewarm["client_metadata"]
+            .get(TURN_STATE_METADATA_KEY)
+            .is_none(),
+        "the prewarm had no token to send"
+    );
     assert_eq!(
         turn["client_metadata"]["x-codex-turn-metadata"],
         r#"{"request_kind":"turn"}"#
@@ -1619,4 +1638,62 @@ async fn a_generating_send_without_input_is_still_refused() {
         "got {refused}"
     );
     assert!(script.sent_json().is_empty(), "nothing was written");
+}
+
+/// A `response.metadata` event handing over a turn-state token.
+fn turn_state_event(token: &str) -> String {
+    json!({
+        "type": "response.metadata",
+        "headers": { TURN_STATE_METADATA_KEY: token },
+    })
+    .to_string()
+}
+
+/// The session records the first turn-state token its turns are handed,
+/// whichever call reads the event, and keeps it until it is taken: a later
+/// token is ignored, a name in another case still matches, and an array
+/// value gives its first string, as the official client reads them.
+#[tokio::test]
+async fn the_first_turn_state_token_is_recorded_until_taken() {
+    let script = Script::new()
+        .turn([
+            turn_state_event("ts-1"),
+            turn_state_event("ts-ignored"),
+            completed("resp_1"),
+        ])
+        .turn([
+            json!({
+                "type": "response.metadata",
+                "headers": { "X-Codex-Turn-State": ["ts-2", "ts-other"] },
+            })
+            .to_string(),
+            completed("resp_2"),
+        ])
+        .turn([completed("resp_3")]);
+    let mut session = session_over(&script);
+    assert_eq!(session.received_turn_state(), None);
+
+    session
+        .completion(user_request("first"))
+        .await
+        .expect("the first turn completes");
+    assert_eq!(session.received_turn_state(), Some("ts-1"));
+    assert_eq!(session.take_received_turn_state().as_deref(), Some("ts-1"));
+    assert_eq!(session.received_turn_state(), None);
+
+    session
+        .completion(user_request("second"))
+        .await
+        .expect("the second turn completes");
+    assert_eq!(session.take_received_turn_state().as_deref(), Some("ts-2"));
+
+    session
+        .completion(user_request("third"))
+        .await
+        .expect("the third turn completes");
+    assert_eq!(
+        session.received_turn_state(),
+        None,
+        "a turn without a token records none"
+    );
 }
