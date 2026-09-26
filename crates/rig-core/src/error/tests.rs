@@ -633,6 +633,16 @@ fn reports_match_the_replaced_error_enums() {
             AdapterErrorBoundary::Decode,
         ),
         (
+            "*::CorruptFrameError",
+            ProviderError::CorruptFrame(crate::error::CorruptFrame::text(
+                Some("text.delta".into()),
+                "{",
+                json_error(),
+            )),
+            r#"{"code":null,"http_status":null,"kind":"json","message":"CorruptFrameError: `text.delta` frame failed to decode: EOF while parsing an object at line 1 column 1; frame: {","refusal":false,"retryable":false,"source_chain":["`text.delta` frame failed to decode: EOF while parsing an object at line 1 column 1; frame: {","EOF while parsing an object at line 1 column 1"],"detail":{"detail":"corrupt_frame","event_type":"text.delta","frame":"{","error":"EOF while parsing an object at line 1 column 1"}}"#,
+            AdapterErrorBoundary::Decode,
+        ),
+        (
             "*::ResponseError",
             ProviderError::Response("bad shape".into()),
             r#"{"code":null,"http_status":null,"kind":"response","message":"ResponseError: bad shape","refusal":false,"retryable":false,"source_chain":[]}"#,

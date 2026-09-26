@@ -5234,7 +5234,11 @@ fn a_content_part_without_a_type_tag_is_a_malformed_frame() {
         json!({"type":"response.content_part.added","item_id":"msg_t","output_index":0,"content_index":0,"sequence_number":0,"part":{"text":"x"}}),
     ]);
     assert!(
-        matches!(errors.as_slice(), [ProviderError::Json(_)]),
+        matches!(
+            errors.as_slice(),
+            [ProviderError::CorruptFrame(corrupt)]
+                if corrupt.event_type() == Some("response.content_part.added")
+        ),
         "{errors:?}"
     );
     assert!(unknown_payloads(&events).is_empty(), "{events:?}");
@@ -5843,4 +5847,92 @@ fn two_items_waiting_parts_at_one_position_each_bind_to_their_own_item() {
     ]);
     assert_eq!(opaque_texts(&choice), [&first, &second]);
     assert!(unknown_payloads(&events).is_empty(), "{events:?}");
+}
+
+/// A modeled frame whose payload fails typed decoding ends an SSE stream
+/// with a typed corrupt-frame error carrying the frame's `type` and the frame
+/// exactly as the provider sent it, never an unmodeled part and never a bare
+/// JSON error.
+#[test]
+fn a_malformed_known_frame_ends_the_sse_stream_carrying_the_frame_as_sent() {
+    use super::super::corrupt_frame_fixtures::MALFORMED_KNOWN_FRAMES;
+    use crate::wire::{Mode, Wire};
+
+    for malformed in MALFORMED_KNOWN_FRAMES {
+        let body = format!(
+            "event: {}\ndata: {}\n\n",
+            malformed.event_type, malformed.frame
+        );
+        let wire = OpenAI::new("test-key").responses("gpt-5.4");
+        let mut driver: WireDriver<Completion, _> = WireDriver::new(wire.decoder(Mode::Streaming));
+        let mut framer = crate::http_client::framing::SseFramer::new();
+        for event in framer.push(body.as_bytes()) {
+            driver.push(WireFrame::Text(event.data));
+        }
+        driver.finish();
+        let error = driver
+            .drain()
+            .find_map(Result::err)
+            .unwrap_or_else(|| panic!("{}: the frame must fail the stream", malformed.case));
+        let ProviderError::CorruptFrame(corrupt) = &error else {
+            panic!(
+                "{}: expected a corrupt frame, got {error:?}",
+                malformed.case
+            );
+        };
+        assert_eq!(
+            corrupt.event_type(),
+            Some(malformed.event_type),
+            "{}",
+            malformed.case
+        );
+        assert_eq!(corrupt.frame(), Some(malformed.frame), "{}", malformed.case);
+        assert_eq!(error.kind(), ErrorKind::Json, "{}", malformed.case);
+        assert!(!error.is_retryable(), "{}", malformed.case);
+    }
+}
+
+/// Through the completion stream, which reports errors in wire form, the
+/// same frame arrives as structured detail on the report.
+#[tokio::test]
+async fn a_malformed_known_frame_reaches_the_stream_report_as_structured_detail() {
+    use super::super::corrupt_frame_fixtures::MALFORMED_KNOWN_FRAMES;
+    use crate::error::{CorruptFrameDetail, ErrorDetail};
+
+    for malformed in MALFORMED_KNOWN_FRAMES {
+        let mut stream = responses_stream(MockStreamingClient {
+            sse_bytes: bytes::Bytes::from(format!("data: {}\n\n", malformed.frame)),
+        })
+        .await;
+        let mut report = None;
+        while let Some(item) = stream.next().await {
+            if let Err(error) = item {
+                report = Some(error);
+                break;
+            }
+        }
+        let report = report.unwrap_or_else(|| panic!("{}: the stream must fail", malformed.case));
+        assert_eq!(report.kind, ErrorKind::Json, "{}", malformed.case);
+        let Some(ErrorDetail::CorruptFrame(CorruptFrameDetail {
+            event_type, frame, ..
+        })) = &report.detail
+        else {
+            panic!(
+                "{}: expected corrupt-frame detail, got {report:?}",
+                malformed.case
+            );
+        };
+        assert_eq!(
+            event_type.as_deref(),
+            Some(malformed.event_type),
+            "{}",
+            malformed.case
+        );
+        assert_eq!(
+            frame.as_deref(),
+            Some(malformed.frame),
+            "{}",
+            malformed.case
+        );
+    }
 }

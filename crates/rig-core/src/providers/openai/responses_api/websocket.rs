@@ -13,7 +13,7 @@
 use crate::completion;
 use crate::driver::{Bound, WireDriver};
 use crate::driver::{TriagedFrame, triage_frame};
-use crate::error::{EncodeError, ProviderError};
+use crate::error::{CorruptFrame, EncodeError, ProviderError};
 use crate::http_client::{self, NoBody};
 use crate::operation::Completion;
 use crate::providers::openai::responses_api::streaming::{
@@ -1593,6 +1593,8 @@ const RESPONSE_METADATA_EVENT: &str = "response.metadata";
 
 /// Decode WebSocket error and done events or delegate to Responses classification.
 /// Return parsing and triage errors; preserve unknown payloads with their tag.
+/// A frame that fails to decode is [`ProviderError::CorruptFrame`] with the
+/// payload as received, the same error a Responses SSE stream returns.
 fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, ProviderError> {
     #[derive(Deserialize)]
     struct EventType {
@@ -1600,14 +1602,22 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
         kind: String,
     }
 
-    let event_type = serde_json::from_str::<EventType>(payload)?;
+    let corrupt = |event_type: Option<&str>, error| {
+        ProviderError::CorruptFrame(CorruptFrame::text(
+            event_type.map(ToOwned::to_owned),
+            payload,
+            error,
+        ))
+    };
+    let event_type =
+        serde_json::from_str::<EventType>(payload).map_err(|error| corrupt(None, error))?;
     match event_type.kind.as_str() {
-        "error" => serde_json::from_str(payload)
+        kind @ "error" => serde_json::from_str(payload)
             .map(|e| Some(ResponsesWebSocketEvent::Error(e)))
-            .map_err(ProviderError::from),
-        "response.done" => serde_json::from_str(payload)
+            .map_err(|error| corrupt(Some(kind), error)),
+        kind @ "response.done" => serde_json::from_str(payload)
             .map(|d| Some(ResponsesWebSocketEvent::Done(d)))
-            .map_err(ProviderError::from),
+            .map_err(|error| corrupt(Some(kind), error)),
         _ => Ok(Some(
             match triage_frame(classify_responses_frame(payload))? {
                 TriagedFrame::Event(StreamingCompletionChunk::Response(response)) => {

@@ -415,7 +415,10 @@ async fn a_malformed_resource_body_is_a_decode_error() {
         .await
         .expect_err("a `name` that is not a string cannot decode");
 
-    assert!(matches!(error, ProviderError::Json(_)), "{error:?}");
+    let ProviderError::CorruptFrame(corrupt) = &error else {
+        panic!("expected a corrupt frame, got {error:?}");
+    };
+    assert_eq!(corrupt.frame(), Some(r#"{"name":5}"#));
 }
 
 /// The `{}` every recorded delete is answered with is the whole reply —

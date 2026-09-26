@@ -734,7 +734,7 @@ async fn malformed_arguments_on_a_completed_tool_turn_stay_a_decode_error() {
         .await
         .expect_err("a completed tool-call turn with malformed arguments is a defect");
     assert!(
-        matches!(error, ProviderError::Json(_)),
+        matches!(&error, ProviderError::CorruptFrame(corrupt) if corrupt.frame() == Some(BODY)),
         "the malformed payload must stay loud rather than be dropped: {error:?}"
     );
 }

@@ -151,6 +151,35 @@ pub enum ErrorDetail {
     /// truncated input. Carries exact accumulated arguments and the parser
     /// error for recovery or replay.
     MalformedToolInput(MalformedToolInput),
+    /// A frame of the provider's reply failed to decode. Carries the frame
+    /// exactly as received, so a consumer can keep it as evidence.
+    CorruptFrame(CorruptFrameDetail),
+}
+
+/// The payload of [`ErrorDetail::CorruptFrame`]: a [`CorruptFrame`] in wire
+/// form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CorruptFrameDetail {
+    /// The frame's discriminator value (for a Responses frame, its `type`),
+    /// when the classifier read a string one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+    /// The frame exactly as received; absent only where no text frame
+    /// exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
+    /// Why the frame failed to decode.
+    pub error: String,
+}
+
+impl From<&CorruptFrame> for CorruptFrameDetail {
+    fn from(corrupt: &CorruptFrame) -> Self {
+        Self {
+            event_type: corrupt.event_type.clone(),
+            frame: corrupt.frame.clone(),
+            error: corrupt.error.to_string(),
+        }
+    }
 }
 
 /// The payload of [`ErrorDetail::MalformedToolInput`].
@@ -320,6 +349,98 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 #[cfg(target_family = "wasm")]
 pub type BoxError = Box<dyn std::error::Error + 'static>;
 
+/// A frame the provider sent that this client could not decode, kept exactly
+/// as it arrived.
+///
+/// It is invalid JSON, or a frame whose discriminator this client models but
+/// whose payload failed typed decoding. A malformed modeled frame is never
+/// demoted to an unmodeled one; it fails the reply, and this record carries
+/// the evidence so a caller can keep the frame.
+///
+/// ```
+/// use rig_core::error::ProviderError;
+///
+/// fn record(error: &ProviderError) {
+///     if let Some(corrupt) = error.corrupt_frame() {
+///         eprintln!("type {:?}, frame {:?}: {}", corrupt.event_type(), corrupt.frame(), corrupt.error());
+///     }
+/// }
+/// ```
+#[derive(Debug)]
+pub struct CorruptFrame {
+    event_type: Option<String>,
+    frame: Option<String>,
+    error: serde_json::Error,
+}
+
+impl CorruptFrame {
+    /// A text frame that failed to decode, with the discriminator value the
+    /// classifier read from it, if any.
+    pub(crate) fn text(
+        event_type: Option<String>,
+        frame: impl Into<String>,
+        error: serde_json::Error,
+    ) -> Self {
+        Self {
+            event_type,
+            frame: Some(frame.into()),
+            error,
+        }
+    }
+
+    /// A decode failure with no text frame: a transport that delivers
+    /// already-decoded events, or bytes that are not UTF-8.
+    pub(crate) fn without_text(error: serde_json::Error) -> Self {
+        Self {
+            event_type: None,
+            frame: None,
+            error,
+        }
+    }
+
+    /// The same frame with `error` in place of the decode error.
+    pub(crate) fn with_error(self, error: serde_json::Error) -> Self {
+        Self { error, ..self }
+    }
+
+    /// The frame's discriminator value (for a Responses frame, its `type`),
+    /// when the classifier read a string one.
+    pub fn event_type(&self) -> Option<&str> {
+        self.event_type.as_deref()
+    }
+
+    /// The frame exactly as received. `None` only where no text frame
+    /// exists: a transport that delivers decoded events, or bytes that are
+    /// not UTF-8.
+    pub fn frame(&self) -> Option<&str> {
+        self.frame.as_deref()
+    }
+
+    /// Why the frame failed to decode.
+    pub fn error(&self) -> &serde_json::Error {
+        &self.error
+    }
+}
+
+impl fmt::Display for CorruptFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.event_type {
+            Some(event_type) => write!(f, "`{event_type}` frame failed to decode: {}", self.error)?,
+            None => write!(f, "frame failed to decode: {}", self.error)?,
+        }
+        match &self.frame {
+            Some(frame) => write!(f, "; frame: {frame}"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for CorruptFrame {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// A failed provider operation: completion, embedding, reranking,
 /// transcription, image or audio generation, verification, model listing, or
 /// context caching.
@@ -354,6 +475,10 @@ pub enum ProviderError {
     /// JSON serialization or deserialization failed.
     #[error("JsonError: {0}")]
     Json(#[from] serde_json::Error),
+    /// A frame of the provider's reply failed to decode. The frame is kept
+    /// exactly as received; see [`CorruptFrame`].
+    #[error("CorruptFrameError: {0}")]
+    CorruptFrame(#[source] CorruptFrame),
     /// A URL could not be parsed.
     #[error("UrlError: {0}")]
     Url(#[from] url::ParseError),
@@ -432,7 +557,7 @@ impl ProviderError {
     pub fn kind(&self) -> ErrorKind {
         match self {
             Self::Http(_) => ErrorKind::Http,
-            Self::Json(_) => ErrorKind::Json,
+            Self::Json(_) | Self::CorruptFrame(_) => ErrorKind::Json,
             Self::Url(_) => ErrorKind::Url,
             Self::Request(_) => ErrorKind::Request,
             Self::Response(_) | Self::MismatchedDimensions { .. } => ErrorKind::Response,
@@ -461,6 +586,15 @@ impl ProviderError {
             Self::ProviderResponse(response)
             | Self::InvalidAuthentication(response)
             | Self::CacheExpired { response, .. } => Some(response),
+            _ => None,
+        }
+    }
+
+    /// The undecodable frame, kept exactly as received, when this error
+    /// carries one.
+    pub fn corrupt_frame(&self) -> Option<&CorruptFrame> {
+        match self {
+            Self::CorruptFrame(corrupt) => Some(corrupt),
             _ => None,
         }
     }
@@ -678,7 +812,9 @@ impl From<&ProviderError> for ErrorReport {
             source_chain: source_chain(error),
             request_id: response.and_then(|response| response.provider_request_id.clone()),
             provider_response: response.cloned(),
-            detail: None,
+            detail: error
+                .corrupt_frame()
+                .map(|corrupt| ErrorDetail::CorruptFrame(corrupt.into())),
         }
     }
 }

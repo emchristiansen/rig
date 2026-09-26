@@ -110,11 +110,11 @@ where
                     self.out.push(Ok(event));
                 }
             }
-            WireEvent::Corrupt(error) => {
+            WireEvent::Corrupt(corrupt) => {
                 if let Some(observation) = &self.observation {
                     observation.corrupt(self.frames);
                 }
-                self.ready.push(Err(ProviderError::Json(error)));
+                self.ready.push(Err(ProviderError::CorruptFrame(corrupt)));
             }
         }
         self.out.check_laws(&mut self.laws);
@@ -266,7 +266,8 @@ pub enum TriagedFrame<T> {
 }
 
 /// Returns known events or unknown payloads, warning without content for the
-/// latter. Corrupt frames return a JSON error.
+/// latter. Corrupt frames return [`ProviderError::CorruptFrame`] with the frame
+/// as received.
 pub fn triage_frame<T>(event: WireEvent<T>) -> Result<TriagedFrame<T>, ProviderError> {
     match event {
         WireEvent::Known(event) => Ok(TriagedFrame::Event(event)),
@@ -274,7 +275,7 @@ pub fn triage_frame<T>(event: WireEvent<T>) -> Result<TriagedFrame<T>, ProviderE
             warn_unmodeled(&event_type, &value);
             Ok(TriagedFrame::Unknown(value))
         }
-        WireEvent::Corrupt(error) => Err(ProviderError::Json(error)),
+        WireEvent::Corrupt(corrupt) => Err(ProviderError::CorruptFrame(corrupt)),
     }
 }
 
