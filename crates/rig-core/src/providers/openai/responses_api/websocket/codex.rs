@@ -422,6 +422,12 @@ impl CodexWebSocketSession {
     /// Take the recorded turn-state token, so the next one a
     /// `response.metadata` event carries is recorded: at a turn boundary,
     /// where the official client starts with no token.
+    ///
+    /// The session spans turns and marks no boundary itself, so nothing
+    /// clears the token but this call. A caller that reads it with
+    /// [`Self::received_turn_state`] and never takes it would stamp an
+    /// earlier turn's token on a later turn, which the official client never
+    /// does.
     pub fn take_received_turn_state(&mut self) -> Option<String> {
         self.session.take_turn_state()
     }
@@ -543,7 +549,8 @@ impl CodexWebSocketSession {
     ///
     /// A warmup generates nothing, so its request may carry no conversation
     /// at all: only its instructions (system messages) and tools, sent with
-    /// an empty `input`. That is the Codex client's session-start prewarm:
+    /// an empty `input`. It still needs at least one message, so a warmup
+    /// without instructions is refused before anything is sent. That is the Codex client's session-start prewarm:
     /// the warmup of the request the session's first turn will make, before
     /// that turn's items exist. The first turn then goes out as a
     /// [`send_incremental`](Self::send_incremental) of its items, chaining

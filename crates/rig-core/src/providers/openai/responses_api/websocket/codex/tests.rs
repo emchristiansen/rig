@@ -1699,3 +1699,111 @@ async fn the_first_turn_state_token_is_recorded_until_taken() {
         "a turn without a token records none"
     );
 }
+
+/// Under Lite the prewarm is Codex's Lite prewarm: the prefix spliced into the
+/// empty input, with no top-level instructions or tools, and the first turn's
+/// delta carries only the turn's items, as Codex splits the incremental input
+/// at the prefix length.
+#[tokio::test]
+async fn the_lite_prewarm_carries_only_the_prefix_and_the_first_turn_only_its_items() {
+    let wire = codex_wire()
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite");
+    let identity =
+        CodexIdentity::from_ids("session-derived", "thread-derived").expect("header-safe ids");
+    let script = Script::new()
+        .turn([completed("resp_prewarm")])
+        .turn([completed("resp_turn_1")]);
+    let mut session =
+        CodexWebSocketSession::from_connection(wire, identity, script.connection(), None)
+            .expect("the ChatGPT dialect speaks the Codex contract");
+
+    session
+        .warmup(prewarm_request())
+        .await
+        .expect("the Lite prewarm completes");
+    session
+        .send_incremental(delta("FIRST_TURN_MARKER"))
+        .await
+        .expect("the first turn continues the prewarm");
+    finish_turn(&mut session).await;
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    let (prewarm, turn) = (&frames[0], &frames[1]);
+    for frame in &frames {
+        openapi_schema::assert_valid(Schema::LiteWebSocketResponseCreate, frame);
+    }
+
+    assert_eq!(prewarm["generate"], false);
+    let prewarm_input = prewarm["input"]
+        .as_array()
+        .expect("the prewarm input is an array");
+    assert_eq!(
+        prewarm_input.len(),
+        2,
+        "the prefix alone: {prewarm_input:?}"
+    );
+    assert_eq!(prewarm_input[0]["type"], "additional_tools");
+    assert_eq!(
+        prewarm_input[1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        json!(["model.base_instructions"])
+    );
+    assert!(prewarm.get("instructions").is_none());
+    assert!(prewarm.get("tools").is_none());
+
+    assert!(turn.get("generate").is_none(), "the first turn generates");
+    assert_eq!(turn["previous_response_id"], "resp_prewarm");
+    let turn_input = serde_json::to_string(&turn["input"]).expect("input serializes");
+    assert!(turn_input.contains("FIRST_TURN_MARKER"), "got {turn_input}");
+    assert!(!turn_input.contains("additional_tools"), "got {turn_input}");
+    assert!(
+        !turn_input.contains("model.base_instructions"),
+        "got {turn_input}"
+    );
+}
+
+/// A warmup may carry no input, but not no messages: a request without even
+/// instructions is refused before anything is written.
+#[tokio::test]
+async fn a_warmup_without_any_message_is_refused_and_writes_nothing() {
+    let script = Script::new();
+    let mut session = session_over(&script);
+    let empty = completion::CompletionRequest {
+        chat_history: Vec::new(),
+        ..user_request("unused")
+    };
+    let refused = session
+        .warmup(empty)
+        .await
+        .expect_err("a warmup needs at least its instructions");
+    assert!(
+        refused.to_string().contains("empty chat history"),
+        "got {refused}"
+    );
+    assert!(script.sent_json().is_empty(), "nothing was written");
+}
+
+/// The generic session's warmup may carry no input too. Over the ChatGPT wire,
+/// which lifts system messages into `instructions`, a request of only
+/// instructions goes out as `generate: false` with an empty input, and the
+/// generic session still leaves `stream` off: only a Codex session states it.
+#[tokio::test]
+async fn a_generic_session_warmup_may_carry_no_input() {
+    let script = Script::new().turn([completed("resp_warm")]);
+    let mut session =
+        ResponsesWebSocketSession::from_connection(codex_wire(), script.connection(), None);
+    let response_id = session
+        .warmup(prewarm_request())
+        .await
+        .expect("the warmup completes");
+    assert_eq!(response_id, "resp_warm");
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 1, "one frame for the warmup: {frames:?}");
+    let frame = &frames[0];
+    assert_eq!(frame["generate"], false);
+    assert_eq!(frame["input"], json!([]), "the warmup carries no input");
+    assert!(frame["instructions"].is_string(), "got {frame}");
+    assert!(frame.get("stream").is_none(), "got {frame}");
+}
