@@ -67,12 +67,21 @@ fn get(provider: &OpenAI, path: &str) -> Result<Encoded, EncodeError> {
 /// Authenticate and build a request, then apply its modality envelope hook.
 /// Return construction or hook errors. Use whole-response framing and the
 /// dialect's request-ID header.
+///
+/// A dialect that requires the caller's exact identity carries it here too,
+/// and refuses without it: those requests reach the same gateway.
 fn encoded(
     provider: &OpenAI,
     builder: http::request::Builder,
     body: Body,
 ) -> Result<Encoded, EncodeError> {
-    let mut request = provider.authenticate(builder).body(body)?;
+    let builder = provider.authenticate(builder);
+    let builder = if provider.dialect.quirks.identity.is_some() {
+        provider.identify(builder)?
+    } else {
+        builder
+    };
+    let mut request = builder.body(body)?;
     if let Some(envelope) = provider
         .dialect
         .quirks

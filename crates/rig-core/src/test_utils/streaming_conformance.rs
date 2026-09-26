@@ -2148,6 +2148,7 @@ pub mod fixtures {
                             &crate::providers::chatgpt::DIALECT,
                             "test-token",
                         )
+                        .with_caller_identity(crate::test_utils::test_caller_identity())
                         .with_account_id("account-id"),
                         crate::test_utils::RecordingHttpClient::new(body),
                     )

@@ -41,9 +41,12 @@
 //! use rig_core::providers::openai::OpenAI;
 //! use rig_core::providers::openai::responses_api::websocket::codex::CodexWebSocketSessionBuilder;
 //!
-//! # async fn example(backend: &impl rig_core::ws_client::WebSocketClientExt)
-//! #     -> Result<(), rig_core::error::ProviderError> {
+//! # async fn example(
+//! #     backend: &impl rig_core::ws_client::WebSocketClientExt,
+//! #     identity: rig_core::providers::openai::wire::CallerIdentity,
+//! # ) -> Result<(), rig_core::error::ProviderError> {
 //! let wire = OpenAI::with_key(&chatgpt::DIALECT, "access-token")
+//!     .with_caller_identity(identity)
 //!     .with_account_id("account-id")
 //!     .responses(chatgpt::GPT_5_3_CODEX);
 //! let mut session = CodexWebSocketSessionBuilder::new(wire)?
@@ -213,7 +216,7 @@ impl CodexIdentity {
                     .method(http::Method::GET)
                     .uri(url),
             ),
-        );
+        )?;
         if let Some(account_id) = &wire.provider.account_id {
             builder = builder.header(CHATGPT_ACCOUNT_ID_HEADER, account_id);
         }

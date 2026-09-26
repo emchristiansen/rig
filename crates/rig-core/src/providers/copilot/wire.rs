@@ -359,7 +359,12 @@ impl Wire for CopilotWire {
     fn encode(&self, request: CompletionRequest, mode: Mode) -> Result<Encoded, EncodeError> {
         self.wire
             .encode_with_headers(request, mode, |provider, request, builder| {
-                completion_envelope(provider, request, provider.headers(builder), self.intent)
+                Ok(completion_envelope(
+                    provider,
+                    request,
+                    provider.headers(builder)?,
+                    self.intent,
+                ))
             })
     }
 

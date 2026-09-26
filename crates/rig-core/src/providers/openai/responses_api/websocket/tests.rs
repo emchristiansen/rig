@@ -451,6 +451,37 @@ fn websocket_request_rejects_an_unsupported_base_url_scheme() {
     assert!(!error.is_retryable());
 }
 
+/// A generic session over the ChatGPT dialect reaches the same gateway, so
+/// its handshake carries the caller's exact identity too, and without one it
+/// is refused as a request error before anything is sent.
+#[test]
+fn websocket_request_over_the_chatgpt_dialect_requires_the_caller_s_identity() {
+    use crate::providers::chatgpt;
+    use crate::providers::openai::wire::MissingCallerIdentity;
+
+    let error = websocket_request(
+        &OpenAI::with_key(&chatgpt::DIALECT, "test-key").responses(chatgpt::GPT_5_3_CODEX),
+    )
+    .expect_err("no identity, no handshake");
+    match ProviderError::from(error) {
+        ProviderError::Request(inner) => assert_eq!(
+            inner.downcast_ref::<MissingCallerIdentity>(),
+            Some(&MissingCallerIdentity::Unset { dialect: "chatgpt" })
+        ),
+        other => panic!("expected a request refusal, got {other:?}"),
+    }
+
+    let identity = crate::test_utils::test_caller_identity();
+    let request = websocket_request(
+        &OpenAI::with_key(&chatgpt::DIALECT, "test-key")
+            .with_caller_identity(identity.clone())
+            .responses(chatgpt::GPT_5_3_CODEX),
+    )
+    .expect("request should build");
+    assert_eq!(request.headers()["originator"], identity.originator());
+    assert_eq!(request.headers()["user-agent"], identity.user_agent());
+}
+
 #[test]
 fn parse_done_event_exposes_response_id() {
     let payload = json!({

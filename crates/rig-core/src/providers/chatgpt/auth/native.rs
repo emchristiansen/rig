@@ -6,6 +6,7 @@ use crate::providers::internal::auth::{request, send_json};
 use crate::providers::internal::device_auth::{
     emit_device_code_prompt, read_json_record, token_expired, write_json_record,
 };
+use crate::providers::openai::wire::CallerIdentity;
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use bytes::Bytes;
@@ -54,6 +55,15 @@ struct DeviceTokenResponse {
     code_verifier: String,
 }
 
+/// The official client's token refresh body: exactly these members, in this
+/// order, sent as JSON.
+#[derive(Serialize)]
+struct RefreshRequest<'a> {
+    client_id: &'a str,
+    grant_type: &'a str,
+    refresh_token: &'a str,
+}
+
 #[derive(Debug, Deserialize)]
 struct OAuthTokenResponse {
     access_token: String,
@@ -85,7 +95,15 @@ impl PlatformAuthenticator {
         }
     }
 
-    pub(super) async fn auth_context_oauth<H>(&self, http: &H) -> Result<AuthContext, AuthError>
+    /// Resolve the cached or refreshed credential, signing in when needed.
+    /// A token refresh carries `identity` exactly, as the official client's
+    /// does; the device sign-in carries none, as the official client's
+    /// does not.
+    pub(super) async fn auth_context_oauth<H>(
+        &self,
+        http: &H,
+        identity: &CallerIdentity,
+    ) -> Result<AuthContext, AuthError>
     where
         H: HttpClientExt,
     {
@@ -110,7 +128,7 @@ impl PlatformAuthenticator {
         }
 
         if let Some(refresh_token) = record.refresh_token.clone() {
-            match self.refresh_tokens(http, &refresh_token).await {
+            match self.refresh_tokens(http, identity, &refresh_token).await {
                 Ok(refreshed) => {
                     write_json_record(self.auth_file.as_deref(), &refreshed)?;
                     return Ok(AuthContext {
@@ -138,6 +156,8 @@ impl PlatformAuthenticator {
         })
     }
 
+    /// Sign in with the device flow. Like the official client's, these
+    /// requests carry no caller identity.
     async fn login_device_flow<H>(&self, http: &H) -> Result<AuthRecord, AuthError>
     where
         H: HttpClientExt,
@@ -237,29 +257,23 @@ impl PlatformAuthenticator {
     async fn refresh_tokens<H>(
         &self,
         http: &H,
+        identity: &CallerIdentity,
         refresh_token: &str,
     ) -> Result<AuthRecord, RefreshTokensError>
     where
         H: HttpClientExt,
     {
-        let form = [
-            ("client_id", CHATGPT_CLIENT_ID),
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("scope", "openid profile email"),
-        ];
-
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .extend_pairs(form)
-            .finish();
+        let body = serde_json::to_vec(&RefreshRequest {
+            client_id: CHATGPT_CLIENT_ID,
+            grant_type: "refresh_token",
+            refresh_token,
+        })
+        .map_err(|error| RefreshTokensError::Auth(error.into()))?;
 
         let response = send_json::<_, OAuthTokenResponse>(
             http,
-            request(Method::POST, CHATGPT_OAUTH_TOKEN_URL)
-                .header(
-                    http::header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
+            identified(identity, Method::POST, CHATGPT_OAUTH_TOKEN_URL)
+                .header(http::header::CONTENT_TYPE, "application/json")
                 .body(Bytes::from(body)),
         )
         .await;
@@ -288,6 +302,12 @@ impl PlatformAuthenticator {
             format_refresh_error(status, oauth_error.as_ref(), &body),
         )))
     }
+}
+
+/// A request to the sign-in service carrying the caller's exact identity, as
+/// the official client's token refresh does.
+fn identified(identity: &CallerIdentity, method: Method, url: &str) -> http::request::Builder {
+    identity.stamp(request(method, url))
 }
 
 fn build_auth_record(

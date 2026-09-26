@@ -83,7 +83,7 @@ impl OpenAiWire {
             &OpenAI,
             &CompletionRequest,
             http::request::Builder,
-        ) -> http::request::Builder,
+        ) -> Result<http::request::Builder, EncodeError>,
     ) -> Result<Encoded, EncodeError> {
         on_route!(self, wire => wire.encode_with_headers(request, mode, headers))
     }

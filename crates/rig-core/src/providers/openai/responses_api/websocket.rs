@@ -1659,7 +1659,7 @@ fn websocket_request(wire: &Responses) -> Result<http_client::Request<NoBody>, E
             http_client::Request::builder()
                 .method(http::Method::GET)
                 .uri(url),
-        ),
+        )?,
     );
 
     request.body(NoBody).map_err(|error| {

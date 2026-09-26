@@ -185,7 +185,9 @@ async fn a_unary_tool_turn_and_its_stream_fold_alike() {
 #[tokio::test]
 async fn a_chatgpt_replayed_body_folds_the_same_unary_and_streamed() {
     let sse = cassette_body("chatgpt/codex_tool_args/zero_argument_tool_call_nonstreaming.yaml");
-    let wire = OpenAI::with_key(&CHATGPT, "test-token").responses("gpt-5.4");
+    let wire = OpenAI::with_key(&CHATGPT, "test-token")
+        .with_caller_identity(crate::test_utils::test_caller_identity())
+        .responses("gpt-5.4");
 
     let buffered = folded_unary(wire.clone(), &sse).await;
     let streamed = folded_stream(wire, &sse).await;
@@ -263,7 +265,9 @@ fn assert_string_map(value: &serde_json::Value, field: &str) {
 }
 
 fn chatgpt() -> Responses {
-    OpenAI::with_key(&CHATGPT, "test-token").responses("gpt-5.4")
+    OpenAI::with_key(&CHATGPT, "test-token")
+        .with_caller_identity(crate::test_utils::test_caller_identity())
+        .responses("gpt-5.4")
 }
 
 #[test]
@@ -351,6 +355,7 @@ fn muninn_shaped_codex_request() -> CompletionRequest {
 /// default instructions (`default_instructions("")` at the fork).
 fn muninn_configured_chatgpt() -> Responses {
     OpenAI::with_key(&CHATGPT, "test-token")
+        .with_caller_identity(crate::test_utils::test_caller_identity())
         .with_instructions("")
         .responses("gpt-5.4")
 }
@@ -1102,6 +1107,7 @@ fn exact_standard_http_create_response_satisfies_the_named_public_schema_view() 
 #[test]
 fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
     let wire = OpenAI::with_key(&CHATGPT, "test-token")
+        .with_caller_identity(crate::test_utils::test_caller_identity())
         .with_instructions("provider base")
         .responses("gpt-5.4")
         .with_responses_lite()
