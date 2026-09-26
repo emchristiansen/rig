@@ -48,6 +48,14 @@ impl WireFrame {
             Self::Bytes(bytes) => String::from_utf8_lossy(bytes),
         }
     }
+
+    /// The frame payload's bytes, exactly as received.
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Text(text) => text.as_bytes(),
+            Self::Bytes(bytes) => bytes,
+        }
+    }
 }
 
 /// The request a wire sends, and how its reply is framed.

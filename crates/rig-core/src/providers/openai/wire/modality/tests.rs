@@ -904,3 +904,24 @@ fn a_table_supplied_width_is_not_a_declaration() {
     let asked = OpenAI::with_key(&DOUBLEWORD, "k").embeddings(QWEN3_EMBEDDING_8B, Some(4_096));
     assert_eq!(asked.capabilities().declared, Some(4_096));
 }
+
+/// A byte-framed reply that is not UTF-8 keeps its exact bytes as the
+/// corrupt frame's evidence, through a real modality adapter.
+#[tokio::test]
+async fn an_embedding_reply_that_is_not_utf8_keeps_its_exact_bytes() {
+    let body: &[u8] = b"{\"object\":\xff}";
+    let bound = Bound::new(
+        OpenAI::new("sk-test").embeddings("text-embedding-3-small", None),
+        RecordingHttpClient::new(bytes::Bytes::from_static(body)),
+    );
+    let error = bound
+        .embed_texts_response(documents())
+        .await
+        .expect_err("the reply cannot decode");
+    let ProviderError::CorruptFrame(corrupt) = &error else {
+        panic!("expected a corrupt frame, got {error:?}");
+    };
+    assert_eq!(corrupt.frame(), None);
+    assert_eq!(corrupt.frame_bytes(), Some(body));
+    assert_eq!(error.kind(), ErrorKind::Json);
+}

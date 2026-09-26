@@ -151,8 +151,9 @@ pub enum ErrorDetail {
     /// truncated input. Carries exact accumulated arguments and the parser
     /// error for recovery or replay.
     MalformedToolInput(MalformedToolInput),
-    /// A frame of the provider's reply failed to decode. Carries the frame
-    /// exactly as received, so a consumer can keep it as evidence.
+    /// A frame of the provider's reply failed to decode. Carries what was
+    /// kept of the frame, labelled by how faithful it is, so a consumer can
+    /// keep it as evidence.
     CorruptFrame(CorruptFrameDetail),
 }
 
@@ -164,10 +165,8 @@ pub struct CorruptFrameDetail {
     /// when the classifier read a string one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_type: Option<String>,
-    /// The frame exactly as received; absent only where no text frame
-    /// exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frame: Option<String>,
+    /// What was kept of the frame, and how faithful it is.
+    pub evidence: FrameEvidence,
     /// Why the frame failed to decode.
     pub error: String,
 }
@@ -176,7 +175,7 @@ impl From<&CorruptFrame> for CorruptFrameDetail {
     fn from(corrupt: &CorruptFrame) -> Self {
         Self {
             event_type: corrupt.event_type.clone(),
-            frame: corrupt.frame.clone(),
+            evidence: corrupt.evidence.clone(),
             error: corrupt.error.to_string(),
         }
     }
@@ -349,28 +348,55 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 #[cfg(target_family = "wasm")]
 pub type BoxError = Box<dyn std::error::Error + 'static>;
 
-/// A frame the provider sent that this client could not decode, kept exactly
-/// as it arrived.
+/// A frame the provider sent that this client could not decode, with what
+/// was kept of it, labelled by how faithful it is.
 ///
 /// It is invalid JSON, or a frame whose discriminator this client models but
 /// whose payload failed typed decoding. A malformed modeled frame is never
-/// demoted to an unmodeled one; it fails the reply, and this record carries
-/// the evidence so a caller can keep the frame.
+/// demoted to an unmodeled one; it surfaces as an error, and this record
+/// carries the evidence so a caller can keep the frame. A buffered call fails
+/// on it and a WebSocket session is failed by it; a stream reports it in band,
+/// and a consumer that keeps polling may still receive later events.
 ///
 /// ```
-/// use rig_core::error::ProviderError;
+/// use rig_core::error::{FrameEvidence, ProviderError};
 ///
 /// fn record(error: &ProviderError) {
 ///     if let Some(corrupt) = error.corrupt_frame() {
-///         eprintln!("type {:?}, frame {:?}: {}", corrupt.event_type(), corrupt.frame(), corrupt.error());
+///         match corrupt.evidence() {
+///             FrameEvidence::Text(frame) => eprintln!("exact frame: {frame}"),
+///             FrameEvidence::Bytes(bytes) => eprintln!("exact bytes: {bytes:?}"),
+///             FrameEvidence::Decoded(text) => eprintln!("replacement-decoded: {text}"),
+///             FrameEvidence::Absent => eprintln!("no frame: {}", corrupt.error()),
+///         }
 ///     }
 /// }
 /// ```
 #[derive(Debug)]
 pub struct CorruptFrame {
     event_type: Option<String>,
-    frame: Option<String>,
+    evidence: FrameEvidence,
     error: serde_json::Error,
+}
+
+/// What a [`CorruptFrame`] kept of the frame, and how faithful it is.
+///
+/// Only [`Self::Text`] and [`Self::Bytes`] are the frame exactly as received.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "frame", rename_all = "snake_case")]
+pub enum FrameEvidence {
+    /// The frame's text, exactly as received.
+    Text(String),
+    /// The frame's bytes, exactly as received. They are not valid UTF-8, so
+    /// there is no exact text.
+    Bytes(Vec<u8>),
+    /// Text decoded from bytes that were not all valid UTF-8, each invalid
+    /// sequence replaced with U+FFFD before this client saw the frame, as the
+    /// `text/event-stream` grammar requires. Not the frame as received; the
+    /// original bytes were not kept.
+    Decoded(String),
+    /// No frame: the transport delivered an already-decoded event.
+    Absent,
 }
 
 impl CorruptFrame {
@@ -383,17 +409,26 @@ impl CorruptFrame {
     ) -> Self {
         Self {
             event_type,
-            frame: Some(frame.into()),
+            evidence: FrameEvidence::Text(frame.into()),
             error,
         }
     }
 
-    /// A decode failure with no text frame: a transport that delivers
-    /// already-decoded events, or bytes that are not UTF-8.
-    pub(crate) fn without_text(error: serde_json::Error) -> Self {
+    /// A byte frame that failed to decode.
+    pub(crate) fn bytes(bytes: Vec<u8>, error: serde_json::Error) -> Self {
         Self {
             event_type: None,
-            frame: None,
+            evidence: FrameEvidence::Bytes(bytes),
+            error,
+        }
+    }
+
+    /// A decode failure with no frame: a transport that delivers
+    /// already-decoded events.
+    pub(crate) fn absent(error: serde_json::Error) -> Self {
+        Self {
+            event_type: None,
+            evidence: FrameEvidence::Absent,
             error,
         }
     }
@@ -403,17 +438,50 @@ impl CorruptFrame {
         Self { error, ..self }
     }
 
+    /// Relabel text a decoder read from a replacement-decoded payload: it is
+    /// not the frame as received.
+    pub(crate) fn mark_replacement_decoded(&mut self) {
+        if let FrameEvidence::Text(text) = &mut self.evidence {
+            self.evidence = FrameEvidence::Decoded(std::mem::take(text));
+        }
+    }
+
+    /// Replace what a decoder read lossily from `bytes`, the frame as
+    /// received, with those bytes.
+    pub(crate) fn set_received_bytes(&mut self, bytes: &[u8]) {
+        if !matches!(self.evidence, FrameEvidence::Absent) {
+            self.evidence = FrameEvidence::Bytes(bytes.to_vec());
+        }
+    }
+
     /// The frame's discriminator value (for a Responses frame, its `type`),
     /// when the classifier read a string one.
     pub fn event_type(&self) -> Option<&str> {
         self.event_type.as_deref()
     }
 
-    /// The frame exactly as received. `None` only where no text frame
-    /// exists: a transport that delivers decoded events, or bytes that are
-    /// not UTF-8.
+    /// What was kept of the frame, and how faithful it is.
+    pub fn evidence(&self) -> &FrameEvidence {
+        &self.evidence
+    }
+
+    /// The frame's text exactly as received. `None` when there is no exact
+    /// text: see [`Self::evidence`].
     pub fn frame(&self) -> Option<&str> {
-        self.frame.as_deref()
+        match &self.evidence {
+            FrameEvidence::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// The frame's bytes exactly as received, text or not. `None` when they
+    /// were not kept: see [`Self::evidence`].
+    pub fn frame_bytes(&self) -> Option<&[u8]> {
+        match &self.evidence {
+            FrameEvidence::Text(text) => Some(text.as_bytes()),
+            FrameEvidence::Bytes(bytes) => Some(bytes),
+            FrameEvidence::Decoded(_) | FrameEvidence::Absent => None,
+        }
     }
 
     /// Why the frame failed to decode.
@@ -428,9 +496,15 @@ impl fmt::Display for CorruptFrame {
             Some(event_type) => write!(f, "`{event_type}` frame failed to decode: {}", self.error)?,
             None => write!(f, "frame failed to decode: {}", self.error)?,
         }
-        match &self.frame {
-            Some(frame) => write!(f, "; frame: {frame}"),
-            None => Ok(()),
+        match &self.evidence {
+            FrameEvidence::Text(text) => write!(f, "; frame: {text}"),
+            FrameEvidence::Bytes(bytes) => {
+                write!(f, "; frame bytes (not UTF-8): {}", bytes.escape_ascii())
+            }
+            FrameEvidence::Decoded(text) => {
+                write!(f, "; frame decoded with U+FFFD replacement: {text}")
+            }
+            FrameEvidence::Absent => Ok(()),
         }
     }
 }
@@ -475,8 +549,8 @@ pub enum ProviderError {
     /// JSON serialization or deserialization failed.
     #[error("JsonError: {0}")]
     Json(#[from] serde_json::Error),
-    /// A frame of the provider's reply failed to decode. The frame is kept
-    /// exactly as received; see [`CorruptFrame`].
+    /// A frame of the provider's reply failed to decode. What was kept of the
+    /// frame travels with it; see [`CorruptFrame`].
     #[error("CorruptFrameError: {0}")]
     CorruptFrame(#[source] CorruptFrame),
     /// A URL could not be parsed.
@@ -590,8 +664,8 @@ impl ProviderError {
         }
     }
 
-    /// The undecodable frame, kept exactly as received, when this error
-    /// carries one.
+    /// The undecodable frame and what was kept of it, when this error is
+    /// one.
     pub fn corrupt_frame(&self) -> Option<&CorruptFrame> {
         match self {
             Self::CorruptFrame(corrupt) => Some(corrupt),

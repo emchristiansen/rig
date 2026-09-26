@@ -25,7 +25,7 @@ pub enum WireEvent<T> {
         value: crate::streaming::UnknownPayload,
     },
     /// Invalid JSON or a recognized frame that failed typed decoding, with
-    /// the frame kept exactly as received. Must not be demoted to `Unknown`.
+    /// what was kept of the frame. Must not be demoted to `Unknown`.
     Corrupt(CorruptFrame),
 }
 
@@ -175,7 +175,7 @@ where
         Ok(event) => WireEvent::Known(event),
         Err(error) => WireEvent::Corrupt(match std::str::from_utf8(line) {
             Ok(text) => CorruptFrame::text(None, text, error),
-            Err(_) => CorruptFrame::without_text(error),
+            Err(_) => CorruptFrame::bytes(line.to_vec(), error),
         }),
     }
 }
@@ -207,7 +207,7 @@ pub fn classify_typed_event<T>(event: TypedEvent<T>) -> WireEvent<T> {
             event_type,
             value: serde_json::Value::String(detail).into(),
         },
-        TypedEvent::Malformed(message) => WireEvent::Corrupt(CorruptFrame::without_text(
+        TypedEvent::Malformed(message) => WireEvent::Corrupt(CorruptFrame::absent(
             <serde_json::Error as serde::de::Error>::custom(message),
         )),
     }

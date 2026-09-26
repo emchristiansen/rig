@@ -143,3 +143,26 @@ fn ndjson_lines_split_across_chunks_rejoin() {
     let lines: Vec<_> = framer.push(b"1}\r\n").collect();
     assert_eq!(lines, vec![b"{\"a\":1}".to_vec()]);
 }
+
+/// An event whose `data` needed U+FFFD replacement says so; one whose only
+/// invalid bytes sat in a comment, or that had none, does not.
+#[test]
+fn an_event_whose_data_was_not_utf8_is_marked_replacement_decoded() {
+    let marks = |body: &[u8]| -> Vec<(String, bool)> {
+        SseFramer::new()
+            .push(body)
+            .map(|event| (event.data, event.replaced_invalid_utf8))
+            .collect()
+    };
+    assert_eq!(
+        marks(b"data: {\"a\":\"\xff\"}\n\ndata: ok\n\n"),
+        vec![
+            ("{\"a\":\"\u{fffd}\"}".to_owned(), true),
+            ("ok".to_owned(), false)
+        ]
+    );
+    assert_eq!(
+        marks(b": \xff\ndata: ok\n\n"),
+        vec![("ok".to_owned(), false)]
+    );
+}

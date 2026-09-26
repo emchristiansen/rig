@@ -639,7 +639,7 @@ fn reports_match_the_replaced_error_enums() {
                 "{",
                 json_error(),
             )),
-            r#"{"code":null,"http_status":null,"kind":"json","message":"CorruptFrameError: `text.delta` frame failed to decode: EOF while parsing an object at line 1 column 1; frame: {","refusal":false,"retryable":false,"source_chain":["`text.delta` frame failed to decode: EOF while parsing an object at line 1 column 1; frame: {","EOF while parsing an object at line 1 column 1"],"detail":{"detail":"corrupt_frame","event_type":"text.delta","frame":"{","error":"EOF while parsing an object at line 1 column 1"}}"#,
+            r#"{"code":null,"http_status":null,"kind":"json","message":"CorruptFrameError: `text.delta` frame failed to decode: EOF while parsing an object at line 1 column 1; frame: {","refusal":false,"retryable":false,"source_chain":["`text.delta` frame failed to decode: EOF while parsing an object at line 1 column 1; frame: {","EOF while parsing an object at line 1 column 1"],"detail":{"detail":"corrupt_frame","event_type":"text.delta","evidence":{"kind":"text","frame":"{"},"error":"EOF while parsing an object at line 1 column 1"}}"#,
             AdapterErrorBoundary::Decode,
         ),
         (

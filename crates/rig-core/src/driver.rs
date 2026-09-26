@@ -215,10 +215,27 @@ where
     /// One payload at a time, because a streamed reply yields between them:
     /// a consumer that stops reading must not have facts recorded for the
     /// frames it never saw.
+    ///
+    /// A decoder reads a payload that is not exact UTF-8 text lossily, so a
+    /// corrupt frame it reports is relabelled here with what the reply
+    /// actually carried: the exact bytes, or text marked as
+    /// replacement-decoded. It is never passed off as the frame received.
     fn absorb(&mut self, payload: Framed) {
         self.project(payload.payload());
+        let lossy = payload.lossy_evidence();
         if let Some(frame) = payload.into_frame() {
+            let first_new = self.ready.len();
             self.push(frame);
+            if let Some(lossy) = lossy {
+                for item in self.ready.iter_mut().skip(first_new) {
+                    if let Err(ProviderError::CorruptFrame(corrupt)) = item {
+                        match &lossy {
+                            LossyPayload::ReplacementDecoded => corrupt.mark_replacement_decoded(),
+                            LossyPayload::NotUtf8(bytes) => corrupt.set_received_bytes(bytes),
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -927,11 +944,26 @@ fn byte_request(request: http::Request<Body>) -> Result<http::Request<Vec<u8>>, 
 struct Framed {
     payload: Vec<u8>,
     frame: bool,
+    /// The framer replaced invalid UTF-8 in `payload` with U+FFFD, so it is
+    /// not the bytes the reply carried.
+    replaced_invalid_utf8: bool,
 }
 
 impl Framed {
     fn payload(&self) -> &[u8] {
         &self.payload
+    }
+
+    /// How a corrupt frame decoded from this payload must be labelled, when
+    /// its decoder could only read it lossily.
+    fn lossy_evidence(&self) -> Option<LossyPayload> {
+        if self.replaced_invalid_utf8 {
+            Some(LossyPayload::ReplacementDecoded)
+        } else if std::str::from_utf8(&self.payload).is_err() {
+            Some(LossyPayload::NotUtf8(self.payload.clone()))
+        } else {
+            None
+        }
     }
 
     fn into_frame(self) -> Option<WireFrame> {
@@ -940,6 +972,14 @@ impl Framed {
             Err(error) => WireFrame::Bytes(error.into_bytes()),
         })
     }
+}
+
+/// A payload a decoder can read only lossily, as text.
+enum LossyPayload {
+    /// The framer already replaced invalid UTF-8 with U+FFFD.
+    ReplacementDecoded,
+    /// The payload, exactly as received, is not UTF-8.
+    NotUtf8(Vec<u8>),
 }
 
 /// The framer for one reply's bytes.
@@ -965,6 +1005,7 @@ impl Framer {
                 .map(|event| Framed {
                     frame: !event.data.trim().is_empty(),
                     payload: event.data.into_bytes(),
+                    replaced_invalid_utf8: event.replaced_invalid_utf8,
                 })
                 .collect(),
             Self::Ndjson(framer) => framer
@@ -972,6 +1013,7 @@ impl Framer {
                 .map(|line| Framed {
                     frame: true,
                     payload: line,
+                    replaced_invalid_utf8: false,
                 })
                 .collect(),
             Self::Whole(buffer) => {
@@ -991,6 +1033,7 @@ impl Framer {
                 .map(|line| Framed {
                     frame: true,
                     payload: line,
+                    replaced_invalid_utf8: false,
                 })
                 .into_iter()
                 .collect(),
@@ -1002,6 +1045,7 @@ impl Framer {
                     vec![Framed {
                         frame: true,
                         payload,
+                        replaced_invalid_utf8: false,
                     }]
                 }
             }

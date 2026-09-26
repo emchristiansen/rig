@@ -32,6 +32,10 @@ pub struct SseEvent {
     /// Most recent parsed `retry:` value since the previous emitted event.
     /// This value does not trigger automatic reconnection.
     pub retry: Option<u64>,
+    /// Whether a `data` line of this event was not valid UTF-8, so the
+    /// grammar's decoding replaced each invalid sequence with U+FFFD: `data`
+    /// is then not the bytes the stream carried.
+    pub replaced_invalid_utf8: bool,
 }
 
 /// The optional leading byte-order mark, which the grammar ignores.
@@ -53,6 +57,8 @@ pub struct SseFramer {
     bom_done: bool,
     /// Bytes of complete lines consumed since the last blank line.
     since_dispatch: usize,
+    /// A `data` line since the last blank line needed U+FFFD replacement.
+    replaced_invalid_utf8: bool,
 }
 
 impl SseFramer {
@@ -66,11 +72,13 @@ impl SseFramer {
         let chunk = self.strip_bom(chunk);
         self.buffer.extend_from_slice(chunk);
         while let Some((line_len, consumed)) = terminated_line(&self.buffer) {
-            let line = String::from_utf8_lossy(self.buffer.get(..line_len).unwrap_or_default())
-                .into_owned();
+            let line = String::from_utf8_lossy(self.buffer.get(..line_len).unwrap_or_default());
+            // Only a replacement allocates: valid UTF-8 borrows.
+            let replaced = matches!(line, std::borrow::Cow::Owned(_));
+            let line = line.into_owned();
             self.buffer.drain(..consumed);
             self.since_dispatch = self.since_dispatch.saturating_add(consumed);
-            self.line(&line);
+            self.line(&line, replaced);
         }
         self.ready.drain(..)
     }
@@ -108,8 +116,9 @@ impl SseFramer {
         rest
     }
 
-    /// Process one complete line of the grammar.
-    fn line(&mut self, line: &str) {
+    /// Process one complete line of the grammar; `replaced` says its bytes
+    /// were not valid UTF-8.
+    fn line(&mut self, line: &str, replaced: bool) {
         if line.is_empty() {
             self.dispatch();
             return;
@@ -131,6 +140,7 @@ impl SseFramer {
             "data" => {
                 self.data.push_str(value);
                 self.data.push('\n');
+                self.replaced_invalid_utf8 |= replaced;
             }
             // A NUL in an id is ignored outright, per the grammar.
             "id" if !value.contains('\0') => {
@@ -148,6 +158,7 @@ impl SseFramer {
     /// it only resets the event type, as the grammar says.
     fn dispatch(&mut self) {
         self.since_dispatch = 0;
+        let replaced_invalid_utf8 = std::mem::take(&mut self.replaced_invalid_utf8);
         if self.data.is_empty() {
             self.event_type.clear();
             return;
@@ -163,6 +174,7 @@ impl SseFramer {
             data: std::mem::take(&mut self.data),
             id: self.last_event_id.clone(),
             retry: self.retry.take(),
+            replaced_invalid_utf8,
         });
         self.event_type.clear();
     }
