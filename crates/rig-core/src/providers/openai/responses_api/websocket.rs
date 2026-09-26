@@ -791,10 +791,12 @@ impl ResponsesWebSocketSession {
         else {
             return;
         };
+        // Like the official client, a name whose value is not a string does
+        // not end the search: another spelling of the name may carry one.
         self.turn_state = headers
             .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(codex::TURN_STATE_METADATA_KEY))
-            .and_then(|(_, value)| first_string(value))
+            .filter(|(name, _)| name.eq_ignore_ascii_case(codex::TURN_STATE_METADATA_KEY))
+            .find_map(|(_, value)| first_string(value))
             .map(str::to_owned);
     }
 
@@ -1570,12 +1572,12 @@ fn header_map_from_json(headers: &Map<String, Value>) -> http::HeaderMap {
         .collect()
 }
 
-/// Decode WebSocket error and done events or delegate to Responses classification.
-/// Return parsing and triage errors; preserve unknown payloads with their tag.
 /// The unmodelled Responses event carrying server-supplied headers, among
 /// them the Codex turn-state token.
 const RESPONSE_METADATA_EVENT: &str = "response.metadata";
 
+/// Decode WebSocket error and done events or delegate to Responses classification.
+/// Return parsing and triage errors; preserve unknown payloads with their tag.
 fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, ProviderError> {
     #[derive(Deserialize)]
     struct EventType {
