@@ -191,8 +191,10 @@ pub use super::super::codex_identity::{
 impl CodexIdentity {
     /// The handshake request that opens a Codex websocket carrying this
     /// identity: `GET {base_url}/responses` on the websocket scheme, with the
-    /// wire's credential, its caller identity (`originator` and `user-agent`,
-    /// exactly as its HTTP requests carry them) when it has one, its account
+    /// wire's credential, its caller identity (`originator`, `user-agent` and
+    /// any `version`, exactly as its HTTP requests carry them; refused with
+    /// [`MissingCallerIdentity`](crate::providers::openai::wire::MissingCallerIdentity)
+    /// when the wire has no exact one), its account
     /// id when set, the dashed identity headers, `x-client-request-id`, the
     /// `OpenAI-Beta` opt-in, and last the wire's
     /// [request headers](Responses::with_request_headers). Nothing else: the

@@ -180,6 +180,39 @@ fn a_manual_copilot_wrapper_keeps_its_envelope_after_deserialization() {
     }
 }
 
+/// A Copilot envelope around a ChatGPT wire is refused before anything is
+/// sent, even with the caller's exact identity: the envelope would replace
+/// its `user-agent`, so the request could not carry that identity exactly.
+#[test]
+fn a_copilot_wrapper_around_the_chatgpt_dialect_is_refused() {
+    use crate::providers::chatgpt;
+
+    let provider = OpenAI::with_key(&chatgpt::DIALECT, "token")
+        .with_caller_identity(crate::test_utils::test_caller_identity());
+    for shared in [
+        provider.chat("model").into(),
+        provider.responses("model").into(),
+    ] {
+        let wire = CopilotWire {
+            wire: shared,
+            intent: CopilotIntent::default(),
+        };
+        for mode in [Mode::Unary, Mode::Streaming] {
+            let error = crate::error::ProviderError::from(
+                wire.encode(prompt(), mode)
+                    .expect_err("the envelope would replace the caller's identity"),
+            );
+            match error {
+                crate::error::ProviderError::Request(inner) => assert_eq!(
+                    inner.downcast_ref::<CopilotEnvelopeOverCallerIdentity>(),
+                    Some(&CopilotEnvelopeOverCallerIdentity { dialect: "chatgpt" })
+                ),
+                other => panic!("expected a request refusal, got {other:?}"),
+            }
+        }
+    }
+}
+
 // ── routing ─────────────────────────────────────────────────────────────
 
 /// The route is a property of the model, and the choice is made in one

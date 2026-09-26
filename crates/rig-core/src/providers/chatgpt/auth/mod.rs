@@ -48,8 +48,9 @@ pub enum AuthSource {
         account_id: Option<String>,
     },
     /// Sign in and refresh through OAuth. A token refresh carries
-    /// `identity`'s `originator`, `user-agent` and, when it names one,
-    /// `version` headers exactly, as the official client's does.
+    /// `identity`'s `originator` and `user-agent` headers exactly, as the
+    /// official client's does; a `version` it names is a model request
+    /// header and is not sent there.
     OAuth { identity: CallerIdentity },
 }
 

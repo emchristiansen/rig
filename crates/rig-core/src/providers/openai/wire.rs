@@ -486,15 +486,24 @@ impl CallerIdentity {
     }
 
     /// Add the `originator`, `user-agent` and, when this identity names one,
-    /// `version` headers, each exactly as given.
+    /// `version` headers, each exactly as given: what a model request
+    /// carries.
     pub(crate) fn stamp(&self, builder: http::request::Builder) -> http::request::Builder {
-        let builder = builder
-            .header(ORIGINATOR_HEADER, &self.originator)
-            .header(http::header::USER_AGENT, &self.user_agent);
+        let builder = self.stamp_client(builder);
         match &self.version {
             Some(version) => builder.header(VERSION_HEADER, version),
             None => builder,
         }
+    }
+
+    /// Add only the `originator` and `user-agent` headers, exactly as given:
+    /// what the official client's own HTTP client carries on every request,
+    /// its sign-in service's token refresh included. `version` is a model
+    /// request header, so it is not added here.
+    pub(crate) fn stamp_client(&self, builder: http::request::Builder) -> http::request::Builder {
+        builder
+            .header(ORIGINATOR_HEADER, &self.originator)
+            .header(http::header::USER_AGENT, &self.user_agent)
     }
 
     /// The `originator` header.
@@ -1001,7 +1010,9 @@ impl OpenAI {
     }
 
     /// `dialect` with `api_key`, at the dialect's default base URL and with
-    /// the instructions and caller identity its gateway expects, if any.
+    /// the instructions its gateway expects, if any. It starts with no
+    /// caller identity: a dialect that requires one sends nothing until the
+    /// caller supplies it ([`Self::with_caller_identity`]).
     pub fn with_key(dialect: &Dialect, api_key: impl Into<Secret>) -> Self {
         let quirks = &dialect.quirks;
         let api_key = api_key.into();
@@ -1466,22 +1477,35 @@ impl OpenAI {
         &self,
         builder: http::request::Builder,
     ) -> Result<http::request::Builder, MissingCallerIdentity> {
+        Ok(match self.sendable_identity()? {
+            Some(ConfiguredIdentity::Exact(identity)) => identity.stamp(builder),
+            Some(ConfiguredIdentity::Originator { originator }) => builder
+                .header(ORIGINATOR_HEADER, originator)
+                .header(http::header::USER_AGENT, default_user_agent(originator)),
+            None => builder,
+        })
+    }
+
+    /// The identity this configuration may send with, refusing a dialect
+    /// that requires the caller's exact identity when there is none or only
+    /// an originator. The one rule every send checks: [`Self::identify`]
+    /// before stamping a request, and a websocket session before writing a
+    /// frame, whoever opened its connection.
+    pub(crate) fn sendable_identity(
+        &self,
+    ) -> Result<Option<&ConfiguredIdentity>, MissingCallerIdentity> {
         let required = self.dialect.quirks.identity.is_some();
         match &self.identity {
-            Some(ConfiguredIdentity::Exact(identity)) => Ok(identity.stamp(builder)),
             Some(ConfiguredIdentity::Originator { originator }) if required => {
                 Err(MissingCallerIdentity::OriginatorOnly {
                     dialect: self.dialect.name,
                     originator: originator.clone(),
                 })
             }
-            Some(ConfiguredIdentity::Originator { originator }) => Ok(builder
-                .header(ORIGINATOR_HEADER, originator)
-                .header(http::header::USER_AGENT, default_user_agent(originator))),
             None if required => Err(MissingCallerIdentity::Unset {
                 dialect: self.dialect.name,
             }),
-            None => Ok(builder),
+            identity => Ok(identity.as_ref()),
         }
     }
 

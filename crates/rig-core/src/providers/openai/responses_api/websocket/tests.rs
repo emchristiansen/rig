@@ -919,6 +919,48 @@ fn session_over(script: &Script) -> ResponsesWebSocketSession {
     )
 }
 
+/// A session over a connection someone else opened, on the ChatGPT dialect
+/// without the caller's exact identity, refuses every send before a frame
+/// is written: Rig made no handshake of its own to refuse.
+#[tokio::test]
+async fn a_session_over_an_open_connection_refuses_to_send_without_the_caller_s_identity() {
+    use crate::providers::chatgpt;
+    use crate::providers::openai::wire::MissingCallerIdentity;
+
+    for (provider, expected) in [
+        (
+            OpenAI::with_key(&chatgpt::DIALECT, "test-key"),
+            MissingCallerIdentity::Unset { dialect: "chatgpt" },
+        ),
+        (
+            OpenAI::with_key(&chatgpt::DIALECT, "test-key").with_originator("ccc"),
+            MissingCallerIdentity::OriginatorOnly {
+                dialect: "chatgpt",
+                originator: "ccc".to_owned(),
+            },
+        ),
+    ] {
+        let script = Script::new().turn([completed_event("resp_1")]);
+        let mut session = ResponsesWebSocketSession::from_connection(
+            provider.responses(chatgpt::GPT_5_3_CODEX),
+            script.connection(),
+            None,
+        );
+        match session
+            .completion(user_request("hi"))
+            .await
+            .expect_err("no exact identity, no frame")
+        {
+            ProviderError::Request(inner) => assert_eq!(
+                inner.downcast_ref::<MissingCallerIdentity>(),
+                Some(&expected)
+            ),
+            other => panic!("expected a request refusal, got {other:?}"),
+        }
+        assert!(script.sent().is_empty(), "nothing was written");
+    }
+}
+
 /// The frames of a drain that must have serviced the socket cleanly.
 fn serviced(drain: KeepaliveDrain, context: &str) -> Vec<UnrecognizedEvent> {
     let (recovered, ending) = drain.into_parts();

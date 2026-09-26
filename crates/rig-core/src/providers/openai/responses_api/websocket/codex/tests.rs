@@ -289,6 +289,35 @@ fn the_handshake_refuses_without_the_caller_s_exact_identity() {
     );
 }
 
+/// A Codex session over a connection the caller opened still refuses to
+/// send without the caller's exact identity on its wire, before any frame is
+/// written.
+#[tokio::test]
+async fn a_codex_session_over_an_open_connection_refuses_to_send_without_the_caller_s_identity() {
+    use crate::providers::openai::wire::MissingCallerIdentity;
+
+    let script = Script::new().turn([completed("resp_1")]);
+    let mut session = CodexWebSocketSession::from_connection(
+        OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).responses(chatgpt::GPT_5_3_CODEX),
+        CodexIdentity::generate(),
+        script.connection(),
+        None,
+    )
+    .expect("the ChatGPT dialect speaks the Codex contract");
+    match session
+        .send(user_request("hello"))
+        .await
+        .expect_err("no exact identity, no frame")
+    {
+        ProviderError::Request(inner) => assert_eq!(
+            inner.downcast_ref::<MissingCallerIdentity>(),
+            Some(&MissingCallerIdentity::Unset { dialect: "chatgpt" })
+        ),
+        other => panic!("expected a request refusal, got {other:?}"),
+    }
+    assert!(script.sent().is_empty(), "nothing was written");
+}
+
 #[test]
 fn the_handshake_omits_the_account_header_without_an_account() {
     let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)

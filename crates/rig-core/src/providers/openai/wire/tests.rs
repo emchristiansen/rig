@@ -639,6 +639,65 @@ fn chatgpt_refuses_an_originator_without_the_caller_s_user_agent() {
     assert_eq!(identity_headers(&exact)["originator"], "client_exec");
 }
 
+/// The request refusal a ChatGPT configuration without the caller's exact
+/// identity meets, as its typed cause.
+fn missing_identity(error: crate::error::ProviderError) -> MissingCallerIdentity {
+    match error {
+        crate::error::ProviderError::Request(inner) => inner
+            .downcast_ref::<MissingCallerIdentity>()
+            .cloned()
+            .unwrap_or_else(|| panic!("expected a missing identity, got {inner}")),
+        other => panic!("expected a request refusal, got {other:?}"),
+    }
+}
+
+/// The two configurations the ChatGPT dialect refuses, with the refusal each
+/// meets.
+fn refused_chatgpt_configurations() -> [(OpenAI, MissingCallerIdentity); 2] {
+    [
+        (
+            chatgpt("tok"),
+            MissingCallerIdentity::Unset { dialect: "chatgpt" },
+        ),
+        (
+            chatgpt("tok").with_originator("ccc"),
+            MissingCallerIdentity::OriginatorOnly {
+                dialect: "chatgpt",
+                originator: "ccc".to_owned(),
+            },
+        ),
+    ]
+}
+
+/// A completion on the ChatGPT dialect without the caller's exact identity,
+/// unary or streamed, on either route, is refused with the typed cause and
+/// reaches no transport.
+#[tokio::test]
+async fn chatgpt_completions_refuse_without_the_caller_s_identity_and_send_nothing() {
+    use crate::completion::CompletionModel as _;
+
+    for (provider, expected) in refused_chatgpt_configurations() {
+        for route in [Route::Responses, Route::Chat] {
+            let http = crate::test_utils::RecordingHttpClient::new("");
+            let model = crate::driver::Bind::bind(provider.clone().with_route(route), http.clone())
+                .completion("gpt-5.4");
+            let request = model.completion_request("hello").build();
+            let error = model
+                .completion(request.clone())
+                .await
+                .expect_err("no exact identity, no request");
+            assert_eq!(missing_identity(error), expected, "{route:?} unary");
+            let error = model
+                .stream(request)
+                .await
+                .err()
+                .expect("no exact identity, no stream");
+            assert_eq!(missing_identity(error), expected, "{route:?} streamed");
+            assert!(http.requests().is_empty(), "{route:?}: nothing was sent");
+        }
+    }
+}
+
 /// A request other than a completion on the ChatGPT dialect reaches the
 /// same gateway, so it carries the caller's identity too, and refuses
 /// without it.
@@ -646,16 +705,13 @@ fn chatgpt_refuses_an_originator_without_the_caller_s_user_agent() {
 fn chatgpt_modality_requests_carry_the_caller_s_identity_or_refuse() {
     use crate::wire::{Mode, Wire};
 
-    let refused = chatgpt("tok")
-        .models()
-        .encode((), Mode::Unary)
-        .expect_err("no identity, no request");
-    assert!(
-        refused
-            .to_string()
-            .contains("requires the caller's exact identity"),
-        "got {refused}"
-    );
+    for (provider, expected) in refused_chatgpt_configurations() {
+        let refused = provider
+            .models()
+            .encode((), Mode::Unary)
+            .expect_err("no exact identity, no request");
+        assert_eq!(missing_identity(refused.into()), expected);
+    }
 
     let encoded = chatgpt("tok")
         .with_caller_identity(client_exec_identity(Some("1.2.3")))

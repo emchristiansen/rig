@@ -304,10 +304,12 @@ impl PlatformAuthenticator {
     }
 }
 
-/// A request to the sign-in service carrying the caller's exact identity, as
-/// the official client's token refresh does.
+/// A request to the sign-in service carrying the caller's `originator` and
+/// `user-agent` exactly, as the official client's token refresh does. A
+/// `version` the identity names is a model request header, which the
+/// official refresh does not send.
 fn identified(identity: &CallerIdentity, method: Method, url: &str) -> http::request::Builder {
-    identity.stamp(request(method, url))
+    identity.stamp_client(request(method, url))
 }
 
 fn build_auth_record(

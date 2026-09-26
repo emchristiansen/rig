@@ -745,6 +745,10 @@ impl ResponsesWebSocketSession {
 
     /// Build a session over an already-open, authenticated connection.
     /// `event_timeout: None` waits indefinitely for each event.
+    ///
+    /// On a dialect that requires the caller's exact identity, every send
+    /// refuses with [`MissingCallerIdentity`](crate::providers::openai::wire::MissingCallerIdentity)
+    /// until `wire` carries one, whoever opened the connection.
     pub fn from_connection(
         wire: Responses,
         connection: BoxedWebSocketConnection,
@@ -905,6 +909,10 @@ impl ResponsesWebSocketSession {
         frame: String,
     ) -> Result<(), ProviderError> {
         self.ensure_can_send()?;
+        // A session built over a connection someone else opened has had no
+        // handshake of Rig's to refuse, so the identity rule is checked again
+        // here, before any frame is written.
+        self.wire.provider.sendable_identity()?;
 
         if let Err(error) = self.socket.send(Frame::Text(frame)).await {
             return Err(self.fail_session(websocket_provider_error(error)));
