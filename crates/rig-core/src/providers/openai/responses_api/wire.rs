@@ -15,6 +15,8 @@ use crate::wire::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::request_compression::RequestCompression;
+use super::request_headers::RequestHeaders;
 use super::responses_lite::{CodexRequestShape, ResponsesLiteError};
 use super::streaming::{IncompleteTerminal, ResponsesDecoder, ResponsesStreamOptions};
 use super::{
@@ -64,6 +66,15 @@ pub struct Responses {
     /// Responses Lite developer prefix. Standard is the serialized default.
     #[serde(default, skip_serializing_if = "CodexRequestShape::is_standard")]
     pub codex_request_shape: CodexRequestShape,
+    /// Caller-supplied headers added to every HTTP request and every
+    /// websocket handshake this wire sends (see [`Self::with_request_headers`]).
+    /// Empty by default.
+    #[serde(default, skip_serializing_if = "RequestHeaders::is_empty")]
+    pub request_headers: RequestHeaders,
+    /// How this wire encodes its HTTP request bodies (see
+    /// [`Self::with_request_compression`]). Sent as they are by default.
+    #[serde(default, skip_serializing_if = "RequestCompression::is_none")]
+    pub request_compression: RequestCompression,
 }
 
 impl Responses {
@@ -84,11 +95,11 @@ impl Responses {
         // the driver folds it.
         let codex = quirks.contract == ResponsesContract::Codex;
         let streaming = matches!(mode, Mode::Streaming) || codex;
-        let mut builder = headers(
+        let mut builder = self.request_headers.stamp(headers(
             &self.provider,
             &request,
             http::Request::post(self.provider.uri(quirks.path, None)),
-        );
+        ));
         let request = self.responses_request(request, streaming, self.codex_identity.as_ref())?;
         if self.codex_request_shape.is_lite() {
             builder = builder.header(super::responses_lite::HTTP_HEADER, "true");
@@ -124,6 +135,7 @@ impl Responses {
             }
             None => serde_json::to_vec(&request)?,
         };
+        let (builder, body) = self.request_compression.apply(builder, body)?;
 
         let request = builder
             .header(http::header::CONTENT_TYPE, "application/json")
@@ -172,7 +184,32 @@ impl Responses {
             streamed_incomplete: IncompleteTerminal::default(),
             codex_identity: None,
             codex_request_shape: CodexRequestShape::default(),
+            request_headers: RequestHeaders::new(),
+            request_compression: RequestCompression::default(),
         }
+    }
+
+    /// Encode every HTTP request body this wire sends as `compression` says;
+    /// see [`RequestCompression`]. Websocket frames are unaffected.
+    #[must_use]
+    pub fn with_request_compression(mut self, compression: RequestCompression) -> Self {
+        self.request_compression = compression;
+        self
+    }
+
+    /// Add `headers` to every HTTP request and every websocket handshake this
+    /// wire sends, exactly as given and after the headers Rig sends itself,
+    /// replacing any set given before. For headers a gateway asks for that
+    /// Rig does not model, such as the Codex backend's `x-codex-*` request
+    /// headers; [`RequestHeaders`] refuses the ones Rig sends from another
+    /// source.
+    ///
+    /// A wire is a cheap value: a header whose value changes per request
+    /// (a turn's metadata, say) is a per-request wire.
+    #[must_use]
+    pub fn with_request_headers(mut self, headers: RequestHeaders) -> Self {
+        self.request_headers = headers;
+        self
     }
 
     /// Emit the Codex Responses Lite request shape.

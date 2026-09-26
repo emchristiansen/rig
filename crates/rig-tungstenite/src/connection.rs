@@ -5,7 +5,7 @@
 //! cancelled receives.
 
 use futures::{SinkExt, StreamExt};
-use rig_core::http_client::{Error, Result};
+use rig_core::http_client::{Error, HeaderMap, Result};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use rig_core::ws_client::{CloseFrame, Frame, ReadyFrame, WebSocketConnection};
 use std::collections::VecDeque;
@@ -19,12 +19,13 @@ use tokio_tungstenite::{
 
 pub(crate) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// A socket polled by the caller's own tokio runtime.
-pub(crate) struct DirectConnection(Socket);
+/// A socket polled by the caller's own tokio runtime, with the headers of
+/// the upgrade response that opened it.
+pub(crate) struct DirectConnection(Socket, HeaderMap);
 
 impl DirectConnection {
-    pub(crate) fn new(socket: Socket) -> Self {
-        Self(socket)
+    pub(crate) fn new(socket: Socket, handshake_response_headers: HeaderMap) -> Self {
+        Self(socket, handshake_response_headers)
     }
 }
 
@@ -97,6 +98,10 @@ impl WebSocketConnection for DirectConnection {
                 .map_err(crate::from_tungstenite)
         })
     }
+
+    fn handshake_response_headers(&self) -> Result<&HeaderMap> {
+        Ok(&self.1)
+    }
 }
 
 /// One request to the connection actor, with the channel its answer goes back
@@ -119,6 +124,8 @@ enum Command {
 /// leaves the actor alive and preserves undelivered frames.
 pub(crate) struct ForwardedConnection {
     commands: futures::channel::mpsc::Sender<Command>,
+    /// The headers of the upgrade response that opened the socket.
+    handshake_response_headers: HeaderMap,
     /// Aborts the actor on drop, including during a blocked write that cannot
     /// observe the command channel closing.
     _actor: crate::runtime::OwnedTask<()>,
@@ -259,13 +266,17 @@ impl ForwardedConnection {
     /// Move `socket` onto the fallback runtime and return the channel-backed
     /// connection, or an error if the runtime cannot start.
     #[cfg(not(target_family = "wasm"))]
-    pub(crate) fn spawn(socket: Socket) -> Result<rig_core::ws_client::BoxedWebSocketConnection> {
+    pub(crate) fn spawn(
+        socket: Socket,
+        handshake_response_headers: HeaderMap,
+    ) -> Result<rig_core::ws_client::BoxedWebSocketConnection> {
         // The sequential contract needs one pending command; bounding the queue
         // prevents callers from buffering unaccepted frames.
         let (commands, requests) = futures::channel::mpsc::channel::<Command>(1);
         let actor = crate::runtime::spawn_off_runtime(run_actor(socket, requests))?;
         Ok(Box::new(Self {
             commands,
+            handshake_response_headers,
             _actor: actor,
         }))
     }
@@ -308,6 +319,10 @@ impl WebSocketConnection for ForwardedConnection {
 
     fn flush(&mut self) -> WasmBoxedFuture<'_, Result<()>> {
         Box::pin(async move { self.request(Command::Flush).await })
+    }
+
+    fn handshake_response_headers(&self) -> Result<&HeaderMap> {
+        Ok(&self.handshake_response_headers)
     }
 }
 

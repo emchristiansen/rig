@@ -10712,6 +10712,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

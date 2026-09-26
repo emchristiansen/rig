@@ -401,6 +401,47 @@ pub struct CallerIdentity {
     pub originator: String,
     /// The `user-agent` header.
     pub user_agent: String,
+    /// The `version` header, naming the calling client's version, when the
+    /// caller states one. `None` (the default) sends no `version` header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// The `version` header a [`CallerIdentity`] carries when it names one.
+pub const VERSION_HEADER: &str = "version";
+
+/// A caller identity value no request could carry: empty, or not a valid
+/// HTTP header value.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a caller identity's {field} must be a non-empty, header-safe string; `{value}` is not")]
+pub struct InvalidCallerIdentity {
+    /// Which value: `originator`, `user_agent` or `version`.
+    pub field: &'static str,
+    /// The value as supplied.
+    pub value: String,
+}
+
+impl CallerIdentity {
+    /// Refuse a value no request could carry, so a configured identity
+    /// always reaches the wire exactly as given.
+    fn validate(&self) -> Result<(), InvalidCallerIdentity> {
+        fn checked(field: &'static str, value: &str) -> Result<(), InvalidCallerIdentity> {
+            if value.is_empty() || http::HeaderValue::from_str(value).is_err() {
+                Err(InvalidCallerIdentity {
+                    field,
+                    value: value.to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        checked("originator", &self.originator)?;
+        checked("user_agent", &self.user_agent)?;
+        if let Some(version) = &self.version {
+            checked("version", version)?;
+        }
+        Ok(())
+    }
 }
 
 /// The user agent a gateway that asks for one is told: the crate, the host,
@@ -805,6 +846,7 @@ impl OpenAI {
             identity: quirks.identity.map(|identity| CallerIdentity {
                 originator: identity.originator.to_owned(),
                 user_agent: default_user_agent(identity.originator),
+                version: None,
             }),
             system_instructions: None,
             credential_source: None,
@@ -1008,8 +1050,28 @@ impl OpenAI {
         self.identity = Some(CallerIdentity {
             user_agent: default_user_agent(&originator),
             originator,
+            version: None,
         });
         self
+    }
+
+    /// Send exactly `identity` as the caller identity: its `originator`,
+    /// its `user-agent` as given (no default is derived), and its `version`
+    /// header when it names one. Every transport that stamps the caller
+    /// identity carries it: each HTTP request and the Codex websocket
+    /// handshake.
+    ///
+    /// Replaces any identity the dialect, its environment variables or
+    /// [`Self::with_originator`] configured. A dialect whose gateway asks for
+    /// no caller identity gains this one. Refuses an empty or header-unsafe
+    /// value, before anything is sent.
+    pub fn with_caller_identity(
+        mut self,
+        identity: CallerIdentity,
+    ) -> Result<Self, InvalidCallerIdentity> {
+        identity.validate()?;
+        self.identity = Some(identity);
+        Ok(self)
     }
 
     /// Put Rig's system instructions somewhere other than the dialect's
@@ -1222,16 +1284,23 @@ impl OpenAI {
         }
     }
 
-    /// Stamp the configured caller identity, `originator` and `user-agent`,
-    /// when this configuration has one; otherwise leave the request as is.
+    /// Stamp the configured caller identity, `originator`, `user-agent` and,
+    /// when it names one, `version`, when this configuration has one;
+    /// otherwise leave the request as is.
     ///
     /// The one source of caller identity for every transport: the HTTP
     /// request headers and the Codex websocket handshake both stamp it here.
     pub(crate) fn identify(&self, builder: http::request::Builder) -> http::request::Builder {
         match &self.identity {
-            Some(identity) => builder
-                .header("originator", &identity.originator)
-                .header(http::header::USER_AGENT, &identity.user_agent),
+            Some(identity) => {
+                let builder = builder
+                    .header("originator", &identity.originator)
+                    .header(http::header::USER_AGENT, &identity.user_agent);
+                match &identity.version {
+                    Some(version) => builder.header(VERSION_HEADER, version),
+                    None => builder,
+                }
+            }
             None => builder,
         }
     }
