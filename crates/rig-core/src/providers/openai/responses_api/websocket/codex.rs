@@ -380,9 +380,20 @@ impl CodexWebSocketSession {
     /// Stamp `key: value` into the `client_metadata` of every frame this
     /// session sends from now on, full and incremental alike, over any value
     /// the frame itself carries for `key`: for a value that belongs to the
-    /// current turn rather than to one request, such as the
-    /// `x-codex-turn-state` token. Replaces the key's earlier value. Refuses
-    /// a key the session stamps itself.
+    /// current turn rather than to one request. Replaces the key's earlier
+    /// value. Refuses a key the session stamps itself.
+    ///
+    /// The stamp is applied as each frame is encoded and is never stored in
+    /// the envelope an incremental send reuses, so a turn-scoped key belongs
+    /// here and never in a request's own `client_metadata`: once removed, a
+    /// later incremental frame would carry the request's value again.
+    ///
+    /// The Codex backend's `x-codex-turn-state` sticky-routing token is such
+    /// a value. The backend hands it over in the `headers` of a
+    /// `response.metadata` event, which this session yields as
+    /// [`ResponsesWebSocketEvent::Unknown`] with its complete payload, and
+    /// the official client sends it back on every later frame of that turn,
+    /// never across turns.
     pub fn set_frame_metadata(
         &mut self,
         key: impl Into<String>,
@@ -406,17 +417,6 @@ impl CodexWebSocketSession {
     /// `None`; see [`CodexWebSocketSessionBuilder::with_request_start_ms_stamp`].
     pub fn set_request_start_ms_stamp(&mut self, clock: Option<Arc<dyn FrameClock>>) {
         self.frame_stamps.clock = clock;
-    }
-
-    /// The headers of the upgrade response that opened this session, as the
-    /// server sent them: where the Codex backend hands the client the
-    /// `x-codex-turn-state` sticky-routing token of the turn the connection
-    /// opened for. Rig does not replay it; a caller that does puts it in the
-    /// [frame metadata](Self::set_frame_metadata). Refused with
-    /// [`UnsupportedCapability`](crate::ws_client::UnsupportedCapability) by a
-    /// backend that does not keep them.
-    pub fn handshake_response_headers(&self) -> Result<&http::HeaderMap, ProviderError> {
-        self.session.handshake_response_headers()
     }
 
     /// The ID of the last response a turn on this session produced, if any.

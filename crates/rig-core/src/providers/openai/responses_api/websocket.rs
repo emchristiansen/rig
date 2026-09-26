@@ -756,16 +756,6 @@ impl ResponsesWebSocketSession {
         }
     }
 
-    /// The headers of the upgrade response that opened this session's
-    /// connection, as the server sent them. Refused with
-    /// [`UnsupportedCapability`](crate::ws_client::UnsupportedCapability) by a
-    /// backend that does not keep them.
-    pub fn handshake_response_headers(&self) -> Result<&http::HeaderMap, ProviderError> {
-        self.socket
-            .handshake_response_headers()
-            .map_err(websocket_provider_error)
-    }
-
     /// Return the response ID retained for automatic chaining, if any.
     #[must_use]
     pub fn previous_response_id(&self) -> Option<&str> {

@@ -614,31 +614,35 @@ fn a_configuration_without_a_caller_identity_stamps_none() {
     assert!(request.headers().is_empty(), "got {:?}", request.headers());
 }
 
+fn client_exec_identity(version: Option<&str>) -> CallerIdentity {
+    CallerIdentity::new(
+        "client_exec",
+        "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)",
+        version.map(str::to_owned),
+    )
+    .expect("a valid identity")
+}
+
+fn identity_headers(provider: &OpenAI) -> http::HeaderMap {
+    provider
+        .headers(http::Request::get("https://example.invalid/"))
+        .body(())
+        .expect("builds")
+        .headers()
+        .clone()
+}
+
 /// A caller identity given whole reaches every request exactly as given: its
 /// `originator`, its `user-agent` (no default is derived), and its `version`
-/// header when it names one. The dialect's own identity and the
-/// environment-shaped defaults are replaced; without a version no `version`
-/// header is sent.
+/// header when it names one. It replaces the dialect's identity and any
+/// originator set before; without a version no `version` header is sent.
 #[test]
 fn a_whole_caller_identity_reaches_the_request_exactly_as_given() {
-    fn headers(provider: &OpenAI) -> http::HeaderMap {
-        provider
-            .headers(http::Request::get("https://example.invalid/"))
-            .body(())
-            .expect("builds")
-            .headers()
-            .clone()
-    }
-    let identity = CallerIdentity {
-        originator: "client_exec".to_owned(),
-        user_agent: "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)".to_owned(),
-        version: Some("1.2.3".to_owned()),
-    };
+    let identity = client_exec_identity(Some("1.2.3"));
     let config = OpenAI::with_key(&crate::providers::chatgpt::DIALECT, "tok")
         .with_originator("overridden")
-        .with_caller_identity(identity.clone())
-        .expect("a valid identity");
-    let sent = headers(&config);
+        .with_caller_identity(identity.clone());
+    let sent = identity_headers(&config);
     assert_eq!(sent["originator"], "client_exec");
     assert_eq!(
         sent["user-agent"],
@@ -646,21 +650,17 @@ fn a_whole_caller_identity_reaches_the_request_exactly_as_given() {
     );
     assert_eq!(sent[VERSION_HEADER], "1.2.3");
     assert_eq!(config.identity.as_ref(), Some(&identity));
+    assert_eq!(identity.originator(), "client_exec");
+    assert_eq!(identity.version(), Some("1.2.3"));
 
-    let unversioned = headers(
-        &OpenAI::new("sk-test")
-            .with_caller_identity(CallerIdentity {
-                version: None,
-                ..identity.clone()
-            })
-            .expect("a valid identity"),
-    );
+    let unversioned =
+        identity_headers(&OpenAI::new("sk-test").with_caller_identity(client_exec_identity(None)));
     assert_eq!(unversioned["originator"], "client_exec");
     assert!(unversioned.get(VERSION_HEADER).is_none());
 
     // The default and originator-derived identities name no version.
     assert!(
-        headers(&OpenAI::with_key(
+        identity_headers(&OpenAI::with_key(
             &crate::providers::chatgpt::DIALECT,
             "tok"
         ))
@@ -668,55 +668,64 @@ fn a_whole_caller_identity_reaches_the_request_exactly_as_given() {
         .is_none()
     );
     assert!(
-        headers(&OpenAI::new("sk-test").with_originator("ccc"))
+        identity_headers(&OpenAI::new("sk-test").with_originator("ccc"))
             .get(VERSION_HEADER)
             .is_none()
     );
 }
 
-/// A value no request could carry is refused before anything is sent, and
-/// names which value it was.
+/// A value no request could carry cannot become a caller identity, by the
+/// constructor or by deserialization, and the refusal names which value it
+/// was.
 #[test]
-fn a_caller_identity_no_request_could_carry_is_refused() {
-    let valid = CallerIdentity {
-        originator: "client_exec".to_owned(),
-        user_agent: "client_exec/1.2.3".to_owned(),
-        version: Some("1.2.3".to_owned()),
+fn a_caller_identity_no_request_could_carry_cannot_be_built() {
+    let refused = |originator: &str, user_agent: &str, version: Option<&str>| {
+        CallerIdentity::new(originator, user_agent, version.map(str::to_owned))
+            .expect_err("an invalid value is refused")
     };
-    for (identity, field, value) in [
-        (
-            CallerIdentity {
-                originator: String::new(),
-                ..valid.clone()
-            },
-            "originator",
-            "",
-        ),
-        (
-            CallerIdentity {
-                user_agent: "line\nbreak".to_owned(),
-                ..valid.clone()
-            },
-            "user_agent",
-            "line\nbreak",
-        ),
-        (
-            CallerIdentity {
-                version: Some(String::new()),
-                ..valid.clone()
-            },
-            "version",
-            "",
-        ),
+    assert_eq!(
+        refused("", "ua", None),
+        InvalidCallerIdentity {
+            field: "originator",
+            value: String::new()
+        }
+    );
+    assert_eq!(
+        refused("client_exec", "line\nbreak", None),
+        InvalidCallerIdentity {
+            field: "user_agent",
+            value: "line\nbreak".to_owned()
+        }
+    );
+    assert_eq!(
+        refused("client_exec", "ua", Some("")),
+        InvalidCallerIdentity {
+            field: "version",
+            value: String::new()
+        }
+    );
+
+    for json in [
+        serde_json::json!({"originator": "", "user_agent": "ua"}),
+        serde_json::json!({"originator": "o", "user_agent": "ua", "version": "1\n2"}),
     ] {
-        assert_eq!(
-            OpenAI::new("sk-test").with_caller_identity(identity).err(),
-            Some(InvalidCallerIdentity {
-                field,
-                value: value.to_owned()
-            })
+        assert!(
+            serde_json::from_value::<CallerIdentity>(json.clone()).is_err(),
+            "{json} must not decode"
         );
     }
+    // Nor through a whole configuration.
+    let mut config = serde_json::to_value(
+        OpenAI::with_key(&crate::providers::chatgpt::DIALECT, "tok")
+            .with_caller_identity(client_exec_identity(Some("1.2.3"))),
+    )
+    .expect("serializes");
+    assert!(
+        serde_json::from_value::<OpenAI>(config.clone()).is_ok(),
+        "the configuration as serialized decodes, so the refusal below is the identity's"
+    );
+    config["identity"]["version"] = serde_json::json!("");
+    assert!(serde_json::from_value::<OpenAI>(config).is_err());
 }
 
 /// A serialized identity without a version still decodes, and a version is
@@ -726,17 +735,20 @@ fn a_caller_identity_serializes_its_version_only_when_it_has_one() {
     let old: CallerIdentity =
         serde_json::from_str(r#"{"originator":"rig","user_agent":"rig/0 (linux x86_64; rig)"}"#)
             .expect("an identity serialized before `version` existed decodes");
-    assert_eq!(old.version, None);
+    assert_eq!(old.version(), None);
     assert_eq!(
         serde_json::to_value(&old).expect("serializes"),
         serde_json::json!({"originator": "rig", "user_agent": "rig/0 (linux x86_64; rig)"})
     );
-    let versioned = CallerIdentity {
-        version: Some("1.2.3".to_owned()),
-        ..old
-    };
     assert_eq!(
-        serde_json::to_value(&versioned).expect("serializes")["version"],
+        serde_json::to_value(client_exec_identity(Some("1.2.3"))).expect("serializes")["version"],
         "1.2.3"
+    );
+    assert!(
+        serde_json::from_value::<CallerIdentity>(
+            serde_json::json!({"originator": "o", "user_agent": "ua", "extra": 1})
+        )
+        .is_err(),
+        "unknown fields are still refused"
     );
 }

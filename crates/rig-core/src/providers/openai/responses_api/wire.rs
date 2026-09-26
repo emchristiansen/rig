@@ -198,14 +198,18 @@ impl Responses {
     }
 
     /// Add `headers` to every HTTP request and every websocket handshake this
-    /// wire sends, exactly as given and after the headers Rig sends itself,
+    /// wire sends, exactly as given, beside the headers Rig sends itself,
     /// replacing any set given before. For headers a gateway asks for that
     /// Rig does not model, such as the Codex backend's `x-codex-*` request
     /// headers; [`RequestHeaders`] refuses the ones Rig sends from another
-    /// source.
+    /// source, so the position of a caller header carries no meaning.
     ///
     /// A wire is a cheap value: a header whose value changes per request
-    /// (a turn's metadata, say) is a per-request wire.
+    /// (a turn's metadata, say) is a per-request wire. The same set goes on
+    /// HTTP requests and on handshakes alike, so a header only one transport
+    /// should carry needs a wire of its own for that transport: the Codex
+    /// backend's `x-codex-turn-state`, for one, travels as an HTTP header but
+    /// never on a handshake.
     #[must_use]
     pub fn with_request_headers(mut self, headers: RequestHeaders) -> Self {
         self.request_headers = headers;

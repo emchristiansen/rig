@@ -1240,13 +1240,14 @@ async fn with_identity_overrides_the_wire_identity_for_the_session_only() {
 fn official_wire() -> Responses {
     OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
         .with_account_id(ACCOUNT_ID)
-        .with_caller_identity(crate::providers::openai::wire::CallerIdentity {
-            originator: "client_exec".to_owned(),
-            user_agent: "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)"
-                .to_owned(),
-            version: Some("1.2.3".to_owned()),
-        })
-        .expect("a valid caller identity")
+        .with_caller_identity(
+            crate::providers::openai::wire::CallerIdentity::new(
+                "client_exec",
+                "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)",
+                Some("1.2.3".to_owned()),
+            )
+            .expect("a valid caller identity"),
+        )
         .responses(chatgpt::GPT_5_3_CODEX)
         .with_request_headers(
             crate::providers::openai::responses_api::request_headers::RequestHeaders::new()
@@ -1507,31 +1508,4 @@ impl crate::ws_client::WebSocketClientExt for ScriptBackend {
         let connection = self.0.connection();
         async move { Ok(connection) }
     }
-}
-
-/// The session reports the upgrade response's headers the backend kept, and
-/// refuses by name when the backend keeps none.
-#[test]
-fn the_handshake_response_headers_are_the_backends() {
-    let mut headers = http::HeaderMap::new();
-    headers.insert(
-        "x-codex-turn-state",
-        http::HeaderValue::from_static("state-from-server"),
-    );
-    let script = Script::new().with_handshake_response_headers(headers);
-    let session = session_over(&script);
-    assert_eq!(
-        session
-            .handshake_response_headers()
-            .expect("the backend kept them")["x-codex-turn-state"],
-        "state-from-server"
-    );
-
-    let refused = session_over(&Script::new())
-        .handshake_response_headers()
-        .expect_err("the backend kept none");
-    assert!(
-        refused.to_string().contains("handshake_response_headers"),
-        "the refusal names the capability, got {refused}"
-    );
 }

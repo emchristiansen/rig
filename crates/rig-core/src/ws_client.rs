@@ -160,18 +160,6 @@ pub trait WebSocketConnection: WasmCompatSend + WasmCompatSync {
             },
         ))))
     }
-
-    /// The headers of the upgrade response that opened this connection, as
-    /// the server sent them. A gateway can hand a client state there that it
-    /// expects back later, such as the Codex backend's `x-codex-turn-state`.
-    ///
-    /// The default refuses with [`UnsupportedCapability`] rather than
-    /// reporting headers it never saw.
-    fn handshake_response_headers(&self) -> Result<&http::HeaderMap> {
-        Err(Error::instance(UnsupportedCapability {
-            capability: "handshake_response_headers",
-        }))
-    }
 }
 
 /// A type-erased [`WebSocketConnection`].
@@ -196,10 +184,6 @@ impl WebSocketConnection for BoxedWebSocketConnection {
 
     fn flush(&mut self) -> WasmBoxedFuture<'_, Result<()>> {
         (**self).flush()
-    }
-
-    fn handshake_response_headers(&self) -> Result<&http::HeaderMap> {
-        (**self).handshake_response_headers()
     }
 }
 

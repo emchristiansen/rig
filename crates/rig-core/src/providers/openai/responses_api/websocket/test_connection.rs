@@ -30,9 +30,6 @@ struct ScriptState {
     without_flush: bool,
     flush_stalls: bool,
     flush_fails: bool,
-    /// The upgrade response's headers a new connection reports; `None`
-    /// refuses the capability, as a backend that does not keep them does.
-    handshake_response_headers: Option<http::HeaderMap>,
 }
 
 /// A scripted connection, cloneable so a test can inspect what the session
@@ -55,14 +52,6 @@ impl Script {
         self.state()
             .turns
             .push_back(frames.into_iter().map(Frame::Text).collect());
-        self
-    }
-
-    /// Report `headers` as the upgrade response's headers of the connections
-    /// this script hands out from now on.
-    #[must_use]
-    pub(super) fn with_handshake_response_headers(self, headers: http::HeaderMap) -> Self {
-        self.state().handshake_response_headers = Some(headers);
         self
     }
 
@@ -140,12 +129,11 @@ impl Script {
 
     /// The scripted connection handle to hand to a session.
     pub(super) fn connection(&self) -> BoxedWebSocketConnection {
-        let headers = self.state().handshake_response_headers.clone();
-        Box::new(ScriptedConnection(self.clone(), headers))
+        Box::new(ScriptedConnection(self.clone()))
     }
 }
 
-struct ScriptedConnection(Script, Option<http::HeaderMap>);
+struct ScriptedConnection(Script);
 
 impl ScriptedConnection {
     /// Take the next queued frame, recording a consumed ping as an owed pong.
@@ -222,13 +210,5 @@ impl WebSocketConnection for ScriptedConnection {
         }
         state.pongs_flushed += std::mem::take(&mut state.pongs_owed);
         Box::pin(std::future::ready(Ok(())))
-    }
-
-    fn handshake_response_headers(&self) -> http_client::Result<&http::HeaderMap> {
-        self.1.as_ref().ok_or_else(|| {
-            Error::instance(UnsupportedCapability {
-                capability: "handshake_response_headers",
-            })
-        })
     }
 }

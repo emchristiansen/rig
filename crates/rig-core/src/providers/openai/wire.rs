@@ -393,18 +393,48 @@ pub struct Identity {
     pub session_ids: bool,
 }
 
-/// The identity a gateway requires on every request, resolved.
+/// The identity a gateway requires on every request, resolved: the
+/// `originator` and `user-agent` headers, and optionally a `version` header.
+///
+/// Every value is a non-empty, header-safe string. [`Self::new`],
+/// deserialization and the dialect's environment overrides refuse anything
+/// else. Two older paths take their value as given: a dialect's built-in
+/// default, which is a constant, and [`OpenAI::with_originator`], whose
+/// originator a header cannot carry fails when the request is built.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "CallerIdentityValues", into = "CallerIdentityValues")]
 pub struct CallerIdentity {
-    /// The `originator` header.
-    pub originator: String,
-    /// The `user-agent` header.
-    pub user_agent: String,
-    /// The `version` header, naming the calling client's version, when the
-    /// caller states one. `None` (the default) sends no `version` header.
+    originator: String,
+    user_agent: String,
+    version: Option<String>,
+}
+
+/// The serialized form of a [`CallerIdentity`], validated on the way back in.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallerIdentityValues {
+    originator: String,
+    user_agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
+    version: Option<String>,
+}
+
+impl TryFrom<CallerIdentityValues> for CallerIdentity {
+    type Error = InvalidCallerIdentity;
+
+    fn try_from(values: CallerIdentityValues) -> Result<Self, Self::Error> {
+        Self::new(values.originator, values.user_agent, values.version)
+    }
+}
+
+impl From<CallerIdentity> for CallerIdentityValues {
+    fn from(identity: CallerIdentity) -> Self {
+        Self {
+            originator: identity.originator,
+            user_agent: identity.user_agent,
+            version: identity.version,
+        }
+    }
 }
 
 /// The `version` header a [`CallerIdentity`] carries when it names one.
@@ -421,26 +451,62 @@ pub struct InvalidCallerIdentity {
     pub value: String,
 }
 
+/// Refuse a caller identity value no request could carry.
+fn checked_identity_value(
+    field: &'static str,
+    value: String,
+) -> Result<String, InvalidCallerIdentity> {
+    if value.is_empty() || http::HeaderValue::from_str(&value).is_err() {
+        Err(InvalidCallerIdentity { field, value })
+    } else {
+        Ok(value)
+    }
+}
+
 impl CallerIdentity {
-    /// Refuse a value no request could carry, so a configured identity
-    /// always reaches the wire exactly as given.
-    fn validate(&self) -> Result<(), InvalidCallerIdentity> {
-        fn checked(field: &'static str, value: &str) -> Result<(), InvalidCallerIdentity> {
-            if value.is_empty() || http::HeaderValue::from_str(value).is_err() {
-                Err(InvalidCallerIdentity {
-                    field,
-                    value: value.to_owned(),
-                })
-            } else {
-                Ok(())
-            }
+    /// An identity sending `originator`, `user_agent` and, when given,
+    /// `version`, each exactly as given. Refuses an empty or header-unsafe
+    /// value, naming which.
+    pub fn new(
+        originator: impl Into<String>,
+        user_agent: impl Into<String>,
+        version: Option<String>,
+    ) -> Result<Self, InvalidCallerIdentity> {
+        Ok(Self {
+            originator: checked_identity_value("originator", originator.into())?,
+            user_agent: checked_identity_value("user_agent", user_agent.into())?,
+            version: version
+                .map(|version| checked_identity_value("version", version))
+                .transpose()?,
+        })
+    }
+
+    /// An identity whose originator is taken as given, with the default user
+    /// agent naming it: the two older paths the type documentation names.
+    fn with_default_user_agent(originator: String) -> Self {
+        Self {
+            user_agent: default_user_agent(&originator),
+            originator,
+            version: None,
         }
-        checked("originator", &self.originator)?;
-        checked("user_agent", &self.user_agent)?;
-        if let Some(version) = &self.version {
-            checked("version", version)?;
-        }
-        Ok(())
+    }
+
+    /// The `originator` header.
+    #[must_use]
+    pub fn originator(&self) -> &str {
+        &self.originator
+    }
+
+    /// The `user-agent` header.
+    #[must_use]
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
+    }
+
+    /// The `version` header, when this identity names one.
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
     }
 }
 
@@ -843,10 +909,8 @@ impl OpenAI {
             sub_route: None,
             account_id: None,
             instructions: quirks.default_instructions.map(str::to_owned),
-            identity: quirks.identity.map(|identity| CallerIdentity {
-                originator: identity.originator.to_owned(),
-                user_agent: default_user_agent(identity.originator),
-                version: None,
+            identity: quirks.identity.map(|identity| {
+                CallerIdentity::with_default_user_agent(identity.originator.to_owned())
             }),
             system_instructions: None,
             credential_source: None,
@@ -931,16 +995,24 @@ impl OpenAI {
             provider.instructions = Some(instructions);
         }
         if let (Some(identity), Some(resolved)) = (quirks.identity, provider.identity.as_mut()) {
+            let invalid = |name: &'static str| {
+                move |error: InvalidCallerIdentity| EnvError::Invalid {
+                    name,
+                    detail: error.to_string(),
+                }
+            };
             if let Some(originator) =
                 env::optional(identity.originator_env)?.filter(|value| !value.is_empty())
             {
-                resolved.originator = originator;
-                resolved.user_agent = default_user_agent(&resolved.originator);
+                let originator = checked_identity_value("originator", originator)
+                    .map_err(invalid(identity.originator_env))?;
+                *resolved = CallerIdentity::with_default_user_agent(originator);
             }
             if let Some(user_agent) =
                 env::optional(identity.user_agent_env)?.filter(|value| !value.is_empty())
             {
-                resolved.user_agent = user_agent;
+                resolved.user_agent = checked_identity_value("user_agent", user_agent)
+                    .map_err(invalid(identity.user_agent_env))?;
             }
         }
         Ok(provider)
@@ -1046,12 +1118,7 @@ impl OpenAI {
     /// one naming the new originator. A dialect whose gateway asks for no
     /// caller identity gains one, so both headers are sent.
     pub fn with_originator(mut self, originator: impl Into<String>) -> Self {
-        let originator = originator.into();
-        self.identity = Some(CallerIdentity {
-            user_agent: default_user_agent(&originator),
-            originator,
-            version: None,
-        });
+        self.identity = Some(CallerIdentity::with_default_user_agent(originator.into()));
         self
     }
 
@@ -1063,15 +1130,12 @@ impl OpenAI {
     ///
     /// Replaces any identity the dialect, its environment variables or
     /// [`Self::with_originator`] configured. A dialect whose gateway asks for
-    /// no caller identity gains this one. Refuses an empty or header-unsafe
-    /// value, before anything is sent.
-    pub fn with_caller_identity(
-        mut self,
-        identity: CallerIdentity,
-    ) -> Result<Self, InvalidCallerIdentity> {
-        identity.validate()?;
+    /// no caller identity gains this one. [`CallerIdentity::new`] has already
+    /// refused any value a request could not carry.
+    #[must_use]
+    pub fn with_caller_identity(mut self, identity: CallerIdentity) -> Self {
         self.identity = Some(identity);
-        Ok(self)
+        self
     }
 
     /// Put Rig's system instructions somewhere other than the dialect's

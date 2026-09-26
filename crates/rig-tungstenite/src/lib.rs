@@ -42,7 +42,7 @@ pub use session::{DefaultWebSocketBuilder, DefaultWebSocketClient};
 #[cfg(not(target_family = "wasm"))]
 use connection::{DirectConnection, ForwardedConnection};
 #[cfg(not(target_family = "wasm"))]
-use rig_core::http_client::{Error, HeaderMap, NoBody, Request, Result};
+use rig_core::http_client::{Error, NoBody, Request, Result};
 #[cfg(not(target_family = "wasm"))]
 use rig_core::ws_client::{BoxedWebSocketConnection, ConnectOptions, WebSocketClientExt};
 #[cfg(not(target_family = "wasm"))]
@@ -85,14 +85,14 @@ impl WebSocketClientExt for TungsteniteClient {
         if !runtime::in_tokio() {
             let timeout = options.timeout;
             return runtime::run_off_runtime(async move {
-                let (socket, headers) = handshake(request, timeout).await?;
-                ForwardedConnection::spawn(socket, headers)
+                let socket = handshake(request, timeout).await?;
+                ForwardedConnection::spawn(socket)
             })
             .await?;
         }
 
-        let (socket, headers) = handshake(request, options.timeout).await?;
-        Ok(Box::new(DirectConnection::new(socket, headers)))
+        let socket = handshake(request, options.timeout).await?;
+        Ok(Box::new(DirectConnection::new(socket)))
     }
 }
 
@@ -119,15 +119,14 @@ fn client_request(request: Request<NoBody>) -> Result<tungstenite::handshake::cl
 struct ConnectTimeout(Duration);
 
 #[cfg(not(target_family = "wasm"))]
-/// Open the socket, keeping the upgrade response's headers.
 async fn handshake(
     request: tungstenite::handshake::client::Request,
     timeout: Option<Duration>,
-) -> Result<(connection::Socket, HeaderMap)> {
+) -> Result<connection::Socket> {
     let connect = async {
         tokio_tungstenite::connect_async(request)
             .await
-            .map(|(socket, response)| (socket, response.into_parts().0.headers))
+            .map(|(socket, _)| socket)
             .map_err(from_tungstenite)
     };
 

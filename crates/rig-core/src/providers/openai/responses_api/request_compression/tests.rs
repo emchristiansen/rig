@@ -77,3 +77,27 @@ fn the_default_sends_bodies_as_they_are() {
         .expect("serializes");
     assert_eq!(zstd["request_compression"], "zstd");
 }
+
+/// Compression applies to the body as sent, after the Codex identity is
+/// stamped into it: the decompressed body carries the identity.
+#[test]
+fn a_codex_identity_is_stamped_before_the_body_is_compressed() {
+    let identity =
+        crate::providers::openai::responses_api::codex_identity::CodexIdentity::from_ids(
+            "thread-1", "thread-1",
+        )
+        .expect("valid ids");
+    let wire = chatgpt()
+        .with_codex_identity(identity)
+        .expect("a Codex wire")
+        .with_request_compression(RequestCompression::Zstd);
+    let (encoding, compressed) = sent(&wire);
+    assert_eq!(encoding.as_deref(), Some("zstd"));
+    let body: serde_json::Value = serde_json::from_slice(
+        &zstd::stream::decode_all(compressed.as_slice()).expect("a zstd frame"),
+    )
+    .expect("the body is JSON");
+    assert_eq!(body["prompt_cache_key"], "thread-1");
+    assert_eq!(body["client_metadata"]["session_id"], "thread-1");
+    assert_eq!(body["client_metadata"]["thread_id"], "thread-1");
+}
