@@ -61,6 +61,11 @@ struct MockTurnResponse {
     message_id: Option<String>,
     response_id: Option<String>,
     provider_request_id: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::completion::ProviderResponseHeaders::is_empty"
+    )]
+    provider_response_headers: crate::completion::ProviderResponseHeaders,
     finish_reason: Option<crate::completion::FinishReason>,
     /// A scripted provider document, when the test supplies one; otherwise
     /// the turn itself, serialized, is the mock's document. Absent from the
@@ -138,6 +143,7 @@ impl MockTurn {
                 message_id: None,
                 response_id: None,
                 provider_request_id: None,
+                provider_response_headers: Default::default(),
                 finish_reason: None,
                 raw: None,
             }),
@@ -156,6 +162,7 @@ impl MockTurn {
                 message_id: None,
                 response_id: None,
                 provider_request_id: None,
+                provider_response_headers: Default::default(),
                 finish_reason: None,
                 raw: None,
             }),
@@ -204,6 +211,17 @@ impl MockTurn {
     pub fn with_provider_request_id(mut self, request_id: impl Into<String>) -> Self {
         if let Ok(response) = &mut self.response {
             response.provider_request_id = Some(request_id.into());
+        }
+        self
+    }
+
+    /// Set the captured success-reply headers for this turn.
+    pub fn with_provider_response_headers(
+        mut self,
+        headers: crate::completion::ProviderResponseHeaders,
+    ) -> Self {
+        if let Ok(response) = &mut self.response {
+            response.provider_response_headers = headers;
         }
         self
     }
@@ -259,6 +277,7 @@ impl MockTurn {
                 .with_optional_message_id(response.message_id)
                 .with_optional_response_id(response.response_id)
                 .with_optional_provider_request_id(response.provider_request_id)
+                .with_provider_response_headers(response.provider_response_headers)
                 .with_optional_finish_reason(response.finish_reason),
         )
     }

@@ -357,6 +357,7 @@ where
         requests,
         framing,
         request_id_header,
+        response_header_prefix,
         relaxed_content_type,
     } = wire.encode(request, Mode::Unary)?;
 
@@ -364,14 +365,27 @@ where
         provider: wire.name().to_owned(),
         raw: serde_json::Value::Null,
         provider_request_id: None,
+        response_headers: crate::completion::ProviderResponseHeaders::new(),
     };
 
     // Preserve every page document so batched replies do not lose earlier data.
     let mut documents: Vec<serde_json::Value> = Vec::new();
     let mut pending: std::collections::VecDeque<http::Request<Body>> = requests.into();
+    let credential_stamp = wire.credential_stamp();
     // Replies read in this call, which is what MAX_CONTINUATION_PAGES bounds.
     let mut pages: usize = 0;
     while let Some(mut http_request) = pending.pop_front() {
+        // Every page is its own send attempt, so it reads the credential
+        // afresh; a refusal sends nothing.
+        if let Some(stamp) = &credential_stamp {
+            let route = http_request.uri().path().to_owned();
+            tracing::Instrument::instrument(
+                stamp.authorize(http_request.headers_mut()),
+                span.clone(),
+            )
+            .await
+            .map_err(|error| <W::Op as Operation>::with_route(error, wire.name(), &route))?;
+        }
         accept_header(&mut http_request, framing);
         // Errors need the actual path; observations use the declared template
         // to group attempts independently of concrete URLs.
@@ -485,6 +499,12 @@ where
             .or_else(|| page.document())
             .unwrap_or(serde_json::Value::Null);
         reply.provider_request_id = page_reply.provider_request_id;
+        // Like the request id, the last page's headers win: a paged reply
+        // keeps only its final page's captured headers.
+        reply.response_headers = crate::providers::internal::captured_response_headers(
+            &page_reply.headers,
+            response_header_prefix,
+        );
         crate::providers::internal::trace_json(
             crate::providers::internal::LogTarget::Completions,
             &format!("{} {} reply", wire.name(), <W::Op as Operation>::NAME),
@@ -559,6 +579,7 @@ where
         requests,
         framing,
         request_id_header,
+        response_header_prefix,
         relaxed_content_type,
     } = wire.encode(request, Mode::Streaming)?;
     // No streamed operation sends a batch: a batch exists for providers
@@ -577,6 +598,11 @@ where
     let http_request = byte_request(http_request)?;
 
     let http = http.clone();
+    let credential_stamp = wire.credential_stamp();
+    // Read here for the same reason: a refusal reports the route the way
+    // the unary path does.
+    let wire_name = wire.name().to_owned();
+    let request_path = http_request.uri().path().to_owned();
     let observation = context.as_ref().map(|_| AdapterSlot::default());
     let mut driver =
         WireDriver::<W::Op, _>::observed(wire.decoder(Mode::Streaming), observation.clone());
@@ -586,6 +612,18 @@ where
     let declared_route = wire.route().map(str::to_owned);
 
     let frames = async_stream::stream! {
+        // The one send attempt reads the credential when it is first
+        // polled; a refusal sends nothing and is the stream's only item.
+        let mut http_request = http_request;
+        if let Some(stamp) = &credential_stamp
+            && let Err(error) = stamp.authorize(http_request.headers_mut()).await
+        {
+            driver.fail(<W::Op as Operation>::with_route(error, &wire_name, &request_path));
+            for item in driver.drain() {
+                yield item;
+            }
+            return;
+        }
         // Unpolled streams must not report transport attempts.
         if let Some(observation) = &observation {
             // Group attempts by declared route rather than concrete path.
@@ -641,6 +679,10 @@ where
         }
         let request_id = request_id_from(response.headers(), request_id_header);
         record_request_id(&recording, request_id.as_deref());
+        let response_headers = crate::providers::internal::captured_response_headers(
+            response.headers(),
+            response_header_prefix,
+        );
         let mut body = response.into_body();
         let mut framer = Framer::new(framing);
         while let Some(chunk) = body.next().await {
@@ -653,7 +695,7 @@ where
                     }
                     driver.fail(ProviderError::from_transport_error(error));
                     for item in driver.drain() {
-                        yield stamped::<W>(item, &request_id, &recording);
+                        yield stamped::<W>(item, &request_id, &response_headers, &recording);
                     }
                     return;
                 }
@@ -664,7 +706,7 @@ where
             for payload in framer.push(&chunk) {
                 driver.absorb(payload);
                 for item in driver.drain() {
-                    yield stamped::<W>(item, &request_id, &recording);
+                    yield stamped::<W>(item, &request_id, &response_headers, &recording);
                 }
                 if driver.done() {
                     return;
@@ -674,7 +716,7 @@ where
         for payload in framer.finish() {
             driver.absorb(payload);
             for item in driver.drain() {
-                yield stamped::<W>(item, &request_id, &recording);
+                yield stamped::<W>(item, &request_id, &response_headers, &recording);
             }
             if driver.done() {
                 return;
@@ -682,23 +724,26 @@ where
         }
         driver.finish();
         for item in driver.drain() {
-            yield stamped::<W>(item, &request_id, &recording);
+            yield stamped::<W>(item, &request_id, &response_headers, &recording);
         }
     };
     Ok(tracing_futures::Instrument::instrument(frames, span))
 }
 
 /// Stamp the transport request id captured off the reply onto a terminal
-/// event or a preserved provider error. An id an upstream constructor
-/// already attached is never replaced: it saw the reply that carried it.
+/// event or a preserved provider error, and the captured success-reply
+/// headers onto a terminal event. Metadata an upstream constructor already
+/// attached is never replaced: it saw the reply that carried it.
 fn stamped<W: Wire>(
     item: Result<Event<W>, ProviderError>,
     request_id: &Option<String>,
+    response_headers: &crate::completion::ProviderResponseHeaders,
     span: &tracing::Span,
 ) -> Result<Event<W>, ProviderError> {
     match item {
         Ok(mut event) => {
             <W::Op as Operation>::stamp_request_id(&mut event, request_id);
+            <W::Op as Operation>::stamp_response_headers(&mut event, response_headers);
             <W::Op as Operation>::record_event(span, &event);
             Ok(event)
         }

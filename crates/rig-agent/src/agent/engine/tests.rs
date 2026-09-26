@@ -10168,3 +10168,90 @@ async fn outcome_stop_is_terminal_through_nested_hooks_on_both_surfaces() {
         }
     }
 }
+
+fn codex_headers(used_percent: &str) -> rig_core::completion::ProviderResponseHeaders {
+    [(
+        "x-codex-primary-used-percent".to_owned(),
+        used_percent.to_owned(),
+    )]
+    .into_iter()
+    .collect()
+}
+
+/// Records the captured success-reply headers each completion outcome carries.
+#[derive(Clone, Default)]
+struct ResponseHeadersHook {
+    seen: Arc<Mutex<Vec<rig_core::completion::ProviderResponseHeaders>>>,
+}
+
+impl AgentHook for ResponseHeadersHook {
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        if let Some(response) = event.completion() {
+            self.seen
+                .lock()
+                .expect("header snapshots")
+                .push(response.provider_response_headers.clone());
+        }
+        OutcomeAction::proceed()
+    }
+}
+
+/// Blocking surface: each completion outcome carries its own attempt's
+/// captured success-reply headers, never an earlier attempt's.
+#[tokio::test]
+async fn completion_outcomes_carry_their_own_attempts_response_headers_blocking() {
+    let hook = ResponseHeadersHook::default();
+    AgentBuilder::new(MockCompletionModel::new([
+        MockTurn::tool_call("tc1", "add", json!({"x": 2, "y": 3}))
+            .with_provider_response_headers(codex_headers("10")),
+        MockTurn::text("5").with_provider_response_headers(codex_headers("11")),
+    ]))
+    .tool(crate::test_utils::MockAddTool)
+    .add_hook(hook.clone())
+    .build()
+    .prompt(Message::user("add 2 and 3"))
+    .max_turns(3)
+    .run()
+    .await
+    .expect("blocking response");
+
+    assert_eq!(
+        *hook.seen.lock().expect("header snapshots"),
+        [codex_headers("10"), codex_headers("11")]
+    );
+}
+
+/// Streamed surface: each completion outcome carries the headers its own
+/// attempt's terminal record captured.
+#[tokio::test]
+async fn completion_outcomes_carry_their_own_attempts_response_headers_streamed() {
+    let final_with = |used_percent: &str| {
+        MockStreamEvent::FinalResponse(
+            rig_core::streaming::StreamFinal::new("mock", Usage::default(), json!({}))
+                .with_provider_response_headers(codex_headers(used_percent)),
+        )
+    };
+    let hook = ResponseHeadersHook::default();
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
+            final_with("20"),
+        ],
+        vec![MockStreamEvent::text("5"), final_with("21")],
+    ]);
+    let mut stream = AgentBuilder::new(model)
+        .tool(crate::test_utils::MockAddTool)
+        .add_hook(hook.clone())
+        .build()
+        .prompt(Message::user("add 2 and 3"))
+        .max_turns(3)
+        .stream();
+    while let Some(item) = stream.next().await {
+        item.expect("stream item");
+    }
+
+    assert_eq!(
+        *hook.seen.lock().expect("header snapshots"),
+        [codex_headers("20"), codex_headers("21")]
+    );
+}

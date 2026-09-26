@@ -178,6 +178,10 @@ impl Wire for OpenAiWire {
     type Op = Completion;
     type Decoder = OpenAiDecoder;
 
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        on_route!(self, wire => wire.credential_stamp())
+    }
+
     fn name(&self) -> &str {
         on_route!(self, wire => wire.name())
     }

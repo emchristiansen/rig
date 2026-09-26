@@ -19,8 +19,13 @@ pub use crate::http_client::framing::Framing;
 pub use crate::observe::{AdapterErrorEnvelope, AdapterEvent, AdapterUsage, AdapterVerdict};
 pub use crate::providers::internal::wire::WireEvent;
 
+pub mod credential;
 pub(crate) mod secret;
 
+pub use credential::{
+    Credential, CredentialPlacement, CredentialSource, CredentialSourceError,
+    CredentialSourceHandle, CredentialStamp, CredentialUnavailable, TokenPlacement,
+};
 pub use secret::Secret;
 
 /// One transport frame, after framing but before decoding.
@@ -63,6 +68,10 @@ pub struct Encoded {
     /// (Anthropic `request-id`, OpenAI `x-request-id`), when the provider
     /// reports one. `None` is "does not report one", never an error.
     pub request_id_header: Option<&'static str>,
+    /// The name prefix of the success-reply headers to keep on the response
+    /// (the Codex backend's `x-codex-`), when the dialect keeps any. `None`
+    /// keeps none. See [`crate::completion::ProviderResponseHeaders`].
+    pub response_header_prefix: Option<&'static str>,
     /// Whether a streamed reply may omit `Content-Type` (one gateway
     /// replays Responses bodies without it). A *wrong* content type is
     /// still rejected.
@@ -81,6 +90,7 @@ impl Encoded {
             requests,
             framing,
             request_id_header: None,
+            response_header_prefix: None,
             relaxed_content_type: false,
         }
     }
@@ -88,6 +98,13 @@ impl Encoded {
     /// Name the reply header carrying the provider's transport request id.
     pub fn with_request_id_header(mut self, header: Option<&'static str>) -> Self {
         self.request_id_header = header;
+        self
+    }
+
+    /// Keep the success-reply headers whose lowercase name starts with
+    /// `prefix` on the response; `None` keeps none.
+    pub fn with_captured_response_headers(mut self, prefix: Option<&'static str>) -> Self {
+        self.response_header_prefix = prefix;
         self
     }
 
@@ -146,6 +163,7 @@ impl std::fmt::Debug for Encoded {
             .field("requests", &Requests(&self.requests))
             .field("framing", &self.framing)
             .field("request_id_header", &self.request_id_header)
+            .field("response_header_prefix", &self.response_header_prefix)
             .field("relaxed_content_type", &self.relaxed_content_type)
             .finish()
     }
@@ -212,6 +230,14 @@ pub trait Operation: Sized + 'static {
     /// nothing.
     fn stamp_request_id(_event: &mut Self::Event, _request_id: &Option<String>) {}
 
+    /// Stamp the success-reply headers the dialect captures onto a terminal
+    /// event. Operations whose events carry none do nothing.
+    fn stamp_response_headers(
+        _event: &mut Self::Event,
+        _headers: &crate::completion::ProviderResponseHeaders,
+    ) {
+    }
+
     /// Stamp what the driver learned about a unary reply beyond its events.
     fn stamp_reply(_response: &mut Self::Response, _reply: Reply) {}
 
@@ -260,6 +286,9 @@ pub struct Reply {
     pub raw: serde_json::Value,
     /// The provider's transport request id from the reply headers.
     pub provider_request_id: Option<String>,
+    /// The success-reply headers the dialect captures; see
+    /// [`crate::completion::ProviderResponseHeaders`].
+    pub response_headers: crate::completion::ProviderResponseHeaders,
 }
 
 /// Where a decoder writes the events of one `interpret` step.
@@ -421,6 +450,14 @@ pub trait Wire: WasmCompatSend + WasmCompatSync + 'static {
     /// Stable endpoint template for observation grouping, without base-URL
     /// prefixes or interpolated values. `None` uses the concrete request path.
     fn route(&self) -> Option<&str> {
+        None
+    }
+
+    /// This wire's send-time credential, when it reads one then rather than
+    /// while encoding: data only (see [`CredentialStamp`]). The driver reads
+    /// and applies it once per send attempt. `None`, the default, sends each
+    /// request exactly as encoded.
+    fn credential_stamp(&self) -> Option<CredentialStamp> {
         None
     }
 

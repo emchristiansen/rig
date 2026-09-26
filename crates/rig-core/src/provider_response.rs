@@ -232,10 +232,21 @@ pub(crate) fn json(body: Option<&str>) -> Result<Option<serde_json::Value>, serd
 }
 
 /// Implements setters for `message_id`, `response_id`, `provider_request_id`,
-/// and `model` fields of type `Option<String>`. Empty strings become `None`.
+/// and `model` fields of type `Option<String>`, where empty strings become
+/// `None`, and for the captured `provider_response_headers`.
 macro_rules! response_metadata_setters {
     ($ty:ty) => {
         impl $ty {
+            /// Attach the provider response headers the reply's dialect
+            /// captures (see [`crate::completion::ProviderResponseHeaders`]).
+            pub fn with_provider_response_headers(
+                mut self,
+                headers: crate::completion::ProviderResponseHeaders,
+            ) -> Self {
+                self.provider_response_headers = headers;
+                self
+            }
+
             /// Replaces the provider message ID, treating an empty string as absent.
             pub fn with_message_id(self, message_id: impl Into<String>) -> Self {
                 self.with_optional_message_id(Some(message_id.into()))

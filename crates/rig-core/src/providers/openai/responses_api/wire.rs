@@ -15,11 +15,16 @@ use crate::wire::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::responses_lite::{CodexRequestShape, ResponsesLiteError};
 use super::streaming::{IncompleteTerminal, ResponsesDecoder, ResponsesStreamOptions};
 use super::{
     CompletionRequest, ResponsesRequestParams, ResponsesRequestTool, ResponsesToolDefinition,
     SystemInstructionsPlacement,
 };
+
+/// The per-request session header the ChatGPT dialect sends when no Codex
+/// identity names the conversation.
+const SESSION_ID_PER_REQUEST_HEADER: &str = "session_id";
 
 /// The Responses wire: `POST /responses`, SSE when streamed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,6 +46,24 @@ pub struct Responses {
     /// policy, never a request parameter, so it does not reach the wire.
     #[serde(default)]
     pub streamed_incomplete: IncompleteTerminal,
+    /// The Codex conversation identity every HTTP request from this wire
+    /// carries, when set (see [`Self::with_codex_identity`]). `None` sends a
+    /// fresh `session_id` per request, as the dialect asks.
+    ///
+    /// An identity names ONE conversation: every HTTP request, and every
+    /// websocket session built from this wire value, shares its cache
+    /// affinity. A caller running several conversations gives each its own
+    /// wire value with its own identity ([`CodexIdentity::from_ids`] or
+    /// [`CodexIdentity::generate`]).
+    ///
+    /// [`CodexIdentity::from_ids`]: super::codex_identity::CodexIdentity::from_ids
+    /// [`CodexIdentity::generate`]: super::codex_identity::CodexIdentity::generate
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_identity: Option<super::codex_identity::CodexIdentity>,
+    /// Whether this wire emits the ordinary Responses envelope or the Codex
+    /// Responses Lite developer prefix. Standard is the serialized default.
+    #[serde(default, skip_serializing_if = "CodexRequestShape::is_standard")]
+    pub codex_request_shape: CodexRequestShape,
 }
 
 impl Responses {
@@ -61,18 +84,46 @@ impl Responses {
         // the driver folds it.
         let codex = quirks.contract == ResponsesContract::Codex;
         let streaming = matches!(mode, Mode::Streaming) || codex;
-        let builder = headers(
+        let mut builder = headers(
             &self.provider,
             &request,
             http::Request::post(self.provider.uri(quirks.path, None)),
         );
-        let request = self.responses_request(request, streaming)?;
+        let request = self.responses_request(request, streaming, self.codex_identity.as_ref())?;
+        if self.codex_request_shape.is_lite() {
+            builder = builder.header(super::responses_lite::HTTP_HEADER, "true");
+        }
         crate::providers::internal::trace_json(
             crate::providers::internal::LogTarget::Completions,
             "Responses completion request",
             &request,
         );
-        let body = serde_json::to_vec(&request)?;
+        let body = match &self.codex_identity {
+            // The conversation's identity replaces the per-request session id:
+            // the same dashed headers and body fields its websocket frames
+            // carry, so both transports name one conversation alike.
+            Some(identity) => {
+                // An identity can reach a wire by field assignment or serde as
+                // well as through `with_codex_identity`; it is refused here
+                // all the same, before anything is stamped.
+                super::codex_identity::require_codex(self).map_err(EncodeError::request)?;
+                if let Some(headers) = builder.headers_mut() {
+                    headers.remove(SESSION_ID_PER_REQUEST_HEADER);
+                }
+                builder = identity.stamp_headers(builder);
+                let mut body = match serde_json::to_value(&request)? {
+                    serde_json::Value::Object(body) => body,
+                    other => {
+                        return Err(EncodeError::request(format!(
+                            "a Responses request must serialize to a JSON object, got {other}"
+                        )));
+                    }
+                };
+                identity.stamp(&mut body)?;
+                serde_json::to_vec(&body)?
+            }
+            None => serde_json::to_vec(&request)?,
+        };
 
         let request = builder
             .header(http::header::CONTENT_TYPE, "application/json")
@@ -84,12 +135,29 @@ impl Responses {
             Framing::Whole
         };
         let encoded = Encoded::new(request, framing)
-            .with_request_id_header(self.provider.dialect.request_id_header);
+            .with_request_id_header(self.provider.dialect.request_id_header)
+            .with_captured_response_headers(self.provider.dialect.response_header_prefix);
         Ok(if codex {
             encoded.with_relaxed_content_type()
         } else {
             encoded
         })
+    }
+
+    /// Name the Codex conversation every HTTP request from this wire belongs
+    /// to. Each request then carries `identity`'s dashed `session-id` and
+    /// `thread-id` headers, `x-client-request-id`, and its `prompt_cache_key`
+    /// and `client_metadata` body fields, exactly as a Codex websocket session
+    /// with the same identity does, instead of a fresh `session_id` header.
+    /// A request's own `prompt_cache_key` or metadata keys are kept. Refuses a
+    /// wire whose dialect does not speak the Codex contract.
+    pub fn with_codex_identity(
+        mut self,
+        identity: super::codex_identity::CodexIdentity,
+    ) -> Result<Self, super::codex_identity::NotACodexWire> {
+        super::codex_identity::require_codex(&self)?;
+        self.codex_identity = Some(identity);
+        Ok(self)
     }
 
     /// Create a wire with the provider's instruction placement and dialect's
@@ -102,7 +170,24 @@ impl Responses {
             model: model.into(),
             tools: Vec::new(),
             streamed_incomplete: IncompleteTerminal::default(),
+            codex_identity: None,
+            codex_request_shape: CodexRequestShape::default(),
         }
+    }
+
+    /// Emit the Codex Responses Lite request shape.
+    ///
+    /// The wire still needs a stable [`CodexIdentity`](super::codex_identity::CodexIdentity)
+    /// before HTTP encoding. A Codex WebSocket builder supplies its selected
+    /// session identity when it prepares each frame. Returns
+    /// [`ResponsesLiteError::ResponsesLiteRequiresCodex`] for another dialect.
+    pub fn with_responses_lite(mut self) -> Result<Self, ResponsesLiteError> {
+        super::responses_lite::validate_codex(
+            self.provider.dialect.quirks.responses.contract,
+            self.provider.dialect.name,
+        )?;
+        self.codex_request_shape = CodexRequestShape::ResponsesLite;
+        Ok(self)
     }
 
     /// Select how a streamed reply's terminal `response.incomplete` is taken.
@@ -190,8 +275,34 @@ impl Responses {
         &self,
         request: completion::CompletionRequest,
         streaming: bool,
+        identity: Option<&super::codex_identity::CodexIdentity>,
     ) -> Result<CompletionRequest, EncodeError> {
+        let issuers = self.replay_issuers(request.model.as_deref().or(Some(&self.model)));
+        for message in &request.chat_history {
+            if let crate::message::Message::Assistant { content, .. } = message {
+                for part in content {
+                    if let crate::message::AssistantContent::Reasoning(reasoning) = part
+                        && reasoning.has_opaque_parts()
+                        && !issuers.iter().any(|issuer| reasoning.replayable_to(issuer))
+                    {
+                        return Err(EncodeError::request(
+                            crate::message::UnrepresentableOpaqueContent::new(
+                                "OpenAI Responses with incompatible reasoning provenance",
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         let quirks = &self.provider.dialect.quirks.responses;
+        let lite_identity = super::responses_lite::validate_activation(
+            self.codex_request_shape,
+            quirks.contract,
+            self.provider.dialect.name,
+            self.system_instructions,
+            identity,
+        )
+        .map_err(EncodeError::request)?;
         let mut request = CompletionRequest::try_from(ResponsesRequestParams {
             model: self.model.clone(),
             request,
@@ -221,6 +332,13 @@ impl Responses {
         }
         if quirks.contract == ResponsesContract::Codex {
             shape_codex_request(&mut request).map_err(EncodeError::request)?;
+        }
+        if let Some(identity) = lite_identity {
+            super::responses_lite::shape_request(&mut request, identity)
+                .map_err(EncodeError::request)?;
+            // Lite may have created `reasoning`; the shared include rule
+            // follows it.
+            request.additional_parameters.request_reasoning_ciphertext();
         }
         request.stream = streaming.then_some(true);
         Ok(request)
@@ -309,6 +427,10 @@ impl Wire for Responses {
     type Op = Completion;
     type Decoder = ResponsesDecoder;
 
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -370,6 +492,8 @@ pub(crate) fn fold_body(
         provider: provider.to_owned(),
         raw: serde_json::to_value(&response)?,
         provider_request_id: response.provider_request_id.clone(),
+        // A body already in hand: no reply headers came with it.
+        response_headers: crate::completion::ProviderResponseHeaders::new(),
     };
     // A whole body is a unary reply, whose contract accepts an incomplete
     // terminal.

@@ -16,12 +16,18 @@
 //!   the dashed `session-id` / `thread-id` handshake headers,
 //!   `x-client-request-id`, and the `prompt_cache_key` / `client_metadata`
 //!   body fields of every frame, so cache routing stays sticky across turns.
+//! - **Responses Lite is marked per frame.** An opted-in wire uses the shared
+//!   deterministic developer prefix on full sends and adds the Lite marker to
+//!   every frame's `client_metadata`; the upgrade handshake stays unchanged.
 //! - **Single in-flight custody**, inherited from the shared session.
 //!
-//! Credentials are the wire's static credential: the handshake carries
-//! whatever [`OpenAI::api_key`](crate::providers::openai::OpenAI::api_key)
-//! holds when the session connects. A caller that refreshes tokens builds the
-//! wire from the fresh token before connecting.
+//! The handshake carries the wire's credential as it stands when the session
+//! connects: [`OpenAI::api_key`](crate::providers::openai::OpenAI::api_key),
+//! or, when the wire has a
+//! [credential source](crate::providers::openai::OpenAI::with_credential_source),
+//! what that source supplies at connect. An open connection keeps the
+//! credential it was opened with; a rotated credential takes effect at the
+//! next session's connect.
 //!
 //! ```no_run
 //! use rig_core::providers::chatgpt;
@@ -58,22 +64,11 @@ use crate::completion;
 use crate::error::{EncodeError, ProviderError};
 use crate::http_client::{self, NoBody};
 use crate::providers::openai::responses_api::wire::Responses;
-use crate::providers::openai::wire::ResponsesContract;
 use crate::ws_client::{BoxedWebSocketConnection, WebSocketClientExt};
-use serde_json::{Map, Value};
 use std::time::Duration;
 
 /// The handshake header carrying the ChatGPT subscription account id.
 pub const CHATGPT_ACCOUNT_ID_HEADER: &str = "ChatGPT-Account-Id";
-
-/// The dashed session identity header of the Codex websocket transport.
-pub const SESSION_ID_HEADER: &str = "session-id";
-
-/// The dashed thread identity header of the Codex websocket transport.
-pub const THREAD_ID_HEADER: &str = "thread-id";
-
-/// The correlation header; Codex sets it to the thread id.
-pub const X_CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
 
 /// The beta opt-in header enabling Codex's Responses websocket protocol.
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
@@ -81,65 +76,28 @@ pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 /// The Codex Responses websocket beta value.
 pub const RESPONSES_WEBSOCKETS_BETA_VALUE: &str = "responses_websockets=2026-02-06";
 
-/// The top-level body field carrying the cache-routing key.
-const PROMPT_CACHE_KEY_FIELD: &str = "prompt_cache_key";
-
-/// The top-level body field carrying correlation metadata.
-const CLIENT_METADATA_FIELD: &str = "client_metadata";
-
-/// The `client_metadata` key carrying the session id (Codex spelling).
-pub const SESSION_ID_METADATA_KEY: &str = "session_id";
-
-/// The `client_metadata` key carrying the thread id (Codex spelling).
-pub const THREAD_ID_METADATA_KEY: &str = "thread_id";
-
-/// The stable Codex cache and correlation identity of one websocket session.
-///
-/// Generated once per session and used for every header and body field that
-/// names the session, so the handshake and every frame agree by construction.
-/// The ids are opaque correlation strings from [`crate::id::generate`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CodexIdentity {
-    session_id: String,
-    thread_id: String,
-}
+// The identity itself lives beside the HTTP wire that also stamps it; its
+// public path here is kept.
+pub(crate) use super::super::codex_identity::require_codex;
+pub use super::super::codex_identity::{
+    CodexIdentity, InvalidCodexIdentity, NotACodexWire, SESSION_ID_HEADER, SESSION_ID_METADATA_KEY,
+    THREAD_ID_HEADER, THREAD_ID_METADATA_KEY, X_CLIENT_REQUEST_ID_HEADER,
+};
 
 impl CodexIdentity {
-    /// A fresh identity.
-    #[must_use]
-    pub fn generate() -> Self {
-        Self {
-            session_id: crate::id::generate(),
-            thread_id: crate::id::generate(),
-        }
-    }
-
-    /// The session id: the `session-id` header and the `session_id` metadata key.
-    #[must_use]
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    /// The thread id: the `thread-id` and `x-client-request-id` headers, the
-    /// `thread_id` metadata key, and the default `prompt_cache_key`.
-    #[must_use]
-    pub fn thread_id(&self) -> &str {
-        &self.thread_id
-    }
-
-    /// The cache-routing key. Codex derives it from the thread id.
-    #[must_use]
-    pub fn prompt_cache_key(&self) -> &str {
-        &self.thread_id
-    }
-
     /// The handshake request that opens a Codex websocket carrying this
     /// identity: `GET {base_url}/responses` on the websocket scheme, with the
-    /// wire's credential, its account id when set, the dashed identity
-    /// headers, `x-client-request-id`, and the `OpenAI-Beta` opt-in.
+    /// wire's credential, its caller identity (`originator` and `user-agent`,
+    /// exactly as its HTTP requests carry them) when it has one, its account
+    /// id when set, the dashed identity headers, `x-client-request-id`, and
+    /// the `OpenAI-Beta` opt-in. Nothing else: the per-request `session_id`
+    /// HTTP header is not sent, because the dashed pair is the session
+    /// identity here.
     ///
     /// Public so a caller that opens its own connection can open it with the
-    /// same identity the session will stamp on every frame.
+    /// same identity the session will stamp on every frame. It stamps the
+    /// wire's static credential; a caller with a credential source reads it
+    /// itself, as [`CodexWebSocketSessionBuilder::connect_with`] does.
     pub fn handshake_request(
         &self,
         wire: &Responses,
@@ -147,73 +105,22 @@ impl CodexIdentity {
         let url = crate::ws_client::websocket_url(&wire.provider.base_url, WEBSOCKET_PATH)
             .map_err(EncodeError::request)?;
 
-        let mut builder = wire.provider.authenticate(
-            http_client::Request::builder()
-                .method(http::Method::GET)
-                .uri(url),
+        let mut builder = wire.provider.identify(
+            wire.provider.authenticate(
+                http_client::Request::builder()
+                    .method(http::Method::GET)
+                    .uri(url),
+            ),
         );
         if let Some(account_id) = &wire.provider.account_id {
             builder = builder.header(CHATGPT_ACCOUNT_ID_HEADER, account_id);
         }
-        builder
-            .header(SESSION_ID_HEADER, &self.session_id)
-            .header(THREAD_ID_HEADER, &self.thread_id)
-            .header(X_CLIENT_REQUEST_ID_HEADER, &self.thread_id)
+        self.stamp_headers(builder)
             .header(OPENAI_BETA_HEADER, RESPONSES_WEBSOCKETS_BETA_VALUE)
             .body(NoBody)
             .map_err(|error| {
                 EncodeError::request(format!("Failed to build Codex websocket request: {error}"))
             })
-    }
-
-    /// Stamp this identity onto a `response.create` body: `prompt_cache_key`
-    /// and the `client_metadata` session and thread keys, each only where the
-    /// request does not already carry its own value.
-    fn stamp(&self, body: &mut Map<String, Value>) -> Result<(), EncodeError> {
-        body.entry(PROMPT_CACHE_KEY_FIELD)
-            .or_insert_with(|| Value::String(self.prompt_cache_key().to_owned()));
-
-        let metadata = body
-            .entry(CLIENT_METADATA_FIELD)
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Value::Object(metadata) = metadata else {
-            return Err(EncodeError::request(format!(
-                "the Codex request's `{CLIENT_METADATA_FIELD}` must be a JSON object to carry the session identity, got {metadata}"
-            )));
-        };
-        metadata
-            .entry(SESSION_ID_METADATA_KEY)
-            .or_insert_with(|| Value::String(self.session_id.clone()));
-        metadata
-            .entry(THREAD_ID_METADATA_KEY)
-            .or_insert_with(|| Value::String(self.thread_id.clone()));
-        Ok(())
-    }
-}
-
-/// A wire that does not speak the Codex Responses contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "a Codex websocket session needs a Responses wire speaking the Codex contract; dialect `{dialect}` does not"
-)]
-pub struct NotACodexWire {
-    /// The wire's dialect.
-    pub dialect: &'static str,
-}
-
-impl From<NotACodexWire> for ProviderError {
-    fn from(error: NotACodexWire) -> Self {
-        ProviderError::Request(Box::new(error))
-    }
-}
-
-fn require_codex(wire: &Responses) -> Result<(), NotACodexWire> {
-    if wire.provider.dialect.quirks.responses.contract == ResponsesContract::Codex {
-        Ok(())
-    } else {
-        Err(NotACodexWire {
-            dialect: wire.provider.dialect.name,
-        })
     }
 }
 
@@ -229,13 +136,20 @@ pub struct CodexWebSocketSessionBuilder {
 }
 
 impl CodexWebSocketSessionBuilder {
-    /// Configure a session for `wire`, with a freshly generated identity.
-    /// Refuses a wire whose dialect does not speak the Codex contract.
+    /// Configure a session for `wire`, carrying the wire's own Codex identity
+    /// when it has one ([`Responses::with_codex_identity`]), so its HTTP
+    /// requests and this session name one conversation, and a freshly
+    /// generated one otherwise. Refuses a wire whose dialect does not speak
+    /// the Codex contract.
     pub fn new(wire: Responses) -> Result<Self, NotACodexWire> {
         require_codex(&wire)?;
+        let identity = wire
+            .codex_identity
+            .clone()
+            .unwrap_or_else(CodexIdentity::generate);
         Ok(Self {
             wire,
-            identity: CodexIdentity::generate(),
+            identity,
             connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
             event_timeout: None,
         })
@@ -245,6 +159,14 @@ impl CodexWebSocketSessionBuilder {
     #[must_use]
     pub fn identity(&self) -> &CodexIdentity {
         &self.identity
+    }
+
+    /// Carry `identity` instead: for example one built with
+    /// [`CodexIdentity::from_ids`] from ids the caller derives.
+    #[must_use]
+    pub fn with_identity(mut self, identity: CodexIdentity) -> Self {
+        self.identity = identity;
+        self
     }
 
     /// Sets the timeout for establishing the websocket connection.
@@ -282,7 +204,8 @@ impl CodexWebSocketSessionBuilder {
     where
         W: WebSocketClientExt,
     {
-        let request = self.identity.handshake_request(&self.wire)?;
+        let mut request = self.identity.handshake_request(&self.wire)?;
+        super::authorize_handshake(&self.wire, &mut request).await?;
         let connection = connect(backend, request, self.connect_timeout).await?;
         Ok(CodexWebSocketSession {
             session: ResponsesWebSocketSession::from_connection(
@@ -363,11 +286,14 @@ impl CodexWebSocketSession {
         options: ResponsesWebSocketCreateOptions,
     ) -> Result<(), ProviderError> {
         self.session.ensure_can_send()?;
-        let envelope = self
-            .session
-            .prepare_request(completion_request, Chaining::Root)?;
+        let envelope = self.session.prepare_request(
+            completion_request,
+            Chaining::Root,
+            Some(&self.identity),
+        )?;
+        let responses_lite = self.session.wire.codex_request_shape.is_lite();
         let frame = encode_frame(&envelope, options.generate, |body| {
-            self.identity.stamp(body)
+            stamp_frame(&self.identity, responses_lite, body)
         })?;
         self.session.send_encoded(envelope, frame).await
     }
@@ -394,7 +320,13 @@ impl CodexWebSocketSession {
         request.input = delta.into_vec();
         request.additional_parameters.previous_response_id = Some(tip.to_owned());
 
-        let frame = encode_frame(&request, None, |body| self.identity.stamp(body))?;
+        let responses_lite = self.session.wire.codex_request_shape.is_lite();
+        if responses_lite {
+            super::super::responses_lite::shape_delta(&mut request.input);
+        }
+        let frame = encode_frame(&request, None, |body| {
+            stamp_frame(&self.identity, responses_lite, body)
+        })?;
         // The captured envelope, not the delta request, is what a later
         // delta continues from.
         self.session.send_encoded(envelope, frame).await
@@ -438,6 +370,18 @@ impl CodexWebSocketSession {
     pub async fn close(&mut self) -> Result<(), ProviderError> {
         self.session.close().await
     }
+}
+
+fn stamp_frame(
+    identity: &CodexIdentity,
+    responses_lite: bool,
+    body: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<(), EncodeError> {
+    identity.stamp(body)?;
+    if responses_lite {
+        super::super::responses_lite::stamp_websocket_marker(body)?;
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for CodexWebSocketSession {

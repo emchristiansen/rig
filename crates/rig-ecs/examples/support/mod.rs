@@ -107,6 +107,7 @@ impl Serve for Scripted {
                             message_id: None,
                             response_id: None,
                             provider_request_id: None,
+                            provider_response_headers: Default::default(),
                             provider: "scripted".to_owned(),
                             reasoning_issuer: None,
                             model: None,

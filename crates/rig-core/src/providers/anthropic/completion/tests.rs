@@ -43,6 +43,7 @@ fn fold_reply(body: &serde_json::Value) -> Result<completion::CompletionResponse
             provider: "anthropic".to_owned(),
             raw: body,
             provider_request_id: None,
+            response_headers: Default::default(),
         },
     )
 }
