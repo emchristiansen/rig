@@ -1404,3 +1404,61 @@ fn the_responses_wire_replays_its_own_and_unknown_provider_items_and_refuses_oth
     assert_eq!(refusal.issuer.as_deref(), Some("anthropic"));
     assert_eq!(refusal.item_type.as_deref(), Some("web_search_call"));
 }
+
+/// A wire's request headers reach its HTTP request exactly as given, beside
+/// the headers Rig sends itself, which they cannot replace; the default wire
+/// sends none.
+#[test]
+fn request_headers_reach_the_http_request_beside_rigs_own() {
+    let headers = crate::providers::openai::responses_api::request_headers::RequestHeaders::new()
+        .with("x-codex-window-id", "thread-1:0")
+        .expect("a valid header")
+        .with("x-codex-turn-state", "state-1")
+        .expect("a valid header");
+    let identity =
+        crate::providers::openai::responses_api::codex_identity::CodexIdentity::from_ids(
+            "thread-1", "thread-1",
+        )
+        .expect("valid ids");
+    let wire = chatgpt()
+        .with_codex_identity(identity)
+        .expect("a Codex wire")
+        .with_request_headers(headers);
+    let encoded = wire.encode(prompt(), Mode::Streaming).expect("encodes");
+    let request = encoded
+        .requests
+        .first()
+        .expect("a Responses request is one request");
+    let sent = request.headers();
+    assert_eq!(sent["x-codex-window-id"], "thread-1:0");
+    assert_eq!(sent["x-codex-turn-state"], "state-1");
+    assert_eq!(sent["session-id"], "thread-1");
+    assert_eq!(sent["thread-id"], "thread-1");
+    assert_eq!(sent["x-client-request-id"], "thread-1");
+    assert!(sent.get("session_id").is_none());
+    for name in [
+        "x-codex-window-id",
+        "x-codex-turn-state",
+        "originator",
+        "user-agent",
+    ] {
+        assert_eq!(
+            sent.get_all(name).iter().count(),
+            1,
+            "`{name}` is sent once"
+        );
+    }
+
+    let plain = chatgpt()
+        .encode(prompt(), Mode::Streaming)
+        .expect("encodes");
+    let plain = plain.requests.first().expect("one request");
+    assert!(plain.headers().get("x-codex-window-id").is_none());
+    assert!(
+        serde_json::to_value(chatgpt())
+            .expect("serializes")
+            .get("request_headers")
+            .is_none(),
+        "an empty set stays off the serialized wire"
+    );
+}

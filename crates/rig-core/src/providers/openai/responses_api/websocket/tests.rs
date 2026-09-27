@@ -1434,3 +1434,20 @@ async fn a_failing_credential_source_refuses_an_ordinary_websocket_connect() {
     );
     assert!(backend.handshakes.lock().expect("unpoisoned").is_empty());
 }
+
+/// The generic handshake carries the wire's request headers too, beside its
+/// own credential.
+#[test]
+fn websocket_request_carries_the_wires_request_headers() {
+    let wire = test_wire("https://api.openai.com/v1").with_request_headers(
+        crate::providers::openai::responses_api::request_headers::RequestHeaders::new()
+            .with("x-codex-window-id", "thread-1:0")
+            .expect("a valid header"),
+    );
+    let request = websocket_request(&wire).expect("request should build");
+    assert_eq!(request.headers()["x-codex-window-id"], "thread-1:0");
+    assert_eq!(
+        request.headers()[http::header::AUTHORIZATION],
+        "Bearer test-key"
+    );
+}

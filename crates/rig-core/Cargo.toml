@@ -56,6 +56,9 @@ mime = { workspace = true }
 # `target_os = "unknown"` (browser) rather than the whole
 # `wasm` family because the gloo-timers/setTimeout backend needs a JS host and
 # would be wrong-by-construction on WASI.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+zstd = { workspace = true, optional = true }
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 futures-timer = { workspace = true, features = ["wasm-bindgen"] }
 # `lopdf` pulls `getrandom` through its PDF encryption support. Browser WASM
@@ -101,3 +104,8 @@ epub = ["dep:epub", "dep:quick-xml"]
 # built from `http`/`bytes`/`futures`/`url`, which rig-core already has — but
 # stays gated so the surface is opt-in, matching `audio`/`image`.
 websocket = []
+# zstd compression of Responses HTTP request bodies
+# (`Responses::with_request_compression`), for gateways that expect it, such
+# as the Codex backend. Native only: zstd is a C library that does not build
+# for the browser target, where the feature compiles to nothing.
+request-compression = ["dep:zstd"]

@@ -301,6 +301,7 @@ wasm-bindgen-futures = "0.4"
 wasm-bindgen = "0.2"
 web-time = "1"
 zerocopy = "0.8"
+zstd = "0.13"
 
 [workspace.metadata.cargo-autoinherit]
 # Skip cargo-autoinherit for these packages
