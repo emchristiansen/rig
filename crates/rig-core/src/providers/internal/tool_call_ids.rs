@@ -90,7 +90,8 @@ impl ToolCallIds {
                             AssistantContent::CustomToolCall(call) => (&call.id, &call.provider),
                             AssistantContent::Text(_)
                             | AssistantContent::Reasoning(_)
-                            | AssistantContent::Image(_) => continue,
+                            | AssistantContent::Image(_)
+                            | AssistantContent::ProviderItem(_) => continue,
                         };
                         let provider = provider.as_ref().map(|id| id.call_id.clone());
                         if occurrences.iter().any(|previous| {

@@ -492,8 +492,9 @@ impl StreamedTurnAssembler {
             })
     }
 
-    /// Combine accepted calls and reasoning with provider text and images in
-    /// canonical order. Without calls or reasoning, preserve the provider choice.
+    /// Combine accepted calls and reasoning with provider text, provider items
+    /// and images in canonical order. Without calls or reasoning, preserve the
+    /// provider choice.
     fn canonical_choice_with(
         pending_tool_calls: Vec<(ToolCall, BlockId)>,
         reasoning: Vec<Reasoning>,
@@ -503,7 +504,15 @@ impl StreamedTurnAssembler {
             let parts = reasoning
                 .into_iter()
                 .map(AssistantContent::Reasoning)
-                .chain(assistant_text_items_from_choice(provider_choice))
+                // Text and provider items, in the order the provider sent them.
+                .chain(provider_choice.iter().filter_map(|content| {
+                    match content {
+                        AssistantContent::ProviderItem(_) => Some(content.clone()),
+                        other => assistant_text_items_from_choice(std::slice::from_ref(other))
+                            .into_iter()
+                            .next(),
+                    }
+                }))
                 .chain(
                     pending_tool_calls
                         .into_iter()
@@ -642,8 +651,13 @@ impl StreamedTurnAssembler {
                 Ok(vec![StreamedTurnEvent::EmitIngested])
             }
             // The driver and provider aggregate retain message identity and text metadata.
+            // A provider item's blocks too: the aggregate records the item.
             StreamEvent::BlockStart {
-                kind: BlockKind::Message | BlockKind::Text { .. } | BlockKind::ToolCall,
+                kind:
+                    BlockKind::Message
+                    | BlockKind::Text { .. }
+                    | BlockKind::ToolCall
+                    | BlockKind::ProviderItem,
                 ..
             }
             | StreamEvent::BlockDelta {
@@ -651,12 +665,13 @@ impl StreamedTurnAssembler {
                 ..
             }
             | StreamEvent::BlockEnd {
-                end: BlockClose::Text,
+                end: BlockClose::Text | BlockClose::ProviderItem(_),
                 ..
             } => Ok(vec![StreamedTurnEvent::EmitIngested]),
             StreamEvent::BlockStart {
                 id,
                 kind: BlockKind::Reasoning { provider_id },
+                ..
             } => {
                 let pending = self.reasoning_parts.iter_mut().find(|part| {
                     part.matches_key(id) && matches!(part.state, ReasoningPartState::Pending(_))
@@ -1029,7 +1044,8 @@ impl StreamedTurnAssembler {
                 AssistantContent::CustomToolCall(_)
                 | AssistantContent::Text(_)
                 | AssistantContent::Reasoning(_)
-                | AssistantContent::Image(_) => true,
+                | AssistantContent::Image(_)
+                | AssistantContent::ProviderItem(_) => true,
             })
             .cloned()
             .collect();

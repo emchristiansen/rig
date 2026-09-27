@@ -110,6 +110,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -325,6 +329,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

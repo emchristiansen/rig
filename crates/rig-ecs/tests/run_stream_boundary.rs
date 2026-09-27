@@ -63,6 +63,7 @@ impl Serve for FinishingName {
             for event in [
                 StreamEvent::BlockStart {
                     id: id.clone(),
+                    source_order: None,
                     kind: BlockKind::ToolCall,
                 },
                 StreamEvent::BlockDelta {
@@ -367,6 +368,7 @@ impl Serve for NameThenGate {
             writer
                 .event(StreamEvent::BlockStart {
                     id: id.clone(),
+                    source_order: None,
                     kind: BlockKind::ToolCall,
                 })
                 .await

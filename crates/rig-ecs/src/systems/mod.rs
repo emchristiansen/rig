@@ -292,7 +292,8 @@ impl TurnRead {
             AssistantContent::CustomToolCall(_)
             | AssistantContent::Text(_)
             | AssistantContent::Reasoning(_)
-            | AssistantContent::Image(_) => None,
+            | AssistantContent::Image(_)
+            | AssistantContent::ProviderItem(_) => None,
         })
     }
 }
@@ -1984,7 +1985,8 @@ pub fn land_batch(
                 | AssistantContent::CustomToolCall(_)
                 | AssistantContent::Text(_)
                 | AssistantContent::Reasoning(_)
-                | AssistantContent::Image(_) => None,
+                | AssistantContent::Image(_)
+                | AssistantContent::ProviderItem(_) => None,
             })
         });
         match output_call {
@@ -2168,7 +2170,8 @@ fn edited_content(
                     AssistantContent::CustomToolCall(_)
                     | AssistantContent::Text(_)
                     | AssistantContent::Reasoning(_)
-                    | AssistantContent::Image(_) => true,
+                    | AssistantContent::Image(_)
+                    | AssistantContent::ProviderItem(_) => true,
                 });
             }
             Resolution::Fail | Resolution::Retry { .. } | Resolution::Skip { .. } => {}

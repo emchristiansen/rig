@@ -1634,6 +1634,9 @@ fn assert_reasoning_tool_reasoning(
             AssistantContent::CustomToolCall(call) => format!("custom_tool:{}", call.name),
             AssistantContent::Text(text) => format!("text:{}", text.text),
             AssistantContent::Image(_) => "image".to_string(),
+            AssistantContent::ProviderItem(item) => {
+                format!("provider_item:{}", item.item_type().unwrap_or_default())
+            }
         })
         .collect();
     let expected = vec![

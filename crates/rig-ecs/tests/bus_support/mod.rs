@@ -307,7 +307,8 @@ pub fn text_of(outcome: &Result<Outcome, ErrorReport>) -> String {
                 AssistantContent::Reasoning(_)
                 | AssistantContent::Image(_)
                 | AssistantContent::ToolCall(_)
-                | AssistantContent::CustomToolCall(_) => None,
+                | AssistantContent::CustomToolCall(_)
+                | AssistantContent::ProviderItem(_) => None,
             })
             .collect(),
         other => panic!("not a completion: {other:?}"),

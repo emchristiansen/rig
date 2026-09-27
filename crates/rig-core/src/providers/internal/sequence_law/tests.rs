@@ -118,6 +118,7 @@ fn a_wire_keyed_part_may_stay_open_across_interleaving() {
         vec![
             StreamEvent::BlockStart {
                 id: BlockId::wire("rs_1"),
+                source_order: None,
                 kind: BlockKind::Reasoning {
                     provider_id: crate::streaming::non_empty_id("rs_1"),
                 },

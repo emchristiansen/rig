@@ -335,7 +335,9 @@ fn normalize_image_details(items: &mut [InputItem]) {
             | InputContent::FunctionCall(_)
             | InputContent::CustomToolCall(_)
             | InputContent::CustomToolCallOutput(_)
-            | InputContent::Compaction(_) => {}
+            | InputContent::Compaction(_)
+            // A raw provider item replays verbatim, whatever it contains.
+            | InputContent::Raw(_) => {}
         }
     }
 }

@@ -201,6 +201,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_01daa38ebaca9411006ab2b27662b887d0ae82fe04e184f270",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_01daa38ebaca9411006ab2b27662b887d0ae82fe04e184f270"
@@ -209,6 +213,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_01daa38ebaca9411006ab2b27ae2e087d08c02e244e3df7566",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }
@@ -232,6 +240,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_01daa38ebaca9411006ab2b27ae2f487d0abf1120ef2ff8a34",
+          "source_order": {
+            "primary": 2,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }
@@ -643,6 +655,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_01daa38ebaca9411006ab2b27c802087d08f17b22e0d6501fb",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_01daa38ebaca9411006ab2b27c802087d08f17b22e0d6501fb"
@@ -651,6 +667,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_01daa38ebaca9411006ab2b282e95887d0bba4d9afc7091c55",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -818,6 +838,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_01daa38ebaca9411006ab2b282e95887d0bba4d9afc7091c55",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

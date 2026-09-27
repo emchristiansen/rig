@@ -518,6 +518,11 @@ enum TelemetryPart {
     Reasoning {
         content: String,
     },
+    /// An opaque provider output item, recorded whole: a distinct part type,
+    /// so a trace never presents it as text or a tool call.
+    ProviderItem {
+        item: serde_json::Value,
+    },
     Uri {
         #[serde(skip_serializing_if = "Option::is_none")]
         mime_type: Option<String>,
@@ -667,6 +672,9 @@ fn assistant_parts(content: &[AssistantContent]) -> Vec<TelemetryPart> {
             }],
             AssistantContent::Reasoning(reasoning) => reasoning_parts(reasoning),
             AssistantContent::Image(image) => image_part(image).into_iter().collect(),
+            AssistantContent::ProviderItem(item) => vec![TelemetryPart::ProviderItem {
+                item: item.item.clone(),
+            }],
         })
         .collect()
 }

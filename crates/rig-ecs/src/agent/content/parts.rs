@@ -42,6 +42,11 @@ pub enum ContentPart {
     ),
     /// Ordered reasoning with IDs, signatures and opaque provider data.
     Reasoning(#[reflect(remote = super::reflect::ReasoningPartReflect)] message::Reasoning),
+    /// An opaque provider output item, kept whole with its issuer. Held as
+    /// history; the runtime never interprets one.
+    ProviderItem(
+        #[reflect(remote = super::reflect::ProviderItemPartReflect)] message::ProviderItem,
+    ),
     /// A tool result whose children must be Text, Image or Json parts.
     ToolResult {
         /// The call answered by this result.
@@ -297,6 +302,7 @@ fn prepare(
                             ContentPart::CustomToolCall(value)
                         }
                         AssistantContent::Reasoning(value) => ContentPart::Reasoning(value),
+                        AssistantContent::ProviderItem(value) => ContentPart::ProviderItem(value),
                     };
                     Ok((part, Vec::new()))
                 })
@@ -619,6 +625,7 @@ fn read_message_from<'a>(
                             AssistantContent::CustomToolCall(value)
                         }
                         ContentPart::Reasoning(value) => AssistantContent::Reasoning(value),
+                        ContentPart::ProviderItem(value) => AssistantContent::ProviderItem(value),
                         _ => return Err(ContentError::Shape),
                     })
                 })

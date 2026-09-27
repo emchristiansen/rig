@@ -1355,3 +1355,36 @@ async fn a_source_credential_is_kept_out_of_observed_diagnostics_as_a_static_key
         "a source credential and a static key are observed alike"
     );
 }
+
+/// The chat wire carries no opaque output item, so it refuses one by name,
+/// whoever issued it and when its provenance is unknown.
+#[test]
+fn the_chat_wire_refuses_every_provider_item_by_name() {
+    use crate::wire::Wire as _;
+    for provider in [Some("openai"), None] {
+        let request = CompletionRequest {
+            chat_history: vec![
+                crate::message::Message::user("hi"),
+                crate::message::Message::Assistant {
+                    id: None,
+                    content: vec![crate::message::AssistantContent::ProviderItem(
+                        crate::message::ProviderItem {
+                            item: serde_json::json!({"type": "web_search_call"}),
+                            provider: provider.map(str::to_owned),
+                        },
+                    )],
+                },
+            ],
+            ..prompt("again")
+        };
+        let error = Chat::new(OpenAI::new("static-key"), "gpt-4o")
+            .encode(request, crate::wire::Mode::Unary)
+            .expect_err("the chat wire cannot carry a provider item");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot replay the `web_search_call` item"),
+            "{provider:?}: {error}"
+        );
+    }
+}

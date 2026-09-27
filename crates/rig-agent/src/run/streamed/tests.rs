@@ -362,6 +362,7 @@ fn finish_orders_reasoning_text_then_tool_calls() {
     let mut asm = assembler();
     asm.ingest(&StreamEvent::BlockStart {
         id: BlockId::wire("corr_1"),
+        source_order: None,
         kind: BlockKind::Reasoning {
             provider_id: Some("rs_1".to_string()),
         },
@@ -408,6 +409,7 @@ fn reasoning_delta_events(
     if let Some(provider_id) = provider_id {
         events.push(StreamEvent::BlockStart {
             id: BlockId::wire(correlator),
+            source_order: None,
             kind: BlockKind::Reasoning {
                 provider_id: Some(provider_id.to_string()),
             },
@@ -1753,6 +1755,7 @@ fn a_completed_key_takes_precedence_over_another_keys_pending_provider_id() {
             reasoning_close(Some(Reasoning::new("A").with_id("rs".into())), None),
             StreamEvent::BlockStart {
                 id: BlockId::wire("other"),
+                source_order: None,
                 kind: BlockKind::Reasoning {
                     provider_id: Some("rs".into()),
                 },
@@ -1905,6 +1908,7 @@ fn finish_carries_images_after_the_calls_when_regrouping() {
             AssistantContent::CustomToolCall(_) => "custom_call",
             AssistantContent::Image(_) => "image",
             AssistantContent::Reasoning(_) => "reasoning",
+            AssistantContent::ProviderItem(_) => "provider_item",
         })
         .collect();
     assert_eq!(kinds, ["text", "call", "image"], "{:?}", turn.choice);
@@ -2029,4 +2033,30 @@ fn completed_namespaced_and_custom_calls_are_refused_at_their_end() {
         panic!("the refused turn ends the history");
     };
     assert_eq!(last.last(), Some(&content));
+}
+
+/// A turn rebuilt around its reasoning or tool calls keeps the provider's
+/// opaque items, in their order relative to its text: none is dropped.
+#[test]
+fn a_rebuilt_turn_keeps_provider_items_in_their_order_with_the_text() {
+    let item = rig_core::message::ProviderItem::new(json!({"type": "web_search_call"}), "openai");
+    let provider_choice = vec![
+        AssistantContent::Text(Text::from("before")),
+        AssistantContent::ProviderItem(item.clone()),
+        AssistantContent::Text(Text::from("after")),
+    ];
+    let choice = StreamedTurnAssembler::canonical_choice_with(
+        Vec::new(),
+        vec![rig_core::message::Reasoning::new("think")],
+        &provider_choice,
+    );
+    assert_eq!(
+        choice,
+        vec![
+            AssistantContent::Reasoning(rig_core::message::Reasoning::new("think")),
+            AssistantContent::Text(Text::from("before")),
+            AssistantContent::ProviderItem(item),
+            AssistantContent::Text(Text::from("after")),
+        ]
+    );
 }

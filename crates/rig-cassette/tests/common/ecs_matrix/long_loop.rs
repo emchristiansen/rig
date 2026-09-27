@@ -1709,7 +1709,7 @@ fn assert_stream_delivery(cell: &Cell, turns: &[Turn<'_>]) {
         );
         for id in &delivered {
             assert!(events.iter().any(|event| matches!(event,
-                StreamEvent::BlockStart { id: started, kind: BlockKind::ToolCall }
+                StreamEvent::BlockStart { id: started, kind: BlockKind::ToolCall, .. }
                 | StreamEvent::BlockDelta { id: started, delta: Delta::ToolName { .. } | Delta::ToolArguments { .. } }
                 if started == *id
             )), "{}: the completed call has actual matching tool-block or delta delivery", cell.name);

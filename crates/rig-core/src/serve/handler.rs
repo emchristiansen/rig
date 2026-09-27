@@ -304,6 +304,10 @@ pub(crate) fn events_from_response(
                 }
                 out.custom_tool_call(BlockId::minted(MintKind::Tool, index), end);
             }
+            // Re-emitted whole, keyed by its position like the other parts.
+            AssistantContent::ProviderItem(item) => {
+                out.provider_item(BlockId::minted(MintKind::Output, index), item.clone());
+            }
         }
     }
     let mut terminal = StreamFinal::new(
@@ -358,6 +362,7 @@ impl StreamTap {
                 if let StreamEvent::BlockStart {
                     id,
                     kind: crate::streaming::BlockKind::Message,
+                    ..
                 } = event
                     && let Some(wire) = id.wire_str()
                 {

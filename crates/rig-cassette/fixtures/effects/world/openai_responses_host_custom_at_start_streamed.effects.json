@@ -2,14 +2,14 @@
   "header": {
     "deliveries": [
       {
-        "batch": 3,
+        "batch": 5,
         "id": 0,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 60,
+        "batch": 51,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -17,7 +17,7 @@
         }
       },
       {
-        "batch": 71,
+        "batch": 56,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -25,7 +25,7 @@
         }
       },
       {
-        "batch": 72,
+        "batch": 58,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -33,7 +33,7 @@
         }
       },
       {
-        "batch": 81,
+        "batch": 65,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -41,7 +41,7 @@
         }
       },
       {
-        "batch": 90,
+        "batch": 80,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -49,7 +49,7 @@
         }
       },
       {
-        "batch": 90,
+        "batch": 80,
         "id": 1,
         "kind": {
           "delivery": "outcome"
@@ -209,6 +209,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_07d392167649007a006ab2b30ae8e887d086e864510b5d5f87",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_07d392167649007a006ab2b30ae8e887d086e864510b5d5f87"
@@ -217,6 +221,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_07d392167649007a006ab2b30b429487d0800336bc1f38386c",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -232,6 +240,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_07d392167649007a006ab2b30b429487d0800336bc1f38386c",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

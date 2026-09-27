@@ -2,23 +2,7 @@
   "header": {
     "deliveries": [
       {
-        "batch": 11,
-        "id": 0,
-        "kind": {
-          "delivery": "stream",
-          "items": 3
-        }
-      },
-      {
-        "batch": 12,
-        "id": 0,
-        "kind": {
-          "delivery": "stream",
-          "items": 3
-        }
-      },
-      {
-        "batch": 13,
+        "batch": 50,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -26,15 +10,79 @@
         }
       },
       {
-        "batch": 14,
+        "batch": 52,
         "id": 0,
         "kind": {
           "delivery": "stream",
-          "items": 3
+          "items": 1
         }
       },
       {
-        "batch": 16,
+        "batch": 55,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 57,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 59,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 62,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 66,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 68,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 69,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 72,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 95,
         "id": 0,
         "kind": {
           "delivery": "stream",
@@ -42,21 +90,21 @@
         }
       },
       {
-        "batch": 16,
+        "batch": 95,
         "id": 0,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 17,
+        "batch": 96,
         "id": 1,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 28,
+        "batch": 148,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -64,31 +112,7 @@
         }
       },
       {
-        "batch": 29,
-        "id": 2,
-        "kind": {
-          "delivery": "stream",
-          "items": 2
-        }
-      },
-      {
-        "batch": 30,
-        "id": 2,
-        "kind": {
-          "delivery": "stream",
-          "items": 4
-        }
-      },
-      {
-        "batch": 31,
-        "id": 2,
-        "kind": {
-          "delivery": "stream",
-          "items": 2
-        }
-      },
-      {
-        "batch": 32,
+        "batch": 151,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -96,15 +120,7 @@
         }
       },
       {
-        "batch": 33,
-        "id": 2,
-        "kind": {
-          "delivery": "stream",
-          "items": 2
-        }
-      },
-      {
-        "batch": 34,
+        "batch": 154,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -112,7 +128,7 @@
         }
       },
       {
-        "batch": 35,
+        "batch": 157,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -120,7 +136,7 @@
         }
       },
       {
-        "batch": 36,
+        "batch": 159,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -128,7 +144,7 @@
         }
       },
       {
-        "batch": 37,
+        "batch": 161,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -136,7 +152,7 @@
         }
       },
       {
-        "batch": 38,
+        "batch": 163,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -144,7 +160,7 @@
         }
       },
       {
-        "batch": 41,
+        "batch": 166,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -152,7 +168,7 @@
         }
       },
       {
-        "batch": 49,
+        "batch": 170,
         "id": 2,
         "kind": {
           "delivery": "stream",
@@ -160,7 +176,87 @@
         }
       },
       {
-        "batch": 49,
+        "batch": 171,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 173,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 176,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 178,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 180,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 186,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 191,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 194,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 200,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 213,
+        "id": 2,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 213,
         "id": 2,
         "kind": {
           "delivery": "outcome"
@@ -388,6 +484,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_08cb637cfdc74423006ab396a050d887d0b1f7f3da90392f62",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }
@@ -748,6 +848,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_08cb637cfdc74423006ab396a1820487d08c4320f270906771",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -883,6 +987,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_08cb637cfdc74423006ab396a1820487d08c4320f270906771",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

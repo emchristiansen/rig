@@ -64,6 +64,7 @@ fn tool_events() -> Vec<StreamEvent> {
     vec![
         StreamEvent::BlockStart {
             id: id.clone(),
+            source_order: None,
             kind: BlockKind::ToolCall,
         },
         StreamEvent::BlockEnd {

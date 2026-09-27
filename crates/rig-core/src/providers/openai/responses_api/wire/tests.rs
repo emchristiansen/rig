@@ -1359,3 +1359,48 @@ fn a_callers_own_cache_key_and_metadata_are_kept_over_http() {
         serde_json::json!({"session_id": "caller-session", "thread_id": "thread-derived"})
     );
 }
+
+// ── provider items at encode ──────────────────────────────────────────────
+
+fn with_provider_item(provider: Option<&str>) -> CompletionRequest {
+    turn(vec![
+        Message::user("hi"),
+        Message::Assistant {
+            id: Some("msg_1".to_owned()),
+            content: vec![message::AssistantContent::ProviderItem(
+                message::ProviderItem {
+                    item: serde_json::json!({"type": "web_search_call", "id": "ws_1"}),
+                    provider: provider.map(str::to_owned),
+                },
+            )],
+        },
+        Message::user("again"),
+    ])
+}
+
+/// The Responses wire replays an item it issued, or one of unknown
+/// provenance, verbatim, and refuses by name an item another issuer
+/// produced.
+#[test]
+fn the_responses_wire_replays_its_own_and_unknown_provider_items_and_refuses_others() {
+    for provider in [Some("openai"), None] {
+        let body = encoded_body_of(&openai(), with_provider_item(provider), Mode::Unary);
+        let input = body["input"].as_array().expect("input items");
+        assert!(
+            input.contains(&serde_json::json!({"type": "web_search_call", "id": "ws_1"})),
+            "{provider:?}: {body}"
+        );
+    }
+    let error = openai()
+        .encode(with_provider_item(Some("anthropic")), Mode::Unary)
+        .expect_err("another issuer's item cannot be replayed");
+    let crate::error::ProviderError::Request(inner) = crate::error::ProviderError::from(error)
+    else {
+        panic!("expected a request refusal");
+    };
+    let refusal = inner
+        .downcast_ref::<message::UnreplayableProviderItem>()
+        .unwrap_or_else(|| panic!("expected UnreplayableProviderItem, got {inner}"));
+    assert_eq!(refusal.issuer.as_deref(), Some("anthropic"));
+    assert_eq!(refusal.item_type.as_deref(), Some("web_search_call"));
+}

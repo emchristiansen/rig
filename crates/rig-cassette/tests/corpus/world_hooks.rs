@@ -604,7 +604,8 @@ fn judge_turn(
                 AssistantContent::ToolCall(_)
                 | AssistantContent::CustomToolCall(_)
                 | AssistantContent::Reasoning(_)
-                | AssistantContent::Image(_) => None,
+                | AssistantContent::Image(_)
+                | AssistantContent::ProviderItem(_) => None,
             })
             .collect();
         for hook in hooks.hooks {

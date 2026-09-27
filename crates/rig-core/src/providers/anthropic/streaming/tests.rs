@@ -495,6 +495,7 @@ fn test_handle_thinking_delta_event() {
         vec![
             StreamEvent::BlockStart {
                 id: id.clone(),
+                source_order: None,
                 kind: BlockKind::Reasoning { provider_id: None },
             },
             StreamEvent::BlockDelta {
@@ -552,6 +553,7 @@ fn test_handle_redacted_thinking_content_block_start_event() {
         events[0],
         StreamEvent::BlockStart {
             id: id.clone(),
+            source_order: None,
             kind: BlockKind::Reasoning { provider_id: None },
         }
     );
@@ -716,6 +718,7 @@ fn thinking_block_start_text_streams_as_the_first_delta() {
         vec![
             StreamEvent::BlockStart {
                 id: id.clone(),
+                source_order: None,
                 kind: BlockKind::Reasoning { provider_id: None },
             },
             StreamEvent::BlockDelta {
@@ -843,6 +846,7 @@ fn test_handle_text_block_start_event() {
         events,
         vec![StreamEvent::BlockStart {
             id: crate::streaming::MintKind::Block.for_wire_index(0),
+            source_order: None,
             kind: BlockKind::Text {
                 additional_params: None
             },
@@ -901,6 +905,7 @@ fn test_handle_input_json_delta_event() {
         vec![
             StreamEvent::BlockStart {
                 id: id.clone(),
+                source_order: None,
                 kind: BlockKind::ToolCall,
             },
             StreamEvent::BlockDelta {
@@ -1229,6 +1234,7 @@ fn test_code_execution_tool_result_block_is_preserved() {
         kind: BlockKind::Text {
             additional_params: Some(additional_params),
         },
+        ..
     }) = events.first()
     else {
         panic!("expected text-start metadata for code_execution_tool_result");

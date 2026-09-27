@@ -194,7 +194,8 @@ pub fn texts(request: &CompletionRequest) -> Vec<String> {
                         AssistantContent::ToolCall(_)
                         | AssistantContent::CustomToolCall(_)
                         | AssistantContent::Reasoning(_)
-                        | AssistantContent::Image(_) => None,
+                        | AssistantContent::Image(_)
+                        | AssistantContent::ProviderItem(_) => None,
                     })
                     .collect::<String>()
             ),

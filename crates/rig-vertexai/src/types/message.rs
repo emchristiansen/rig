@@ -133,6 +133,15 @@ impl TryFrom<RigMessage> for vertexai::model::Content {
                             AssistantContent::CustomToolCall(call) => Err(ProviderError::Request(
                                 call.refused_by_json_only_wire(VERTEX_AI_WIRE).into(),
                             )),
+                            // An opaque provider item has no representation on
+                            // this wire.
+                            AssistantContent::ProviderItem(item) => Err(ProviderError::Request(
+                                rig_core::message::UnreplayableProviderItem::new(
+                                    VERTEX_AI_WIRE,
+                                    &item,
+                                )
+                                .into(),
+                            )),
                             AssistantContent::ToolCall(tool_call) => {
                                 // `functionCall` has no namespace member.
                                 tool_call

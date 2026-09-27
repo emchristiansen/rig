@@ -219,7 +219,7 @@ pub(crate) fn assert_log(cell: &Cell, log: &EffectLog) {
                     "one completed tool call delivered in this dependent turn"
                 );
                 assert!(events.iter().any(|event| matches!(event,
-                    StreamEvent::BlockStart { id, kind: BlockKind::ToolCall }
+                    StreamEvent::BlockStart { id, kind: BlockKind::ToolCall, .. }
                     | StreamEvent::BlockDelta { id, delta: Delta::ToolName { .. } | Delta::ToolArguments { .. } }
                     if id == delivered[0]
                 )), "the completed call has actual matching tool-block or delta delivery");

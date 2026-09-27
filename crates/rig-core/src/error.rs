@@ -633,6 +633,12 @@ impl From<crate::message::UnrepresentableToolCall> for EncodeError {
     }
 }
 
+impl From<crate::message::UnreplayableProviderItem> for EncodeError {
+    fn from(error: crate::message::UnreplayableProviderItem) -> Self {
+        Self::request(error)
+    }
+}
+
 impl From<BoxError> for EncodeError {
     fn from(error: BoxError) -> Self {
         Self(ProviderError::Request(error))

@@ -881,6 +881,12 @@ pub fn assistant_content_to_messages(
             message::AssistantContent::CustomToolCall(call) => {
                 return Err(call.refused_by_json_only_wire(CHAT_COMPLETIONS_WIRE).into());
             }
+            // An opaque provider item has no representation on this wire.
+            message::AssistantContent::ProviderItem(item) => {
+                return Err(
+                    message::UnreplayableProviderItem::new(CHAT_COMPLETIONS_WIRE, &item).into(),
+                );
+            }
             // Structured replay preserves signatures and encrypted payloads.
             message::AssistantContent::Reasoning(reasoning)
                 if reasoning_details && !reasoning.content.is_empty() =>

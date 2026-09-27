@@ -679,6 +679,12 @@ fn emit_parsed_items(
                 }
                 emit(GenerationEvent::ToolCall { id, end })?;
             }
+            // The local parsers never produce an opaque provider item.
+            AssistantContent::ProviderItem(_) => {
+                return Err(CandleError::Inference(
+                    "the local output parser produced a provider item, which it never emits".into(),
+                ));
+            }
             // The local parsers only produce function calls.
             AssistantContent::CustomToolCall(_) => {
                 return Err(CandleError::Inference(

@@ -94,10 +94,8 @@ impl ToolCallSlot {
 #[derive(Debug)]
 pub struct ToolCallBridge<I> {
     slots: HashMap<I, ToolCallSlot>,
-    /// Minter for slot identities on id-less wires. Defaults to the tool
-    /// kind (chat-compat, bedrock); the Responses adapter uses the output
-    /// kind so its tool mints share its reasoning mints' id space on the
-    /// same wire.
+    /// Minter for slot identities on id-less wires. The tool namespace
+    /// keeps anonymous calls distinct from independently minted reasoning.
     minted: SyntheticIds,
 }
 

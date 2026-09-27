@@ -44,6 +44,7 @@ pub(crate) mod shared_parts {
         vec![
             StreamEvent::BlockStart {
                 id: id.clone(),
+                source_order: None,
                 kind: BlockKind::ToolCall,
             },
             StreamEvent::BlockEnd {
@@ -514,6 +515,7 @@ impl GenerateContentDecoder {
                         vec![
                             streaming::StreamEvent::BlockStart {
                                 id: id.clone(),
+                                source_order: None,
                                 kind: streaming::BlockKind::Text {
                                     additional_params: Some(params),
                                 },

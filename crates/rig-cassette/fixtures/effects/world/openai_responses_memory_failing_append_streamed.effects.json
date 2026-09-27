@@ -2,14 +2,14 @@
   "header": {
     "deliveries": [
       {
-        "batch": 1,
+        "batch": 2,
         "id": 0,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 64,
+        "batch": 50,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -17,7 +17,7 @@
         }
       },
       {
-        "batch": 75,
+        "batch": 54,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -25,7 +25,7 @@
         }
       },
       {
-        "batch": 78,
+        "batch": 56,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -33,7 +33,7 @@
         }
       },
       {
-        "batch": 84,
+        "batch": 63,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -41,7 +41,7 @@
         }
       },
       {
-        "batch": 91,
+        "batch": 81,
         "id": 1,
         "kind": {
           "delivery": "stream",
@@ -49,14 +49,14 @@
         }
       },
       {
-        "batch": 91,
+        "batch": 81,
         "id": 1,
         "kind": {
           "delivery": "outcome"
         }
       },
       {
-        "batch": 93,
+        "batch": 83,
         "id": 2,
         "kind": {
           "delivery": "outcome"
@@ -214,6 +214,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_09058fa107a17908006ab2b34c0c8887d0a15595966b1de712",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_09058fa107a17908006ab2b34c0c8887d0a15595966b1de712"
@@ -222,6 +226,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_09058fa107a17908006ab2b34c60fc87d0add8acb539c242cf",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "text"
           }
@@ -237,6 +245,10 @@
         {
           "event": "block_start",
           "id": "wire:msg_09058fa107a17908006ab2b34c60fc87d0add8acb539c242cf",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "message"
           }

@@ -40,6 +40,7 @@ fn parsed_missing_ids_keep_their_identity_and_provenance_through_stream_emission
         accumulator
             .apply(&StreamEvent::BlockStart {
                 id: id.clone(),
+                source_order: None,
                 kind: BlockKind::ToolCall,
             })
             .expect("valid parsed tool event");

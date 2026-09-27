@@ -189,6 +189,10 @@
         {
           "event": "block_start",
           "id": "wire:rs_01472300353bb3f6006ab2b2b34f5487d08dfcc064fcff4649",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "reasoning",
             "provider_id": "rs_01472300353bb3f6006ab2b2b34f5487d08dfcc064fcff4649"
@@ -197,6 +201,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_01472300353bb3f6006ab2b2b4430087d0b1be9c145f388214",
+          "source_order": {
+            "primary": 1,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }

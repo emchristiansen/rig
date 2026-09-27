@@ -6,11 +6,19 @@
         "id": 0,
         "kind": {
           "delivery": "stream",
-          "items": 12
+          "items": 4
         }
       },
       {
-        "batch": 2,
+        "batch": 3,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 8
+        }
+      },
+      {
+        "batch": 3,
         "id": 0,
         "kind": {
           "delivery": "outcome"
@@ -187,6 +195,10 @@
         {
           "event": "block_start",
           "id": "wire:fc_0dd460aaf73c6856006ab396a05df887d09ce0241dc70fbf9f",
+          "source_order": {
+            "primary": 0,
+            "secondary": 0
+          },
           "kind": {
             "kind": "tool_call"
           }

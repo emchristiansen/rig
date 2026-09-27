@@ -127,6 +127,7 @@ async fn a_long_run_of_non_yielding_events_does_not_grow_the_stack() {
         for n in 0..50_000u32 {
             yield Ok(StreamEvent::BlockStart {
                 id: BlockId::wire(format!("msg_{n}")),
+                source_order: None,
                 kind: BlockKind::Message,
             });
         }
@@ -661,7 +662,7 @@ async fn test_stream_cancellation() {
     let mut chunk_count = 0;
     while let Some(chunk) = stream.next().await {
         match chunk {
-            Ok(StreamEvent::BlockStart { id, kind }) => {
+            Ok(StreamEvent::BlockStart { id, kind, .. }) => {
                 println!("\nBlock start: id={id:?}, kind={kind:?}");
             }
             Ok(StreamEvent::BlockDelta {
