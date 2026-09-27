@@ -20,8 +20,8 @@ use super::request_headers::RequestHeaders;
 use super::responses_lite::{CodexRequestShape, ResponsesLiteError};
 use super::streaming::{IncompleteTerminal, ResponsesDecoder, ResponsesStreamOptions};
 use super::{
-    CompletionRequest, ResponsesRequestParams, ResponsesRequestTool, ResponsesToolDefinition,
-    SystemInstructionsPlacement,
+    CompletionRequest, InputRequirement, ResponsesRequestParams, ResponsesRequestTool,
+    ResponsesToolDefinition, SystemInstructionsPlacement,
 };
 
 /// The per-request session header the ChatGPT dialect sends when no Codex
@@ -100,7 +100,12 @@ impl Responses {
             &request,
             http::Request::post(self.provider.uri(quirks.path, None)),
         ));
-        let request = self.responses_request(request, streaming, self.codex_identity.as_ref())?;
+        let request = self.responses_request(
+            request,
+            streaming,
+            self.codex_identity.as_ref(),
+            InputRequirement::NonEmpty,
+        )?;
         if self.codex_request_shape.is_lite() {
             builder = builder.header(super::responses_lite::HTTP_HEADER, "true");
         }
@@ -344,6 +349,7 @@ impl Responses {
         request: completion::CompletionRequest,
         streaming: bool,
         identity: Option<&super::codex_identity::CodexIdentity>,
+        input_requirement: InputRequirement,
     ) -> Result<CompletionRequest, EncodeError> {
         let issuers = self.replay_issuers(request.model.as_deref().or(Some(&self.model)));
         for message in &request.chat_history {
@@ -372,11 +378,14 @@ impl Responses {
             identity,
         )
         .map_err(EncodeError::request)?;
-        let mut request = CompletionRequest::try_from(ResponsesRequestParams {
-            model: self.model.clone(),
-            request,
-            system_instructions_placement: self.system_instructions,
-        })?;
+        let mut request = CompletionRequest::convert(
+            ResponsesRequestParams {
+                model: self.model.clone(),
+                request,
+                system_instructions_placement: self.system_instructions,
+            },
+            input_requirement,
+        )?;
         // Typed request tools, then declared tools, then this wire's defaults.
         request.tools.extend(
             self.tools

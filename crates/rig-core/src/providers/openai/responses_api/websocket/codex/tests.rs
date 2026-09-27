@@ -347,8 +347,9 @@ async fn root_sends_never_chain_and_carry_one_identity() {
                 "thread_id": identity.thread_id(),
             })
         );
-        // Websocket mode is event-driven: the SSE-only flags stay off the wire.
-        assert!(frame.get("stream").is_none(), "got {frame}");
+        // The official client states `stream: true` on every frame; the
+        // SSE-only `background` stays off the wire.
+        assert_eq!(frame["stream"], json!(true), "got {frame}");
         assert!(frame.get("background").is_none(), "got {frame}");
         assert!(frame.get("generate").is_none(), "got {frame}");
     }
@@ -419,6 +420,7 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
         openapi_schema::assert_valid(Schema::WebSocketResponseCreate, frame);
         assert_eq!(frame["type"], "response.create");
         assert_eq!(frame["store"], json!(false), "store is stated: {frame}");
+        assert_eq!(frame["stream"], json!(true), "stream is stated: {frame}");
         for unset in ["top_p", "temperature", "max_output_tokens"] {
             assert!(
                 frame.get(unset).is_none(),
@@ -1508,4 +1510,302 @@ impl crate::ws_client::WebSocketClientExt for ScriptBackend {
         let connection = self.0.connection();
         async move { Ok(connection) }
     }
+}
+
+// ── the Codex session-start prewarm ─────────────────────────────────────
+
+/// The session's standing request with no conversation yet: its
+/// instructions and nothing else, as Codex's startup prewarm builds it
+/// (`build_prompt(Vec::new(), …)`).
+fn prewarm_request() -> completion::CompletionRequest {
+    completion::CompletionRequest {
+        chat_history: vec![Message::system("Standing instructions.")],
+        ..user_request("unused")
+    }
+}
+
+/// Codex 0.155.1 opens a fresh session with a prewarm: a `generate: false`
+/// `response.create` with empty input and the prewarm's metadata, waited on
+/// until it completes. The first turn then continues it on the same
+/// connection: `previous_response_id` names the prewarm's response, the input
+/// is the turn's items alone, and the turn's own metadata replaces the
+/// prewarm's. The session reproduces that sequence with `warmup`, the frame
+/// metadata and `send_incremental`, and nothing else in the frames changes.
+#[tokio::test]
+async fn the_codex_prewarm_sequence_is_a_warmup_then_an_incremental_first_turn() {
+    let script = Script::new()
+        .turn([turn_state_event("ts-prewarm"), completed("resp_prewarm")])
+        .turn([completed("resp_turn_1")]);
+    let mut session = session_over(&script);
+
+    session
+        .set_frame_metadata("turn_id", "")
+        .expect("a caller key");
+    session
+        .set_frame_metadata("x-codex-turn-metadata", r#"{"request_kind":"prewarm"}"#)
+        .expect("a caller key");
+    let prewarm_id = session
+        .warmup(prewarm_request())
+        .await
+        .expect("the prewarm completes");
+    assert_eq!(prewarm_id, "resp_prewarm");
+    // The prewarm's turn-state token belongs to the first turn, as it does in
+    // the official client.
+    let turn_state = session
+        .take_received_turn_state()
+        .expect("the prewarm handed over a turn-state token");
+    assert_eq!(turn_state, "ts-prewarm");
+    session
+        .set_frame_metadata(TURN_STATE_METADATA_KEY, turn_state)
+        .expect("a caller key");
+
+    session
+        .set_frame_metadata("turn_id", "turn-1")
+        .expect("a caller key");
+    session
+        .set_frame_metadata("x-codex-turn-metadata", r#"{"request_kind":"turn"}"#)
+        .expect("a caller key");
+    session
+        .send_incremental(delta("FIRST_TURN_MARKER"))
+        .await
+        .expect("the first turn continues the prewarm");
+    finish_turn(&mut session).await;
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    let (prewarm, turn) = (&frames[0], &frames[1]);
+
+    assert_eq!(prewarm["generate"], false);
+    assert!(prewarm.get("previous_response_id").is_none());
+    assert_eq!(prewarm["input"], json!([]), "the prewarm carries no input");
+    assert_eq!(prewarm["client_metadata"]["turn_id"], "");
+    assert_eq!(
+        prewarm["client_metadata"]["x-codex-turn-metadata"],
+        r#"{"request_kind":"prewarm"}"#
+    );
+
+    assert!(turn.get("generate").is_none(), "the first turn generates");
+    assert_eq!(turn["previous_response_id"], "resp_prewarm");
+    let input = serde_json::to_string(&turn["input"]).expect("input serializes");
+    assert!(input.contains("FIRST_TURN_MARKER"), "got {input}");
+    assert_eq!(turn["client_metadata"]["turn_id"], "turn-1");
+    assert_eq!(
+        turn["client_metadata"][TURN_STATE_METADATA_KEY],
+        "ts-prewarm"
+    );
+    assert!(
+        prewarm["client_metadata"]
+            .get(TURN_STATE_METADATA_KEY)
+            .is_none(),
+        "the prewarm had no token to send"
+    );
+    assert_eq!(
+        turn["client_metadata"]["x-codex-turn-metadata"],
+        r#"{"request_kind":"turn"}"#
+    );
+
+    // Everything but the input, the chaining, `generate` and the per-turn
+    // metadata is the prewarm's request: the properties Codex requires to
+    // match before it continues a prewarm.
+    let strip = |frame: &serde_json::Value| {
+        let mut frame = frame.as_object().expect("a frame is an object").clone();
+        for key in [
+            "input",
+            "previous_response_id",
+            "generate",
+            "client_metadata",
+        ] {
+            frame.remove(key);
+        }
+        frame
+    };
+    assert_eq!(strip(turn), strip(prewarm));
+    for frame in &frames {
+        openapi_schema::assert_valid(Schema::WebSocketResponseCreate, frame);
+    }
+}
+
+/// Only a frame that generates nothing may carry no input: a generating send
+/// of the same request is refused before anything is written.
+#[tokio::test]
+async fn a_generating_send_without_input_is_still_refused() {
+    let script = Script::new();
+    let mut session = session_over(&script);
+    let refused = session
+        .send(prewarm_request())
+        .await
+        .expect_err("a generating request needs input");
+    assert!(
+        refused.to_string().contains("at least one non-system item"),
+        "got {refused}"
+    );
+    assert!(script.sent_json().is_empty(), "nothing was written");
+}
+
+/// A `response.metadata` event handing over a turn-state token.
+fn turn_state_event(token: &str) -> String {
+    json!({
+        "type": "response.metadata",
+        "headers": { TURN_STATE_METADATA_KEY: token },
+    })
+    .to_string()
+}
+
+/// The session records the first turn-state token its turns are handed,
+/// whichever call reads the event, and keeps it until it is taken: a later
+/// token is ignored, a name in another case still matches, and an array
+/// value gives its first string, as the official client reads them.
+#[tokio::test]
+async fn the_first_turn_state_token_is_recorded_until_taken() {
+    let script = Script::new()
+        .turn([
+            turn_state_event("ts-1"),
+            turn_state_event("ts-ignored"),
+            completed("resp_1"),
+        ])
+        .turn([
+            json!({
+                "type": "response.metadata",
+                "headers": { "X-Codex-Turn-State": ["ts-2", "ts-other"] },
+            })
+            .to_string(),
+            completed("resp_2"),
+        ])
+        .turn([completed("resp_3")]);
+    let mut session = session_over(&script);
+    assert_eq!(session.received_turn_state(), None);
+
+    session
+        .completion(user_request("first"))
+        .await
+        .expect("the first turn completes");
+    assert_eq!(session.received_turn_state(), Some("ts-1"));
+    assert_eq!(session.take_received_turn_state().as_deref(), Some("ts-1"));
+    assert_eq!(session.received_turn_state(), None);
+
+    session
+        .completion(user_request("second"))
+        .await
+        .expect("the second turn completes");
+    assert_eq!(session.take_received_turn_state().as_deref(), Some("ts-2"));
+
+    session
+        .completion(user_request("third"))
+        .await
+        .expect("the third turn completes");
+    assert_eq!(
+        session.received_turn_state(),
+        None,
+        "a turn without a token records none"
+    );
+}
+
+/// Under Lite the prewarm is Codex's Lite prewarm: the prefix spliced into the
+/// empty input, with no top-level instructions or tools, and the first turn's
+/// delta carries only the turn's items, as Codex splits the incremental input
+/// at the prefix length.
+#[tokio::test]
+async fn the_lite_prewarm_carries_only_the_prefix_and_the_first_turn_only_its_items() {
+    let wire = codex_wire()
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite");
+    let identity =
+        CodexIdentity::from_ids("session-derived", "thread-derived").expect("header-safe ids");
+    let script = Script::new()
+        .turn([completed("resp_prewarm")])
+        .turn([completed("resp_turn_1")]);
+    let mut session =
+        CodexWebSocketSession::from_connection(wire, identity, script.connection(), None)
+            .expect("the ChatGPT dialect speaks the Codex contract");
+
+    session
+        .warmup(prewarm_request())
+        .await
+        .expect("the Lite prewarm completes");
+    session
+        .send_incremental(delta("FIRST_TURN_MARKER"))
+        .await
+        .expect("the first turn continues the prewarm");
+    finish_turn(&mut session).await;
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    let (prewarm, turn) = (&frames[0], &frames[1]);
+    for frame in &frames {
+        openapi_schema::assert_valid(Schema::LiteWebSocketResponseCreate, frame);
+        // The warmup and the delta state it too, as every Codex frame does.
+        assert_eq!(frame["stream"], json!(true), "got {frame}");
+    }
+
+    assert_eq!(prewarm["generate"], false);
+    let prewarm_input = prewarm["input"]
+        .as_array()
+        .expect("the prewarm input is an array");
+    assert_eq!(
+        prewarm_input.len(),
+        2,
+        "the prefix alone: {prewarm_input:?}"
+    );
+    assert_eq!(prewarm_input[0]["type"], "additional_tools");
+    assert_eq!(
+        prewarm_input[1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        json!(["model.base_instructions"])
+    );
+    assert!(prewarm.get("instructions").is_none());
+    assert!(prewarm.get("tools").is_none());
+
+    assert!(turn.get("generate").is_none(), "the first turn generates");
+    assert_eq!(turn["previous_response_id"], "resp_prewarm");
+    let turn_input = serde_json::to_string(&turn["input"]).expect("input serializes");
+    assert!(turn_input.contains("FIRST_TURN_MARKER"), "got {turn_input}");
+    assert!(!turn_input.contains("additional_tools"), "got {turn_input}");
+    assert!(
+        !turn_input.contains("model.base_instructions"),
+        "got {turn_input}"
+    );
+}
+
+/// A warmup may carry no input, but not no messages: a request without even
+/// instructions is refused before anything is written.
+#[tokio::test]
+async fn a_warmup_without_any_message_is_refused_and_writes_nothing() {
+    let script = Script::new();
+    let mut session = session_over(&script);
+    let empty = completion::CompletionRequest {
+        chat_history: Vec::new(),
+        ..user_request("unused")
+    };
+    let refused = session
+        .warmup(empty)
+        .await
+        .expect_err("a warmup needs at least its instructions");
+    assert!(
+        refused.to_string().contains("empty chat history"),
+        "got {refused}"
+    );
+    assert!(script.sent_json().is_empty(), "nothing was written");
+}
+
+/// The generic session's warmup may carry no input too. Over the ChatGPT wire,
+/// which lifts system messages into `instructions`, a request of only
+/// instructions goes out as `generate: false` with an empty input, and the
+/// generic session still leaves `stream` off: only a Codex session states it.
+#[tokio::test]
+async fn a_generic_session_warmup_may_carry_no_input() {
+    let script = Script::new().turn([completed("resp_warm")]);
+    let mut session =
+        ResponsesWebSocketSession::from_connection(codex_wire(), script.connection(), None);
+    let response_id = session
+        .warmup(prewarm_request())
+        .await
+        .expect("the warmup completes");
+    assert_eq!(response_id, "resp_warm");
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 1, "one frame for the warmup: {frames:?}");
+    let frame = &frames[0];
+    assert_eq!(frame["generate"], false);
+    assert_eq!(frame["input"], json!([]), "the warmup carries no input");
+    assert!(frame["instructions"].is_string(), "got {frame}");
+    assert!(frame.get("stream").is_none(), "got {frame}");
 }

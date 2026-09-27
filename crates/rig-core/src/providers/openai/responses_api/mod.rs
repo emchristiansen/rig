@@ -1573,10 +1573,48 @@ pub struct ResponsesRequestParams {
     pub system_instructions_placement: SystemInstructionsPlacement,
 }
 
+/// Whether a converted request must carry input.
+///
+/// A request that asks for output needs at least one input item. A request
+/// that only prepares state (a websocket `response.create` with
+/// `generate: false`) may carry none: the Codex client's session-start
+/// prewarm sends its instructions and tools with an empty input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputRequirement {
+    /// At least one input item: every request that generates.
+    NonEmpty,
+    /// Any input, including none: only a request that generates nothing.
+    #[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+    MayBeEmpty,
+}
+
+#[cfg(feature = "websocket")]
+impl InputRequirement {
+    /// The requirement for a websocket `response.create` sent with `options`:
+    /// empty input only when it asks for no output.
+    pub(crate) fn for_create(options: &websocket::ResponsesWebSocketCreateOptions) -> Self {
+        if options.generate == Some(false) {
+            Self::MayBeEmpty
+        } else {
+            Self::NonEmpty
+        }
+    }
+}
+
 impl TryFrom<ResponsesRequestParams> for CompletionRequest {
     type Error = EncodeError;
 
     fn try_from(params: ResponsesRequestParams) -> Result<Self, Self::Error> {
+        CompletionRequest::convert(params, InputRequirement::NonEmpty)
+    }
+}
+
+impl CompletionRequest {
+    /// Convert `params`, refusing an empty input unless `input` allows one.
+    pub(crate) fn convert(
+        params: ResponsesRequestParams,
+        input_requirement: InputRequirement,
+    ) -> Result<Self, EncodeError> {
         let ResponsesRequestParams {
             model,
             request: mut req,
@@ -1653,14 +1691,17 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
         let instructions = (!instruction_parts.is_empty()).then(|| instruction_parts.join("\n\n"));
         let lifted_system_items = input.len() < items_before_lift;
 
-        let input = crate::message::require_non_empty(input, || {
-            EncodeError::request(if lifted_system_items {
-                "OpenAI Responses request input must contain at least one non-system item \
-                 (system messages were lifted into the top-level `instructions` field)"
-            } else {
-                "OpenAI Responses request input must contain at least one item"
-            })
-        })?;
+        let input = match input_requirement {
+            InputRequirement::NonEmpty => crate::message::require_non_empty(input, || {
+                EncodeError::request(if lifted_system_items {
+                    "OpenAI Responses request input must contain at least one non-system item \
+                     (system messages were lifted into the top-level `instructions` field)"
+                } else {
+                    "OpenAI Responses request input must contain at least one item"
+                })
+            })?,
+            InputRequirement::MayBeEmpty => input,
+        };
 
         let mut additional_params_payload = req.additional_params.take().unwrap_or(Value::Null);
         let stream = match &additional_params_payload {

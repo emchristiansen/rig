@@ -86,6 +86,11 @@ pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 /// The Codex Responses websocket beta value.
 pub const RESPONSES_WEBSOCKETS_BETA_VALUE: &str = "responses_websockets=2026-02-06";
 
+/// The Codex sticky-routing token: the header name inside a
+/// `response.metadata` event, and the `client_metadata` key the official
+/// client sends it back under.
+pub const TURN_STATE_METADATA_KEY: &str = "x-codex-turn-state";
+
 /// The `client_metadata` key carrying a frame's send instant, in milliseconds
 /// since the Unix epoch, stamped when the session has a [`FrameClock`].
 pub const WS_STREAM_REQUEST_START_MS_METADATA_KEY: &str = "x-codex-ws-stream-request-start-ms";
@@ -390,17 +395,41 @@ impl CodexWebSocketSession {
     ///
     /// The Codex backend's `x-codex-turn-state` sticky-routing token is such
     /// a value. The backend hands it over in the `headers` of a
-    /// `response.metadata` event, which [`Self::next_event`] yields as
-    /// [`ResponsesWebSocketEvent::Unknown`] with its complete payload (a
-    /// streamed turn passes it on as `StreamEvent::Unknown`; the folded reply
-    /// of [`Self::completion`] does not carry it), and the official client
-    /// sends it back on every later frame of that turn, never across turns.
+    /// `response.metadata` event, which the session records whichever call
+    /// reads it ([`Self::received_turn_state`]), and the official client sends
+    /// it back on every later frame of that turn, never across turns.
     pub fn set_frame_metadata(
         &mut self,
         key: impl Into<String>,
         value: impl Into<String>,
     ) -> Result<(), ReservedFrameMetadataKey> {
         self.frame_stamps.set(key.into(), value.into())
+    }
+
+    /// The first `x-codex-turn-state` token a `response.metadata` event of
+    /// this session's turns handed over since the token was last taken,
+    /// whichever call read the event: [`Self::next_event`], [`Self::warmup`],
+    /// [`Self::completion`] or a streamed turn. Later tokens are ignored
+    /// until it is taken, as the official client keeps the first token of a
+    /// turn. Rig never sends it back; a caller that does puts it in the
+    /// [frame metadata](Self::set_frame_metadata) under
+    /// [`TURN_STATE_METADATA_KEY`].
+    #[must_use]
+    pub fn received_turn_state(&self) -> Option<&str> {
+        self.session.turn_state()
+    }
+
+    /// Take the recorded turn-state token, so the next one a
+    /// `response.metadata` event carries is recorded: at a turn boundary,
+    /// where the official client starts with no token.
+    ///
+    /// The session spans turns and marks no boundary itself, so nothing
+    /// clears the token but this call. A caller that reads it with
+    /// [`Self::received_turn_state`] and never takes it would stamp an
+    /// earlier turn's token on a later turn, which the official client never
+    /// does.
+    pub fn take_received_turn_state(&mut self) -> Option<String> {
+        self.session.take_turn_state()
     }
 
     /// Stop stamping `key`, returning the value it had.
@@ -460,6 +489,7 @@ impl CodexWebSocketSession {
             completion_request,
             Chaining::Root,
             Some(&self.identity),
+            super::super::InputRequirement::for_create(&options),
         )?;
         let responses_lite = self.session.wire.codex_request_shape.is_lite();
         let frame = encode_frame(&envelope, options.generate, |body| {
@@ -513,7 +543,27 @@ impl CodexWebSocketSession {
         self.session.keepalive().await
     }
 
-    /// Send a root warmup turn (`generate: false`) and return its response ID.
+    /// Send a root warmup turn (`generate: false`), wait for it to complete,
+    /// and return its response ID. The completed warmup is the live tip, so
+    /// [`Self::send_incremental`] continues it.
+    ///
+    /// A warmup generates nothing, so its request may carry no conversation
+    /// at all: only its instructions (system messages) and tools, sent with
+    /// an empty `input`. It still needs at least one message, so a warmup
+    /// without instructions is refused before anything is sent. That is the
+    /// Codex client's session-start prewarm: the warmup of the request the
+    /// session's first turn will make, before that turn's items exist. The
+    /// first turn then goes out as a
+    /// [`send_incremental`](Self::send_incremental) of its items, chaining
+    /// the warmup's response ID and reusing its model, instructions, tools
+    /// and other properties. When the first turn needs different properties,
+    /// it is a full [`send`](Self::send) instead, as the official client
+    /// falls back to a full request when they do not match. Set the frame
+    /// metadata and the wire's request headers for the warmup before calling
+    /// it, and the turn's own before the first turn. A turn-state token the
+    /// warmup's `response.metadata` handed over belongs to the first turn
+    /// too, as it does in the official client: read it with
+    /// [`Self::received_turn_state`] and stamp it before that turn.
     pub async fn warmup(
         &mut self,
         completion_request: completion::CompletionRequest,
