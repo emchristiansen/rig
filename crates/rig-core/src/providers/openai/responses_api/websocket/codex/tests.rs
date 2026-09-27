@@ -16,6 +16,7 @@ const ACCOUNT_ID: &str = "acct-123";
 
 fn codex_wire() -> Responses {
     OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_caller_identity(crate::test_utils::test_caller_identity())
         .with_account_id(ACCOUNT_ID)
         .responses(chatgpt::GPT_5_3_CODEX)
 }
@@ -187,6 +188,7 @@ fn http_caller_identity(wire: &Responses) -> (String, String) {
     let request = wire
         .provider
         .headers(http::Request::get("https://example.invalid/"))
+        .expect("the wire carries the caller's identity")
         .body(())
         .expect("builds");
     let value = |name: &str| {
@@ -210,8 +212,9 @@ fn the_handshake_carries_exactly_the_codex_identity_headers() {
     let wire = codex_wire();
     let (originator, user_agent) = http_caller_identity(&wire);
     assert_eq!(
-        originator, "rig",
-        "the ChatGPT dialect's default originator"
+        originator,
+        crate::test_utils::test_caller_identity().originator(),
+        "the caller's identity, exactly"
     );
     let request = identity
         .handshake_request(&wire)
@@ -254,29 +257,72 @@ fn the_handshake_carries_exactly_the_codex_identity_headers() {
     assert_eq!(headers, expected);
 }
 
-/// An originator set on the wire reaches the handshake exactly as it reaches
-/// the wire's HTTP requests, with the default user agent naming it.
+/// Without the caller's exact identity the handshake is refused before it is
+/// sent, rather than identifying as Rig: with none configured, and with only
+/// an originator, whose user agent Rig would derive.
 #[test]
-fn the_handshake_carries_the_wire_s_configured_originator() {
-    let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
-        .with_originator("muninn")
-        .responses(chatgpt::GPT_5_3_CODEX);
-    let (originator, user_agent) = http_caller_identity(&wire);
-    assert_eq!(originator, "muninn");
-    assert!(
-        user_agent.ends_with("; muninn)"),
-        "the default user agent names the originator, got {user_agent}"
+fn the_handshake_refuses_without_the_caller_s_exact_identity() {
+    use crate::providers::openai::wire::MissingCallerIdentity;
+
+    let refusal = |provider: OpenAI| {
+        let error = CodexIdentity::generate()
+            .handshake_request(&provider.responses(chatgpt::GPT_5_3_CODEX))
+            .expect_err("no exact identity, no handshake");
+        match ProviderError::from(error) {
+            ProviderError::Request(inner) => inner
+                .downcast_ref::<MissingCallerIdentity>()
+                .cloned()
+                .unwrap_or_else(|| panic!("expected a missing identity, got {inner}")),
+            other => panic!("expected a request refusal, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        refusal(OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)),
+        MissingCallerIdentity::Unset { dialect: "chatgpt" }
     );
-    let request = CodexIdentity::generate()
-        .handshake_request(&wire)
-        .expect("handshake request should build");
-    assert_eq!(request.headers()["originator"], originator.as_str());
-    assert_eq!(request.headers()["user-agent"], user_agent.as_str());
+    assert_eq!(
+        refusal(OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).with_originator("muninn")),
+        MissingCallerIdentity::OriginatorOnly {
+            dialect: "chatgpt",
+            originator: "muninn".to_owned()
+        }
+    );
+}
+
+/// A Codex session over a connection the caller opened still refuses to
+/// send without the caller's exact identity on its wire, before any frame is
+/// written.
+#[tokio::test]
+async fn a_codex_session_over_an_open_connection_refuses_to_send_without_the_caller_s_identity() {
+    use crate::providers::openai::wire::MissingCallerIdentity;
+
+    let script = Script::new().turn([completed("resp_1")]);
+    let mut session = CodexWebSocketSession::from_connection(
+        OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).responses(chatgpt::GPT_5_3_CODEX),
+        CodexIdentity::generate(),
+        script.connection(),
+        None,
+    )
+    .expect("the ChatGPT dialect speaks the Codex contract");
+    match session
+        .send(user_request("hello"))
+        .await
+        .expect_err("no exact identity, no frame")
+    {
+        ProviderError::Request(inner) => assert_eq!(
+            inner.downcast_ref::<MissingCallerIdentity>(),
+            Some(&MissingCallerIdentity::Unset { dialect: "chatgpt" })
+        ),
+        other => panic!("expected a request refusal, got {other:?}"),
+    }
+    assert!(script.sent().is_empty(), "nothing was written");
 }
 
 #[test]
 fn the_handshake_omits_the_account_header_without_an_account() {
-    let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).responses(chatgpt::GPT_5_3_CODEX);
+    let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_caller_identity(crate::test_utils::test_caller_identity())
+        .responses(chatgpt::GPT_5_3_CODEX);
     let request = CodexIdentity::generate()
         .handshake_request(&wire)
         .expect("handshake request should build");
@@ -1114,6 +1160,7 @@ impl crate::wire::CredentialSource for CountingSource {
 async fn each_connect_reads_the_credential_source_once() {
     let source = CountingSource::default();
     let wire = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_caller_identity(crate::test_utils::test_caller_identity())
         .with_account_id(ACCOUNT_ID)
         .with_credential_source(source.clone())
         .responses(chatgpt::GPT_5_3_CODEX);

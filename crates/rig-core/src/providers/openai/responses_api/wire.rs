@@ -86,7 +86,7 @@ impl Responses {
             &OpenAI,
             &completion::CompletionRequest,
             http::request::Builder,
-        ) -> http::request::Builder,
+        ) -> Result<http::request::Builder, EncodeError>,
     ) -> Result<Encoded, EncodeError> {
         let quirks = &self.provider.dialect.quirks.responses;
         // The codex gateway only ever answers with an event stream, and
@@ -99,7 +99,7 @@ impl Responses {
             &self.provider,
             &request,
             http::Request::post(self.provider.uri(quirks.path, None)),
-        ));
+        )?);
         let request = self.responses_request(
             request,
             streaming,

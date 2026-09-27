@@ -137,7 +137,8 @@ mod chatgpt {
                         &rig_core::providers::chatgpt::DIALECT,
                         "test-token",
                     )
-                    .with_account_id("account-id"),
+                    .with_account_id("account-id")
+                    .with_caller_identity(rig_core::test_utils::test_caller_identity()),
                     SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
                 )
                 .completion("gpt-5.4");

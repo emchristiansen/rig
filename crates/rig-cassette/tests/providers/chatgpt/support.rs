@@ -3,12 +3,26 @@ use rig::driver::{Bind as _, Bound};
 use rig::prelude::*;
 use rig::providers::chatgpt;
 use rig::providers::openai::OpenAI;
+use rig::providers::openai::wire::CallerIdentity;
 use rig::rig_reqwest::client::bundled;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 
 use crate::cassettes::{CassetteSpec, ProviderCassette};
 use futures::FutureExt;
+
+/// The caller identity a ChatGPT cassette sends. Recording reads it from
+/// `CHATGPT_ORIGINATOR` and `CHATGPT_USER_AGENT`, so what reaches the live
+/// service is the recorder's exact identity and never one Rig makes up;
+/// replay sends a placeholder that never leaves the machine.
+pub(super) fn cassette_identity(cassette: &ProviderCassette) -> CallerIdentity {
+    CallerIdentity::new(
+        cassette.api_key("CHATGPT_ORIGINATOR"),
+        cassette.api_key("CHATGPT_USER_AGENT"),
+        None,
+    )
+    .expect("the cassette identity should be header-safe")
+}
 
 async fn chatgpt_cassette_with_default_instructions(
     spec: impl Into<CassetteSpec>,
@@ -22,6 +36,7 @@ async fn chatgpt_cassette_with_default_instructions(
     )
     .await;
     let client = OpenAI::with_key(&chatgpt::DIALECT, cassette.api_key("CHATGPT_ACCESS_TOKEN"))
+        .with_caller_identity(cassette_identity(&cassette))
         .with_account_id(cassette.api_key("CHATGPT_ACCOUNT_ID"))
         .with_base_url(cassette.base_url())
         .with_instructions(default_instructions)
@@ -66,7 +81,9 @@ async fn chatgpt_noninteractive_oauth_cassette(
     // the device flow refused so a stale cache fails loudly.
     let http = bundled().expect("transport should build");
     let context = chatgpt::auth::Authenticator::new(
-        chatgpt::auth::AuthSource::OAuth,
+        chatgpt::auth::AuthSource::OAuth {
+            identity: cassette_identity(&cassette),
+        },
         Some(auth_file),
         chatgpt::auth::DeviceCodeHandler::default(),
         false,
@@ -76,6 +93,7 @@ async fn chatgpt_noninteractive_oauth_cassette(
     .expect("non-interactive ChatGPT OAuth cassette credential should resolve");
 
     let mut provider = OpenAI::with_key(&chatgpt::DIALECT, context.access_token)
+        .with_caller_identity(cassette_identity(&cassette))
         .with_base_url(cassette.base_url())
         .with_instructions("");
     if let Some(account_id) = context.account_id {

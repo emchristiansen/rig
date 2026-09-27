@@ -1,12 +1,28 @@
 //! ChatGPT access-token configuration and native OAuth authentication.
 //!
+//! A token refresh is a request on the ChatGPT subscription channel too, so
+//! it carries the caller's exact identity, as the official client's does:
+//! an [`AuthSource::OAuth`] cannot be built without one. The device sign-in
+//! carries none, as the official client's does not.
+//!
 //! ```no_run
 //! use rig_core::providers::chatgpt::auth::{AuthSource, Authenticator, DeviceCodeHandler};
+//! use rig_core::providers::openai::wire::CallerIdentity;
 //!
-//! let auth = Authenticator::new(AuthSource::OAuth, None, DeviceCodeHandler::default(), true);
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let identity = CallerIdentity::new("my-originator", "my-user-agent/1.0", None)?;
+//! let auth = Authenticator::new(
+//!     AuthSource::OAuth { identity },
+//!     None,
+//!     DeviceCodeHandler::default(),
+//!     true,
+//! );
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::http_client::HttpClientExt;
+use crate::providers::openai::wire::CallerIdentity;
 use crate::wire::Secret;
 use futures::lock::Mutex;
 use std::fmt;
@@ -31,14 +47,20 @@ pub enum AuthSource {
         access_token: String,
         account_id: Option<String>,
     },
-    OAuth,
+    /// Sign in and refresh through OAuth. A token refresh carries
+    /// `identity`'s `originator` and `user-agent` headers exactly, as the
+    /// official client's does; a `version` it names is a model request
+    /// header and is not sent there.
+    OAuth { identity: CallerIdentity },
 }
 
 impl fmt::Debug for AuthSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AccessToken { .. } => f.write_str("AccessToken(<redacted>)"),
-            Self::OAuth => f.write_str("OAuth"),
+            Self::OAuth { identity } => {
+                f.debug_struct("OAuth").field("identity", identity).finish()
+            }
         }
     }
 }
@@ -100,7 +122,13 @@ impl Authenticator {
                 access_token: access_token.clone().into(),
                 account_id: account_id.clone(),
             }),
-            AuthSource::OAuth => self.platform.lock().await.auth_context_oauth(http).await,
+            AuthSource::OAuth { identity } => {
+                self.platform
+                    .lock()
+                    .await
+                    .auth_context_oauth(http, identity)
+                    .await
+            }
         }
     }
 }

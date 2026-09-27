@@ -41,9 +41,12 @@
 //! use rig_core::providers::openai::OpenAI;
 //! use rig_core::providers::openai::responses_api::websocket::codex::CodexWebSocketSessionBuilder;
 //!
-//! # async fn example(backend: &impl rig_core::ws_client::WebSocketClientExt)
-//! #     -> Result<(), rig_core::error::ProviderError> {
+//! # async fn example(
+//! #     backend: &impl rig_core::ws_client::WebSocketClientExt,
+//! #     identity: rig_core::providers::openai::wire::CallerIdentity,
+//! # ) -> Result<(), rig_core::error::ProviderError> {
 //! let wire = OpenAI::with_key(&chatgpt::DIALECT, "access-token")
+//!     .with_caller_identity(identity)
 //!     .with_account_id("account-id")
 //!     .responses(chatgpt::GPT_5_3_CODEX);
 //! let mut session = CodexWebSocketSessionBuilder::new(wire)?
@@ -188,8 +191,10 @@ pub use super::super::codex_identity::{
 impl CodexIdentity {
     /// The handshake request that opens a Codex websocket carrying this
     /// identity: `GET {base_url}/responses` on the websocket scheme, with the
-    /// wire's credential, its caller identity (`originator` and `user-agent`,
-    /// exactly as its HTTP requests carry them) when it has one, its account
+    /// wire's credential, its caller identity (`originator`, `user-agent` and
+    /// any `version`, exactly as its HTTP requests carry them; refused with
+    /// [`MissingCallerIdentity`](crate::providers::openai::wire::MissingCallerIdentity)
+    /// when the wire has no exact one), its account
     /// id when set, the dashed identity headers, `x-client-request-id`, the
     /// `OpenAI-Beta` opt-in, and last the wire's
     /// [request headers](Responses::with_request_headers). Nothing else: the
@@ -213,7 +218,7 @@ impl CodexIdentity {
                     .method(http::Method::GET)
                     .uri(url),
             ),
-        );
+        )?;
         if let Some(account_id) = &wire.provider.account_id {
             builder = builder.header(CHATGPT_ACCOUNT_ID_HEADER, account_id);
         }

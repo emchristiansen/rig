@@ -451,6 +451,37 @@ fn websocket_request_rejects_an_unsupported_base_url_scheme() {
     assert!(!error.is_retryable());
 }
 
+/// A generic session over the ChatGPT dialect reaches the same gateway, so
+/// its handshake carries the caller's exact identity too, and without one it
+/// is refused as a request error before anything is sent.
+#[test]
+fn websocket_request_over_the_chatgpt_dialect_requires_the_caller_s_identity() {
+    use crate::providers::chatgpt;
+    use crate::providers::openai::wire::MissingCallerIdentity;
+
+    let error = websocket_request(
+        &OpenAI::with_key(&chatgpt::DIALECT, "test-key").responses(chatgpt::GPT_5_3_CODEX),
+    )
+    .expect_err("no identity, no handshake");
+    match ProviderError::from(error) {
+        ProviderError::Request(inner) => assert_eq!(
+            inner.downcast_ref::<MissingCallerIdentity>(),
+            Some(&MissingCallerIdentity::Unset { dialect: "chatgpt" })
+        ),
+        other => panic!("expected a request refusal, got {other:?}"),
+    }
+
+    let identity = crate::test_utils::test_caller_identity();
+    let request = websocket_request(
+        &OpenAI::with_key(&chatgpt::DIALECT, "test-key")
+            .with_caller_identity(identity.clone())
+            .responses(chatgpt::GPT_5_3_CODEX),
+    )
+    .expect("request should build");
+    assert_eq!(request.headers()["originator"], identity.originator());
+    assert_eq!(request.headers()["user-agent"], identity.user_agent());
+}
+
 #[test]
 fn parse_done_event_exposes_response_id() {
     let payload = json!({
@@ -886,6 +917,48 @@ fn session_over(script: &Script) -> ResponsesWebSocketSession {
         script.connection(),
         None,
     )
+}
+
+/// A session over a connection someone else opened, on the ChatGPT dialect
+/// without the caller's exact identity, refuses every send before a frame
+/// is written: Rig made no handshake of its own to refuse.
+#[tokio::test]
+async fn a_session_over_an_open_connection_refuses_to_send_without_the_caller_s_identity() {
+    use crate::providers::chatgpt;
+    use crate::providers::openai::wire::MissingCallerIdentity;
+
+    for (provider, expected) in [
+        (
+            OpenAI::with_key(&chatgpt::DIALECT, "test-key"),
+            MissingCallerIdentity::Unset { dialect: "chatgpt" },
+        ),
+        (
+            OpenAI::with_key(&chatgpt::DIALECT, "test-key").with_originator("ccc"),
+            MissingCallerIdentity::OriginatorOnly {
+                dialect: "chatgpt",
+                originator: "ccc".to_owned(),
+            },
+        ),
+    ] {
+        let script = Script::new().turn([completed_event("resp_1")]);
+        let mut session = ResponsesWebSocketSession::from_connection(
+            provider.responses(chatgpt::GPT_5_3_CODEX),
+            script.connection(),
+            None,
+        );
+        match session
+            .completion(user_request("hi"))
+            .await
+            .expect_err("no exact identity, no frame")
+        {
+            ProviderError::Request(inner) => assert_eq!(
+                inner.downcast_ref::<MissingCallerIdentity>(),
+                Some(&expected)
+            ),
+            other => panic!("expected a request refusal, got {other:?}"),
+        }
+        assert!(script.sent().is_empty(), "nothing was written");
+    }
 }
 
 /// The frames of a drain that must have serviced the socket cleanly.

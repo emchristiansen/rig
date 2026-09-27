@@ -62,7 +62,10 @@ fn refresh_reauth_only_on_invalid_grant() {
 async fn noninteractive_oauth_requires_sign_in_instead_of_device_flow() {
     let auth = PlatformAuthenticator::new(None, DeviceCodeHandler::default(), false);
     let err = auth
-        .auth_context_oauth(&RecordingHttpClient::new(""))
+        .auth_context_oauth(
+            &RecordingHttpClient::new(""),
+            &crate::test_utils::test_caller_identity(),
+        )
         .await
         .expect_err("missing cached auth should not start device flow")
         .to_string();
@@ -116,7 +119,9 @@ async fn cached_credential_remains_persistent_and_reusable() -> anyhow::Result<(
     super::write_json_record(Some(&path), &record)?;
     let http = RecordingHttpClient::new("");
     let auth = PlatformAuthenticator::new(Some(path.clone()), DeviceCodeHandler::default(), false);
-    let context = auth.auth_context_oauth(&http).await?;
+    let context = auth
+        .auth_context_oauth(&http, &crate::test_utils::test_caller_identity())
+        .await?;
     anyhow::ensure!(http.requests().is_empty(), "a fresh cache must not refresh");
     anyhow::ensure!(
         context.access_token.expose() == "synthetic-cached-chatgpt-token",
@@ -129,4 +134,107 @@ async fn cached_credential_remains_persistent_and_reusable() -> anyhow::Result<(
     let persisted: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
     anyhow::ensure!(persisted == fixture, "persisted cache changed");
     Ok(())
+}
+
+/// A token refresh is the official client's: the caller's `originator` and
+/// `user-agent` exactly, no `version` even when the identity names one, and
+/// a JSON body of exactly `client_id`, `grant_type` and `refresh_token`,
+/// with no `scope`.
+#[tokio::test]
+async fn a_token_refresh_carries_the_caller_s_identity_and_the_official_body() {
+    let dir = assert_fs::TempDir::new().expect("temp dir");
+    let path = dir.path().join("auth.json");
+    let record: super::AuthRecord = serde_json::from_value(serde_json::json!({
+        "access_token": "synthetic-expired-token",
+        "refresh_token": "synthetic-refresh-token",
+        "id_token": null,
+        "expires_at": 0,
+        "account_id": "synthetic-account"
+    }))
+    .expect("a valid record");
+    super::write_json_record(Some(&path), &record).expect("writes the cache");
+    let http = RecordingHttpClient::new(
+        serde_json::json!({"access_token": "synthetic-refreshed-token"}).to_string(),
+    );
+    // A version the identity names is a model request header: the official
+    // refresh does not carry it.
+    let identity = crate::providers::openai::wire::CallerIdentity::new(
+        "client_exec",
+        "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)",
+        Some("1.2.3".to_owned()),
+    )
+    .expect("a valid identity");
+    let auth = PlatformAuthenticator::new(Some(path), DeviceCodeHandler::default(), false);
+    let context = auth
+        .auth_context_oauth(&http, &identity)
+        .await
+        .expect("the refresh succeeds");
+    assert_eq!(context.access_token.expose(), "synthetic-refreshed-token");
+
+    let requests = http.requests();
+    assert_eq!(requests.len(), 1, "exactly one refresh: {requests:?}");
+    let refresh = &requests[0];
+    assert_eq!(refresh.uri, "https://auth.openai.com/oauth/token");
+    let mut names: Vec<&str> = refresh
+        .headers
+        .keys()
+        .map(http::HeaderName::as_str)
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["content-type", "originator", "user-agent"]);
+    assert_eq!(refresh.headers["content-type"], "application/json");
+    assert_eq!(refresh.headers["originator"], "client_exec");
+    assert_eq!(
+        refresh.headers["user-agent"],
+        "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)"
+    );
+    assert_eq!(
+        std::str::from_utf8(&refresh.body).expect("utf-8 body"),
+        r#"{"client_id":"app_EMoamEEZ73f0CkXaXp7hrann","grant_type":"refresh_token","refresh_token":"synthetic-refresh-token"}"#
+    );
+}
+
+/// The device sign-in carries no caller identity, as the official client's
+/// raw sign-in client does not: neither the user-code request nor the token
+/// poll has an `originator` or `user-agent`, even when the authenticator
+/// holds an identity for its token refresh.
+#[tokio::test]
+async fn the_device_sign_in_carries_no_caller_identity() {
+    // One reply for every request: it reads as the user-code response, and
+    // the token poll then fails to decode it, which ends the flow at once.
+    let http = RecordingHttpClient::new(
+        serde_json::json!({
+            "device_auth_id": "deviceauth_synthetic",
+            "user_code": "SYNTH-CODE",
+            "interval": 1
+        })
+        .to_string(),
+    );
+    let auth = PlatformAuthenticator::new(None, DeviceCodeHandler::new(|_| {}), true);
+    auth.auth_context_oauth(&http, &crate::test_utils::test_caller_identity())
+        .await
+        .expect_err("the scripted poll reply is not a token");
+
+    let requests = http.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the user code and one poll: {requests:?}"
+    );
+    assert_eq!(
+        requests[0].uri,
+        "https://auth.openai.com/api/accounts/deviceauth/usercode"
+    );
+    assert_eq!(
+        requests[1].uri,
+        "https://auth.openai.com/api/accounts/deviceauth/token"
+    );
+    for request in &requests {
+        assert!(request.headers.get("originator").is_none(), "{request:?}");
+        assert!(
+            request.headers.get(http::header::USER_AGENT).is_none(),
+            "{request:?}"
+        );
+        assert!(request.headers.get("version").is_none(), "{request:?}");
+    }
 }

@@ -287,6 +287,7 @@ async fn the_codex_handshake_carries_the_session_identity() {
     });
 
     let wire = OpenAI::with_key(&chatgpt::DIALECT, "test-token")
+        .with_caller_identity(rig_core::test_utils::test_caller_identity())
         .with_base_url(format!("http://{address}/backend-api/codex"))
         .with_account_id("acct-123")
         .responses(chatgpt::GPT_5_3_CODEX);

@@ -2,6 +2,7 @@
 
 use super::{AuthContext, AuthError, DeviceCodeHandler};
 use crate::http_client::HttpClientExt;
+use crate::providers::openai::wire::CallerIdentity;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]
@@ -16,7 +17,11 @@ impl PlatformAuthenticator {
         Self
     }
 
-    pub(super) async fn auth_context_oauth<H>(&self, _http: &H) -> Result<AuthContext, AuthError>
+    pub(super) async fn auth_context_oauth<H>(
+        &self,
+        _http: &H,
+        _identity: &CallerIdentity,
+    ) -> Result<AuthContext, AuthError>
     where
         H: HttpClientExt,
     {

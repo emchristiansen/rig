@@ -20,6 +20,18 @@ pub use http::{
     SequencedStreamingHttpClient,
 };
 pub use memory::{AppendFailingMemory, CountingMemory, FailingMemory};
+
+/// A caller identity for tests of a dialect that requires one (the ChatGPT
+/// dialect): plainly a test value, never an official client's.
+#[allow(clippy::expect_used)]
+pub fn test_caller_identity() -> crate::providers::openai::wire::CallerIdentity {
+    crate::providers::openai::wire::CallerIdentity::new(
+        "rig_test",
+        "rig-test/0 (test identity)",
+        None,
+    )
+    .expect("a valid test identity")
+}
 pub use streaming::{MOCK_PROVIDER, MockStreamEvent, mock_final, mock_final_with_total_tokens};
 pub use tracing_isolation::{
     scoped_tracing_subscriber_guard, scoped_tracing_subscriber_guard_blocking,

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::env::{self, EnvError};
 use crate::driver::{Bound, HasEmbedding, HasModelListing, HasRerank, HasTranscription, HasVerify};
+use crate::error::{EncodeError, ProviderError};
 use crate::wire::{
     CredentialPlacement, CredentialSource, CredentialSourceHandle, CredentialStamp, HasCompletion,
     Secret, TokenPlacement,
@@ -381,13 +382,18 @@ impl EmbeddingQuirks {
 }
 
 /// The caller identity a gateway requires on every request.
+///
+/// The gateway has no default identity: the caller supplies one exactly
+/// ([`OpenAI::with_caller_identity`], or both of the environment variables
+/// below), and every request refuses with [`MissingCallerIdentity`] until
+/// it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
-    /// The `originator` header's default value.
-    pub originator: &'static str,
-    /// The environment variable overriding `originator`.
+    /// The environment variable carrying `originator`. It is read only
+    /// together with [`Self::user_agent_env`].
     pub originator_env: &'static str,
-    /// The environment variable overriding `user-agent`.
+    /// The environment variable carrying `user-agent`. It is read only
+    /// together with [`Self::originator_env`].
     pub user_agent_env: &'static str,
     /// Whether every request carries a fresh `session_id` header.
     pub session_ids: bool,
@@ -396,11 +402,9 @@ pub struct Identity {
 /// The identity a gateway requires on every request, resolved: the
 /// `originator` and `user-agent` headers, and optionally a `version` header.
 ///
-/// Every value is a non-empty, header-safe string. [`Self::new`],
-/// deserialization and the dialect's environment overrides refuse anything
-/// else. Two older paths take their value as given: a dialect's built-in
-/// default, which is a constant, and [`OpenAI::with_originator`], whose
-/// originator a header cannot carry fails when the request is built.
+/// Every value is a non-empty, header-safe string, sent exactly as given.
+/// [`Self::new`], deserialization and the dialect's environment variables
+/// refuse anything else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "CallerIdentityValues", into = "CallerIdentityValues")]
 pub struct CallerIdentity {
@@ -481,14 +485,25 @@ impl CallerIdentity {
         })
     }
 
-    /// An identity whose originator is taken as given, with the default user
-    /// agent naming it: the two older paths the type documentation names.
-    fn with_default_user_agent(originator: String) -> Self {
-        Self {
-            user_agent: default_user_agent(&originator),
-            originator,
-            version: None,
+    /// Add the `originator`, `user-agent` and, when this identity names one,
+    /// `version` headers, each exactly as given: what a model request
+    /// carries.
+    pub(crate) fn stamp(&self, builder: http::request::Builder) -> http::request::Builder {
+        let builder = self.stamp_client(builder);
+        match &self.version {
+            Some(version) => builder.header(VERSION_HEADER, version),
+            None => builder,
         }
+    }
+
+    /// Add only the `originator` and `user-agent` headers, exactly as given:
+    /// what the official client's own HTTP client carries on every request,
+    /// its sign-in service's token refresh included. `version` is a model
+    /// request header, so it is not added here.
+    pub(crate) fn stamp_client(&self, builder: http::request::Builder) -> http::request::Builder {
+        builder
+            .header(ORIGINATOR_HEADER, &self.originator)
+            .header(http::header::USER_AGENT, &self.user_agent)
     }
 
     /// The `originator` header.
@@ -510,8 +525,74 @@ impl CallerIdentity {
     }
 }
 
-/// The user agent a gateway that asks for one is told: the crate, the host,
-/// and who is calling.
+/// The caller identity a configuration sends, and whether its user agent is
+/// the caller's own.
+///
+/// Serialized with a `kind` tag, so a configuration serialized before the
+/// distinction existed does not deserialize at all rather than turning a
+/// derived user agent into an exact one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfiguredIdentity {
+    /// Exactly the caller's values, from [`OpenAI::with_caller_identity`] or
+    /// from both of a dialect's identity environment variables.
+    Exact(CallerIdentity),
+    /// Only an originator, from [`OpenAI::with_originator`]. Rig sends a
+    /// `rig/…` user agent naming it, so a dialect that requires a caller
+    /// identity refuses to send this one ([`MissingCallerIdentity`]).
+    Originator {
+        /// The `originator` header, taken as given: one a header cannot
+        /// carry fails when the request is built.
+        originator: String,
+    },
+}
+
+/// A request refused before it was sent, because its dialect requires the
+/// caller's exact identity ([`Identity`]) and the configuration has none.
+///
+/// Such a dialect has no default identity, and Rig never derives a user
+/// agent for it: the request carries exactly the caller's values or is not
+/// sent.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum MissingCallerIdentity {
+    /// No caller identity is configured.
+    #[error(
+        "`{dialect}` requires the caller's exact identity (`OpenAI::with_caller_identity`); none is configured, so the request is not sent"
+    )]
+    Unset {
+        /// The dialect's name.
+        dialect: &'static str,
+    },
+    /// Only an originator is configured ([`OpenAI::with_originator`]), whose
+    /// user agent Rig would derive.
+    #[error(
+        "`{dialect}` requires the caller's exact identity (`OpenAI::with_caller_identity`); only the originator `{originator}` is configured, and Rig derives no user agent for it, so the request is not sent"
+    )]
+    OriginatorOnly {
+        /// The dialect's name.
+        dialect: &'static str,
+        /// The configured originator.
+        originator: String,
+    },
+}
+
+impl From<MissingCallerIdentity> for EncodeError {
+    fn from(error: MissingCallerIdentity) -> Self {
+        EncodeError::request(error)
+    }
+}
+
+impl From<MissingCallerIdentity> for ProviderError {
+    fn from(error: MissingCallerIdentity) -> Self {
+        ProviderError::Request(Box::new(error))
+    }
+}
+
+/// The header carrying a caller identity's originator.
+const ORIGINATOR_HEADER: &str = "originator";
+
+/// The user agent sent with an originator-only identity on a dialect that
+/// requires no caller identity: the crate, the host, and who is calling.
 fn default_user_agent(originator: &str) -> String {
     format!(
         "rig/{} ({} {}; {originator})",
@@ -519,6 +600,48 @@ fn default_user_agent(originator: &str) -> String {
         std::env::consts::OS,
         std::env::consts::ARCH,
     )
+}
+
+/// The exact caller identity a dialect's environment variables name, read
+/// through `lookup`: both variables set (non-empty) give one, neither gives
+/// none, and one without the other is refused, since Rig derives no half of
+/// an identity.
+fn identity_from_env(
+    identity: Identity,
+    lookup: impl Fn(&'static str) -> Result<Option<String>, EnvError>,
+) -> Result<Option<CallerIdentity>, EnvError> {
+    let read = |name: &'static str| -> Result<Option<String>, EnvError> {
+        Ok(lookup(name)?.filter(|value| !value.is_empty()))
+    };
+    let originator = read(identity.originator_env)?;
+    let user_agent = read(identity.user_agent_env)?;
+    let (originator, user_agent) = match (originator, user_agent) {
+        (None, None) => return Ok(None),
+        (Some(originator), Some(user_agent)) => (originator, user_agent),
+        (set, _) => {
+            let (present, missing) = if set.is_some() {
+                (identity.originator_env, identity.user_agent_env)
+            } else {
+                (identity.user_agent_env, identity.originator_env)
+            };
+            return Err(EnvError::Invalid {
+                name: missing,
+                detail: format!(
+                    "`{present}` is set, so `{missing}` must be set too: this gateway takes the caller's exact identity, never half of one"
+                ),
+            });
+        }
+    };
+    CallerIdentity::new(originator, user_agent, None)
+        .map(Some)
+        .map_err(|error| EnvError::Invalid {
+            name: if error.field == "originator" {
+                identity.originator_env
+            } else {
+                identity.user_agent_env
+            },
+            detail: error.to_string(),
+        })
 }
 
 /// Request restrictions and response handling for a Responses dialect.
@@ -865,9 +988,11 @@ pub struct OpenAI {
     /// the gateway expects some.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
-    /// The caller identity, when the gateway requires one.
+    /// The caller identity, when one is configured. A dialect that requires
+    /// one ([`Quirks::identity`]) starts with none and sends no request
+    /// until the caller supplies it exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity: Option<CallerIdentity>,
+    pub identity: Option<ConfiguredIdentity>,
     /// Responses instruction placement override. `None` uses the dialect default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_instructions: Option<SystemInstructionsPlacement>,
@@ -885,7 +1010,9 @@ impl OpenAI {
     }
 
     /// `dialect` with `api_key`, at the dialect's default base URL and with
-    /// the instructions and caller identity its gateway expects, if any.
+    /// the instructions its gateway expects, if any. It starts with no
+    /// caller identity: a dialect that requires one sends nothing until the
+    /// caller supplies it ([`Self::with_caller_identity`]).
     pub fn with_key(dialect: &Dialect, api_key: impl Into<Secret>) -> Self {
         let quirks = &dialect.quirks;
         let api_key = api_key.into();
@@ -909,9 +1036,7 @@ impl OpenAI {
             sub_route: None,
             account_id: None,
             instructions: quirks.default_instructions.map(str::to_owned),
-            identity: quirks.identity.map(|identity| {
-                CallerIdentity::with_default_user_agent(identity.originator.to_owned())
-            }),
+            identity: None,
             system_instructions: None,
             credential_source: None,
         }
@@ -994,26 +1119,9 @@ impl OpenAI {
         {
             provider.instructions = Some(instructions);
         }
-        if let (Some(identity), Some(resolved)) = (quirks.identity, provider.identity.as_mut()) {
-            let invalid = |name: &'static str| {
-                move |error: InvalidCallerIdentity| EnvError::Invalid {
-                    name,
-                    detail: error.to_string(),
-                }
-            };
-            if let Some(originator) =
-                env::optional(identity.originator_env)?.filter(|value| !value.is_empty())
-            {
-                let originator = checked_identity_value("originator", originator)
-                    .map_err(invalid(identity.originator_env))?;
-                *resolved = CallerIdentity::with_default_user_agent(originator);
-            }
-            if let Some(user_agent) =
-                env::optional(identity.user_agent_env)?.filter(|value| !value.is_empty())
-            {
-                resolved.user_agent = checked_identity_value("user_agent", user_agent)
-                    .map_err(invalid(identity.user_agent_env))?;
-            }
+        if let Some(identity) = quirks.identity {
+            provider.identity =
+                identity_from_env(identity, env::optional)?.map(ConfiguredIdentity::Exact);
         }
         Ok(provider)
     }
@@ -1111,14 +1219,18 @@ impl OpenAI {
         self
     }
 
-    /// Send `originator` as the caller identity's `originator` header.
+    /// Send `originator` as the `originator` header, with a `rig/…`
+    /// `user-agent` naming it.
     ///
-    /// The programmatic twin of the dialect's originator environment
-    /// variable, with the same effect: the `user-agent` becomes the default
-    /// one naming the new originator. A dialect whose gateway asks for no
-    /// caller identity gains one, so both headers are sent.
+    /// A dialect whose gateway asks for no caller identity gains one, so
+    /// both headers are sent. A dialect that requires the caller's exact
+    /// identity ([`Quirks::identity`]) refuses every request with
+    /// [`MissingCallerIdentity::OriginatorOnly`] instead: use
+    /// [`Self::with_caller_identity`] there.
     pub fn with_originator(mut self, originator: impl Into<String>) -> Self {
-        self.identity = Some(CallerIdentity::with_default_user_agent(originator.into()));
+        self.identity = Some(ConfiguredIdentity::Originator {
+            originator: originator.into(),
+        });
         self
     }
 
@@ -1128,13 +1240,15 @@ impl OpenAI {
     /// identity carries it: each HTTP request and the Codex websocket
     /// handshake.
     ///
-    /// Replaces any identity the dialect, its environment variables or
+    /// Replaces any identity the dialect's environment variables or
     /// [`Self::with_originator`] configured. A dialect whose gateway asks for
-    /// no caller identity gains this one. [`CallerIdentity::new`] has already
-    /// refused any value a request could not carry.
+    /// no caller identity gains this one; a dialect that requires one
+    /// ([`Quirks::identity`]) sends nothing without it.
+    /// [`CallerIdentity::new`] has already refused any value a request could
+    /// not carry.
     #[must_use]
     pub fn with_caller_identity(mut self, identity: CallerIdentity) -> Self {
-        self.identity = Some(identity);
+        self.identity = Some(ConfiguredIdentity::Exact(identity));
         self
     }
 
@@ -1236,17 +1350,19 @@ impl OpenAI {
         &self,
         request: &crate::completion::CompletionRequest,
         builder: http::request::Builder,
-    ) -> http::request::Builder {
-        let builder = self.headers(builder);
-        match self
-            .dialect
-            .quirks
-            .hooks
-            .and_then(|hooks| hooks.completion_envelope)
-        {
-            Some(envelope) => envelope(self, request, builder),
-            None => builder,
-        }
+    ) -> Result<http::request::Builder, EncodeError> {
+        let builder = self.headers(builder)?;
+        Ok(
+            match self
+                .dialect
+                .quirks
+                .hooks
+                .and_then(|hooks| hooks.completion_envelope)
+            {
+                Some(envelope) => envelope(self, request, builder),
+                None => builder,
+            },
+        )
     }
 
     /// Resolve `path` against the base URL, applying Azure's
@@ -1349,29 +1465,57 @@ impl OpenAI {
     }
 
     /// Stamp the configured caller identity, `originator`, `user-agent` and,
-    /// when it names one, `version`, when this configuration has one;
-    /// otherwise leave the request as is.
+    /// when it names one, `version`; with none configured, leave the request
+    /// as is.
     ///
     /// The one source of caller identity for every transport: the HTTP
-    /// request headers and the Codex websocket handshake both stamp it here.
-    pub(crate) fn identify(&self, builder: http::request::Builder) -> http::request::Builder {
-        match &self.identity {
-            Some(identity) => {
-                let builder = builder
-                    .header("originator", &identity.originator)
-                    .header(http::header::USER_AGENT, &identity.user_agent);
-                match &identity.version {
-                    Some(version) => builder.header(VERSION_HEADER, version),
-                    None => builder,
-                }
-            }
+    /// requests and the websocket handshakes all stamp it here. A dialect
+    /// that requires the caller's exact identity ([`Quirks::identity`])
+    /// refuses here, before anything is sent, when there is none or only an
+    /// originator.
+    pub(crate) fn identify(
+        &self,
+        builder: http::request::Builder,
+    ) -> Result<http::request::Builder, MissingCallerIdentity> {
+        Ok(match self.sendable_identity()? {
+            Some(ConfiguredIdentity::Exact(identity)) => identity.stamp(builder),
+            Some(ConfiguredIdentity::Originator { originator }) => builder
+                .header(ORIGINATOR_HEADER, originator)
+                .header(http::header::USER_AGENT, default_user_agent(originator)),
             None => builder,
+        })
+    }
+
+    /// The identity this configuration may send with, refusing a dialect
+    /// that requires the caller's exact identity when there is none or only
+    /// an originator. The one rule every send checks: [`Self::identify`]
+    /// before stamping a request, and a websocket session before writing a
+    /// frame, whoever opened its connection.
+    pub(crate) fn sendable_identity(
+        &self,
+    ) -> Result<Option<&ConfiguredIdentity>, MissingCallerIdentity> {
+        let required = self.dialect.quirks.identity.is_some();
+        match &self.identity {
+            Some(ConfiguredIdentity::Originator { originator }) if required => {
+                Err(MissingCallerIdentity::OriginatorOnly {
+                    dialect: self.dialect.name,
+                    originator: originator.clone(),
+                })
+            }
+            None if required => Err(MissingCallerIdentity::Unset {
+                dialect: self.dialect.name,
+            }),
+            identity => Ok(identity.as_ref()),
         }
     }
 
-    /// Apply authentication, configured identity, account, and per-request session headers.
-    pub(crate) fn headers(&self, builder: http::request::Builder) -> http::request::Builder {
-        let mut builder = self.identify(self.authenticate(builder));
+    /// Apply authentication, configured identity, account, and per-request
+    /// session headers. Refuses as [`Self::identify`] does.
+    pub(crate) fn headers(
+        &self,
+        builder: http::request::Builder,
+    ) -> Result<http::request::Builder, MissingCallerIdentity> {
+        let mut builder = self.identify(self.authenticate(builder))?;
         if self
             .dialect
             .quirks
@@ -1384,7 +1528,7 @@ impl OpenAI {
         if let Some(account_id) = &self.account_id {
             builder = builder.header("ChatGPT-Account-Id", account_id);
         }
-        builder
+        Ok(builder)
     }
 }
 

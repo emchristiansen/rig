@@ -62,7 +62,7 @@ impl Chat {
             &OpenAI,
             &CompletionRequest,
             http::request::Builder,
-        ) -> http::request::Builder,
+        ) -> Result<http::request::Builder, EncodeError>,
     ) -> Result<Encoded, EncodeError> {
         let quirks = &self.provider.dialect.quirks;
         // Azure's deployment URL remains pinned to the handle, not a request override.
@@ -74,7 +74,7 @@ impl Chat {
             &self.provider,
             &request,
             http::Request::post(uri).header("Content-Type", "application/json"),
-        );
+        )?;
         if !quirks.accepts_file_ids {
             refuse_file_ids(&request)?;
         }

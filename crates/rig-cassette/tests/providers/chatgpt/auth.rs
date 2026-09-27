@@ -11,7 +11,7 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 
-use crate::chatgpt::LIVE_MODEL;
+use crate::chatgpt::{LIVE_MODEL, live_identity};
 use crate::support::{
     BASIC_PREAMBLE, BASIC_PROMPT, assert_nonempty_response, collect_stream_final_response,
 };
@@ -25,7 +25,9 @@ use crate::support::{
 /// then speaks over.
 async fn oauth_provider_with_auth_file(path: &Path, http: &BoxedHttpClient) -> OpenAI {
     let context = chatgpt::auth::Authenticator::new(
-        chatgpt::auth::AuthSource::OAuth,
+        chatgpt::auth::AuthSource::OAuth {
+            identity: live_identity(),
+        },
         Some(path.to_path_buf()),
         chatgpt::auth::DeviceCodeHandler::default(),
         true,
@@ -34,7 +36,8 @@ async fn oauth_provider_with_auth_file(path: &Path, http: &BoxedHttpClient) -> O
     .await
     .expect("ChatGPT OAuth should resolve an access token");
 
-    let mut provider = OpenAI::with_key(&chatgpt::DIALECT, context.access_token);
+    let mut provider = OpenAI::with_key(&chatgpt::DIALECT, context.access_token)
+        .with_caller_identity(live_identity());
     if let Some(account_id) = context.account_id {
         provider = provider.with_account_id(account_id);
     }

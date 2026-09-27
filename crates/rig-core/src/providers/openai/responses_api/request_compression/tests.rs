@@ -21,7 +21,9 @@ fn prompt() -> CompletionRequest {
 }
 
 fn chatgpt() -> Responses {
-    OpenAI::with_key(&chatgpt::DIALECT, "test-token").responses("gpt-5.4")
+    OpenAI::with_key(&chatgpt::DIALECT, "test-token")
+        .with_caller_identity(crate::test_utils::test_caller_identity())
+        .responses("gpt-5.4")
 }
 
 /// The one request an encode sends: its `Content-Encoding`, if any, and its

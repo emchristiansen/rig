@@ -491,6 +491,10 @@ async fn a_caller_set_output_token_cap_is_refused_by_name() {
     use rig::providers::openai::responses_api::wire::UnsupportedCodexControl;
 
     let client = OpenAI::with_key(&chatgpt::DIALECT, "unused-token")
+        .with_caller_identity(
+            rig::providers::openai::wire::CallerIdentity::new("rig_test", "rig-test/0", None)
+                .expect("a valid test identity"),
+        )
         .with_base_url("http://127.0.0.1:9")
         .bound()
         .expect("transport should build");

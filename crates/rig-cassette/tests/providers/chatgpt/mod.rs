@@ -30,12 +30,24 @@ use rig::driver::{Bind as _, Bound};
 use rig::http_client::BoxedHttpClient;
 use rig::providers::chatgpt;
 use rig::providers::openai::OpenAI;
+use rig::providers::openai::wire::CallerIdentity;
 use rig::rig_reqwest::client::bundled;
 use serde::Deserialize;
 use std::path::PathBuf;
 
 const TOKEN_EXPIRY_SKEW_SECONDS: i64 = 60;
 pub(crate) const LIVE_MODEL: &str = chatgpt::GPT_5_3_CODEX;
+
+/// The caller identity a live ChatGPT test sends: exactly
+/// `CHATGPT_ORIGINATOR` and `CHATGPT_USER_AGENT`, which the tester sets. Rig
+/// supplies none of its own.
+pub(crate) fn live_identity() -> CallerIdentity {
+    let read = |name: &str| {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for a live ChatGPT test"))
+    };
+    CallerIdentity::new(read("CHATGPT_ORIGINATOR"), read("CHATGPT_USER_AGENT"), None)
+        .expect("the live identity should be header-safe")
+}
 
 #[derive(Debug, Deserialize)]
 struct CachedAuthRecord {
@@ -58,7 +70,9 @@ async fn live_provider(http: &BoxedHttpClient) -> OpenAI {
     }
 
     let context = chatgpt::auth::Authenticator::new(
-        chatgpt::auth::AuthSource::OAuth,
+        chatgpt::auth::AuthSource::OAuth {
+            identity: live_identity(),
+        },
         default_auth_file(),
         chatgpt::auth::DeviceCodeHandler::default(),
         true,
@@ -67,7 +81,8 @@ async fn live_provider(http: &BoxedHttpClient) -> OpenAI {
     .await
     .expect("ChatGPT OAuth should resolve an access token");
 
-    let mut provider = OpenAI::with_key(&chatgpt::DIALECT, context.access_token);
+    let mut provider = OpenAI::with_key(&chatgpt::DIALECT, context.access_token)
+        .with_caller_identity(live_identity());
     if let Some(account_id) = context.account_id {
         provider = provider.with_account_id(account_id);
     }

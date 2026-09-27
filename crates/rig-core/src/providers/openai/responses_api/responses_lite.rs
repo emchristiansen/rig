@@ -5,9 +5,11 @@
 //! each transport adds its own opt-in marker afterward.
 //!
 //! ```no_run
-//! use rig_core::providers::{chatgpt, openai::OpenAI};
+//! use rig_core::providers::{chatgpt, openai::OpenAI, openai::wire::CallerIdentity};
 //! # fn wire() -> Result<(), Box<dyn std::error::Error>> {
+//! let identity = CallerIdentity::new("my-originator", "my-user-agent/1.0", None)?;
 //! let responses = OpenAI::with_key(&chatgpt::DIALECT, "access-token")
+//!     .with_caller_identity(identity)
 //!     .responses(chatgpt::GPT_5_3_CODEX)
 //!     .with_responses_lite()?;
 //! # let _ = responses;

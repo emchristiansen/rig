@@ -253,6 +253,19 @@ fn stamp(
     Ok(())
 }
 
+/// A [`CopilotWire`] around a wire whose dialect requires the caller's exact
+/// identity (the ChatGPT dialect), refused before anything is sent: Copilot's
+/// envelope replaces the `user-agent`, so the request could not carry that
+/// identity exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "a Copilot envelope would replace the caller's exact identity that `{dialect}` requires, so the request is not sent"
+)]
+pub struct CopilotEnvelopeOverCallerIdentity {
+    /// The enclosed wire's dialect.
+    pub dialect: &'static str,
+}
+
 /// Completion wire with Copilot's conversation intent and editor headers.
 /// Delegates payload handling to `wire`, but overrides its request envelope
 /// even when that field contains another dialect.
@@ -357,9 +370,20 @@ impl Wire for CopilotWire {
     }
 
     fn encode(&self, request: CompletionRequest, mode: Mode) -> Result<Encoded, EncodeError> {
+        let dialect = &self.wire.provider().dialect;
+        if dialect.quirks.identity.is_some() {
+            return Err(EncodeError::request(CopilotEnvelopeOverCallerIdentity {
+                dialect: dialect.name,
+            }));
+        }
         self.wire
             .encode_with_headers(request, mode, |provider, request, builder| {
-                completion_envelope(provider, request, provider.headers(builder), self.intent)
+                Ok(completion_envelope(
+                    provider,
+                    request,
+                    provider.headers(builder)?,
+                    self.intent,
+                ))
             })
     }
 
