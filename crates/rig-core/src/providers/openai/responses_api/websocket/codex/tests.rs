@@ -7,7 +7,7 @@ use crate::providers::openai::responses_api::openapi_schema::{self, Schema};
 use crate::providers::openai::responses_api::websocket::test_connection::Script;
 use crate::providers::openai::responses_api::{
     CompletionResponse, IncompleteDetailsReason, InputItem, OutputTokensDetails, ResponseObject,
-    ResponseStatus, ResponsesUsage,
+    ResponseStatus, ResponsesUsage, SystemInstructionsPlacement,
 };
 use serde_json::json;
 
@@ -1809,6 +1809,169 @@ async fn the_lite_prewarm_carries_only_the_prefix_and_the_first_turn_only_its_it
     assert!(
         !turn_input.contains("model.base_instructions"),
         "got {turn_input}"
+    );
+}
+
+/// A ChatGPT wire that lifts only the leading run of system messages into
+/// `instructions`, as a caller that keeps mid-conversation system messages in
+/// place configures it. It carries none of the dialect's default
+/// instructions, so a frame's `instructions` are exactly what the placement
+/// lifted.
+fn leading_instructions_wire() -> Responses {
+    let mut provider = OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_caller_identity(crate::test_utils::test_caller_identity())
+        .with_account_id(ACCOUNT_ID);
+    provider.instructions = None;
+    provider
+        .responses(chatgpt::GPT_5_3_CODEX)
+        .with_system_instructions_placement(SystemInstructionsPlacement::Instructions)
+}
+
+/// Under the leading-run placement a request of only instructions keeps them
+/// in `input` when it generates, so it is not empty. The prewarm generates
+/// nothing, so it lifts them as Codex's prewarm sends them: `instructions`
+/// with an empty input. The first turn continues it with the same
+/// `instructions`, as a delta on the prewarm.
+#[tokio::test]
+async fn the_prewarm_lifts_its_instructions_under_the_leading_run_placement() {
+    let script = Script::new()
+        .turn([completed("resp_prewarm")])
+        .turn([completed("resp_turn_1")]);
+    let mut session = CodexWebSocketSession::from_connection(
+        leading_instructions_wire(),
+        CodexIdentity::generate(),
+        script.connection(),
+        None,
+    )
+    .expect("the ChatGPT dialect speaks the Codex contract");
+
+    session
+        .warmup(prewarm_request())
+        .await
+        .expect("the prewarm completes");
+    session
+        .send_incremental(delta("FIRST_TURN_MARKER"))
+        .await
+        .expect("the first turn continues the prewarm");
+    finish_turn(&mut session).await;
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    let (prewarm, turn) = (&frames[0], &frames[1]);
+    assert_eq!(prewarm["generate"], false);
+    assert_eq!(prewarm["input"], json!([]), "got {prewarm}");
+    assert_eq!(prewarm["instructions"], "Standing instructions.");
+    assert_eq!(turn["previous_response_id"], "resp_prewarm");
+    assert_eq!(turn["instructions"], "Standing instructions.");
+    let turn_input = serde_json::to_string(&turn["input"]).expect("input serializes");
+    assert!(turn_input.contains("FIRST_TURN_MARKER"), "got {turn_input}");
+    assert!(
+        !turn_input.contains("Standing instructions."),
+        "got {turn_input}"
+    );
+    for frame in &frames {
+        openapi_schema::assert_valid(Schema::WebSocketResponseCreate, frame);
+    }
+}
+
+/// Under Lite with the leading-run placement the prewarm is still Codex's
+/// Lite prewarm: the lifted instructions become the prefix's base
+/// instructions, and nothing else is in the input.
+#[tokio::test]
+async fn the_lite_prewarm_lifts_its_instructions_under_the_leading_run_placement() {
+    let wire = leading_instructions_wire()
+        .with_responses_lite()
+        .expect("the ChatGPT dialect supports Lite");
+    let identity =
+        CodexIdentity::from_ids("session-derived", "thread-derived").expect("header-safe ids");
+    let script = Script::new().turn([completed("resp_prewarm")]);
+    let mut session =
+        CodexWebSocketSession::from_connection(wire, identity, script.connection(), None)
+            .expect("the ChatGPT dialect speaks the Codex contract");
+
+    session
+        .warmup(prewarm_request())
+        .await
+        .expect("the Lite prewarm completes");
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 1);
+    let prewarm = &frames[0];
+    openapi_schema::assert_valid(Schema::LiteWebSocketResponseCreate, prewarm);
+    assert_eq!(prewarm["generate"], false);
+    assert!(prewarm.get("instructions").is_none(), "got {prewarm}");
+    let input = prewarm["input"]
+        .as_array()
+        .expect("the prewarm input is an array");
+    assert_eq!(input.len(), 2, "the prefix alone: {input:?}");
+    assert_eq!(input[0]["type"], "additional_tools");
+    assert_eq!(input[1]["role"], "developer");
+    assert_eq!(
+        input[1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        json!(["model.base_instructions"])
+    );
+    assert_eq!(input[1]["content"][0]["text"], "Standing instructions.");
+}
+
+/// Generating requests are unchanged by the prewarm's lift: under the
+/// leading-run placement a request of only system messages still sends them
+/// in `input` with no `instructions`, and a request whose system messages
+/// open a conversation still lifts only that leading run.
+#[tokio::test]
+async fn generating_requests_keep_the_leading_run_placement() {
+    let script = Script::new()
+        .turn([completed("resp_1")])
+        .turn([completed("resp_2")]);
+    let mut session = CodexWebSocketSession::from_connection(
+        leading_instructions_wire(),
+        CodexIdentity::generate(),
+        script.connection(),
+        None,
+    )
+    .expect("the ChatGPT dialect speaks the Codex contract");
+
+    session
+        .completion(prewarm_request())
+        .await
+        .expect("a generating request of only system messages is sent");
+    let conversation = completion::CompletionRequest {
+        chat_history: vec![
+            Message::system("Standing instructions."),
+            Message::user("hello"),
+            Message::system("MID_CONVERSATION_NOTE"),
+        ],
+        ..user_request("unused")
+    };
+    session
+        .completion(conversation)
+        .await
+        .expect("the conversation turn completes");
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    let (system_only, conversation) = (&frames[0], &frames[1]);
+
+    assert!(system_only.get("generate").is_none());
+    assert!(
+        system_only.get("instructions").is_none(),
+        "got {system_only}"
+    );
+    let system_only_input = serde_json::to_string(&system_only["input"]).expect("input serializes");
+    assert!(
+        system_only_input.contains("Standing instructions."),
+        "got {system_only_input}"
+    );
+
+    assert_eq!(conversation["instructions"], "Standing instructions.");
+    let conversation_input =
+        serde_json::to_string(&conversation["input"]).expect("input serializes");
+    assert!(
+        !conversation_input.contains("Standing instructions."),
+        "got {conversation_input}"
+    );
+    assert!(
+        conversation_input.contains("MID_CONVERSATION_NOTE"),
+        "got {conversation_input}"
     );
 }
 

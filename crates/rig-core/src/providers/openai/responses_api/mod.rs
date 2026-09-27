@@ -1663,11 +1663,16 @@ impl CompletionRequest {
                 // Lift only the leading run of system items (the preamble and any
                 // system messages that open the conversation) into the top-level
                 // `instructions` field. Mid-conversation system messages keep
-                // their position in `input`, and a request made up solely of
-                // system messages keeps them in `input` so it stays non-empty.
+                // their position in `input`. A generating request made up solely
+                // of system messages keeps them in `input` so it stays non-empty;
+                // one that may carry no input (a `generate: false` warmup) lifts
+                // them all, as the Codex client's session-start prewarm sends its
+                // instructions with an empty input.
                 let leading_system_texts: Vec<String> =
                     input.iter().map_while(InputItem::system_text).collect();
-                if leading_system_texts.len() < input.len() {
+                if leading_system_texts.len() < input.len()
+                    || input_requirement == InputRequirement::MayBeEmpty
+                {
                     input.drain(..leading_system_texts.len());
                     leading_system_texts
                         .into_iter()
