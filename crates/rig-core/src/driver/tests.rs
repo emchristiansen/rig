@@ -391,10 +391,11 @@ async fn an_undecodable_body_fails_the_call_as_a_json_error() {
     let error = call(&Echo::unary(), &http, prompt(), None)
         .await
         .expect_err("a non-JSON reply fails the call");
-    assert!(
-        matches!(error, ProviderError::Json(_)),
-        "expected a JSON error, got {error:?}"
-    );
+    let ProviderError::CorruptFrame(corrupt) = &error else {
+        panic!("expected a corrupt frame, got {error:?}");
+    };
+    assert_eq!(corrupt.frame(), Some("not json at all"));
+    assert_eq!(error.kind(), crate::error::ErrorKind::Json);
 }
 
 /// The driver itself has no empty-turn policy: a reply that framed to
@@ -651,9 +652,12 @@ impl Decoder<ModelListing> for CatalogueDecoder {
     type Event = Page;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        match serde_json::from_str(&frame.as_str()) {
+        let text = frame.as_str();
+        match serde_json::from_str(&text) {
             Ok(page) => WireEvent::Known(page),
-            Err(error) => WireEvent::Corrupt(error),
+            Err(error) => {
+                WireEvent::Corrupt(crate::error::CorruptFrame::text(None, text.as_ref(), error))
+            }
         }
     }
 

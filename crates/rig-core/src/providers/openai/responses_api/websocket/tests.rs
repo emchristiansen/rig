@@ -1524,3 +1524,64 @@ fn websocket_request_carries_the_wires_request_headers() {
         "Bearer test-key"
     );
 }
+
+/// A modeled frame whose payload fails typed decoding ends the WebSocket turn
+/// with the same typed corrupt-frame error an SSE stream returns: the frame's
+/// `type` and the frame exactly as received. The session is failed, as for
+/// any other undecodable frame.
+#[tokio::test]
+async fn a_malformed_known_frame_fails_the_websocket_turn_carrying_the_frame_as_received() {
+    use super::super::corrupt_frame_fixtures::MALFORMED_KNOWN_FRAMES;
+
+    for malformed in MALFORMED_KNOWN_FRAMES {
+        let script = Script::new().turn([malformed.frame.to_owned()]);
+        let mut session = session_over(&script);
+        session
+            .send(user_request("hello"))
+            .await
+            .expect("request sends");
+        let error = session
+            .next_event()
+            .await
+            .expect_err(&format!("{}: the frame must fail the turn", malformed.case));
+        let ProviderError::CorruptFrame(corrupt) = &error else {
+            panic!(
+                "{}: expected a corrupt frame, got {error:?}",
+                malformed.case
+            );
+        };
+        assert_eq!(
+            corrupt.event_type(),
+            Some(malformed.event_type),
+            "{}",
+            malformed.case
+        );
+        assert_eq!(corrupt.frame(), Some(malformed.frame), "{}", malformed.case);
+        assert!(
+            session.send(user_request("again")).await.is_err(),
+            "{}: the session is failed",
+            malformed.case
+        );
+    }
+}
+
+/// The WebSocket-only frames decoded before Responses classification, and a
+/// frame without a string `type`, carry the frame as received too.
+#[test]
+fn an_undecodable_websocket_frame_carries_the_frame_as_received() {
+    for (event_type, frame) in [
+        (None, r#"{"item_id": "msg_1", "sequence_number": 1}"#),
+        (
+            Some("response.done"),
+            r#"{"type":"response.done", "response":{"id":"bad_tip","status":"completed","output":42}}"#,
+        ),
+        (Some("error"), r#"{"type":"error", "error": 7}"#),
+    ] {
+        let error = parse_server_event(frame).expect_err(frame);
+        let ProviderError::CorruptFrame(corrupt) = &error else {
+            panic!("expected a corrupt frame, got {error:?}");
+        };
+        assert_eq!(corrupt.event_type(), event_type, "{frame}");
+        assert_eq!(corrupt.frame(), Some(frame));
+    }
+}

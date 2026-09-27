@@ -734,7 +734,7 @@ async fn malformed_arguments_on_a_completed_tool_turn_stay_a_decode_error() {
         .await
         .expect_err("a completed tool-call turn with malformed arguments is a defect");
     assert!(
-        matches!(error, ProviderError::Json(_)),
+        matches!(&error, ProviderError::CorruptFrame(corrupt) if corrupt.frame() == Some(BODY)),
         "the malformed payload must stay loud rather than be dropped: {error:?}"
     );
 }
@@ -1387,4 +1387,25 @@ fn the_chat_wire_refuses_every_provider_item_by_name() {
             "{provider:?}: {error}"
         );
     }
+}
+
+/// A reply body that is not UTF-8 reaches the text decoder lossily; the
+/// corrupt frame it reports keeps the body's exact bytes instead.
+#[tokio::test]
+async fn a_corrupt_body_that_is_not_utf8_keeps_its_exact_bytes() {
+    let body: &[u8] = b"{\"object\":\"chat.completion\",\"choices\":7,\"note\":\"\xff\"}";
+    let error = Bound::new(wire(), RecordingHttpClient::new(Bytes::from_static(body)))
+        .completion(prompt("hello"))
+        .await
+        .expect_err("a malformed body fails the call");
+    let ProviderError::CorruptFrame(corrupt) = &error else {
+        panic!("expected a corrupt frame, got {error:?}");
+    };
+    assert_eq!(corrupt.event_type(), Some("chat.completion"));
+    assert_eq!(corrupt.frame(), None, "no exact text exists");
+    assert_eq!(corrupt.frame_bytes(), Some(body));
+    assert_eq!(
+        corrupt.evidence(),
+        &crate::error::FrameEvidence::Bytes(body.to_vec())
+    );
 }

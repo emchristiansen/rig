@@ -61,6 +61,7 @@ impl<Op, D, F> WireDriver<Op, D, F>
 where
     Op: Operation,
     D: Decoder<Op, F>,
+    F: 'static,
 {
     /// A driver over one reply, without observation.
     pub fn new(decoder: D) -> Self {
@@ -87,12 +88,38 @@ where
     }
 
     /// Feed one frame.
+    ///
+    /// A decoder reads a [`WireFrame::Bytes`] that is not UTF-8 lossily, as
+    /// text; a corrupt frame it reports from one carries the frame's exact
+    /// bytes instead, never the replacement text. The driver recognizes only
+    /// a frame whose type is [`WireFrame`] itself: a custom frame type that
+    /// wraps one (`Wrap(WireFrame)`, `Box<WireFrame>`) must keep its own
+    /// fidelity, for example by passing the `WireFrame` to the driver
+    /// unwrapped.
     pub fn push(&mut self, frame: F) {
+        self.push_framed(frame, false);
+    }
+
+    /// Feed one frame whose text the framer may already have decoded with
+    /// U+FFFD replacement (`replaced_invalid_utf8`), so that a corrupt frame
+    /// from it is labelled as replacement-decoded rather than as received.
+    fn push_framed(&mut self, frame: F, replaced_invalid_utf8: bool) {
         if self.done {
             return;
         }
         let analysis_only = self.observation.is_some() && self.decoder.is_analysis_only(&frame);
-        let classified = self.decoder.classify(frame);
+        let received_bytes = inexact_byte_frame(&frame);
+        let classified = match self.decoder.classify(frame) {
+            WireEvent::Corrupt(mut corrupt) => {
+                if let Some(bytes) = &received_bytes {
+                    corrupt.set_received_bytes(bytes);
+                } else if replaced_invalid_utf8 {
+                    corrupt.mark_replacement_decoded();
+                }
+                WireEvent::Corrupt(corrupt)
+            }
+            classified => classified,
+        };
         // Never exempt a corrupt frame, even when the provider's metadata
         // predicate accepts its shape.
         let corrupt = matches!(classified, WireEvent::Corrupt(_));
@@ -110,11 +137,11 @@ where
                     self.out.push(Ok(event));
                 }
             }
-            WireEvent::Corrupt(error) => {
+            WireEvent::Corrupt(corrupt) => {
                 if let Some(observation) = &self.observation {
                     observation.corrupt(self.frames);
                 }
-                self.ready.push(Err(ProviderError::Json(error)));
+                self.ready.push(Err(ProviderError::CorruptFrame(corrupt)));
             }
         }
         self.out.check_laws(&mut self.laws);
@@ -217,8 +244,9 @@ where
     /// frames it never saw.
     fn absorb(&mut self, payload: Framed) {
         self.project(payload.payload());
+        let replaced_invalid_utf8 = payload.replaced_invalid_utf8;
         if let Some(frame) = payload.into_frame() {
-            self.push(frame);
+            self.push_framed(frame, replaced_invalid_utf8);
         }
     }
 }
@@ -266,7 +294,8 @@ pub enum TriagedFrame<T> {
 }
 
 /// Returns known events or unknown payloads, warning without content for the
-/// latter. Corrupt frames return a JSON error.
+/// latter. Corrupt frames return [`ProviderError::CorruptFrame`] with the frame
+/// as received.
 pub fn triage_frame<T>(event: WireEvent<T>) -> Result<TriagedFrame<T>, ProviderError> {
     match event {
         WireEvent::Known(event) => Ok(TriagedFrame::Event(event)),
@@ -274,7 +303,7 @@ pub fn triage_frame<T>(event: WireEvent<T>) -> Result<TriagedFrame<T>, ProviderE
             warn_unmodeled(&event_type, &value);
             Ok(TriagedFrame::Unknown(value))
         }
-        WireEvent::Corrupt(error) => Err(ProviderError::Json(error)),
+        WireEvent::Corrupt(corrupt) => Err(ProviderError::CorruptFrame(corrupt)),
     }
 }
 
@@ -926,6 +955,9 @@ fn byte_request(request: http::Request<Body>) -> Result<http::Request<Vec<u8>>, 
 struct Framed {
     payload: Vec<u8>,
     frame: bool,
+    /// The framer replaced invalid UTF-8 in `payload` with U+FFFD, so it is
+    /// not the bytes the reply carried.
+    replaced_invalid_utf8: bool,
 }
 
 impl Framed {
@@ -938,6 +970,17 @@ impl Framed {
             Ok(text) => WireFrame::Text(text),
             Err(error) => WireFrame::Bytes(error.into_bytes()),
         })
+    }
+}
+
+/// The exact bytes of a [`WireFrame::Bytes`] that is not UTF-8, which a
+/// decoder can read only lossily as text. `None` for any other frame,
+/// including a frame of another type: the driver's own frame type is the
+/// only one it knows to be read that way.
+fn inexact_byte_frame<F: 'static>(frame: &F) -> Option<Vec<u8>> {
+    match (frame as &dyn std::any::Any).downcast_ref::<WireFrame>()? {
+        WireFrame::Bytes(bytes) if std::str::from_utf8(bytes).is_err() => Some(bytes.clone()),
+        _ => None,
     }
 }
 
@@ -964,6 +1007,7 @@ impl Framer {
                 .map(|event| Framed {
                     frame: !event.data.trim().is_empty(),
                     payload: event.data.into_bytes(),
+                    replaced_invalid_utf8: event.replaced_invalid_utf8,
                 })
                 .collect(),
             Self::Ndjson(framer) => framer
@@ -971,6 +1015,7 @@ impl Framer {
                 .map(|line| Framed {
                     frame: true,
                     payload: line,
+                    replaced_invalid_utf8: false,
                 })
                 .collect(),
             Self::Whole(buffer) => {
@@ -990,6 +1035,7 @@ impl Framer {
                 .map(|line| Framed {
                     frame: true,
                     payload: line,
+                    replaced_invalid_utf8: false,
                 })
                 .into_iter()
                 .collect(),
@@ -1001,6 +1047,7 @@ impl Framer {
                     vec![Framed {
                         frame: true,
                         payload,
+                        replaced_invalid_utf8: false,
                     }]
                 }
             }

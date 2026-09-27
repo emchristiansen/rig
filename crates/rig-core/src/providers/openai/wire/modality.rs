@@ -244,7 +244,7 @@ impl Decoder<Embedding> for EmbeddingsDecoder {
     type Event = CompatibleEmbeddingResponse;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        classify_untyped_line(frame.as_str().as_bytes())
+        classify_untyped_line(frame.as_bytes())
     }
 
     fn interpret(&mut self, event: Self::Event, out: &mut Output<Embedding>) {
@@ -505,7 +505,7 @@ impl Decoder<Transcription> for TranscriptionsDecoder {
     type Event = crate::providers::openai::transcription::TranscriptionResponse;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        classify_untyped_line(frame.as_str().as_bytes())
+        classify_untyped_line(frame.as_bytes())
     }
 
     fn interpret(&mut self, event: Self::Event, out: &mut Output<Transcription>) {
@@ -682,7 +682,7 @@ impl Decoder<crate::operation::ImageGeneration> for ImagesDecoder {
                 WireFrame::Bytes(bytes) => bytes,
             })),
             ImageBody::OpenAi | ImageBody::Xai | ImageBody::Hyperbolic | ImageBody::Venice => {
-                classify_untyped_line(frame.as_str().as_bytes()).map(ImagesEvent::Json)
+                classify_untyped_line(frame.as_bytes()).map(ImagesEvent::Json)
             }
         }
     }
@@ -1050,7 +1050,7 @@ impl Decoder<ModelListing> for ModelsDecoder {
     type Event = ModelsReply;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        classify_untyped_line(frame.as_str().as_bytes())
+        classify_untyped_line(frame.as_bytes())
     }
 
     fn interpret(&mut self, event: Self::Event, out: &mut Output<ModelListing>) {
@@ -1158,7 +1158,7 @@ impl Decoder<RerankOp> for RerankDecoder {
     type Event = RerankReply;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        classify_untyped_line(frame.as_str().as_bytes())
+        classify_untyped_line(frame.as_bytes())
     }
 
     fn interpret(&mut self, event: Self::Event, out: &mut Output<RerankOp>) {

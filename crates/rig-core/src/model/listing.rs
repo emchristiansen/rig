@@ -187,6 +187,7 @@ pub(crate) fn parse_error(
 
 /// Adds the provider and request path to a failed listing: a preserved reply
 /// records them as its route, and a decode failure names them in its message.
+/// A corrupt frame is returned unchanged, with the frame it carries.
 pub(crate) fn with_route(error: ProviderError, provider: &str, path: &str) -> ProviderError {
     match error {
         ProviderError::ProviderResponse(mut response) => {
@@ -199,6 +200,9 @@ pub(crate) fn with_route(error: ProviderError, provider: &str, path: &str) -> Pr
             format_args!("parse_error"),
             error.to_string().as_bytes(),
         ),
+        // Kept whole: a bounded body preview would discard the frame this
+        // error exists to preserve.
+        corrupt @ ProviderError::CorruptFrame(_) => corrupt,
         ProviderError::Response(message) => parse_error(
             provider,
             path,

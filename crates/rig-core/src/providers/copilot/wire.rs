@@ -462,7 +462,7 @@ impl Decoder<ModelListing> for ModelsDecoder {
     type Event = ModelsReply;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        classify_untyped_line(frame.as_str().as_bytes())
+        classify_untyped_line(frame.as_bytes())
     }
 
     fn interpret(&mut self, event: Self::Event, out: &mut Output<ModelListing>) {

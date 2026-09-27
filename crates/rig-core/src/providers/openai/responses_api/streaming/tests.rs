@@ -5234,7 +5234,11 @@ fn a_content_part_without_a_type_tag_is_a_malformed_frame() {
         json!({"type":"response.content_part.added","item_id":"msg_t","output_index":0,"content_index":0,"sequence_number":0,"part":{"text":"x"}}),
     ]);
     assert!(
-        matches!(errors.as_slice(), [ProviderError::Json(_)]),
+        matches!(
+            errors.as_slice(),
+            [ProviderError::CorruptFrame(corrupt)]
+                if corrupt.event_type() == Some("response.content_part.added")
+        ),
         "{errors:?}"
     );
     assert!(unknown_payloads(&events).is_empty(), "{events:?}");
@@ -5843,4 +5847,176 @@ fn two_items_waiting_parts_at_one_position_each_bind_to_their_own_item() {
     ]);
     assert_eq!(opaque_texts(&choice), [&first, &second]);
     assert!(unknown_payloads(&events).is_empty(), "{events:?}");
+}
+
+/// A modeled frame whose payload fails typed decoding surfaces on an SSE
+/// stream as a typed corrupt-frame error carrying the frame's `type` and the frame
+/// exactly as the provider sent it, never an unmodeled part and never a bare
+/// JSON error.
+#[test]
+fn a_malformed_known_frame_surfaces_on_the_sse_stream_carrying_the_frame_as_sent() {
+    use super::super::corrupt_frame_fixtures::MALFORMED_KNOWN_FRAMES;
+    use crate::wire::{Mode, Wire};
+
+    for malformed in MALFORMED_KNOWN_FRAMES {
+        let body = format!(
+            "event: {}\ndata: {}\n\n",
+            malformed.event_type, malformed.frame
+        );
+        let wire = OpenAI::new("test-key").responses("gpt-5.4");
+        let mut driver: WireDriver<Completion, _> = WireDriver::new(wire.decoder(Mode::Streaming));
+        let mut framer = crate::http_client::framing::SseFramer::new();
+        for event in framer.push(body.as_bytes()) {
+            driver.push(WireFrame::Text(event.data));
+        }
+        driver.finish();
+        let error = driver
+            .drain()
+            .find_map(Result::err)
+            .unwrap_or_else(|| panic!("{}: the frame must surface an error", malformed.case));
+        let ProviderError::CorruptFrame(corrupt) = &error else {
+            panic!(
+                "{}: expected a corrupt frame, got {error:?}",
+                malformed.case
+            );
+        };
+        assert_eq!(
+            corrupt.event_type(),
+            Some(malformed.event_type),
+            "{}",
+            malformed.case
+        );
+        assert_eq!(corrupt.frame(), Some(malformed.frame), "{}", malformed.case);
+        assert_eq!(error.kind(), ErrorKind::Json, "{}", malformed.case);
+        assert!(!error.is_retryable(), "{}", malformed.case);
+    }
+}
+
+/// Through the completion stream, which reports errors in wire form, the
+/// same frame arrives as structured detail on the report.
+#[tokio::test]
+async fn a_malformed_known_frame_reaches_the_stream_report_as_structured_detail() {
+    use super::super::corrupt_frame_fixtures::MALFORMED_KNOWN_FRAMES;
+    use crate::error::{CorruptFrameDetail, ErrorDetail, FrameEvidence};
+
+    for malformed in MALFORMED_KNOWN_FRAMES {
+        let mut stream = responses_stream(MockStreamingClient {
+            sse_bytes: bytes::Bytes::from(format!("data: {}\n\n", malformed.frame)),
+        })
+        .await;
+        let mut report = None;
+        while let Some(item) = stream.next().await {
+            if let Err(error) = item {
+                report = Some(error);
+                break;
+            }
+        }
+        let report = report.unwrap_or_else(|| panic!("{}: the stream must fail", malformed.case));
+        assert_eq!(report.kind, ErrorKind::Json, "{}", malformed.case);
+        let Some(ErrorDetail::CorruptFrame(CorruptFrameDetail {
+            event_type,
+            evidence,
+            ..
+        })) = &report.detail
+        else {
+            panic!(
+                "{}: expected corrupt-frame detail, got {report:?}",
+                malformed.case
+            );
+        };
+        assert_eq!(
+            event_type.as_deref(),
+            Some(malformed.event_type),
+            "{}",
+            malformed.case
+        );
+        assert_eq!(
+            evidence,
+            &FrameEvidence::Text(malformed.frame.to_owned()),
+            "{}",
+            malformed.case
+        );
+    }
+}
+
+/// An SSE stream whose bytes are not valid UTF-8 reaches the decoder already
+/// decoded with U+FFFD replacement, as the grammar requires. A corrupt frame
+/// from it keeps that text labelled as replacement-decoded, never as the
+/// frame received.
+#[tokio::test]
+async fn a_corrupt_frame_from_replacement_decoded_sse_is_labelled_decoded() {
+    use crate::error::{CorruptFrameDetail, ErrorDetail, FrameEvidence};
+
+    let mut body = br#"data: {"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":0,"sequence_number":1,"part":{"type":"refusal","note":""#.to_vec();
+    body.push(0xff);
+    body.extend_from_slice(b"\"}}\n\n");
+    let decoded = String::from_utf8_lossy(&body)
+        .strip_prefix("data: ")
+        .and_then(|data| data.strip_suffix("\n\n"))
+        .expect("one data line")
+        .to_owned();
+
+    let mut stream = responses_stream(MockStreamingClient {
+        sse_bytes: bytes::Bytes::from(body),
+    })
+    .await;
+    let mut report = None;
+    while let Some(item) = stream.next().await {
+        if let Err(error) = item {
+            report = Some(error);
+            break;
+        }
+    }
+    let report = report.expect("the malformed refusal part must surface an error");
+    let Some(ErrorDetail::CorruptFrame(CorruptFrameDetail {
+        event_type,
+        evidence,
+        ..
+    })) = &report.detail
+    else {
+        panic!("expected corrupt-frame detail, got {report:?}");
+    };
+    assert_eq!(event_type.as_deref(), Some("response.content_part.added"));
+    assert_eq!(evidence, &FrameEvidence::Decoded(decoded));
+}
+
+/// A byte frame that is not UTF-8, pushed straight into a driver or a
+/// framed-event stream rather than framed by the HTTP driver, still reports
+/// its exact bytes, not the text the decoder read lossily.
+#[tokio::test]
+async fn a_corrupt_byte_frame_keeps_its_exact_bytes_on_every_driver_entrypoint() {
+    use crate::error::FrameEvidence;
+    use crate::wire::{Mode, Wire};
+
+    let received = vec![0x7b, 0xff];
+
+    let wire = OpenAI::new("test-key").responses("gpt-5.4");
+    let mut driver: WireDriver<Completion, _> = WireDriver::new(wire.decoder(Mode::Streaming));
+    driver.push(WireFrame::Bytes(received.clone()));
+    driver.finish();
+    let error = driver
+        .drain()
+        .find_map(Result::err)
+        .expect("the frame cannot decode");
+    let ProviderError::CorruptFrame(corrupt) = &error else {
+        panic!("expected a corrupt frame, got {error:?}");
+    };
+    assert_eq!(corrupt.evidence(), &FrameEvidence::Bytes(received.clone()));
+
+    let mut stream = crate::driver::run_wire_stream(
+        futures::stream::iter([Ok(WireFrame::Bytes(received.clone()))]),
+        ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()),
+    );
+    let mut error = None;
+    while let Some(item) = stream.next().await {
+        if let Err(found) = item {
+            error = Some(found);
+            break;
+        }
+    }
+    let error = error.expect("the frame cannot decode");
+    let ProviderError::CorruptFrame(corrupt) = &error else {
+        panic!("expected a corrupt frame, got {error:?}");
+    };
+    assert_eq!(corrupt.evidence(), &FrameEvidence::Bytes(received));
 }

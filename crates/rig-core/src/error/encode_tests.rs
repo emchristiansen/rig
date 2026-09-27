@@ -49,6 +49,7 @@ fn assert_request_building(case: &str, error: &ProviderError) {
         ProviderError::Http(_)
         | ProviderError::Url(_)
         | ProviderError::Json(_)
+        | ProviderError::CorruptFrame(_)
         | ProviderError::Response(_)
         | ProviderError::Provider(_)
         | ProviderError::ProviderResponse(_)

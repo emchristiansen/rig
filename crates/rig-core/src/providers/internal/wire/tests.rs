@@ -237,3 +237,85 @@ fn untyped_line_is_known_or_corrupt() {
         WireEvent::Corrupt(_)
     ));
 }
+
+/// What a `Corrupt` kept, as `(event type, evidence)`.
+fn corrupt_evidence<T: std::fmt::Debug>(
+    event: WireEvent<T>,
+) -> (Option<String>, crate::error::FrameEvidence) {
+    let WireEvent::Corrupt(corrupt) = event else {
+        panic!("expected a corrupt frame, got {event:?}");
+    };
+    (
+        corrupt.event_type().map(ToOwned::to_owned),
+        corrupt.evidence().clone(),
+    )
+}
+
+/// Exact text evidence.
+fn text(frame: &str) -> crate::error::FrameEvidence {
+    crate::error::FrameEvidence::Text(frame.to_owned())
+}
+
+/// A corrupt frame keeps the frame byte for byte, spacing and key order
+/// included, with the discriminator the classifier read from it.
+#[test]
+fn a_corrupt_frame_keeps_the_frame_as_received_and_its_type() {
+    let frame = r#"{ "delta" : 42,"type":"text.delta" }"#;
+    assert_eq!(
+        corrupt_evidence(classify_tagged_frame::<TestEvent>(frame, "type", known)),
+        (Some("text.delta".to_owned()), text(frame))
+    );
+    for frame in [
+        "{not json",
+        "{}",
+        r#"{"type":"text.delta","type":"future.event"}"#,
+    ] {
+        assert_eq!(
+            corrupt_evidence(classify_tagged_frame::<TestEvent>(frame, "type", known)),
+            (None, text(frame)),
+            "{frame}"
+        );
+    }
+    let frame = r#"{"object":"chat.completion.chunk", "choices":7}"#;
+    assert_eq!(
+        corrupt_evidence(classify_chat_completions_frame::<TestChunk>(frame)),
+        (Some("chat.completion.chunk".to_owned()), text(frame))
+    );
+}
+
+/// A repaired retry that still fails reports the frame as received, not the
+/// repaired text.
+#[test]
+fn a_frame_that_repair_cannot_save_keeps_the_original_frame() {
+    let frame = r#"{"type":"text.delta"}"#;
+    let classify = |data: &str| classify_tagged_frame::<TestEvent>(data, "type", known);
+    for repair in [None, Some(r#"{"type":"text.delta","delta":7}"#.to_owned())] {
+        let event = super::classify_with_repair(
+            frame,
+            classify,
+            |_| repair,
+            |_| serde::de::Error::custom("unrepairable"),
+            || serde::de::Error::custom("still corrupt"),
+        );
+        assert_eq!(
+            corrupt_evidence(event),
+            (Some("text.delta".to_owned()), text(frame))
+        );
+    }
+}
+
+/// An undiscriminated line keeps its text when it is UTF-8, and its exact
+/// bytes when it is not.
+#[test]
+fn an_untyped_corrupt_line_keeps_its_text_or_its_exact_bytes() {
+    assert_eq!(
+        corrupt_evidence(super::classify_untyped_line::<TestChunk>(
+            b"{\"choices\": 1}"
+        )),
+        (None, text("{\"choices\": 1}"))
+    );
+    assert_eq!(
+        corrupt_evidence(super::classify_untyped_line::<TestChunk>(b"{\xff")),
+        (None, crate::error::FrameEvidence::Bytes(b"{\xff".to_vec()))
+    );
+}

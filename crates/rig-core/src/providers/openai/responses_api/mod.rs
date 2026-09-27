@@ -3225,6 +3225,8 @@ impl FromStr for UserContent {
 }
 
 #[cfg(test)]
+mod corrupt_frame_fixtures;
+#[cfg(test)]
 mod openapi_schema;
 #[cfg(test)]
 mod stateless_replay_tests;
