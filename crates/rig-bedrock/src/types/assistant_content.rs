@@ -207,6 +207,8 @@ impl RigAssistantContent {
     pub(crate) fn into_content_block(
         self,
     ) -> Result<Option<aws_bedrock::ContentBlock>, ProviderError> {
+        rig_core::providers::internal::refuse_opaque_responses_part(&self.0, BEDROCK_CONVERSE_WIRE)
+            .map_err(|error| ProviderError::Request(error.into()))?;
         match self.0 {
             AssistantContent::Text(text) => Ok(Some(aws_bedrock::ContentBlock::Text(text.text))),
             AssistantContent::ToolCall(tool_call) => {

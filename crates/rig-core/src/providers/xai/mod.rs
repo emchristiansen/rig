@@ -43,6 +43,7 @@ use crate::providers::openai::wire::{
 /// arrive at `output_item.done`, and structured output cannot combine with tools.
 pub const DIALECT: Dialect = Dialect {
     request_id_header: Some("x-request-id"),
+    response_header_prefix: None,
     quirks: Quirks {
         completion_route: Route::Responses,
         completion_path: "/v1/chat/completions",

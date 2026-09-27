@@ -9,9 +9,11 @@
 //! sources to the two transport headers, the Codex websocket session
 //! identity and the LSH index. None of them can reach a message or an effect
 //! record. The transport headers and the LSH index reach no request body
-//! either; the Codex identity reaches only the frames of the websocket
-//! session it names (its cache key and client metadata), and no effect log
-//! records those frames.
+//! either; the Codex identity reaches only the requests of the conversation
+//! it names: its websocket session's handshake and frames, and the HTTP
+//! requests of a Responses wire that carries it (their identity headers,
+//! cache key and client metadata). It is stamped as a request is encoded,
+//! and no effect log records those requests.
 
 use std::path::{Path, PathBuf};
 
@@ -66,9 +68,10 @@ const GENERATE_SITES: &[(&str, &str)] = &[
         "a `session_id` transport header",
     ),
     (
-        "crates/rig-core/src/providers/openai/responses_api/websocket/codex.rs",
-        "the Codex websocket session identity: its handshake headers and the cache key \
-         and client metadata of that session's own frames, never a message or an effect record",
+        "crates/rig-core/src/providers/openai/responses_api/codex_identity.rs",
+        "the Codex conversation identity: its headers and the cache key and client \
+         metadata of that conversation's own frames and HTTP requests, never a message or an \
+         effect record",
     ),
 ];
 

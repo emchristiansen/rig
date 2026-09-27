@@ -37,6 +37,12 @@ pub enum MintKind {
     /// Text blocks opened by a bare `Message` on wires that never announce
     /// text-block boundaries.
     Text,
+    /// OpenAI Responses message content parts that cannot take the message's
+    /// wire id: refusals, parts after the first, and parts of an id-less
+    /// message. Each is its own text block, minted in stream order, so a
+    /// refusal or an opaque part is never merged into the text beside it.
+    /// The serialized kind keeps its historical name.
+    Refusal,
 }
 
 impl MintKind {
@@ -48,18 +54,20 @@ impl MintKind {
         BlockId::minted(self, index)
     }
 
+    /// Every kind, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::Reasoning,
+        Self::EncryptedReasoning,
+        Self::Block,
+        Self::Output,
+        Self::Tool,
+        Self::Text,
+        Self::Refusal,
+    ];
+
     /// Parse [`MintKind::as_str`]'s rendering.
     pub fn parse_name(name: &str) -> Option<Self> {
-        [
-            Self::Reasoning,
-            Self::EncryptedReasoning,
-            Self::Block,
-            Self::Output,
-            Self::Tool,
-            Self::Text,
-        ]
-        .into_iter()
-        .find(|kind| kind.as_str() == name)
+        Self::ALL.into_iter().find(|kind| kind.as_str() == name)
     }
 
     /// The stable name used when a minted id is rendered.
@@ -71,6 +79,7 @@ impl MintKind {
             Self::Output => "output",
             Self::Tool => "tool",
             Self::Text => "text",
+            Self::Refusal => "refusal",
         }
     }
 }

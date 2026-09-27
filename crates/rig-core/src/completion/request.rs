@@ -156,6 +156,16 @@ impl FinishReason {
     }
 }
 
+/// Headers of a successful reply that its dialect asks to keep, such as the
+/// Codex backend's `x-codex-*` rate-limit headers: lowercase header name to
+/// value. Empty when the dialect captures none or the reply carried none.
+///
+/// Values are kept as sent. A value that is not valid UTF-8 is the one
+/// exception: it is converted lossily, replacing each invalid byte sequence
+/// with U+FFFD. A header repeated in one reply is combined into one value,
+/// its values joined with `", "` in arrival order (RFC 9110, section 5.3).
+pub type ProviderResponseHeaders = std::collections::BTreeMap<String, String>;
+
 /// Assistant content and normalized completion metadata. The choice may be
 /// empty, including for truncated or filtered turns. Provider-specific data is
 /// available through [`Self::raw`] without retaining a concrete model type.
@@ -178,6 +188,10 @@ pub struct CompletionResponse {
     /// message or response ID. `None` when the provider reports none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
+    /// Success-reply headers the dialect captures, from the reply that
+    /// produced this response. See [`ProviderResponseHeaders`].
+    #[serde(default, skip_serializing_if = "ProviderResponseHeaders::is_empty")]
+    pub provider_response_headers: ProviderResponseHeaders,
     /// Reported finish reason, reconciled by the setters with tool-call output.
     /// Read through [`Self::finish_reason`].
     #[serde(default)]
@@ -230,6 +244,7 @@ impl CompletionResponse {
             message_id: None,
             response_id: None,
             provider_request_id: None,
+            provider_response_headers: ProviderResponseHeaders::new(),
             finish_reason: None,
             provider: provider.into(),
             model: None,
@@ -286,6 +301,8 @@ struct CompletionResponseRepr {
     #[serde(default)]
     provider_request_id: Option<String>,
     #[serde(default)]
+    provider_response_headers: ProviderResponseHeaders,
+    #[serde(default)]
     finish_reason: Option<FinishReason>,
     provider: String,
     #[serde(default)]
@@ -301,6 +318,7 @@ impl From<CompletionResponseRepr> for CompletionResponse {
             message_id,
             response_id,
             provider_request_id,
+            provider_response_headers,
             finish_reason,
             provider,
             model,
@@ -310,6 +328,7 @@ impl From<CompletionResponseRepr> for CompletionResponse {
             .with_optional_message_id(message_id)
             .with_optional_response_id(response_id)
             .with_optional_provider_request_id(provider_request_id)
+            .with_provider_response_headers(provider_response_headers)
             .with_optional_finish_reason(finish_reason)
             .with_optional_model(model)
     }

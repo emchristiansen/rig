@@ -940,3 +940,106 @@ fn the_responses_route_sends_declared_tools_as_written_under_its_strict_default(
         "a declared function takes exactly strict mode's transformation"
     );
 }
+
+// ── credential source through the wrapper ──────────────────────────────
+
+/// A source counting its reads and supplying `source-token`, or failing.
+#[derive(Clone, Default)]
+struct SourceForCopilot {
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fails: bool,
+}
+
+impl crate::wire::CredentialSource for SourceForCopilot {
+    fn current(
+        &self,
+    ) -> crate::wasm_compat::WasmBoxedFuture<
+        '_,
+        Result<crate::wire::Credential, crate::wire::CredentialSourceError>,
+    > {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let fails = self.fails;
+        Box::pin(async move {
+            if fails {
+                Err("the token owner is offline".into())
+            } else {
+                Ok(crate::wire::Credential::new("source-token"))
+            }
+        })
+    }
+}
+
+fn copilot_over_a_source(source: SourceForCopilot) -> CopilotWire {
+    CopilotWire {
+        wire: crate::providers::openai::OpenAI::new("static-key")
+            .with_credential_source(source)
+            .completion("gpt-4o"),
+        intent: CopilotIntent::default(),
+    }
+}
+
+/// The wrapper forwards the contained wire's credential source: the driver
+/// reads it once and the transport receives its token, not the static key.
+#[tokio::test]
+async fn the_copilot_wrapper_forwards_its_wires_credential_source() {
+    let source = SourceForCopilot::default();
+    let http = crate::test_utils::RecordingHttpClient::new("{}");
+    // Whether the canned reply decodes is beside the point: the request has
+    // already reached the transport.
+    let _ = crate::driver::Bound::new(copilot_over_a_source(source.clone()), http.clone())
+        .completion(crate::completion::CompletionRequest {
+            model: None,
+            chat_history: vec![crate::message::Message::user("hi")],
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        })
+        .await;
+
+    assert_eq!(source.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let requests = http.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].headers["authorization"], "Bearer source-token");
+}
+
+/// A failing source refuses through the wrapper, and nothing is sent.
+#[tokio::test]
+async fn a_failing_credential_source_refuses_through_the_copilot_wrapper() {
+    let http = crate::test_utils::RecordingHttpClient::new("{}");
+    let error = crate::driver::Bound::new(
+        copilot_over_a_source(SourceForCopilot {
+            fails: true,
+            ..SourceForCopilot::default()
+        }),
+        http.clone(),
+    )
+    .completion(crate::completion::CompletionRequest {
+        model: None,
+        chat_history: vec![crate::message::Message::user("hi")],
+        documents: Vec::new(),
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        additional_params: None,
+        output_schema: None,
+        record_telemetry_content: false,
+    })
+    .await
+    .expect_err("the source has no credential");
+
+    assert!(http.requests().is_empty(), "nothing was sent");
+    let crate::error::ProviderError::Request(inner) = &error else {
+        panic!("expected a request refusal, got {error:?}");
+    };
+    assert!(
+        inner
+            .downcast_ref::<crate::wire::CredentialUnavailable>()
+            .is_some()
+    );
+}

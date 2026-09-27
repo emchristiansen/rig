@@ -724,6 +724,10 @@ impl TryFrom<crate::message::Message> for Vec<Message> {
                 let mut tool_calls = Vec::new();
 
                 for content in content.into_iter() {
+                    crate::providers::internal::refuse_opaque_responses_part(
+                        &content,
+                        OLLAMA_CHAT_WIRE,
+                    )?;
                     match content {
                         crate::message::AssistantContent::Text(text) => {
                             text_content.push(text.text);

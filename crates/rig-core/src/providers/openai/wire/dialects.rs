@@ -29,6 +29,7 @@ pub(super) const AZURE_DEFAULT_AUDIO_API_VERSION: &str = "2025-04-01-preview";
 pub const OPENAI: Dialect = Dialect {
     base_url_env: Some("OPENAI_BASE_URL"),
     request_id_header: Some("x-request-id"),
+    response_header_prefix: None,
     quirks: Quirks {
         completion_route: Route::Responses,
         // OpenAI's reasoning families take `max_completion_tokens`; every
@@ -84,6 +85,7 @@ pub const DEEPSEEK: Dialect = Dialect {
 /// Groq.
 pub const GROQ: Dialect = Dialect {
     request_id_header: Some("x-request-id"),
+    response_header_prefix: None,
     quirks: Quirks {
         emits_complete_single_chunk_tool_calls: true,
         rewrite: BodyRewrite::GroqCompoundTools,
@@ -293,6 +295,7 @@ const MISTRAL_EMBEDDING_WIDTHS: &[ModelWidth] = &[
 /// Mistral.
 pub const MISTRAL: Dialect = Dialect {
     request_id_header: Some("mistral-correlation-id"),
+    response_header_prefix: None,
     quirks: Quirks {
         // Mistral rejects `stream_options` and reports usage on its final
         // chunk regardless.

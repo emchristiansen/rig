@@ -26,6 +26,8 @@ use std::convert::Infallible;
 use std::ops::Add;
 use std::str::FromStr;
 
+pub mod codex_identity;
+pub mod responses_lite;
 pub mod streaming;
 #[cfg(feature = "websocket")]
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
@@ -63,7 +65,7 @@ pub struct CompletionRequest {
     /// verbatim through `additional_params["tools"]`, then the wire's default tools.
     /// A declared tool is serialized as the JSON object the caller wrote; see
     /// [`ResponsesRequestTool`].
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ResponsesRequestTool>,
     /// Additional parameters
     #[serde(flatten)]
@@ -93,16 +95,40 @@ impl CompletionRequest {
 }
 
 /// An input item for [`CompletionRequest`].
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct InputItem {
     /// The role of an input item/message.
     /// Input messages should be Some(Role::User), and output messages should be Some(Role::Assistant).
     /// Everything else should be None.
-    #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<Role>,
     /// The input content itself.
-    #[serde(flatten)]
     input: InputContent,
+}
+
+impl<'de> Deserialize<'de> for InputItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let role = value
+            .get("role")
+            .cloned()
+            .map(serde_json::from_value::<Option<Role>>)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .flatten();
+        let input = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        let role = if matches!(
+            &input,
+            InputContent::Message(_) | InputContent::AdditionalTools { .. }
+        ) {
+            None
+        } else {
+            role
+        };
+        Ok(Self { role, input })
+    }
 }
 
 impl Serialize for InputItem {
@@ -175,6 +201,17 @@ pub enum Role {
     User,
     Assistant,
     System,
+    /// A provider-authored instruction item that participates in the input
+    /// sequence instead of the top-level `instructions` field.
+    Developer,
+}
+
+/// The only role accepted by a client-created Responses Lite prefix item.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum DeveloperRole {
+    /// Provider-level instructions and tool declarations.
+    Developer,
 }
 
 /// Content carried by an [`InputItem`].
@@ -182,6 +219,15 @@ pub enum Role {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputContent {
     Message(Message),
+    /// The Responses Lite tool declaration prefix.
+    AdditionalTools {
+        /// A stable item id derived from the thread and transmitted tools.
+        id: String,
+        /// Always [`DeveloperRole::Developer`].
+        role: DeveloperRole,
+        /// The exact JSON tool values transmitted in this item.
+        tools: Vec<Value>,
+    },
     Reasoning(OpenAIReasoning),
     FunctionCall(OutputFunctionCall),
     FunctionCallOutput(ToolResult),
@@ -204,10 +250,9 @@ pub struct OpenAIReasoning {
     #[serde(
         default,
         deserialize_with = "deserialize_reasoning_text_content",
-        serialize_with = "serialize_reasoning_text_content",
         skip_serializing_if = "Vec::is_empty"
     )]
-    pub content: Vec<String>,
+    pub content: Vec<ReasoningTextContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted_content: Option<String>,
     /// The upstream's signature over the reasoning text, which a gateway
@@ -218,65 +263,118 @@ pub struct OpenAIReasoning {
     pub status: Option<ToolStatus>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReasoningSummary {
-    SummaryText { text: String },
+    SummaryText {
+        text: String,
+    },
+    /// An unmodeled summary part, retained verbatim.
+    #[serde(untagged)]
+    Unknown(Value),
 }
 
 impl ReasoningSummary {
     fn new(input: &str) -> Self {
         Self::SummaryText {
-            text: input.to_string(),
+            text: input.to_owned(),
         }
     }
 
-    pub fn text(&self) -> &str {
-        let ReasoningSummary::SummaryText { text } = self;
-        text
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::SummaryText { text } => Some(text),
+            Self::Unknown(_) => None,
+        }
     }
 }
 
-fn reasoning_text_content_json(content: &[String]) -> Value {
-    Value::Array(
-        content
-            .iter()
-            .map(|text| {
-                serde_json::json!({
-                    "type": "reasoning_text",
-                    "text": text,
-                })
-            })
-            .collect(),
-    )
+impl<'de> Deserialize<'de> for ReasoningSummary {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        match content_part_tag::<D::Error>(&value)? {
+            "summary_text" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    text: String,
+                }
+                let fields: Fields =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::SummaryText { text: fields.text })
+            }
+            _ => Ok(Self::Unknown(value)),
+        }
+    }
 }
 
-fn serialize_reasoning_text_content<S>(content: &[String], serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    reasoning_text_content_json(content).serialize(serializer)
+/// A reasoning content part. Known text is decoded strictly; unknown tags retain their JSON.
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReasoningTextContent {
+    ReasoningText {
+        text: String,
+    },
+    #[serde(untagged)]
+    Unknown(Value),
 }
 
-fn deserialize_reasoning_text_content<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+impl From<String> for ReasoningTextContent {
+    fn from(text: String) -> Self {
+        Self::ReasoningText { text }
+    }
+}
+
+impl From<&str> for ReasoningTextContent {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningTextContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        if let Value::String(text) = value {
+            return Ok(Self::ReasoningText { text });
+        }
+        match content_part_tag::<D::Error>(&value)? {
+            "reasoning_text" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    text: String,
+                }
+                let fields: Fields =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::ReasoningText { text: fields.text })
+            }
+            _ => Ok(Self::Unknown(value)),
+        }
+    }
+}
+
+fn content_part_tag<E: serde::de::Error>(value: &Value) -> Result<&str, E> {
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| E::custom("content part requires an object with a string `type`"))
+}
+
+fn deserialize_reasoning_text_content<'de, D>(
+    deserializer: D,
+) -> Result<Vec<ReasoningTextContent>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = Value::deserialize(deserializer)?;
-    Ok(match value {
+    match value {
+        Value::String(text) => Ok(vec![text.into()]),
         Value::Array(items) => items
             .into_iter()
-            .filter_map(|item| match item {
-                Value::Object(mut item) => item
-                    .remove("text")
-                    .and_then(|text| text.as_str().map(ToOwned::to_owned)),
-                Value::String(text) => Some(text),
-                _ => None,
-            })
+            .map(|item| serde_json::from_value(item).map_err(serde::de::Error::custom))
             .collect(),
-        Value::String(text) => vec![text],
-        _ => Vec::new(),
-    })
+        _ => Err(serde::de::Error::custom(
+            "reasoning content must be an array or string",
+        )),
+    }
 }
 
 /// A tool result.
@@ -320,8 +418,8 @@ pub enum ToolResultOutputContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         file_id: Option<String>,
         /// Provider image-detail preference.
-        #[serde(default)]
-        detail: ImageDetail,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
     },
 }
 
@@ -413,7 +511,7 @@ fn responses_tool_result_output(
                 rich_output.push(ToolResultOutputContent::InputImage {
                     image_url,
                     file_id,
-                    detail: detail.unwrap_or_default(),
+                    detail: Some(detail.unwrap_or_default()),
                 });
             }
         }
@@ -531,7 +629,7 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                             };
                             items.push(InputItem::user_content(UserContent::InputImage {
                                 image_url: url,
-                                detail: detail.unwrap_or_default(),
+                                detail: Some(detail.unwrap_or_default()),
                             }));
                         }
                         message => {
@@ -557,6 +655,16 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                             text,
                             additional_params,
                         }) => {
+                            // The marker replays its raw part verbatim, so text
+                            // beside it would silently not replay.
+                            if !text.is_empty()
+                                && opaque_message_part(additional_params.as_ref()).is_some()
+                            {
+                                return Err(EncodeError::request(
+                                    "an opaque Responses message part carries non-empty text: the \
+                                     raw part replays verbatim, so the text cannot be sent",
+                                ));
+                            }
                             let Some(message) =
                                 assistant_text_replay_message(id.clone(), text, additional_params)
                             else {
@@ -647,6 +755,15 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
                             });
                         }
                         crate::message::AssistantContent::Reasoning(reasoning) => {
+                            if reasoning.has_opaque_parts()
+                                && reasoning.id.as_deref().is_none_or(str::is_empty)
+                            {
+                                return Err(EncodeError::request(
+                                    message::UnrepresentableOpaqueContent::new(
+                                        "OpenAI Responses without a reasoning item ID",
+                                    ),
+                                ));
+                            }
                             if let Some(openai_reasoning) = openai_reasoning_from_core(&reasoning) {
                                 reasoning_items.push(InputItem {
                                     role: None,
@@ -677,7 +794,7 @@ impl TryFrom<crate::completion::Message> for Vec<InputItem> {
 /// when the item carried no text.
 pub(crate) fn reasoning_content_blocks(
     summary: Vec<ReasoningSummary>,
-    content: Vec<String>,
+    content: Vec<ReasoningTextContent>,
     encrypted_content: Option<String>,
     signature: Option<String>,
 ) -> Vec<message::ReasoningContent> {
@@ -685,17 +802,17 @@ pub(crate) fn reasoning_content_blocks(
         .into_iter()
         .map(|summary| match summary {
             ReasoningSummary::SummaryText { text } => message::ReasoningContent::Summary(text),
+            ReasoningSummary::Unknown(value) => message::ReasoningContent::OpaqueSummary(value),
         })
         .collect::<Vec<_>>();
 
-    blocks.extend(
-        content
-            .into_iter()
-            .map(|text| message::ReasoningContent::Text {
-                text,
-                signature: None,
-            }),
-    );
+    blocks.extend(content.into_iter().map(|part| match part {
+        ReasoningTextContent::ReasoningText { text } => message::ReasoningContent::Text {
+            text,
+            signature: None,
+        },
+        ReasoningTextContent::Unknown(value) => message::ReasoningContent::OpaqueContent(value),
+    }));
     if let Some(signature) = signature {
         match blocks.iter_mut().rev().find_map(|block| match block {
             message::ReasoningContent::Text { signature, .. } => Some(signature),
@@ -729,7 +846,7 @@ fn openai_reasoning_from_core(reasoning: &crate::message::Reasoning) -> Option<O
             crate::message::ReasoningContent::Text { text, signature } => {
                 // An empty block that only carries the signature adds no text.
                 if !(text.is_empty() && signature.is_some()) {
-                    reasoning_content.push(text.clone());
+                    reasoning_content.push(text.clone().into());
                 }
                 // A signature covers the reasoning before it, so the last
                 // one is the item's, matching where decoding puts it.
@@ -739,6 +856,12 @@ fn openai_reasoning_from_core(reasoning: &crate::message::Reasoning) -> Option<O
             }
             crate::message::ReasoningContent::Summary(text) => {
                 summary.push(ReasoningSummary::new(text));
+            }
+            crate::message::ReasoningContent::OpaqueSummary(value) => {
+                summary.push(ReasoningSummary::Unknown(value.clone()))
+            }
+            crate::message::ReasoningContent::OpaqueContent(value) => {
+                reasoning_content.push(ReasoningTextContent::Unknown(value.clone()))
             }
             // OpenAI reasoning input has one opaque payload field; preserve either
             // encrypted or redacted blocks there, preferring the first one seen.
@@ -1149,7 +1272,7 @@ impl From<&ResponsesUsage> for crate::completion::Usage {
             cached_input_tokens: usage
                 .input_tokens_details
                 .as_ref()
-                .map(|details| details.cached_tokens),
+                .and_then(|details| details.cached_tokens),
             reasoning_tokens: usage
                 .output_tokens_details
                 .as_ref()
@@ -1165,7 +1288,27 @@ impl From<ResponsesUsage> for crate::completion::Usage {
     }
 }
 
+/// Sums input-token breakdowns. A side without one reports no cached count,
+/// so the summed count is unknown, never the other side's value alone:
+/// absence is not zero, in aggregation as in decoding.
+fn add_input_details(
+    lhs: Option<InputTokensDetails>,
+    rhs: Option<InputTokensDetails>,
+) -> Option<InputTokensDetails> {
+    const UNREPORTED: InputTokensDetails = InputTokensDetails {
+        cached_tokens: None,
+    };
+    match (lhs, rhs) {
+        (None, None) => None,
+        (lhs, rhs) => Some(lhs.unwrap_or(UNREPORTED) + rhs.unwrap_or(UNREPORTED)),
+    }
+}
+
 /// Adds present breakdowns, preserving a lone value or joint absence.
+///
+/// Used for output-token breakdowns only, whose counters are required: an
+/// absent breakdown there is kept as the other side's (see
+/// [`add_input_details`] for the input side, whose count is optional).
 fn add_optional_details<T: Add<Output = T>>(lhs: Option<T>, rhs: Option<T>) -> Option<T> {
     match (lhs, rhs) {
         (Some(lhs), Some(rhs)) => Some(lhs + rhs),
@@ -1179,7 +1322,7 @@ impl Add for ResponsesUsage {
     fn add(self, rhs: Self) -> Self::Output {
         Self {
             input_tokens: self.input_tokens + rhs.input_tokens,
-            input_tokens_details: add_optional_details(
+            input_tokens_details: add_input_details(
                 self.input_tokens_details,
                 rhs.input_tokens_details,
             ),
@@ -1196,15 +1339,25 @@ impl Add for ResponsesUsage {
 /// In-depth details on input tokens.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct InputTokensDetails {
-    /// Cached tokens from OpenAI
-    pub cached_tokens: u64,
+    /// Cached tokens from OpenAI, `None` when the provider omits the count.
+    ///
+    /// Absence is not zero: an omitted count stays `None` through
+    /// deserialization, arithmetic and the usage projection, so a missing
+    /// field never fails the whole decode and is never reported as zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
 }
 
 impl Add for InputTokensDetails {
     type Output = Self;
+    /// A sum is known only when both parts are: one absent side makes the
+    /// total absent rather than silently counting it as zero.
     fn add(self, rhs: Self) -> Self::Output {
         Self {
-            cached_tokens: self.cached_tokens + rhs.cached_tokens,
+            cached_tokens: self
+                .cached_tokens
+                .zip(rhs.cached_tokens)
+                .map(|(left, right)| left + right),
         }
     }
 }
@@ -1235,8 +1388,10 @@ pub struct IncompleteDetailsReason {
 /// A response error from OpenAI's Response API.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ResponseError {
-    /// Error code
-    pub code: String,
+    /// Error code, `None` when the provider omits it. A failed response
+    /// without a code still decodes, so its message and status survive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
     /// Error message
     pub message: String,
 }
@@ -1417,6 +1572,7 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
                             InputContent::CustomToolCall(call) => Some(&mut call.call_id),
                             InputContent::CustomToolCallOutput(result) => Some(&mut result.call_id),
                             InputContent::Message(_)
+                            | InputContent::AdditionalTools { .. }
                             | InputContent::Reasoning(_)
                             | InputContent::Compaction(_) => None,
                         }),
@@ -1524,15 +1680,7 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
                 },
             )?
         };
-        if additional_parameters.reasoning.is_some() {
-            let include = additional_parameters.include.get_or_insert_with(Vec::new);
-            if !include
-                .iter()
-                .any(|item| matches!(item, Include::ReasoningEncryptedContent))
-            {
-                include.push(Include::ReasoningEncryptedContent);
-            }
-        }
+        additional_parameters.request_reasoning_ciphertext();
 
         // Apply output_schema as structured output if not already configured via additional_params
         if additional_parameters.text.is_none()
@@ -1808,6 +1956,23 @@ pub struct AdditionalParameters {
     /// cache identity here). Empty by default and omitted when empty.
     #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub client_metadata: BTreeMap<String, String>,
+}
+
+impl AdditionalParameters {
+    /// Request encrypted reasoning whenever reasoning is configured, without
+    /// duplicating the include: the rule every dialect shares. A later shaping
+    /// step that creates `reasoning` applies it again.
+    pub(crate) fn request_reasoning_ciphertext(&mut self) {
+        if self.reasoning.is_some() {
+            let include = self.include.get_or_insert_with(Vec::new);
+            if !include
+                .iter()
+                .any(|item| matches!(item, Include::ReasoningEncryptedContent))
+            {
+                include.push(Include::ReasoningEncryptedContent);
+            }
+        }
+    }
 }
 
 fn deserialize_metadata<'de, D>(
@@ -2107,7 +2272,7 @@ pub enum Output {
     Reasoning {
         id: String,
         summary: Vec<ReasoningSummary>,
-        content: Vec<String>,
+        content: Vec<ReasoningTextContent>,
         encrypted_content: Option<String>,
         /// The upstream's signature over the reasoning text, when a gateway
         /// relays one (OpenRouter for Claude).
@@ -2132,7 +2297,7 @@ struct ReasoningFields {
     #[serde(default)]
     summary: Vec<ReasoningSummary>,
     #[serde(default, deserialize_with = "deserialize_reasoning_text_content")]
-    content: Vec<String>,
+    content: Vec<ReasoningTextContent>,
     #[serde(default)]
     encrypted_content: Option<String>,
     #[serde(default)]
@@ -2198,7 +2363,10 @@ impl Serialize for Output {
                     serde::ser::Error::custom("reasoning output must serialize to an object")
                 })?;
                 if !content.is_empty() {
-                    map.insert("content".to_string(), reasoning_text_content_json(content));
+                    map.insert(
+                        "content".to_string(),
+                        serde_json::to_value(content).map_err(serde::ser::Error::custom)?,
+                    );
                 }
                 if let Some(signature) = signature {
                     map.insert("signature".to_string(), Value::String(signature.clone()));
@@ -2495,7 +2663,22 @@ pub enum OutputRole {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum Message {
-    #[serde(alias = "developer")]
+    /// A developer message, including the typed Responses Lite
+    /// base-instruction form.
+    Developer {
+        /// A stable item id derived from the thread and instruction bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Instruction text represented as Responses input content.
+        #[serde(deserialize_with = "string_or_vec")]
+        content: Vec<SystemContent>,
+        /// An optional caller-supplied message name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// The internal marker identifying model base instructions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+    },
     System {
         #[serde(deserialize_with = "string_or_vec")]
         content: Vec<SystemContent>,
@@ -2527,6 +2710,26 @@ pub enum Message {
     },
 }
 
+/// Metadata carried by the Responses Lite developer instruction item.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct InternalChatMessageMetadataPassthrough {
+    content_item_kinds: Vec<InternalChatMessageContentKind>,
+}
+
+impl InternalChatMessageMetadataPassthrough {
+    pub(crate) fn base_instructions() -> Self {
+        Self {
+            content_item_kinds: vec![InternalChatMessageContentKind::BaseInstructions],
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+enum InternalChatMessageContentKind {
+    #[serde(rename = "model.base_instructions")]
+    BaseInstructions,
+}
+
 impl Message {
     pub fn system(content: &str) -> Self {
         Message::System {
@@ -2538,11 +2741,46 @@ impl Message {
 
 /// Text assistant content.
 /// Note that the text type in comparison to the Completions API is actually `output_text` rather than `text`.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Serialize, PartialEq, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantContent {
     OutputText(OutputText),
-    Refusal { refusal: String },
+    Refusal {
+        refusal: String,
+    },
+    /// A nested message part retained for same-wire replay.
+    #[serde(untagged)]
+    Unknown(Value),
+}
+
+impl<'de> Deserialize<'de> for AssistantContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        match content_part_tag::<D::Error>(&value)? {
+            "output_text" => {
+                // OutputText flattens sibling fields; the tag belongs to the enum.
+                let mut value = value;
+                if let Some(fields) = value.as_object_mut() {
+                    fields.remove("type");
+                }
+                serde_json::from_value(value)
+                    .map(Self::OutputText)
+                    .map_err(serde::de::Error::custom)
+            }
+            "refusal" => {
+                #[derive(Deserialize)]
+                struct Fields {
+                    refusal: String,
+                }
+                let fields: Fields =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(Self::Refusal {
+                    refusal: fields.refusal,
+                })
+            }
+            _ => Ok(Self::Unknown(value)),
+        }
+    }
 }
 
 /// Responses `output_text` block with unmodeled sibling fields preserved as JSON.
@@ -2617,10 +2855,31 @@ fn assistant_text_replay_message(
              object — replaying without these extras"
         );
     }
-    let own_extras = additional_params
-        .as_ref()
-        .and_then(|params| params.wire_extras(OPENAI_RESPONSES_EXTRAS_KEY))
-        .is_some();
+    if let Some(raw) = opaque_message_part(additional_params.as_ref()) {
+        let phase = additional_params
+            .as_ref()
+            .and_then(|params| params.wire_extras(OPENAI_RESPONSES_EXTRAS_KEY))
+            .and_then(|extras| extras.get(OPENAI_RESPONSES_PHASE_KEY))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        return Some(Message::Assistant {
+            content: vec![AssistantContentType::Text(AssistantContent::Unknown(
+                raw.clone(),
+            ))],
+            id: id.unwrap_or_default(),
+            name: None,
+            status: ToolStatus::Completed,
+            phase,
+        });
+    }
+    let refusal = is_refusal(additional_params.as_ref());
+    // The refusal marker is Responses-owned metadata too, though it lives
+    // beside the sibling mirror rather than in it.
+    let own_extras = refusal
+        || additional_params
+            .as_ref()
+            .and_then(|params| params.wire_extras(OPENAI_RESPONSES_EXTRAS_KEY))
+            .is_some();
     if text.is_empty() && !(own_extras && id.is_some()) {
         return None;
     }
@@ -2634,9 +2893,12 @@ fn assistant_text_replay_message(
         .map(str::to_owned);
     match id {
         Some(id) => Some(Message::Assistant {
-            content: vec![AssistantContentType::Text(AssistantContent::OutputText(
-                OutputText::from_message_text(text, additional_params),
-            ))],
+            // A marked refusal goes back as the refusal part it came from.
+            content: vec![AssistantContentType::Text(if refusal {
+                AssistantContent::Refusal { refusal: text }
+            } else {
+                AssistantContent::OutputText(OutputText::from_message_text(text, additional_params))
+            })],
             id,
             name: None,
             status: ToolStatus::Completed,
@@ -2668,33 +2930,99 @@ pub(crate) const OPENAI_RESPONSES_EXTRAS_KEY: &str = "openai_responses";
 /// lifted back onto the assistant input item at replay.
 pub(crate) const OPENAI_RESPONSES_PHASE_KEY: &str = "phase";
 
+/// Responses-owned metadata about which content part a text block came
+/// from, kept in its own [`Text::additional_params`](crate::message::Text)
+/// entry beside [`OPENAI_RESPONSES_EXTRAS_KEY`] rather than inside it. The
+/// extras object mirrors the wire part's own sibling fields verbatim, so a
+/// key reserved there could collide with a field the provider sends; this
+/// entry holds only what rig itself records.
+pub(crate) const OPENAI_RESPONSES_PART_KEY: &str = "openai_responses_part";
+
+/// The part kind, under [`OPENAI_RESPONSES_PART_KEY`], of a Responses
+/// `refusal` content part. Replay turns a block carrying it back into a
+/// refusal part; other wires read only the text, so there a refusal replays
+/// as plain text.
+const REFUSAL_PART_KIND: &str = "refusal";
+
+pub(crate) fn is_opaque_part_marker(key: &str, value: &Value) -> bool {
+    key == OPENAI_RESPONSES_PART_KEY
+        && value.get("kind").and_then(Value::as_str) == Some("opaque")
+        && value.get("value").is_some()
+}
+
+/// The exact marker used for an opaque Responses message part.
+pub(crate) fn opaque_message_part(
+    params: Option<&crate::message::AdditionalParams>,
+) -> Option<&Value> {
+    let marker = params?.wire_extras(OPENAI_RESPONSES_PART_KEY)?;
+    (marker.get("kind").and_then(Value::as_str) == Some("opaque"))
+        .then(|| marker.get("value"))
+        .flatten()
+}
+
+/// The metadata that marks a text block as a refusal.
+pub(crate) fn refusal_marker() -> Option<crate::message::AdditionalParams> {
+    crate::message::AdditionalParams::from_entries(Some((
+        OPENAI_RESPONSES_PART_KEY,
+        serde_json::json!({ "kind": REFUSAL_PART_KIND }),
+    )))
+}
+
+/// Whether a text block is marked as a refusal.
+pub(crate) fn is_refusal(additional_params: Option<&crate::message::AdditionalParams>) -> bool {
+    additional_params
+        .and_then(|params| params.wire_extras(OPENAI_RESPONSES_PART_KEY))
+        .and_then(|part| part.get("kind"))
+        .and_then(Value::as_str)
+        == Some(REFUSAL_PART_KIND)
+}
+
 /// Record an output message's `phase` on a text block's own-wire extras so
 /// the follow-up request can re-send it.
 pub(crate) fn stamp_phase(text: &mut Text, phase: Option<&str>) {
     let Some(phase) = phase else {
         return;
     };
-    let mut extras = text
+    // Keep every other entry — a refusal block's part marker among them.
+    let mut entries = match text
         .additional_params
-        .as_ref()
-        .and_then(|params| params.wire_extras(OPENAI_RESPONSES_EXTRAS_KEY))
-        .cloned()
-        .unwrap_or_default();
+        .take()
+        .map(crate::message::AdditionalParams::into_value)
+    {
+        Some(Value::Object(entries)) => entries,
+        _ => Map::new(),
+    };
+    let mut extras = match entries.remove(OPENAI_RESPONSES_EXTRAS_KEY) {
+        Some(Value::Object(extras)) => extras,
+        _ => Map::new(),
+    };
     extras.insert(
         OPENAI_RESPONSES_PHASE_KEY.to_string(),
         Value::String(phase.to_string()),
     );
-    text.additional_params = crate::message::AdditionalParams::from_entries(Some((
-        OPENAI_RESPONSES_EXTRAS_KEY,
+    entries.insert(
+        OPENAI_RESPONSES_EXTRAS_KEY.to_string(),
         Value::Object(extras),
-    )));
+    );
+    text.additional_params = crate::message::AdditionalParams::new(entries);
 }
 
 /// Converts output text or a refusal to a Rig text block, retaining nonempty
-/// output-text extras under the Responses key.
+/// output-text extras under the Responses key. A refusal is marked with
+/// [`refusal_marker`], so it stays distinct from output text.
 pub(crate) fn text_block(value: AssistantContent) -> Text {
     match value {
-        AssistantContent::Refusal { refusal } => Text::new(refusal),
+        AssistantContent::Unknown(value) => Text {
+            text: String::new(),
+            additional_params: crate::message::AdditionalParams::from_entries(Some((
+                OPENAI_RESPONSES_PART_KEY,
+                serde_json::json!({"kind": "opaque", "value": value}),
+            ))),
+        },
+        AssistantContent::Refusal { refusal } => Text {
+            text: refusal,
+            additional_params: refusal_marker(),
+        },
         // Keep this destructuring exhaustive so new wire fields force an
         // explicit capture-or-drop decision.
         AssistantContent::OutputText(OutputText { text, extras }) => {
@@ -2725,12 +3053,46 @@ impl From<AssistantContent> for completion::AssistantContent {
 }
 
 /// The type of assistant content.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Serialize, PartialEq, Clone)]
 #[serde(untagged)]
 pub enum AssistantContentType {
     Text(AssistantContent),
     ToolCall(OutputFunctionCall),
     Reasoning(OpenAIReasoning),
+}
+
+impl<'de> Deserialize<'de> for AssistantContentType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        match value.get("type") {
+            Some(Value::String(tag)) => match tag.as_str() {
+                "function_call" => serde_json::from_value(value)
+                    .map(Self::ToolCall)
+                    .map_err(serde::de::Error::custom),
+                "reasoning" => serde_json::from_value(value)
+                    .map(Self::Reasoning)
+                    .map_err(serde::de::Error::custom),
+                _ => serde_json::from_value(value)
+                    .map(Self::Text)
+                    .map_err(serde::de::Error::custom),
+            },
+            Some(_) => Err(serde::de::Error::custom(
+                "content part `type` must be a string",
+            )),
+            None => {
+                #[derive(Deserialize)]
+                #[serde(untagged)]
+                enum Legacy {
+                    ToolCall(OutputFunctionCall),
+                    Reasoning(OpenAIReasoning),
+                }
+                match serde_json::from_value(value).map_err(serde::de::Error::custom)? {
+                    Legacy::ToolCall(call) => Ok(Self::ToolCall(call)),
+                    Legacy::Reasoning(reasoning) => Ok(Self::Reasoning(reasoning)),
+                }
+            }
+        }
+    }
 }
 
 /// System content for the OpenAI Responses API.
@@ -2766,8 +3128,8 @@ pub enum UserContent {
     },
     InputImage {
         image_url: String,
-        #[serde(default)]
-        detail: ImageDetail,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<ImageDetail>,
     },
     InputFile {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2792,6 +3154,13 @@ impl FromStr for UserContent {
 }
 
 #[cfg(test)]
+mod openapi_schema;
+#[cfg(test)]
 mod stateless_replay_tests;
 #[cfg(test)]
+mod streaming_conformance;
+#[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod opaque_content_tests;

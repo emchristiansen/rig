@@ -82,7 +82,8 @@ fn encoded(
         envelope(provider, &mut request)?;
     }
     Ok(Encoded::new(request, Framing::Whole)
-        .with_request_id_header(provider.dialect.request_id_header))
+        .with_request_id_header(provider.dialect.request_id_header)
+        .with_captured_response_headers(provider.dialect.response_header_prefix))
 }
 
 /// Refuse an embeddings request parameter the dialect does not accept.
@@ -281,6 +282,10 @@ impl Decoder<Embedding> for EmbeddingsDecoder {
 impl Wire for Embeddings {
     type Op = Embedding;
     type Decoder = EmbeddingsDecoder;
+
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
+    }
 
     fn name(&self) -> &str {
         self.provider.dialect.name
@@ -511,6 +516,10 @@ impl Wire for Transcriptions {
     type Op = Transcription;
     type Decoder = TranscriptionsDecoder;
 
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -711,6 +720,10 @@ impl Wire for Images {
     type Op = crate::operation::ImageGeneration;
     type Decoder = ImagesDecoder;
 
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -879,6 +892,10 @@ impl Wire for Speech {
     type Op = crate::operation::AudioGeneration;
     type Decoder = SpeechDecoder;
 
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -1037,6 +1054,10 @@ impl Wire for Models {
     type Op = ModelListing;
     type Decoder = ModelsDecoder;
 
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -1164,6 +1185,10 @@ impl Wire for Rerank {
     type Op = RerankOp;
     type Decoder = RerankDecoder;
 
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
+    }
+
     fn name(&self) -> &str {
         self.provider.dialect.name
     }
@@ -1239,6 +1264,10 @@ pub use crate::operation::VerifyDecoder;
 impl Wire for Verify {
     type Op = VerifyOp;
     type Decoder = VerifyDecoder;
+
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
+    }
 
     fn name(&self) -> &str {
         self.provider.dialect.name

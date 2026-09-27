@@ -788,6 +788,7 @@ const ANTHROPIC_MESSAGES_WIRE: &str = "Anthropic Messages";
 fn anthropic_content_from_assistant_content(
     content: message::AssistantContent,
 ) -> Result<Vec<Content>, MessageError> {
+    crate::providers::internal::refuse_opaque_responses_part(&content, ANTHROPIC_MESSAGES_WIRE)?;
     match content {
         message::AssistantContent::Text(text) => {
             // Anthropic rejects empty text; only supported raw hosted-tool metadata
@@ -820,6 +821,13 @@ fn anthropic_content_from_assistant_content(
             let mut converted = Vec::new();
             for block in reasoning.content {
                 match block {
+                    message::ReasoningContent::OpaqueSummary(_)
+                    | message::ReasoningContent::OpaqueContent(_) => {
+                        return Err(message::UnrepresentableOpaqueContent::new(
+                            ANTHROPIC_MESSAGES_WIRE,
+                        )
+                        .into());
+                    }
                     message::ReasoningContent::Text { text, signature } => {
                         converted.push(Content::Thinking {
                             thinking: text,

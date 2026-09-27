@@ -573,6 +573,9 @@ mod grammar_guards {
                 ReasoningContent::Text { text, .. } => text.clone(),
                 ReasoningContent::Encrypted(data) => data.clone(),
                 ReasoningContent::Redacted { data } => data.clone(),
+                ReasoningContent::OpaqueSummary(value) | ReasoningContent::OpaqueContent(value) => {
+                    value.to_string()
+                }
             })
             .collect();
         assert_eq!(

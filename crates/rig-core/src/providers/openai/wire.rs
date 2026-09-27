@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::env::{self, EnvError};
 use crate::driver::{Bound, HasEmbedding, HasModelListing, HasRerank, HasTranscription, HasVerify};
-use crate::wire::{HasCompletion, Secret};
+use crate::wire::{
+    CredentialPlacement, CredentialSource, CredentialSourceHandle, CredentialStamp, HasCompletion,
+    Secret, TokenPlacement,
+};
 
 use super::responses_api::SystemInstructionsPlacement;
 use super::responses_api::wire::Responses;
@@ -660,6 +663,10 @@ pub struct Dialect {
     pub base_url_env: Option<&'static str>,
     /// The reply header carrying the provider's transport request id.
     pub request_id_header: Option<&'static str>,
+    /// The name prefix of the success-reply headers this dialect keeps on
+    /// its responses (the ChatGPT backend's `x-codex-` rate-limit headers);
+    /// `None` keeps none.
+    pub response_header_prefix: Option<&'static str>,
     /// A second credential this dialect accepts, with its own variable and
     /// header. `None` for every dialect but Azure.
     pub alternate_auth: Option<AuthAlternative>,
@@ -681,6 +688,7 @@ impl Dialect {
             api_key_env,
             base_url_env: None,
             request_id_header: None,
+            response_header_prefix: None,
             alternate_auth: None,
             quirks: Quirks::openai(),
         }
@@ -756,6 +764,11 @@ pub struct OpenAI {
     /// Responses instruction placement override. `None` uses the dialect default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_instructions: Option<SystemInstructionsPlacement>,
+    /// Where the credential is read at send time, when it is not
+    /// [`Self::api_key`]; see [`Self::with_credential_source`]. Never
+    /// serialized, like the credential itself.
+    #[serde(skip)]
+    pub credential_source: Option<CredentialSourceHandle>,
 }
 
 impl OpenAI {
@@ -794,6 +807,7 @@ impl OpenAI {
                 user_agent: default_user_agent(identity.originator),
             }),
             system_instructions: None,
+            credential_source: None,
         }
     }
 
@@ -893,7 +907,11 @@ impl OpenAI {
     /// Point this configuration at another dialect: the same credential,
     /// with everything else at that dialect's defaults.
     pub fn with_dialect(self, dialect: &Dialect) -> Self {
-        Self::with_key(dialect, self.api_key)
+        let credential_source = self.credential_source;
+        Self {
+            credential_source,
+            ..Self::with_key(dialect, self.api_key)
+        }
     }
 
     /// Route through a Hugging Face sub-provider.
@@ -930,6 +948,47 @@ impl OpenAI {
     pub fn with_account_id(mut self, account_id: impl Into<String>) -> Self {
         self.account_id = Some(account_id.into());
         self
+    }
+
+    /// Read the credential from `source` each time a request is sent,
+    /// instead of sending [`Self::api_key`].
+    ///
+    /// The source is read once per send attempt (every request, every page
+    /// of a paged reply, every managed websocket connect), so a credential
+    /// rotated by its owner reaches the next request without rebuilding
+    /// anything. Its credential replaces the header [`Self::auth`] names
+    /// (`Authorization: Bearer …` or `api-key`), and it is authoritative for
+    /// the account too: a credential naming an account sends
+    /// `ChatGPT-Account-Id`, and one naming none sends no account header,
+    /// even when [`Self::account_id`] is set. A source that fails refuses the
+    /// request with [`crate::wire::CredentialUnavailable`] before anything is
+    /// sent.
+    pub fn with_credential_source(mut self, source: impl CredentialSource + 'static) -> Self {
+        self.credential_source = Some(CredentialSourceHandle::new(source));
+        self
+    }
+
+    /// This configuration's send-time credential: `None` unless a
+    /// [credential source](Self::with_credential_source) is set. Its token
+    /// goes in the header [`Self::auth`] names, the one
+    /// [`Self::authenticate`] writes, and it is authoritative for
+    /// `ChatGPT-Account-Id`.
+    pub(crate) fn credential_stamp(&self) -> Option<CredentialStamp> {
+        self.credential_source
+            .as_ref()
+            .map(|source| CredentialStamp {
+                source: source.clone(),
+                placement: CredentialPlacement {
+                    token: match self.auth {
+                        Auth::Bearer => TokenPlacement::Bearer,
+                        Auth::OptionalBearer => TokenPlacement::OptionalBearer,
+                        Auth::ApiKeyHeader => {
+                            TokenPlacement::Header(http::HeaderName::from_static(API_KEY_HEADER))
+                        }
+                    },
+                    account: Some(http::HeaderName::from_static(ACCOUNT_ID_HEADER)),
+                },
+            })
     }
 
     /// Merge these instructions ahead of every Responses turn's preamble.
@@ -1163,14 +1222,23 @@ impl OpenAI {
         }
     }
 
+    /// Stamp the configured caller identity, `originator` and `user-agent`,
+    /// when this configuration has one; otherwise leave the request as is.
+    ///
+    /// The one source of caller identity for every transport: the HTTP
+    /// request headers and the Codex websocket handshake both stamp it here.
+    pub(crate) fn identify(&self, builder: http::request::Builder) -> http::request::Builder {
+        match &self.identity {
+            Some(identity) => builder
+                .header("originator", &identity.originator)
+                .header(http::header::USER_AGENT, &identity.user_agent),
+            None => builder,
+        }
+    }
+
     /// Apply authentication, configured identity, account, and per-request session headers.
     pub(crate) fn headers(&self, builder: http::request::Builder) -> http::request::Builder {
-        let mut builder = self.authenticate(builder);
-        if let Some(identity) = &self.identity {
-            builder = builder
-                .header("originator", &identity.originator)
-                .header(http::header::USER_AGENT, &identity.user_agent);
-        }
+        let mut builder = self.identify(self.authenticate(builder));
         if self
             .dialect
             .quirks
@@ -1186,6 +1254,11 @@ impl OpenAI {
         builder
     }
 }
+
+/// The header `Auth::ApiKeyHeader` sends the credential in.
+const API_KEY_HEADER: &str = "api-key";
+/// The header naming the account a credential belongs to.
+const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 
 /// Build completion wires using configured, model-specific, or dialect routing.
 impl HasCompletion for OpenAI {

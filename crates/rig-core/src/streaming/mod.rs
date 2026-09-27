@@ -156,6 +156,11 @@ pub(crate) fn fold_finish(
     .with_optional_provider_request_id(
         terminal.and_then(|response| response.provider_request_id.clone()),
     )
+    .with_provider_response_headers(
+        terminal
+            .map(|response| response.provider_response_headers.clone())
+            .unwrap_or_default(),
+    )
     .with_optional_finish_reason(terminal.and_then(|response| response.finish_reason.clone()))
     .with_optional_model(terminal.and_then(|response| response.model.clone()))
 }
@@ -269,6 +274,14 @@ pub struct StreamFinal {
     /// never the body's message or response ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
+    /// Success-reply headers the dialect captures, from the HTTP reply
+    /// delivering this stream. See
+    /// [`crate::completion::ProviderResponseHeaders`].
+    #[serde(
+        default,
+        skip_serializing_if = "crate::completion::ProviderResponseHeaders::is_empty"
+    )]
+    pub provider_response_headers: crate::completion::ProviderResponseHeaders,
     /// Stable descriptor name of the provider that produced this stream.
     pub provider: String,
     /// The service whose reasoning this stream carries, when it is not
@@ -298,6 +311,7 @@ impl StreamFinal {
             message_id: None,
             response_id: None,
             provider_request_id: None,
+            provider_response_headers: crate::completion::ProviderResponseHeaders::new(),
             provider: provider.into(),
             reasoning_issuer: None,
             model: None,
@@ -357,6 +371,8 @@ struct StreamFinalRepr {
     response_id: Option<String>,
     #[serde(default)]
     provider_request_id: Option<String>,
+    #[serde(default)]
+    provider_response_headers: crate::completion::ProviderResponseHeaders,
     provider: String,
     #[serde(default)]
     reasoning_issuer: Option<String>,
@@ -373,6 +389,7 @@ impl From<StreamFinalRepr> for StreamFinal {
             message_id,
             response_id,
             provider_request_id,
+            provider_response_headers,
             provider,
             reasoning_issuer,
             model,
@@ -383,6 +400,7 @@ impl From<StreamFinalRepr> for StreamFinal {
             .with_optional_message_id(message_id)
             .with_optional_response_id(response_id)
             .with_optional_provider_request_id(provider_request_id)
+            .with_provider_response_headers(provider_response_headers)
             .with_optional_model(model);
         terminal.reasoning_issuer = reasoning_issuer;
         terminal

@@ -845,3 +845,46 @@ fn only_vertex_reasoning_is_replayed() {
         .collect();
     assert_eq!(thoughts, ["vertex thought"]);
 }
+
+#[test]
+fn opaque_responses_parts_are_refused_before_request_content_is_discarded() {
+    use rig_core::message::{AssistantContent, Message, Reasoning, ReasoningContent};
+    let raw = serde_json::json!({"type":"future_part","payload":{"list":[1,2]}});
+    let opaque: AssistantContent =
+        rig_core::providers::openai::responses_api::AssistantContent::Unknown(raw.clone()).into();
+    for part in [
+        opaque,
+        AssistantContent::Reasoning(Reasoning {
+            id: None,
+            provider: Some("openai".into()),
+            content: vec![ReasoningContent::OpaqueSummary(raw.clone())],
+        }),
+        AssistantContent::Reasoning(Reasoning {
+            id: Some("rs_1".into()),
+            provider: Some("openai".into()),
+            content: vec![ReasoningContent::OpaqueContent(raw)],
+        }),
+    ] {
+        let history = vec![Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::text("known"), part],
+        }];
+        let request = rig_core::completion::CompletionRequest {
+            model: None,
+            chat_history: history,
+            documents: vec![],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+            output_schema: None,
+            record_telemetry_content: false,
+        };
+        let error = VertexCompletionRequest(request)
+            .contents()
+            .expect_err("opaque content refused");
+        assert!(matches!(error, rig_core::error::ProviderError::Request(_)));
+        assert!(error.to_string().contains("opaque"));
+    }
+}

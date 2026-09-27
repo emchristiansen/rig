@@ -1290,6 +1290,7 @@ impl TurnSource for StreamingTurnSource {
                         content: &canonical_choice,
                         usage: last_usage,
                         identity: &identity,
+                        response_headers: &terminal.provider_response_headers,
                         finish_reason: attempt_finish_reason.as_ref(),
                         max_tokens: attempt_max_tokens,
                         raw: attempt_raw,
@@ -1449,6 +1450,9 @@ pub(crate) struct AssembledTurn<'a> {
     pub(crate) content: &'a Vec<AssistantContent>,
     pub(crate) usage: Usage,
     pub(crate) identity: &'a ResponseIdentity,
+    /// This attempt's captured success-reply headers, never an earlier
+    /// attempt's.
+    pub(crate) response_headers: &'a rig_core::completion::ProviderResponseHeaders,
     pub(crate) finish_reason: Option<&'a FinishReason>,
     /// The cap this attempt was prepared with, completion-call patches
     /// included; read off the prepared request, never the agent config.
@@ -1484,6 +1488,7 @@ pub(crate) async fn settle_model_turn(
     folded.message_id = turn.identity.message_id.clone();
     folded.response_id = turn.identity.response_id.clone();
     folded.provider_request_id = turn.identity.provider_request_id.clone();
+    folded.provider_response_headers = turn.response_headers.clone();
     let outcome: Result<Outcome, ErrorReport> = Ok(Outcome::Completion(folded));
     let mut replaced: Option<Vec<AssistantContent>> = None;
     match hooks
@@ -1982,6 +1987,7 @@ impl TurnSource for UnaryTurnSource {
                                     content: &resp.choice,
                                     usage: resp.usage,
                                     identity: &identity,
+                                    response_headers: &resp.provider_response_headers,
                                     finish_reason: attempt_finish_reason.as_ref(),
                                     max_tokens: attempt_max_tokens,
                                     raw: &resp.raw,

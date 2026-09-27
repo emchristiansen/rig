@@ -646,3 +646,45 @@ fn every_prompt_format_refuses_namespaced_and_custom_calls() {
         }
     }
 }
+
+#[test]
+fn opaque_responses_parts_are_refused_before_request_content_is_discarded() {
+    use rig_core::message::{AssistantContent, Message, Reasoning, ReasoningContent};
+    let raw = serde_json::json!({"type":"future_part","payload":{"list":[1,2]}});
+    let opaque: AssistantContent =
+        rig_core::providers::openai::responses_api::AssistantContent::Unknown(raw.clone()).into();
+    for part in [
+        opaque,
+        AssistantContent::Reasoning(Reasoning {
+            id: None,
+            provider: Some("openai".into()),
+            content: vec![ReasoningContent::OpaqueSummary(raw.clone())],
+        }),
+        AssistantContent::Reasoning(Reasoning {
+            id: Some("rs_1".into()),
+            provider: Some("openai".into()),
+            content: vec![ReasoningContent::OpaqueContent(raw)],
+        }),
+    ] {
+        let history = vec![Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::text("known"), part],
+        }];
+        let request = request(history);
+        for protocol in [
+            ConversationProtocol::Llama3,
+            ConversationProtocol::SmolLm2,
+            ConversationProtocol::Qwen3,
+        ] {
+            let error = render_prompt(&request, protocol).expect_err("opaque content refused");
+            assert!(matches!(
+                error,
+                CandleError::UnrepresentableOpaqueContent(_)
+            ));
+            assert!(matches!(
+                rig_core::error::ProviderError::from(error),
+                rig_core::error::ProviderError::Request(_)
+            ));
+        }
+    }
+}

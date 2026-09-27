@@ -120,6 +120,7 @@ fn validate_protocol_inputs(
             }
             Message::Assistant { content, .. } => {
                 for item in content.iter() {
+                    rig_core::providers::internal::refuse_opaque_responses_part(item, CANDLE_WIRE)?;
                     match item {
                         AssistantContent::Text(text) => {
                             validate_protocol_text(&text.text, "assistant text", protocol)?;

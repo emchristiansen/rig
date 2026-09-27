@@ -84,6 +84,7 @@ fn fold(body: &str, mode: Mode) -> crate::completion::CompletionResponse {
             provider: "anthropic".to_owned(),
             raw: serde_json::from_str(body).unwrap_or(serde_json::Value::Null),
             provider_request_id: Some("req_REDACTED_1".to_owned()),
+            response_headers: Default::default(),
         },
     )
     .expect("the fold produces a response")

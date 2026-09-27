@@ -224,6 +224,7 @@ fn finish_unary(
     response.message_id = message_id.or(terminal.message_id.clone());
     response.response_id = terminal.response_id.clone();
     response.provider_request_id = terminal.provider_request_id.clone();
+    response.provider_response_headers = terminal.provider_response_headers.clone();
     response.model = terminal.model.clone();
     Ok(Outcome::Completion(response))
 }
@@ -314,6 +315,7 @@ pub(crate) fn events_from_response(
     terminal.message_id = response.message_id.clone();
     terminal.response_id = response.response_id.clone();
     terminal.provider_request_id = response.provider_request_id.clone();
+    terminal.provider_response_headers = response.provider_response_headers.clone();
     terminal.model = response.model.clone();
     out.final_record(terminal);
     // An item that failed to re-emit (an image that did not serialize) is

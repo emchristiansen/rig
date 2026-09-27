@@ -1049,6 +1049,7 @@ pub mod gemini_api_types {
         type Error = message::MessageError;
 
         fn try_from(content: message::AssistantContent) -> Result<Self, Self::Error> {
+            crate::providers::internal::refuse_opaque_responses_part(&content, GEMINI_WIRE)?;
             match content {
                 message::AssistantContent::Text(text) => {
                     // A signed answer part returns with its signature.

@@ -63,6 +63,9 @@ fn reasoning_texts(parts: &[AssistantContent]) -> Vec<String> {
             ReasoningContent::Text { text, .. } => text.clone(),
             ReasoningContent::Encrypted(data) => data.clone(),
             ReasoningContent::Redacted { data } => data.clone(),
+            ReasoningContent::OpaqueSummary(value) | ReasoningContent::OpaqueContent(value) => {
+                value.to_string()
+            }
         })
         .collect()
 }

@@ -398,6 +398,8 @@ fn rig_user_content_to_grpc_part(
 fn rig_assistant_content_to_grpc_part(
     content: message::AssistantContent,
 ) -> Result<proto::Part, ProviderError> {
+    rig_core::providers::internal::refuse_opaque_responses_part(&content, GEMINI_GRPC_WIRE)
+        .map_err(|error| ProviderError::Request(error.into()))?;
     match content {
         message::AssistantContent::Text(text) => Ok(proto::Part {
             thought_signature: decode_optional_base64(

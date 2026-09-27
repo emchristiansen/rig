@@ -134,7 +134,8 @@ impl Chat {
             Mode::Unary => Framing::Whole,
         };
         Ok(Encoded::new(request, framing)
-            .with_request_id_header(self.provider.dialect.request_id_header))
+            .with_request_id_header(self.provider.dialect.request_id_header)
+            .with_captured_response_headers(self.provider.dialect.response_header_prefix))
     }
 
     /// The wire for `model` on `provider`, with every option off.
@@ -752,6 +753,10 @@ fn refuse_file_ids(request: &CompletionRequest) -> Result<(), EncodeError> {
 impl Wire for Chat {
     type Op = crate::operation::Completion;
     type Decoder = ChatDecoder;
+
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.provider.credential_stamp()
+    }
 
     fn name(&self) -> &str {
         self.provider.dialect.name

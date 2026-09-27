@@ -355,6 +355,10 @@ impl TryFrom<message::Message> for Vec<Message> {
                 let mut tool_calls = vec![];
 
                 for content in content.into_iter() {
+                    crate::providers::internal::refuse_opaque_responses_part(
+                        &content,
+                        COHERE_CHAT_WIRE,
+                    )?;
                     match content {
                         message::AssistantContent::Text(message::Text { text, .. }) => {
                             text_content.push(AssistantContent::Text { text });

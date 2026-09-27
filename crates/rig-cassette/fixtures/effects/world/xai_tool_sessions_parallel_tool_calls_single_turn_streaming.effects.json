@@ -2,27 +2,11 @@
   "header": {
     "deliveries": [
       {
-        "batch": 10,
-        "id": 0,
-        "kind": {
-          "delivery": "stream",
-          "items": 2
-        }
-      },
-      {
-        "batch": 11,
-        "id": 0,
-        "kind": {
-          "delivery": "stream",
-          "items": 3
-        }
-      },
-      {
         "batch": 13,
         "id": 0,
         "kind": {
           "delivery": "stream",
-          "items": 1
+          "items": 2
         }
       },
       {
@@ -30,7 +14,7 @@
         "id": 0,
         "kind": {
           "delivery": "stream",
-          "items": 2
+          "items": 1
         }
       },
       {
@@ -38,7 +22,7 @@
         "id": 0,
         "kind": {
           "delivery": "stream",
-          "items": 2
+          "items": 1
         }
       },
       {
@@ -46,96 +30,80 @@
         "id": 0,
         "kind": {
           "delivery": "stream",
-          "items": 2
+          "items": 1
         }
       },
       {
-        "batch": 17,
+        "batch": 20,
         "id": 0,
-        "kind": {
-          "delivery": "stream",
-          "items": 1
-        }
-      },
-      {
-        "batch": 18,
-        "id": 0,
-        "kind": {
-          "delivery": "stream",
-          "items": 1
-        }
-      },
-      {
-        "batch": 21,
-        "id": 0,
-        "kind": {
-          "delivery": "stream",
-          "items": 1
-        }
-      },
-      {
-        "batch": 21,
-        "id": 0,
-        "kind": {
-          "delivery": "outcome"
-        }
-      },
-      {
-        "batch": 22,
-        "id": 1,
-        "kind": {
-          "delivery": "outcome"
-        }
-      },
-      {
-        "batch": 23,
-        "id": 2,
-        "kind": {
-          "delivery": "outcome"
-        }
-      },
-      {
-        "batch": 32,
-        "id": 3,
-        "kind": {
-          "delivery": "stream",
-          "items": 2
-        }
-      },
-      {
-        "batch": 33,
-        "id": 3,
-        "kind": {
-          "delivery": "stream",
-          "items": 2
-        }
-      },
-      {
-        "batch": 34,
-        "id": 3,
-        "kind": {
-          "delivery": "stream",
-          "items": 1
-        }
-      },
-      {
-        "batch": 37,
-        "id": 3,
-        "kind": {
-          "delivery": "stream",
-          "items": 1
-        }
-      },
-      {
-        "batch": 38,
-        "id": 3,
         "kind": {
           "delivery": "stream",
           "items": 3
         }
       },
       {
-        "batch": 39,
+        "batch": 21,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 22,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 23,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 24,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 29,
+        "id": 0,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 29,
+        "id": 0,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 30,
+        "id": 1,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 31,
+        "id": 2,
+        "kind": {
+          "delivery": "outcome"
+        }
+      },
+      {
+        "batch": 115,
         "id": 3,
         "kind": {
           "delivery": "stream",
@@ -143,7 +111,31 @@
         }
       },
       {
-        "batch": 40,
+        "batch": 116,
+        "id": 3,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 117,
+        "id": 3,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 118,
+        "id": 3,
+        "kind": {
+          "delivery": "stream",
+          "items": 1
+        }
+      },
+      {
+        "batch": 123,
         "id": 3,
         "kind": {
           "delivery": "stream",
@@ -151,7 +143,15 @@
         }
       },
       {
-        "batch": 41,
+        "batch": 124,
+        "id": 3,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 125,
         "id": 3,
         "kind": {
           "delivery": "stream",
@@ -159,7 +159,15 @@
         }
       },
       {
-        "batch": 42,
+        "batch": 126,
+        "id": 3,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 127,
         "id": 3,
         "kind": {
           "delivery": "stream",
@@ -167,7 +175,7 @@
         }
       },
       {
-        "batch": 43,
+        "batch": 128,
         "id": 3,
         "kind": {
           "delivery": "stream",
@@ -175,7 +183,15 @@
         }
       },
       {
-        "batch": 44,
+        "batch": 129,
+        "id": 3,
+        "kind": {
+          "delivery": "stream",
+          "items": 2
+        }
+      },
+      {
+        "batch": 130,
         "id": 3,
         "kind": {
           "delivery": "stream",
@@ -183,7 +199,7 @@
         }
       },
       {
-        "batch": 45,
+        "batch": 131,
         "id": 3,
         "kind": {
           "delivery": "stream",
@@ -191,7 +207,7 @@
         }
       },
       {
-        "batch": 46,
+        "batch": 133,
         "id": 3,
         "kind": {
           "delivery": "stream",
@@ -199,23 +215,15 @@
         }
       },
       {
-        "batch": 59,
+        "batch": 137,
         "id": 3,
         "kind": {
           "delivery": "stream",
-          "items": 1
+          "items": 2
         }
       },
       {
-        "batch": 73,
-        "id": 3,
-        "kind": {
-          "delivery": "stream",
-          "items": 1
-        }
-      },
-      {
-        "batch": 73,
+        "batch": 137,
         "id": 3,
         "kind": {
           "delivery": "outcome"
@@ -460,33 +468,6 @@
           }
         },
         {
-          "event": "block_end",
-          "id": "wire:rs_e5ce863f-4d6c-9a7a-bb96-3628f1b6c113",
-          "end": {
-            "close": "reasoning",
-            "reasoning": {
-              "id": "rs_e5ce863f-4d6c-9a7a-bb96-3628f1b6c113",
-              "content": [
-                {
-                  "type": "summary",
-                  "content": "I will call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering."
-                }
-              ]
-            },
-            "wire_sent": true
-          },
-          "block": {
-            "type": "reasoning",
-            "id": "rs_e5ce863f-4d6c-9a7a-bb96-3628f1b6c113",
-            "content": [
-              {
-                "type": "summary",
-                "content": "I will call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering."
-              }
-            ]
-          }
-        },
-        {
           "event": "block_start",
           "id": "wire:fc_e5ce863f-4d6c-9a7a-bb96-3628f1b6c113_0",
           "kind": {
@@ -588,6 +569,33 @@
             },
             "signature": null,
             "additional_params": null
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:rs_e5ce863f-4d6c-9a7a-bb96-3628f1b6c113",
+          "end": {
+            "close": "reasoning",
+            "reasoning": {
+              "id": "rs_e5ce863f-4d6c-9a7a-bb96-3628f1b6c113",
+              "content": [
+                {
+                  "type": "summary",
+                  "content": "I will call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering."
+                }
+              ]
+            },
+            "wire_sent": true
+          },
+          "block": {
+            "type": "reasoning",
+            "id": "rs_e5ce863f-4d6c-9a7a-bb96-3628f1b6c113",
+            "content": [
+              {
+                "type": "summary",
+                "content": "I will call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering."
+              }
+            ]
           }
         },
         {
@@ -925,33 +933,6 @@
           }
         },
         {
-          "event": "block_end",
-          "id": "wire:rs_fe602993-cc54-916d-8917-e2d32b577a49",
-          "end": {
-            "close": "reasoning",
-            "reasoning": {
-              "id": "rs_fe602993-cc54-916d-8917-e2d32b577a49",
-              "content": [
-                {
-                  "type": "summary",
-                  "content": "I will call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering."
-                }
-              ]
-            },
-            "wire_sent": true
-          },
-          "block": {
-            "type": "reasoning",
-            "id": "rs_fe602993-cc54-916d-8917-e2d32b577a49",
-            "content": [
-              {
-                "type": "summary",
-                "content": "I will call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering."
-              }
-            ]
-          }
-        },
-        {
           "event": "block_start",
           "id": "wire:msg_fe602993-cc54-916d-8917-e2d32b577a49",
           "kind": {
@@ -1059,6 +1040,33 @@
           "id": "wire:msg_fe602993-cc54-916d-8917-e2d32b577a49",
           "kind": {
             "kind": "message"
+          }
+        },
+        {
+          "event": "block_end",
+          "id": "wire:rs_fe602993-cc54-916d-8917-e2d32b577a49",
+          "end": {
+            "close": "reasoning",
+            "reasoning": {
+              "id": "rs_fe602993-cc54-916d-8917-e2d32b577a49",
+              "content": [
+                {
+                  "type": "summary",
+                  "content": "I will call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering."
+                }
+              ]
+            },
+            "wire_sent": true
+          },
+          "block": {
+            "type": "reasoning",
+            "id": "rs_fe602993-cc54-916d-8917-e2d32b577a49",
+            "content": [
+              {
+                "type": "summary",
+                "content": "I will call `lookup_harbor_label` and `lookup_orchard_label` exactly once each before answering."
+              }
+            ]
           }
         },
         {

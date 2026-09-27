@@ -1,7 +1,8 @@
 //! Debug-mode boundary validation over raw adapter output.
 //!
-//! Minted reasoning blocks must close before text or tool content. Wire-keyed
-//! reasoning and already-closed whole blocks are exempt. No intra-batch ordering
+//! Boundary-less minted reasoning blocks must close before text or tool content.
+//! Wire-keyed reasoning, decoder-declared indexed assemblies and already-closed
+//! whole blocks are exempt. No intra-batch ordering
 //! is enforced. Violations log event names without payloads and panic only under
 //! `cfg(test)` or the `test-utils` feature.
 
@@ -70,7 +71,7 @@ impl SequenceLaws {
                 | StreamEvent::BlockDelta {
                     id,
                     delta: Delta::Reasoning { .. },
-                } if id.is_minted() => {
+                } if id.is_minted() && !batch.is_indexed_reasoning(id) => {
                     self.open_minted_reasoning.insert(id.clone());
                 }
                 // Whole encrypted blocks may close without opening a tracked key.

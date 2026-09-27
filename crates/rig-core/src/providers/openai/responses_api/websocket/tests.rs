@@ -199,6 +199,9 @@ fn websocket_error_event_preserves_provider_payload_as_json() {
             message: Some("slow down".to_string()),
             extra,
         },
+        status: None,
+        headers: None,
+        extra: Map::new(),
     };
 
     let err = provider_error_from_event(&event);
@@ -213,6 +216,168 @@ fn websocket_error_event_preserves_provider_payload_as_json() {
     assert_eq!(json["error"]["code"], "rate_limit_exceeded");
     assert_eq!(json["error"]["message"], "slow down");
     assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+/// The Codex backend's wrapped failure: a top-level `status`, the `error`
+/// object, and a `headers` map carrying `x-codex-*` rate-limit values. The
+/// event decodes whole, and the error it raises carries that status and those
+/// headers, so it classifies as the same failure over HTTP would.
+#[test]
+fn a_codex_wrapped_error_event_keeps_its_status_and_headers() {
+    let payload = json!({
+        "type": "error",
+        "status": 429,
+        "error": {
+            "type": "usage_limit_reached",
+            "message": "The usage limit has been reached",
+            "resets_at": 1738888888
+        },
+        "headers": {
+            "x-codex-primary-used-percent": "100.0",
+            "x-codex-primary-window-minutes": 15
+        }
+    })
+    .to_string();
+    let Some(ResponsesWebSocketEvent::Error(event)) =
+        parse_server_event(&payload).expect("the event parses")
+    else {
+        panic!("a wrapped error decodes as an error event");
+    };
+    assert_eq!(event.status, Some(429));
+
+    let err = provider_error_from_event(&event);
+    assert_eq!(
+        err.provider_response_status(),
+        Some(StatusCode::TOO_MANY_REQUESTS)
+    );
+    let headers = err
+        .provider_response_headers()
+        .expect("the event's headers are attached");
+    assert_eq!(headers["x-codex-primary-used-percent"], "100.0");
+    assert_eq!(headers["x-codex-primary-window-minutes"], "15");
+    let body = err
+        .provider_response_json()
+        .expect("preserved body should be valid JSON")
+        .expect("provider response body should be present");
+    assert_eq!(body["status"], 429);
+    assert_eq!(body["error"]["type"], "usage_limit_reached");
+    assert_eq!(body["error"]["resets_at"], 1738888888);
+    assert_eq!(body["headers"]["x-codex-primary-window-minutes"], 15);
+}
+
+/// A header the typed map cannot carry, a name with a space or a value with
+/// a control character, is left out of the error's headers but kept in the
+/// preserved body, which carries the whole event.
+#[test]
+fn an_error_event_header_no_header_map_can_carry_stays_in_the_body_only() {
+    let payload = json!({
+        "type": "error",
+        "status": 429,
+        "headers": {
+            "not a header name": "kept-in-body",
+            "x-control-value": "line\nbreak",
+            "x-codex-primary-used-percent": "100.0"
+        }
+    })
+    .to_string();
+    let Some(ResponsesWebSocketEvent::Error(event)) =
+        parse_server_event(&payload).expect("the event parses")
+    else {
+        panic!("a wrapped error decodes as an error event");
+    };
+    let err = provider_error_from_event(&event);
+    let headers = err
+        .provider_response_headers()
+        .expect("the event's headers are attached");
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers["x-codex-primary-used-percent"], "100.0");
+    let body = err
+        .provider_response_json()
+        .expect("preserved body should be valid JSON")
+        .expect("provider response body should be present");
+    assert_eq!(body["headers"]["not a header name"], "kept-in-body");
+    assert_eq!(body["headers"]["x-control-value"], "line\nbreak");
+}
+
+/// A reported status that no HTTP status can be is a malformed known field:
+/// the event is refused with a typed decode error rather than read as an
+/// error without a status.
+#[test]
+fn an_error_event_with_an_impossible_status_is_refused() {
+    for (field, status) in [("status", 0), ("status", 1000), ("status_code", 42)] {
+        let payload = json!({"type": "error", field: status}).to_string();
+        let error = parse_server_event(&payload).expect_err("not an HTTP status");
+        assert!(
+            error.to_string().contains("is not an HTTP status"),
+            "{field}={status}: {error}"
+        );
+    }
+    let payload = json!({"type": "error", "status": null}).to_string();
+    let Some(ResponsesWebSocketEvent::Error(event)) =
+        parse_server_event(&payload).expect("a null status is no status")
+    else {
+        panic!("an error event with a null status decodes");
+    };
+    assert_eq!(event.status, None);
+}
+
+/// The `status_code` spelling is read as the status, an event without an
+/// `error` object still decodes, and unmodelled top-level fields are kept
+/// rather than dropped.
+#[test]
+fn an_error_event_without_an_error_object_decodes_and_keeps_its_fields() {
+    let payload = json!({
+        "type": "error",
+        "status_code": 503,
+        "request_id": "req_1"
+    })
+    .to_string();
+    let Some(ResponsesWebSocketEvent::Error(event)) =
+        parse_server_event(&payload).expect("the event parses")
+    else {
+        panic!("an error event without an error object still decodes");
+    };
+    assert_eq!(event.status, Some(503));
+    assert!(event.error.is_empty());
+    assert_eq!(event.extra["request_id"], "req_1");
+    let body = provider_error_from_event(&event)
+        .provider_response_json()
+        .expect("preserved body should be valid JSON")
+        .expect("provider response body should be present");
+    assert_eq!(
+        body,
+        json!({"type": "error", "status": 503, "request_id": "req_1"})
+    );
+}
+
+/// An explicit `"error": null` decodes as an empty payload, exactly as a
+/// missing `error` does, so a wrapped error event is never lost to a decode
+/// failure.
+#[test]
+fn an_error_event_with_a_null_error_decodes_as_an_empty_payload() {
+    let payload = json!({ "type": "error", "status": 429, "error": null }).to_string();
+    let Some(ResponsesWebSocketEvent::Error(event)) =
+        parse_server_event(&payload).expect("the event parses")
+    else {
+        panic!("an error event with a null error still decodes");
+    };
+    assert_eq!(event.status, Some(429));
+    assert!(event.error.is_empty());
+    assert!(
+        event.extra.is_empty(),
+        "the null error is not kept as an extra"
+    );
+}
+
+/// The flattened `extra` cannot swallow the tag: an event whose `type` is not
+/// `error` does not decode as an error event.
+#[test]
+fn an_event_with_another_type_does_not_decode_as_an_error_event() {
+    let decoded = serde_json::from_value::<ResponsesWebSocketErrorEvent>(json!({
+        "type": "response.completed",
+        "status": 429,
+    }));
+    assert!(decoded.is_err(), "the tag is still checked: {decoded:?}");
 }
 
 fn sample_response(status: ResponseStatus) -> CompletionResponse {
@@ -306,6 +471,108 @@ fn parse_done_event_exposes_response_id() {
     ));
     assert_eq!(event.response_id(), Some("resp_done_1"));
     assert!(event.is_terminal());
+}
+
+#[test]
+fn done_response_keeps_valid_sparse_subsets_and_open_metadata() {
+    let fields = [
+        ("object", json!("response")),
+        ("created_at", json!(0)),
+        ("model", json!("gpt-test")),
+    ];
+    for mask in 0..8 {
+        let mut raw = json!({
+            "id":"resp_sparse", "status":"future_status",
+            "reasoning":42, "parallel_tool_calls":"future metadata",
+            "future":{"nested":[1, null, "kept"]}
+        });
+        for (index, (key, value)) in fields.iter().enumerate() {
+            if mask & (1 << index) != 0 {
+                raw[*key] = value.clone();
+            }
+        }
+        let response: ResponsesWebSocketDoneResponse =
+            serde_json::from_value(raw.clone()).expect("valid sparse subsets decode");
+        assert_eq!(response.id(), "resp_sparse");
+        assert_eq!(
+            response.status(),
+            &ResponseStatus::Other("future_status".into())
+        );
+        assert_eq!(response.full.is_some(), mask == 7);
+        assert_eq!(
+            serde_json::to_value(response).expect("raw map serializes"),
+            raw
+        );
+    }
+}
+
+#[test]
+fn done_response_rejects_malformed_present_structural_fields() {
+    for raw in [
+        json!(null),
+        json!(42),
+        json!([]),
+        json!({}),
+        json!({"id":"r"}),
+        json!({"status":"completed"}),
+    ] {
+        assert!(serde_json::from_value::<ResponsesWebSocketDoneResponse>(raw).is_err());
+    }
+    let invalid = [
+        ("id", json!(null)),
+        ("status", json!(42)),
+        ("object", json!(null)),
+        ("object", json!("not_response")),
+        ("created_at", json!(null)),
+        ("created_at", json!(-1)),
+        ("model", json!(null)),
+        ("model", json!(42)),
+        ("output", json!(null)),
+        ("output", json!([{"type":"message","content":42}])),
+        ("tools", json!(42)),
+        ("usage", json!({})),
+        ("error", json!({"message":42})),
+        ("incomplete_details", json!({"reason":42})),
+        ("instructions", json!([])),
+        ("max_output_tokens", json!(-1)),
+    ];
+    for (field, value) in invalid {
+        for full in [false, true] {
+            let mut raw = if full {
+                json!({"id":"r","status":"completed","object":"response","created_at":0,"model":"gpt-test"})
+            } else {
+                json!({"id":"r","status":"completed"})
+            };
+            raw[field] = value.clone();
+            assert!(
+                serde_json::from_value::<ResponsesWebSocketDoneResponse>(raw.clone()).is_err(),
+                "malformed field must not become a sparse success: {raw}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn malformed_done_does_not_settle_a_successful_response() {
+    let script = Script::new().turn([json!({
+        "type":"response.done", "response":{"id":"bad_tip","status":"completed","output":42}
+    })
+    .to_string()]);
+    let mut session = session_over(&script);
+    session
+        .send(user_request("hello"))
+        .await
+        .expect("request sends");
+    assert!(session.next_event().await.is_err());
+    assert_eq!(session.previous_response_id(), None);
+    assert!(session.continuation().is_err());
+    assert!(session.send(user_request("again")).await.is_err());
+}
+
+#[test]
+fn known_websocket_event_cannot_decode_as_a_whole_response() {
+    let payload = json!({"type":"response.completed","id":"r","object":"response","created_at":0,"status":"completed","model":"gpt-test"});
+    assert!(parse_server_event(&payload.to_string()).is_err());
 }
 
 #[test]
@@ -478,7 +745,7 @@ fn terminal_response_requires_completed_status() {
 fn terminal_failed_response_with_error_preserves_raw_payload() {
     let mut response = sample_response(ResponseStatus::Failed);
     response.error = Some(ResponseError {
-        code: "server_error".to_string(),
+        code: Some("server_error".to_string()),
         message: "the model failed to generate a response".to_string(),
     });
 
@@ -1058,4 +1325,112 @@ async fn a_declared_tool_reaches_the_response_create_frame_as_written() {
         untouched, expected,
         "every other declared member is as written"
     );
+}
+
+// --- credential source on the ordinary Responses websocket -----------------
+
+/// A websocket backend recording each handshake it is asked to open.
+#[derive(Clone, Default)]
+struct HandshakeRecorder {
+    handshakes: std::sync::Arc<std::sync::Mutex<Vec<HeaderMap>>>,
+}
+
+impl crate::ws_client::WebSocketClientExt for HandshakeRecorder {
+    fn connect(
+        &self,
+        request: crate::http_client::Request<crate::http_client::NoBody>,
+        _options: crate::ws_client::ConnectOptions,
+    ) -> impl std::future::Future<
+        Output = crate::http_client::Result<crate::ws_client::BoxedWebSocketConnection>,
+    > + crate::wasm_compat::WasmCompatSend {
+        self.handshakes
+            .lock()
+            .expect("unpoisoned")
+            .push(request.headers().clone());
+        let connection = Script::new().connection();
+        async move { Ok(connection) }
+    }
+}
+
+/// A source counting its reads, supplying `source-token-<n>` and no account,
+/// or failing when `fails`.
+#[derive(Clone, Default)]
+struct CountingSource {
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fails: bool,
+}
+
+impl crate::wire::CredentialSource for CountingSource {
+    fn current(
+        &self,
+    ) -> crate::wasm_compat::WasmBoxedFuture<
+        '_,
+        Result<crate::wire::Credential, crate::wire::CredentialSourceError>,
+    > {
+        let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let fails = self.fails;
+        Box::pin(async move {
+            if fails {
+                Err("the token owner is offline".into())
+            } else {
+                Ok(crate::wire::Credential::new(format!("source-token-{read}")))
+            }
+        })
+    }
+}
+
+fn wire_with_source(source: CountingSource) -> Responses {
+    OpenAI::new("static-key")
+        .with_account_id("static-account")
+        .with_credential_source(source)
+        .responses("gpt-5.4")
+}
+
+/// The ordinary Responses websocket reads the source once per connect and
+/// opens with what it supplied, in place of the static key and account.
+#[tokio::test]
+async fn an_ordinary_websocket_connect_reads_the_credential_source_once() {
+    let source = CountingSource::default();
+    let backend = HandshakeRecorder::default();
+    for _ in 0..2 {
+        ResponsesWebSocketSessionBuilder::new(wire_with_source(source.clone()))
+            .connect_with(&backend)
+            .await
+            .expect("the scripted connection opens");
+    }
+
+    assert_eq!(source.reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let handshakes = backend.handshakes.lock().expect("unpoisoned").clone();
+    for (index, handshake) in handshakes.iter().enumerate() {
+        assert_eq!(
+            handshake["authorization"],
+            format!("Bearer source-token-{}", index + 1).as_str()
+        );
+        assert!(
+            handshake.get("chatgpt-account-id").is_none(),
+            "the source names no account, so the static one is not sent"
+        );
+    }
+}
+
+/// A source that fails refuses the connect by name, and the backend is never
+/// asked to open anything.
+#[tokio::test]
+async fn a_failing_credential_source_refuses_an_ordinary_websocket_connect() {
+    let backend = HandshakeRecorder::default();
+    let result = ResponsesWebSocketSessionBuilder::new(wire_with_source(CountingSource {
+        fails: true,
+        ..CountingSource::default()
+    }))
+    .connect_with(&backend)
+    .await;
+    let Err(ProviderError::Request(inner)) = result else {
+        panic!("expected a request refusal");
+    };
+    assert!(
+        inner
+            .downcast_ref::<crate::wire::CredentialUnavailable>()
+            .is_some()
+    );
+    assert!(backend.handshakes.lock().expect("unpoisoned").is_empty());
 }
