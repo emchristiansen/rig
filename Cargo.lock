@@ -10848,6 +10848,7 @@ dependencies = [
  "rig-typesafeai",
  "rig-vectorize",
  "rig-vertexai",
+ "rig-webrtc",
  "rmcp",
  "schemars 1.2.1",
  "serde",
@@ -11480,7 +11481,18 @@ dependencies = [
 name = "rig-webrtc"
 version = "0.42.0"
 dependencies = [
+ "anyhow",
+ "bytes",
+ "fastrand",
+ "futures",
+ "rig-core",
+ "rig-reqwest",
+ "rig-tungstenite",
  "rtc",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
  "webrtc",
 ]
 

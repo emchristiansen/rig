@@ -3,7 +3,8 @@
 //! Use an exchanged access token from the environment, or sign in through [`auth`]
 //! and pass the resolved token to [`OpenAI::with_key`](crate::providers::openai::OpenAI::with_key).
 //! Every request carries the caller's exact identity, which the caller
-//! supplies: the dialect has none of its own.
+//! supplies: the dialect has none of its own. [`realtime`] creates GPT-Live
+//! calls over the same subscription.
 //!
 //! ```no_run
 //! use rig_core::providers::chatgpt;
