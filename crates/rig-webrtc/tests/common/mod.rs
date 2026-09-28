@@ -201,3 +201,17 @@ pub async fn answer(offer: String) -> AnsweringPeer {
         answer,
     }
 }
+
+/// Install aws-lc-rs as the process-wide rustls provider, once.
+///
+/// The test binaries link rustls with both aws-lc-rs (through reqwest's
+/// `rustls` feature) and ring (through the WebRTC stack), so rustls cannot pick
+/// a default and panics the first time a websocket starts TLS. aws-lc-rs is the
+/// provider the HTTPS client already uses, so both TLS paths share one.
+pub fn install_crypto_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        // Another test in the same binary may have installed it first.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}

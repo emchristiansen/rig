@@ -11,6 +11,8 @@
 #![cfg(not(target_family = "wasm"))]
 #![allow(clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::time::{Duration, Instant};
 
 use rig_core::providers::chatgpt::{self, realtime};
@@ -32,6 +34,7 @@ async fn a_live_call_starts_reports_usage_and_closes() {
         eprintln!("skipped: RIG_LIVE_ONE_LIVE is not 1");
         return;
     }
+    common::install_crypto_provider();
     let seconds: u64 = std::env::var("RIG_LIVE_ONE_SECONDS")
         .ok()
         .map(|value| value.parse().expect("RIG_LIVE_ONE_SECONDS is a number"))
@@ -50,7 +53,7 @@ async fn a_live_call_starts_reports_usage_and_closes() {
 
     let peer = LivePeer::builder().build().await.expect("the peer builds");
     let offer = peer.offer().await.expect("an offer");
-    let call = calls
+    let created = calls
         .create_call(
             &rig_reqwest::ReqwestClient::default(),
             &offer,
@@ -58,18 +61,30 @@ async fn a_live_call_starts_reports_usage_and_closes() {
                 "You are a brief test companion. Say nothing unless asked.",
             ),
         )
-        .await
-        .expect("the call is created");
-    peer.apply_answer(call.answer_sdp.clone())
-        .await
-        .expect("the peer connects");
-    let mut control = calls
+        .await;
+    match &created {
+        Ok(call) => eprintln!(
+            "live call created: call id {}, answer SDP {} bytes",
+            call.call_id,
+            call.answer_sdp.len()
+        ),
+        Err(error) => eprintln!("live call creation failed: {error:?}"),
+    }
+    let call = created.expect("the call is created");
+    let applied = peer.apply_answer(call.answer_sdp.clone()).await;
+    eprintln!("live peer answer applied: {applied:?}");
+    applied.expect("the peer connects");
+    let control = calls
         .connect_control(
             &rig_tungstenite::TungsteniteClient::new(),
             call.call_id.clone(),
         )
-        .await
-        .expect("the control socket opens");
+        .await;
+    match &control {
+        Ok(_) => eprintln!("live control socket opened"),
+        Err(error) => eprintln!("live control socket failed: {error:?}"),
+    }
+    let mut control = control.expect("the control socket opens");
 
     let silence = tokio::spawn(async move {
         let deadline = Instant::now() + Duration::from_secs(seconds);
