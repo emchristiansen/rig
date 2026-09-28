@@ -44,11 +44,10 @@ pub use call::{CallId, InvalidCallId, LiveCalls, NotTheCodexBackend, RealtimeCal
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
 pub use control::ControlSocket;
 pub use events::{
-    ClientEvent, ContextChannel, ContextChunk, ContextPart, DelegationContextAppended,
-    DelegationCreated, DelegationItem, ErrorDetail, ErrorEvent, InputAudioAppend,
-    OutputAudioDelta, Role, ServerEvent, SessionStarted, StartedSession, TranscriptAdded,
-    TranscriptItem, Turn, TurnDelta, TurnEvent, UnknownEvent, Usage, UsageLimit, UsageUpdated,
-    context_chunks,
+    ClientEvent, ContentPart, ContextChannel, ContextChunk, DelegationContextAppended,
+    DelegationCreated, DelegationItem, ErrorDetail, ErrorEvent, InputAudioAppend, OutputAudioDelta,
+    Role, ServerEvent, SessionStarted, StartedSession, TranscriptAdded, TranscriptItem, Turn,
+    TurnDelta, TurnEvent, UnknownEvent, Usage, UsageLimit, UsageUpdated, context_chunks,
 };
 pub use session::{InitialItem, SessionConfig, Voice};
 

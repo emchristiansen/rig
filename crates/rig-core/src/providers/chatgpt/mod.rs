@@ -21,6 +21,7 @@
 //! ```
 
 pub mod auth;
+pub mod realtime;
 
 /// The Codex Responses websocket session adapter, re-exported under the
 /// ChatGPT provider's websocket path. The session itself lives with the

@@ -59,7 +59,7 @@ impl ServerEvent {
                 error,
             ))
         };
-        let mut object: Map<String, Value> =
+        let object: Map<String, Value> =
             serde_json::from_str(payload).map_err(|error| corrupt(None, error))?;
         let Some(Value::String(kind)) = object.get("type") else {
             return Err(corrupt(
@@ -545,12 +545,12 @@ impl Serialize for ClientEvent {
             #[serde(rename = "session.close")]
             SessionClose,
         }
-        let content = |text: &'_ ContextChunk| {
+        fn content(text: &ContextChunk) -> [InputText<'_>; 1] {
             [InputText {
                 kind: "input_text",
                 text: text.as_str(),
             }]
-        };
+        }
         match self {
             Self::DelegationContextAppend {
                 delegation_item_id,
