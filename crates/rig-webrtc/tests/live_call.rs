@@ -83,6 +83,7 @@ async fn a_live_call_starts_reports_usage_and_closes() {
         peer
     });
 
+    let opened = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let mut started = None;
     let mut usage = None;
@@ -91,7 +92,16 @@ async fn a_live_call_starts_reports_usage_and_closes() {
         let Ok(event) = tokio::time::timeout(remaining, control.next_event()).await else {
             break;
         };
-        match event.expect("the control socket reads") {
+        let event = event.expect("the control socket reads");
+        eprintln!(
+            "live event at {:?}: {}",
+            opened.elapsed(),
+            match &event {
+                Some(event) => format!("{event:?}").chars().take(160).collect::<String>(),
+                None => "control socket closed".to_string(),
+            }
+        );
+        match event {
             Some(realtime::ServerEvent::SessionStarted(event)) => started = Some(event.session.id),
             Some(realtime::ServerEvent::UsageUpdated(event)) => {
                 usage = Some(event.usage.audio_duration_ms)
@@ -106,6 +116,7 @@ async fn a_live_call_starts_reports_usage_and_closes() {
     }
     control.close().await.expect("the session closes");
     let peer = silence.await.expect("the sender stops");
+    eprintln!("live peer after {:?}: {peer:?}", opened.elapsed());
     peer.close().await.expect("the peer closes");
 
     assert_eq!(started.as_deref(), Some(call.call_id.as_str()));
