@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::call::{CallId, LiveCalls, reply_error};
 use super::{ClientEvent, ContextChannel, ServerEvent};
-use crate::error::ProviderError;
+use crate::error::{CorruptFrame, ProviderError};
 use crate::ws_client::{
     BoxedWebSocketConnection, ConnectOptions, Frame, WebSocketClientExt, WebSocketConnection,
 };
@@ -21,7 +21,16 @@ const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct ControlSocket {
     connection: BoxedWebSocketConnection,
     call_id: CallId,
-    closed: bool,
+    close: CloseProgress,
+}
+
+/// Which steps of [`ControlSocket::close`] have completed. Each flag is set
+/// only after its step returned `Ok`, so an error or a dropped future leaves
+/// the step to be retried.
+#[derive(Clone, Copy, Debug, Default)]
+struct CloseProgress {
+    session_close_sent: bool,
+    transport_closed: bool,
 }
 
 impl LiveCalls {
@@ -63,7 +72,7 @@ impl ControlSocket {
         Self {
             connection,
             call_id,
-            closed: false,
+            close: CloseProgress::default(),
         }
     }
 
@@ -75,7 +84,8 @@ impl ControlSocket {
 
     /// The next server event. `Ok(None)` means the server ended the socket,
     /// with or without a close frame. Pings and pongs are skipped. A frame
-    /// that does not decode is [`ProviderError::CorruptFrame`].
+    /// that does not decode, including a binary frame that is not UTF-8, is
+    /// [`ProviderError::CorruptFrame`] carrying the frame as received.
     pub async fn next_event(&mut self) -> Result<Option<ServerEvent>, ProviderError> {
         loop {
             let frame = self
@@ -87,8 +97,12 @@ impl ControlSocket {
                 None | Some(Frame::Close(_)) => return Ok(None),
                 Some(Frame::Ping(_) | Frame::Pong(_)) => continue,
                 Some(Frame::Text(text)) => text,
-                Some(Frame::Binary(bytes)) => String::from_utf8(bytes.to_vec())
-                    .map_err(|error| ProviderError::Response(error.to_string()))?,
+                Some(Frame::Binary(bytes)) => {
+                    String::from_utf8(bytes.to_vec()).map_err(|error| {
+                        let reason = serde::de::Error::custom(error.utf8_error());
+                        ProviderError::CorruptFrame(CorruptFrame::bytes(error.into_bytes(), reason))
+                    })?
+                }
             };
             return ServerEvent::parse(&text).map(Some);
         }
@@ -133,17 +147,35 @@ impl ControlSocket {
     }
 
     /// End the session: send `session.close`, then complete the websocket
-    /// close handshake. A second call does nothing.
+    /// close handshake.
+    ///
+    /// The transport close is attempted even when sending `session.close`
+    /// fails, and the first error is returned. Each step counts as done only
+    /// once it returns `Ok`, so a call that failed or was dropped part way
+    /// can be retried and repeats only the unfinished steps. Once the
+    /// transport close has completed, further calls return `Ok(())` without
+    /// sending anything, even if `session.close` was never delivered.
     pub async fn close(&mut self) -> Result<(), ProviderError> {
-        if self.closed {
+        if self.close.transport_closed {
             return Ok(());
         }
-        self.closed = true;
-        self.send(&ClientEvent::SessionClose).await?;
-        self.connection
+        let sent = if self.close.session_close_sent {
+            Ok(())
+        } else {
+            self.send(&ClientEvent::SessionClose).await
+        };
+        if sent.is_ok() {
+            self.close.session_close_sent = true;
+        }
+        let closed = self
+            .connection
             .close(None)
             .await
-            .map_err(ProviderError::from_transport_error)
+            .map_err(ProviderError::from_transport_error);
+        if closed.is_ok() {
+            self.close.transport_closed = true;
+        }
+        sent.and(closed)
     }
 }
 
@@ -151,7 +183,8 @@ impl std::fmt::Debug for ControlSocket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControlSocket")
             .field("call_id", &self.call_id)
-            .field("closed", &self.closed)
+            .field("session_close_sent", &self.close.session_close_sent)
+            .field("transport_closed", &self.close.transport_closed)
             .finish_non_exhaustive()
     }
 }

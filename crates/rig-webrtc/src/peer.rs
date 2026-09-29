@@ -2,7 +2,9 @@
 //! they deliver.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -13,6 +15,7 @@ use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
@@ -30,8 +33,12 @@ use crate::{OPUS_CLOCK_RATE, OPUS_PAYLOAD_TYPE};
 /// The most remote candidates an answer may carry.
 const MAX_REMOTE_CANDIDATES: usize = 32;
 
-/// How many events wait for the caller before the peer's readers pause.
-const EVENT_QUEUE: usize = 256;
+/// How many events wait for the caller by default before new ones are
+/// dropped.
+const DEFAULT_EVENT_QUEUE: NonZeroUsize = match NonZeroUsize::new(256) {
+    Some(capacity) => capacity,
+    None => NonZeroUsize::MIN,
+};
 
 /// A peer failure.
 #[derive(Debug, thiserror::Error)]
@@ -54,6 +61,9 @@ pub enum PeerError {
     /// The peer has no local description after gathering.
     #[error("the peer has no local description")]
     MissingOffer,
+    /// The runtime shut down while the peer was being built.
+    #[error("the runtime shut down while the peer was being built")]
+    RuntimeShutDown,
 }
 
 /// One encoded Opus packet to send, and how much audio it holds.
@@ -89,6 +99,37 @@ pub struct ReceivedOpus {
     pub ssrc: u32,
 }
 
+/// How many events the peer dropped because its event queue was full, by
+/// kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LostEvents {
+    /// [`PeerEvent::Audio`] packets.
+    pub audio: u64,
+    /// [`PeerEvent::Text`] and [`PeerEvent::Binary`] data-channel messages.
+    pub messages: u64,
+    /// [`PeerEvent::ChannelOpen`], [`PeerEvent::ChannelClosed`] and
+    /// [`PeerEvent::Connection`] events.
+    pub lifecycle: u64,
+}
+
+impl LostEvents {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn count(&mut self, event: &PeerEvent) {
+        let counter = match event {
+            PeerEvent::Audio(_) => &mut self.audio,
+            PeerEvent::Text(_) | PeerEvent::Binary(_) => &mut self.messages,
+            PeerEvent::ChannelOpen | PeerEvent::ChannelClosed | PeerEvent::Connection(_) => {
+                &mut self.lifecycle
+            }
+            PeerEvent::Lost(_) => return,
+        };
+        *counter = counter.saturating_add(1);
+    }
+}
+
 /// Something the peer received or observed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PeerEvent {
@@ -100,10 +141,14 @@ pub enum PeerEvent {
     Binary(Bytes),
     /// The event data channel opened.
     ChannelOpen,
-    /// The event data channel closed.
+    /// The event data channel closed. Audio may still arrive; the event
+    /// stream ends only when the whole peer does.
     ChannelClosed,
     /// The peer connection changed state.
     Connection(RTCPeerConnectionState),
+    /// Events were dropped at this point in the stream because the queue was
+    /// full. The events before it and after it were delivered.
+    Lost(LostEvents),
 }
 
 /// Configures a [`LivePeer`].
@@ -113,6 +158,7 @@ pub struct LivePeerBuilder {
     tcp_addrs: Vec<String>,
     loopback_candidates: bool,
     timeout: Duration,
+    event_queue: NonZeroUsize,
 }
 
 impl Default for LivePeerBuilder {
@@ -122,6 +168,7 @@ impl Default for LivePeerBuilder {
             tcp_addrs: vec!["0.0.0.0:0".to_owned(), "[::]:0".to_owned()],
             loopback_candidates: false,
             timeout: Duration::from_secs(15),
+            event_queue: DEFAULT_EVENT_QUEUE,
         }
     }
 }
@@ -159,9 +206,29 @@ impl LivePeerBuilder {
         self
     }
 
+    /// Hold at most `capacity` undelivered events (256 by default). While
+    /// the queue is full, new events are dropped and reported as one
+    /// [`PeerEvent::Lost`].
+    #[must_use]
+    pub fn with_event_queue(mut self, capacity: NonZeroUsize) -> Self {
+        self.event_queue = capacity;
+        self
+    }
+
     /// Build the peer: its Opus track and its ordered event data channel.
     /// Needs a running tokio runtime.
+    ///
+    /// The construction runs as its own task, so dropping this future part
+    /// way still closes whatever connection it created.
     pub async fn build(self) -> Result<LivePeer, PeerError> {
+        match tokio::spawn(self.construct()).await {
+            Ok(built) => built,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => Err(PeerError::RuntimeShutDown),
+        }
+    }
+
+    async fn construct(self) -> Result<LivePeer, PeerError> {
         let ssrc = fastrand::u32(..);
         let codec = RTCRtpCodec {
             mime_type: "audio/opus".into(),
@@ -202,51 +269,49 @@ impl LivePeerBuilder {
         settings.set_ice_connection_attempts(Some(check_interval), Some(attempts));
         settings.set_include_loopback_candidate(self.loopback_candidates);
 
-        let (events, receiver) = mpsc::channel(EVENT_QUEUE);
+        let (sink, events) = event_queue(self.event_queue);
+        let ended = Arc::new(watch::Sender::new(false));
         let gathered = Arc::new(Notify::new());
-        let connection: Arc<dyn PeerConnection> = Arc::new(
-            PeerConnectionBuilder::new()
-                .with_media_engine(media)
-                .with_setting_engine(settings)
-                .with_handler(Arc::new(Handler {
-                    gathered: gathered.clone(),
-                    events: events.clone(),
-                }))
-                .with_udp_addrs(self.udp_addrs)
-                .with_tcp_addrs(self.tcp_addrs)
-                .build()
-                .await?,
-        );
-        let channel = match async {
-            connection.add_track(track.clone()).await?;
-            connection
-                .create_data_channel(
-                    EVENTS_DATA_CHANNEL,
-                    Some(RTCDataChannelInit {
-                        ordered: true,
-                        ..Default::default()
-                    }),
-                )
-                .await
-        }
-        .await
-        {
-            Ok(channel) => channel,
-            Err(error) => {
-                let _ = connection.close().await;
-                return Err(error.into());
-            }
+        let owner = ConnectionOwner {
+            connection: Arc::new(
+                PeerConnectionBuilder::new()
+                    .with_media_engine(media)
+                    .with_setting_engine(settings)
+                    .with_handler(Arc::new(Handler {
+                        gathered: gathered.clone(),
+                        events: sink.clone(),
+                        ended: ended.clone(),
+                    }))
+                    .with_udp_addrs(self.udp_addrs)
+                    .with_tcp_addrs(self.tcp_addrs)
+                    .build()
+                    .await?,
+            ),
+            runtime: tokio::runtime::Handle::current(),
+            ended,
+            closed: AtomicBool::new(false),
         };
+        owner.connection.add_track(track.clone()).await?;
+        let channel = owner
+            .connection
+            .create_data_channel(
+                EVENTS_DATA_CHANNEL,
+                Some(RTCDataChannelInit {
+                    ordered: true,
+                    ..Default::default()
+                }),
+            )
+            .await?;
         let (open_sender, open) = watch::channel(false);
-        let observer = tokio::spawn(observe_channel(channel.clone(), open_sender, events));
+        let observer = tokio::spawn(observe_channel(channel.clone(), open_sender, sink));
         Ok(LivePeer {
-            connection,
+            owner,
             track,
             ssrc,
             channel,
             gathered,
             open,
-            events: receiver,
+            events: tokio::sync::Mutex::new(events),
             observer,
             timeout: self.timeout,
         })
@@ -255,23 +320,29 @@ impl LivePeerBuilder {
 
 /// The offering WebRTC peer of one GPT-Live call.
 ///
-/// Send and receive may run concurrently: sending takes `&self`, and only
-/// [`Self::next_event`] takes `&mut self`.
+/// Every method takes `&self`, so one task can wait in [`Self::next_event`]
+/// while another sends, for example through an `Arc<LivePeer>` or
+/// `tokio::join!`. Concurrent [`Self::next_event`] calls take turns, and each
+/// event goes to one of them.
+///
+/// Dropping the peer without [`Self::close`] still closes the connection, in
+/// a task on the runtime that built it, which stops the WebRTC driver and
+/// releases its sockets.
 pub struct LivePeer {
-    connection: Arc<dyn PeerConnection>,
+    owner: ConnectionOwner,
     track: Arc<TrackLocalStaticSample>,
     ssrc: u32,
     channel: Arc<dyn DataChannel>,
     gathered: Arc<Notify>,
     open: watch::Receiver<bool>,
-    events: mpsc::Receiver<PeerEvent>,
+    events: tokio::sync::Mutex<EventQueue>,
     observer: JoinHandle<()>,
     timeout: Duration,
 }
 
 impl LivePeer {
     /// A builder with the defaults: every IPv4 and IPv6 interface for UDP and
-    /// TCP, no loopback candidates, a 15 second timeout.
+    /// TCP, no loopback candidates, a 15 second timeout, 256 queued events.
     #[must_use]
     pub fn builder() -> LivePeerBuilder {
         LivePeerBuilder::default()
@@ -280,11 +351,12 @@ impl LivePeer {
     /// Create the offer, wait until candidate gathering completes, and
     /// return the offer SDP with every candidate in it.
     pub async fn offer(&self) -> Result<String, PeerError> {
+        let connection = &self.owner.connection;
         tokio::time::timeout(self.timeout, async {
-            let offer = self.connection.create_offer(None).await?;
-            self.connection.set_local_description(offer).await?;
+            let offer = connection.create_offer(None).await?;
+            connection.set_local_description(offer).await?;
             self.gathered.notified().await;
-            self.connection
+            connection
                 .local_description()
                 .await
                 .map(|offer| offer.sdp)
@@ -303,10 +375,11 @@ impl LivePeer {
     pub async fn apply_answer(&self, sdp: String) -> Result<(), PeerError> {
         let answer = RTCSessionDescription::answer(sdp)?;
         let candidates = answer_candidates(&answer)?;
+        let connection = &self.owner.connection;
         tokio::time::timeout(self.timeout, async {
-            self.connection.set_remote_description(answer).await?;
+            connection.set_remote_description(answer).await?;
             for candidate in candidates {
-                self.connection.add_ice_candidate(candidate).await?;
+                connection.add_ice_candidate(candidate).await?;
             }
             self.open
                 .clone()
@@ -338,16 +411,53 @@ impl LivePeer {
         Ok(())
     }
 
-    /// The next event, in arrival order per source. `None` once the peer is
-    /// closed and every event has been taken.
-    pub async fn next_event(&mut self) -> Option<PeerEvent> {
-        self.events.recv().await
+    /// The next event, in arrival order per source.
+    ///
+    /// `None` once the peer has ended and every queued event has been
+    /// taken. The peer ends when [`Self::close`] completes or the connection
+    /// reaches [`RTCPeerConnectionState::Closed`] or
+    /// [`RTCPeerConnectionState::Failed`]; a closed data channel alone does
+    /// not end it. Cancel-safe: dropping the future loses no event.
+    pub async fn next_event(&self) -> Option<PeerEvent> {
+        let mut events = self.events.lock().await;
+        let mut ended = self.owner.ended.subscribe();
+        loop {
+            if *ended.borrow_and_update() {
+                events.receiver.close();
+            }
+            match events.take_ready() {
+                Ready::Event(event) => return Some(event),
+                Ready::Ended => return None,
+                Ready::Empty => {}
+            }
+            if events.receiver.is_closed() {
+                // Ended: only sends already under way can still arrive.
+                if let Some(event) = events.receiver.recv().await {
+                    return Some(event);
+                }
+                continue;
+            }
+            tokio::select! {
+                biased;
+                event = events.receiver.recv() => {
+                    if let Some(event) = event {
+                        return Some(event);
+                    }
+                }
+                _ = ended.wait_for(|ended| *ended) => {}
+            }
+        }
     }
 
-    /// Close the peer connection.
-    pub async fn close(self) -> Result<(), PeerError> {
+    /// Close the peer connection, which stops the WebRTC driver and releases
+    /// its sockets, and end the event stream once the queued events are
+    /// taken. A later call closes again, which the WebRTC stack treats as
+    /// done.
+    pub async fn close(&self) -> Result<(), PeerError> {
         self.observer.abort();
-        self.connection.close().await?;
+        self.owner.connection.close().await?;
+        self.owner.closed.store(true, Ordering::Release);
+        self.owner.ended.send_replace(true);
         Ok(())
     }
 }
@@ -363,7 +473,104 @@ impl std::fmt::Debug for LivePeer {
         f.debug_struct("LivePeer")
             .field("ssrc", &self.ssrc)
             .field("open", &*self.open.borrow())
+            .field("ended", &*self.owner.ended.borrow())
             .finish_non_exhaustive()
+    }
+}
+
+/// Owns the connection: dropping it without a completed close closes the
+/// connection in a task, because the upstream peer detaches its driver on
+/// drop and the driver keeps the sockets.
+struct ConnectionOwner {
+    connection: Arc<dyn PeerConnection>,
+    runtime: tokio::runtime::Handle,
+    /// Whether the peer has ended; it also stops the audio forwarders.
+    ended: Arc<watch::Sender<bool>>,
+    closed: AtomicBool,
+}
+
+impl Drop for ConnectionOwner {
+    fn drop(&mut self) {
+        self.ended.send_replace(true);
+        if !self.closed.load(Ordering::Acquire) {
+            let connection = self.connection.clone();
+            // A runtime that has shut down drops the task, and with it the
+            // driver it ran.
+            drop(self.runtime.spawn(async move {
+                let _ = connection.close().await;
+            }));
+        }
+    }
+}
+
+/// A bounded event queue whose producers never wait: an event that does not
+/// fit is counted, and the count is queued as [`PeerEvent::Lost`] ahead of
+/// the next event that fits.
+fn event_queue(capacity: NonZeroUsize) -> (EventSink, EventQueue) {
+    let (sender, receiver) = mpsc::channel(capacity.get());
+    let lost = Arc::new(Mutex::new(LostEvents::default()));
+    (
+        EventSink {
+            sender,
+            lost: lost.clone(),
+        },
+        EventQueue { receiver, lost },
+    )
+}
+
+fn lock(lost: &Mutex<LostEvents>) -> MutexGuard<'_, LostEvents> {
+    lost.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[derive(Clone)]
+struct EventSink {
+    sender: mpsc::Sender<PeerEvent>,
+    lost: Arc<Mutex<LostEvents>>,
+}
+
+impl EventSink {
+    /// Queue `event`, or count it as lost. The lock orders every push
+    /// against the consumer's check for pending losses.
+    fn push(&self, event: PeerEvent) {
+        let mut lost = lock(&self.lost);
+        if !lost.is_empty() {
+            match self.sender.try_send(PeerEvent::Lost(*lost)) {
+                Ok(()) => *lost = LostEvents::default(),
+                Err(TrySendError::Full(_)) => {
+                    lost.count(&event);
+                    return;
+                }
+                Err(TrySendError::Closed(_)) => return,
+            }
+        }
+        if let Err(TrySendError::Full(event)) = self.sender.try_send(event) {
+            lost.count(&event);
+        }
+    }
+}
+
+struct EventQueue {
+    receiver: mpsc::Receiver<PeerEvent>,
+    lost: Arc<Mutex<LostEvents>>,
+}
+
+enum Ready {
+    Event(PeerEvent),
+    Empty,
+    Ended,
+}
+
+impl EventQueue {
+    /// The next queued event, or the pending losses once the queue is
+    /// empty, without waiting.
+    fn take_ready(&mut self) -> Ready {
+        let mut lost = lock(&self.lost);
+        match self.receiver.try_recv() {
+            Ok(event) => Ready::Event(event),
+            Err(_) if !lost.is_empty() => Ready::Event(PeerEvent::Lost(std::mem::take(&mut *lost))),
+            Err(TryRecvError::Empty) => Ready::Empty,
+            Err(TryRecvError::Disconnected) => Ready::Ended,
+        }
     }
 }
 
@@ -405,7 +612,7 @@ fn answer_candidates(
 async fn observe_channel(
     channel: Arc<dyn DataChannel>,
     open: watch::Sender<bool>,
-    events: mpsc::Sender<PeerEvent>,
+    events: EventSink,
 ) {
     while let Some(event) = channel.poll().await {
         let forwarded = match event {
@@ -424,40 +631,44 @@ async fn observe_channel(
                 continue;
             }
         };
-        if events.send(forwarded).await.is_err() {
-            return;
-        }
+        events.push(forwarded);
     }
     open.send_replace(false);
-    let _ = events.send(PeerEvent::ChannelClosed).await;
+    events.push(PeerEvent::ChannelClosed);
 }
 
-/// Forward a remote track's Opus packets until it ends.
-async fn forward_track(track: Arc<dyn TrackRemote>, events: mpsc::Sender<PeerEvent>) {
-    while let Some(event) = track.poll().await {
+/// Forward a remote track's Opus packets until it ends or the peer does.
+async fn forward_track(
+    track: Arc<dyn TrackRemote>,
+    events: EventSink,
+    mut ended: watch::Receiver<bool>,
+) {
+    loop {
+        let event = tokio::select! {
+            event = track.poll() => event,
+            _ = ended.wait_for(|ended| *ended) => return,
+        };
         match event {
-            TrackRemoteEvent::OnRtpPacket(packet)
+            Some(TrackRemoteEvent::OnRtpPacket(packet))
                 if packet.header.payload_type == OPUS_PAYLOAD_TYPE =>
             {
-                let audio = PeerEvent::Audio(ReceivedOpus {
+                events.push(PeerEvent::Audio(ReceivedOpus {
                     payload: packet.payload,
                     sequence_number: packet.header.sequence_number,
                     timestamp: packet.header.timestamp,
                     ssrc: packet.header.ssrc,
-                });
-                if events.send(audio).await.is_err() {
-                    return;
-                }
+                }));
             }
-            TrackRemoteEvent::OnEnded => return,
-            _ => {}
+            Some(TrackRemoteEvent::OnEnded) | None => return,
+            Some(_) => {}
         }
     }
 }
 
 struct Handler {
     gathered: Arc<Notify>,
-    events: mpsc::Sender<PeerEvent>,
+    events: EventSink,
+    ended: Arc<watch::Sender<bool>>,
 }
 
 // The upstream trait uses async-trait's boxed-future signature. Its callbacks
@@ -487,8 +698,13 @@ impl PeerConnectionEventHandler for Handler {
         Self: 'async_trait,
     {
         Box::pin(async move {
-            // A full queue drops the state change rather than stall the driver.
-            let _ = self.events.try_send(PeerEvent::Connection(state));
+            self.events.push(PeerEvent::Connection(state));
+            if matches!(
+                state,
+                RTCPeerConnectionState::Closed | RTCPeerConnectionState::Failed
+            ) {
+                self.ended.send_replace(true);
+            }
         })
     }
 
@@ -501,7 +717,11 @@ impl PeerConnectionEventHandler for Handler {
         Self: 'async_trait,
     {
         Box::pin(async move {
-            tokio::spawn(forward_track(track, self.events.clone()));
+            tokio::spawn(forward_track(
+                track,
+                self.events.clone(),
+                self.ended.subscribe(),
+            ));
         })
     }
 

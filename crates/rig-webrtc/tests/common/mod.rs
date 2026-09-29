@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use rig_webrtc::{OPUS_CLOCK_RATE, OPUS_PAYLOAD_TYPE};
+use rig_webrtc::{LivePeer, LivePeerBuilder, OPUS_CLOCK_RATE, OPUS_PAYLOAD_TYPE, PeerEvent};
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
@@ -202,12 +202,46 @@ pub async fn answer(offer: String) -> AnsweringPeer {
     }
 }
 
-/// Install aws-lc-rs as the process-wide rustls provider, once.
-///
-/// The test binaries link rustls with both aws-lc-rs (through reqwest's
-/// `rustls` feature) and ring (through the WebRTC stack), so rustls cannot pick
-/// a default and panics the first time a websocket starts TLS. aws-lc-rs is the
-/// provider the HTTPS client already uses, so both TLS paths share one.
+/// A builder for a peer that gathers only UDP on 127.0.0.1:`port`.
+pub fn loopback_builder(port: u16) -> LivePeerBuilder {
+    LivePeer::builder()
+        .with_udp_addrs(vec![format!("127.0.0.1:{port}")])
+        .with_tcp_addrs(Vec::new())
+        .with_loopback_candidates(true)
+}
+
+/// Build `builder`'s peer and connect it to an in-process answering peer,
+/// returning both and the answerer's end of the event channel.
+pub async fn connect(builder: LivePeerBuilder) -> (LivePeer, AnsweringPeer, Arc<dyn DataChannel>) {
+    let peer = builder.build().await.expect("the live peer builds");
+    let offer = peer.offer().await.expect("an offer");
+    let mut answering = answer(offer).await;
+    peer.apply_answer(answering.answer.clone())
+        .await
+        .expect("the call connects");
+    let Seen::Channel(channel) = next_seen(&mut answering.seen, "the event channel").await else {
+        panic!("the channel arrives first");
+    };
+    (peer, answering, channel)
+}
+
+/// The next peer event that `matches`, skipping others.
+pub async fn next_peer_event(peer: &LivePeer, matches: impl Fn(&PeerEvent) -> bool) -> PeerEvent {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            match peer.next_event().await {
+                Some(event) if matches(&event) => return event,
+                Some(_) => continue,
+                None => panic!("the peer's events ended"),
+            }
+        }
+    })
+    .await
+    .expect("the expected peer event arrives")
+}
+
+/// Install aws-lc-rs as the process-wide rustls provider, once, exactly as
+/// the crate documentation tells a binary to.
 pub fn install_crypto_provider() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {

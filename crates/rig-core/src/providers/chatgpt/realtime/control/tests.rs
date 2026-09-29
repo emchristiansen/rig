@@ -15,8 +15,28 @@ use std::sync::{Arc, Mutex};
 struct State {
     inbound: VecDeque<Frame>,
     sent: Vec<String>,
+    /// Transport closes that were started.
+    close_calls: usize,
+    /// Transport closes that completed.
     closed: usize,
     handshakes: Vec<Request<NoBody>>,
+    /// Scripted outcomes of the next sends, then of the next closes;
+    /// `Succeed` once each list is empty.
+    send_outcomes: VecDeque<Outcome>,
+    close_outcomes: VecDeque<Outcome>,
+}
+
+/// How one scripted send or close ends.
+#[derive(Clone, Copy, Debug)]
+enum Outcome {
+    Succeed,
+    Fail,
+    /// Never completes, so a caller can only drop it.
+    Hang,
+}
+
+fn scripted_error() -> http_client::Error {
+    http_client::Error::StreamEnded
 }
 
 /// A backend whose connections read queued frames, then end, and record
@@ -46,11 +66,18 @@ impl Scripted {
 
 impl WebSocketConnection for Scripted {
     fn send(&mut self, frame: Frame) -> WasmBoxedFuture<'_, http_client::Result<()>> {
-        match frame {
-            Frame::Text(text) => self.state().sent.push(text),
-            other => panic!("the control socket writes text frames only, got {other:?}"),
+        let Frame::Text(text) = frame else {
+            panic!("the control socket writes text frames only, got {frame:?}");
+        };
+        let mut state = self.state();
+        match state.send_outcomes.pop_front().unwrap_or(Outcome::Succeed) {
+            Outcome::Succeed => {
+                state.sent.push(text);
+                Box::pin(std::future::ready(Ok(())))
+            }
+            Outcome::Fail => Box::pin(std::future::ready(Err(scripted_error()))),
+            Outcome::Hang => Box::pin(std::future::pending()),
         }
-        Box::pin(std::future::ready(Ok(())))
     }
 
     fn recv(&mut self) -> WasmBoxedFuture<'_, http_client::Result<Option<Frame>>> {
@@ -62,8 +89,16 @@ impl WebSocketConnection for Scripted {
         &mut self,
         _frame: Option<CloseFrame>,
     ) -> WasmBoxedFuture<'_, http_client::Result<()>> {
-        self.state().closed += 1;
-        Box::pin(std::future::ready(Ok(())))
+        let mut state = self.state();
+        state.close_calls += 1;
+        match state.close_outcomes.pop_front().unwrap_or(Outcome::Succeed) {
+            Outcome::Succeed => {
+                state.closed += 1;
+                Box::pin(std::future::ready(Ok(())))
+            }
+            Outcome::Fail => Box::pin(std::future::ready(Err(scripted_error()))),
+            Outcome::Hang => Box::pin(std::future::pending()),
+        }
     }
 }
 
@@ -174,4 +209,94 @@ async fn appends_are_chunked_and_close_is_sent_once() {
     assert_eq!(sent[1]["delegation_item_id"], "item_1");
     assert_eq!(sent[1]["channel"], "speakable");
     assert_eq!(backend.state().closed, 1);
+}
+
+fn sent_kinds(backend: &Scripted) -> Vec<String> {
+    backend
+        .sent_json()
+        .iter()
+        .map(|event| event["type"].as_str().expect("a type").to_owned())
+        .collect()
+}
+
+/// A failed `session.close` send still closes the transport and reports the
+/// send's error; the transport is not closed twice.
+#[tokio::test]
+async fn a_failed_session_close_send_still_closes_the_transport() {
+    let backend = Scripted::default();
+    backend.state().send_outcomes.push_back(Outcome::Fail);
+    let mut socket = ControlSocket::from_connection(Box::new(backend.clone()), call_id());
+
+    assert!(socket.close().await.is_err(), "the send error is reported");
+    assert_eq!(backend.state().closed, 1, "the transport closed anyway");
+    assert!(sent_kinds(&backend).is_empty());
+
+    socket.close().await.expect("nothing is left to do");
+    assert_eq!(backend.state().close_calls, 1);
+}
+
+/// A failed transport close is retried by the next call, which does not
+/// send `session.close` again.
+#[tokio::test]
+async fn a_failed_transport_close_is_retried() {
+    let backend = Scripted::default();
+    backend.state().close_outcomes.push_back(Outcome::Fail);
+    let mut socket = ControlSocket::from_connection(Box::new(backend.clone()), call_id());
+
+    assert!(socket.close().await.is_err());
+    assert_eq!(backend.state().closed, 0);
+    socket.close().await.expect("the retry completes");
+    assert_eq!(backend.state().close_calls, 2);
+    assert_eq!(backend.state().closed, 1);
+    assert_eq!(sent_kinds(&backend), ["session.close"]);
+    socket.close().await.expect("a completed close does nothing");
+    assert_eq!(backend.state().close_calls, 2);
+}
+
+/// A close dropped while sending `session.close` leaves both steps to the
+/// next call.
+#[tokio::test]
+async fn a_close_cancelled_during_the_send_is_completed_by_a_retry() {
+    let backend = Scripted::default();
+    backend.state().send_outcomes.push_back(Outcome::Hang);
+    let mut socket = ControlSocket::from_connection(Box::new(backend.clone()), call_id());
+
+    assert!(futures::FutureExt::now_or_never(socket.close()).is_none());
+    assert_eq!(backend.state().close_calls, 0);
+    socket.close().await.expect("the retry completes");
+    assert_eq!(sent_kinds(&backend), ["session.close"]);
+    assert_eq!(backend.state().closed, 1);
+}
+
+/// A close dropped during the transport close retries only that step.
+#[tokio::test]
+async fn a_close_cancelled_during_the_transport_close_is_completed_by_a_retry() {
+    let backend = Scripted::default();
+    backend.state().close_outcomes.push_back(Outcome::Hang);
+    let mut socket = ControlSocket::from_connection(Box::new(backend.clone()), call_id());
+
+    assert!(futures::FutureExt::now_or_never(socket.close()).is_none());
+    assert_eq!(backend.state().close_calls, 1);
+    assert_eq!(backend.state().closed, 0);
+    socket.close().await.expect("the retry completes");
+    assert_eq!(sent_kinds(&backend), ["session.close"]);
+    assert_eq!(backend.state().close_calls, 2);
+    assert_eq!(backend.state().closed, 1);
+}
+
+/// A binary frame that is not UTF-8 is a corrupt frame carrying its exact
+/// bytes.
+#[tokio::test]
+async fn a_binary_frame_that_is_not_utf8_keeps_its_bytes() {
+    let received = vec![b'{', 0xff, 0xfe, b'}'];
+    let backend = Scripted::with([Frame::Binary(bytes::Bytes::from(received.clone()))]);
+    let mut socket = ControlSocket::from_connection(Box::new(backend), call_id());
+
+    let error = socket.next_event().await.expect_err("the frame is refused");
+    let corrupt = error.corrupt_frame().expect("a corrupt frame");
+    assert_eq!(
+        corrupt.evidence(),
+        &crate::error::FrameEvidence::Bytes(received)
+    );
+    assert_eq!(corrupt.event_type(), None);
 }

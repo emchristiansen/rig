@@ -156,7 +156,7 @@ async fn a_call_runs_end_to_end_against_local_servers() {
         .with_identity(CodexIdentity::from_ids("session-1", "thread-1").expect("ids"))
         .with_control_base_url(format!("ws://{ws_addr}/v1/live"));
 
-    let mut peer = LivePeer::builder()
+    let peer = LivePeer::builder()
         .with_udp_addrs(vec!["127.0.0.1:0".to_owned()])
         .with_tcp_addrs(Vec::new())
         .with_loopback_candidates(true)
