@@ -39,6 +39,7 @@ mod control;
 mod events;
 mod session;
 
+pub(crate) use call::decode_created_call;
 pub use call::{CallId, InvalidCallId, LiveCalls, NotTheCodexBackend, RealtimeCall};
 #[cfg(feature = "websocket")]
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]

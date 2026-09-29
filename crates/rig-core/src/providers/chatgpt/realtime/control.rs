@@ -1,9 +1,12 @@
-//! The control socket of a GPT-Live call.
+//! The long-lived control socket of a GPT-Live call. One connection carries
+//! many session events and commands, so this is a session rather than a
+//! single request/response wire.
 
 use std::time::Duration;
 
-use super::call::{CallId, LiveCalls, reply_error};
+use super::call::{CallId, LiveCalls};
 use super::{ClientEvent, ContextChannel, ServerEvent};
+use crate::driver::realtime::reply_error;
 use crate::error::{CorruptFrame, ProviderError};
 use crate::ws_client::{
     BoxedWebSocketConnection, ConnectOptions, Frame, WebSocketClientExt, WebSocketConnection,
@@ -56,7 +59,9 @@ impl LiveCalls {
         timeout: Option<Duration>,
     ) -> Result<ControlSocket, ProviderError> {
         let mut request = self.control_request(&call_id)?;
-        self.authorize(request.headers_mut()).await?;
+        if let Some(stamp) = self.credential_stamp() {
+            stamp.authorize(request.headers_mut()).await?;
+        }
         let connection = backend
             .connect(request, ConnectOptions::new().with_timeout(timeout))
             .await

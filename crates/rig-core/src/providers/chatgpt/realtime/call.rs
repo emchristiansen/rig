@@ -1,19 +1,18 @@
 //! Call creation: the offer and session go to the Codex backend, and the
 //! answer and call id come back.
 
-use bytes::Bytes;
-
 use super::{
     CONTROL_SOCKET_BASE_URL, OPENAI_ALPHA_HEADER, QUICKSILVER_V2, REALTIME_CALLS_PATH,
     REALTIME_CALLS_QUERY, SessionConfig, X_SESSION_ID_HEADER,
 };
 use crate::error::{EncodeError, ProviderError};
-use crate::http_client::{self, HttpClientExt, LazyBody};
+use crate::http_client;
 use crate::providers::openai::OpenAI;
 use crate::providers::openai::responses_api::codex_identity::{
     CodexIdentity, InvalidCodexIdentity, NotACodexWire, SESSION_ID_HEADER, THREAD_ID_HEADER,
 };
 use crate::providers::openai::wire::ResponsesContract;
+use crate::wire::CredentialStamp;
 
 /// A GPT-Live call id: the last `Location` segment of a created call, either
 /// `rtc_` followed by at least one character or a dashed 36-character UUID.
@@ -59,6 +58,28 @@ impl CallId {
             .find(|segment| is_call_id(segment))
             .map(|segment| Self(segment.to_owned()))
     }
+}
+
+/// Decode the successful call-creation response after the driver has read it.
+pub(crate) fn decode_created_call(
+    headers: &http::HeaderMap,
+    body: &[u8],
+) -> Result<RealtimeCall, ProviderError> {
+    let location = headers
+        .get(http::header::LOCATION)
+        .ok_or_else(|| ProviderError::Response("the created call has no `Location`".into()))?
+        .to_str()
+        .map_err(|error| ProviderError::Response(format!("unreadable `Location`: {error}")))?;
+    let call_id = CallId::from_location(location).ok_or_else(|| {
+        ProviderError::Response(format!("`Location` names no call id: {location}"))
+    })?;
+    let answer_sdp = String::from_utf8(body.to_vec()).map_err(|error| {
+        ProviderError::Response(format!("the SDP answer is not UTF-8: {error}"))
+    })?;
+    Ok(RealtimeCall {
+        answer_sdp,
+        call_id,
+    })
 }
 
 impl std::fmt::Display for CallId {
@@ -235,84 +256,15 @@ impl LiveCalls {
     }
 
     /// The reply header naming the provider's request id.
-    pub(super) fn request_id_header(&self) -> Option<&'static str> {
+    pub(crate) fn request_id_header(&self) -> Option<&'static str> {
         self.provider.dialect.request_id_header
     }
 
-    /// Stamp the credential source's current credential, when the provider
-    /// has one. It is read once per request.
-    pub(super) async fn authorize(
-        &self,
-        headers: &mut http::HeaderMap,
-    ) -> Result<(), ProviderError> {
-        if let Some(stamp) = self.provider.credential_stamp() {
-            stamp.authorize(headers).await?;
-        }
-        Ok(())
+    /// The credential source the driver reads once for each request, when
+    /// the provider has one.
+    pub(crate) fn credential_stamp(&self) -> Option<CredentialStamp> {
+        self.provider.credential_stamp()
     }
-
-    /// Create a call for `offer_sdp` configured by `session`, over `http`.
-    ///
-    /// Returns the answer SDP and the call id read from `Location`. A
-    /// non-success reply is [`ProviderError::ProviderResponse`] keeping its
-    /// status, body, headers and request id. A
-    /// success without a `Location` call id, or with a body that is not
-    /// UTF-8, is [`ProviderError::Response`].
-    pub async fn create_call<H: HttpClientExt>(
-        &self,
-        http: &H,
-        offer_sdp: &str,
-        session: &SessionConfig,
-    ) -> Result<RealtimeCall, ProviderError> {
-        let mut request = self.call_request(offer_sdp, session)?;
-        self.authorize(request.headers_mut()).await?;
-        let request_id_header = self.request_id_header();
-        let response = http
-            .send::<_, Bytes>(request)
-            .await
-            .map_err(|error| reply_error(error, request_id_header))?;
-        let (parts, body) = response.into_parts();
-        let body: LazyBody<Bytes> = body;
-        let body = body.await.map_err(ProviderError::Http)?;
-        if !parts.status.is_success() {
-            return Err(reply_error(
-                http_client::Error::non_success_with_details(
-                    parts.status,
-                    parts.headers,
-                    String::from_utf8_lossy(&body).into_owned(),
-                ),
-                request_id_header,
-            ));
-        }
-        let location = parts
-            .headers
-            .get(http::header::LOCATION)
-            .ok_or_else(|| ProviderError::Response("the created call has no `Location`".into()))?
-            .to_str()
-            .map_err(|error| ProviderError::Response(format!("unreadable `Location`: {error}")))?;
-        let call_id = CallId::from_location(location).ok_or_else(|| {
-            ProviderError::Response(format!("`Location` names no call id: {location}"))
-        })?;
-        let answer_sdp = String::from_utf8(body.to_vec()).map_err(|error| {
-            ProviderError::Response(format!("the SDP answer is not UTF-8: {error}"))
-        })?;
-        Ok(RealtimeCall {
-            answer_sdp,
-            call_id,
-        })
-    }
-}
-
-/// A transport failure, keeping a rejected reply's status, body, headers and
-/// request id.
-pub(super) fn reply_error(
-    error: http_client::Error,
-    request_id_header: Option<&'static str>,
-) -> ProviderError {
-    let request_id = error.non_success_headers().and_then(|headers| {
-        crate::providers::internal::request_id_from_headers(headers, request_id_header)
-    });
-    ProviderError::from_transport_error(error).with_provider_request_id(request_id)
 }
 
 #[cfg(test)]

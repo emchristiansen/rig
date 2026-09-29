@@ -4,8 +4,10 @@
 //! reproduced here from its log (status 201, `text/plain`, `Location`).
 
 use super::*;
+use crate::http_client::{HttpClientExt, LazyBody};
 use crate::providers::chatgpt;
 use crate::wasm_compat::WasmCompatSend;
+use bytes::Bytes;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 

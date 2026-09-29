@@ -29,6 +29,7 @@ use crate::wire::{
 
 mod bound;
 mod consumers;
+pub(crate) mod realtime;
 
 pub use bound::{Bind, Bound};
 #[cfg(feature = "audio")]
