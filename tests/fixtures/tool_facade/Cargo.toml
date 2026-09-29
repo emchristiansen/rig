@@ -51,6 +51,7 @@ all_root = [
     "rig/websocket",
     "rig/websocket-rustls",
     "rig/websocket-native-tls",
+    "rig/webrtc",
     "rig/rustls",
     "rig/native-tls",
     "rig/reqwest-middleware",

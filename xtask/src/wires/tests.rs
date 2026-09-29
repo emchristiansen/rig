@@ -33,8 +33,17 @@ fn the_named_non_wire_surfaces_may_own_what_encode_cannot_be() {
     }
     assert_eq!(
         SESSION_EXCEPTIONS.len(),
-        2,
+        3,
         "a new non-wire surface must be argued for, not added quietly"
+    );
+    assert_eq!(
+        offenders(
+            "chatgpt/realtime/call.rs",
+            "async fn create_call() { http().await; }"
+        )
+        .len(),
+        2,
+        "the unary call exchange remains a pure provider wire"
     );
 }
 
