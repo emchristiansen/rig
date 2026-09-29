@@ -6,14 +6,14 @@
 //! Tool-call handles for wires that carry no id used to draw from
 //! `fastrand`; they now derive from the block that assembled the call or
 //! the call's index in the response. This guard pins the remaining random
-//! sources to the two transport headers, the Codex websocket session
-//! identity and the LSH index. None of them can reach a message or an effect
-//! record. The transport headers and the LSH index reach no request body
-//! either; the Codex identity reaches only the requests of the conversation
-//! it names: its websocket session's handshake and frames, and the HTTP
-//! requests of a Responses wire that carries it (their identity headers,
-//! cache key and client metadata). It is stamped as a request is encoded,
-//! and no effect log records those requests.
+//! sources to transport identities and the LSH index. None of them can reach
+//! a message or an effect record. The WebRTC SSRC reaches the SDP offer in
+//! the call-creation request; that request is not an effect record. The
+//! Codex identity reaches only the requests of the conversation it names:
+//! its websocket session's handshake and frames, and the HTTP requests of
+//! a Responses wire that carries it (their identity headers, cache key and
+//! client metadata). It is stamped as a request is encoded, and no effect
+//! log records those requests.
 
 use std::path::{Path, PathBuf};
 
@@ -50,6 +50,10 @@ const FASTRAND_SITES: &[(&str, &str)] = &[
     (
         "crates/rig-core/src/vector_store/lsh.rs",
         "LSH hyperplanes; an index, never a request or a record",
+    ),
+    (
+        "crates/rig-webrtc/src/peer.rs",
+        "the WebRTC SSRC; only an SDP/RTP transport identity, never an effect record",
     ),
 ];
 
