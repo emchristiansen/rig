@@ -4,7 +4,7 @@
 //! WebRTC offer and a [`SessionConfig`] to the Codex backend and returns the
 //! answer SDP and the call id. The caller's WebRTC peer carries Opus audio and
 //! the `oai-events` data channel. The control socket
-//! ([`LiveCalls::connect_control`], feature `websocket`) carries typed
+//! (`LiveCalls::connect_control`, feature `websocket`) carries typed
 //! [`ServerEvent`]s and [`ClientEvent`]s for the same call.
 //!
 //! This is the alpha, Codex-only protocol (`openai-alpha: quicksilver=v2`), not

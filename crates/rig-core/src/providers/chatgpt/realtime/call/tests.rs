@@ -32,8 +32,15 @@ struct Backend {
     status: http::StatusCode,
     headers: http::HeaderMap,
     body: Bytes,
-    /// Report a non-success reply as a transport error, as `rig-reqwest` does.
-    as_transport_error: bool,
+    rejection_at: RejectionAt,
+}
+
+#[derive(Clone, Copy)]
+enum RejectionAt {
+    Response,
+    Send,
+    Body,
+    BodyTransport,
 }
 
 impl Backend {
@@ -52,11 +59,11 @@ impl Backend {
             status: http::StatusCode::CREATED,
             headers,
             body: Bytes::from_static(ANSWER.as_bytes()),
-            as_transport_error: false,
+            rejection_at: RejectionAt::Response,
         }
     }
 
-    fn failing(status: http::StatusCode, body: &'static str, as_transport_error: bool) -> Self {
+    fn failing(status: http::StatusCode, body: &'static str, rejection_at: RejectionAt) -> Self {
         let mut headers = http::HeaderMap::new();
         headers.insert("x-request-id", http::HeaderValue::from_static("req-9"));
         Self {
@@ -64,7 +71,7 @@ impl Backend {
             status,
             headers,
             body: Bytes::from_static(body.as_bytes()),
-            as_transport_error,
+            rejection_at,
         }
     }
 
@@ -91,17 +98,31 @@ impl HttpClientExt for Backend {
         });
         let reply = self.clone();
         async move {
-            if reply.as_transport_error && !reply.status.is_success() {
+            if matches!(reply.rejection_at, RejectionAt::Send) && !reply.status.is_success() {
                 return Err(http_client::Error::non_success_with_details(
                     reply.status,
                     reply.headers,
                     String::from_utf8_lossy(&reply.body).into_owned(),
                 ));
             }
-            let body: LazyBody<U> = Box::pin(async move { Ok(U::from(reply.body)) });
-            let mut response = http::Response::builder().status(reply.status);
+            let response_status = reply.status;
+            let response_headers = reply.headers.clone();
+            let body: LazyBody<U> = Box::pin(async move {
+                if matches!(reply.rejection_at, RejectionAt::BodyTransport) {
+                    return Err(http_client::Error::StreamEnded);
+                }
+                if matches!(reply.rejection_at, RejectionAt::Body) && !reply.status.is_success() {
+                    return Err(http_client::Error::non_success_with_details(
+                        reply.status,
+                        reply.headers,
+                        String::from_utf8_lossy(&reply.body).into_owned(),
+                    ));
+                }
+                Ok(U::from(reply.body))
+            });
+            let mut response = http::Response::builder().status(response_status);
             if let Some(headers) = response.headers_mut() {
-                *headers = reply.headers;
+                *headers = response_headers;
             }
             response.body(body).map_err(http_client::Error::Protocol)
         }
@@ -126,6 +147,18 @@ impl HttpClientExt for Backend {
     {
         std::future::ready(Err(http_client::Error::StreamEnded))
     }
+}
+
+#[tokio::test]
+async fn a_response_less_body_failure_stays_a_transport_error() {
+    let mut backend = Backend::created("/v1/realtime/calls/rtc_test");
+    backend.rejection_at = RejectionAt::BodyTransport;
+    let error = calls()
+        .create_call(&backend, OFFER, &SessionConfig::new("x"))
+        .await
+        .expect_err("body read failed");
+    assert!(matches!(error, ProviderError::Http(_)), "got {error:?}");
+    assert_eq!(error.provider_response_status(), None);
 }
 
 /// The identity the Codex client stamps: `originator`, its user agent and
@@ -238,11 +271,11 @@ async fn a_call_is_created_exactly_as_the_probe_created_it() {
 /// transport hands it back as a response or reports it as an error.
 #[tokio::test]
 async fn a_rejected_call_keeps_its_status_and_body() {
-    for as_transport_error in [false, true] {
+    for rejection_at in [RejectionAt::Response, RejectionAt::Send, RejectionAt::Body] {
         let backend = Backend::failing(
             http::StatusCode::FORBIDDEN,
             "{\"detail\":\"no\"}",
-            as_transport_error,
+            rejection_at,
         );
         let error = calls()
             .create_call(&backend, OFFER, &SessionConfig::new("x"))
@@ -254,6 +287,12 @@ async fn a_rejected_call_keeps_its_status_and_body() {
         );
         assert_eq!(error.provider_response_body(), Some("{\"detail\":\"no\"}"));
         assert_eq!(error.provider_request_id(), Some("req-9"));
+        assert_eq!(
+            error
+                .provider_response_headers()
+                .and_then(|headers| headers.get("x-request-id")),
+            Some(&http::HeaderValue::from_static("req-9"))
+        );
     }
 }
 

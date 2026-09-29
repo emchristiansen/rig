@@ -35,7 +35,9 @@ impl LiveCalls {
             .map_err(|error| reply_error(error, request_id_header))?;
         let (parts, body) = response.into_parts();
         let body: LazyBody<Bytes> = body;
-        let body = body.await.map_err(ProviderError::Http)?;
+        let body = body
+            .await
+            .map_err(|error| reply_error(error, request_id_header))?;
         if !parts.status.is_success() {
             return Err(reply_error(
                 http_client::Error::non_success_with_details(
