@@ -1,42 +1,89 @@
-//! A secure websocket connect must not panic in a binary that links both
-//! rustls providers, once the process installs one explicitly.
+//! The composition the crate documentation shows, run offline: a binary that
+//! links `rig-webrtc` with `rig-reqwest`'s `rustls` feature has two rustls
+//! providers, installs one exactly as the documentation does, and then
+//! reaches TLS on both the call-creation request and the control socket
+//! without panicking. The servers read the client's first TLS record and hang
+//! up, so this proves the TLS client was built and started its handshake,
+//! not that a handshake completes.
 
 #![cfg(not(target_family = "wasm"))]
 #![allow(clippy::expect_used, clippy::panic)]
 
 mod common;
 
-use std::time::Duration;
+use std::net::SocketAddr;
 
-use rig_core::http_client::{NoBody, Request};
-use rig_core::ws_client::{ConnectOptions, WebSocketClientExt};
+use rig_core::providers::chatgpt::{self, realtime};
+use rig_core::providers::openai::OpenAI;
+use rig_core::providers::openai::wire::CallerIdentity;
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_wss_connect_to_a_silent_local_port_fails_without_panicking() {
-    common::install_crypto_provider();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+/// The content type of a TLS handshake record, which starts a ClientHello.
+const TLS_HANDSHAKE: u8 = 0x16;
+
+/// Accept one connection, return the first byte the client sends, and hang
+/// up.
+async fn first_byte_server() -> (SocketAddr, JoinHandle<u8>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("a local port");
-    let port = listener.local_addr().expect("its address").port();
-    let held = tokio::spawn(async move {
-        // Accept and hold the socket without answering, so the client gets as
-        // far as building its TLS configuration and then times out.
-        let (socket, _) = listener.accept().await.expect("one connection");
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        drop(socket);
+    let addr = listener.local_addr().expect("its address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("one connection");
+        socket.read_u8().await.expect("the client speaks first")
     });
-    let request = Request::builder()
-        .uri(format!("wss://127.0.0.1:{port}/"))
-        .body(NoBody)
-        .expect("a request");
-    let outcome = tokio::time::timeout(
-        Duration::from_secs(2),
-        rig_tungstenite::TungsteniteClient::new().connect(request, ConnectOptions::default()),
+    (addr, server)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_documented_composition_reaches_tls_without_panicking() {
+    // The documented setup, verbatim. This binary installs nothing else.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("no other rustls provider is installed");
+
+    let (https, call_server) = first_byte_server().await;
+    let (wss, control_server) = first_byte_server().await;
+    let identity =
+        CallerIdentity::new("codex_cli_rs", "codex_cli_rs/0.155.1", None).expect("an identity");
+    let provider = OpenAI::with_key(&chatgpt::DIALECT, "access-token")
+        .with_base_url(format!("https://{https}/backend-api/codex"))
+        .with_account_id("account-id")
+        .with_caller_identity(identity);
+    let calls = realtime::LiveCalls::new(provider)
+        .expect("the Codex backend")
+        .with_control_base_url(format!("wss://{wss}/v1/live"));
+
+    let peer = common::loopback_builder(0)
+        .build()
+        .await
+        .expect("the peer builds");
+    let offer_sdp = peer.offer().await.expect("an offer");
+    let created = tokio::time::timeout(
+        common::WAIT,
+        calls.create_call(
+            &rig_reqwest::ReqwestClient::default(),
+            &offer_sdp,
+            &realtime::SessionConfig::new("Answer briefly."),
+        ),
     )
-    .await;
-    assert!(
-        !matches!(outcome, Ok(Ok(_))),
-        "a silent peer cannot complete a TLS websocket handshake"
-    );
-    held.abort();
+    .await
+    .expect("the request ends when the server hangs up");
+    assert!(created.is_err(), "the server hung up: {created:?}");
+    let control = tokio::time::timeout(
+        common::WAIT,
+        calls.connect_control(
+            &rig_tungstenite::TungsteniteClient::new(),
+            realtime::CallId::new("rtc_u2_offline").expect("a call id"),
+        ),
+    )
+    .await
+    .expect("the connect ends when the server hangs up");
+    assert!(control.is_err(), "the server hung up");
+
+    assert_eq!(call_server.await.expect("served"), TLS_HANDSHAKE);
+    assert_eq!(control_server.await.expect("served"), TLS_HANDSHAKE);
+    peer.close().await.expect("the peer closes");
 }

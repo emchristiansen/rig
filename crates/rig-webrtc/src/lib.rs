@@ -9,10 +9,12 @@
 //! a bounded queue that reports dropped events as [`PeerEvent::Lost`]. It
 //! decodes no audio; the control socket also carries the model's audio as PCM.
 //!
-//! A binary that uses this crate with `rig-reqwest`'s `rustls` feature links
-//! two rustls providers, ring and aws-lc-rs, so rustls cannot choose one and
-//! the first secure websocket panics. The binary must install one before it
-//! makes a connection, as the first line of the example does.
+//! The WebRTC stack enables rustls's ring provider and `rig-reqwest`'s
+//! `rustls` feature enables aws-lc-rs, so rustls cannot choose one and the
+//! first secure websocket panics. The binary must depend on `rustls` 0.23
+//! with its `aws_lc_rs` feature and install that provider before it makes a
+//! connection, as the first lines of the example do. The README lists the
+//! dependencies and the peer's delivery and lifetime contract.
 //!
 //! ```no_run
 //! use std::time::Duration;

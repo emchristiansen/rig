@@ -249,7 +249,10 @@ async fn a_failed_transport_close_is_retried() {
     assert_eq!(backend.state().close_calls, 2);
     assert_eq!(backend.state().closed, 1);
     assert_eq!(sent_kinds(&backend), ["session.close"]);
-    socket.close().await.expect("a completed close does nothing");
+    socket
+        .close()
+        .await
+        .expect("a completed close does nothing");
     assert_eq!(backend.state().close_calls, 2);
 }
 

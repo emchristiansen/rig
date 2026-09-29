@@ -138,7 +138,10 @@ async fn one_peer_sends_while_another_task_waits_for_its_events() {
                     break;
                 }
             }
-            channel.send_text("pong").await.expect("the answerer replies");
+            channel
+                .send_text("pong")
+                .await
+                .expect("the answerer replies");
         }
     );
     assert_eq!(received, PeerEvent::Text("pong".to_owned()));
@@ -170,10 +173,16 @@ async fn one_peer_sends_while_another_task_waits_for_its_events() {
     let mut heard = false;
     let deadline = tokio::time::Instant::now() + WAIT;
     while !receiver.is_finished() || !heard {
-        assert!(tokio::time::Instant::now() < deadline, "audio crosses both ways");
-        peer.send_opus(&OpusPacket::new(vec![0xf8, 0xff, 0xfe], Duration::from_millis(20)))
-            .await
-            .expect("the packet is sent");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "audio crosses both ways"
+        );
+        peer.send_opus(&OpusPacket::new(
+            vec![0xf8, 0xff, 0xfe],
+            Duration::from_millis(20),
+        ))
+        .await
+        .expect("the packet is sent");
         while let Ok(event) = seen.try_recv() {
             heard |= matches!(event, Seen::Audio(_));
         }
