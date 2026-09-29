@@ -52,7 +52,7 @@
 //!             eprintln!("the consumer fell behind: {lost:?}");
 //!         }
 //!     }
-//!     Ok::<_, rig_webrtc::PeerError>(())
+//!     Ok::<_, Box<dyn std::error::Error>>(())
 //! };
 //! let control_loop = async {
 //!     while let Some(event) = control.next_event().await? {
@@ -67,9 +67,7 @@
 //!     peer.close().await?;
 //!     Ok::<_, Box<dyn std::error::Error>>(())
 //! };
-//! let (media, control_loop) = tokio::join!(media, control_loop);
-//! media?;
-//! control_loop?;
+//! tokio::try_join!(media, control_loop)?;
 //! # Ok(())
 //! # }
 //! ```

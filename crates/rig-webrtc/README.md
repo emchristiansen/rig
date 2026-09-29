@@ -66,7 +66,7 @@ async fn call(identity: CallerIdentity) -> Result<(), Box<dyn std::error::Error>
                 eprintln!("the consumer fell behind: {lost:?}");
             }
         }
-        Ok::<_, rig_webrtc::PeerError>(())
+        Ok::<_, Box<dyn std::error::Error>>(())
     };
     let control_loop = async {
         while let Some(event) = control.next_event().await? {
@@ -81,18 +81,16 @@ async fn call(identity: CallerIdentity) -> Result<(), Box<dyn std::error::Error>
         peer.close().await?;
         Ok::<_, Box<dyn std::error::Error>>(())
     };
-    let (media, control_loop) = tokio::join!(media, control_loop);
-    media?;
-    control_loop?;
+    tokio::try_join!(media, control_loop)?;
     Ok(())
 }
 ```
 
 ## Contract
 
-**Sharing.** Every `LivePeer` method takes `&self`, and the peer is `Send + Sync`. One task can wait in `next_event` while others send audio or text, through shared references (`tokio::join!`) or an `Arc<LivePeer>`. Concurrent `next_event` calls take turns, and each event goes to one of them.
+**Sharing.** Every `LivePeer` method takes `&self`, and the peer is `Send + Sync`. One task can wait in `next_event` while others send audio or text, through shared references (`tokio::try_join!`) or an `Arc<LivePeer>`. Concurrent `next_event` calls take turns, and each event goes to one of them.
 
-**Ending.** `next_event` returns `None` once the peer has ended and its queued events are taken. The peer ends when `close` completes or the connection reports `Closed` or `Failed`. A closed data channel alone does not end it; audio may still arrive. A remote that goes away sends nothing webrtc-rs reports, so it is seen only as silence: the connection reports `Disconnected` after about 5 seconds and `Failed` after about 30. A connection that never forms reports `Failed` after about 30 seconds of checking.
+**Ending.** `next_event` returns `None` once the peer has ended and its queued events are taken. The peer ends when `close` completes or the connection reports `Closed` or `Failed`. A closed data channel alone does not end it; audio may still arrive. When a remote stops sending without a closing signal, the connection reports `Disconnected` after about 5 seconds and `Failed` after about 30 seconds of silence. A connection that never forms reports `Failed` after about 30 seconds of checking.
 
 **Release.** `close` stops the WebRTC driver and releases its sockets. Dropping a peer without `close`, including one dropped by `?` after a failed negotiation, and dropping a `build` future part way, closes the connection in a task on the runtime that built the peer. If that runtime has shut down, its tasks, the driver among them, are already gone.
 

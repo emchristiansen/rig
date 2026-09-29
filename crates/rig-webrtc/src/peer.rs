@@ -419,11 +419,11 @@ impl LivePeer {
     /// taken. The peer ends when [`Self::close`] completes or the connection
     /// reaches [`RTCPeerConnectionState::Closed`] or
     /// [`RTCPeerConnectionState::Failed`]; a closed data channel alone does
-    /// not end it. A remote that goes away is seen only as silence: the
-    /// connection reports `Disconnected` after about 5 seconds and `Failed`
-    /// after about 30, and a connection that never forms reports `Failed`
-    /// after about 30 seconds of checking. Cancel-safe: dropping the future
-    /// loses no event.
+    /// not end it. When a remote stops sending without a closing signal,
+    /// the connection reports `Disconnected` after about 5 seconds and
+    /// `Failed` after about 30 seconds of silence. A connection that never
+    /// forms reports `Failed` after about 30 seconds of checking. Cancel-safe:
+    /// dropping the future loses no event.
     pub async fn next_event(&self) -> Option<PeerEvent> {
         let mut events = self.events.lock().await;
         let mut ended = self.owner.ended.subscribe();
