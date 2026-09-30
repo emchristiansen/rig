@@ -1,4 +1,4 @@
-target/
+target
 .DS_Store
 .idea/
 .vscode/
@@ -7,7 +7,6 @@ target/
 
 # env
 .env
-.envrc
 .direnv
 
 # nodejs stuff
