@@ -37,8 +37,8 @@ mod function_calls;
 mod session;
 
 pub use create::{
-    ApiErrorDetail, CreatedSession, EmptyOffer, LiveApiError, LiveErrorReply, NotOfficialOpenAi,
-    PublicLiveSessions,
+    ApiErrorDetail, CreatedSession, EmptyOffer, LiveApiError, LiveErrorReply, LiveReply,
+    MalformedReason, MalformedSession, NotOfficialOpenAi, PublicLiveSessions, ReplyBody, ReplyHead,
 };
 pub use events::{
     Acknowledgement, Appended, BackendEvent, ClientEvent, CloseReason, ContextAppend,

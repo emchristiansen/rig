@@ -146,26 +146,38 @@ fn the_reference_201_body_decodes() {
 }
 
 #[test]
-fn a_success_without_a_webrtc_answer_is_malformed() {
+fn a_success_without_a_webrtc_answer_is_malformed_and_keeps_the_reply() {
     let sip = br#"{"session":{"id":"live_123"},"transport":{"type":"sip"}}"#;
     let error = sessions()
-        .decode_reply(http::StatusCode::CREATED, &http::HeaderMap::new(), sip)
+        .decode_reply(http::StatusCode::CREATED, &headers_with_request_id(), sip)
         .expect_err("no SDP answer");
-    let LiveApiError::Malformed(ProviderError::Response(message)) = &error else {
+    let LiveApiError::Malformed(malformed) = &error else {
         panic!("expected a malformed reply, got {error:?}");
     };
-    assert!(message.contains(r#""type":"sip""#), "{message}");
+    assert!(matches!(malformed.reason, MalformedReason::NoWebRtcAnswer));
+    assert_eq!(malformed.reply.head.status, http::StatusCode::CREATED);
+    assert_eq!(malformed.reply.head.request_id.as_deref(), Some("req_42"));
+    assert_eq!(malformed.reply.body.bytes(), Some(&sip[..]));
+    assert_eq!(
+        error.head().map(|head| head.status),
+        Some(http::StatusCode::CREATED)
+    );
     assert!(!error.is_terminal());
     assert!(!error.is_retryable());
 
-    let not_json = b"<html>oops</html>";
+    let not_json = b"<html>oops\xff</html>";
     let error = sessions()
         .decode_reply(http::StatusCode::CREATED, &http::HeaderMap::new(), not_json)
         .expect_err("not JSON");
-    let LiveApiError::Malformed(ProviderError::Response(message)) = &error else {
+    let LiveApiError::Malformed(malformed) = &error else {
         panic!("expected a malformed reply, got {error:?}");
     };
-    assert!(message.ends_with("body: <html>oops</html>"), "{message}");
+    assert!(matches!(malformed.reason, MalformedReason::Undecodable(_)));
+    assert_eq!(malformed.reply.body.bytes(), Some(&not_json[..]));
+    assert!(matches!(
+        ProviderError::from(error),
+        ProviderError::Response(message) if message.contains("<html>oops\u{fffd}</html>")
+    ));
 }
 
 #[test]
@@ -185,13 +197,13 @@ fn a_401_is_a_terminal_authentication_failure() {
         reply.error.as_ref().and_then(|error| error.code.as_deref()),
         Some("invalid_api_key")
     );
-    assert_eq!(reply.response.status, Some(http::StatusCode::UNAUTHORIZED));
-    assert_eq!(reply.response.body, body);
+    assert_eq!(reply.reply.head.status, http::StatusCode::UNAUTHORIZED);
+    assert_eq!(reply.reply.body.bytes(), Some(body.as_bytes()));
+    assert_eq!(reply.reply.head.request_id.as_deref(), Some("req_42"));
     assert_eq!(
-        reply.response.provider_request_id.as_deref(),
-        Some("req_42")
+        reply.reply.head.headers.get("x-request-id"),
+        Some(&http::HeaderValue::from_static("req_42"))
     );
-    assert!(reply.response.headers.is_some());
     assert!(error.is_terminal());
     assert!(!error.is_retryable());
 
@@ -236,7 +248,7 @@ fn a_429_spend_limit_is_terminal() {
             reply.error.as_ref().and_then(|error| error.code.as_deref()),
             Some(code)
         );
-        assert_eq!(reply.response.body, body);
+        assert_eq!(reply.reply.body.bytes(), Some(body.as_bytes()));
         assert!(error.is_terminal(), "{code}");
         assert!(!error.is_retryable(), "{code}");
     }
@@ -286,11 +298,30 @@ fn other_failures_are_rejections_keeping_the_reply() {
     let LiveApiError::Rejected(reply) = &error else {
         panic!("expected a rejection, got {error:?}");
     };
-    assert_eq!(reply.error, None);
-    assert_eq!(reply.response.body, "upstream unavailable");
+    assert!(reply.error.is_none());
+    assert_eq!(reply.reply.body.bytes(), Some(&b"upstream unavailable"[..]));
     assert!(error.is_retryable());
     assert!(matches!(
         ProviderError::from(error),
         ProviderError::ProviderResponse(_)
     ));
+}
+
+#[test]
+fn a_rejected_body_keeps_its_exact_bytes() {
+    let body = b"bad gateway \xff\xfe";
+    let error = sessions()
+        .decode_reply(http::StatusCode::BAD_GATEWAY, &http::HeaderMap::new(), body)
+        .expect_err("a gateway failure");
+    let LiveApiError::Rejected(reply) = &error else {
+        panic!("expected a rejection, got {error:?}");
+    };
+    assert_eq!(reply.reply.body.bytes(), Some(&body[..]));
+    assert_eq!(
+        reply.reply.body.text().as_deref(),
+        Some("bad gateway \u{fffd}\u{fffd}")
+    );
+    let shared = reply.reply.to_provider_response();
+    assert_eq!(shared.body, "bad gateway \u{fffd}\u{fffd}");
+    assert_eq!(shared.status, Some(http::StatusCode::BAD_GATEWAY));
 }

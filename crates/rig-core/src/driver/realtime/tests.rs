@@ -23,8 +23,10 @@ enum Delivery {
     Reply,
     /// As a transport error carrying the reply, from `send`.
     SendError,
-    /// As a body read that fails with no reply.
+    /// As a response whose body read then fails.
     BodyTransport,
+    /// As a send that fails before any reply.
+    SendTransport,
 }
 
 /// An HTTP double answering every request with one scripted reply.
@@ -79,6 +81,9 @@ impl HttpClientExt for Backend {
             .push(http::Request::from_parts(parts, body.into()));
         let reply = self.clone();
         async move {
+            if matches!(reply.delivery, Delivery::SendTransport) {
+                return Err(http_client::Error::StreamEnded);
+            }
             if matches!(reply.delivery, Delivery::SendError) {
                 return Err(http_client::Error::non_success_with_details(
                     reply.status,
@@ -205,11 +210,8 @@ async fn a_rejected_reply_keeps_its_request_id_however_it_arrives() {
         let LiveApiError::Authentication(reply) = &error else {
             panic!("expected an authentication failure, got {error:?}");
         };
-        assert_eq!(
-            reply.response.provider_request_id.as_deref(),
-            Some("req_42")
-        );
-        assert_eq!(reply.response.body, body);
+        assert_eq!(reply.reply.head.request_id.as_deref(), Some("req_42"));
+        assert_eq!(reply.reply.body.bytes(), Some(body.as_bytes()));
         assert!(error.is_terminal());
     }
 
@@ -225,10 +227,7 @@ async fn a_rejected_reply_keeps_its_request_id_however_it_arrives() {
     let LiveApiError::Rejected(reply) = &error else {
         panic!("expected a rejection, got {error:?}");
     };
-    assert_eq!(
-        reply.response.provider_request_id.as_deref(),
-        Some("req_42")
-    );
+    assert_eq!(reply.reply.head.request_id.as_deref(), Some("req_42"));
 }
 
 #[tokio::test]
@@ -242,27 +241,82 @@ async fn a_spend_limit_429_stays_terminal_however_it_arrives() {
         let LiveApiError::SpendLimit(reply) = &error else {
             panic!("expected a spend limit, got {error:?}");
         };
-        assert_eq!(
-            reply.response.provider_request_id.as_deref(),
-            Some("req_42")
-        );
+        assert_eq!(reply.reply.head.request_id.as_deref(), Some("req_42"));
         assert!(error.is_terminal());
         assert!(!error.is_retryable());
     }
 }
 
 #[tokio::test]
-async fn a_body_read_without_a_reply_is_a_transport_failure() {
+async fn a_send_without_a_reply_is_a_transport_failure() {
+    let backend = Backend::new(http::StatusCode::CREATED, CREATED, Delivery::SendTransport);
+    let error = sessions()
+        .create_session(&backend, OFFER, &session())
+        .await
+        .expect_err("the send failed");
+    let LiveApiError::Transport(inner) = &error else {
+        panic!("expected a transport failure, got {error:?}");
+    };
+    assert!(matches!(inner, ProviderError::Http(_)), "got {inner:?}");
+    assert!(error.head().is_none());
+    assert!(error.is_retryable());
+    assert!(!error.is_terminal());
+}
+
+#[tokio::test]
+async fn an_unreadable_created_body_is_an_unknown_outcome() {
     let backend = Backend::new(http::StatusCode::CREATED, CREATED, Delivery::BodyTransport);
     let error = sessions()
         .create_session(&backend, OFFER, &session())
         .await
         .expect_err("the body read failed");
-    let LiveApiError::Transport(inner) = &error else {
-        panic!("expected a transport failure, got {error:?}");
+    let LiveApiError::OutcomeUnknown { head, read_error } = &error else {
+        panic!("expected an unknown outcome, got {error:?}");
     };
-    assert!(matches!(inner, ProviderError::Http(_)), "got {inner:?}");
-    assert!(error.is_retryable());
+    assert_eq!(head.status, http::StatusCode::CREATED);
+    assert_eq!(head.request_id.as_deref(), Some("req_42"));
+    assert!(matches!(read_error, ProviderError::Http(_)));
+    assert!(!error.is_retryable());
+    assert!(!error.is_terminal());
+}
+
+#[tokio::test]
+async fn a_rejected_credential_with_an_unreadable_body_stays_terminal() {
+    for status in [http::StatusCode::UNAUTHORIZED, http::StatusCode::FORBIDDEN] {
+        let backend = Backend::new(status, "", Delivery::BodyTransport);
+        let error = sessions()
+            .create_session(&backend, OFFER, &session())
+            .await
+            .expect_err("a rejected credential");
+        let LiveApiError::Authentication(reply) = &error else {
+            panic!("expected an authentication failure, got {error:?}");
+        };
+        assert_eq!(reply.reply.head.status, status);
+        assert_eq!(reply.reply.head.request_id.as_deref(), Some("req_42"));
+        assert!(matches!(reply.reply.body, ReplyBody::Unreadable(_)));
+        assert!(reply.error.is_none());
+        assert!(error.is_terminal());
+        assert!(!error.is_retryable());
+    }
+}
+
+#[tokio::test]
+async fn a_429_with_an_unreadable_body_is_not_a_spend_limit() {
+    let backend = Backend::new(
+        http::StatusCode::TOO_MANY_REQUESTS,
+        SPEND_LIMIT,
+        Delivery::BodyTransport,
+    );
+    let error = sessions()
+        .create_session(&backend, OFFER, &session())
+        .await
+        .expect_err("a 429");
+    let LiveApiError::Rejected(reply) = &error else {
+        panic!("expected a rejection with an unknown code, got {error:?}");
+    };
+    assert_eq!(reply.reply.head.status, http::StatusCode::TOO_MANY_REQUESTS);
+    assert!(reply.error.is_none());
+    assert!(matches!(reply.reply.body, ReplyBody::Unreadable(_)));
     assert!(!error.is_terminal());
 }
 
