@@ -77,10 +77,13 @@ pub struct ReplyHead {
     pub request_id: Option<String>,
 }
 
-/// The body of a reply the Live API sent, as far as it was received.
+/// The body of a reply the Live API sent, as far as it is known. Only
+/// [`Self::Received`] holds the exact bytes; the other states hold the
+/// transport's text or no body at all.
 #[derive(Debug)]
 pub enum ReplyBody {
-    /// The body bytes exactly as received.
+    /// The body bytes exactly as received, when the transport delivered the
+    /// body as bytes.
     Received(Vec<u8>),
     /// The body as text from a transport that reported the reply as an
     /// error. The transport made the text, so it may not be byte-exact.
@@ -204,8 +207,13 @@ const SPEND_LIMIT_CODES: [&str; 2] = [
 
 /// A failed session creation, classified so that a caller can stop rather
 /// than retry when retrying cannot succeed. Callers that need the
-/// spend-limit distinction must branch on this type, not on the
-/// [`ProviderError`] it converts into.
+/// spend-limit distinction or the reply evidence must branch on this type,
+/// not on the [`ProviderError`] it converts into.
+///
+/// A failure after a reply arrived keeps the reply's status, headers and
+/// request id. Its body is kept as exact bytes only when the body was read
+/// as bytes; otherwise it is the transport's text, not guaranteed
+/// byte-exact, or an explicit unreadable state (see [`ReplyBody`]).
 #[derive(Debug, thiserror::Error)]
 pub enum LiveApiError {
     /// 401 or 403: the credential was rejected, whether or not the body was
@@ -300,9 +308,14 @@ impl LiveApiError {
 /// [`LiveApiError::Authentication`] becomes
 /// [`ProviderError::InvalidAuthentication`], the other non-success replies
 /// [`ProviderError::ProviderResponse`], and a malformed success or an unknown
-/// outcome [`ProviderError::Response`]. The conversion keeps the reply as
-/// text, not bytes, and the spend-limit classification does not survive:
-/// [`ProviderError::is_retryable`] judges a 429 by its status.
+/// outcome [`ProviderError::Response`].
+///
+/// The conversion weakens the evidence. Body bytes become text with invalid
+/// UTF-8 replaced, an unreadable body becomes an empty one, and a malformed
+/// success or unknown outcome keeps only a message, without its headers or
+/// structured reply. The decoded `error` object, [`MalformedReason`] and
+/// read error are no longer typed, and the spend-limit classification does
+/// not survive: [`ProviderError::is_retryable`] judges a 429 by its status.
 impl From<LiveApiError> for ProviderError {
     fn from(error: LiveApiError) -> Self {
         match error {
@@ -408,10 +421,11 @@ impl PublicLiveSessions {
     /// its whole body.
     ///
     /// A success status with `{"session": {"id"}, "transport": {"type":
-    /// "webrtc", "sdp"}}` is the [`CreatedSession`]. A non-success status is
-    /// classified into [`LiveApiError`], and a success body of any other
-    /// shape is [`LiveApiError::Malformed`]; both keep the status, headers,
-    /// request id and the body bytes unchanged.
+    /// "webrtc", "sdp"}}` is the [`CreatedSession`], which keeps only the
+    /// session id and the SDP answer. A non-success status is classified
+    /// into [`LiveApiError`], and a success body of any other shape is
+    /// [`LiveApiError::Malformed`]; both keep the status, headers, request id
+    /// and `body` as [`ReplyBody::Received`].
     pub fn decode_reply(
         &self,
         status: http::StatusCode,

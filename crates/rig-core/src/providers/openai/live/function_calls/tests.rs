@@ -440,3 +440,144 @@ fn two_open_responses_of_one_delegation_leave_its_call_unresolved() {
         Some(CallsUpdate::Unresolved { uncertain, .. }) if uncertain == vec![call("b", "book")]
     ));
 }
+
+#[test]
+fn a_known_correlation_is_never_claimed_by_another_delegation() {
+    let mut collector = FunctionCallCollector::new();
+    observe_all(
+        &mut collector,
+        &[
+            call_done(None, "c0", "lookup"),
+            call_done(Some("d1"), "c1", "book"),
+            created(Some("d2"), "r2"),
+        ],
+    );
+    assert_eq!(
+        collector.observe(&ended(Some("d2"), "response.completed", "r2")),
+        Some(CallsUpdate::Unresolved {
+            delegation_id: Some("d2".to_owned()),
+            response_id: "r2".to_owned(),
+            outcome: ResponseOutcome::Completed,
+            owned: Vec::new(),
+            uncertain: vec![call("c0", "lookup")],
+        })
+    );
+    assert_eq!(
+        collector.unresolved_calls().cloned().collect::<Vec<_>>(),
+        vec![call("c0", "lookup")]
+    );
+
+    observe_all(&mut collector, &[created(Some("d1"), "r1")]);
+    assert_eq!(
+        collector.observe(&ended(Some("d1"), "response.completed", "r1")),
+        Some(CallsUpdate::Submit(PendingFunctionCalls {
+            delegation_id: Some("d1".to_owned()),
+            response_id: "r1".to_owned(),
+            calls: vec![call("c1", "book")],
+        }))
+    );
+}
+
+#[test]
+fn an_unannounced_response_reports_only_retrievable_unresolved_calls() {
+    let mut collector = FunctionCallCollector::new();
+    observe_all(
+        &mut collector,
+        &[
+            call_done(Some("d1"), "c1", "lookup"),
+            call_done(Some("d2"), "c2", "book"),
+        ],
+    );
+    let both = vec![call("c1", "lookup"), call("c2", "book")];
+    assert_eq!(
+        collector.observe(&ended(None, "response.completed", "r1")),
+        Some(CallsUpdate::Unresolved {
+            delegation_id: None,
+            response_id: "r1".to_owned(),
+            outcome: ResponseOutcome::Completed,
+            owned: Vec::new(),
+            uncertain: both.clone(),
+        })
+    );
+    assert_eq!(
+        collector.unresolved_calls().cloned().collect::<Vec<_>>(),
+        both
+    );
+
+    // Reported calls are not attributed again before they are drained.
+    observe_all(&mut collector, &[created(Some("d1"), "r2")]);
+    assert_eq!(
+        collector.observe(&ended(Some("d1"), "response.completed", "r2")),
+        Some(CallsUpdate::Ended {
+            delegation_id: Some("d1".to_owned()),
+            response_id: "r2".to_owned(),
+            outcome: ResponseOutcome::Completed,
+        })
+    );
+
+    assert_eq!(collector.take_unresolved(), both);
+    assert_eq!(collector.unresolved_calls().count(), 0);
+    assert!(!collector.is_collecting());
+    assert_eq!(
+        collector.observe(&ended(None, "response.completed", "r3")),
+        Some(CallsUpdate::Ended {
+            delegation_id: None,
+            response_id: "r3".to_owned(),
+            outcome: ResponseOutcome::Completed,
+        })
+    );
+}
+
+#[test]
+fn a_drained_ambiguous_call_is_not_reported_again() {
+    let mut collector = FunctionCallCollector::new();
+    observe_all(
+        &mut collector,
+        &[
+            created(Some("d1"), "r1"),
+            created(Some("d2"), "r2"),
+            call_done(None, "c1", "lookup"),
+        ],
+    );
+    assert_eq!(collector.take_unresolved(), vec![call("c1", "lookup")]);
+    assert_eq!(
+        collector.observe(&ended(Some("d1"), "response.completed", "r1")),
+        Some(CallsUpdate::Ended {
+            delegation_id: Some("d1".to_owned()),
+            response_id: "r1".to_owned(),
+            outcome: ResponseOutcome::Completed,
+        })
+    );
+}
+
+#[test]
+fn a_response_learns_its_delegation_from_a_call_it_owns() {
+    let mut collector = FunctionCallCollector::new();
+    let updates = observe_all(
+        &mut collector,
+        &[
+            created(None, "r1"),
+            call_done(Some("d1"), "c1", "lookup"),
+            created(Some("d2"), "r2"),
+            call_done(Some("d2"), "c2", "book"),
+            ended(Some("d1"), "response.completed", "r1"),
+            ended(Some("d2"), "response.completed", "r2"),
+        ],
+    );
+    assert_eq!(
+        updates,
+        vec![
+            CallsUpdate::Submit(PendingFunctionCalls {
+                delegation_id: Some("d1".to_owned()),
+                response_id: "r1".to_owned(),
+                calls: vec![call("c1", "lookup")],
+            }),
+            CallsUpdate::Submit(PendingFunctionCalls {
+                delegation_id: Some("d2".to_owned()),
+                response_id: "r2".to_owned(),
+                calls: vec![call("c2", "book")],
+            }),
+        ]
+    );
+    assert_eq!(collector.unresolved_calls().count(), 0);
+}

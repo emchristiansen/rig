@@ -124,8 +124,10 @@ pub enum CallsUpdate {
     },
     /// The response ended while calls whose response is ambiguous were held,
     /// and it may own some of them. The collector neither submits nor
-    /// discards them; they stay available through
-    /// [`FunctionCallCollector::unresolved_calls`].
+    /// discards them: every `uncertain` call is available through
+    /// [`FunctionCallCollector::unresolved_calls`] until
+    /// [`FunctionCallCollector::take_unresolved`] drains it, and is never
+    /// attributed to a response afterwards.
     Unresolved {
         /// The delegation the response belongs to, when correlated.
         delegation_id: Option<String>,
@@ -140,24 +142,32 @@ pub enum CallsUpdate {
     },
 }
 
-/// A backend response whose calls are being collected.
+/// A backend response announced by `response.created` or ended while the
+/// collector held calls for it.
 #[derive(Clone, Debug)]
 struct OpenResponse {
-    /// The collector's own identity for the response, stable before the
-    /// response id is known.
+    /// The collector's own identity for the response.
     key: u64,
-    /// `None` until an event with a correlation names it.
+    /// `None` until an event correlated with it names its delegation.
     delegation_id: Option<String>,
-    /// `None` until `response.created` or the response's end names it.
-    response_id: Option<String>,
+    response_id: String,
     calls: Vec<FunctionCall>,
 }
 
-/// A call that could belong to more than one open response.
+/// Calls that finished while no announced response could own them, held for
+/// the next response of exactly their correlation. Calls with different
+/// correlations, an absent one included, are never in one group.
+#[derive(Clone, Debug)]
+struct WaitingGroup {
+    delegation_id: Option<String>,
+    calls: Vec<FunctionCall>,
+}
+
+/// A call whose owner is ambiguous.
 #[derive(Clone, Debug)]
 struct UnresolvedCall {
     call: FunctionCall,
-    /// The keys of the open responses that could own it and have not ended.
+    /// The announced responses that could own it and have not ended.
     candidates: Vec<u64>,
 }
 
@@ -173,15 +183,20 @@ fn compatible(left: Option<&String>, right: Option<&String>) -> bool {
 /// Collects the function calls of each backend response from the server
 /// events and reports when a response's calls need outputs.
 ///
-/// The outer `delegation_id` may be absent on any event. A finished call is
-/// attributed to an open response only when exactly one open response is
-/// compatible with its correlation. With none, the call is held for the next
-/// compatible response. With more than one, its ownership is ambiguous: it is
-/// kept as unresolved and every candidate response that ends reports it as
-/// [`CallsUpdate::Unresolved`]. A repeated `call_id` is kept once.
+/// The outer `delegation_id` may be absent on any event, and a known
+/// correlation is never discarded. A finished call is attributed to an
+/// announced response only when it is the call's sole possible owner. With
+/// no announced candidate, the call waits for the next response of exactly
+/// its correlation; an uncorrelated waiting call is claimed only when no
+/// differently correlated call is also waiting. A call with several possible
+/// owners becomes unresolved: each candidate response that ends reports it as
+/// [`CallsUpdate::Unresolved`], it stays retrievable until
+/// [`Self::take_unresolved`] drains it, and it is never submitted under any
+/// response. A repeated `call_id` is kept once.
 #[derive(Clone, Debug, Default)]
 pub struct FunctionCallCollector {
     open: Vec<OpenResponse>,
+    waiting: Vec<WaitingGroup>,
     unresolved: Vec<UnresolvedCall>,
     next_key: u64,
 }
@@ -217,20 +232,24 @@ impl FunctionCallCollector {
         }
     }
 
-    /// Whether any calls are held: collected for an open response or
-    /// unresolved.
+    /// Whether any calls are held: owned by an open response, waiting for
+    /// one, or unresolved.
     #[must_use]
     pub fn is_collecting(&self) -> bool {
-        !self.unresolved.is_empty() || self.open.iter().any(|open| !open.calls.is_empty())
+        !self.unresolved.is_empty()
+            || self.waiting.iter().any(|group| !group.calls.is_empty())
+            || self.open.iter().any(|open| !open.calls.is_empty())
     }
 
-    /// The calls whose response is ambiguous, in the order they finished.
+    /// The calls whose owner is ambiguous, in the order they became so.
+    /// Every call a [`CallsUpdate::Unresolved`] reported is here until
+    /// drained.
     pub fn unresolved_calls(&self) -> impl Iterator<Item = &FunctionCall> {
         self.unresolved.iter().map(|held| &held.call)
     }
 
-    /// Remove and return the calls whose response is ambiguous, for the
-    /// caller to settle.
+    /// Remove and return the calls whose owner is ambiguous, for the caller
+    /// to settle. No later update reports them.
     pub fn take_unresolved(&mut self) -> Vec<FunctionCall> {
         std::mem::take(&mut self.unresolved)
             .into_iter()
@@ -238,83 +257,17 @@ impl FunctionCallCollector {
             .collect()
     }
 
-    fn open_response(&mut self, delegation_id: Option<&String>, response_id: Option<&str>) -> u64 {
-        let key = self.next_key;
-        self.next_key += 1;
-        self.open.push(OpenResponse {
-            key,
-            delegation_id: delegation_id.cloned(),
-            response_id: response_id.map(ToOwned::to_owned),
-            calls: Vec::new(),
-        });
-        key
-    }
-
-    /// The open responses not yet named by `response.created` that are
-    /// compatible with `delegation_id`, by index.
-    fn unnamed_matching(&self, delegation_id: Option<&String>) -> Vec<usize> {
+    fn holds(&self, call_id: &str) -> bool {
         self.open
             .iter()
-            .enumerate()
-            .filter(|(_, open)| {
-                open.response_id.is_none() && compatible(open.delegation_id.as_ref(), delegation_id)
-            })
-            .map(|(index, _)| index)
-            .collect()
-    }
-
-    fn created(&mut self, delegation_id: Option<&String>, response_id: &str) {
-        if let Some(open) = self
-            .open
-            .iter_mut()
-            .find(|open| open.response_id.as_deref() == Some(response_id))
-        {
-            if open.delegation_id.is_none() {
-                open.delegation_id = delegation_id.cloned();
-            }
-            return;
-        }
-        let matching = self.unnamed_matching(delegation_id);
-        if let [index] = matching.as_slice() {
-            // Calls that finished before their response was announced belong to it.
-            if let Some(open) = self.open.get_mut(*index) {
-                open.response_id = Some(response_id.to_owned());
-                if open.delegation_id.is_none() {
-                    open.delegation_id = delegation_id.cloned();
-                }
-            }
-            return;
-        }
-        let key = self.open_response(delegation_id, Some(response_id));
-        if matching.is_empty() {
-            return;
-        }
-        // Several held groups could be this response's: their calls become
-        // unresolved, with this response as a candidate.
-        let mut index = 0;
-        while let Some(open) = self.open.get(index) {
-            if open.response_id.is_none() && compatible(open.delegation_id.as_ref(), delegation_id)
-            {
-                let held = self.open.remove(index);
-                self.unresolved
-                    .extend(held.calls.into_iter().map(|call| UnresolvedCall {
-                        call,
-                        candidates: vec![key],
-                    }));
-            } else {
-                index += 1;
-            }
-        }
+            .flat_map(|open| open.calls.iter())
+            .chain(self.waiting.iter().flat_map(|group| group.calls.iter()))
+            .chain(self.unresolved_calls())
+            .any(|held| held.call_id == call_id)
     }
 
     fn call_done(&mut self, delegation_id: Option<&String>, call: &FunctionCall) {
-        let held = self
-            .open
-            .iter()
-            .flat_map(|open| open.calls.iter())
-            .chain(self.unresolved_calls())
-            .any(|held| held.call_id == call.call_id);
-        if held {
+        if self.holds(&call.call_id) {
             return;
         }
         let candidates: Vec<u64> = self
@@ -323,15 +276,20 @@ impl FunctionCallCollector {
             .filter(|open| compatible(open.delegation_id.as_ref(), delegation_id))
             .map(|open| open.key)
             .collect();
+        // An uncorrelated call may also belong to the not yet announced
+        // response a correlated waiting call stands for.
+        let waiting_owner = delegation_id.is_none()
+            && self
+                .waiting
+                .iter()
+                .any(|group| group.delegation_id.is_some());
         match candidates.as_slice() {
-            [] => {
-                let key = self.open_response(delegation_id, None);
-                if let Some(open) = self.open.iter_mut().find(|open| open.key == key) {
-                    open.calls.push(call.clone());
-                }
-            }
-            [key] => {
+            [] => self.wait(delegation_id, call.clone()),
+            [key] if !waiting_owner => {
                 if let Some(open) = self.open.iter_mut().find(|open| open.key == *key) {
+                    if open.delegation_id.is_none() {
+                        open.delegation_id = delegation_id.cloned();
+                    }
                     open.calls.push(call.clone());
                 }
             }
@@ -340,6 +298,99 @@ impl FunctionCallCollector {
                 candidates,
             }),
         }
+    }
+
+    fn wait(&mut self, delegation_id: Option<&String>, call: FunctionCall) {
+        match self
+            .waiting
+            .iter_mut()
+            .find(|group| group.delegation_id.as_ref() == delegation_id)
+        {
+            Some(group) => group.calls.push(call),
+            None => self.waiting.push(WaitingGroup {
+                delegation_id: delegation_id.cloned(),
+                calls: vec![call],
+            }),
+        }
+    }
+
+    /// Take the waiting calls a response correlated as `delegation_id` can
+    /// claim. Returns the claimed calls with the correlation they establish,
+    /// and the calls it may or may not own, which leave the waiting groups.
+    fn claim_waiting(
+        &mut self,
+        delegation_id: Option<&String>,
+    ) -> (Vec<FunctionCall>, Option<String>, Vec<FunctionCall>) {
+        let mut claimed = Vec::new();
+        let mut uncertain = Vec::new();
+        match delegation_id {
+            Some(delegation) => {
+                if let Some(index) = self
+                    .waiting
+                    .iter()
+                    .position(|group| group.delegation_id.as_ref() == Some(delegation))
+                {
+                    claimed.extend(self.waiting.remove(index).calls);
+                }
+                if let Some(index) = self
+                    .waiting
+                    .iter()
+                    .position(|group| group.delegation_id.is_none())
+                {
+                    let others_wait = self
+                        .waiting
+                        .iter()
+                        .any(|group| group.delegation_id.is_some());
+                    let group = self.waiting.remove(index);
+                    if others_wait {
+                        uncertain.extend(group.calls);
+                    } else {
+                        claimed.extend(group.calls);
+                    }
+                }
+                (claimed, Some(delegation.clone()), uncertain)
+            }
+            None => match self.waiting.len() {
+                0 => (claimed, None, uncertain),
+                1 => {
+                    let group = self.waiting.remove(0);
+                    (group.calls, group.delegation_id, uncertain)
+                }
+                _ => {
+                    for group in std::mem::take(&mut self.waiting) {
+                        uncertain.extend(group.calls);
+                    }
+                    (claimed, None, uncertain)
+                }
+            },
+        }
+    }
+
+    fn created(&mut self, delegation_id: Option<&String>, response_id: &str) {
+        if let Some(open) = self
+            .open
+            .iter_mut()
+            .find(|open| open.response_id == response_id)
+        {
+            if open.delegation_id.is_none() {
+                open.delegation_id = delegation_id.cloned();
+            }
+            return;
+        }
+        let key = self.next_key;
+        self.next_key += 1;
+        let (calls, claimed_delegation, uncertain) = self.claim_waiting(delegation_id);
+        self.open.push(OpenResponse {
+            key,
+            delegation_id: delegation_id.cloned().or(claimed_delegation),
+            response_id: response_id.to_owned(),
+            calls,
+        });
+        self.unresolved
+            .extend(uncertain.into_iter().map(|call| UnresolvedCall {
+                call,
+                candidates: vec![key],
+            }));
     }
 
     fn ended(
@@ -351,15 +402,10 @@ impl FunctionCallCollector {
         let named = self
             .open
             .iter()
-            .position(|open| open.response_id.as_deref() == Some(response_id));
-        let unnamed = self.unnamed_matching(delegation_id);
-        let index = named.or(match unnamed.as_slice() {
-            [index] => Some(*index),
-            _ => None,
-        });
-        let mut uncertain = Vec::new();
-        let (delegation_id, owned) = match index.map(|index| self.open.remove(index)) {
+            .position(|open| open.response_id == response_id);
+        let (delegation_id, owned, uncertain) = match named.map(|index| self.open.remove(index)) {
             Some(open) => {
+                let mut uncertain = Vec::new();
                 for held in &mut self.unresolved {
                     if let Some(position) = held.candidates.iter().position(|key| *key == open.key)
                     {
@@ -370,20 +416,23 @@ impl FunctionCallCollector {
                 (
                     open.delegation_id.or_else(|| delegation_id.cloned()),
                     open.calls,
+                    uncertain,
                 )
             }
             None => {
-                // An unannounced response matching several held groups may
-                // own any of their calls; they stay held for their own end.
-                if unnamed.len() > 1 {
-                    uncertain.extend(
-                        unnamed
-                            .iter()
-                            .filter_map(|index| self.open.get(*index))
-                            .flat_map(|open| open.calls.iter().cloned()),
-                    );
-                }
-                (delegation_id.cloned(), Vec::new())
+                // An unannounced response claims the waiting calls it can;
+                // those it may own are reported and become unresolved.
+                let (owned, claimed_delegation, uncertain) = self.claim_waiting(delegation_id);
+                self.unresolved
+                    .extend(uncertain.iter().cloned().map(|call| UnresolvedCall {
+                        call,
+                        candidates: Vec::new(),
+                    }));
+                (
+                    delegation_id.cloned().or(claimed_delegation),
+                    owned,
+                    uncertain,
+                )
             }
         };
         let response_id = response_id.to_owned();

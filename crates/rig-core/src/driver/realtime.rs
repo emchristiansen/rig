@@ -63,11 +63,17 @@ impl PublicLiveSessions {
     /// Reads the provider's credential source, when it has one, before
     /// sending; a failure there is [`LiveApiError::Request`] and nothing is
     /// sent. A send that fails before any reply is [`LiveApiError::Transport`].
-    /// Every received reply keeps its status, headers and request id: a
-    /// rejected credential, a reached spend limit and any other refusal stay
-    /// distinct whether the transport returned the reply or reported it as an
-    /// error, and a success whose body cannot be read is
-    /// [`LiveApiError::OutcomeUnknown`].
+    ///
+    /// A success returns the [`CreatedSession`], which keeps only the session
+    /// id and the SDP answer. A failure after a reply arrived keeps the
+    /// reply's status, headers and request id, and its body as far as it is
+    /// known: the exact bytes when the body was read
+    /// ([`ReplyBody::Received`]), the transport's text when the transport
+    /// reported the reply as an error ([`ReplyBody::TransportText`], not
+    /// guaranteed byte-exact), or [`ReplyBody::Unreadable`] when the read
+    /// failed. A rejected credential, a reached spend limit and any other
+    /// refusal stay distinct on each of those paths, and a success whose body
+    /// cannot be read is [`LiveApiError::OutcomeUnknown`].
     pub async fn create_session<H: HttpClientExt>(
         &self,
         http: &H,
