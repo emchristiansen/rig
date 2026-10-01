@@ -581,3 +581,60 @@ fn a_response_learns_its_delegation_from_a_call_it_owns() {
     );
     assert_eq!(collector.unresolved_calls().count(), 0);
 }
+
+#[test]
+fn claimed_waiting_calls_are_submitted_in_completion_order() {
+    let mut collector = FunctionCallCollector::new();
+    let updates = observe_all(
+        &mut collector,
+        &[
+            call_done(None, "c0", "lookup"),
+            call_done(Some("d1"), "c1", "book"),
+            created(Some("d1"), "r1"),
+            ended(Some("d1"), "response.completed", "r1"),
+        ],
+    );
+    assert_eq!(
+        updates,
+        vec![CallsUpdate::Submit(PendingFunctionCalls {
+            delegation_id: Some("d1".to_owned()),
+            response_id: "r1".to_owned(),
+            calls: vec![call("c0", "lookup"), call("c1", "book")],
+        })]
+    );
+}
+
+#[test]
+fn interleaved_uncertain_calls_keep_completion_order() {
+    let mut collector = FunctionCallCollector::new();
+    observe_all(
+        &mut collector,
+        &[
+            call_done(Some("d1"), "a", "lookup"),
+            call_done(Some("d2"), "b", "book"),
+            call_done(None, "x", "weather"),
+            call_done(Some("d1"), "c", "cancel"),
+        ],
+    );
+    let arrival = vec![
+        call("a", "lookup"),
+        call("b", "book"),
+        call("x", "weather"),
+        call("c", "cancel"),
+    ];
+    assert_eq!(
+        collector.observe(&ended(None, "response.completed", "r1")),
+        Some(CallsUpdate::Unresolved {
+            delegation_id: None,
+            response_id: "r1".to_owned(),
+            outcome: ResponseOutcome::Completed,
+            owned: Vec::new(),
+            uncertain: arrival.clone(),
+        })
+    );
+    assert_eq!(
+        collector.unresolved_calls().cloned().collect::<Vec<_>>(),
+        arrival
+    );
+    assert_eq!(collector.take_unresolved(), arrival);
+}

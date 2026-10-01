@@ -135,9 +135,11 @@ pub enum CallsUpdate {
         response_id: String,
         /// How it ended.
         outcome: ResponseOutcome,
-        /// The calls known to belong to this response.
+        /// The calls known to belong to this response, in the order they
+        /// finished.
         owned: Vec<FunctionCall>,
-        /// The calls that may belong to this response or to another one.
+        /// The calls that may belong to this response or to another one, in
+        /// the order they finished.
         uncertain: Vec<FunctionCall>,
     },
 }
@@ -151,7 +153,20 @@ struct OpenResponse {
     /// `None` until an event correlated with it names its delegation.
     delegation_id: Option<String>,
     response_id: String,
-    calls: Vec<FunctionCall>,
+    calls: Vec<Arrived>,
+}
+
+/// A finished call with its place in the order calls finished.
+#[derive(Clone, Debug)]
+struct Arrived {
+    seq: u64,
+    call: FunctionCall,
+}
+
+/// `calls` in the order they finished.
+fn in_arrival_order(mut calls: Vec<Arrived>) -> Vec<FunctionCall> {
+    calls.sort_by_key(|arrived| arrived.seq);
+    calls.into_iter().map(|arrived| arrived.call).collect()
 }
 
 /// Calls that finished while no announced response could own them, held for
@@ -160,13 +175,13 @@ struct OpenResponse {
 #[derive(Clone, Debug)]
 struct WaitingGroup {
     delegation_id: Option<String>,
-    calls: Vec<FunctionCall>,
+    calls: Vec<Arrived>,
 }
 
 /// A call whose owner is ambiguous.
 #[derive(Clone, Debug)]
 struct UnresolvedCall {
-    call: FunctionCall,
+    arrived: Arrived,
     /// The announced responses that could own it and have not ended.
     candidates: Vec<u64>,
 }
@@ -197,8 +212,10 @@ fn compatible(left: Option<&String>, right: Option<&String>) -> bool {
 pub struct FunctionCallCollector {
     open: Vec<OpenResponse>,
     waiting: Vec<WaitingGroup>,
+    /// Kept in the order the calls finished.
     unresolved: Vec<UnresolvedCall>,
     next_key: u64,
+    next_seq: u64,
 }
 
 impl FunctionCallCollector {
@@ -241,11 +258,11 @@ impl FunctionCallCollector {
             || self.open.iter().any(|open| !open.calls.is_empty())
     }
 
-    /// The calls whose owner is ambiguous, in the order they became so.
+    /// The calls whose owner is ambiguous, in the order they finished.
     /// Every call a [`CallsUpdate::Unresolved`] reported is here until
     /// drained.
     pub fn unresolved_calls(&self) -> impl Iterator<Item = &FunctionCall> {
-        self.unresolved.iter().map(|held| &held.call)
+        self.unresolved.iter().map(|held| &held.arrived.call)
     }
 
     /// Remove and return the calls whose owner is ambiguous, for the caller
@@ -253,7 +270,7 @@ impl FunctionCallCollector {
     pub fn take_unresolved(&mut self) -> Vec<FunctionCall> {
         std::mem::take(&mut self.unresolved)
             .into_iter()
-            .map(|held| held.call)
+            .map(|held| held.arrived.call)
             .collect()
     }
 
@@ -262,6 +279,7 @@ impl FunctionCallCollector {
             .iter()
             .flat_map(|open| open.calls.iter())
             .chain(self.waiting.iter().flat_map(|group| group.calls.iter()))
+            .map(|arrived| &arrived.call)
             .chain(self.unresolved_calls())
             .any(|held| held.call_id == call_id)
     }
@@ -270,6 +288,11 @@ impl FunctionCallCollector {
         if self.holds(&call.call_id) {
             return;
         }
+        let arrived = Arrived {
+            seq: self.next_seq,
+            call: call.clone(),
+        };
+        self.next_seq += 1;
         let candidates: Vec<u64> = self
             .open
             .iter()
@@ -284,23 +307,30 @@ impl FunctionCallCollector {
                 .iter()
                 .any(|group| group.delegation_id.is_some());
         match candidates.as_slice() {
-            [] => self.wait(delegation_id, call.clone()),
+            [] => self.wait(delegation_id, arrived),
             [key] if !waiting_owner => {
                 if let Some(open) = self.open.iter_mut().find(|open| open.key == *key) {
                     if open.delegation_id.is_none() {
                         open.delegation_id = delegation_id.cloned();
                     }
-                    open.calls.push(call.clone());
+                    open.calls.push(arrived);
                 }
             }
-            _ => self.unresolved.push(UnresolvedCall {
-                call: call.clone(),
-                candidates,
-            }),
+            _ => self.hold_unresolved(vec![arrived], &candidates),
         }
     }
 
-    fn wait(&mut self, delegation_id: Option<&String>, call: FunctionCall) {
+    /// Add `calls` to the unresolved calls, keeping arrival order.
+    fn hold_unresolved(&mut self, calls: Vec<Arrived>, candidates: &[u64]) {
+        self.unresolved
+            .extend(calls.into_iter().map(|arrived| UnresolvedCall {
+                arrived,
+                candidates: candidates.to_vec(),
+            }));
+        self.unresolved.sort_by_key(|held| held.arrived.seq);
+    }
+
+    fn wait(&mut self, delegation_id: Option<&String>, call: Arrived) {
         match self
             .waiting
             .iter_mut()
@@ -320,7 +350,7 @@ impl FunctionCallCollector {
     fn claim_waiting(
         &mut self,
         delegation_id: Option<&String>,
-    ) -> (Vec<FunctionCall>, Option<String>, Vec<FunctionCall>) {
+    ) -> (Vec<Arrived>, Option<String>, Vec<Arrived>) {
         let mut claimed = Vec::new();
         let mut uncertain = Vec::new();
         match delegation_id {
@@ -379,18 +409,15 @@ impl FunctionCallCollector {
         }
         let key = self.next_key;
         self.next_key += 1;
-        let (calls, claimed_delegation, uncertain) = self.claim_waiting(delegation_id);
+        let (mut calls, claimed_delegation, uncertain) = self.claim_waiting(delegation_id);
+        calls.sort_by_key(|arrived| arrived.seq);
         self.open.push(OpenResponse {
             key,
             delegation_id: delegation_id.cloned().or(claimed_delegation),
             response_id: response_id.to_owned(),
             calls,
         });
-        self.unresolved
-            .extend(uncertain.into_iter().map(|call| UnresolvedCall {
-                call,
-                candidates: vec![key],
-            }));
+        self.hold_unresolved(uncertain, &[key]);
     }
 
     fn ended(
@@ -410,28 +437,24 @@ impl FunctionCallCollector {
                     if let Some(position) = held.candidates.iter().position(|key| *key == open.key)
                     {
                         held.candidates.remove(position);
-                        uncertain.push(held.call.clone());
+                        uncertain.push(held.arrived.clone());
                     }
                 }
                 (
                     open.delegation_id.or_else(|| delegation_id.cloned()),
-                    open.calls,
-                    uncertain,
+                    in_arrival_order(open.calls),
+                    in_arrival_order(uncertain),
                 )
             }
             None => {
                 // An unannounced response claims the waiting calls it can;
                 // those it may own are reported and become unresolved.
                 let (owned, claimed_delegation, uncertain) = self.claim_waiting(delegation_id);
-                self.unresolved
-                    .extend(uncertain.iter().cloned().map(|call| UnresolvedCall {
-                        call,
-                        candidates: Vec::new(),
-                    }));
+                self.hold_unresolved(uncertain.clone(), &[]);
                 (
                     delegation_id.cloned().or(claimed_delegation),
-                    owned,
-                    uncertain,
+                    in_arrival_order(owned),
+                    in_arrival_order(uncertain),
                 )
             }
         };
