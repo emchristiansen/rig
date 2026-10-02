@@ -1,6 +1,6 @@
-//! Transport and credential I/O for a GPT-Live call. The provider builds
-//! requests and parses identifiers; this driver sends one call-creation
-//! exchange and keeps its transport errors intact.
+//! Transport and credential I/O for a GPT-Live call and a public Live
+//! session. The provider builds requests and parses identifiers; this driver
+//! sends one creation exchange and keeps its transport errors intact.
 
 use bytes::Bytes;
 
@@ -8,6 +8,10 @@ use crate::error::ProviderError;
 use crate::http_client::{self, HttpClientExt, LazyBody};
 use crate::providers::chatgpt::realtime::{
     LiveCalls, RealtimeCall, SessionConfig, decode_created_call,
+};
+use crate::providers::openai::live::{
+    CreatedSession, LiveApiError, PublicLiveSessions, ReplyBody,
+    SessionConfig as PublicSessionConfig,
 };
 
 impl LiveCalls {
@@ -52,6 +56,71 @@ impl LiveCalls {
     }
 }
 
+impl PublicLiveSessions {
+    /// Create a public Live session for `offer_sdp` configured by `session`,
+    /// over `http`.
+    ///
+    /// Reads the provider's credential source, when it has one, before
+    /// sending; a failure there is [`LiveApiError::Request`] and nothing is
+    /// sent. A send that fails before any reply is [`LiveApiError::Transport`].
+    ///
+    /// A success returns the [`CreatedSession`], which keeps only the session
+    /// id and the SDP answer. A failure after a reply arrived keeps the
+    /// reply's status, headers and request id, and its body as far as it is
+    /// known: the exact bytes when the body was read
+    /// ([`ReplyBody::Received`]), the transport's text when the transport
+    /// reported the reply as an error ([`ReplyBody::TransportText`], not
+    /// guaranteed byte-exact), or [`ReplyBody::Unreadable`] when the read
+    /// failed. A rejected credential, a reached spend limit and any other
+    /// refusal stay distinct on each of those paths, and a success whose body
+    /// cannot be read is [`LiveApiError::OutcomeUnknown`].
+    pub async fn create_session<H: HttpClientExt>(
+        &self,
+        http: &H,
+        offer_sdp: &str,
+        session: &PublicSessionConfig,
+    ) -> Result<CreatedSession, LiveApiError> {
+        let mut request = self
+            .create_request(offer_sdp, session)
+            .map_err(|error| LiveApiError::Request(error.into()))?;
+        if let Some(stamp) = self.credential_stamp() {
+            stamp
+                .authorize(request.headers_mut())
+                .await
+                .map_err(LiveApiError::Request)?;
+        }
+        let response = match http.send::<_, Bytes>(request).await {
+            Ok(response) => response,
+            Err(http_client::Error::InvalidStatusCodeWithDetails {
+                status,
+                body,
+                headers,
+            }) => {
+                return self.decode(
+                    self.reply_head(status, headers),
+                    ReplyBody::TransportText(body),
+                );
+            }
+            Err(other) => {
+                return Err(LiveApiError::Transport(
+                    ProviderError::from_transport_error(other),
+                ));
+            }
+        };
+        let (parts, body) = response.into_parts();
+        let head = self.reply_head(parts.status, parts.headers);
+        let body: LazyBody<Bytes> = body;
+        let body = match body.await {
+            Ok(bytes) => ReplyBody::Received(bytes.to_vec()),
+            Err(http_client::Error::InvalidStatusCodeWithDetails { body, .. }) => {
+                ReplyBody::TransportText(body)
+            }
+            Err(other) => ReplyBody::Unreadable(ProviderError::from_transport_error(other)),
+        };
+        self.decode(head, body)
+    }
+}
+
 /// A transport failure, keeping a rejected reply's status, body, headers and
 /// request id.
 pub(crate) fn reply_error(
@@ -63,3 +132,6 @@ pub(crate) fn reply_error(
     });
     ProviderError::from_transport_error(error).with_provider_request_id(request_id)
 }
+
+#[cfg(test)]
+mod tests;

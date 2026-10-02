@@ -20,6 +20,7 @@
 
 pub mod completion;
 pub mod embedding;
+pub mod live;
 pub mod responses_api;
 
 /// The OpenAI wires: the configuration, the chat-completions wire and one
