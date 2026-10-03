@@ -1,0 +1,816 @@
+//! Deterministic boundary tests for the opt-in observed Responses operation.
+//!
+//! These are synthetic transport fixtures, not recorded provider traffic: they
+//! exercise first-poll/Drop timing, exact supplied strings, and deliberately
+//! malformed or rejected replies that a cassette cannot reliably reproduce.
+#![cfg(all(feature = "completion-observations", not(target_family = "wasm")))]
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+use bytes::Bytes;
+use futures::{StreamExt, poll};
+use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
+use rig_core::{
+    client::CompletionClient,
+    completion::{CompletionError, CompletionModel},
+    http_client::{
+        self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse, sse::BoxedStream,
+    },
+    providers::{
+        chatgpt::{self, ChatGPTAuth},
+        live_support::{
+            CallerIdentity,
+            error::{ErrorDetail, ProviderError},
+        },
+        openai::responses_api::{
+            observation::{
+                ExistingDiagnosticBasis, Observation, ObservationDispatch, ObservationHandle,
+                ObservationProvenance, ObservationStage, ObservedFailureKind,
+                ObservedRequestContext, ObservedResponsesResult, ObservedResponsesStream,
+            },
+            observed_types::{AssistantContent, FinishReason},
+            streaming::observed::ObservedEvent,
+        },
+    },
+    streaming::RawStreamingChoice,
+    wasm_compat::WasmCompatSend,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::VecDeque,
+    future::Future,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::Poll,
+};
+
+#[derive(Clone, Debug, Default)]
+struct ScriptedHttp {
+    script: Arc<Script>,
+    sends: Arc<AtomicUsize>,
+    body_polls: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<Request<Bytes>>>>,
+}
+
+#[derive(Debug)]
+struct Script {
+    status: StatusCode,
+    headers: HeaderMap,
+    frames: Vec<String>,
+    pending_connect: bool,
+    pending_tail: bool,
+}
+
+impl Default for Script {
+    fn default() -> Self {
+        Self {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            frames: Vec::new(),
+            pending_connect: false,
+            pending_tail: false,
+        }
+    }
+}
+
+impl ScriptedHttp {
+    fn new(script: Script) -> Self {
+        Self {
+            script: Arc::new(script),
+            ..Self::default()
+        }
+    }
+
+    fn frames(frames: Vec<String>) -> Self {
+        Self::new(Script {
+            frames,
+            ..Script::default()
+        })
+    }
+
+    fn sent_request(&self) -> Request<Bytes> {
+        self.requests
+            .lock()
+            .expect("request ledger")
+            .first()
+            .expect("one request")
+            .clone()
+    }
+}
+
+impl HttpClientExt for ScriptedHttp {
+    fn send<T, U>(
+        &self,
+        _request: Request<T>,
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+    where
+        T: Into<Bytes> + WasmCompatSend,
+        U: From<Bytes> + WasmCompatSend + 'static,
+    {
+        std::future::ready(Err(http_client::Error::InvalidStatusCode(
+            StatusCode::NOT_IMPLEMENTED,
+        )))
+    }
+
+    fn send_multipart<U>(
+        &self,
+        _request: Request<MultipartForm>,
+    ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>> + WasmCompatSend + 'static
+    where
+        U: From<Bytes> + WasmCompatSend + 'static,
+    {
+        std::future::ready(Err(http_client::Error::InvalidStatusCode(
+            StatusCode::NOT_IMPLEMENTED,
+        )))
+    }
+
+    fn send_streaming<T>(
+        &self,
+        request: Request<T>,
+    ) -> impl Future<Output = http_client::Result<StreamingResponse>> + WasmCompatSend
+    where
+        T: Into<Bytes> + WasmCompatSend,
+    {
+        let request = request.map(Into::into);
+        let this = self.clone();
+        async move {
+            this.sends.fetch_add(1, Ordering::SeqCst);
+            this.requests.lock().expect("request ledger").push(request);
+            if this.script.pending_connect {
+                return std::future::pending().await;
+            }
+            let mut chunks: VecDeque<_> = this
+                .script
+                .frames
+                .iter()
+                .map(|frame| Bytes::from(format!("data: {frame}\n\n")))
+                .collect();
+            let pending_tail = this.script.pending_tail;
+            let polls = this.body_polls.clone();
+            let body: BoxedStream = Box::pin(futures::stream::poll_fn(move |_| {
+                polls.fetch_add(1, Ordering::SeqCst);
+                match chunks.pop_front() {
+                    Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                    None if pending_tail => Poll::Pending,
+                    None => Poll::Ready(None),
+                }
+            }));
+            let mut response = Response::new(body);
+            *response.status_mut() = this.script.status;
+            *response.headers_mut() = this.script.headers.clone();
+            Ok(response)
+        }
+    }
+}
+
+type Model = chatgpt::ResponsesCompletionModel<ScriptedHttp>;
+
+fn model(http: ScriptedHttp) -> Model {
+    chatgpt::Client::builder()
+        .api_key(ChatGPTAuth::AccessToken {
+            access_token: "synthetic-baseline-token".into(),
+            account_id: Some("synthetic-baseline-account".into()),
+        })
+        .base_url("https://baseline.invalid/backend")
+        .default_instructions("baseline defaults")
+        .originator("baseline-originator")
+        .user_agent("baseline-agent")
+        .allow_device_flow(false)
+        .http_client(http)
+        .build()
+        .expect("synthetic client")
+        .completion_model("requested-model")
+}
+
+fn context() -> ObservedRequestContext {
+    ObservedRequestContext {
+        access_token: "synthetic-observed-token".into(),
+        account_id: Some("synthetic-observed-account".into()),
+        base_url: "https://observed.invalid/backend".into(),
+        caller_identity: CallerIdentity::new(
+            "observed-originator",
+            "observed-agent",
+            Some("fixture-v1".into()),
+        )
+        .expect("synthetic caller identity"),
+    }
+}
+
+async fn open(http: ScriptedHttp) -> (ObservationHandle, ObservedResponsesStream) {
+    let model = model(http);
+    let request = model
+        .completion_request("hello")
+        .preamble("caller preamble".into())
+        .build();
+    let (handle, writer) = Observation::prepare();
+    let stream = model
+        .raw_stream_observed(request, context(), writer)
+        .await
+        .expect("observed open");
+    (handle, stream)
+}
+
+async fn finish(
+    mut stream: ObservedResponsesStream,
+) -> (Vec<ObservedEvent>, ObservedResponsesResult) {
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("successful observed item"));
+    }
+    (
+        events,
+        stream.finish().expect("successful native finalization"),
+    )
+}
+
+fn response(output: Value) -> Value {
+    json!({
+        "id": "resp_fixture", "object": "response", "created_at": 7,
+        "status": "completed", "model": "reported-model", "output": output,
+    })
+}
+
+fn terminal(response: Value) -> String {
+    json!({"type": "response.completed", "sequence_number": 4, "response": response}).to_string()
+}
+
+fn message(text: &str) -> Value {
+    json!({
+        "type": "message", "id": "msg_fixture", "role": "assistant", "status": "completed",
+        "content": [{"type": "output_text", "text": text}],
+    })
+}
+
+fn whole_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert("x-request-id", HeaderValue::from_static("request-fixture"));
+    headers.append("x-codex-limit", HeaderValue::from_static("first"));
+    headers.append("x-codex-limit", HeaderValue::from_static("second"));
+    headers.insert(
+        "x-codex-bytes",
+        HeaderValue::from_bytes(b"a\xffz").expect("opaque header bytes"),
+    );
+    headers.append("x-unprojected", HeaderValue::from_static("one"));
+    headers.append(
+        "x-unprojected",
+        HeaderValue::from_bytes(b"two\xfe").expect("opaque header bytes"),
+    );
+    headers
+}
+
+/// An unpolled future owns the writer but cannot start the mock HTTP future.
+#[tokio::test]
+async fn dropping_an_unpolled_opening_future_cancels_without_dispatch() {
+    let http = ScriptedHttp::default();
+    let model = model(http.clone());
+    let request = model.completion_request("hello").build();
+    let (handle, writer) = Observation::prepare();
+    let opening = model.raw_stream_observed(request, context(), writer);
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::Prepared);
+        assert_eq!(view.dispatch, ObservationDispatch::NotDispatched);
+        assert_eq!(view.provenance, ObservationProvenance::SuppliedSse);
+        assert!(view.committed_prefix.is_empty());
+    });
+    drop(opening);
+    assert_eq!(http.sends.load(Ordering::SeqCst), 0);
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::Cancelled);
+        assert_eq!(view.dispatch, ObservationDispatch::NotDispatched);
+        assert!(view.reply_head.is_none());
+    });
+}
+
+/// A pending send proves the mark is made at first poll, independently of a reply.
+#[tokio::test]
+async fn first_stream_poll_marks_attempt_and_dropping_next_does_not_cancel() {
+    let http = ScriptedHttp::new(Script {
+        pending_connect: true,
+        ..Script::default()
+    });
+    let (handle, mut stream) = open(http.clone()).await;
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::Prepared);
+        assert_eq!(view.dispatch, ObservationDispatch::NotDispatched);
+    });
+    assert_eq!(http.sends.load(Ordering::SeqCst), 0);
+    let mut next = Box::pin(stream.next());
+    assert!(poll!(next.as_mut()).is_pending());
+    drop(next);
+    assert_eq!(http.sends.load(Ordering::SeqCst), 1);
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::Running);
+        assert_eq!(view.dispatch, ObservationDispatch::SendAttemptStarted);
+        assert!(view.committed_prefix.is_empty());
+        assert!(view.reply_head.is_none());
+    });
+    drop(stream);
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::Cancelled);
+        assert_eq!(view.dispatch, ObservationDispatch::SendAttemptStarted);
+    });
+    assert_eq!(http.sends.load(Ordering::SeqCst), 1);
+}
+
+/// JSON parsing cannot preserve duplicate keys; the ledger must keep the source string.
+#[tokio::test]
+async fn original_duplicate_key_prefix_survives_the_whole_stream() {
+    let original =
+        "{ \"type\" : \"response.future_fixture\", \"same\":1, \"same\":2, \"text\":\"a\\nb\" }"
+            .to_owned();
+    let http = ScriptedHttp::new(Script {
+        frames: vec![original.clone()],
+        pending_tail: true,
+        ..Script::default()
+    });
+    let (handle, mut stream) = open(http.clone()).await;
+    let stream_handle = stream.observation();
+    assert!(handle.same_operation(&stream_handle));
+    let (other, other_writer) = Observation::prepare();
+    assert!(!handle.same_operation(&other));
+    drop(other_writer);
+    match stream
+        .next()
+        .await
+        .expect("unknown frame")
+        .expect("valid unknown frame")
+    {
+        ObservedEvent::Unknown { event_type, value } => {
+            assert_eq!(event_type, "response.future_fixture");
+            assert_eq!(value["same"], 2);
+        }
+        event => panic!("unexpected event: {event:?}"),
+    }
+    let mut next = Box::pin(stream.next());
+    assert!(poll!(next.as_mut()).is_pending());
+    drop(next);
+    handle.inspect(|view| assert_eq!(view.stage, ObservationStage::Running));
+    drop(stream);
+    drop(stream_handle);
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::Cancelled);
+        assert_eq!(view.committed_prefix, [original]);
+        assert!(view.capture_fault.is_none());
+    });
+    assert_eq!(http.sends.load(Ordering::SeqCst), 1);
+}
+
+/// Terminal-only output and headers must survive without any preceding delta.
+#[tokio::test]
+async fn terminal_only_output_preserves_opaque_parts_usage_and_the_whole_head() {
+    let opaque_part = json!({"type": "future_part", "bytes": [1, 2], "keep": null});
+    let provider_item =
+        json!({"type": "future_tool_result", "id": "opaque_1", "payload": {"exact": true}});
+    let mut output_message = message("terminal answer");
+    output_message["phase"] = json!("final_answer");
+    output_message["content"]
+        .as_array_mut()
+        .expect("message content")
+        .push(opaque_part.clone());
+    let mut body = response(json!([output_message, provider_item.clone()]));
+    body["usage"] = json!({"input_tokens": 5, "output_tokens": 2, "total_tokens": 7, "input_tokens_details": {}});
+    let original = terminal(body.clone());
+    let headers = whole_headers();
+    let http = ScriptedHttp::new(Script {
+        frames: vec![original.clone(), "[DONE]".into()],
+        headers: headers.clone(),
+        ..Script::default()
+    });
+    let (handle, stream) = open(http.clone()).await;
+    let (events, result) = finish(stream).await;
+    assert!(handle.same_operation(&result.observation));
+    let response = &result.body.response;
+    assert_eq!(response.finish_reason(), Some(&FinishReason::Stop));
+    assert_eq!(response.provider, "chatgpt");
+    assert_eq!(response.model.as_deref(), Some("reported-model"));
+    assert_eq!(response.message_id.as_deref(), Some("msg_fixture"));
+    assert_eq!(response.response_id.as_deref(), Some("resp_fixture"));
+    assert_eq!(
+        response.provider_request_id.as_deref(),
+        Some("request-fixture")
+    );
+    assert_eq!(
+        response.provider_response_headers["x-codex-limit"],
+        "first, second"
+    );
+    assert_eq!(
+        response.provider_response_headers["x-codex-bytes"],
+        "a\u{fffd}z"
+    );
+    assert_eq!(response.provider_response_headers.len(), 2);
+    assert_eq!(response.raw, body);
+    assert_eq!(
+        format!("{:?}", response.usage),
+        "Usage { input_tokens: Some(5), output_tokens: Some(2), total_tokens: Some(7), cached_input_tokens: None, cache_creation_input_tokens: None, tool_use_prompt_tokens: None, reasoning_tokens: None }"
+    );
+    assert_eq!(response.choice.len(), 3);
+    match &response.choice[0] {
+        AssistantContent::Text(text) => {
+            assert_eq!(text.text, "terminal answer");
+            assert_eq!(
+                text.additional_params.as_ref().expect("phase metadata")["openai_responses"]["phase"],
+                "final_answer"
+            );
+        }
+        other => panic!("unexpected first output: {other:?}"),
+    }
+    match &response.choice[1] {
+        AssistantContent::Text(text) => {
+            assert!(text.text.is_empty());
+            assert_eq!(
+                text.additional_params.as_ref().expect("opaque metadata")["openai_responses_part"]
+                    ["value"],
+                opaque_part
+            );
+        }
+        other => panic!("unexpected opaque part: {other:?}"),
+    }
+    match &response.choice[2] {
+        AssistantContent::ProviderItem(item) => {
+            assert_eq!(item.item, provider_item);
+            assert_eq!(item.provider.as_deref(), Some("chatgpt"));
+        }
+        other => panic!("unexpected provider item: {other:?}"),
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ObservedEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>(),
+        "terminal answer"
+    );
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeSucceeded);
+        assert_eq!(view.committed_prefix, [original, "[DONE]".into()]);
+        let head = view.reply_head.expect("actual HTTP head");
+        assert_eq!(head.status, StatusCode::OK);
+        assert_eq!(head.headers, headers);
+        assert!(head.accepted_sse);
+    });
+    // A caller's later text-only admission can reject output without owning
+    // any capability that changes Rig's already successful native stage.
+    let caller_admission: Result<(), &str> = if response
+        .choice
+        .iter()
+        .any(|part| matches!(part, AssistantContent::ProviderItem(_)))
+    {
+        Err("caller accepts text only")
+    } else {
+        Ok(())
+    };
+    assert_eq!(caller_admission, Err("caller accepts text only"));
+    drop(result);
+    handle.inspect(|view| assert_eq!(view.stage, ObservationStage::NativeSucceeded));
+    let sent = http.sent_request();
+    let request_body: Value = serde_json::from_slice(sent.body()).expect("request JSON");
+    assert_eq!(request_body["instructions"], "caller preamble");
+    assert_eq!(
+        sent.uri().to_string(),
+        "https://observed.invalid/backend/responses"
+    );
+    assert_eq!(
+        sent.headers()["authorization"],
+        "Bearer synthetic-observed-token"
+    );
+    assert_eq!(
+        sent.headers()["chatgpt-account-id"],
+        "synthetic-observed-account"
+    );
+    assert_eq!(sent.headers()["originator"], "observed-originator");
+    assert_eq!(sent.headers()["user-agent"], "observed-agent");
+    assert_eq!(sent.headers()["version"], "fixture-v1");
+}
+
+/// Missing usage and a reported cached zero are distinct provider facts.
+#[tokio::test]
+async fn missing_usage_output_and_optional_cached_counts_decode_without_defaults() {
+    for (usage, expected_input, expected_cached) in [
+        (None, None, None),
+        (
+            Some(json!({"input_tokens": 3, "output_tokens": 1, "total_tokens": 4})),
+            Some(3),
+            None,
+        ),
+        (
+            Some(
+                json!({"input_tokens": 3, "output_tokens": 1, "total_tokens": 4, "input_tokens_details": {}}),
+            ),
+            Some(3),
+            None,
+        ),
+        (
+            Some(
+                json!({"input_tokens": 3, "output_tokens": 1, "total_tokens": 4, "input_tokens_details": {"cached_tokens": 0}}),
+            ),
+            Some(3),
+            Some(0),
+        ),
+    ] {
+        let mut body = response(json!([]));
+        body.as_object_mut()
+            .expect("response object")
+            .remove("output");
+        if let Some(usage) = usage {
+            body["usage"] = usage;
+        }
+        let (handle, stream) = open(ScriptedHttp::frames(vec![terminal(body)])).await;
+        let (_, result) = finish(stream).await;
+        assert!(result.body.response.choice.is_empty());
+        assert_eq!(result.body.response.usage.input_tokens, expected_input);
+        assert_eq!(
+            result.body.response.usage.cached_input_tokens,
+            expected_cached
+        );
+        handle.inspect(|view| assert_eq!(view.stage, ObservationStage::NativeSucceeded));
+    }
+}
+
+/// Codex's omitted envelope indices are repaired only after original capture.
+#[tokio::test]
+async fn missing_codex_indices_repair_without_replacing_the_original_payload() {
+    let delta =
+        r#"{ "type":"response.output_text.delta", "item_id":"msg_fixture", "delta":"hello" }"#
+            .to_owned();
+    let done = terminal(response(json!([message("hello")])));
+    let (handle, stream) = open(ScriptedHttp::frames(vec![delta.clone(), done.clone()])).await;
+    let (events, result) = finish(stream).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event {
+                ObservedEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>(),
+        "hello"
+    );
+    assert!(
+        matches!(&result.body.response.choice[..], [AssistantContent::Text(text)] if text.text == "hello")
+    );
+    handle.inspect(|view| assert_eq!(view.committed_prefix, [delta.clone(), done.clone()]));
+
+    // The ordinary live adapter retains its baseline strict envelope decoder.
+    let baseline_model = model(ScriptedHttp::frames(vec![delta, done]));
+    let request = baseline_model.completion_request("hello").build();
+    let mut baseline = baseline_model
+        .raw_stream(request)
+        .await
+        .expect("baseline open");
+    let failure = baseline
+        .next()
+        .await
+        .expect("strict envelope rejection")
+        .expect_err("baseline must not gain observed envelope repair");
+    assert!(matches!(failure, CompletionError::JsonError(_)));
+}
+
+/// Finalization without a genuine terminal differs from a completed malformed tool item.
+#[tokio::test]
+async fn missing_terminal_is_provider_failure_but_completed_malformed_tool_is_stream_failure() {
+    let (handle, mut stream) = open(ScriptedHttp::default()).await;
+    assert!(stream.next().await.is_none());
+    handle.inspect(|view| assert_eq!(view.stage, ObservationStage::AwaitingNativeFinalization));
+    let failure = stream.finish().expect_err("no genuine terminal");
+    assert_eq!(failure.kind, ObservedFailureKind::Provider);
+    assert!(handle.same_operation(&failure.observation));
+    match &failure.diagnostic_basis {
+        ExistingDiagnosticBasis::Provider(error) => assert_eq!(
+            format!("{error:?}"),
+            "Response(\"provider stream ended without a terminal record; treating the turn as truncated\")"
+        ),
+        other => panic!("wrong missing-terminal basis: {other:?}"),
+    }
+    handle.inspect(|view| assert_eq!(view.stage, ObservationStage::NativeFailed));
+
+    let tool = json!({
+        "type": "function_call", "id": "fc_fixture", "call_id": "call_fixture",
+        "name": "broken", "arguments": "{", "status": "completed",
+    });
+    let item_done = json!({
+        "type": "response.output_item.done", "output_index": 0,
+        "sequence_number": 3, "item": tool.clone(),
+    })
+    .to_string();
+    let terminal = terminal(response(json!([tool])));
+    let originals = vec![item_done, terminal];
+    let (handle, mut stream) = open(ScriptedHttp::frames(originals.clone())).await;
+    let failure = loop {
+        match stream.next().await {
+            Some(Err(failure)) => break failure,
+            Some(Ok(_)) => {}
+            None => panic!("malformed completed tool must fail as a stream item"),
+        }
+    };
+    assert_eq!(failure.kind, ObservedFailureKind::Stream);
+    assert!(handle.same_operation(&failure.observation));
+    match &failure.diagnostic_basis {
+        ExistingDiagnosticBasis::Stream(report) => match report.detail.as_ref() {
+            Some(ErrorDetail::MalformedToolInput(detail)) => {
+                assert_eq!(detail.name, "broken");
+                assert_eq!(detail.raw, "{");
+                assert_eq!(detail.id.explicit(), Some("call_fixture"));
+                assert_eq!(
+                    detail
+                        .provider
+                        .as_ref()
+                        .expect("provider identity")
+                        .item_id
+                        .as_deref(),
+                    Some("fc_fixture")
+                );
+            }
+            other => panic!("wrong malformed tool detail: {other:?}"),
+        },
+        other => panic!("wrong malformed tool basis: {other:?}"),
+    }
+    assert_eq!(
+        stream.finish().expect_err("retained stream failure").kind,
+        ObservedFailureKind::Stream
+    );
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert_eq!(view.committed_prefix, originals);
+        assert!(matches!(
+            view.native_cause,
+            Some(ExistingDiagnosticBasis::Stream(_))
+        ));
+    });
+}
+
+/// Selected terminal snapshots hydrate text and opaque items, not known tools.
+/// A malformed argument string stays raw data without an item-done declaration.
+#[tokio::test]
+async fn terminal_only_known_tools_remain_raw_without_normalized_tool_calls() {
+    let body = response(json!([
+        {
+            "type": "function_call", "id": "fc_terminal", "call_id": "call_terminal",
+            "name": "raw_function", "arguments": "{", "status": "completed",
+        },
+        {
+            "type": "custom_tool_call", "id": "ctc_terminal", "call_id": "custom_terminal",
+            "name": "raw_custom", "input": "verbatim custom input", "status": "completed",
+        },
+    ]));
+    let original = terminal(body.clone());
+    let (handle, stream) = open(ScriptedHttp::frames(vec![original.clone()])).await;
+    let (events, result) = finish(stream).await;
+    assert!(events.is_empty());
+    assert!(result.body.response.choice.is_empty());
+    assert_eq!(
+        result.body.response.finish_reason(),
+        Some(&FinishReason::Stop)
+    );
+    assert_eq!(result.body.response.raw, body);
+    assert!(handle.same_operation(&result.observation));
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeSucceeded);
+        assert_eq!(view.committed_prefix, [original]);
+        assert!(view.native_cause.is_none());
+    });
+}
+
+/// The feature flag must not route ordinary callers through the observed decoder.
+#[tokio::test]
+async fn feature_on_unobserved_raw_stream_keeps_baseline_instructions_and_content() {
+    let delta = json!({"type": "response.output_text.delta", "item_id": "msg_fixture", "output_index": 0, "content_index": 0, "sequence_number": 1, "delta": "baseline answer"}).to_string();
+    let mut body = response(json!([]));
+    body["usage"] = json!({"input_tokens": 1, "output_tokens": 2, "total_tokens": 3});
+    let http = ScriptedHttp::frames(vec![delta, terminal(body)]);
+    let model = model(http.clone());
+    let (unrelated, writer) = Observation::prepare();
+    let request = model
+        .completion_request("hello")
+        .preamble("caller preamble".into())
+        .build();
+    let mut stream = model.raw_stream(request).await.expect("baseline open");
+    let mut text = String::new();
+    let mut final_usage = None;
+    while let Some(item) = stream.next().await {
+        match item.expect("baseline item") {
+            RawStreamingChoice::Message(delta) => text.push_str(&delta),
+            RawStreamingChoice::FinalResponse(response) => {
+                final_usage = Some(response.usage.total_tokens)
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(text, "baseline answer");
+    assert_eq!(final_usage, Some(3));
+    assert_eq!(http.sends.load(Ordering::SeqCst), 1);
+    let sent = http.sent_request();
+    let body: Value = serde_json::from_slice(sent.body()).expect("baseline request JSON");
+    assert_eq!(body["instructions"], "baseline defaults\n\ncaller preamble");
+    assert_eq!(body["model"], "requested-model");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["store"], false);
+    assert_eq!(
+        sent.uri().to_string(),
+        "https://baseline.invalid/backend/responses"
+    );
+    assert_eq!(
+        sent.headers()["authorization"],
+        "Bearer synthetic-baseline-token"
+    );
+    assert_eq!(sent.headers()["originator"], "baseline-originator");
+    unrelated.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::Prepared);
+        assert_eq!(view.dispatch, ObservationDispatch::NotDispatched);
+        assert!(view.committed_prefix.is_empty());
+        assert!(view.reply_head.is_none());
+    });
+    drop(writer);
+}
+
+/// The baseline SSE check accepts 200 only and never polls rejected reply bodies.
+/// Expected diagnostics start with the same baseline status-only error; they
+/// intentionally make no selected-version claim about 201 or 204 acceptance.
+#[tokio::test]
+async fn returned_201_204_and_non_success_statuses_keep_baseline_rejection_diagnostics() {
+    for status in [
+        StatusCode::CREATED,
+        StatusCode::NO_CONTENT,
+        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    ] {
+        let headers = whole_headers();
+        let script = || Script {
+            status,
+            headers: headers.clone(),
+            frames: vec![r#"{"error":{"message":"rejected body must stay unread"}}"#.into()],
+            ..Script::default()
+        };
+        let baseline_http = ScriptedHttp::new(script());
+        let model = model(baseline_http.clone());
+        let request = model.completion_request("hello").build();
+        let mut baseline = model.raw_stream(request).await.expect("lazy baseline open");
+        let actual = baseline
+            .next()
+            .await
+            .expect("baseline rejection")
+            .expect_err("baseline status rejection");
+        let expected = CompletionError::from(http_client::Error::InvalidStatusCode(status));
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        assert_eq!(
+            format!("{actual:?}"),
+            format!("HttpError(InvalidStatusCode({}))", status.as_u16())
+        );
+        assert_eq!(baseline_http.body_polls.load(Ordering::SeqCst), 0);
+        drop(baseline);
+
+        let observed_http = ScriptedHttp::new(script());
+        let (handle, mut observed) = open(observed_http.clone()).await;
+        let failure = observed
+            .next()
+            .await
+            .expect("observed rejection")
+            .expect_err("observed status rejection");
+        assert_eq!(failure.kind, ObservedFailureKind::Stream);
+        assert!(handle.same_operation(&failure.observation));
+        let expected = ProviderError::from(http_client::Error::InvalidStatusCode(status)).report();
+        let report = match &failure.diagnostic_basis {
+            ExistingDiagnosticBasis::Stream(report) => report,
+            other => panic!("wrong rejected-status basis: {other:?}"),
+        };
+        assert_eq!(report.as_ref(), &expected);
+        assert_eq!(format!("{report:?}"), format!("{expected:?}"));
+        if status == StatusCode::CREATED {
+            assert_eq!(
+                format!("{report:?}"),
+                "ErrorReport { kind: Http, retryable: false, message: \"HttpError: Invalid status code: 201 Created\", code: None, http_status: Some(201), refusal: false, source_chain: [], request_id: None, provider_response: None, detail: None }"
+            );
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            assert_eq!(
+                format!("{report:?}"),
+                "ErrorReport { kind: Http, retryable: true, message: \"HttpError: Invalid status code: 429 Too Many Requests\", code: None, http_status: Some(429), refusal: false, source_chain: [], request_id: None, provider_response: None, detail: None }"
+            );
+        }
+        assert!(report.provider_response.is_none());
+        assert!(report.request_id.is_none());
+        assert_eq!(observed_http.body_polls.load(Ordering::SeqCst), 0);
+        assert_eq!(observed_http.sends.load(Ordering::SeqCst), 1);
+        handle.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::NativeFailed);
+            assert_eq!(view.dispatch, ObservationDispatch::SendAttemptStarted);
+            assert!(view.committed_prefix.is_empty());
+            let head = view.reply_head.expect("returned rejection head");
+            assert_eq!(head.status, status);
+            assert_eq!(head.headers, headers);
+            assert!(!head.accepted_sse);
+        });
+        assert_eq!(
+            observed.finish().expect_err("retained rejection").kind,
+            ObservedFailureKind::Stream
+        );
+    }
+}

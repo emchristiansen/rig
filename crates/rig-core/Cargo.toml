@@ -120,6 +120,9 @@ tracing-opentelemetry = { workspace = true }
 
 
 [features]
+live = []
+live-websocket = ["live"]
+completion-observations = []
 default = ["reqwest", "derive", "rustls"]
 audio = []
 image = []

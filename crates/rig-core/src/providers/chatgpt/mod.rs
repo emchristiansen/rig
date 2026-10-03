@@ -17,6 +17,8 @@
 //! ```
 
 mod auth;
+#[cfg(feature = "live")]
+pub mod realtime;
 #[cfg(all(not(target_family = "wasm"), feature = "websocket"))]
 pub mod websocket;
 
@@ -676,6 +678,69 @@ where
             span,
             options,
         ))
+    }
+
+    /// Open one observed subscription stream with explicitly supplied static input.
+    ///
+    /// The future owns `writer` even before its first poll. It performs no OAuth
+    /// acquisition or refresh and makes only the existing Responses request.
+    #[cfg(feature = "completion-observations")]
+    pub async fn raw_stream_observed(
+        &self,
+        completion_request: completion::CompletionRequest,
+        context: responses_api::observation::ObservedRequestContext,
+        mut writer: responses_api::observation::ObservationWriter,
+    ) -> Result<
+        responses_api::observation::ObservedResponsesStream,
+        responses_api::observation::ObservedFailure,
+    > {
+        use crate::providers::live_support::error::ProviderError;
+        use responses_api::observation::{ObservedFailure, ObservedResponsesStream};
+
+        let prepared = (|| -> Result<http::Request<Vec<u8>>, ProviderError> {
+            let mut request = self.openai_model().create_completion_request(completion_request)
+                .map_err(|error| ProviderError::Request(Box::new(error)))?;
+            // Observed calls use the supplied preamble without the baseline
+            // client's default instructions. Baseline raw_stream is untouched.
+            request.temperature = None;
+            request.max_output_tokens = None;
+            request.stream = Some(true);
+            if request.additional_parameters.reasoning.is_some() {
+                let include = request.additional_parameters.include.get_or_insert_with(Vec::new);
+                if !include.iter().any(|item| matches!(item, Include::ReasoningEncryptedContent)) {
+                    include.push(Include::ReasoningEncryptedContent);
+                }
+            }
+            request.additional_parameters.background = None;
+            request.additional_parameters.metadata.clear();
+            request.additional_parameters.parallel_tool_calls = None;
+            request.additional_parameters.service_tier = None;
+            request.additional_parameters.store = Some(false);
+            request.additional_parameters.text = None;
+            request.additional_parameters.top_p = None;
+            request.additional_parameters.user = None;
+            let body = serde_json::to_vec(&request)?;
+            let uri = format!("{}/responses", context.base_url.trim_end_matches('/'));
+            let mut builder = context.caller_identity.stamp(http::Request::post(uri))
+                .header(http::header::AUTHORIZATION, format!("Bearer {}", context.access_token))
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(http::header::ACCEPT, "text/event-stream")
+                .header("session_id", crate::id::generate());
+            if let Some(account_id) = &context.account_id {
+                builder = builder.header("ChatGPT-Account-Id", account_id);
+            }
+            builder.body(body).map_err(|error| ProviderError::Request(Box::new(error)))
+        })();
+        let request = match prepared {
+            Ok(request) => request,
+            Err(error) => return Err(ObservedFailure::provider(error, &mut writer)),
+        };
+        let source = crate::http_client::sse::GenericEventSource::new(self.client.clone(), request)
+            .allow_missing_content_type()
+            .observe_dispatch(writer.handle());
+        // Selected stream construction is lazy: transport failures are item
+        // reports, while request preparation failures remain Provider errors.
+        Ok(ObservedResponsesStream::new(Box::pin(source), writer))
     }
 }
 

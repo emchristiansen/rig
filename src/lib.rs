@@ -263,3 +263,10 @@ companion_modules! {
     vectorize = rig_vectorize ["vectorize"];
     vertexai = rig_vertexai ["vertexai"];
 }
+
+/// Native raw WebSocket transport for the Live control protocol.
+#[cfg(all(feature = "live-websocket", not(target_family = "wasm")))]
+pub use rig_tungstenite as tungstenite;
+/// Native WebRTC peer transport for Live calls.
+#[cfg(all(feature = "webrtc", not(target_family = "wasm")))]
+pub use rig_webrtc as webrtc;

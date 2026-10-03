@@ -77,6 +77,11 @@ pin_project! {
 /// delivered the terminal, never a previous connection's.
 pub type RequestIdSlot = std::sync::Arc<std::sync::Mutex<Option<String>>>;
 
+#[cfg(feature = "completion-observations")]
+type ObservationDispatchHook = Option<crate::providers::openai::responses_api::observation::ObservationHandle>;
+#[cfg(not(feature = "completion-observations"))]
+type ObservationDispatchHook = ();
+
 pin_project! {
     /// A generic SSE event source that works with any [`HttpClientExt`] implementation.
     #[project = GenericEventSourceProjection]
@@ -87,6 +92,7 @@ pin_project! {
         last_event_id: Option<String>,
         allow_missing_content_type: bool,
         request_id_capture: Option<(String, RequestIdSlot)>,
+        observation_dispatch: ObservationDispatchHook,
         #[pin]
         state: SourceState,
     }
@@ -112,12 +118,22 @@ where
             last_event_id: None,
             allow_missing_content_type: false,
             request_id_capture: None,
+            observation_dispatch: ObservationDispatchHook::default(),
             state,
         }
     }
 
     pub fn allow_missing_content_type(mut self) -> Self {
         self.allow_missing_content_type = true;
+        self
+    }
+
+    #[cfg(feature = "completion-observations")]
+    pub(crate) fn observe_dispatch(
+        mut self,
+        handle: crate::providers::openai::responses_api::observation::ObservationHandle,
+    ) -> Self {
+        self.observation_dispatch = Some(handle);
         self
     }
 
@@ -202,11 +218,23 @@ where
                     // Copied out before the poll so the state projection's
                     // borrow ends before the transition writes `this.state`.
                     let last_retry = *last_retry;
+                    #[cfg(feature = "completion-observations")]
+                    if let Some(handle) = this.observation_dispatch.as_ref() {
+                        handle.mark_send_attempt_started();
+                    }
                     match response_future.poll(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Ok(response)) => {
+                            #[cfg(feature = "completion-observations")]
+                            if let Some(handle) = this.observation_dispatch.as_ref() {
+                                handle.record_reply_head(response.status(), response.headers(), false);
+                            }
                             match check_response(response, *this.allow_missing_content_type) {
                                 Ok(response) => {
+                                    #[cfg(feature = "completion-observations")]
+                                    if let Some(handle) = this.observation_dispatch.as_ref() {
+                                        handle.record_reply_head(response.status(), response.headers(), true);
+                                    }
                                     // Transition: Connecting -> Open
                                     capture_request_id_header(
                                         this.request_id_capture.as_ref(),

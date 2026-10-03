@@ -287,6 +287,10 @@ tracing-opentelemetry = { workspace = true }
 url = { workspace = true }
 
 [features]
+live = ["rig-core/live"]
+live-websocket = ["live", "rig-core/live-websocket", "dep:rig-tungstenite"]
+completion-observations = ["rig-core/completion-observations"]
+webrtc = ["live", "dep:rig-webrtc"]
 default = ["rig-core/default", "agent", "derive", "rustls"]
 agent = ["dep:rig-agent"]
 test-utils = ["rig-core/test-utils", "rig-agent?/test-utils"]
@@ -332,6 +336,7 @@ websocket = ["rig-core/websocket"]
 websocket-rustls = ["rig-core/websocket-rustls"]
 websocket-native-tls = ["rig-core/websocket-native-tls"]
 rustls = [
+  "rig-tungstenite?/rustls",
   "rig-core/rustls",
   "rig-fastembed?/hf-hub-rustls-tls",
   "rig-helixdb?/rustls",
@@ -339,6 +344,7 @@ rustls = [
   "rig-milvus?/rustls",
 ]
 native-tls = [
+  "rig-tungstenite?/native-tls",
   "rig-core/native-tls",
   "rig-fastembed?/hf-hub-native-tls",
   "rig-helixdb?/native-tls",
@@ -348,3 +354,7 @@ native-tls = [
 reqwest-middleware = ["rig-core/reqwest-middleware"]
 reqwest-middleware-rustls = ["rig-core/reqwest-middleware-rustls"]
 reqwest-middleware-native-tls = ["rig-core/reqwest-middleware-native-tls"]
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rig-tungstenite = { path = "crates/rig-tungstenite", version = "0.41.0", optional = true, default-features = false }
+rig-webrtc = { path = "crates/rig-webrtc", version = "0.41.0", optional = true, default-features = false }
