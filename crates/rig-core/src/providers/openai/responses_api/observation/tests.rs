@@ -94,3 +94,29 @@ fn fakes_are_explicitly_synthetic() {
     });
     drop(writer);
 }
+
+#[test]
+fn poisoned_inspection_keeps_actual_attempt_and_uncommitted_evidence() {
+    let (handle, mut writer) = Observation::prepare();
+    assert!(writer.append("committed prefix".into()).is_ok());
+    let panic = std::panic::catch_unwind(|| {
+        handle.inspect(|_| panic!("fixture visitor panic while holding the ledger"));
+    });
+    assert!(panic.is_err());
+    // The send-future poll is a fact even when an earlier visitor poisoned capture.
+    handle.mark_send_attempt_started();
+    let original = "  {\"type\":\"error\",\"whole\":\"supplied\"}  ".to_owned();
+    assert!(writer.append(original.clone()).is_err());
+    let failure = ObservedFailure::capture_only(&mut writer);
+    assert!(failure.observation.same_operation(&handle));
+    drop(writer);
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert_eq!(view.dispatch, ObservationDispatch::SendAttemptStarted);
+        assert_eq!(view.committed_prefix, &["committed prefix".to_owned()]);
+        let fault = view.capture_fault.expect("actual mutex poison remains");
+        assert!(matches!(fault.cause, CaptureCause::LockPoisoned));
+        assert_eq!(fault.offending_string.as_ref(), Some(&original));
+        assert!(view.native_cause.is_none());
+    });
+}

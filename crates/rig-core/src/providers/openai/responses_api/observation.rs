@@ -204,8 +204,8 @@ impl ObservationHandle {
 
     pub(crate) fn mark_send_attempt_started(&self) {
         let mut ledger = self.lock();
+        ledger.dispatch = ObservationDispatch::SendAttemptStarted;
         if !ledger.stage.is_terminal() {
-            ledger.dispatch = ObservationDispatch::SendAttemptStarted;
             ledger.stage = ObservationStage::Running;
         }
     }

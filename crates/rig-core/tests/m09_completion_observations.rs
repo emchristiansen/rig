@@ -342,9 +342,12 @@ async fn original_duplicate_key_prefix_survives_the_whole_stream() {
     {
         ObservedEvent::Unknown { event_type, value } => {
             assert_eq!(event_type, "response.future_fixture");
-            assert_eq!(value["same"], 2);
+            assert_eq!(value.get("same"), Some(&json!(2)));
         }
-        event => panic!("unexpected event: {event:?}"),
+        event => assert!(
+            matches!(&event, ObservedEvent::Unknown { .. }),
+            "unexpected event: {event:?}"
+        ),
     }
     let mut next = Box::pin(stream.next());
     assert!(poll!(next.as_mut()).is_pending());
@@ -367,13 +370,18 @@ async fn terminal_only_output_preserves_opaque_parts_usage_and_the_whole_head() 
     let provider_item =
         json!({"type": "future_tool_result", "id": "opaque_1", "payload": {"exact": true}});
     let mut output_message = message("terminal answer");
-    output_message["phase"] = json!("final_answer");
-    output_message["content"]
+    output_message
+        .as_object_mut()
+        .expect("message object")
+        .insert("phase".into(), json!("final_answer"));
+    output_message
+        .get_mut("content")
+        .expect("message content field")
         .as_array_mut()
         .expect("message content")
         .push(opaque_part.clone());
     let mut body = response(json!([output_message, provider_item.clone()]));
-    body["usage"] = json!({"input_tokens": 5, "output_tokens": 2, "total_tokens": 7, "input_tokens_details": {}});
+    body.as_object_mut().expect("response object").insert("usage".into(), json!({"input_tokens": 5, "output_tokens": 2, "total_tokens": 7, "input_tokens_details": {}}));
     let original = terminal(body.clone());
     let headers = whole_headers();
     let http = ScriptedHttp::new(Script {
@@ -395,11 +403,17 @@ async fn terminal_only_output_preserves_opaque_parts_usage_and_the_whole_head() 
         Some("request-fixture")
     );
     assert_eq!(
-        response.provider_response_headers["x-codex-limit"],
+        response
+            .provider_response_headers
+            .get("x-codex-limit")
+            .expect("projected x-codex-limit"),
         "first, second"
     );
     assert_eq!(
-        response.provider_response_headers["x-codex-bytes"],
+        response
+            .provider_response_headers
+            .get("x-codex-bytes")
+            .expect("projected x-codex-bytes"),
         "a\u{fffd}z"
     );
     assert_eq!(response.provider_response_headers.len(), 2);
@@ -409,33 +423,49 @@ async fn terminal_only_output_preserves_opaque_parts_usage_and_the_whole_head() 
         "Usage { input_tokens: Some(5), output_tokens: Some(2), total_tokens: Some(7), cached_input_tokens: None, cache_creation_input_tokens: None, tool_use_prompt_tokens: None, reasoning_tokens: None }"
     );
     assert_eq!(response.choice.len(), 3);
-    match &response.choice[0] {
+    match response.choice.first().expect("first output") {
         AssistantContent::Text(text) => {
             assert_eq!(text.text, "terminal answer");
             assert_eq!(
-                text.additional_params.as_ref().expect("phase metadata")["openai_responses"]["phase"],
-                "final_answer"
+                text.additional_params
+                    .as_ref()
+                    .expect("phase metadata")
+                    .get("openai_responses")
+                    .and_then(|extras| extras.get("phase")),
+                Some(&json!("final_answer"))
             );
         }
-        other => panic!("unexpected first output: {other:?}"),
+        other => assert!(
+            matches!(other, AssistantContent::Text(_)),
+            "unexpected first output: {other:?}"
+        ),
     }
-    match &response.choice[1] {
+    match response.choice.get(1).expect("opaque part") {
         AssistantContent::Text(text) => {
             assert!(text.text.is_empty());
             assert_eq!(
-                text.additional_params.as_ref().expect("opaque metadata")["openai_responses_part"]
-                    ["value"],
-                opaque_part
+                text.additional_params
+                    .as_ref()
+                    .expect("opaque metadata")
+                    .get("openai_responses_part")
+                    .and_then(|part| part.get("value")),
+                Some(&opaque_part)
             );
         }
-        other => panic!("unexpected opaque part: {other:?}"),
+        other => assert!(
+            matches!(other, AssistantContent::Text(_)),
+            "unexpected opaque part: {other:?}"
+        ),
     }
-    match &response.choice[2] {
+    match response.choice.get(2).expect("provider item") {
         AssistantContent::ProviderItem(item) => {
             assert_eq!(item.item, provider_item);
             assert_eq!(item.provider.as_deref(), Some("chatgpt"));
         }
-        other => panic!("unexpected provider item: {other:?}"),
+        other => assert!(
+            matches!(other, AssistantContent::ProviderItem(_)),
+            "unexpected provider item: {other:?}"
+        ),
     }
     assert_eq!(
         events
@@ -471,22 +501,42 @@ async fn terminal_only_output_preserves_opaque_parts_usage_and_the_whole_head() 
     handle.inspect(|view| assert_eq!(view.stage, ObservationStage::NativeSucceeded));
     let sent = http.sent_request();
     let request_body: Value = serde_json::from_slice(sent.body()).expect("request JSON");
-    assert_eq!(request_body["instructions"], "caller preamble");
+    assert_eq!(
+        request_body.get("instructions"),
+        Some(&json!("caller preamble"))
+    );
     assert_eq!(
         sent.uri().to_string(),
         "https://observed.invalid/backend/responses"
     );
     assert_eq!(
-        sent.headers()["authorization"],
+        sent.headers()
+            .get("authorization")
+            .expect("sent authorization header"),
         "Bearer synthetic-observed-token"
     );
     assert_eq!(
-        sent.headers()["chatgpt-account-id"],
+        sent.headers()
+            .get("chatgpt-account-id")
+            .expect("sent chatgpt-account-id header"),
         "synthetic-observed-account"
     );
-    assert_eq!(sent.headers()["originator"], "observed-originator");
-    assert_eq!(sent.headers()["user-agent"], "observed-agent");
-    assert_eq!(sent.headers()["version"], "fixture-v1");
+    assert_eq!(
+        sent.headers()
+            .get("originator")
+            .expect("sent originator header"),
+        "observed-originator"
+    );
+    assert_eq!(
+        sent.headers()
+            .get("user-agent")
+            .expect("sent user-agent header"),
+        "observed-agent"
+    );
+    assert_eq!(
+        sent.headers().get("version").expect("sent version header"),
+        "fixture-v1"
+    );
 }
 
 /// Missing usage and a reported cached zero are distinct provider facts.
@@ -519,7 +569,9 @@ async fn missing_usage_output_and_optional_cached_counts_decode_without_defaults
             .expect("response object")
             .remove("output");
         if let Some(usage) = usage {
-            body["usage"] = usage;
+            body.as_object_mut()
+                .expect("response object")
+                .insert("usage".into(), usage);
         }
         let (handle, stream) = open(ScriptedHttp::frames(vec![terminal(body)])).await;
         let (_, result) = finish(stream).await;
@@ -553,7 +605,7 @@ async fn missing_codex_indices_repair_without_replacing_the_original_payload() {
         "hello"
     );
     assert!(
-        matches!(&result.body.response.choice[..], [AssistantContent::Text(text)] if text.text == "hello")
+        matches!(result.body.response.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "hello")
     );
     handle.inspect(|view| assert_eq!(view.committed_prefix, [delta.clone(), done.clone()]));
 
@@ -586,7 +638,10 @@ async fn missing_terminal_is_provider_failure_but_completed_malformed_tool_is_st
             format!("{error:?}"),
             "Response(\"provider stream ended without a terminal record; treating the turn as truncated\")"
         ),
-        other => panic!("wrong missing-terminal basis: {other:?}"),
+        other => assert!(
+            matches!(other, ExistingDiagnosticBasis::Provider(_)),
+            "wrong missing-terminal basis: {other:?}"
+        ),
     }
     handle.inspect(|view| assert_eq!(view.stage, ObservationStage::NativeFailed));
 
@@ -603,10 +658,12 @@ async fn missing_terminal_is_provider_failure_but_completed_malformed_tool_is_st
     let originals = vec![item_done, terminal];
     let (handle, mut stream) = open(ScriptedHttp::frames(originals.clone())).await;
     let failure = loop {
-        match stream.next().await {
-            Some(Err(failure)) => break failure,
-            Some(Ok(_)) => {}
-            None => panic!("malformed completed tool must fail as a stream item"),
+        if let Err(failure) = stream
+            .next()
+            .await
+            .expect("malformed completed tool must fail as a stream item")
+        {
+            break failure;
         }
     };
     assert_eq!(failure.kind, ObservedFailureKind::Stream);
@@ -627,9 +684,15 @@ async fn missing_terminal_is_provider_failure_but_completed_malformed_tool_is_st
                     Some("fc_fixture")
                 );
             }
-            other => panic!("wrong malformed tool detail: {other:?}"),
+            other => assert!(
+                matches!(other, Some(ErrorDetail::MalformedToolInput(_))),
+                "wrong malformed tool detail: {other:?}"
+            ),
         },
-        other => panic!("wrong malformed tool basis: {other:?}"),
+        other => assert!(
+            matches!(other, ExistingDiagnosticBasis::Stream(_)),
+            "wrong malformed tool basis: {other:?}"
+        ),
     }
     assert_eq!(
         stream.finish().expect_err("retained stream failure").kind,
@@ -682,7 +745,10 @@ async fn terminal_only_known_tools_remain_raw_without_normalized_tool_calls() {
 async fn feature_on_unobserved_raw_stream_keeps_baseline_instructions_and_content() {
     let delta = json!({"type": "response.output_text.delta", "item_id": "msg_fixture", "output_index": 0, "content_index": 0, "sequence_number": 1, "delta": "baseline answer"}).to_string();
     let mut body = response(json!([]));
-    body["usage"] = json!({"input_tokens": 1, "output_tokens": 2, "total_tokens": 3});
+    body.as_object_mut().expect("response object").insert(
+        "usage".into(),
+        json!({"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}),
+    );
     let http = ScriptedHttp::frames(vec![delta, terminal(body)]);
     let model = model(http.clone());
     let (unrelated, writer) = Observation::prepare();
@@ -707,19 +773,29 @@ async fn feature_on_unobserved_raw_stream_keeps_baseline_instructions_and_conten
     assert_eq!(http.sends.load(Ordering::SeqCst), 1);
     let sent = http.sent_request();
     let body: Value = serde_json::from_slice(sent.body()).expect("baseline request JSON");
-    assert_eq!(body["instructions"], "baseline defaults\n\ncaller preamble");
-    assert_eq!(body["model"], "requested-model");
-    assert_eq!(body["stream"], true);
-    assert_eq!(body["store"], false);
+    assert_eq!(
+        body.get("instructions"),
+        Some(&json!("baseline defaults\n\ncaller preamble"))
+    );
+    assert_eq!(body.get("model"), Some(&json!("requested-model")));
+    assert_eq!(body.get("stream"), Some(&json!(true)));
+    assert_eq!(body.get("store"), Some(&json!(false)));
     assert_eq!(
         sent.uri().to_string(),
         "https://baseline.invalid/backend/responses"
     );
     assert_eq!(
-        sent.headers()["authorization"],
+        sent.headers()
+            .get("authorization")
+            .expect("sent authorization header"),
         "Bearer synthetic-baseline-token"
     );
-    assert_eq!(sent.headers()["originator"], "baseline-originator");
+    assert_eq!(
+        sent.headers()
+            .get("originator")
+            .expect("sent originator header"),
+        "baseline-originator"
+    );
     unrelated.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::Prepared);
         assert_eq!(view.dispatch, ObservationDispatch::NotDispatched);
@@ -777,10 +853,19 @@ async fn returned_201_204_and_non_success_statuses_keep_baseline_rejection_diagn
         assert_eq!(failure.kind, ObservedFailureKind::Stream);
         assert!(handle.same_operation(&failure.observation));
         let expected = ProviderError::from(http_client::Error::InvalidStatusCode(status)).report();
+        assert!(
+            matches!(
+                &failure.diagnostic_basis,
+                ExistingDiagnosticBasis::Stream(_)
+            ),
+            "wrong rejected-status basis: {:?}",
+            failure.diagnostic_basis
+        );
         let report = match &failure.diagnostic_basis {
-            ExistingDiagnosticBasis::Stream(report) => report,
-            other => panic!("wrong rejected-status basis: {other:?}"),
-        };
+            ExistingDiagnosticBasis::Stream(report) => Some(report),
+            _ => None,
+        }
+        .expect("rejected-status stream basis");
         assert_eq!(report.as_ref(), &expected);
         assert_eq!(format!("{report:?}"), format!("{expected:?}"));
         if status == StatusCode::CREATED {
