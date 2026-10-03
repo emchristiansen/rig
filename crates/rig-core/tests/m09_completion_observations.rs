@@ -1274,6 +1274,73 @@ async fn caller_rejection_diagnostic_bases_match_selected_terminal_metadata_debu
     }
 }
 
+/// Later terminal frames preserve an earlier optional incomplete reason.
+#[tokio::test]
+async fn repeated_terminals_keep_the_retained_incomplete_reason() {
+    for whole_last in [false, true] {
+        let mut first = response(json!([]));
+        first["status"] = json!("incomplete");
+        first["incomplete_details"] = json!({"reason": "max_output_tokens"});
+        let mut last = response(json!([]));
+        last["status"] = json!("incomplete");
+        let originals = vec![
+            terminal(first),
+            if whole_last {
+                last.to_string()
+            } else {
+                terminal(last)
+            },
+        ];
+        let http = ScriptedHttp::new(Script {
+            frames: originals.clone(),
+            pending_tail: whole_last,
+            tail_error: whole_last,
+            ..Script::default()
+        });
+        let (handle, mut stream) = open(http.clone()).await;
+        let mut next = Box::pin(stream.next());
+        assert!(matches!(poll!(next.as_mut()), Poll::Ready(None)));
+        drop(next);
+        let expected_polls = if whole_last { 2 } else { 3 };
+        assert_eq!(http.body_polls.load(Ordering::SeqCst), expected_polls);
+        handle.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::AwaitingNativeFinalization);
+            assert_eq!(view.committed_prefix, originals);
+        });
+        let result = stream.finish().expect("retained terminal finalization");
+        assert!(handle.same_operation(&result.observation));
+        assert!(result.body.native.incomplete_details.is_none());
+        assert_eq!(
+            result.body.response.finish_reason(),
+            Some(&FinishReason::Length)
+        );
+        let expected_raw = json!({
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "status": "incomplete", "response_id": "resp_fixture", "model": "reported-model",
+        });
+        assert_eq!(result.body.response.raw, expected_raw);
+        let expected_debug = format!(
+            concat!(
+                "CompletionResponse {{ choice: [], usage: Usage {{ input_tokens: None, ",
+                "output_tokens: None, total_tokens: None, cached_input_tokens: None, ",
+                "cache_creation_input_tokens: None, tool_use_prompt_tokens: None, reasoning_tokens: None }}, ",
+                "message_id: None, response_id: Some(\"resp_fixture\"), provider_request_id: None, ",
+                "provider_response_headers: {{}}, finish_reason: Some(Length), ",
+                "provider: \"chatgpt\", model: Some(\"reported-model\"), raw: {:?} }}"
+            ),
+            expected_raw
+        );
+        assert_eq!(format!("{:?}", result.body.response), expected_debug);
+        drop(result);
+        handle.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::NativeSucceeded);
+            assert_eq!(view.committed_prefix, originals);
+            assert!(view.native_cause.is_none());
+        });
+        assert_eq!(http.body_polls.load(Ordering::SeqCst), expected_polls);
+    }
+}
+
 /// The feature flag must not route ordinary callers through the observed decoder.
 #[tokio::test]
 async fn feature_on_unobserved_raw_stream_keeps_baseline_instructions_and_content() {

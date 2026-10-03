@@ -7173,10 +7173,11 @@ pub mod observed {
             let reason = match &native.status {
                 super::super::ResponseStatus::Completed => Some(ot::FinishReason::Stop),
                 super::super::ResponseStatus::Incomplete => Some(
-                    match native
-                        .incomplete_details
-                        .as_ref()
-                        .map(|details| details.reason.as_str())
+                    match self
+                        .document
+                        .get("incomplete_details")
+                        .and_then(|details| details.get("reason"))
+                        .and_then(Value::as_str)
                         .filter(|reason| !reason.is_empty())
                     {
                         Some("max_output_tokens") => ot::FinishReason::Length,
