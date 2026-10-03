@@ -6,6 +6,7 @@ The backend uses the caller's Tokio runtime when available. With another executo
 
 The `rustls` feature is enabled by default; `native-tls` selects the other TLS backend. When using `default-features = false`, select a TLS feature for `wss` connections. This crate is native-only and does not provide canonical Responses websocket session constructors.
 
-Rejected WebSocket upgrades retain their status, parsed headers and the body
-bytes tungstenite buffered while reading those headers. The body may be empty
-or partial; the transport does not read the remaining rejection body.
+Rejected WebSocket upgrades retain their status, parsed headers and a text
+rendering of the body bytes tungstenite buffered while reading those headers.
+That body may be empty or partial, and invalid UTF-8 uses the inherited lossy
+conversion. The transport does not read the remaining rejection body.

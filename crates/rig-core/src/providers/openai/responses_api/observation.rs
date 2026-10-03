@@ -445,7 +445,7 @@ pub struct ObservedResponsesStream {
     source: ObservedSource,
     assembler: Option<ObservedAssembler>,
     writer: ObservationWriter,
-    ready: VecDeque<ObservedEvent>,
+    ready: VecDeque<Result<ObservedEvent, ObservedFailure>>,
     ended: bool,
     failure: Option<ObservedFailure>,
 }
@@ -502,7 +502,8 @@ impl ObservedResponsesStream {
     ) -> Poll<Option<Result<ObservedEvent, ObservedFailure>>> {
         self.ended = true;
         self.failure = Some(failure.clone());
-        Poll::Ready(Some(Err(failure)))
+        self.ready.push_back(Err(failure));
+        Poll::Ready(self.ready.pop_front())
     }
 }
 
@@ -512,7 +513,7 @@ impl Stream for ObservedResponsesStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             if let Some(event) = self.ready.pop_front() {
-                return Poll::Ready(Some(Ok(event)));
+                return Poll::Ready(Some(event));
             }
             if self.ended {
                 return Poll::Ready(None);
@@ -525,7 +526,7 @@ impl Stream for ObservedResponsesStream {
                         None => Ok(Vec::new()),
                     };
                     match folded {
-                        Ok(events) => self.ready.extend(events),
+                        Ok(events) => self.ready.extend(events.into_iter().map(Ok)),
                         Err(ObservedInterpretationError::NativeProvider(error)) => {
                             let failure = ObservedFailure::report_provider(error, &mut self.writer);
                             return self.fail_item(failure);
@@ -538,7 +539,7 @@ impl Stream for ObservedResponsesStream {
                     self.ended = true;
                     self.writer.awaiting_finalization();
                     if let Some(event) = self.ready.pop_front() {
-                        return Poll::Ready(Some(Ok(event)));
+                        return Poll::Ready(Some(event));
                     }
                     return Poll::Ready(None);
                 }
@@ -580,13 +581,14 @@ impl Stream for ObservedResponsesStream {
                     let Some(assembler) = self.assembler.as_mut() else {
                         continue;
                     };
+                    let mut events = Vec::new();
                     let interpreted = handle.inspect(|view| match view.committed_prefix.last() {
-                        Some(original) => assembler.push(original),
-                        None => Ok(Vec::new()),
+                        Some(original) => assembler.push(original, &mut events),
+                        None => Ok(()),
                     });
+                    self.ready.extend(events.into_iter().map(Ok));
                     match interpreted {
-                        Ok(events) => {
-                            self.ready.extend(events);
+                        Ok(()) => {
                             if self
                                 .assembler
                                 .as_ref()

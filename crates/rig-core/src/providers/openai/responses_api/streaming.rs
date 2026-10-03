@@ -5811,14 +5811,16 @@ pub mod observed {
         }
 
         /// Interpret an already captured supplied SSE data string, without I/O.
+        /// Events emitted before an error remain in the caller-owned output prefix.
         pub fn push(
             &mut self,
             data: &str,
-        ) -> Result<Vec<ObservedEvent>, ObservedInterpretationError> {
+            out: &mut Vec<ObservedEvent>,
+        ) -> Result<(), ObservedInterpretationError> {
             if self.stopped || self.whole_finished || data.trim().is_empty() {
-                return Ok(Vec::new());
+                return Ok(());
             }
-            let result = self.push_inner(data);
+            let result = self.push_inner(data, out);
             if result.is_err() {
                 self.stopped = true;
             }
@@ -5828,8 +5830,8 @@ pub mod observed {
         fn push_inner(
             &mut self,
             data: &str,
-        ) -> Result<Vec<ObservedEvent>, ObservedInterpretationError> {
-            let mut out = Vec::new();
+            out: &mut Vec<ObservedEvent>,
+        ) -> Result<(), ObservedInterpretationError> {
             match classify(data) {
                 WireEvent::Unknown { event_type, value } => out.push(ObservedEvent::Unknown {
                     event_type,
@@ -5872,7 +5874,7 @@ pub mod observed {
                             return Err(LiveProviderError::from_provider_body(raw).into());
                         }
                         super::ResponseChunkKind::ResponseCompleted => {
-                            self.complete(chunk.response, &mut out)?
+                            self.complete(chunk.response, out)?
                         }
                         _ => {}
                     }
@@ -5880,7 +5882,7 @@ pub mod observed {
                 WireEvent::Known(Payload::Frame {
                     chunk: Chunk::Delta(chunk),
                     ..
-                }) => self.item(chunk, &mut out)?,
+                }) => self.item(chunk, out)?,
                 WireEvent::Known(Payload::Whole(response)) => {
                     self.document = serde_json::to_value(&*response).ok();
                     if !response
@@ -5906,15 +5908,15 @@ pub mod observed {
                         }
                     }
                     for (index, item) in response.output.iter().cloned().enumerate() {
-                        self.done_immediately(index as u64, item, &mut out)?;
+                        self.done_immediately(index as u64, item, out)?;
                     }
-                    self.complete(*response, &mut out)?;
+                    self.complete(*response, out)?;
                     self.flush_pending_calls()?;
                     self.flush_unclosed_tools();
                     self.whole_finished = true;
                 }
             }
-            Ok(out)
+            Ok(())
         }
 
         fn failure(message: String) -> ObservedInterpretationError {

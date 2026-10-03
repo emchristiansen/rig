@@ -913,6 +913,85 @@ async fn pending_malformed_tool_is_not_lost_before_a_whole_response() {
     assert_eq!(http.body_polls.load(Ordering::SeqCst), 2);
 }
 
+/// Whole-response text remains visible before a later pending-tool failure.
+#[tokio::test]
+async fn whole_response_text_precedes_a_pending_malformed_tool_failure() {
+    let item_done = json!({
+        "type": "response.output_item.done", "output_index": 1,
+        "sequence_number": 3,
+        "item": {
+            "type": "function_call", "id": "fc_fixture", "call_id": "call_fixture",
+            "name": "broken", "arguments": "{", "status": "completed",
+        },
+    })
+    .to_string();
+    let originals = vec![
+        item_done,
+        response(json!([message("whole answer")])).to_string(),
+    ];
+    let http = ScriptedHttp::new(Script {
+        frames: originals.clone(),
+        pending_tail: true,
+        tail_error: true,
+        ..Script::default()
+    });
+    let (handle, mut stream) = open(http.clone()).await;
+    assert!(handle.same_operation(&stream.observation()));
+    let mut next = Box::pin(stream.next());
+    assert!(matches!(
+        poll!(next.as_mut()),
+        Poll::Ready(Some(Ok(ObservedEvent::TextDelta { text }))) if text == "whole answer"
+    ));
+    drop(next);
+    assert_eq!(http.body_polls.load(Ordering::SeqCst), 2);
+    handle.inspect(|view| assert_eq!(view.committed_prefix, originals));
+
+    let mut next = Box::pin(stream.next());
+    let polled = poll!(next.as_mut());
+    drop(next);
+    assert!(matches!(&polled, Poll::Ready(Some(Err(_)))));
+    let failure = match polled {
+        Poll::Ready(Some(Err(failure))) => Some(failure),
+        _ => None,
+    }
+    .expect("malformed tool failure follows the whole-response text immediately");
+    assert_eq!(failure.kind, ObservedFailureKind::Stream);
+    assert!(handle.same_operation(&failure.observation));
+    assert!(matches!(
+        &failure.diagnostic_basis,
+        ExistingDiagnosticBasis::Stream(report)
+            if matches!(report.detail.as_ref(), Some(ErrorDetail::MalformedToolInput(detail))
+                if detail.name == "broken" && detail.raw == "{"
+                    && detail.id.explicit() == Some("call_fixture")
+                    && detail.provider.as_ref().and_then(|provider| provider.item_id.as_deref())
+                        == Some("fc_fixture"))
+    ));
+    assert_eq!(http.body_polls.load(Ordering::SeqCst), 2);
+    let mut next = Box::pin(stream.next());
+    assert!(matches!(poll!(next.as_mut()), Poll::Ready(None)));
+    drop(next);
+    let retained = stream
+        .finish()
+        .expect_err("retained malformed tool failure after delivered text");
+    assert_eq!(retained.kind, ObservedFailureKind::Stream);
+    assert!(handle.same_operation(&retained.observation));
+    assert!(matches!(
+        (&retained.diagnostic_basis, &failure.diagnostic_basis),
+        (ExistingDiagnosticBasis::Stream(retained_report), ExistingDiagnosticBasis::Stream(report))
+            if retained_report == report
+    ));
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert_eq!(view.committed_prefix, originals);
+        assert!(matches!(
+            (view.native_cause, &failure.diagnostic_basis),
+            (Some(ExistingDiagnosticBasis::Stream(retained_report)), ExistingDiagnosticBasis::Stream(report))
+                if retained_report == report
+        ));
+    });
+    assert_eq!(http.body_polls.load(Ordering::SeqCst), 2);
+}
+
 /// Selected terminal snapshots hydrate text and opaque items, not known tools.
 /// A malformed argument string stays raw data without an item-done declaration.
 #[tokio::test]
