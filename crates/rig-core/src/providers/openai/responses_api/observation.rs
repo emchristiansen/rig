@@ -24,7 +24,7 @@ pub enum ObservationStage {
     Prepared,
     /// The send attempt has started.
     Running,
-    /// EOF was observed; native finalization has not completed.
+    /// A whole-response terminal or EOF ended the source; finalization is pending.
     AwaitingNativeFinalization,
     /// Native finalization succeeded with healthy capture.
     NativeSucceeded,
@@ -467,7 +467,7 @@ impl ObservedResponsesStream {
         self.writer.handle()
     }
 
-    /// Finalize synchronously after EOF; no drain, retry, or second request.
+    /// Finalize after source EOF or a whole-response terminal, without more I/O.
     pub fn finish(mut self) -> Result<ObservedResponsesResult, ObservedFailure> {
         if let Some(failure) = self.failure.take() {
             return Err(failure);
@@ -543,6 +543,21 @@ impl Stream for ObservedResponsesStream {
                     return Poll::Ready(None);
                 }
                 Poll::Ready(Some(Err(error))) => {
+                    let flushed = match self.assembler.as_mut() {
+                        Some(assembler) => assembler.flush_before_terminal_error(),
+                        None => Ok(()),
+                    };
+                    match flushed {
+                        Err(ObservedInterpretationError::NativeProvider(error)) => {
+                            let failure = ObservedFailure::report_provider(error, &mut self.writer);
+                            return self.fail_item(failure);
+                        }
+                        Err(ObservedInterpretationError::NativeReport(report)) => {
+                            let failure = ObservedFailure::report(report, &mut self.writer);
+                            return self.fail_item(failure);
+                        }
+                        Ok(()) => {}
+                    }
                     let failure = ObservedFailure::report_provider(
                         ProviderError::from(error),
                         &mut self.writer,
@@ -570,7 +585,17 @@ impl Stream for ObservedResponsesStream {
                         None => Ok(Vec::new()),
                     });
                     match interpreted {
-                        Ok(events) => self.ready.extend(events),
+                        Ok(events) => {
+                            self.ready.extend(events);
+                            if self
+                                .assembler
+                                .as_ref()
+                                .is_some_and(|assembler| assembler.whole_response_finished())
+                            {
+                                self.ended = true;
+                                self.writer.awaiting_finalization();
+                            }
+                        }
                         Err(ObservedInterpretationError::NativeProvider(error)) => {
                             let failure = ObservedFailure::report_provider(error, &mut self.writer);
                             return self.fail_item(failure);

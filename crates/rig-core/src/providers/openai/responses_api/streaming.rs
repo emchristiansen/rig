@@ -5909,6 +5909,7 @@ pub mod observed {
                         self.done_immediately(index as u64, item, &mut out)?;
                     }
                     self.complete(*response, &mut out)?;
+                    self.flush_pending_calls()?;
                     self.flush_unclosed_tools();
                     self.whole_finished = true;
                 }
@@ -6594,6 +6595,20 @@ pub mod observed {
             Ok(())
         }
 
+        /// Flush completed calls before the owning stream reports a transport error.
+        /// This does not finalize the stream or close incomplete tool input.
+        pub(in super::super) fn flush_before_terminal_error(
+            &mut self,
+        ) -> Result<(), ObservedInterpretationError> {
+            self.flush_pending_calls()
+        }
+
+        /// Whether a whole-response payload has already emitted its terminal result.
+        /// The owning stream drains ready events, then stops polling its source.
+        pub(in super::super) fn whole_response_finished(&self) -> bool {
+            self.whole_finished
+        }
+
         fn flush_unclosed_tools(&mut self) {
             for (slot, part) in std::mem::take(&mut self.unclosed_tools) {
                 let key = part
@@ -7098,7 +7113,7 @@ pub mod observed {
             self.terminal = Some(response);
             Ok(())
         }
-        /// Finalize only after stream EOF. Absence of a genuine terminal is an error.
+        /// Finalize after transport EOF or a whole response. A genuine terminal is required.
         pub fn finish(
             mut self,
         ) -> Result<ObservedResponsesResultBody, ObservedInterpretationError> {

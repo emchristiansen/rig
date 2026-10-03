@@ -60,6 +60,7 @@ struct Script {
     frames: Vec<String>,
     pending_connect: bool,
     pending_tail: bool,
+    tail_error: bool,
 }
 
 impl Default for Script {
@@ -70,6 +71,7 @@ impl Default for Script {
             frames: Vec::new(),
             pending_connect: false,
             pending_tail: false,
+            tail_error: false,
         }
     }
 }
@@ -147,11 +149,16 @@ impl HttpClientExt for ScriptedHttp {
                 .map(|frame| Bytes::from(format!("data: {frame}\n\n")))
                 .collect();
             let pending_tail = this.script.pending_tail;
+            let mut tail_error = this.script.tail_error;
             let polls = this.body_polls.clone();
             let body: BoxedStream = Box::pin(futures::stream::poll_fn(move |_| {
                 polls.fetch_add(1, Ordering::SeqCst);
                 match chunks.pop_front() {
                     Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+                    None if tail_error => {
+                        tail_error = false;
+                        Poll::Ready(Some(Err(http_client::Error::StreamEnded)))
+                    }
                     None if pending_tail => Poll::Pending,
                     None => Poll::Ready(None),
                 }
@@ -706,6 +713,204 @@ async fn missing_terminal_is_provider_failure_but_completed_malformed_tool_is_st
             Some(ExistingDiagnosticBasis::Stream(_))
         ));
     });
+}
+
+/// Completed malformed tools take precedence over a subsequent transport failure.
+#[tokio::test]
+async fn pending_malformed_tool_precedes_transport_failure() {
+    let item_done = json!({
+        "type": "response.output_item.done", "output_index": 0,
+        "sequence_number": 3,
+        "item": {
+            "type": "function_call", "id": "fc_fixture", "call_id": "call_fixture",
+            "name": "broken", "arguments": "{", "status": "completed",
+        },
+    })
+    .to_string();
+    let transport_report = ProviderError::from(http_client::Error::StreamEnded).report();
+    for malformed in [false, true] {
+        let originals = if malformed {
+            vec![item_done.clone()]
+        } else {
+            Vec::new()
+        };
+        let http = ScriptedHttp::new(Script {
+            frames: originals.clone(),
+            tail_error: true,
+            ..Script::default()
+        });
+        let (handle, mut stream) = open(http.clone()).await;
+        let failure = stream
+            .next()
+            .await
+            .expect("first item is the native failure")
+            .expect_err("completed malformed tool or transport failure");
+        assert_eq!(failure.kind, ObservedFailureKind::Stream);
+        assert!(handle.same_operation(&failure.observation));
+        let report = match &failure.diagnostic_basis {
+            ExistingDiagnosticBasis::Stream(report) => Some(report),
+            _ => None,
+        }
+        .expect("stream failure retains the native report");
+        if malformed {
+            assert_ne!(report.as_ref(), &transport_report);
+            assert!(matches!(
+                report.detail.as_ref(),
+                Some(ErrorDetail::MalformedToolInput(detail))
+                    if detail.name == "broken"
+                        && detail.raw == "{"
+                        && detail.id.explicit() == Some("call_fixture")
+                        && detail.provider.as_ref().and_then(|provider| provider.item_id.as_deref())
+                            == Some("fc_fixture")
+            ));
+        } else {
+            assert_eq!(report.as_ref(), &transport_report);
+        }
+        assert_eq!(http.body_polls.load(Ordering::SeqCst), originals.len() + 1);
+        assert!(stream.next().await.is_none());
+        let retained = stream.finish().expect_err("retained first failure");
+        assert_eq!(retained.kind, ObservedFailureKind::Stream);
+        assert!(handle.same_operation(&retained.observation));
+        assert!(matches!(
+            &retained.diagnostic_basis,
+            ExistingDiagnosticBasis::Stream(retained_report) if retained_report == report
+        ));
+        handle.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::NativeFailed);
+            assert_eq!(view.committed_prefix, originals);
+            assert!(matches!(
+                view.native_cause,
+                Some(ExistingDiagnosticBasis::Stream(retained_report)) if retained_report == report
+            ));
+        });
+        assert_eq!(http.body_polls.load(Ordering::SeqCst), originals.len() + 1);
+    }
+}
+
+/// A whole response ends the stream without polling any following source data.
+#[tokio::test]
+async fn whole_response_finishes_without_reading_the_tail() {
+    for (pending_tail, tail_error, unread_frame) in [
+        (true, false, false),
+        (false, true, false),
+        (true, true, false),
+        (true, true, true),
+    ] {
+        let body = response(json!([message("whole answer")]));
+        let original = body.to_string();
+        let mut frames = vec![original.clone()];
+        if unread_frame {
+            frames.push(r#"{ "type": "future.unread", "value": "untouched" }"#.into());
+        }
+        let http = ScriptedHttp::new(Script {
+            frames,
+            pending_tail,
+            tail_error,
+            ..Script::default()
+        });
+        let (handle, mut stream) = open(http.clone()).await;
+        let mut next = Box::pin(stream.next());
+        assert!(matches!(
+            poll!(next.as_mut()),
+            Poll::Ready(Some(Ok(ObservedEvent::TextDelta { text }))) if text == "whole answer"
+        ));
+        drop(next);
+        let mut next = Box::pin(stream.next());
+        assert!(matches!(poll!(next.as_mut()), Poll::Ready(None)));
+        drop(next);
+        assert_eq!(http.body_polls.load(Ordering::SeqCst), 1);
+        handle.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::AwaitingNativeFinalization);
+            assert_eq!(view.committed_prefix, [original.clone()]);
+        });
+        let result = stream.finish().expect("whole response native finalization");
+        assert!(handle.same_operation(&result.observation));
+        assert_eq!(result.body.native.id, "resp_fixture");
+        assert_eq!(
+            result.body.response.raw,
+            serde_json::to_value(&result.body.native).expect("serialized native whole response")
+        );
+        assert!(matches!(
+            result.body.response.choice.as_slice(),
+            [AssistantContent::Text(text)] if text.text == "whole answer"
+        ));
+        assert_eq!(
+            result.body.response.finish_reason(),
+            Some(&FinishReason::Stop)
+        );
+        handle.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::NativeSucceeded);
+            assert_eq!(view.committed_prefix, [original]);
+            assert!(view.native_cause.is_none());
+        });
+        assert_eq!(http.body_polls.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// Whole-response completion still flushes an earlier completed malformed tool.
+#[tokio::test]
+async fn pending_malformed_tool_is_not_lost_before_a_whole_response() {
+    let item_done = json!({
+        "type": "response.output_item.done", "output_index": 0,
+        "sequence_number": 3,
+        "item": {
+            "type": "function_call", "id": "fc_fixture", "call_id": "call_fixture",
+            "name": "broken", "arguments": "{", "status": "completed",
+        },
+    })
+    .to_string();
+    let originals = vec![item_done, response(json!([])).to_string()];
+    let http = ScriptedHttp::new(Script {
+        frames: originals.clone(),
+        pending_tail: true,
+        tail_error: true,
+        ..Script::default()
+    });
+    let (handle, mut stream) = open(http.clone()).await;
+    let mut next = Box::pin(stream.next());
+    let polled = poll!(next.as_mut());
+    drop(next);
+    assert!(matches!(&polled, Poll::Ready(Some(Err(_)))));
+    let failure = match polled {
+        Poll::Ready(Some(Err(failure))) => Some(failure),
+        _ => None,
+    }
+    .expect("whole response must immediately flush the malformed tool");
+    assert_eq!(failure.kind, ObservedFailureKind::Stream);
+    assert!(handle.same_operation(&failure.observation));
+    assert!(matches!(
+        &failure.diagnostic_basis,
+        ExistingDiagnosticBasis::Stream(report)
+            if matches!(report.detail.as_ref(), Some(ErrorDetail::MalformedToolInput(detail))
+                if detail.name == "broken" && detail.raw == "{"
+                    && detail.id.explicit() == Some("call_fixture")
+                    && detail.provider.as_ref().and_then(|provider| provider.item_id.as_deref())
+                        == Some("fc_fixture"))
+    ));
+    assert_eq!(http.body_polls.load(Ordering::SeqCst), 2);
+    let mut next = Box::pin(stream.next());
+    assert!(matches!(poll!(next.as_mut()), Poll::Ready(None)));
+    drop(next);
+    let retained = stream
+        .finish()
+        .expect_err("retained malformed tool failure");
+    assert_eq!(retained.kind, ObservedFailureKind::Stream);
+    assert!(handle.same_operation(&retained.observation));
+    assert!(matches!(
+        (&retained.diagnostic_basis, &failure.diagnostic_basis),
+        (ExistingDiagnosticBasis::Stream(retained_report), ExistingDiagnosticBasis::Stream(report))
+            if retained_report == report
+    ));
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert_eq!(view.committed_prefix, originals);
+        assert!(matches!(
+            (view.native_cause, &failure.diagnostic_basis),
+            (Some(ExistingDiagnosticBasis::Stream(retained_report)), ExistingDiagnosticBasis::Stream(report))
+                if retained_report == report
+        ));
+    });
+    assert_eq!(http.body_polls.load(Ordering::SeqCst), 2);
 }
 
 /// Selected terminal snapshots hydrate text and opaque items, not known tools.
