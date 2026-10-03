@@ -6807,6 +6807,7 @@ pub mod observed {
                     out,
                 )?,
                 ItemChunkKind::ContentPartAdded(part) | ItemChunkKind::ContentPartDone(part) => {
+                    let is_refusal = matches!(&part.part, ContentPartChunkPart::Refusal { .. });
                     match part.part {
                         ContentPartChunkPart::SummaryText { text } => {
                             self.reasoning_conflict(
@@ -6894,18 +6895,15 @@ pub mod observed {
                                 }
                             }
                         }
-                        content => {
-                            let content = match content {
-                                ContentPartChunkPart::OutputText { text } => {
-                                    ow::AssistantContent::OutputText(ow::OutputText {
-                                        text,
-                                        extras: Default::default(),
-                                    })
-                                }
-                                ContentPartChunkPart::Refusal { refusal } => {
-                                    ow::AssistantContent::Refusal { refusal }
-                                }
-                                _ => unreachable!(),
+                        ContentPartChunkPart::OutputText { text }
+                        | ContentPartChunkPart::Refusal { refusal: text } => {
+                            let content = if is_refusal {
+                                ow::AssistantContent::Refusal { refusal: text }
+                            } else {
+                                ow::AssistantContent::OutputText(ow::OutputText {
+                                    text,
+                                    extras: Default::default(),
+                                })
                             };
                             let slot = self.slot(
                                 slot,
