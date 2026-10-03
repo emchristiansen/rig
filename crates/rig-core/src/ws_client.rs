@@ -1,5 +1,6 @@
 //! Transport-independent websocket handshakes, connections, and frames.
-//! Backends preserve rejected upgrades as HTTP errors with status, headers, and body.
+//! Backends preserve rejected upgrades as HTTP errors with status, headers, and
+//! the body supplied by the backend, which may be empty or partial.
 //!
 //! ```
 //! use rig_core::ws_client::websocket_url;
@@ -66,7 +67,7 @@ impl ConnectOptions {
 /// `Sec-WebSocket-Key`; callers must not supply those headers.
 pub trait WebSocketClientExt: Clone + WasmCompatSend + WasmCompatSync + 'static {
     /// Opens a connection, preserving rejected upgrades with their HTTP status,
-    /// headers, and response body.
+    /// headers, and the body supplied by the backend. That body may be empty or partial.
     fn connect(
         &self,
         request: Request<NoBody>,

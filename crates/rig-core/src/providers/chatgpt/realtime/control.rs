@@ -40,8 +40,8 @@ struct CloseProgress {
 impl LiveCalls {
     /// Join the control socket of `call_id` over `backend`, with a 30 second
     /// handshake timeout. The already-resolved credential is sent unchanged.
-    /// A rejected upgrade keeps its status, supplied headers, body
-    /// and request id.
+    /// A rejected upgrade keeps its status, supplied headers, request id and
+    /// the body supplied by the backend, which may be empty or partial.
     pub async fn connect_control<W: WebSocketClientExt>(
         &self,
         backend: &W,

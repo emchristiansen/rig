@@ -130,7 +130,9 @@ async fn handshake(
 
 #[cfg(not(target_family = "wasm"))]
 /// Convert a tungstenite failure to a transport error, preserving the status,
-/// headers, and the selected text rendering of a rejected upgrade body.
+/// headers, and the selected text rendering of the rejected upgrade body supplied
+/// by tungstenite. That body contains only bytes buffered with the headers and
+/// may be empty or partial.
 /// Invalid UTF-8 follows the selected transport's lossy conversion; these
 /// strings are not a claim of original byte fidelity.
 /// Other failures become [`Error::Instance`].
