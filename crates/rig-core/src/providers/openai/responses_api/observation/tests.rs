@@ -47,19 +47,27 @@ fn poisoned_append_retains_prefix_and_whole_uncommitted_string() {
         Err(cause) => cause,
         Ok(()) => panic!("an impossible String-vector capacity must fail"),
     };
-    handle.lock().fault = Some(CaptureFault { cause: CaptureCause::Allocation(cause), offending_string: None });
+    handle.lock().fault = Some(CaptureFault {
+        cause: CaptureCause::Allocation(cause),
+        offending_string: None,
+    });
     let offending = "{\"type\":\"error\",\"error\":\"whole supplied cause\"}".to_owned();
     assert!(writer.append(offending.clone()).is_err());
     let failure = ObservedFailure::capture_only(&mut writer);
     assert_eq!(failure.kind, ObservedFailureKind::CaptureOnly);
     assert!(failure.observation.same_operation(&handle));
-    assert!(matches!(failure.diagnostic_basis, ExistingDiagnosticBasis::NoExistingNativeCause));
+    assert!(matches!(
+        failure.diagnostic_basis,
+        ExistingDiagnosticBasis::NoExistingNativeCause
+    ));
     assert!(writer.succeeded().is_err());
     drop(writer);
     handle.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::NativeFailed);
         assert_eq!(view.committed_prefix, &["prefix".to_owned()]);
-        let Some(fault) = view.capture_fault else { panic!("actual capture fault must remain") };
+        let Some(fault) = view.capture_fault else {
+            panic!("actual capture fault must remain")
+        };
         assert_eq!(fault.offending_string.as_ref(), Some(&offending));
         assert!(view.native_cause.is_none());
     });

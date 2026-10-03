@@ -27,7 +27,9 @@ static RUNTIME: LazyLock<Result<Runtime, RuntimeUnavailable>> = LazyLock::new(||
 struct RuntimeUnavailable(String);
 
 fn runtime() -> Result<&'static Runtime, Error> {
-    RUNTIME.as_ref().map_err(|err| Error::Instance(Box::new(err.clone())))
+    RUNTIME
+        .as_ref()
+        .map_err(|err| Error::Instance(Box::new(err.clone())))
 }
 
 /// Return whether the current task has a Tokio runtime handle.
@@ -48,7 +50,9 @@ impl<T> OwnedTask<T> {
     /// Dropping the returned future aborts the task.
     pub(crate) async fn join(mut self) -> Result<T, Error> {
         // Borrow the handle so cancellation still drops the abort guard.
-        (&mut self.handle).await.map_err(|error| Error::Instance(Box::new(error)))
+        (&mut self.handle)
+            .await
+            .map_err(|error| Error::Instance(Box::new(error)))
     }
 }
 

@@ -78,7 +78,8 @@ pin_project! {
 pub type RequestIdSlot = std::sync::Arc<std::sync::Mutex<Option<String>>>;
 
 #[cfg(feature = "completion-observations")]
-type ObservationDispatchHook = Option<crate::providers::openai::responses_api::observation::ObservationHandle>;
+type ObservationDispatchHook =
+    Option<crate::providers::openai::responses_api::observation::ObservationHandle>;
 #[cfg(not(feature = "completion-observations"))]
 type ObservationDispatchHook = ();
 
@@ -227,13 +228,21 @@ where
                         Poll::Ready(Ok(response)) => {
                             #[cfg(feature = "completion-observations")]
                             if let Some(handle) = this.observation_dispatch.as_ref() {
-                                handle.record_reply_head(response.status(), response.headers(), false);
+                                handle.record_reply_head(
+                                    response.status(),
+                                    response.headers(),
+                                    false,
+                                );
                             }
                             match check_response(response, *this.allow_missing_content_type) {
                                 Ok(response) => {
                                     #[cfg(feature = "completion-observations")]
                                     if let Some(handle) = this.observation_dispatch.as_ref() {
-                                        handle.record_reply_head(response.status(), response.headers(), true);
+                                        handle.record_reply_head(
+                                            response.status(),
+                                            response.headers(),
+                                            true,
+                                        );
                                     }
                                     // Transition: Connecting -> Open
                                     capture_request_id_header(

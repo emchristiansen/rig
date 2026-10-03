@@ -69,14 +69,23 @@ fn a_rejection_keeps_rate_limit_headers() {
 fn a_rejection_without_a_body_keeps_the_status() {
     let error = from_tungstenite(handshake_rejection(503, &[], None));
 
-    assert!(matches!(error, Error::InvalidStatusCodeWithDetails { status: StatusCode::SERVICE_UNAVAILABLE, .. }));
+    assert!(matches!(
+        error,
+        Error::InvalidStatusCodeWithDetails {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn every_rejection_status_survives() {
     for status in [400u16, 401, 403, 404, 429, 500, 503] {
         let error = from_tungstenite(handshake_rejection(status, &[], Some("{}")));
-        assert!(matches!(error, Error::InvalidStatusCodeWithDetails { status: actual, .. } if actual.as_u16() == status), "status {status} should survive");
+        assert!(
+            matches!(error, Error::InvalidStatusCodeWithDetails { status: actual, .. } if actual.as_u16() == status),
+            "status {status} should survive"
+        );
     }
 }
 

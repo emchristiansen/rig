@@ -117,7 +117,10 @@ fn calls() -> LiveCalls {
     LiveCalls::new(
         LiveConfiguration::subscription("test-token")
             .with_account_id("acct-123")
-            .with_caller_identity(crate::providers::live_support::CallerIdentity::new("test", "test/1", None).expect("valid identity")),
+            .with_caller_identity(
+                crate::providers::live_support::CallerIdentity::new("test", "test/1", None)
+                    .expect("valid identity"),
+            ),
     )
     .expect("the Codex backend")
 }

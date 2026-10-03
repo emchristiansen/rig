@@ -43,7 +43,10 @@ async fn serve_one_rejection(
 
 async fn refusal(url: &str) -> Error {
     let request = Request::builder().uri(url).body(NoBody).expect("request");
-    match TungsteniteClient::new().connect(request, ConnectOptions::new()).await {
+    match TungsteniteClient::new()
+        .connect(request, ConnectOptions::new())
+        .await
+    {
         Ok(_) => panic!("the upgrade should be refused"),
         Err(error) => error,
     }
@@ -59,13 +62,21 @@ async fn a_refused_upgrade_keeps_the_status_body_and_request_id() {
     .await;
 
     let error = refusal(&base_url).await;
-    let Error::InvalidStatusCodeWithDetails { status, body, headers } = error else {
+    let Error::InvalidStatusCodeWithDetails {
+        status,
+        body,
+        headers,
+    } = error
+    else {
         panic!("the refusal should retain its response: {error:?}");
     };
     assert_eq!(status, http::StatusCode::UNAUTHORIZED);
     assert_eq!(body, REJECTION_BODY);
     assert_eq!(headers["x-request-id"], "req_websocket_live_1");
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).expect("JSON")["error"]["code"], "invalid_api_key");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).expect("JSON")["error"]["code"],
+        "invalid_api_key"
+    );
 }
 
 /// rig#2210: a rate-limited upgrade carries the backoff metadata its HTTP twin
@@ -84,11 +95,19 @@ async fn a_rate_limited_upgrade_keeps_its_backoff_headers() {
     .await;
 
     let error = refusal(&base_url).await;
-    let Error::InvalidStatusCodeWithDetails { status, body, headers } = error else {
+    let Error::InvalidStatusCodeWithDetails {
+        status,
+        body,
+        headers,
+    } = error
+    else {
         panic!("the refusal should retain its response: {error:?}");
     };
     assert_eq!(status, http::StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(body, r#"{"error":{"message":"Rate limit reached","code":"rate_limit_exceeded"}}"#);
+    assert_eq!(
+        body,
+        r#"{"error":{"message":"Rate limit reached","code":"rate_limit_exceeded"}}"#
+    );
     assert_eq!(headers["retry-after"], "20");
     assert_eq!(headers["x-ratelimit-remaining"], "0");
     assert_eq!(headers["x-request-id"], "req_websocket_live_2");
@@ -105,5 +124,8 @@ async fn a_connection_failure_reports_no_provider_response() {
     };
 
     let error = refusal(&format!("ws://{address}/v1")).await;
-    assert!(matches!(error, Error::Instance(_)), "a transport failure has no provider response: {error:?}");
+    assert!(
+        matches!(error, Error::Instance(_)),
+        "a transport failure has no provider response: {error:?}"
+    );
 }

@@ -14,10 +14,10 @@
 pub mod client;
 pub mod completion;
 pub mod embedding;
-pub mod model_listing;
-pub mod responses_api;
 #[cfg(feature = "live")]
 pub mod live;
+pub mod model_listing;
+pub mod responses_api;
 
 #[cfg(feature = "audio")]
 #[cfg_attr(docsrs, doc(cfg(feature = "audio")))]

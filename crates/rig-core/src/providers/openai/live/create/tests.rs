@@ -61,9 +61,10 @@ fn the_request_matches_the_reference_example() {
 
 #[test]
 fn the_offer_is_sent_verbatim_under_a_custom_base_url() {
-    let sessions =
-        PublicLiveSessions::new(LiveConfiguration::public(API_KEY).with_base_url("http://localhost:8080/v1/"))
-            .expect("the OpenAI dialect");
+    let sessions = PublicLiveSessions::new(
+        LiveConfiguration::public(API_KEY).with_base_url("http://localhost:8080/v1/"),
+    )
+    .expect("the OpenAI dialect");
     let request = sessions
         .create_request(OFFER, &SessionConfig::new())
         .expect("a request");
@@ -90,12 +91,7 @@ fn an_empty_offer_is_refused() {
 fn the_codex_backend_is_refused() {
     let provider = LiveConfiguration::subscription("access-token");
     let error = PublicLiveSessions::new(provider).expect_err("the Codex dialect");
-    assert_eq!(
-        error,
-        NotOfficialOpenAi {
-            dialect: "chatgpt"
-        }
-    );
+    assert_eq!(error, NotOfficialOpenAi { dialect: "chatgpt" });
     assert!(matches!(
         ProviderError::from(error),
         ProviderError::Request(_)
@@ -104,7 +100,8 @@ fn the_codex_backend_is_refused() {
 
 #[test]
 fn a_custom_url_does_not_change_the_explicit_backend() {
-    let provider=LiveConfiguration::subscription("test").with_base_url("https://api.openai.com/v1");
+    let provider =
+        LiveConfiguration::subscription("test").with_base_url("https://api.openai.com/v1");
     assert!(PublicLiveSessions::new(provider).is_err());
 }
 
@@ -117,7 +114,6 @@ fn the_official_openai_dialect_is_accepted() {
 fn the_dialect_supplies_the_request_id_header_and_no_stamp_by_default() {
     let sessions = sessions();
     assert_eq!(sessions.request_id_header(), Some("x-request-id"));
-
 }
 
 #[test]
@@ -201,8 +197,6 @@ fn a_401_is_a_terminal_authentication_failure() {
     );
     assert!(error.is_terminal());
     assert!(!error.is_retryable());
-
-
 }
 
 #[test]
@@ -308,5 +302,4 @@ fn a_rejected_body_keeps_its_exact_bytes() {
         reply.reply.body.text().as_deref(),
         Some("bad gateway \u{fffd}\u{fffd}")
     );
-
 }

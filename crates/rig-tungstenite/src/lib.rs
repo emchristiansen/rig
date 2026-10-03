@@ -153,4 +153,3 @@ fn from_tungstenite(error: tungstenite::Error) -> Error {
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests;
-

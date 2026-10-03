@@ -608,7 +608,9 @@ impl ProviderError {
             Self::Request(_) => ErrorKind::Request,
             Self::Response(_) => ErrorKind::Response,
             Self::Provider(_) => ErrorKind::Provider,
-            Self::ProviderResponse(_) | Self::InvalidAuthentication(_) => ErrorKind::ProviderResponse,
+            Self::ProviderResponse(_) | Self::InvalidAuthentication(_) => {
+                ErrorKind::ProviderResponse
+            }
         }
     }
 
@@ -627,7 +629,9 @@ impl ProviderError {
     /// The provider's preserved reply, when this error carries one.
     pub fn provider_response(&self) -> Option<&ProviderResponseError> {
         match self {
-            Self::ProviderResponse(response) | Self::InvalidAuthentication(response) => Some(response),
+            Self::ProviderResponse(response) | Self::InvalidAuthentication(response) => {
+                Some(response)
+            }
             _ => None,
         }
     }
@@ -789,7 +793,9 @@ impl From<&ProviderError> for ErrorReport {
             retryable: error.is_retryable(),
             message: error.to_string(),
             code: response.and_then(ProviderResponseError::machine_code),
-            http_status: error.provider_response_status().map(|status| status.as_u16()),
+            http_status: error
+                .provider_response_status()
+                .map(|status| status.as_u16()),
             refusal: response.is_some_and(|response| response.refusal),
             source_chain: source_chain(error),
             request_id: response.and_then(|response| response.provider_request_id.clone()),

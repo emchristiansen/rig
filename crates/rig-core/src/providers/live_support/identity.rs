@@ -221,7 +221,6 @@ impl CodexIdentity {
     pub fn thread_id(&self) -> &str {
         &self.thread_id
     }
-
 }
 
 #[cfg(test)]

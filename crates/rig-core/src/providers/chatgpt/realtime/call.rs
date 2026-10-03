@@ -5,9 +5,9 @@ use super::{
     CONTROL_SOCKET_BASE_URL, OPENAI_ALPHA_HEADER, QUICKSILVER_V2, REALTIME_CALLS_PATH,
     REALTIME_CALLS_QUERY, SessionConfig, X_SESSION_ID_HEADER,
 };
-use crate::providers::live_support::error::{EncodeError, ProviderError};
 use crate::http_client;
-use crate::providers::live_support::configuration::{LiveConfiguration, LiveBackend};
+use crate::providers::live_support::configuration::{LiveBackend, LiveConfiguration};
+use crate::providers::live_support::error::{EncodeError, ProviderError};
 use crate::providers::live_support::identity::{
     CodexIdentity, InvalidCodexIdentity, SESSION_ID_HEADER, THREAD_ID_HEADER,
 };
@@ -128,7 +128,9 @@ pub struct NotTheCodexBackend {
     pub dialect: &'static str,
 }
 impl From<NotTheCodexBackend> for ProviderError {
-    fn from(error: NotTheCodexBackend) -> Self { Self::Request(Box::new(error)) }
+    fn from(error: NotTheCodexBackend) -> Self {
+        Self::Request(Box::new(error))
+    }
 }
 
 impl LiveCalls {
@@ -264,7 +266,6 @@ impl LiveCalls {
     pub(crate) fn request_id_header(&self) -> Option<&'static str> {
         Some("x-request-id")
     }
-
 }
 
 #[cfg(test)]

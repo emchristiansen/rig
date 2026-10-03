@@ -5,8 +5,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::{LIVE_SESSIONS_PATH, SessionConfig};
+use crate::providers::live_support::configuration::{LiveBackend, LiveConfiguration};
 use crate::providers::live_support::error::{EncodeError, ProviderError};
-use crate::providers::live_support::configuration::{LiveConfiguration, LiveBackend};
 
 /// The provider's dialect is not official OpenAI, the only dialect that
 /// speaks the public Live API. This restricts the dialect, not the origin: an
@@ -250,9 +250,9 @@ impl LiveApiError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Rejected(reply) => {
-                crate::providers::live_support::error::retryable_status(Some(reply.reply.head.status.as_u16()))
-            }
+            Self::Rejected(reply) => crate::providers::live_support::error::retryable_status(Some(
+                reply.reply.head.status.as_u16(),
+            )),
             Self::Request(error) | Self::Transport(error) => error.is_retryable(),
             Self::Authentication(_)
             | Self::SpendLimit(_)
@@ -392,8 +392,10 @@ impl PublicLiveSessions {
         status: http::StatusCode,
         headers: http::HeaderMap,
     ) -> ReplyHead {
-        let request_id =
-            crate::providers::live_support::error::request_id_from_headers(&headers, self.request_id_header());
+        let request_id = crate::providers::live_support::error::request_id_from_headers(
+            &headers,
+            self.request_id_header(),
+        );
         ReplyHead {
             status,
             headers,
@@ -419,7 +421,12 @@ impl PublicLiveSessions {
             ReplyBody::Received(bytes) => {
                 decode_created(&bytes).map_err(|reason| (reason, ReplyBody::Received(bytes)))
             }
-            ReplyBody::Unavailable => return Err(LiveApiError::OutcomeUnknown { head, read_error: ProviderError::Response("legacy transport supplied no body".into()) }),
+            ReplyBody::Unavailable => {
+                return Err(LiveApiError::OutcomeUnknown {
+                    head,
+                    read_error: ProviderError::Response("legacy transport supplied no body".into()),
+                });
+            }
             ReplyBody::TransportText(text) => decode_created(text.as_bytes())
                 .map_err(|reason| (reason, ReplyBody::TransportText(text))),
         };

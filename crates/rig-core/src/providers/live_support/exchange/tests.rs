@@ -87,10 +87,21 @@ impl HttpClientExt for Backend {
             if matches!(reply.delivery, Delivery::SendTransport) {
                 return Err(http_client::Error::StreamEnded);
             }
-            if matches!(reply.delivery, Delivery::LegacyStatus) { return Err(http_client::Error::InvalidStatusCode(reply.status)); }
-            if matches!(reply.delivery, Delivery::LegacyMessage) { return Err(http_client::Error::InvalidStatusCodeWithMessage(reply.status, String::from_utf8_lossy(&reply.body).into_owned())); }
+            if matches!(reply.delivery, Delivery::LegacyStatus) {
+                return Err(http_client::Error::InvalidStatusCode(reply.status));
+            }
+            if matches!(reply.delivery, Delivery::LegacyMessage) {
+                return Err(http_client::Error::InvalidStatusCodeWithMessage(
+                    reply.status,
+                    String::from_utf8_lossy(&reply.body).into_owned(),
+                ));
+            }
             if matches!(reply.delivery, Delivery::SendError) {
-                return Err(http_client::Error::InvalidStatusCodeWithDetails { status: reply.status, headers: Box::new(reply.headers), body: String::from_utf8_lossy(&reply.body).into_owned() });
+                return Err(http_client::Error::InvalidStatusCodeWithDetails {
+                    status: reply.status,
+                    headers: Box::new(reply.headers),
+                    body: String::from_utf8_lossy(&reply.body).into_owned(),
+                });
             }
             let status = reply.status;
             let headers = reply.headers.clone();
@@ -160,11 +171,15 @@ async fn a_created_session_decodes() {
 
 #[tokio::test]
 async fn invalid_static_access_sends_nothing() {
-    let sessions = PublicLiveSessions::new(LiveConfiguration::public("invalid\ntoken")).expect("public");
+    let sessions =
+        PublicLiveSessions::new(LiveConfiguration::public("invalid\ntoken")).expect("public");
     let backend = Backend::new(http::StatusCode::CREATED, CREATED, Delivery::Reply);
-    let error=sessions.create_session(&backend,OFFER,&session()).await.expect_err("invalid header");
-    assert!(matches!(error,LiveApiError::Request(_)));
-    assert_eq!(backend.sent(),0);
+    let error = sessions
+        .create_session(&backend, OFFER, &session())
+        .await
+        .expect_err("invalid header");
+    assert!(matches!(error, LiveApiError::Request(_)));
+    assert_eq!(backend.sent(), 0);
 }
 
 #[tokio::test]
@@ -309,23 +324,42 @@ async fn a_malformed_success_is_not_a_transport_failure() {
 #[tokio::test]
 async fn legacy_replies_preserve_absence_and_terminal_classification() {
     for delivery in [Delivery::LegacyMessage, Delivery::LegacyStatus] {
-        let backend=Backend::new(http::StatusCode::UNAUTHORIZED,"rejected",delivery);
-        let error=sessions().create_session(&backend,OFFER,&session()).await.expect_err("rejected");
-        let LiveApiError::Authentication(reply)=&error else { panic!("expected authentication, {error:?}") };
+        let backend = Backend::new(http::StatusCode::UNAUTHORIZED, "rejected", delivery);
+        let error = sessions()
+            .create_session(&backend, OFFER, &session())
+            .await
+            .expect_err("rejected");
+        let LiveApiError::Authentication(reply) = &error else {
+            panic!("expected authentication, {error:?}")
+        };
         assert!(!reply.reply.head.headers_available);
         assert!(reply.reply.head.headers.is_empty());
         assert!(reply.reply.head.request_id.is_none());
         match delivery {
-            Delivery::LegacyStatus=>assert!(matches!(reply.reply.body,ReplyBody::Unavailable)),
-            Delivery::LegacyMessage=>assert_eq!(reply.reply.body.bytes(),Some(&b"rejected"[..])),
-            _=>unreachable!(),
+            Delivery::LegacyStatus => assert!(matches!(reply.reply.body, ReplyBody::Unavailable)),
+            Delivery::LegacyMessage => assert_eq!(reply.reply.body.bytes(), Some(&b"rejected"[..])),
+            _ => unreachable!(),
         }
         assert!(error.is_terminal());
     }
-    let backend=Backend::new(http::StatusCode::TOO_MANY_REQUESTS,SPEND_LIMIT,Delivery::LegacyStatus);
-    let error=sessions().create_session(&backend,OFFER,&session()).await.expect_err("rejected");
-    assert!(matches!(error,LiveApiError::Rejected(_)));
-    let backend=Backend::new(http::StatusCode::TOO_MANY_REQUESTS,SPEND_LIMIT,Delivery::LegacyMessage);
-    let error=sessions().create_session(&backend,OFFER,&session()).await.expect_err("rejected");
-    assert!(matches!(error,LiveApiError::SpendLimit(_)));
+    let backend = Backend::new(
+        http::StatusCode::TOO_MANY_REQUESTS,
+        SPEND_LIMIT,
+        Delivery::LegacyStatus,
+    );
+    let error = sessions()
+        .create_session(&backend, OFFER, &session())
+        .await
+        .expect_err("rejected");
+    assert!(matches!(error, LiveApiError::Rejected(_)));
+    let backend = Backend::new(
+        http::StatusCode::TOO_MANY_REQUESTS,
+        SPEND_LIMIT,
+        Delivery::LegacyMessage,
+    );
+    let error = sessions()
+        .create_session(&backend, OFFER, &session())
+        .await
+        .expect_err("rejected");
+    assert!(matches!(error, LiveApiError::SpendLimit(_)));
 }

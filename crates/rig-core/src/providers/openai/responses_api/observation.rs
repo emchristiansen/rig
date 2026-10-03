@@ -4,9 +4,9 @@
 //! interpretation. It is an in-memory prefix, not a record of unread transport
 //! bytes. Keeping a handle retains that prefix after the owning future is dropped.
 
+use crate::providers::live_support::error::{ErrorReport, ProviderError};
 use std::collections::TryReserveError;
 use std::sync::{Arc, Mutex, MutexGuard};
-use crate::providers::live_support::error::{ErrorReport, ProviderError};
 
 /// How this operation acquired its evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +38,13 @@ pub enum ObservationStage {
 
 impl ObservationStage {
     fn is_terminal(self) -> bool {
-        matches!(self, Self::NativeSucceeded | Self::NativeFailed | Self::CallerRejectedBeforeDispatch | Self::Cancelled)
+        matches!(
+            self,
+            Self::NativeSucceeded
+                | Self::NativeFailed
+                | Self::CallerRejectedBeforeDispatch
+                | Self::Cancelled
+        )
     }
 }
 
@@ -132,7 +138,9 @@ impl Observation {
         Self::with_provenance(ObservationProvenance::Synthetic)
     }
 
-    fn with_provenance(provenance: ObservationProvenance) -> (ObservationHandle, ObservationWriter) {
+    fn with_provenance(
+        provenance: ObservationProvenance,
+    ) -> (ObservationHandle, ObservationWriter) {
         let handle = ObservationHandle(Arc::new(Mutex::new(Ledger {
             provenance,
             stage: ObservationStage::Prepared,
@@ -181,7 +189,10 @@ impl ObservationHandle {
             Err(poison) => {
                 let mut ledger = poison.into_inner();
                 if ledger.fault.is_none() {
-                    ledger.fault = Some(CaptureFault { cause: CaptureCause::LockPoisoned, offending_string: None });
+                    ledger.fault = Some(CaptureFault {
+                        cause: CaptureCause::LockPoisoned,
+                        offending_string: None,
+                    });
                     if !ledger.stage.is_terminal() {
                         ledger.stage = ObservationStage::NativeFailed;
                     }
@@ -199,20 +210,41 @@ impl ObservationHandle {
         }
     }
 
-    pub(crate) fn record_reply_head(&self, status: http::StatusCode, headers: &http::HeaderMap, accepted_sse: bool) {
-        self.lock().reply_head = Some(ObservedReplyHead { status, headers: headers.clone(), accepted_sse });
+    pub(crate) fn record_reply_head(
+        &self,
+        status: http::StatusCode,
+        headers: &http::HeaderMap,
+        accepted_sse: bool,
+    ) {
+        self.lock().reply_head = Some(ObservedReplyHead {
+            status,
+            headers: headers.clone(),
+            accepted_sse,
+        });
     }
 
     fn response_metadata(&self) -> (Option<String>, std::collections::BTreeMap<String, String>) {
         self.inspect(|view| {
-            let Some(head) = view.reply_head.filter(|head| head.accepted_sse) else { return (None, Default::default()); };
-            let request_id = head.headers.get("x-request-id")
-                .and_then(|value| value.to_str().ok()).filter(|value| !value.is_empty()).map(str::to_owned);
+            let Some(head) = view.reply_head.filter(|head| head.accepted_sse) else {
+                return (None, Default::default());
+            };
+            let request_id = head
+                .headers
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
             let mut headers = std::collections::BTreeMap::<String, String>::new();
             for (name, value) in &head.headers {
                 if name.as_str().starts_with("x-codex-") {
                     let value = String::from_utf8_lossy(value.as_bytes());
-                    headers.entry(name.as_str().to_owned()).and_modify(|existing| { existing.push_str(", "); existing.push_str(&value); }).or_insert_with(|| value.into_owned());
+                    headers
+                        .entry(name.as_str().to_owned())
+                        .and_modify(|existing| {
+                            existing.push_str(", ");
+                            existing.push_str(&value);
+                        })
+                        .or_insert_with(|| value.into_owned());
                 }
             }
             (request_id, headers)
@@ -238,7 +270,9 @@ impl ObservationWriter {
     /// Record explicit caller rejection before handing this writer to Rig.
     pub fn reject_before_dispatch(self) {
         let mut ledger = self.handle.lock();
-        if ledger.stage == ObservationStage::Prepared && ledger.dispatch == ObservationDispatch::NotDispatched {
+        if ledger.stage == ObservationStage::Prepared
+            && ledger.dispatch == ObservationDispatch::NotDispatched
+        {
             ledger.stage = ObservationStage::CallerRejectedBeforeDispatch;
         }
     }
@@ -247,12 +281,17 @@ impl ObservationWriter {
         let mut ledger = self.handle.lock();
         if ledger.fault.is_some() {
             if let Some(fault) = ledger.fault.as_mut() {
-                if fault.offending_string.is_none() { fault.offending_string = Some(original); }
+                if fault.offending_string.is_none() {
+                    fault.offending_string = Some(original);
+                }
             }
             return Err(self.handle.clone());
         }
         if let Err(cause) = ledger.committed.try_reserve(1) {
-            ledger.fault = Some(CaptureFault { cause: CaptureCause::Allocation(cause), offending_string: Some(original) });
+            ledger.fault = Some(CaptureFault {
+                cause: CaptureCause::Allocation(cause),
+                offending_string: Some(original),
+            });
             ledger.stage = ObservationStage::NativeFailed;
             return Err(self.handle.clone());
         }
@@ -271,19 +310,27 @@ impl ObservationWriter {
     fn failed_with(&mut self, cause: ExistingDiagnosticBasis) {
         let mut ledger = self.handle.lock();
         ledger.native_cause = Some(cause);
-        if !ledger.stage.is_terminal() { ledger.stage = ObservationStage::NativeFailed; }
+        if !ledger.stage.is_terminal() {
+            ledger.stage = ObservationStage::NativeFailed;
+        }
     }
 
     pub(crate) fn succeeded(&mut self) -> Result<(), ObservationHandle> {
         let mut ledger = self.handle.lock();
-        if ledger.fault.is_some() { return Err(self.handle.clone()); }
-        if !ledger.stage.is_terminal() { ledger.stage = ObservationStage::NativeSucceeded; }
+        if ledger.fault.is_some() {
+            return Err(self.handle.clone());
+        }
+        if !ledger.stage.is_terminal() {
+            ledger.stage = ObservationStage::NativeSucceeded;
+        }
         Ok(())
     }
 
     fn transition(&mut self, stage: ObservationStage) {
         let mut ledger = self.handle.lock();
-        if !ledger.stage.is_terminal() { ledger.stage = stage; }
+        if !ledger.stage.is_terminal() {
+            ledger.stage = stage;
+        }
     }
 }
 
@@ -333,13 +380,21 @@ impl ObservedFailure {
         writer.handle.lock().native_error = Some(error.clone());
         let basis = ExistingDiagnosticBasis::Provider(error);
         writer.failed_with(basis.clone());
-        Self { kind: ObservedFailureKind::Provider, diagnostic_basis: basis, observation: writer.handle() }
+        Self {
+            kind: ObservedFailureKind::Provider,
+            diagnostic_basis: basis,
+            observation: writer.handle(),
+        }
     }
 
     fn report(error: ErrorReport, writer: &mut ObservationWriter) -> Self {
         let basis = ExistingDiagnosticBasis::Stream(Arc::new(error));
         writer.failed_with(basis.clone());
-        Self { kind: ObservedFailureKind::Stream, diagnostic_basis: basis, observation: writer.handle() }
+        Self {
+            kind: ObservedFailureKind::Stream,
+            diagnostic_basis: basis,
+            observation: writer.handle(),
+        }
     }
 
     fn report_provider(error: ProviderError, writer: &mut ObservationWriter) -> Self {
@@ -351,19 +406,30 @@ impl ObservedFailure {
 
     fn capture_only(writer: &mut ObservationWriter) -> Self {
         writer.failed();
-        Self { kind: ObservedFailureKind::CaptureOnly, diagnostic_basis: ExistingDiagnosticBasis::NoExistingNativeCause, observation: writer.handle() }
+        Self {
+            kind: ObservedFailureKind::CaptureOnly,
+            diagnostic_basis: ExistingDiagnosticBasis::NoExistingNativeCause,
+            observation: writer.handle(),
+        }
     }
 }
 
-use super::streaming::observed::{ObservedAssembler, ObservedEvent, ObservedInterpretationError, ObservedResponsesResultBody};
+use super::streaming::observed::{
+    ObservedAssembler, ObservedEvent, ObservedInterpretationError, ObservedResponsesResultBody,
+};
 use crate::http_client::{self, sse};
 use futures::Stream;
-use std::{collections::VecDeque, pin::Pin, task::{Context, Poll}};
+use std::{
+    collections::VecDeque,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 type ObservedSource = futures::stream::BoxStream<'static, Result<sse::Event, http_client::Error>>;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-type ObservedSource = futures::stream::LocalBoxStream<'static, Result<sse::Event, http_client::Error>>;
+type ObservedSource =
+    futures::stream::LocalBoxStream<'static, Result<sse::Event, http_client::Error>>;
 
 /// Selected response views accompanied by custody of their original operation.
 #[derive(Clone, Debug)]
@@ -386,15 +452,26 @@ pub struct ObservedResponsesStream {
 
 impl ObservedResponsesStream {
     pub(crate) fn new(source: ObservedSource, writer: ObservationWriter) -> Self {
-        Self { source, assembler: Some(ObservedAssembler::new("chatgpt")), writer, ready: VecDeque::new(), ended: false, failure: None }
+        Self {
+            source,
+            assembler: Some(ObservedAssembler::new("chatgpt")),
+            writer,
+            ready: VecDeque::new(),
+            ended: false,
+            failure: None,
+        }
     }
 
     /// Read custody of this stream's operation.
-    pub fn observation(&self) -> ObservationHandle { self.writer.handle() }
+    pub fn observation(&self) -> ObservationHandle {
+        self.writer.handle()
+    }
 
     /// Finalize synchronously after EOF; no drain, retry, or second request.
     pub fn finish(mut self) -> Result<ObservedResponsesResult, ObservedFailure> {
-        if let Some(failure) = self.failure.take() { return Err(failure); }
+        if let Some(failure) = self.failure.take() {
+            return Err(failure);
+        }
         if !self.ended {
             return Err(ObservedFailure::provider(ProviderError::Response("provider stream ended without a terminal record; treating the turn as truncated".into()), &mut self.writer));
         }
@@ -403,14 +480,26 @@ impl ObservedResponsesStream {
         };
         let body = match assembler.finish() {
             Ok(body) => body,
-            Err(ObservedInterpretationError::NativeProvider(error)) => return Err(ObservedFailure::provider(error, &mut self.writer)),
-            Err(ObservedInterpretationError::NativeReport(report)) => return Err(ObservedFailure::report(report, &mut self.writer)),
+            Err(ObservedInterpretationError::NativeProvider(error)) => {
+                return Err(ObservedFailure::provider(error, &mut self.writer));
+            }
+            Err(ObservedInterpretationError::NativeReport(report)) => {
+                return Err(ObservedFailure::report(report, &mut self.writer));
+            }
         };
-        if self.writer.succeeded().is_err() { return Err(ObservedFailure::capture_only(&mut self.writer)); }
-        Ok(ObservedResponsesResult { body, observation: self.writer.handle() })
+        if self.writer.succeeded().is_err() {
+            return Err(ObservedFailure::capture_only(&mut self.writer));
+        }
+        Ok(ObservedResponsesResult {
+            body,
+            observation: self.writer.handle(),
+        })
     }
 
-    fn fail_item(&mut self, failure: ObservedFailure) -> Poll<Option<Result<ObservedEvent, ObservedFailure>>> {
+    fn fail_item(
+        &mut self,
+        failure: ObservedFailure,
+    ) -> Poll<Option<Result<ObservedEvent, ObservedFailure>>> {
         self.ended = true;
         self.failure = Some(failure.clone());
         Poll::Ready(Some(Err(failure)))
@@ -422,8 +511,12 @@ impl Stream for ObservedResponsesStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            if let Some(event) = self.ready.pop_front() { return Poll::Ready(Some(Ok(event))); }
-            if self.ended { return Poll::Ready(None); }
+            if let Some(event) = self.ready.pop_front() {
+                return Poll::Ready(Some(Ok(event)));
+            }
+            if self.ended {
+                return Poll::Ready(None);
+            }
             match self.source.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => {
@@ -444,16 +537,23 @@ impl Stream for ObservedResponsesStream {
                     }
                     self.ended = true;
                     self.writer.awaiting_finalization();
-                    if let Some(event) = self.ready.pop_front() { return Poll::Ready(Some(Ok(event))); }
+                    if let Some(event) = self.ready.pop_front() {
+                        return Poll::Ready(Some(Ok(event)));
+                    }
                     return Poll::Ready(None);
                 }
                 Poll::Ready(Some(Err(error))) => {
-                    let failure = ObservedFailure::report_provider(ProviderError::from(error), &mut self.writer);
+                    let failure = ObservedFailure::report_provider(
+                        ProviderError::from(error),
+                        &mut self.writer,
+                    );
                     return self.fail_item(failure);
                 }
                 Poll::Ready(Some(Ok(sse::Event::Open))) => {
                     let (request_id, headers) = self.writer.handle.response_metadata();
-                    if let Some(assembler) = self.assembler.as_mut() { assembler.set_response_metadata(request_id, headers); }
+                    if let Some(assembler) = self.assembler.as_mut() {
+                        assembler.set_response_metadata(request_id, headers);
+                    }
                 }
                 Poll::Ready(Some(Ok(sse::Event::Message(message)))) => {
                     // Commit the complete source String before any classification.
@@ -462,7 +562,9 @@ impl Stream for ObservedResponsesStream {
                         return self.fail_item(failure);
                     }
                     let handle = self.writer.handle();
-                    let Some(assembler) = self.assembler.as_mut() else { continue; };
+                    let Some(assembler) = self.assembler.as_mut() else {
+                        continue;
+                    };
                     let interpreted = handle.inspect(|view| match view.committed_prefix.last() {
                         Some(original) => assembler.push(original),
                         None => Ok(Vec::new()),

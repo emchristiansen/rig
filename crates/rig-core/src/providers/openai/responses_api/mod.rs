@@ -44,8 +44,8 @@ pub mod streaming;
 pub use observation::{
     CaptureCause, CaptureFault, ExistingDiagnosticBasis, Observation, ObservationDispatch,
     ObservationHandle, ObservationProvenance, ObservationStage, ObservationView, ObservationWriter,
-    ObservedFailure, ObservedFailureKind, ObservedReplyHead, ObservedRequestContext, ObservedResponsesResult,
-    ObservedResponsesStream,
+    ObservedFailure, ObservedFailureKind, ObservedReplyHead, ObservedRequestContext,
+    ObservedResponsesResult, ObservedResponsesStream,
 };
 /// Provider-native response retained by an observed Responses operation.
 #[cfg(feature = "completion-observations")]

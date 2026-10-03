@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use rig_core::providers::chatgpt::realtime;
-use rig_core::providers::live_support::{LiveConfiguration, CallerIdentity, CodexIdentity};
+use rig_core::providers::live_support::{CallerIdentity, CodexIdentity, LiveConfiguration};
 use rig_webrtc::{LivePeer, PeerEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -166,7 +166,10 @@ async fn a_call_runs_end_to_end_against_local_servers() {
     let offer = peer.offer().await.expect("an offer");
     let call = calls
         .create_call(
-            &rig_core::http_client::ReqwestClient::builder().no_proxy().build().expect("HTTP client builds"),
+            &rig_core::http_client::ReqwestClient::builder()
+                .no_proxy()
+                .build()
+                .expect("HTTP client builds"),
             &offer,
             &realtime::SessionConfig::new("Answer briefly."),
         )

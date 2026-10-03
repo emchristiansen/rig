@@ -698,7 +698,9 @@ where
         use responses_api::observation::{ObservedFailure, ObservedResponsesStream};
 
         let prepared = (|| -> Result<http::Request<Vec<u8>>, ProviderError> {
-            let mut request = self.openai_model().create_completion_request(completion_request)
+            let mut request = self
+                .openai_model()
+                .create_completion_request(completion_request)
                 .map_err(|error| ProviderError::Request(Box::new(error)))?;
             // Observed calls use the supplied preamble without the baseline
             // client's default instructions. Baseline raw_stream is untouched.
@@ -706,8 +708,14 @@ where
             request.max_output_tokens = None;
             request.stream = Some(true);
             if request.additional_parameters.reasoning.is_some() {
-                let include = request.additional_parameters.include.get_or_insert_with(Vec::new);
-                if !include.iter().any(|item| matches!(item, Include::ReasoningEncryptedContent)) {
+                let include = request
+                    .additional_parameters
+                    .include
+                    .get_or_insert_with(Vec::new);
+                if !include
+                    .iter()
+                    .any(|item| matches!(item, Include::ReasoningEncryptedContent))
+                {
                     include.push(Include::ReasoningEncryptedContent);
                 }
             }
@@ -721,15 +729,22 @@ where
             request.additional_parameters.user = None;
             let body = serde_json::to_vec(&request)?;
             let uri = format!("{}/responses", context.base_url.trim_end_matches('/'));
-            let mut builder = context.caller_identity.stamp(http::Request::post(uri))
-                .header(http::header::AUTHORIZATION, format!("Bearer {}", context.access_token))
+            let mut builder = context
+                .caller_identity
+                .stamp(http::Request::post(uri))
+                .header(
+                    http::header::AUTHORIZATION,
+                    format!("Bearer {}", context.access_token),
+                )
                 .header(http::header::CONTENT_TYPE, "application/json")
                 .header(http::header::ACCEPT, "text/event-stream")
                 .header("session_id", crate::id::generate());
             if let Some(account_id) = &context.account_id {
                 builder = builder.header("ChatGPT-Account-Id", account_id);
             }
-            builder.body(body).map_err(|error| ProviderError::Request(Box::new(error)))
+            builder
+                .body(body)
+                .map_err(|error| ProviderError::Request(Box::new(error)))
         })();
         let request = match prepared {
             Ok(request) => request,

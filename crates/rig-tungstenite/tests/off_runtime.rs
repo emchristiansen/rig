@@ -12,7 +12,9 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use rig_core::http_client::{NoBody, Request};
-use rig_core::ws_client::{BoxedWebSocketConnection, ConnectOptions, Frame, WebSocketClientExt as _};
+use rig_core::ws_client::{
+    BoxedWebSocketConnection, ConnectOptions, Frame, WebSocketClientExt as _,
+};
 use rig_tungstenite::TungsteniteClient;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -104,10 +106,12 @@ fn serve_one_turn_after(
     format!("ws://{address}/v1")
 }
 
-
 async fn connect(url: &str) -> BoxedWebSocketConnection {
     TungsteniteClient::new()
-        .connect(Request::builder().uri(url).body(NoBody).expect("request"), ConnectOptions::new())
+        .connect(
+            Request::builder().uri(url).body(NoBody).expect("request"),
+            ConnectOptions::new(),
+        )
         .await
         .expect("connect without a caller runtime")
 }
@@ -119,9 +123,15 @@ fn a_raw_round_trip_runs_without_a_tokio_runtime() {
     assert!(tokio::runtime::Handle::try_current().is_err());
     block_on(async move {
         let mut connection = connect(&url).await;
-        connection.send(Frame::Text(r#"{"type":"response.create"}"#.to_owned())).await.expect("send");
+        connection
+            .send(Frame::Text(r#"{"type":"response.create"}"#.to_owned()))
+            .await
+            .expect("send");
         for expected in events {
-            assert_eq!(connection.recv().await.expect("receive"), Some(Frame::Text(expected)));
+            assert_eq!(
+                connection.recv().await.expect("receive"),
+                Some(Frame::Text(expected))
+            );
         }
         connection.close(None).await.expect("close");
     });
@@ -134,11 +144,17 @@ fn a_receive_timeout_still_allows_close_without_a_tokio_runtime() {
     assert!(tokio::runtime::Handle::try_current().is_err());
     block_on(async move {
         let mut connection = connect(&url).await;
-        connection.send(Frame::Text(r#"{"type":"response.create"}"#.to_owned())).await.expect("send");
-        let timeout = rig_core::wasm_compat::timeout(Duration::from_millis(50), connection.recv()).await;
+        connection
+            .send(Frame::Text(r#"{"type":"response.create"}"#.to_owned()))
+            .await
+            .expect("send");
+        let timeout =
+            rig_core::wasm_compat::timeout(Duration::from_millis(50), connection.recv()).await;
         assert!(timeout.is_err(), "the peer deliberately sends no frame");
         rig_core::wasm_compat::timeout(Duration::from_secs(5), connection.close(None))
-            .await.expect("close must not hang after receive cancellation").expect("close");
+            .await
+            .expect("close must not hang after receive cancellation")
+            .expect("close");
     });
 }
 
@@ -151,12 +167,18 @@ fn cancellation_before_a_frame_exists_preserves_the_later_frame() {
     assert!(tokio::runtime::Handle::try_current().is_err());
     block_on(async move {
         let mut connection = connect(&url).await;
-        connection.send(Frame::Text(r#"{"type":"response.create"}"#.to_owned())).await.expect("send");
-        let cancelled = rig_core::wasm_compat::timeout(Duration::from_millis(20), connection.recv()).await;
+        connection
+            .send(Frame::Text(r#"{"type":"response.create"}"#.to_owned()))
+            .await
+            .expect("send");
+        let cancelled =
+            rig_core::wasm_compat::timeout(Duration::from_millis(20), connection.recv()).await;
         assert!(cancelled.is_err());
         release.send(()).expect("release only after cancellation");
         let event = rig_core::wasm_compat::timeout(Duration::from_secs(5), connection.recv())
-            .await.expect("receive deadline").expect("receive");
+            .await
+            .expect("receive deadline")
+            .expect("receive");
         assert_eq!(event, Some(Frame::Text("kept".to_owned())));
         connection.close(None).await.expect("close");
     });

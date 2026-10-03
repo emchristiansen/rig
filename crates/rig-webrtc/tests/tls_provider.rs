@@ -14,7 +14,7 @@ mod common;
 use std::net::SocketAddr;
 
 use rig_core::providers::chatgpt::realtime;
-use rig_core::providers::live_support::{LiveConfiguration, CallerIdentity};
+use rig_core::providers::live_support::{CallerIdentity, LiveConfiguration};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -63,7 +63,10 @@ async fn the_documented_composition_reaches_tls_without_panicking() {
     let created = tokio::time::timeout(
         common::WAIT,
         calls.create_call(
-            &rig_core::http_client::ReqwestClient::builder().no_proxy().build().expect("HTTP client builds"),
+            &rig_core::http_client::ReqwestClient::builder()
+                .no_proxy()
+                .build()
+                .expect("HTTP client builds"),
             &offer_sdp,
             &realtime::SessionConfig::new("Answer briefly."),
         ),

@@ -98,7 +98,11 @@ impl HttpClientExt for Backend {
         let reply = self.clone();
         async move {
             if matches!(reply.rejection_at, RejectionAt::Send) && !reply.status.is_success() {
-                return Err(http_client::Error::InvalidStatusCodeWithDetails { status: reply.status, headers: Box::new(reply.headers), body: String::from_utf8_lossy(&reply.body).into_owned() });
+                return Err(http_client::Error::InvalidStatusCodeWithDetails {
+                    status: reply.status,
+                    headers: Box::new(reply.headers),
+                    body: String::from_utf8_lossy(&reply.body).into_owned(),
+                });
             }
             let response_status = reply.status;
             let response_headers = reply.headers.clone();
@@ -107,7 +111,11 @@ impl HttpClientExt for Backend {
                     return Err(http_client::Error::StreamEnded);
                 }
                 if matches!(reply.rejection_at, RejectionAt::Body) && !reply.status.is_success() {
-                    return Err(http_client::Error::InvalidStatusCodeWithDetails { status: reply.status, headers: Box::new(reply.headers), body: String::from_utf8_lossy(&reply.body).into_owned() });
+                    return Err(http_client::Error::InvalidStatusCodeWithDetails {
+                        status: reply.status,
+                        headers: Box::new(reply.headers),
+                        body: String::from_utf8_lossy(&reply.body).into_owned(),
+                    });
                 }
                 Ok(U::from(reply.body))
             });
@@ -357,7 +365,8 @@ fn calls_need_the_codex_backend_and_the_callers_identity() {
             .is_err()
     );
 
-    let refused = LiveCalls::new(LiveConfiguration::public("sk-test")).expect_err("not the Codex backend");
+    let refused =
+        LiveCalls::new(LiveConfiguration::public("sk-test")).expect_err("not the Codex backend");
     assert_eq!(refused.dialect, "openai");
 }
 
@@ -380,7 +389,12 @@ fn the_realtime_session_id_can_differ_from_the_session_id() {
 async fn static_access_is_sent_unchanged() {
     let calls = calls();
     let backend = Backend::created("/calls/rtc_1");
-    for _ in 0..2 { calls.create_call(&backend, OFFER, &SessionConfig::new("x")).await.expect("created"); }
+    for _ in 0..2 {
+        calls
+            .create_call(&backend, OFFER, &SessionConfig::new("x"))
+            .await
+            .expect("created");
+    }
     let requests = backend.requests();
     assert_eq!(requests.len(), 2);
     for request in requests {
