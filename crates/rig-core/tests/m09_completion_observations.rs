@@ -1279,10 +1279,18 @@ async fn caller_rejection_diagnostic_bases_match_selected_terminal_metadata_debu
 async fn repeated_terminals_keep_the_retained_incomplete_reason() {
     for whole_last in [false, true] {
         let mut first = response(json!([]));
-        first["status"] = json!("incomplete");
-        first["incomplete_details"] = json!({"reason": "max_output_tokens"});
+        let fields = first
+            .as_object_mut()
+            .expect("first fixture response object");
+        fields.insert("status".into(), json!("incomplete"));
+        fields.insert(
+            "incomplete_details".into(),
+            json!({"reason": "max_output_tokens"}),
+        );
         let mut last = response(json!([]));
-        last["status"] = json!("incomplete");
+        last.as_object_mut()
+            .expect("last fixture response object")
+            .insert("status".into(), json!("incomplete"));
         let originals = vec![
             terminal(first),
             if whole_last {
