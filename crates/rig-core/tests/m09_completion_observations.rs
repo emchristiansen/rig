@@ -424,7 +424,25 @@ async fn terminal_only_output_preserves_opaque_parts_usage_and_the_whole_head() 
         "a\u{fffd}z"
     );
     assert_eq!(response.provider_response_headers.len(), 2);
-    assert_eq!(response.raw, body);
+    assert_eq!(
+        response.raw,
+        json!({
+            "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7, "input_tokens_details": {}},
+            "status": "completed", "message_id": "msg_fixture",
+            "response_id": "resp_fixture", "model": "reported-model",
+        })
+    );
+    let native = serde_json::to_value(&result.body.native).expect("native response JSON");
+    assert_eq!(
+        native.pointer("/output/0/content/0/text"),
+        Some(&json!("terminal answer"))
+    );
+    assert_eq!(
+        native.pointer("/output/0/phase"),
+        Some(&json!("final_answer"))
+    );
+    assert_eq!(native.pointer("/output/0/content/1"), Some(&opaque_part));
+    assert_eq!(native.pointer("/output/1"), Some(&provider_item));
     assert_eq!(
         format!("{:?}", response.usage),
         "Usage { input_tokens: Some(5), output_tokens: Some(2), total_tokens: Some(7), cached_input_tokens: None, cache_creation_input_tokens: None, tool_use_prompt_tokens: None, reasoning_tokens: None }"
@@ -828,7 +846,13 @@ async fn whole_response_finishes_without_reading_the_tail() {
         assert_eq!(result.body.native.id, "resp_fixture");
         assert_eq!(
             result.body.response.raw,
-            serde_json::to_value(&result.body.native).expect("serialized native whole response")
+            json!({"status": "completed", "message_id": "msg_fixture",
+                "response_id": "resp_fixture", "model": "reported-model"})
+        );
+        let native = serde_json::to_value(&result.body.native).expect("native whole response JSON");
+        assert_eq!(
+            native.pointer("/output/0/content/0/text"),
+            Some(&json!("whole answer"))
         );
         assert!(matches!(
             result.body.response.choice.as_slice(),
@@ -1015,13 +1039,239 @@ async fn terminal_only_known_tools_remain_raw_without_normalized_tool_calls() {
         result.body.response.finish_reason(),
         Some(&FinishReason::Stop)
     );
-    assert_eq!(result.body.response.raw, body);
+    assert_eq!(
+        result.body.response.raw,
+        json!({
+            "status": "completed", "response_id": "resp_fixture", "model": "reported-model",
+        })
+    );
+    let native = serde_json::to_value(&result.body.native).expect("native tool response JSON");
+    assert_eq!(
+        native.pointer("/output/0/type"),
+        Some(&json!("function_call"))
+    );
+    assert_eq!(native.pointer("/output/0/arguments"), Some(&json!("{")));
+    assert_eq!(
+        native.pointer("/output/1/type"),
+        Some(&json!("custom_tool_call"))
+    );
+    assert_eq!(
+        native.pointer("/output/1/input"),
+        Some(&json!("verbatim custom input"))
+    );
     assert!(handle.same_operation(&result.observation));
     handle.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::NativeSucceeded);
         assert_eq!(view.committed_prefix, [original]);
         assert!(view.native_cause.is_none());
     });
+}
+
+/// Rig's response Debug is the basis carried by four caller rejection variants.
+/// These fixtures do not instantiate the outer consumer error or test persistence.
+/// The metadata and field order below come from selected 149ffec91da3f74b6b52c7fd117d58e8a8b5551a:
+/// completion/request.rs::CompletionResponse and responses_api/streaming.rs's
+/// StreamingCompletionResponse/terminal_record. Choice Debug is carried from the
+/// typed normalized output; its fixture content is checked separately, so this
+/// is not an independent golden for every nested content type's Debug spelling.
+#[tokio::test]
+async fn caller_rejection_diagnostic_bases_match_selected_terminal_metadata_debug() {
+    // Actual consumer limit at muninn 418e8162f6ab,
+    // observatory/companion/src/internal/backend.rs:38 (owner-verified).
+    const MAX_ANSWER_BYTES: usize = 64 * 1024;
+    for case in ["NonStop", "UnexpectedOutput", "NoText", "AnswerTooLarge"] {
+        let has_usage = matches!(case, "NonStop" | "AnswerTooLarge");
+        let text = if case == "AnswerTooLarge" {
+            "x".repeat(MAX_ANSWER_BYTES + 1)
+        } else {
+            "diagnostic answer".to_owned()
+        };
+        let opaque = json!({"type": "future_tool_result", "id": "opaque_diagnostic",
+            "payload": {"keep": null, "exact": [1, 2]}});
+        let output = match case {
+            "NoText" => json!([]),
+            "UnexpectedOutput" => json!([message(&text), opaque.clone()]),
+            _ => json!([message(&text)]),
+        };
+        let mut body = response(output);
+        let fields = body.as_object_mut().expect("diagnostic response object");
+        fields.insert(
+            "reasoning".into(),
+            json!({
+                "context": "diagnostic-context", "future": {"keep": null},
+            }),
+        );
+        fields.insert(
+            "future_response".into(),
+            json!({"original": [1, null, {"exact": true}]}),
+        );
+        if has_usage {
+            fields.insert(
+                "usage".into(),
+                json!({
+                    "input_tokens": 11, "output_tokens": 7, "total_tokens": 18,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 2},
+                }),
+            );
+        }
+        if case == "NonStop" {
+            fields.insert("status".into(), json!("cancelled"));
+            fields.insert(
+                "incomplete_details".into(),
+                json!({"reason": "caller_cancelled"}),
+            );
+        }
+        let original = format!(
+            " {{ \"type\":\"response.completed\", \"sequence_number\":4, \"response\":{body} }} "
+        );
+        let headers = HeaderMap::from_iter([
+            (
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream"),
+            ),
+            (
+                http::header::HeaderName::from_static("x-request-id"),
+                HeaderValue::from_static("diagnostic-request"),
+            ),
+            (
+                http::header::HeaderName::from_static("x-codex-fixture"),
+                HeaderValue::from_static("captured"),
+            ),
+        ]);
+        let (handle, stream) = open(ScriptedHttp::new(Script {
+            frames: vec![original.clone()],
+            headers,
+            ..Script::default()
+        }))
+        .await;
+        let (_, result) = finish(stream).await;
+        let actual = &result.body.response;
+        assert!(handle.same_operation(&result.observation), "{case}");
+        let delivered_text = actual
+            .choice
+            .iter()
+            .filter_map(|part| match part {
+                AssistantContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        match case {
+            "NoText" => {
+                assert!(actual.choice.is_empty());
+                assert!(delivered_text.is_empty());
+            }
+            "AnswerTooLarge" => {
+                assert_eq!(delivered_text, text);
+                assert_eq!(delivered_text.len(), 65_537);
+                assert!(delivered_text.len() > MAX_ANSWER_BYTES);
+                assert_eq!(actual.choice.len(), 1);
+            }
+            "UnexpectedOutput" => {
+                assert_eq!(delivered_text, text);
+                assert_eq!(actual.choice.len(), 2);
+                assert!(
+                    matches!(actual.choice.get(1), Some(AssistantContent::ProviderItem(item))
+                    if item.item == opaque && item.provider.as_deref() == Some("chatgpt"))
+                );
+            }
+            _ => {
+                assert_eq!(case, "NonStop");
+                assert_eq!(delivered_text, text);
+                assert_eq!(actual.choice.len(), 1);
+            }
+        }
+
+        // Independently spell the selected narrow terminal record. In selected S,
+        // driver.rs stamps the HTTP ID after terminal_record serializes raw, so
+        // provider_request_id is present on the normalized response only.
+        let mut expected_raw = json!({
+            "reasoning_metadata": {"context": "diagnostic-context", "future": {"keep": null}},
+            "reasoning_context": "diagnostic-context", "status": "completed",
+            "response_id": "resp_fixture", "model": "reported-model",
+        });
+        let expected_fields = expected_raw
+            .as_object_mut()
+            .expect("selected terminal metadata");
+        let expected_message_id = (case != "NoText").then_some("msg_fixture");
+        if let Some(message_id) = expected_message_id {
+            expected_fields.insert("message_id".into(), json!(message_id));
+        }
+        if has_usage {
+            expected_fields.insert(
+                "usage".into(),
+                json!({
+                    "input_tokens": 11, "output_tokens": 7, "total_tokens": 18,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 2},
+                }),
+            );
+        }
+        let expected_finish_reason = if case == "NonStop" {
+            expected_fields.insert("status".into(), json!("cancelled"));
+            expected_fields.insert(
+                "incomplete_details".into(),
+                json!({"reason": "caller_cancelled"}),
+            );
+            Some(FinishReason::Other("cancelled".into()))
+        } else {
+            Some(FinishReason::Stop)
+        };
+        let expected_usage_debug = if has_usage {
+            "Usage { input_tokens: Some(11), output_tokens: Some(7), total_tokens: Some(18), cached_input_tokens: Some(0), cache_creation_input_tokens: None, tool_use_prompt_tokens: None, reasoning_tokens: Some(2) }"
+        } else {
+            "Usage { input_tokens: None, output_tokens: None, total_tokens: None, cached_input_tokens: None, cache_creation_input_tokens: None, tool_use_prompt_tokens: None, reasoning_tokens: None }"
+        };
+        assert_eq!(actual.raw, expected_raw, "{case} selected raw metadata");
+        assert!(actual.raw.get("output").is_none(), "{case}");
+        assert!(actual.raw.get("future_response").is_none(), "{case}");
+        assert!(actual.raw.get("provider_request_id").is_none(), "{case}");
+        assert_eq!(
+            actual.finish_reason(),
+            expected_finish_reason.as_ref(),
+            "{case}"
+        );
+        let expected_debug = format!(
+            concat!(
+                "CompletionResponse {{ choice: {:?}, usage: {}, message_id: {:?}, ",
+                "response_id: Some(\"resp_fixture\"), provider_request_id: Some(\"diagnostic-request\"), ",
+                "provider_response_headers: {{\"x-codex-fixture\": \"captured\"}}, ",
+                "finish_reason: {:?}, provider: \"chatgpt\", model: Some(\"reported-model\"), raw: {:?} }}"
+            ),
+            actual.choice,
+            expected_usage_debug,
+            expected_message_id,
+            expected_finish_reason,
+            expected_raw,
+        );
+        assert_eq!(
+            format!("{actual:?}"),
+            expected_debug,
+            "{case} complete response Debug"
+        );
+        let native = serde_json::to_value(&result.body.native).expect("native diagnostic response");
+        if case == "NoText" {
+            assert_eq!(native.get("output"), Some(&json!([])));
+        } else {
+            assert_eq!(
+                native.pointer("/output/0/content/0/text"),
+                Some(&json!(text))
+            );
+        }
+        if case == "UnexpectedOutput" {
+            assert_eq!(native.pointer("/output/1"), Some(&opaque));
+        }
+        handle.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::NativeSucceeded, "{case}");
+            assert_eq!(view.committed_prefix, [original.clone()], "{case}");
+            assert!(view.native_cause.is_none());
+        });
+        drop(result);
+        handle.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::NativeSucceeded, "{case}");
+            assert_eq!(view.committed_prefix, [original], "{case}");
+        });
+    }
 }
 
 /// The feature flag must not route ordinary callers through the observed decoder.

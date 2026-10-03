@@ -2,9 +2,9 @@
 //!
 //! Server events decode by their `type`. A type this module does not model
 //! decodes as [`ServerEvent::Unknown`] with its whole JSON object, because the
-//! protocol is alpha and grows. Every modelled object keeps the fields it does
-//! not model in `extra`. Client events are built already split into
-//! [`ContextChunk`]s of at most [`CONTEXT_APPEND_MAX_BYTES`] bytes.
+//! protocol is alpha and grows. Every modeled object keeps the fields it does
+//! not model in `extra`. Context-append client events are built already split
+//! into [`ContextChunk`]s of at most [`CONTEXT_APPEND_MAX_BYTES`] bytes.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
@@ -48,7 +48,7 @@ impl ServerEvent {
     /// Decode one event payload.
     ///
     /// A payload that is not a JSON object with a string `type`, or a
-    /// modelled type whose fields do not match, is refused as
+    /// modeled type whose fields do not match, is refused as
     /// [`ProviderError::CorruptFrame`] carrying the payload. Any other `type`
     /// decodes as [`ServerEvent::Unknown`].
     pub fn parse(payload: &str) -> Result<Self, ProviderError> {
@@ -97,7 +97,7 @@ impl ServerEvent {
     }
 }
 
-/// An event whose `type` is not modelled, kept whole.
+/// An event whose `type` is not modeled, kept whole.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnknownEvent {
     /// The event's `type`.
@@ -111,7 +111,7 @@ pub struct UnknownEvent {
 pub struct SessionStarted {
     /// The started session.
     pub session: StartedSession,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -127,7 +127,7 @@ pub struct StartedSession {
     /// When the session expires, in seconds since the Unix epoch.
     #[serde(default)]
     pub expires_at: Option<u64>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -137,7 +137,7 @@ pub struct StartedSession {
 pub struct InputAudioAppend {
     /// Base64 audio.
     pub audio: String,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -153,7 +153,7 @@ pub struct OutputAudioDelta {
     /// Session-relative end, in milliseconds.
     #[serde(default)]
     pub end_ms: Option<u64>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -169,7 +169,7 @@ pub struct TranscriptAdded {
     /// Session-relative end, in milliseconds.
     #[serde(default)]
     pub end_ms: Option<u64>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -184,7 +184,7 @@ pub struct TranscriptItem {
     pub kind: String,
     /// The fragment's text, with its leading space when it has one.
     pub text: String,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -216,7 +216,7 @@ impl From<String> for Role {
 pub struct TurnEvent {
     /// The turn.
     pub turn: Turn,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -236,7 +236,7 @@ pub struct Turn {
     /// Session-relative end, in milliseconds.
     #[serde(default)]
     pub end_ms: Option<u64>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -254,7 +254,7 @@ pub struct TurnDelta {
     /// Session-relative end, in milliseconds.
     #[serde(default)]
     pub end_ms: Option<u64>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -267,7 +267,7 @@ pub struct DelegationCreated {
     /// Session-relative offset, in milliseconds.
     #[serde(default)]
     pub offset_ms: Option<u64>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -290,7 +290,7 @@ pub struct DelegationItem {
     /// The caller turn the question came from.
     #[serde(default)]
     pub user_bidi_turn_id: Option<String>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -315,7 +315,7 @@ pub struct ContentPart {
     pub kind: String,
     /// The part's text.
     pub text: String,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -331,7 +331,7 @@ pub struct DelegationContextAppended {
     /// Session-relative end, in milliseconds.
     #[serde(default)]
     pub end_ms: Option<u64>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -344,7 +344,7 @@ pub struct UsageUpdated {
     /// The account's usage limit, when reported.
     #[serde(default)]
     pub usage_limit: Option<UsageLimit>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -358,7 +358,7 @@ pub struct Usage {
     /// Backend model usage entries, as sent.
     #[serde(default)]
     pub backend_model_usage: Vec<Value>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -373,7 +373,7 @@ pub struct UsageLimit {
     /// Seconds until the limit resets.
     #[serde(default)]
     pub reset_seconds: Option<Value>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -387,7 +387,7 @@ pub struct ErrorEvent {
     /// A top-level message, when sent.
     #[serde(default)]
     pub message: Option<String>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -417,7 +417,7 @@ pub struct ErrorDetail {
     /// The parameter at fault.
     #[serde(default)]
     pub param: Option<String>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

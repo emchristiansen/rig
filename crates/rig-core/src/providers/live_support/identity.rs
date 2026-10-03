@@ -10,7 +10,7 @@ pub const THREAD_ID_HEADER: &str = "thread-id";
 /// `originator` and `user-agent` headers, and optionally a `version` header.
 ///
 /// Every value is a non-empty, header-safe string, sent exactly as given.
-/// [`Self::new`], deserialization and the dialect's environment variables
+/// [`Self::new`] and deserialization
 /// refuse anything else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "CallerIdentityValues", into = "CallerIdentityValues")]
@@ -132,10 +132,10 @@ impl CallerIdentity {
     }
 }
 
-/// The stable Codex cache and correlation identity of one conversation.
+/// The stable Codex correlation identity of one conversation.
 ///
-/// Used for every header and body field that names the conversation, so all
-/// of them agree by construction. [`Self::generate`] draws opaque ids from
+/// Used for the `session-id` and `thread-id` headers, and by default for
+/// `x-session-id`. [`Self::generate`] draws opaque ids from
 /// [`crate::id::generate`]; [`Self::from_ids`] takes ids the caller derives.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "CodexIdentityIds", into = "CodexIdentityIds")]
@@ -173,7 +173,7 @@ impl From<CodexIdentity> for CodexIdentityIds {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("a Codex {field} must be a non-empty, header-safe string; `{value}` is not")]
 pub struct InvalidCodexIdentity {
-    /// Which id: `session_id` or `thread_id`.
+    /// Which id: `session_id`, `thread_id` or `realtime_session_id`.
     pub field: &'static str,
     /// The id as supplied.
     pub value: String,
@@ -209,14 +209,13 @@ impl CodexIdentity {
         })
     }
 
-    /// The session id: the `session-id` header and the `session_id` metadata key.
+    /// The session id: the `session-id` header and, by default, the `x-session-id` header.
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
-    /// The thread id: the `thread-id` and `x-client-request-id` headers, the
-    /// `thread_id` metadata key, and the default `prompt_cache_key`.
+    /// The thread id: the `thread-id` header.
     #[must_use]
     pub fn thread_id(&self) -> &str {
         &self.thread_id

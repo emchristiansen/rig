@@ -44,7 +44,7 @@ fn server_events(name: &str) -> Vec<ServerEvent> {
         .collect()
 }
 
-/// Every recorded server event decodes to a modelled variant.
+/// Every recorded server event decodes to a modeled variant.
 #[test]
 fn every_recorded_server_event_decodes_to_a_modelled_variant() {
     let mut total = 0;
@@ -197,7 +197,7 @@ fn the_delegation_recording_round_trips_the_client_answer() {
     assert_eq!(usage, [14_200, 29_400]);
 }
 
-/// An unmodelled type is kept whole; a modelled type with a malformed field,
+/// An unmodeled type is kept whole; a modeled type with a malformed field,
 /// or a payload with no string `type`, is a corrupt frame.
 #[test]
 fn unknown_types_are_kept_and_malformed_known_types_are_refused() {

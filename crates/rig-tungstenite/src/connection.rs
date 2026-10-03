@@ -115,7 +115,7 @@ enum Command {
 
 /// A socket living on the fallback runtime, reached over channels.
 ///
-/// The connection owns the actor and aborts it on drop. Cancelling a receive
+/// The connection owns the actor and aborts it on drop. Canceling a receive
 /// leaves the actor alive. Frames are restored if sending the reply fails;
 /// a reply already enqueued when the caller cancels can be lost.
 pub(crate) struct ForwardedConnection {
@@ -226,7 +226,7 @@ async fn run_actor(socket: Socket, mut requests: futures::channel::mpsc::Receive
                     None => Ok(ReadyFrame::Empty),
                 };
                 // A caller that stopped waiting has not received the frame:
-                // keep it at the front, exactly as a cancelled `Recv` does.
+                // keep it at the front, exactly as a canceled `Recv` does.
                 if let Err(answer) = reply.send(answer) {
                     match answer {
                         Ok(ReadyFrame::Frame(frame)) => inbound.push_front(Ok(frame)),

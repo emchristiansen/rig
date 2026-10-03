@@ -2,7 +2,7 @@ use super::*;
 use http::StatusCode;
 
 /// The live shape of a rejected upgrade, recorded against the real
-/// endpoint: status, request id, and the provider's error envelope.
+/// endpoint: the provider's error envelope with its status.
 const REJECTION_BODY: &str = r#"{"error":{"message":"Incorrect API key provided: sk-inval***-key.","type":"invalid_request_error","code":"invalid_api_key","param":null},"status":401}"#;
 
 fn handshake_rejection(

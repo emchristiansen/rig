@@ -3,8 +3,8 @@
 //!
 //! The backend's forwarded lifecycle snapshots carry an empty `output`, so the
 //! calls are read from nested `response.output_item.done` events and grouped
-//! by response. When the response ends with calls pending, the caller submits
-//! an output for every call and then sends `response.create`.
+//! by response. When a response completes with unambiguous pending calls, the
+//! caller submits an output for every call and then sends `response.create`.
 
 use std::collections::BTreeSet;
 
@@ -18,7 +18,8 @@ pub struct PendingFunctionCalls {
     pub delegation_id: Option<String>,
     /// The response id.
     pub response_id: String,
-    /// The calls, in the order they finished. Never empty.
+    /// The calls, in the order they finished. Never empty in a value the
+    /// collector reports.
     pub calls: Vec<FunctionCall>,
 }
 
@@ -127,7 +128,7 @@ pub enum CallsUpdate {
     /// discards them: every `uncertain` call is available through
     /// [`FunctionCallCollector::unresolved_calls`] until
     /// [`FunctionCallCollector::take_unresolved`] drains it, and is never
-    /// attributed to a response afterwards.
+    /// attributed to a response afterward.
     Unresolved {
         /// The delegation the response belongs to, when correlated.
         delegation_id: Option<String>,
@@ -144,8 +145,7 @@ pub enum CallsUpdate {
     },
 }
 
-/// A backend response announced by `response.created` or ended while the
-/// collector held calls for it.
+/// A backend response announced by `response.created` that has not yet ended.
 #[derive(Clone, Debug)]
 struct OpenResponse {
     /// The collector's own identity for the response.
@@ -170,7 +170,7 @@ fn in_arrival_order(mut calls: Vec<Arrived>) -> Vec<FunctionCall> {
 }
 
 /// Calls that finished while no announced response could own them, held for
-/// the next response of exactly their correlation. Calls with different
+/// a later response with a compatible correlation. Calls with different
 /// correlations, an absent one included, are never in one group.
 #[derive(Clone, Debug)]
 struct WaitingGroup {
@@ -201,13 +201,15 @@ fn compatible(left: Option<&String>, right: Option<&String>) -> bool {
 /// The outer `delegation_id` may be absent on any event, and a known
 /// correlation is never discarded. A finished call is attributed to an
 /// announced response only when it is the call's sole possible owner. With
-/// no announced candidate, the call waits for the next response of exactly
-/// its correlation; an uncorrelated waiting call is claimed only when no
-/// differently correlated call is also waiting. A call with several possible
+/// no announced candidate, the call waits for a later response. A correlated
+/// response claims its matching waiting group, and the uncorrelated waiting
+/// group only when no differently correlated group is also waiting. An
+/// uncorrelated response claims waiting calls only when there is a single
+/// waiting group. A call with several possible
 /// owners becomes unresolved: each candidate response that ends reports it as
 /// [`CallsUpdate::Unresolved`], it stays retrievable until
 /// [`Self::take_unresolved`] drains it, and it is never submitted under any
-/// response. A repeated `call_id` is kept once.
+/// response. A `call_id` that repeats while the collector still holds it is ignored.
 #[derive(Clone, Debug, Default)]
 pub struct FunctionCallCollector {
     open: Vec<OpenResponse>,

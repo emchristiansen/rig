@@ -41,7 +41,7 @@ impl LiveCalls {
     /// Join the control socket of `call_id` over `backend`, with a 30 second
     /// handshake timeout. The already-resolved credential is sent unchanged.
     /// A rejected upgrade keeps its status, supplied headers, request id and
-    /// the body supplied by the backend, which may be empty or partial.
+    /// the body that `backend` supplies, which may be empty or partial.
     pub async fn connect_control<W: WebSocketClientExt>(
         &self,
         backend: &W,
@@ -154,7 +154,7 @@ impl ControlSocket {
     ///
     /// The transport close is attempted even when sending `session.close`
     /// fails, and the first error is returned. Each step counts as done only
-    /// once it returns `Ok`, so a call that failed or was dropped part way
+    /// once it returns `Ok`, so a call that failed or was dropped partway
     /// can be retried and repeats only the unfinished steps. Once the
     /// transport close has completed, further calls return `Ok(())` without
     /// sending anything, even if `session.close` was never delivered.

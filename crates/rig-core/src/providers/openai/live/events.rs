@@ -2,9 +2,9 @@
 //!
 //! Server events decode by their `type`. A type this module does not model
 //! decodes as [`ServerEvent::Unknown`] with its whole JSON object. Every
-//! modelled object keeps the fields it does not model in `extra`, and a
-//! [`ResponseEvent`] keeps its nested Responses event whole beside the part
-//! this module types.
+//! modeled object except [`FunctionCall`] keeps the fields it does not model
+//! in `extra`, and a [`ResponseEvent`] keeps its nested Responses event whole
+//! beside the part this module types.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize, Serializer};
@@ -53,7 +53,7 @@ impl ServerEvent {
     /// Decode one data channel message.
     ///
     /// A payload that is not a JSON object with a string `type`, or a
-    /// modelled type whose fields do not match, is refused as
+    /// modeled type whose fields do not match, is refused as
     /// [`ProviderError::CorruptFrame`] carrying the payload. Any other `type`
     /// decodes as [`ServerEvent::Unknown`].
     pub fn parse(payload: &str) -> Result<Self, ProviderError> {
@@ -106,7 +106,7 @@ impl ServerEvent {
     }
 }
 
-/// An event whose `type` is not modelled, kept whole.
+/// An event whose `type` is not modeled, kept whole.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnknownEvent {
     /// The event's `type`.
@@ -126,7 +126,7 @@ pub struct SessionSnapshot {
     pub client_event_id: Option<String>,
     /// The resolved session.
     pub session: SessionResource,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -146,7 +146,7 @@ pub struct SessionResource {
     /// When the session expires, in seconds since the Unix epoch.
     #[serde(default)]
     pub expires_at: Option<u64>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -198,7 +198,7 @@ pub struct SessionClosed {
     /// The final session snapshot, when sent.
     #[serde(default)]
     pub session: Option<SessionResource>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -208,7 +208,7 @@ pub struct SessionClosed {
 pub struct SessionUsage {
     /// Billed session seconds so far, silence included.
     pub seconds: f64,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -229,7 +229,7 @@ pub struct TranscriptDelta {
     pub start_ms: u64,
     /// Session-relative end, in milliseconds.
     pub end_ms: u64,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -267,7 +267,7 @@ pub struct DelegationInfo {
     /// The Responses response of a Responses delegation.
     #[serde(default)]
     pub response_id: Option<String>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -285,7 +285,7 @@ pub struct DelegationCreated {
     pub offset_ms: u64,
     /// The delegation.
     pub delegation: DelegationInfo,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -353,7 +353,7 @@ pub struct ResponseEvent {
     pub backend: BackendEvent,
     /// The nested event object, exactly as decoded.
     pub event: Value,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     pub extra: Map<String, Value>,
 }
 
@@ -385,7 +385,7 @@ struct ResponseEventWire {
 }
 
 impl BackendEvent {
-    /// Type `event`, refusing a modelled nested event whose fields do not
+    /// Type `event`, refusing a modeled nested event whose fields do not
     /// match.
     fn classify(event: &Value) -> serde_json::Result<Self> {
         #[derive(Deserialize)]
@@ -446,7 +446,7 @@ pub struct UsageUpdated {
     /// The latest context window usage, when the limit is known.
     #[serde(default)]
     pub context_window: Option<ContextWindow>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -457,7 +457,7 @@ pub struct ContextWindow {
     /// Active context tokens divided by the model's context limit. It can
     /// fall after compaction.
     pub usage_ratio: f64,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -477,7 +477,7 @@ pub struct Appended {
     pub start_ms: u64,
     /// Session-relative end, in milliseconds; it can equal `start_ms`.
     pub end_ms: u64,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -491,7 +491,7 @@ pub struct Acknowledgement {
     /// The `event_id` of the command, when it had one.
     #[serde(default)]
     pub client_event_id: Option<String>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -508,7 +508,7 @@ pub struct ErrorEvent {
     pub client_event_id: Option<String>,
     /// The error.
     pub error: ApiErrorDetail,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

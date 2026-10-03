@@ -147,7 +147,8 @@ pub enum PeerEvent {
     /// The peer connection changed state.
     Connection(RTCPeerConnectionState),
     /// Events were dropped at this point in the stream because the queue was
-    /// full. The events before it and after it were delivered. A nonzero
+    /// full. The events before it were delivered; drops after it are reported
+    /// by a later `Lost`. A nonzero
     /// [`LostEvents::messages`] means server events are missing, so the
     /// caller's view of the conversation is incomplete.
     Lost(LostEvents),
@@ -194,7 +195,7 @@ impl LivePeerBuilder {
         self
     }
 
-    /// Gather loopback candidates, which are skipped by default.
+    /// Whether to gather loopback candidates, which are skipped by default.
     #[must_use]
     pub fn with_loopback_candidates(mut self, include: bool) -> Self {
         self.loopback_candidates = include;

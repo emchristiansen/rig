@@ -155,7 +155,7 @@ impl SessionConfig {
         self
     }
 
-    /// Send `delegation.ack_filler` as `ack_filler`.
+    /// Send `ack_filler` as `delegation.ack_filler`.
     #[must_use]
     pub fn with_delegation_ack_filler(mut self, ack_filler: bool) -> Self {
         self.delegation_ack_filler = Some(ack_filler);

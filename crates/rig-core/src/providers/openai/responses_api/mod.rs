@@ -6022,13 +6022,13 @@ mod tests {
     }
 }
 
-/// Selected completion leaves used only by the observed Responses operation.
+/// Completion types used only by the observed Responses operation.
 ///
-/// Structural models preserve the selected diagnostic format independently of
+/// Structural models preserve the diagnostic format independently of
 /// the default completion and durable message types.
 #[cfg(feature = "completion-observations")]
 pub mod observed_types {
-    //! Selected typed completion values returned by observed Responses calls.
+    //! Typed completion values returned by observed Responses calls.
 
     use crate::message::{AdditionalParams, Image, optional_additional_params};
     use serde::{Deserialize, Serialize};
@@ -6103,13 +6103,14 @@ pub mod observed_types {
         /// requested; it is `None` when the provider reports no identifier.
         #[serde(default)]
         pub model: Option<String>,
-        /// Provider response document for typed inspection through deserialization.
-        /// Parsed wire types may omit unmodeled fields. This data does not override
-        /// normalized fields; callers constructing responses must supply it.
+        /// Serialized stream terminal usage and metadata for observed responses.
+        /// The observation handle retains the original provider strings separately.
+        /// Callers constructing a response supply this value; it does not override
+        /// the normalized fields.
         pub raw: serde_json::Value,
     }
     impl CompletionResponse {
-        /// Construct the selected response from the observed provider output.
+        /// Construct the response from the observed provider output.
         pub fn new(
             choice: Vec<AssistantContent>,
             usage: Usage,
@@ -6212,7 +6213,7 @@ pub mod observed_types {
             *self != Self::default()
         }
     }
-    /// Assistant text, tool calls, reasoning, or images.
+    /// Assistant text, tool calls, reasoning or images.
     /// Deserialization requires the lowercase `type` tag.
     #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
     #[serde(tag = "type", rename_all = "lowercase")]
@@ -6350,7 +6351,7 @@ pub mod observed_types {
         /// text-block boundaries.
         Text,
         /// OpenAI Responses message content parts that cannot take the message's
-        /// wire id: refusals, parts after the first, and parts of an id-less
+        /// wire id: refusals, parts after the first and parts of an id-less
         /// message. Each is its own text block, minted in stream order, so a
         /// refusal or an opaque part is never merged into the text beside it.
         /// The serialized kind keeps its historical name.
@@ -6433,7 +6434,8 @@ pub mod observed_types {
     }
 
     /// Error when adopting an empty explicit tool-call identifier.
-    /// Represent absent provider identity with [`ToolCall::provider`] set to `None`.
+    /// Represent absent provider identity with [`ToolCall::provider`] set to `None`,
+    /// and an absent correlation identity with [`ToolCallId::minted`].
     #[derive(Debug, thiserror::Error)]
     #[error("a tool-call identifier cannot be the empty string; absence is `None` or a minted id")]
     pub struct EmptyToolCallId;
@@ -6610,9 +6612,8 @@ pub mod observed_types {
         ///
         /// Carried exactly as the provider item spelled it. No spelling (`""`,
         /// `"functions"`) is normalized to absence here: whether a destination
-        /// treats one as its default namespace is that destination's evidence to
-        /// supply, and a wire that cannot represent a namespace refuses the call
-        /// must preserve the qualifier or refuse the call.
+        /// treats one as its default namespace is for that destination to decide,
+        /// and a destination must preserve the qualifier or refuse the call.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub namespace: Option<String>,
         /// JSON arguments for the tool/function.
@@ -6655,7 +6656,7 @@ pub mod observed_types {
     }
 }
 
-/// Private selected wire leaves for observed Responses decoding and assembly.
+/// Private wire types for observed Responses decoding and assembly.
 #[cfg(feature = "completion-observations")]
 pub(crate) mod observed_wire {
     use super::observed_types::{self as message, Text};
@@ -6845,7 +6846,7 @@ pub(crate) mod observed_wire {
         pub provider_request_id: Option<String>,
         /// The complete object-shaped top-level reasoning metadata returned by the provider.
         ///
-        /// Unknown fields, unknown values, and null-valued members inside the object
+        /// Unknown fields, unknown values and null-valued members inside the object
         /// are preserved value-equivalently. A top-level null, missing field, or
         /// unsupported non-object shape is normalized to no reasoning metadata.
         /// When serializing manually constructed responses, [`Self::provider_reasoning`]
@@ -7468,8 +7469,8 @@ pub(crate) mod observed_wire {
         pub arguments: FunctionCallArguments,
         pub call_id: String,
         pub name: String,
-        /// The namespace qualifying this callable, verbatim; absent for the
-        /// default one.
+        /// The namespace qualifying this callable, verbatim; absent when the
+        /// provider sent none.
         ///
         /// Present in both directions because this struct is shared by
         /// function-call decoding and serialization; dropping
@@ -7492,8 +7493,8 @@ pub(crate) mod observed_wire {
         pub call_id: String,
         /// The custom tool's name.
         pub name: String,
-        /// The namespace qualifying this callable, verbatim; absent for the
-        /// default one.
+        /// The namespace qualifying this callable, verbatim; absent when the
+        /// provider sent none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub namespace: Option<String>,
         /// The model's verbatim input, preserved byte for byte.
@@ -7545,7 +7546,7 @@ pub(crate) mod observed_wire {
     }
 
     impl FunctionCallArguments {
-        /// Parse the raw wire string into JSON arguments. An empty string is a
+        /// Parse the raw wire string into JSON arguments. An empty or whitespace-only string is a
         /// parameterless invocation (`{}`); anything else must parse as JSON.
         pub fn parse(&self) -> serde_json::Result<serde_json::Value> {
             json_utils::parse_tool_arguments(&self.0)
@@ -7753,7 +7754,7 @@ pub(crate) mod observed_wire {
     const OPENAI_RESPONSES_PART_KEY: &str = "openai_responses_part";
     const REFUSAL_PART_KIND: &str = "refusal";
 
-    /// The exact marker used for an opaque Responses message part.
+    /// The retained JSON value of an opaque Responses message part, when `params` marks one.
     pub(crate) fn opaque_message_part(
         params: Option<&crate::message::AdditionalParams>,
     ) -> Option<&Value> {
@@ -7810,7 +7811,7 @@ pub(crate) mod observed_wire {
         text.additional_params = crate::message::AdditionalParams::new(entries);
     }
 
-    /// Converts output text or a refusal to a Rig text block, retaining nonempty
+    /// Converts output text, a refusal or an opaque part to a Rig text block, retaining nonempty
     /// output-text extras under the Responses key. A refusal is marked with
     /// [`refusal_marker`], so it stays distinct from output text.
     pub(crate) fn text_block(value: AssistantContent) -> Text {

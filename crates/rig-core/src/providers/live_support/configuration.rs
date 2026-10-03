@@ -22,7 +22,7 @@ impl LiveBackend {
 
 /// Static access resolved by the caller at the point of use.
 ///
-/// This value never discovers, refreshes, or reads credentials. Subscription
+/// This value never discovers, refreshes or reads credentials. Subscription
 /// requests require an exact validated caller identity before they can be built.
 #[derive(Clone, Debug)]
 pub struct LiveConfiguration {
@@ -53,7 +53,7 @@ impl LiveConfiguration {
             caller_identity: None,
         }
     }
-    /// Select a custom origin without changing the protocol discriminator.
+    /// Select a custom base URL without changing the protocol discriminator.
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();

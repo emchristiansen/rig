@@ -162,7 +162,7 @@ fn assert_no_tokio_runtime() {
 }
 
 /// A caller that gives up on a connect — its own `select!`, its own timeout,
-/// a cancelled request — must not leave a handshake running on the fallback
+/// a canceled request — must not leave a handshake running on the fallback
 /// runtime, holding a socket nothing can ever reach.
 #[test]
 fn an_abandoned_connect_releases_the_socket_it_opened() {

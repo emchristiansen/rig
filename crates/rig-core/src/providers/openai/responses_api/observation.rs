@@ -17,14 +17,14 @@ pub enum ObservationProvenance {
     Synthetic,
 }
 
-/// Native operation state, independently of later caller admission.
+/// Native operation state, independent of whether the caller later accepts the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservationStage {
     /// Prepared, with no send attempt yet.
     Prepared,
     /// The send attempt has started.
     Running,
-    /// A whole-response terminal or EOF ended the source; finalization is pending.
+    /// Source EOF or a whole-response terminal ended reading; finalization is pending.
     AwaitingNativeFinalization,
     /// Native finalization succeeded with healthy capture.
     NativeSucceeded,
@@ -91,7 +91,7 @@ struct Ledger {
 
 /// Whole HTTP head returned to the observed SSE source.
 ///
-/// Rejected response bodies are unavailable: the baseline response check does
+/// Rejected response bodies are unavailable: the existing response check does
 /// not read them. This known limitation is independent of captured SSE strings.
 #[derive(Clone, Debug)]
 pub struct ObservedReplyHead {
@@ -99,7 +99,7 @@ pub struct ObservedReplyHead {
     pub status: http::StatusCode,
     /// Whole headers, including repeated and non-UTF8 values.
     pub headers: http::HeaderMap,
-    /// Whether baseline SSE response validation accepted this reply.
+    /// Whether the existing SSE response validation accepted this reply.
     pub accepted_sse: bool,
 }
 
@@ -118,7 +118,7 @@ pub struct ObservationView<'a> {
     pub capture_fault: Option<&'a CaptureFault>,
     /// Available native cause, without a recursive handle inside the ledger.
     pub native_cause: Option<&'a ExistingDiagnosticBasis>,
-    /// Original typed cause when Rig converted it into an item report.
+    /// The original typed error of a provider failure, including one Rig converted into an item report.
     pub native_error: Option<&'a ProviderError>,
     /// Actual HTTP head, when a response reached the SSE source.
     pub reply_head: Option<&'a ObservedReplyHead>,
@@ -128,7 +128,7 @@ pub struct ObservationView<'a> {
 pub struct Observation;
 
 impl Observation {
-    /// Prepare without validating input, opening HTTP, or polling a future.
+    /// Prepare without validating input, opening HTTP or polling a future.
     pub fn prepare() -> (ObservationHandle, ObservationWriter) {
         Self::with_provenance(ObservationProvenance::SuppliedSse)
     }
@@ -255,7 +255,7 @@ impl ObservationHandle {
 /// The exclusive capability moved into one prepared future and then its stream.
 ///
 /// Dropping this capability changes only the ledger; it performs no HTTP work,
-/// draining, retry, or background task.
+/// draining, retry or background task.
 #[derive(Debug)]
 pub struct ObservationWriter {
     handle: ObservationHandle,
@@ -340,7 +340,7 @@ impl Drop for ObservationWriter {
     }
 }
 
-/// Original selected diagnostic content, independent of newly retained evidence.
+/// Original diagnostic content, independent of newly retained evidence.
 #[derive(Clone, Debug)]
 pub enum ExistingDiagnosticBasis {
     /// No native error had materialized when capture failed.
@@ -431,10 +431,10 @@ type ObservedSource = futures::stream::BoxStream<'static, Result<sse::Event, htt
 type ObservedSource =
     futures::stream::LocalBoxStream<'static, Result<sse::Event, http_client::Error>>;
 
-/// Selected response views accompanied by custody of their original operation.
+/// Response views accompanied by custody of their original operation.
 #[derive(Clone, Debug)]
 pub struct ObservedResponsesResult {
-    /// Selected normalized response and provider-native response.
+    /// Normalized response and provider-native response.
     pub body: ObservedResponsesResultBody,
     /// The same ledger installed by the caller before polling.
     pub observation: ObservationHandle,

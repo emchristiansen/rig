@@ -36,7 +36,7 @@ fn serve_one_turn(events: Vec<String>) -> String {
     serve_one_turn_after(None, events)
 }
 
-/// Hold events until the caller releases them, so a cancelled read cannot
+/// Hold events until the caller releases them, so a canceled read cannot
 /// race a sleeping server waking up on a loaded machine.
 fn serve_one_turn_after(
     release: Option<futures::channel::oneshot::Receiver<()>>,
@@ -137,7 +137,7 @@ fn a_raw_round_trip_runs_without_a_tokio_runtime() {
     });
 }
 
-/// A cancelled pending receive must leave the actor able to accept close.
+/// A canceled pending receive must leave the actor able to accept close.
 #[test]
 fn a_receive_timeout_still_allows_close_without_a_tokio_runtime() {
     let url = serve_one_turn(Vec::new());

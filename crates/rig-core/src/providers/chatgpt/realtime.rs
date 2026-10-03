@@ -9,8 +9,8 @@
 //!
 //! This is the alpha, Codex-only protocol (`openai-alpha: quicksilver=v2`), not
 //! the public `/v1/live/sessions` API. Every request carries the provider's
-//! credential, account id and exact caller identity, as the ChatGPT dialect's
-//! other requests do.
+//! credential, the account id when one is set and the exact caller identity,
+//! as the ChatGPT dialect's other requests do.
 //!
 //! ```no_run
 //! use rig_core::providers::chatgpt::{self, realtime::{LiveCalls, SessionConfig}};

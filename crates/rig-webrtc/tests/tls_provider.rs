@@ -1,5 +1,5 @@
 //! The composition the crate documentation shows, run offline: a binary that
-//! links `rig-webrtc` with the baseline reqwest client's `rustls` feature has two rustls
+//! links `rig-webrtc` with `rig-core`'s `rustls` feature has two rustls
 //! providers, installs one exactly as the documentation does, and then
 //! reaches TLS on both the call-creation request and the control socket
 //! without panicking. The servers read the client's first TLS record and hang

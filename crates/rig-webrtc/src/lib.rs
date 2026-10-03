@@ -7,11 +7,13 @@
 //! sends Opus packets the caller already encoded and hands back the Opus
 //! packets and data-channel messages it receives, as [`PeerEvent`]s, through
 //! a bounded queue that reports dropped events as [`PeerEvent::Lost`]. It
-//! decodes no audio; the control socket also carries the model's audio as PCM.
+//! decodes no audio; the control socket also carries `ServerEvent::OutputAudioDelta`
+//! events containing base64 audio.
 //!
-//! The WebRTC stack enables rustls's ring provider and the baseline reqwest client's
-//! `rustls` feature enables aws-lc-rs, so rustls cannot choose one and the
-//! first secure websocket panics. The binary must depend on `rustls` 0.23
+//! The WebRTC stack enables rustls's ring provider. The `rig-core` `rustls`
+//! feature enables aws-lc-rs for `rig_core::http_client::ReqwestClient`, which
+//! is reqwest's `Client`. With both linked, rustls cannot select a provider
+//! automatically. The binary must depend on `rustls` 0.23
 //! with its `aws_lc_rs` feature and install that provider before it makes a
 //! connection, as the first lines of the example do. The README lists the
 //! dependencies and the peer's delivery and lifetime contract.

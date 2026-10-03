@@ -2,7 +2,7 @@
 //!
 //! Sockets remain on this runtime for their lifetime; callers communicate over
 //! channels without needing a reactor. Each [`OwnedTask`] aborts on drop so
-//! cancelled connections release their transport resources.
+//! canceled connections release their transport resources.
 
 use rig_core::{http_client::Error, wasm_compat::WasmCompatSend};
 use std::future::Future;

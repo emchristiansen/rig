@@ -12,8 +12,8 @@ use crate::providers::live_support::identity::{
     CodexIdentity, InvalidCodexIdentity, SESSION_ID_HEADER, THREAD_ID_HEADER,
 };
 
-/// A GPT-Live call id: the last `Location` segment of a created call, either
-/// `rtc_` followed by at least one character or a dashed 36-character UUID.
+/// A GPT-Live call id: the last `Location` path segment with the call-id shape,
+/// either `rtc_` followed by at least one character or a dashed 36-character UUID.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CallId(String);
 

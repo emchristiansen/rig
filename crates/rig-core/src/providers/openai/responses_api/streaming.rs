@@ -5287,7 +5287,7 @@ data: {completed}
         }
     }
 }
-/// Selected-compatible interpretation used only by explicitly observed calls.
+/// Interpretation used only by explicitly observed calls.
 /// Original supplied text is captured by the caller before `push` is invoked.
 #[cfg(feature = "completion-observations")]
 pub mod observed {
@@ -5307,7 +5307,7 @@ pub mod observed {
         /// The provider decoder or finalization failed.
         #[error("{0}")]
         NativeProvider(#[from] LiveProviderError),
-        /// The selected normalized fold refused completed content.
+        /// The normalized fold refused completed content.
         #[error("{0:?}")]
         NativeReport(ErrorReport),
     }
@@ -5321,8 +5321,9 @@ pub mod observed {
         Unknown { event_type: String, value: Value },
     }
 
-    /// Selected normalized response and its separate provider-native typed view.
-    /// The normalized response is the original diagnostic basis; custody is added elsewhere.
+    /// Normalized response and its separate provider-native typed view.
+    /// The normalized response contains stream terminal metadata in `raw`.
+    /// The observation handle separately retains the original provider strings.
     #[derive(Clone, Debug)]
     pub struct ObservedResponsesResultBody {
         pub response: ot::CompletionResponse,
@@ -5434,7 +5435,8 @@ pub mod observed {
         Unknown(serde_json::Value),
     }
 
-    /// Decode known tags only with a string text field and preserve unknown tags.
+    /// Decode a known tag only when its text field (`refusal` for a refusal part,
+    /// `text` otherwise) is a string, and preserve unknown tags.
     /// Absent and nonstring tags return an error. Duplicate keys use the last value retained by
     /// `serde_json::Value`.
     impl<'de> Deserialize<'de> for ContentPartChunkPart {
@@ -5522,8 +5524,8 @@ pub mod observed {
         pub sequence_number: u64,
         /// The call's arguments, in the same type (and so under the same
         /// classification) as the `output_item.done` item's
-        /// [`OutputFunctionCall::arguments`](ow::OutputFunctionCall::arguments);
-        /// [`FunctionCallArguments::reconcile`] settles whether the two agree.
+        /// `OutputFunctionCall::arguments`;
+        /// `FunctionCallArguments::reconcile` settles whether the two agree.
         pub arguments: FunctionCallArguments,
     }
 
@@ -5755,7 +5757,8 @@ pub mod observed {
         terminal_response_id: Option<String>,
         terminal_model: Option<String>,
         terminal_message_id: Option<String>,
-        document: Option<Value>,
+        // Selected terminal metadata projection; original frames belong to the handle.
+        document: serde_json::Map<String, Value>,
         message_id: Option<String>,
         provider_request_id: Option<String>,
         response_headers: BTreeMap<String, String>,
@@ -5764,7 +5767,7 @@ pub mod observed {
     }
 
     impl ObservedAssembler {
-        /// Create the selected strict-streaming interpretation, with Codex envelope repair.
+        /// Create the strict-streaming interpretation, with Codex envelope repair.
         pub fn new(provider: impl Into<String>) -> Self {
             Self {
                 provider: provider.into(),
@@ -5791,7 +5794,7 @@ pub mod observed {
                 terminal_response_id: None,
                 terminal_model: None,
                 terminal_message_id: None,
-                document: None,
+                document: serde_json::Map::new(),
                 message_id: None,
                 provider_request_id: None,
                 response_headers: BTreeMap::new(),
@@ -5811,7 +5814,7 @@ pub mod observed {
         }
 
         /// Interpret an already captured supplied SSE data string, without I/O.
-        /// Events emitted before an error remain in the caller-owned output prefix.
+        /// Events emitted before an error remain in `out`.
         pub fn push(
             &mut self,
             data: &str,
@@ -5862,29 +5865,23 @@ pub mod observed {
                 WireEvent::Known(Payload::Frame {
                     raw,
                     chunk: Chunk::Response(chunk),
-                }) => {
-                    self.document = serde_json::from_str::<Value>(&raw)
-                        .ok()
-                        .and_then(|v| v.get("response").filter(|v| v.is_object()).cloned());
-                    match chunk.kind {
-                        super::ResponseChunkKind::ResponseFailed
-                        | super::ResponseChunkKind::ResponseIncomplete => {
-                            self.merge_failed_reasoning(&chunk.response);
-                            self.flush_pending_calls()?;
-                            return Err(LiveProviderError::from_provider_body(raw).into());
-                        }
-                        super::ResponseChunkKind::ResponseCompleted => {
-                            self.complete(chunk.response, out)?
-                        }
-                        _ => {}
+                }) => match chunk.kind {
+                    super::ResponseChunkKind::ResponseFailed
+                    | super::ResponseChunkKind::ResponseIncomplete => {
+                        self.merge_failed_reasoning(&chunk.response);
+                        self.flush_pending_calls()?;
+                        return Err(LiveProviderError::from_provider_body(raw).into());
                     }
-                }
+                    super::ResponseChunkKind::ResponseCompleted => {
+                        self.complete(chunk.response, out)?
+                    }
+                    _ => {}
+                },
                 WireEvent::Known(Payload::Frame {
                     chunk: Chunk::Delta(chunk),
                     ..
                 }) => self.item(chunk, out)?,
                 WireEvent::Known(Payload::Whole(response)) => {
-                    self.document = serde_json::to_value(&*response).ok();
                     if !response
                         .output
                         .iter()
@@ -7112,6 +7109,39 @@ pub mod observed {
             }) {
                 self.terminal_message_id = Some(id);
             }
+            // Match selected StreamingCompletionResponse serialization: absent
+            // optional fields are omitted, and later absence retains prior metadata.
+            // Connection request IDs are stamped on the normalized response only.
+            for (key, value) in [
+                ("usage", serde_json::to_value(&response.usage)),
+                (
+                    "reasoning_metadata",
+                    serde_json::to_value(&response.reasoning_metadata),
+                ),
+                (
+                    "reasoning_context",
+                    serde_json::to_value(&response.reasoning_context),
+                ),
+                ("status", serde_json::to_value(&response.status)),
+                (
+                    "incomplete_details",
+                    serde_json::to_value(&response.incomplete_details),
+                ),
+                (
+                    "message_id",
+                    serde_json::to_value(&self.terminal_message_id),
+                ),
+                (
+                    "response_id",
+                    serde_json::to_value(&self.terminal_response_id),
+                ),
+                ("model", serde_json::to_value(&self.terminal_model)),
+            ] {
+                let value = value.map_err(LiveProviderError::Json)?;
+                if !value.is_null() {
+                    self.document.insert(key.to_owned(), value);
+                }
+            }
             self.terminal = Some(response);
             Ok(())
         }
@@ -7180,7 +7210,7 @@ pub mod observed {
                 finish_reason: None,
                 provider: self.provider,
                 model: self.terminal_model,
-                raw: self.document.unwrap_or(Value::Null),
+                raw: Value::Object(self.document),
             };
             response.set_finish_reason(reason);
             Ok(ObservedResponsesResultBody { response, native })

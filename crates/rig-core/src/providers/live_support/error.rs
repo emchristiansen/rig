@@ -1,7 +1,7 @@
 //! Shared provider-local diagnostics for Live and observed Responses operations.
 //!
-//! These leaves retain the selected provider diagnostic structure independently
-//! of observation custody. Baseline capability errors remain unchanged.
+//! These types retain the provider diagnostic structure independently
+//! of observation custody. Existing capability errors remain unchanged.
 
 use std::fmt;
 
@@ -17,7 +17,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 #[cfg(target_family = "wasm")]
 pub type BoxError = Box<dyn std::error::Error + 'static>;
 
-/// Classifications used by the admitted provider operations.
+/// Classifications used by the Live and observed Responses provider operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
     /// Transport failure.
@@ -60,7 +60,7 @@ pub struct ErrorReport {
     /// carried one.
     pub request_id: Option<String>,
     /// Preserved provider failure response, including available status, body,
-    /// headers, and request ID.
+    /// headers and request ID.
     pub provider_response: Option<ProviderResponseError>,
     /// Structured diagnostic for failures a consumer may want to *route*
     /// rather than only display. Absent for the common case; see
@@ -78,7 +78,7 @@ pub enum ErrorDetail {
     #[cfg(feature = "completion-observations")]
     MalformedToolInput(MalformedToolInput),
     /// A frame of the provider's reply failed to decode. Carries what was
-    /// kept of the frame, labelled by how faithful it is, so a consumer can
+    /// kept of the frame, labeled by how faithful it is, so a consumer can
     /// keep it as evidence.
     CorruptFrame(CorruptFrameDetail),
 }
@@ -424,8 +424,7 @@ impl ProviderResponseError {
         }
     }
 
-    /// Mark the reply as the provider's verdict on the content: a refusal,
-    /// final, never retried.
+    /// Set whether the reply represents a content refusal. Refusals are never retried.
     pub fn with_refusal(mut self, refusal: bool) -> Self {
         self.refusal = refusal;
         self
@@ -506,7 +505,7 @@ impl std::fmt::Display for ProviderResponseError {
 impl std::error::Error for ProviderResponseError {}
 
 /// Returns the first nonempty string at `error.code`, `error.status`, or
-/// `error.type`, in that order. Invalid JSON, non-string fields, and missing
+/// `error.type`, in that order. Invalid JSON, non-string fields and missing
 /// envelopes yield no code.
 pub fn body_code(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
@@ -532,11 +531,11 @@ fn response_json(body: Option<&str>) -> Result<Option<serde_json::Value>, serde_
         .transpose()
 }
 
-/// A failure in the admitted Live or observed Responses provider operation.
+/// A failure in a Live or observed Responses provider operation.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     /// A transport failure that produced no provider reply: a reset
-    /// connection, a timeout, an unreadable response. Also retains baseline
+    /// connection, a timeout, an unreadable response. Also retains the existing
     /// status-only errors, which supply no body for [`Self::ProviderResponse`].
     #[error("HttpError: {0}")]
     Http(http_client::Error),
@@ -564,6 +563,8 @@ pub enum ProviderError {
     #[error("ProviderResponseError: {0}")]
     ProviderResponse(ProviderResponseError),
     /// The provider rejected the configured credentials with 401 or 403.
+    /// This crate's own conversions never produce this variant; such replies
+    /// arrive as [`Self::ProviderResponse`] or [`Self::Http`].
     #[error("invalid authentication: {0}")]
     InvalidAuthentication(ProviderResponseError),
 }
@@ -582,7 +583,7 @@ impl ProviderError {
     }
 
     /// Converts a non-success reply the transport reported as an error to
-    /// [`Self::ProviderResponse`], keeping its status, body, and headers.
+    /// [`Self::ProviderResponse`], keeping its status, body and headers.
     /// Other transport errors become [`Self::Http`].
     pub fn from_transport_error(error: http_client::Error) -> Self {
         match error {
@@ -658,7 +659,8 @@ impl ProviderError {
         response_json(self.provider_response_body())
     }
 
-    /// The preserved reply's HTTP status. It may be 2xx for an error envelope.
+    /// The preserved reply's HTTP status, or the status of a status-only transport
+    /// error. It may be 2xx for an error envelope.
     pub fn provider_response_status(&self) -> Option<http::StatusCode> {
         self.provider_response()
             .and_then(|response| response.status)
@@ -674,7 +676,8 @@ impl ProviderError {
             .and_then(|response| response.provider_request_id.as_deref())
     }
 
-    /// The preserved reply's headers; `None` means the transport supplied none.
+    /// The preserved reply's headers; `None` when there is no preserved reply
+    /// or the transport supplied none.
     pub fn provider_response_headers(&self) -> Option<&http::HeaderMap> {
         self.provider_response()
             .and_then(|response| response.headers.as_ref())
@@ -813,17 +816,17 @@ impl From<ProviderError> for ErrorReport {
     }
 }
 
-/// Public spelling shared by the Live and observation entry points.
+/// Public alias of [`ProviderError`] shared by the Live and observation entry points.
 pub type LiveProviderError = ProviderError;
-/// Public spelling for Live reply evidence.
+/// Public alias of [`ProviderResponseError`] for Live replies.
 pub type LiveResponseError = ProviderResponseError;
 
-/// Selected status retry policy.
+/// Status retry policy: retry 408, 425, 429 and any 5xx status.
 pub const fn retryable_status(status: Option<u16>) -> bool {
     matches!(status, Some(408 | 425 | 429 | 500..=599))
 }
 
-/// Selected transport retry policy, including baseline legacy status variants.
+/// Transport retry policy, including the legacy status-code error variants.
 pub fn transient_transport(error: &http_client::Error) -> bool {
     match error {
         http_client::Error::StreamEnded | http_client::Error::Instance(_) => true,

@@ -1,4 +1,4 @@
-//! How a [`LivePeer`] ends: dropping it releases its socket, its event stream
+//! How a [`LivePeer`](rig_webrtc::LivePeer) ends: dropping it releases its socket, its event stream
 //! ends after the peer does, and a paused consumer is told what it lost.
 //! Sockets are observed passively in `/proc/net/udp`, so the checks never
 //! compete with the peer for its port. No network beyond 127.0.0.1 is used.

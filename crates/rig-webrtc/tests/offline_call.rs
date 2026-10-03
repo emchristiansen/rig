@@ -1,4 +1,4 @@
-//! The whole call sequence of the live test, offline: `LiveCalls` creates the
+//! The whole call sequence, offline: `LiveCalls` creates the
 //! call over the bundled reqwest transport against a local HTTP server, whose
 //! answer comes from an in-process answering peer; the `LivePeer` connects
 //! over loopback; the control socket joins a local websocket server over

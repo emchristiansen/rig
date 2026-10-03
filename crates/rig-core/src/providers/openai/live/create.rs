@@ -9,8 +9,8 @@ use crate::providers::live_support::configuration::{LiveBackend, LiveConfigurati
 use crate::providers::live_support::error::{EncodeError, ProviderError};
 
 /// The provider's dialect is not official OpenAI, the only dialect that
-/// speaks the public Live API. This restricts the dialect, not the origin: an
-/// the public backend provider with a custom base URL is accepted.
+/// speaks the public Live API. A public configuration with a custom base URL
+/// is accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the public Live API needs the official OpenAI dialect; got dialect `{dialect}`")]
 pub struct NotOfficialOpenAi {
@@ -58,7 +58,7 @@ pub struct ApiErrorDetail {
     /// server names one.
     #[serde(default)]
     pub client_event_id: Option<String>,
-    /// Fields not modelled here.
+    /// Fields not modeled here.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -226,7 +226,7 @@ pub enum LiveApiError {
         /// Why the body could not be read.
         read_error: ProviderError,
     },
-    /// The request could not be built or its credential could not be read.
+    /// The request could not be built.
     /// Nothing was sent.
     #[error("the Live session request was not sent: {0}")]
     Request(ProviderError),
@@ -319,8 +319,7 @@ impl PublicLiveSessions {
     /// provider's static credential: `POST {base_url}/live/sessions` with
     /// the JSON body `{"session", "transport": {"type": "webrtc", "sdp"}}`.
     ///
-    /// Refused for an empty offer, or when
-    /// the provider's dialect requires a caller identity it lacks.
+    /// Refused for an empty offer or if the body, URL or headers cannot be encoded.
     pub fn create_request(
         &self,
         offer_sdp: &str,

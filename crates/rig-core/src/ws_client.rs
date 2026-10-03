@@ -1,5 +1,5 @@
-//! Transport-independent websocket handshakes, connections, and frames.
-//! Backends preserve rejected upgrades as HTTP errors with status, headers, and
+//! Transport-independent websocket handshakes, connections and frames.
+//! Backends preserve rejected upgrades as HTTP errors with status, headers and
 //! the body supplied by the backend, which may be empty or partial.
 //!
 //! ```
@@ -67,7 +67,7 @@ impl ConnectOptions {
 /// `Sec-WebSocket-Key`; callers must not supply those headers.
 pub trait WebSocketClientExt: Clone + WasmCompatSend + WasmCompatSync + 'static {
     /// Opens a connection, preserving rejected upgrades with their HTTP status,
-    /// headers, and the body supplied by the backend. That body may be empty or partial.
+    /// headers and the body supplied by the backend. That body may be empty or partial.
     fn connect(
         &self,
         request: Request<NoBody>,
@@ -137,7 +137,7 @@ pub trait WebSocketConnection: WasmCompatSend + WasmCompatSync {
     /// lossless only for backends whose receive happens to be cancel-safe.
     ///
     /// Cancellation behavior is backend-specific. The native forwarded
-    /// connection has an inherited window after it enqueues a reply: dropping
+    /// connection can lose a frame after its actor enqueues a reply: dropping
     /// the receiving future there can lose that frame. A caller requiring
     /// lossless observation must retain and drive this future to completion.
     ///
@@ -196,7 +196,7 @@ impl WebSocketConnection for BoxedWebSocketConnection {
 pub struct InvalidWebSocketUrl(String);
 
 /// Appends `path` to a base URL, converting HTTP(S) to WS(S) and retaining
-/// existing WS(S) schemes, query, and fragment. Trims boundary slashes from the
+/// existing WS(S) schemes, query and fragment. Trims boundary slashes from the
 /// appended path. Returns an error for invalid URLs or unsupported schemes.
 pub fn websocket_url(base_url: &str, path: &str) -> Result<String> {
     fn invalid(message: impl Into<String>) -> Error {

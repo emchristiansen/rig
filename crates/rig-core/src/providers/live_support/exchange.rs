@@ -44,7 +44,7 @@ impl LiveCalls {
 }
 impl PublicLiveSessions {
     /// Send one creation request. A received reply preserves its status,
-    /// supplied headers, and exact bytes or transport-text provenance.
+    /// supplied headers and exact bytes or transport-text provenance.
     /// A successful head followed by an unreadable body is an unknown outcome.
     /// The HTTP implementation must be polled on its required driven runtime.
     pub async fn create_session<H: HttpClientExt>(

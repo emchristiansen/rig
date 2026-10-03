@@ -1,8 +1,8 @@
 //! GPT-Live sessions over the public Live API, with a WebRTC transport.
 //!
 //! [`PublicLiveSessions::create_session`] posts the caller's SDP offer and a
-//! [`SessionConfig`] to `POST /live/sessions` and returns the session id and
-//! SDP answer, or a [`LiveApiError`] that tells rejected credentials and a
+//! [`SessionConfig`] to `POST {base_url}/live/sessions` and returns the session
+//! id and SDP answer, or a [`LiveApiError`] that tells rejected credentials and a
 //! reached spend limit apart from other failures. The caller's WebRTC peer carries the
 //! audio and the `oai-events` data channel, whose messages are
 //! [`ServerEvent`]s and [`ClientEvent`]s.
