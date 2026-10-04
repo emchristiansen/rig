@@ -135,8 +135,8 @@ impl CallerIdentity {
 /// The stable Codex correlation identity of one conversation.
 ///
 /// Used for the `session-id` and `thread-id` headers, and by default for
-/// `x-session-id`. [`Self::generate`] draws opaque ids from
-/// [`crate::id::generate`]; [`Self::from_ids`] takes ids the caller derives.
+/// `x-session-id`. [`Self::generate`] creates a UUIDv7 thread id and uses it
+/// as the fresh root session id; [`Self::from_ids`] preserves supplied ids.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "CodexIdentityIds", into = "CodexIdentityIds")]
 pub struct CodexIdentity {
@@ -180,12 +180,17 @@ pub struct InvalidCodexIdentity {
 }
 
 impl CodexIdentity {
-    /// A fresh identity.
+    /// A fresh root identity with the same UUIDv7 session and thread id.
+    ///
+    /// Matches Codex 0.159.2: `protocol/src/thread_id.rs:30` generates UUIDv7,
+    /// and `core/src/session/session.rs:894–914` assigns the root session id.
+    /// Source: `openai/codex` commit `ff6aec96948b70d94983af2641a6b67c94faeff5`.
     #[must_use]
     pub fn generate() -> Self {
+        let thread_id = uuid::Uuid::now_v7().to_string();
         Self {
-            session_id: crate::id::generate(),
-            thread_id: crate::id::generate(),
+            session_id: thread_id.clone(),
+            thread_id,
         }
     }
 
@@ -209,13 +214,13 @@ impl CodexIdentity {
         })
     }
 
-    /// The session id: the `session-id` header and, by default, the `x-session-id` header.
+    /// The session id carried by the `session-id` header.
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
 
-    /// The thread id: the `thread-id` header.
+    /// The thread id: the `thread-id` header and the default Live `x-session-id`.
     #[must_use]
     pub fn thread_id(&self) -> &str {
         &self.thread_id

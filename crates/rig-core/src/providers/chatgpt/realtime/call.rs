@@ -111,7 +111,7 @@ pub struct RealtimeCall {
 ///
 /// Every request carries the caller-resolved static credential, `ChatGPT-Account-Id` when an account
 /// is set, the exact caller identity, `openai-alpha: quicksilver=v2`, the
-/// dashed `session-id` and `thread-id`, and `x-session-id`.
+/// `session-id` and `thread-id`, and `x-session-id`.
 #[derive(Clone, Debug)]
 pub struct LiveCalls {
     provider: LiveConfiguration,
@@ -134,8 +134,8 @@ impl From<NotTheCodexBackend> for ProviderError {
 }
 
 impl LiveCalls {
-    /// Calls over `provider`, with a fresh identity whose session id is also
-    /// the realtime session id. Refuses a provider whose dialect does not
+    /// Calls over `provider`, with one UUIDv7 for the fresh root session,
+    /// thread and default realtime session id. Refuses a provider whose dialect does not
     /// speak the Codex contract.
     pub fn new(provider: LiveConfiguration) -> Result<Self, NotTheCodexBackend> {
         if provider.backend != LiveBackend::Subscription {
@@ -145,23 +145,27 @@ impl LiveCalls {
         }
         let identity = CodexIdentity::generate();
         Ok(Self {
-            realtime_session_id: identity.session_id().to_owned(),
+            realtime_session_id: identity.thread_id().to_owned(),
             provider,
             identity,
             control_base_url: CONTROL_SOCKET_BASE_URL.to_owned(),
         })
     }
 
-    /// Carry `identity` as `session-id` and `thread-id`, and its session id
+    /// Carry `identity` as `session-id` and `thread-id`, and its thread id
     /// as `x-session-id`.
+    ///
+    /// Codex 0.159.2 `core/src/realtime_conversation.rs:1592–1597` defaults
+    /// the realtime id to the thread id; `:1428–1431` sends all three headers.
+    /// Source: `openai/codex` commit `ff6aec96948b70d94983af2641a6b67c94faeff5`.
     #[must_use]
     pub fn with_identity(mut self, identity: CodexIdentity) -> Self {
-        self.realtime_session_id = identity.session_id().to_owned();
+        self.realtime_session_id = identity.thread_id().to_owned();
         self.identity = identity;
         self
     }
 
-    /// Send `id` as `x-session-id` instead of the identity's session id.
+    /// Send `id` as `x-session-id` instead of the identity's thread id.
     /// Refuses an empty or header-unsafe id.
     pub fn with_realtime_session_id(
         mut self,
