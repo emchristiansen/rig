@@ -196,7 +196,7 @@ async fn a_call_runs_end_to_end_against_local_servers() {
         ("version", "0.155.1"),
         ("session-id", "session-1"),
         ("thread-id", "thread-1"),
-        ("x-session-id", "session-1"),
+        ("x-session-id", "thread-1"),
     ];
     for (name, value) in expected_call_headers {
         assert_eq!(
