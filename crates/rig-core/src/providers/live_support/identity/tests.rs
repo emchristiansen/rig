@@ -43,5 +43,8 @@ fn generated_root_identity_uses_one_uuid_v7() {
     assert_eq!(generated.session_id(), generated.thread_id());
     assert_eq!(generated.thread_id(), thread.hyphenated().to_string());
     let encoded = serde_json::to_string(&generated).expect("serializes");
-    assert_eq!(serde_json::from_str::<CodexIdentity>(&encoded).expect("valid identity"), generated);
+    assert_eq!(
+        serde_json::from_str::<CodexIdentity>(&encoded).expect("valid identity"),
+        generated
+    );
 }

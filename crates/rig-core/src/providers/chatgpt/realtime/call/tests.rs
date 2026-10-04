@@ -413,8 +413,12 @@ fn a_fresh_root_keeps_one_uuid_v7_across_create_and_control() {
     assert_eq!(thread.get_version_num(), 7);
     assert_eq!(calls.identity().session_id(), calls.identity().thread_id());
     assert_eq!(calls.realtime_session_id(), calls.identity().thread_id());
-    let create = calls.call_request(OFFER, &SessionConfig::new("x")).expect("request");
-    let control = calls.control_request(&CallId::new("rtc_1").expect("call id")).expect("handshake");
+    let create = calls
+        .call_request(OFFER, &SessionConfig::new("x"))
+        .expect("request");
+    let control = calls
+        .control_request(&CallId::new("rtc_1").expect("call id"))
+        .expect("handshake");
     for headers in [create.headers(), control.headers()] {
         for name in ["session-id", "thread-id", "x-session-id"] {
             assert_eq!(headers[name], calls.identity().thread_id());
@@ -431,10 +435,15 @@ fn supplied_session_and_thread_keep_the_thread_default_and_explicit_override() {
     let call_id = CallId::new("rtc_1").expect("call id");
     for realtime in [None, Some("explicit-realtime")] {
         let configured = match realtime {
-            Some(id) => calls.clone().with_realtime_session_id(id).expect("valid id"),
+            Some(id) => calls
+                .clone()
+                .with_realtime_session_id(id)
+                .expect("valid id"),
             None => calls.clone(),
         };
-        let create = configured.call_request(OFFER, &SessionConfig::new("x")).expect("request");
+        let create = configured
+            .call_request(OFFER, &SessionConfig::new("x"))
+            .expect("request");
         let control = configured.control_request(&call_id).expect("handshake");
         for headers in [create.headers(), control.headers()] {
             assert_eq!(headers["session-id"], "session-1");
