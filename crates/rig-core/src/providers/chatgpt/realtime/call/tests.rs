@@ -168,8 +168,8 @@ fn provider() -> LiveConfiguration {
         .with_caller_identity(
             crate::providers::live_support::CallerIdentity::new(
                 "codex_cli_rs",
-                "codex_cli_rs/0.155.1 (NixOS 26.05; x86_64) unknown",
-                Some("0.155.1".to_owned()),
+                "codex_cli_rs/0.159.2 (NixOS 26.05; x86_64) unknown",
+                Some("0.159.2".to_owned()),
             )
             .expect("a valid caller identity"),
         )
@@ -204,12 +204,12 @@ fn call_headers() -> Vec<(String, String)> {
         ("originator", "codex_cli_rs".to_owned()),
         (
             "user-agent",
-            "codex_cli_rs/0.155.1 (NixOS 26.05; x86_64) unknown".to_owned(),
+            "codex_cli_rs/0.159.2 (NixOS 26.05; x86_64) unknown".to_owned(),
         ),
-        ("version", "0.155.1".to_owned()),
+        ("version", "0.159.2".to_owned()),
         ("session-id", "session-1".to_owned()),
         ("thread-id", "thread-1".to_owned()),
-        ("x-session-id", "session-1".to_owned()),
+        ("x-session-id", "thread-1".to_owned()),
     ]
     .into_iter()
     .map(|(name, value)| (name.to_owned(), value))
@@ -401,5 +401,45 @@ async fn static_access_is_sent_unchanged() {
         assert_eq!(request.headers["authorization"], "Bearer test-token");
         assert_eq!(request.headers["chatgpt-account-id"], ACCOUNT_ID);
         assert_eq!(request.headers.get_all("authorization").iter().count(), 1);
+    }
+}
+
+/// Codex ff6aec96 protocol/thread_id.rs:30, session/session.rs:894–914,
+/// and realtime_conversation.rs:1428–1431,1592–1597 use one root correlation.
+#[test]
+fn a_fresh_root_keeps_one_uuid_v7_across_create_and_control() {
+    let calls = LiveCalls::new(provider()).expect("subscription backend");
+    let thread = uuid::Uuid::parse_str(calls.identity().thread_id()).expect("UUID");
+    assert_eq!(thread.get_version_num(), 7);
+    assert_eq!(calls.identity().session_id(), calls.identity().thread_id());
+    assert_eq!(calls.realtime_session_id(), calls.identity().thread_id());
+    let create = calls.call_request(OFFER, &SessionConfig::new("x")).expect("request");
+    let control = calls.control_request(&CallId::new("rtc_1").expect("call id")).expect("handshake");
+    for headers in [create.headers(), control.headers()] {
+        for name in ["session-id", "thread-id", "x-session-id"] {
+            assert_eq!(headers[name], calls.identity().thread_id());
+        }
+    }
+}
+
+/// Codex ff6aec96 realtime_conversation.rs:1592–1597 defaults to thread,
+/// while an explicit realtime_session_id replaces only x-session-id.
+#[test]
+fn supplied_session_and_thread_keep_the_thread_default_and_explicit_override() {
+    let calls = calls();
+    assert_eq!(calls.realtime_session_id(), "thread-1");
+    let call_id = CallId::new("rtc_1").expect("call id");
+    for realtime in [None, Some("explicit-realtime")] {
+        let configured = match realtime {
+            Some(id) => calls.clone().with_realtime_session_id(id).expect("valid id"),
+            None => calls.clone(),
+        };
+        let create = configured.call_request(OFFER, &SessionConfig::new("x")).expect("request");
+        let control = configured.control_request(&call_id).expect("handshake");
+        for headers in [create.headers(), control.headers()] {
+            assert_eq!(headers["session-id"], "session-1");
+            assert_eq!(headers["thread-id"], "thread-1");
+            assert_eq!(headers["x-session-id"], realtime.unwrap_or("thread-1"));
+        }
     }
 }

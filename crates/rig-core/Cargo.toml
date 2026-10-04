@@ -46,6 +46,7 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true, optional = true, features = ["v7"] }
 tokio = { workspace = true, features = ["rt", "sync"] }
 http = { workspace = true }
 tracing-futures = { workspace = true, features = ["futures-03"] }
@@ -120,9 +121,9 @@ tracing-opentelemetry = { workspace = true }
 
 
 [features]
-live = []
+live = ["dep:uuid"]
 live-websocket = ["live"]
-completion-observations = []
+completion-observations = ["dep:uuid"]
 default = ["reqwest", "derive", "rustls"]
 audio = []
 image = []
