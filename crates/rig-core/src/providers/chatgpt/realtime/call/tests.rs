@@ -1,7 +1,7 @@
 //! Call creation against an in-process HTTP double that records the whole
-//! request and answers as the backend did for the live probe. No cassette:
-//! recording one needs a live WebRTC offer, and the probe's replies are
-//! reproduced here from its log (status 201, `text/plain`, `Location`).
+//! request with synthetic caller inputs. The scripted creation reply uses the
+//! historical probe's status 201, `text/plain` and `Location` shape; it does not
+//! establish current caller identity or provider access.
 
 use super::*;
 use crate::http_client::{HttpClientExt, LazyBody};
@@ -160,8 +160,8 @@ async fn a_response_less_body_failure_stays_a_transport_error() {
     assert_eq!(error.provider_response_status(), None);
 }
 
-/// The identity the Codex client stamps: `originator`, its user agent and
-/// its version, all three exactly as given.
+/// Synthetic caller values for stamping `originator`, user agent and version.
+/// These inputs do not assert adoption of the current TUI identity contract.
 fn provider() -> LiveConfiguration {
     LiveConfiguration::subscription(ACCESS_TOKEN)
         .with_account_id(ACCOUNT_ID)
@@ -216,11 +216,11 @@ fn call_headers() -> Vec<(String, String)> {
     .collect()
 }
 
-/// The request is exactly the probe's: the method, the Codex path and query,
-/// every header and nothing else, and the `{sdp, session}` body. The 201
-/// reply yields the SDP body and the call id from `Location`.
+/// The request preserves the Codex method, path, query and `{sdp, session}`
+/// shape while stamping the supplied synthetic identity and correlation.
+/// The scripted 201 reply yields the SDP and call id from `Location`.
 #[tokio::test]
-async fn a_call_is_created_exactly_as_the_probe_created_it() {
+async fn call_creation_preserves_request_shape_and_supplied_caller_values() {
     let backend = Backend::created("/v1/realtime/calls/rtc_u2_ETA6qp3oN2ZjwM8wdXUrx6g4jZ3pN2Zx");
     let session = SessionConfig::new("Answer briefly.");
     let call = calls()
