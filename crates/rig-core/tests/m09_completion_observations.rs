@@ -634,7 +634,7 @@ async fn corrupt_known_frame_keeps_native_evidence_and_original_prefix() {
     assert_eq!(failure.kind, ObservedFailureKind::Stream);
     handle.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::NativeFailed);
-        assert_eq!(view.committed_prefix, [original.clone()]);
+        assert_eq!(view.committed_prefix, std::slice::from_ref(&original));
         let corrupt = view
             .native_error
             .expect("native corrupt-frame error")
@@ -878,7 +878,7 @@ async fn whole_response_finishes_without_reading_the_tail() {
         assert_eq!(http.body_polls.load(Ordering::SeqCst), 1);
         handle.inspect(|view| {
             assert_eq!(view.stage, ObservationStage::AwaitingNativeFinalization);
-            assert_eq!(view.committed_prefix, [original.clone()]);
+            assert_eq!(view.committed_prefix, std::slice::from_ref(&original));
         });
         let result = stream.finish().expect("whole response native finalization");
         assert!(handle.same_operation(&result.observation));
@@ -1302,7 +1302,11 @@ async fn caller_rejection_diagnostic_bases_match_selected_terminal_metadata_debu
         }
         handle.inspect(|view| {
             assert_eq!(view.stage, ObservationStage::NativeSucceeded, "{case}");
-            assert_eq!(view.committed_prefix, [original.clone()], "{case}");
+            assert_eq!(
+                view.committed_prefix,
+                std::slice::from_ref(&original),
+                "{case}"
+            );
             assert!(view.native_cause.is_none());
         });
         drop(result);
