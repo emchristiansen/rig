@@ -20,6 +20,8 @@ pub mod groq;
 pub mod huggingface;
 pub mod hyperbolic;
 pub mod internal;
+#[cfg(any(feature = "live", feature = "completion-observations"))]
+pub mod live_support;
 pub mod llamacpp;
 pub mod minimax;
 pub mod mira;

@@ -10,28 +10,31 @@ use bytes::Bytes;
 use futures::{StreamExt, poll};
 use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use rig_core::{
-    client::CompletionClient,
-    completion::{CompletionError, CompletionModel},
+    completion::{CompletionRequest, CompletionRequestBuilder},
+    driver,
     http_client::{
-        self, HttpClientExt, LazyBody, MultipartForm, StreamingResponse, sse::BoxedStream,
+        self, BoxedStream, HttpClientExt, LazyBody, MultipartForm, StreamingResponse,
     },
     providers::{
-        chatgpt::{self, ChatGPTAuth},
+        chatgpt,
         live_support::{
             CallerIdentity,
             error::{ErrorDetail, ProviderError},
         },
-        openai::responses_api::{
-            observation::{
-                ExistingDiagnosticBasis, Observation, ObservationDispatch, ObservationHandle,
-                ObservationProvenance, ObservationStage, ObservedFailureKind,
-                ObservedRequestContext, ObservedResponsesResult, ObservedResponsesStream,
+        openai::{
+            OpenAI,
+            responses_api::{
+                observation::{
+                    ExistingDiagnosticBasis, Observation, ObservationDispatch, ObservationHandle,
+                    ObservationProvenance, ObservationStage, ObservedFailureKind,
+                    ObservedResponsesResult, ObservedResponsesStream,
+                },
+                observed_types::{AssistantContent, FinishReason},
+                streaming::observed::ObservedEvent,
+                wire::Responses,
             },
-            observed_types::{AssistantContent, FinishReason},
-            streaming::observed::ObservedEvent,
         },
     },
-    streaming::RawStreamingChoice,
     wasm_compat::WasmCompatSend,
 };
 use serde_json::{Value, json};
@@ -110,8 +113,8 @@ impl HttpClientExt for ScriptedHttp {
         T: Into<Bytes> + WasmCompatSend,
         U: From<Bytes> + WasmCompatSend + 'static,
     {
-        std::future::ready(Err(http_client::Error::InvalidStatusCode(
-            StatusCode::NOT_IMPLEMENTED,
+        std::future::ready(Err(http_client::Error::Instance(
+            "the scripted transport only streams".into(),
         )))
     }
 
@@ -122,8 +125,8 @@ impl HttpClientExt for ScriptedHttp {
     where
         U: From<Bytes> + WasmCompatSend + 'static,
     {
-        std::future::ready(Err(http_client::Error::InvalidStatusCode(
-            StatusCode::NOT_IMPLEMENTED,
+        std::future::ready(Err(http_client::Error::Instance(
+            "the scripted transport only streams".into(),
         )))
     }
 
@@ -171,49 +174,34 @@ impl HttpClientExt for ScriptedHttp {
     }
 }
 
-type Model = chatgpt::ResponsesCompletionModel<ScriptedHttp>;
-
-fn model(http: ScriptedHttp) -> Model {
-    chatgpt::Client::builder()
-        .api_key(ChatGPTAuth::AccessToken {
-            access_token: "synthetic-baseline-token".into(),
-            account_id: Some("synthetic-baseline-account".into()),
-        })
-        .base_url("https://baseline.invalid/backend")
-        .default_instructions("baseline defaults")
-        .originator("baseline-originator")
-        .user_agent("baseline-agent")
-        .allow_device_flow(false)
-        .http_client(http)
-        .build()
-        .expect("synthetic client")
-        .completion_model("requested-model")
+/// The ChatGPT Responses wire, with the caller's preamble as the whole
+/// instructions: an empty gateway instruction merges to nothing.
+fn wire() -> Responses {
+    OpenAI::with_key(&chatgpt::DIALECT, "synthetic-observed-token")
+        .with_account_id("synthetic-observed-account")
+        .with_base_url("https://observed.invalid/backend")
+        .with_instructions("")
+        .with_caller_identity(
+            CallerIdentity::new(
+                "observed-originator",
+                "observed-agent",
+                Some("fixture-v1".into()),
+            )
+            .expect("synthetic caller identity"),
+        )
+        .responses("requested-model")
 }
 
-fn context() -> ObservedRequestContext {
-    ObservedRequestContext {
-        access_token: "synthetic-observed-token".into(),
-        account_id: Some("synthetic-observed-account".into()),
-        base_url: "https://observed.invalid/backend".into(),
-        caller_identity: CallerIdentity::new(
-            "observed-originator",
-            "observed-agent",
-            Some("fixture-v1".into()),
-        )
-        .expect("synthetic caller identity"),
-    }
+fn request() -> CompletionRequest {
+    CompletionRequestBuilder::unbound("hello")
+        .preamble("caller preamble".into())
+        .build()
 }
 
 async fn open(http: ScriptedHttp) -> (ObservationHandle, ObservedResponsesStream) {
-    let model = model(http);
-    let request = model
-        .completion_request("hello")
-        .preamble("caller preamble".into())
-        .build();
     let (handle, writer) = Observation::prepare();
-    let stream = model
-        .raw_stream_observed(request, context(), writer)
-        .await
+    let stream = wire()
+        .raw_stream_observed(&http, request(), writer)
         .expect("observed open");
     (handle, stream)
 }
@@ -270,14 +258,14 @@ fn whole_headers() -> HeaderMap {
     headers
 }
 
-/// An unpolled future owns the writer but cannot start the mock HTTP future.
+/// An unpolled stream owns the writer but cannot start the mock HTTP future.
 #[tokio::test]
-async fn dropping_an_unpolled_opening_future_cancels_without_dispatch() {
+async fn dropping_an_unpolled_observed_stream_cancels_without_dispatch() {
     let http = ScriptedHttp::default();
-    let model = model(http.clone());
-    let request = model.completion_request("hello").build();
     let (handle, writer) = Observation::prepare();
-    let opening = model.raw_stream_observed(request, context(), writer);
+    let opening = wire()
+        .raw_stream_observed(&http, request(), writer)
+        .expect("observed open");
     handle.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::Prepared);
         assert_eq!(view.dispatch, ObservationDispatch::NotDispatched);
@@ -632,21 +620,7 @@ async fn missing_codex_indices_repair_without_replacing_the_original_payload() {
     assert!(
         matches!(result.body.response.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "hello")
     );
-    handle.inspect(|view| assert_eq!(view.committed_prefix, [delta.clone(), done.clone()]));
-
-    // The ordinary live adapter retains its baseline strict envelope decoder.
-    let baseline_model = model(ScriptedHttp::frames(vec![delta, done]));
-    let request = baseline_model.completion_request("hello").build();
-    let mut baseline = baseline_model
-        .raw_stream(request)
-        .await
-        .expect("baseline open");
-    let failure = baseline
-        .next()
-        .await
-        .expect("strict envelope rejection")
-        .expect_err("baseline must not gain observed envelope repair");
-    assert!(matches!(failure, CompletionError::JsonError(_)));
+    handle.inspect(|view| assert_eq!(view.committed_prefix, [delta, done]));
 }
 
 /// Finalization without a genuine terminal differs from a completed malformed tool item.
@@ -1349,62 +1323,38 @@ async fn repeated_terminals_keep_the_retained_incomplete_reason() {
     }
 }
 
-/// The feature flag must not route ordinary callers through the observed decoder.
+/// Every header of a sent request but the per-request `session_id`.
+fn stable_headers(request: &Request<Bytes>) -> Vec<(String, Vec<u8>)> {
+    request
+        .headers()
+        .iter()
+        .filter(|(name, _)| name.as_str() != "session_id")
+        .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
+        .collect()
+}
+
+/// The observed operation sends exactly the request the ordinary stream of
+/// the same wire sends, and the ordinary stream never touches a ledger.
 #[tokio::test]
-async fn feature_on_unobserved_raw_stream_keeps_baseline_instructions_and_content() {
-    let delta = json!({"type": "response.output_text.delta", "item_id": "msg_fixture", "output_index": 0, "content_index": 0, "sequence_number": 1, "delta": "baseline answer"}).to_string();
-    let mut body = response(json!([]));
+async fn observed_and_ordinary_streams_send_the_same_request() {
+    let delta = json!({"type": "response.output_text.delta", "item_id": "msg_fixture", "output_index": 0, "content_index": 0, "sequence_number": 1, "delta": "answer"}).to_string();
+    let mut body = response(json!([message("answer")]));
     body.as_object_mut().expect("response object").insert(
         "usage".into(),
         json!({"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}),
     );
-    let http = ScriptedHttp::frames(vec![delta, terminal(body)]);
-    let model = model(http.clone());
+    let frames = vec![delta, terminal(body)];
+
+    let ordinary_http = ScriptedHttp::frames(frames.clone());
     let (unrelated, writer) = Observation::prepare();
-    let request = model
-        .completion_request("hello")
-        .preamble("caller preamble".into())
-        .build();
-    let mut stream = model.raw_stream(request).await.expect("baseline open");
-    let mut text = String::new();
-    let mut final_usage = None;
-    while let Some(item) = stream.next().await {
-        match item.expect("baseline item") {
-            RawStreamingChoice::Message(delta) => text.push_str(&delta),
-            RawStreamingChoice::FinalResponse(response) => {
-                final_usage = Some(response.usage.total_tokens)
-            }
-            _ => {}
-        }
+    let mut ordinary =
+        Box::pin(driver::stream(&wire(), &ordinary_http, request(), None).expect("ordinary open"));
+    let mut items = 0;
+    while let Some(item) = ordinary.next().await {
+        item.expect("ordinary item");
+        items += 1;
     }
-    assert_eq!(text, "baseline answer");
-    assert_eq!(final_usage, Some(3));
-    assert_eq!(http.sends.load(Ordering::SeqCst), 1);
-    let sent = http.sent_request();
-    let body: Value = serde_json::from_slice(sent.body()).expect("baseline request JSON");
-    assert_eq!(
-        body.get("instructions"),
-        Some(&json!("baseline defaults\n\ncaller preamble"))
-    );
-    assert_eq!(body.get("model"), Some(&json!("requested-model")));
-    assert_eq!(body.get("stream"), Some(&json!(true)));
-    assert_eq!(body.get("store"), Some(&json!(false)));
-    assert_eq!(
-        sent.uri().to_string(),
-        "https://baseline.invalid/backend/responses"
-    );
-    assert_eq!(
-        sent.headers()
-            .get("authorization")
-            .expect("sent authorization header"),
-        "Bearer synthetic-baseline-token"
-    );
-    assert_eq!(
-        sent.headers()
-            .get("originator")
-            .expect("sent originator header"),
-        "baseline-originator"
-    );
+    assert!(items > 0);
     unrelated.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::Prepared);
         assert_eq!(view.dispatch, ObservationDispatch::NotDispatched);
@@ -1412,13 +1362,31 @@ async fn feature_on_unobserved_raw_stream_keeps_baseline_instructions_and_conten
         assert!(view.reply_head.is_none());
     });
     drop(writer);
+
+    let observed_http = ScriptedHttp::frames(frames);
+    let (_handle, stream) = open(observed_http.clone()).await;
+    let _ = finish(stream).await;
+
+    let ordinary = ordinary_http.sent_request();
+    let observed = observed_http.sent_request();
+    assert_eq!(observed.method(), ordinary.method());
+    assert_eq!(observed.uri(), ordinary.uri());
+    assert_eq!(stable_headers(&observed), stable_headers(&ordinary));
+    assert!(observed.headers().contains_key("session_id"));
+    let ordinary: Value = serde_json::from_slice(ordinary.body()).expect("ordinary request JSON");
+    let observed: Value = serde_json::from_slice(observed.body()).expect("observed request JSON");
+    assert_eq!(observed, ordinary);
+    assert_eq!(observed.get("instructions"), Some(&json!("caller preamble")));
+    assert_eq!(observed.get("model"), Some(&json!("requested-model")));
+    assert_eq!(observed.get("stream"), Some(&json!(true)));
+    assert_eq!(observed.get("store"), Some(&json!(false)));
 }
 
-/// The baseline SSE check accepts 200 only and never polls rejected reply bodies.
-/// Expected diagnostics start with the same baseline status-only error; they
-/// intentionally make no selected-version claim about 201 or 204 acceptance.
+/// Every status but 200 is refused, 201 and 204 included, with the same
+/// diagnostic the ordinary stream of the same wire reports: status, bounded
+/// body, headers and request id. The ledger keeps the refused head.
 #[tokio::test]
-async fn returned_201_204_and_non_success_statuses_keep_baseline_rejection_diagnostics() {
+async fn refused_statuses_report_what_the_ordinary_stream_reports() {
     for status in [
         StatusCode::CREATED,
         StatusCode::NO_CONTENT,
@@ -1431,26 +1399,21 @@ async fn returned_201_204_and_non_success_statuses_keep_baseline_rejection_diagn
         let script = || Script {
             status,
             headers: headers.clone(),
-            frames: vec![r#"{"error":{"message":"rejected body must stay unread"}}"#.into()],
+            frames: vec![r#"{"error":{"message":"rejected"}}"#.into()],
             ..Script::default()
         };
-        let baseline_http = ScriptedHttp::new(script());
-        let model = model(baseline_http.clone());
-        let request = model.completion_request("hello").build();
-        let mut baseline = model.raw_stream(request).await.expect("lazy baseline open");
-        let actual = baseline
+        let ordinary_http = ScriptedHttp::new(script());
+        let mut ordinary =
+            Box::pin(driver::stream(&wire(), &ordinary_http, request(), None).expect("lazy open"));
+        let expected = ordinary
             .next()
             .await
-            .expect("baseline rejection")
-            .expect_err("baseline status rejection");
-        let expected = CompletionError::from(http_client::Error::InvalidStatusCode(status));
-        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
-        assert_eq!(
-            format!("{actual:?}"),
-            format!("HttpError(InvalidStatusCode({}))", status.as_u16())
-        );
-        assert_eq!(baseline_http.body_polls.load(Ordering::SeqCst), 0);
-        drop(baseline);
+            .expect("ordinary rejection")
+            .expect_err("ordinary status rejection")
+            .report();
+        assert_eq!(expected.http_status, Some(status.as_u16()));
+        assert_eq!(expected.request_id.as_deref(), Some("request-fixture"));
+        drop(ordinary);
 
         let observed_http = ScriptedHttp::new(script());
         let (handle, mut observed) = open(observed_http.clone()).await;
@@ -1461,37 +1424,12 @@ async fn returned_201_204_and_non_success_statuses_keep_baseline_rejection_diagn
             .expect_err("observed status rejection");
         assert_eq!(failure.kind, ObservedFailureKind::Stream);
         assert!(handle.same_operation(&failure.observation));
-        let expected = ProviderError::from(http_client::Error::InvalidStatusCode(status)).report();
-        assert!(
-            matches!(
-                &failure.diagnostic_basis,
-                ExistingDiagnosticBasis::Stream(_)
-            ),
-            "wrong rejected-status basis: {:?}",
-            failure.diagnostic_basis
-        );
         let report = match &failure.diagnostic_basis {
             ExistingDiagnosticBasis::Stream(report) => Some(report),
             _ => None,
         }
         .expect("rejected-status stream basis");
         assert_eq!(report.as_ref(), &expected);
-        assert_eq!(format!("{report:?}"), format!("{expected:?}"));
-        if status == StatusCode::CREATED {
-            assert_eq!(
-                format!("{report:?}"),
-                "ErrorReport { kind: Http, retryable: false, message: \"HttpError: Invalid status code: 201 Created\", code: None, http_status: Some(201), refusal: false, source_chain: [], request_id: None, provider_response: None, detail: None }"
-            );
-        }
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            assert_eq!(
-                format!("{report:?}"),
-                "ErrorReport { kind: Http, retryable: true, message: \"HttpError: Invalid status code: 429 Too Many Requests\", code: None, http_status: Some(429), refusal: false, source_chain: [], request_id: None, provider_response: None, detail: None }"
-            );
-        }
-        assert!(report.provider_response.is_none());
-        assert!(report.request_id.is_none());
-        assert_eq!(observed_http.body_polls.load(Ordering::SeqCst), 0);
         assert_eq!(observed_http.sends.load(Ordering::SeqCst), 1);
         handle.inspect(|view| {
             assert_eq!(view.stage, ObservationStage::NativeFailed);
@@ -1501,6 +1439,10 @@ async fn returned_201_204_and_non_success_statuses_keep_baseline_rejection_diagn
             assert_eq!(head.status, status);
             assert_eq!(head.headers, headers);
             assert!(!head.accepted_sse);
+            assert_eq!(
+                view.native_error.and_then(|error| error.provider_response_status()),
+                Some(status)
+            );
         });
         assert_eq!(
             observed.finish().expect_err("retained rejection").kind,

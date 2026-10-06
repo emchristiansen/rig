@@ -31,6 +31,28 @@ pub mod request_compression;
 pub mod request_headers;
 pub mod responses_lite;
 pub mod streaming;
+/// Caller-held observation custody for one Responses operation.
+#[cfg(feature = "completion-observations")]
+pub mod observation;
+#[cfg(feature = "completion-observations")]
+pub use observation::{
+    CaptureCause, CaptureFault, ExistingDiagnosticBasis, Observation, ObservationDispatch,
+    ObservationHandle, ObservationProvenance, ObservationStage, ObservationView, ObservationWriter,
+    ObservedFailure, ObservedFailureKind, ObservedReplyHead, ObservedResponsesResult,
+    ObservedResponsesStream,
+};
+/// Completion types used only by the observed Responses operation.
+///
+/// Structural models preserve the diagnostic format independently of
+/// the default completion and durable message types.
+#[cfg(feature = "completion-observations")]
+pub mod observed_types;
+/// Private wire types for observed Responses decoding and assembly.
+#[cfg(feature = "completion-observations")]
+pub(crate) mod observed_wire;
+/// Provider-native response retained by an observed Responses operation.
+#[cfg(feature = "completion-observations")]
+pub use observed_wire::CompletionResponse as ObservedNativeResponse;
 #[cfg(feature = "websocket")]
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
 pub mod websocket;

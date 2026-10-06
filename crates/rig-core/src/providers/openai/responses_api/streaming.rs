@@ -2738,5 +2738,10 @@ pub struct SummaryTextDoneChunk {
 
 pub type SummaryPartChunkPart = ReasoningSummary;
 
+/// Interpretation used only by explicitly observed calls.
+/// Original supplied text is captured by the caller before `push` is invoked.
+#[cfg(feature = "completion-observations")]
+pub mod observed;
+
 #[cfg(test)]
 mod tests;

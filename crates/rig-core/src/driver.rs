@@ -29,6 +29,8 @@ use crate::wire::{
 
 mod bound;
 mod consumers;
+#[cfg(feature = "completion-observations")]
+pub(crate) mod observed;
 pub(crate) mod realtime;
 
 pub use bound::{Bind, Bound};

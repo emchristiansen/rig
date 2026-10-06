@@ -4,7 +4,7 @@
 //! interpretation. It is an in-memory prefix, not a record of unread transport
 //! bytes. Keeping a handle retains that prefix after the owning future is dropped.
 
-use crate::providers::live_support::error::{ErrorReport, ProviderError};
+use crate::error::{ErrorReport, ProviderError};
 use std::collections::TryReserveError;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -91,8 +91,8 @@ struct Ledger {
 
 /// Whole HTTP head returned to the observed SSE source.
 ///
-/// Rejected response bodies are unavailable: the existing response check does
-/// not read them. This known limitation is independent of captured SSE strings.
+/// A refused reply's body is not kept here: the native error carries it, read
+/// to a bounded length as the driver reads every refused reply.
 #[derive(Clone, Debug)]
 pub struct ObservedReplyHead {
     /// Actual returned status.
@@ -417,7 +417,7 @@ impl ObservedFailure {
 use super::streaming::observed::{
     ObservedAssembler, ObservedEvent, ObservedInterpretationError, ObservedResponsesResultBody,
 };
-use crate::http_client::{self, sse};
+use crate::driver::observed::ObservedSourceEvent;
 use futures::Stream;
 use std::{
     collections::VecDeque,
@@ -426,10 +426,10 @@ use std::{
 };
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-type ObservedSource = futures::stream::BoxStream<'static, Result<sse::Event, http_client::Error>>;
+type ObservedSource = futures::stream::BoxStream<'static, Result<ObservedSourceEvent, ProviderError>>;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 type ObservedSource =
-    futures::stream::LocalBoxStream<'static, Result<sse::Event, http_client::Error>>;
+    futures::stream::LocalBoxStream<'static, Result<ObservedSourceEvent, ProviderError>>;
 
 /// Response views accompanied by custody of their original operation.
 #[derive(Clone, Debug)]
@@ -451,10 +451,10 @@ pub struct ObservedResponsesStream {
 }
 
 impl ObservedResponsesStream {
-    pub(crate) fn new(source: ObservedSource, writer: ObservationWriter) -> Self {
+    pub(crate) fn new(source: ObservedSource, writer: ObservationWriter, provider: &str) -> Self {
         Self {
             source,
-            assembler: Some(ObservedAssembler::new("chatgpt")),
+            assembler: Some(ObservedAssembler::new(provider)),
             writer,
             ready: VecDeque::new(),
             ended: false,
@@ -559,21 +559,18 @@ impl Stream for ObservedResponsesStream {
                         }
                         Ok(()) => {}
                     }
-                    let failure = ObservedFailure::report_provider(
-                        ProviderError::from(error),
-                        &mut self.writer,
-                    );
+                    let failure = ObservedFailure::report_provider(error, &mut self.writer);
                     return self.fail_item(failure);
                 }
-                Poll::Ready(Some(Ok(sse::Event::Open))) => {
+                Poll::Ready(Some(Ok(ObservedSourceEvent::Open))) => {
                     let (request_id, headers) = self.writer.handle.response_metadata();
                     if let Some(assembler) = self.assembler.as_mut() {
                         assembler.set_response_metadata(request_id, headers);
                     }
                 }
-                Poll::Ready(Some(Ok(sse::Event::Message(message)))) => {
+                Poll::Ready(Some(Ok(ObservedSourceEvent::Message(data)))) => {
                     // Commit the complete source String before any classification.
-                    if self.writer.append(message.data).is_err() {
+                    if self.writer.append(data).is_err() {
                         let failure = ObservedFailure::capture_only(&mut self.writer);
                         return self.fail_item(failure);
                     }
@@ -613,20 +610,37 @@ impl Stream for ObservedResponsesStream {
     }
 }
 
-/// Already-resolved subscription input for one observed request.
-///
-/// No credential acquisition, refresh, environment lookup or default identity
-/// is performed. The caller supplies each field at the point of use.
-#[derive(Clone, Debug)]
-pub struct ObservedRequestContext {
-    /// Already-authorized access token.
-    pub access_token: String,
-    /// Optional selected subscription account.
-    pub account_id: Option<String>,
-    /// Explicit subscription backend base URL.
-    pub base_url: String,
-    /// Validated selected caller identity and optional version.
-    pub caller_identity: crate::providers::live_support::CallerIdentity,
+impl super::wire::Responses {
+    /// Open one observed stream of `request` over `http`.
+    ///
+    /// The request is this wire's ordinary streamed request: the same
+    /// encoding, provider credential, caller identity and headers as
+    /// [`driver::stream`](crate::driver::stream). The returned stream owns
+    /// `writer`, so dropping it before a terminal state records the operation
+    /// as cancelled. A request that cannot be encoded is a
+    /// [`ObservedFailureKind::Provider`] failure and nothing is sent; the
+    /// credential read, the send and the reply are read lazily, on the first
+    /// poll, and a failure there is a stream item.
+    pub fn raw_stream_observed<H>(
+        &self,
+        http: &H,
+        request: crate::completion::CompletionRequest,
+        mut writer: ObservationWriter,
+    ) -> Result<ObservedResponsesStream, ObservedFailure>
+    where
+        H: crate::http_client::HttpClientExt + Clone + 'static,
+    {
+        use crate::wire::Wire as _;
+
+        match crate::driver::observed::observed_sse(self, http, request, writer.handle()) {
+            Ok(source) => Ok(ObservedResponsesStream::new(
+                Box::pin(source),
+                writer,
+                self.name(),
+            )),
+            Err(error) => Err(ObservedFailure::provider(error, &mut writer)),
+        }
+    }
 }
 
 #[cfg(test)]
