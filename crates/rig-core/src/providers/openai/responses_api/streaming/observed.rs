@@ -2,8 +2,7 @@ use super::super::ToolStatus;
 use super::super::{observed_types as ot, observed_wire as ow};
 use crate::driver::{TriagedFrame, triage_frame};
 use crate::error::{ErrorReport, ProviderError};
-use ow::FunctionCallArguments;
-use ow::{Output, ReasoningSummary};
+use ow::Output;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -216,7 +215,7 @@ impl ObservedAssembler {
         data: &str,
         out: &mut Vec<ObservedEvent>,
     ) -> Result<(), ObservedInterpretationError> {
-        let (classified, event_type) = classify(data);
+        let (classified, event_type) = classify(data, super::is_known_responses_event_type);
         match triage_frame(classified)? {
             TriagedFrame::Unknown(value) => out.push(ObservedEvent::Unknown {
                 event_type,

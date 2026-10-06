@@ -251,7 +251,7 @@ struct ErrorEnvelope {
     error: Value,
 }
 
-fn classify_payload(data: &str) -> WireEvent<Payload> {
+fn classify_payload(data: &str, is_known_event_type: fn(&str) -> bool) -> WireEvent<Payload> {
     if data.trim() == "[DONE]" {
         return WireEvent::Known(Payload::Sentinel);
     }
@@ -263,14 +263,11 @@ fn classify_payload(data: &str) -> WireEvent<Payload> {
         return WireEvent::Known(Payload::Failure(data.to_owned()));
     }
     let tagged = |data: &str| {
-        wire::classify_tagged_frame::<Chunk>(
-            data,
-            "type",
-            super::super::streaming::is_known_responses_event_type,
-        )
-        .map(|chunk| Payload::Frame {
-            raw: data.to_owned(),
-            chunk,
+        wire::classify_tagged_frame::<Chunk>(data, "type", is_known_event_type).map(|chunk| {
+            Payload::Frame {
+                raw: data.to_owned(),
+                chunk,
+            }
         })
     };
     if parsed.as_ref().is_ok_and(|v| v.get("type").is_some()) {
@@ -294,10 +291,13 @@ fn classify_payload(data: &str) -> WireEvent<Payload> {
     })
 }
 
-pub(in super::super) fn classify(data: &str) -> (WireEvent<Payload>, String) {
+pub(in super::super) fn classify(
+    data: &str,
+    is_known_event_type: fn(&str) -> bool,
+) -> (WireEvent<Payload>, String) {
     let event = wire::classify_with_repair(
         data,
-        classify_payload,
+        |data| classify_payload(data, is_known_event_type),
         |data| {
             let mut value = serde_json::from_str::<Value>(data).ok()?;
             let object = value.as_object_mut()?;
