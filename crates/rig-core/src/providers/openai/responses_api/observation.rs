@@ -24,7 +24,7 @@ pub enum ObservationStage {
     Prepared,
     /// The send attempt has started.
     Running,
-    /// Source EOF or a whole-response terminal ended reading; finalization is pending.
+    /// Source EOF or a retained terminal ended reading; finalization is pending.
     AwaitingNativeFinalization,
     /// Native finalization succeeded with healthy capture.
     NativeSucceeded,
@@ -91,8 +91,9 @@ struct Ledger {
 
 /// Whole HTTP head returned to the observed SSE source.
 ///
-/// A refused reply's body is not kept here: the native error carries it, read
-/// to a bounded length as the driver reads every refused reply.
+/// A refused reply's body is kept in the native error. The reqwest non-2xx
+/// path reads it without a size bound. For `Ok(non-200)` replies, the driver
+/// collects at most 1 MiB or 4096 chunks.
 #[derive(Clone, Debug)]
 pub struct ObservedReplyHead {
     /// Actual returned status.
@@ -468,7 +469,7 @@ impl ObservedResponsesStream {
         self.writer.handle()
     }
 
-    /// Finalize after source EOF or a whole-response terminal, without more I/O.
+    /// Finalize after source EOF or a retained terminal, without more I/O.
     pub fn finish(mut self) -> Result<ObservedResponsesResult, ObservedFailure> {
         if let Some(failure) = self.failure.take() {
             return Err(failure);
@@ -581,7 +582,13 @@ impl Stream for ObservedResponsesStream {
                     };
                     let mut events = Vec::new();
                     let interpreted = handle.inspect(|view| match view.committed_prefix.last() {
-                        Some(original) => assembler.push(original, &mut events),
+                        Some(original) => {
+                            assembler.push(original, &mut events)?;
+                            if assembler.response_finished() {
+                                events.extend(assembler.eof()?);
+                            }
+                            Ok(())
+                        }
                         None => Ok(()),
                     });
                     self.ready.extend(events.into_iter().map(Ok));
@@ -590,7 +597,7 @@ impl Stream for ObservedResponsesStream {
                             if self
                                 .assembler
                                 .as_ref()
-                                .is_some_and(|assembler| assembler.whole_response_finished())
+                                .is_some_and(|assembler| assembler.response_finished())
                             {
                                 self.ended = true;
                                 self.writer.awaiting_finalization();
@@ -613,6 +620,10 @@ impl Stream for ObservedResponsesStream {
 
 impl super::wire::Responses {
     /// Open one observed stream of `request` over `http`.
+    ///
+    /// Reading stops after the first retained terminal. Post-terminal bytes
+    /// are ignored and never captured. Invalid UTF-8 before the terminal
+    /// fails without capturing replacement text.
     ///
     /// The request is this wire's ordinary streamed request: the same
     /// encoding, provider credential, caller identity and headers as

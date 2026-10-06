@@ -1294,10 +1294,10 @@ impl ObservedAssembler {
         self.flush_pending_calls()
     }
 
-    /// Whether a whole-response payload has already emitted its terminal result.
-    /// The owning stream drains ready events, then stops polling its source.
-    pub(in super::super) fn whole_response_finished(&self) -> bool {
-        self.whole_finished
+    /// Whether a genuine terminal has been retained.
+    /// The owning stream flushes pending content, drains ready events, and stops.
+    pub(in super::super) fn response_finished(&self) -> bool {
+        self.terminal.is_some()
     }
 
     fn flush_unclosed_tools(&mut self) {

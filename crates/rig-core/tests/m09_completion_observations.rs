@@ -55,10 +55,16 @@ struct ScriptedHttp {
 }
 
 #[derive(Debug)]
+enum ScriptBody {
+    Events(Vec<String>),
+    Chunks(Vec<Bytes>),
+}
+
+#[derive(Debug)]
 struct Script {
     status: StatusCode,
     headers: HeaderMap,
-    frames: Vec<String>,
+    body: ScriptBody,
     pending_connect: bool,
     pending_tail: bool,
     tail_error: bool,
@@ -69,7 +75,7 @@ impl Default for Script {
         Self {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
-            frames: Vec::new(),
+            body: ScriptBody::Events(Vec::new()),
             pending_connect: false,
             pending_tail: false,
             tail_error: false,
@@ -87,7 +93,7 @@ impl ScriptedHttp {
 
     fn frames(frames: Vec<String>) -> Self {
         Self::new(Script {
-            frames,
+            body: ScriptBody::Events(frames),
             ..Script::default()
         })
     }
@@ -143,12 +149,13 @@ impl HttpClientExt for ScriptedHttp {
             if this.script.pending_connect {
                 return std::future::pending().await;
             }
-            let mut chunks: VecDeque<_> = this
-                .script
-                .frames
-                .iter()
-                .map(|frame| Bytes::from(format!("data: {frame}\n\n")))
-                .collect();
+            let mut chunks: VecDeque<_> = match &this.script.body {
+                ScriptBody::Events(frames) => frames
+                    .iter()
+                    .map(|frame| Bytes::from(format!("data: {frame}\n\n")))
+                    .collect(),
+                ScriptBody::Chunks(chunks) => chunks.iter().cloned().collect(),
+            };
             let pending_tail = this.script.pending_tail;
             let mut tail_error = this.script.tail_error;
             let polls = this.body_polls.clone();
@@ -256,6 +263,96 @@ fn whole_headers() -> HeaderMap {
     headers
 }
 
+async fn assert_terminal_ignores_bytes(tail: Bytes) {
+    let original = terminal(response(json!([message("terminal answer")])));
+    let completed = Bytes::from(format!("data: {original}\n\n"));
+    for same_chunk in [false, true] {
+        let chunks = if same_chunk {
+            let mut combined = completed.to_vec();
+            combined.extend_from_slice(&tail);
+            vec![Bytes::from(combined)]
+        } else {
+            vec![completed.clone(), tail.clone()]
+        };
+        let http = ScriptedHttp::new(Script {
+            body: ScriptBody::Chunks(chunks),
+            pending_tail: true,
+            tail_error: true,
+            ..Script::default()
+        });
+        let (handle, stream) = open(http.clone()).await;
+        let (events, result) = finish(stream).await;
+        assert_eq!(http.body_polls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(events.as_slice(), [ObservedEvent::TextDelta { text }] if text == "terminal answer")
+        );
+        assert_eq!(result.body.native.id, "resp_fixture");
+        assert!(handle.same_operation(&result.observation));
+        handle.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::NativeSucceeded);
+            assert_eq!(view.committed_prefix, std::slice::from_ref(&original));
+            assert!(view.native_cause.is_none());
+        });
+    }
+}
+
+/// Malformed bytes after the retained terminal never fail or enter capture.
+#[tokio::test]
+async fn completed_terminal_ignores_invalid_utf8_tail() {
+    assert_terminal_ignores_bytes(Bytes::from_static(
+        b"data: {\"type\":\"response.future\",\"opaque\":\"\xff\"}\n\n",
+    ))
+    .await;
+}
+
+/// Valid extra data after the retained terminal is also outside the response.
+#[tokio::test]
+async fn completed_terminal_ignores_valid_data_tail() {
+    assert_terminal_ignores_bytes(Bytes::from_static(
+        b"data: {\"type\":\"response.future\",\"opaque\":\"unread\"}\n\n",
+    ))
+    .await;
+}
+
+/// Invalid UTF-8 before a terminal fails without inventing a payload String.
+#[tokio::test]
+async fn invalid_utf8_before_terminal_fails_without_capture() {
+    let completed = Bytes::from(format!("data: {}\n\n", terminal(response(json!([])))));
+    for same_chunk in [false, true] {
+        let invalid = b"data: {\"type\":\"response.future\",\"opaque\":\"\xff\"}\n\n";
+        let chunks = if same_chunk {
+            let mut combined = invalid.to_vec();
+            combined.extend_from_slice(&completed);
+            vec![Bytes::from(combined)]
+        } else {
+            vec![Bytes::from_static(invalid), completed.clone()]
+        };
+        let http = ScriptedHttp::new(Script {
+            body: ScriptBody::Chunks(chunks),
+            ..Script::default()
+        });
+        let (handle, mut stream) = open(http.clone()).await;
+        let failure = stream
+            .next()
+            .await
+            .expect("stream item")
+            .expect_err("invalid UTF-8");
+        assert_eq!(failure.kind, ObservedFailureKind::Stream);
+        assert!(handle.same_operation(&failure.observation));
+        assert!(stream.next().await.is_none());
+        assert_eq!(http.body_polls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            stream.finish().expect_err("retained failure").kind,
+            ObservedFailureKind::Stream
+        );
+        handle.inspect(|view| {
+            assert_eq!(view.stage, ObservationStage::NativeFailed);
+            assert!(view.committed_prefix.is_empty());
+            assert!(matches!(view.native_error, Some(ProviderError::Response(message)) if message == "an event of the observed reply is not valid UTF-8"));
+        });
+    }
+}
+
 /// An unpolled stream owns the writer but cannot start the mock HTTP future.
 #[tokio::test]
 async fn dropping_an_unpolled_observed_stream_cancels_without_dispatch() {
@@ -317,7 +414,7 @@ async fn original_duplicate_key_prefix_survives_the_whole_stream() {
         "{ \"type\" : \"response.future_fixture\", \"same\":1, \"same\":2, \"text\":\"a\\nb\" }"
             .to_owned();
     let http = ScriptedHttp::new(Script {
-        frames: vec![original.clone()],
+        body: ScriptBody::Events(vec![original.clone()]),
         pending_tail: true,
         ..Script::default()
     });
@@ -378,7 +475,7 @@ async fn terminal_only_output_preserves_opaque_parts_usage_and_the_whole_head() 
     let original = terminal(body.clone());
     let headers = whole_headers();
     let http = ScriptedHttp::new(Script {
-        frames: vec![original.clone(), "[DONE]".into()],
+        body: ScriptBody::Events(vec![original.clone(), "[DONE]".into()]),
         headers: headers.clone(),
         ..Script::default()
     });
@@ -792,7 +889,7 @@ async fn pending_malformed_tool_precedes_transport_failure() {
             Vec::new()
         };
         let http = ScriptedHttp::new(Script {
-            frames: originals.clone(),
+            body: ScriptBody::Events(originals.clone()),
             tail_error: true,
             ..Script::default()
         });
@@ -860,7 +957,7 @@ async fn whole_response_finishes_without_reading_the_tail() {
             frames.push(r#"{ "type": "future.unread", "value": "untouched" }"#.into());
         }
         let http = ScriptedHttp::new(Script {
-            frames,
+            body: ScriptBody::Events(frames),
             pending_tail,
             tail_error,
             ..Script::default()
@@ -924,7 +1021,7 @@ async fn pending_malformed_tool_is_not_lost_before_a_whole_response() {
     .to_string();
     let originals = vec![item_done, response(json!([])).to_string()];
     let http = ScriptedHttp::new(Script {
-        frames: originals.clone(),
+        body: ScriptBody::Events(originals.clone()),
         pending_tail: true,
         tail_error: true,
         ..Script::default()
@@ -993,7 +1090,7 @@ async fn whole_response_text_precedes_a_pending_malformed_tool_failure() {
         response(json!([message("whole answer")])).to_string(),
     ];
     let http = ScriptedHttp::new(Script {
-        frames: originals.clone(),
+        body: ScriptBody::Events(originals.clone()),
         pending_tail: true,
         tail_error: true,
         ..Script::default()
@@ -1179,7 +1276,7 @@ async fn caller_rejection_diagnostic_bases_match_selected_terminal_metadata_debu
             ),
         ]);
         let (handle, stream) = open(ScriptedHttp::new(Script {
-            frames: vec![original.clone()],
+            body: ScriptBody::Events(vec![original.clone()]),
             headers,
             ..Script::default()
         }))
@@ -1317,9 +1414,9 @@ async fn caller_rejection_diagnostic_bases_match_selected_terminal_metadata_debu
     }
 }
 
-/// Later terminal frames preserve an earlier optional incomplete reason.
+/// The first retained terminal wins; later terminal frames are not captured.
 #[tokio::test]
-async fn repeated_terminals_keep_the_retained_incomplete_reason() {
+async fn first_terminal_ignores_later_terminals() {
     for whole_last in [false, true] {
         let mut first = response(json!([]));
         let fields = first
@@ -1343,7 +1440,7 @@ async fn repeated_terminals_keep_the_retained_incomplete_reason() {
             },
         ];
         let http = ScriptedHttp::new(Script {
-            frames: originals.clone(),
+            body: ScriptBody::Events(originals.clone()),
             pending_tail: whole_last,
             tail_error: whole_last,
             ..Script::default()
@@ -1352,15 +1449,15 @@ async fn repeated_terminals_keep_the_retained_incomplete_reason() {
         let mut next = Box::pin(stream.next());
         assert!(matches!(poll!(next.as_mut()), Poll::Ready(None)));
         drop(next);
-        let expected_polls = if whole_last { 2 } else { 3 };
+        let expected_polls = 1;
         assert_eq!(http.body_polls.load(Ordering::SeqCst), expected_polls);
         handle.inspect(|view| {
             assert_eq!(view.stage, ObservationStage::AwaitingNativeFinalization);
-            assert_eq!(view.committed_prefix, originals);
+            assert_eq!(view.committed_prefix, &originals[..1]);
         });
         let result = stream.finish().expect("retained terminal finalization");
         assert!(handle.same_operation(&result.observation));
-        assert!(result.body.native.incomplete_details.is_none());
+        assert!(result.body.native.incomplete_details.is_some());
         assert_eq!(
             result.body.response.finish_reason(),
             Some(&FinishReason::Length)
@@ -1385,7 +1482,7 @@ async fn repeated_terminals_keep_the_retained_incomplete_reason() {
         drop(result);
         handle.inspect(|view| {
             assert_eq!(view.stage, ObservationStage::NativeSucceeded);
-            assert_eq!(view.committed_prefix, originals);
+            assert_eq!(view.committed_prefix, &originals[..1]);
             assert!(view.native_cause.is_none());
         });
         assert_eq!(http.body_polls.load(Ordering::SeqCst), expected_polls);
@@ -1471,7 +1568,7 @@ async fn refused_statuses_report_what_the_ordinary_stream_reports() {
         let script = || Script {
             status,
             headers: headers.clone(),
-            frames: vec![r#"{"error":{"message":"rejected"}}"#.into()],
+            body: ScriptBody::Events(vec![r#"{"error":{"message":"rejected"}}"#.into()]),
             ..Script::default()
         };
         let ordinary_http = ScriptedHttp::new(script());
