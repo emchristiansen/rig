@@ -5,6 +5,9 @@
 //! let wire = OpenAI::new("key").responses("gpt-5.2");
 //! ```
 
+#[cfg(feature = "completion-observations")]
+pub(super) mod observed;
+
 use crate::completion::{self, ProviderCapabilities};
 use crate::error::EncodeError;
 use crate::observe::ObservedError;
