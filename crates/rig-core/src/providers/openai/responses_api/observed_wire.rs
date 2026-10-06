@@ -436,7 +436,7 @@ impl AdditionalParameters {
         serde_json::from_value(Value::Object(accepted)).unwrap_or_default()
     }
 
-    pub fn to_json(self) -> serde_json::Value {
+    pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or_else(|_| serde_json::Value::Object(Map::new()))
     }
 }

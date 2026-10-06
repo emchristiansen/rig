@@ -579,23 +579,21 @@ impl ObservedAssembler {
                     .output
                     .iter()
                     .any(|item| matches!(item, Output::Reasoning { .. }))
-                {
-                    if let Some(text) = response
+                    && let Some(text) = response
                         .provider_reasoning
                         .as_ref()
                         .filter(|text| !text.is_empty())
-                    {
-                        // Whole-body top-level reasoning precedes output items.
-                        self.prefix
-                            .push(ot::AssistantContent::Reasoning(ot::Reasoning {
-                                id: None,
-                                content: vec![ot::ReasoningContent::Text {
-                                    text: text.clone(),
-                                    signature: None,
-                                }],
-                                provider: Some(self.provider.clone()),
-                            }));
-                    }
+                {
+                    // Whole-body top-level reasoning precedes output items.
+                    self.prefix
+                        .push(ot::AssistantContent::Reasoning(ot::Reasoning {
+                            id: None,
+                            content: vec![ot::ReasoningContent::Text {
+                                text: text.clone(),
+                                signature: None,
+                            }],
+                            provider: Some(self.provider.clone()),
+                        }));
                 }
                 for (index, item) in response.output.iter().cloned().enumerate() {
                     self.done_immediately(index as u64, item, out)?;
@@ -933,10 +931,10 @@ impl ObservedAssembler {
     }
     fn reasoning_parts(&mut self, slot: u64, id: Option<&str>) -> &mut ReasoningParts {
         self.parents.entry(slot).or_insert(Parent::Reasoning);
-        if let Some(id) = id.filter(|id| !id.is_empty()) {
-            if !self.reasoning.contains_key(&slot) {
-                self.rekey_undecided(id, slot);
-            }
+        if let Some(id) = id.filter(|id| !id.is_empty())
+            && !self.reasoning.contains_key(&slot)
+        {
+            self.rekey_undecided(id, slot);
         }
         let pending = self.take_undecided(slot, id);
         let parts = self.reasoning.entry(slot).or_insert_with(|| {
@@ -952,10 +950,10 @@ impl ObservedAssembler {
                 .content
                 .insert(at, ow::ReasoningTextContent::Unknown(value));
         }
-        if let Some(id) = id.filter(|id| !id.is_empty()) {
-            if !parts.wire_sent || parts.id.is_none() {
-                parts.id = Some(id.to_owned());
-            }
+        if let Some(id) = id.filter(|id| !id.is_empty())
+            && (!parts.wire_sent || parts.id.is_none())
+        {
+            parts.id = Some(id.to_owned());
         }
         parts
     }
@@ -1001,15 +999,15 @@ impl ObservedAssembler {
         parts
             .content
             .extend(content.into_iter().enumerate().map(|(i, p)| (i as u64, p)));
-        if let Some(v) = encrypted.filter(|s| !s.is_empty()) {
-            if !parts.wire_sent || parts.encrypted.is_none() {
-                parts.encrypted = Some(v);
-            }
+        if let Some(v) = encrypted.filter(|s| !s.is_empty())
+            && (!parts.wire_sent || parts.encrypted.is_none())
+        {
+            parts.encrypted = Some(v);
         }
-        if let Some(v) = signature.filter(|s| !s.is_empty()) {
-            if !parts.wire_sent || parts.signature.is_none() {
-                parts.signature = Some(v);
-            }
+        if let Some(v) = signature.filter(|s| !s.is_empty())
+            && (!parts.wire_sent || parts.signature.is_none())
+        {
+            parts.signature = Some(v);
         }
         if done {
             parts.wire_sent = true;
@@ -1043,10 +1041,10 @@ impl ObservedAssembler {
         }
     }
     fn tool_slot(&mut self, slot: u64, id: Option<&str>) -> &mut ToolParts {
-        if !self.tools.contains_key(&slot) {
-            if let Some(id) = id.filter(|id| !id.is_empty()) {
-                self.finished_tools.remove(&ItemKey::Wire(id.to_owned()));
-            }
+        if !self.tools.contains_key(&slot)
+            && let Some(id) = id.filter(|id| !id.is_empty())
+        {
+            self.finished_tools.remove(&ItemKey::Wire(id.to_owned()));
         }
         self.tools.entry(slot).or_insert_with(|| {
             let minted = self.next_tool;
@@ -1087,40 +1085,42 @@ impl ObservedAssembler {
     ) -> Result<(), ObservedInterpretationError> {
         let mut slot = slot;
         let mut part = self.tools.remove(&slot);
-        if part.is_none() && !call.id.is_empty() && !call.call_id.is_empty() {
-            if let Ok(arguments) = call.arguments.parse() {
-                let candidates: Vec<_> = self
-                    .tools
-                    .iter()
-                    .map(|(slot, part)| (false, *slot, part))
-                    .chain(
-                        self.unclosed_tools
-                            .iter()
-                            .map(|(slot, part)| (true, *slot, part)),
-                    )
-                    .filter(|(_, _, part)| part.item_id.is_none())
-                    .collect();
-                if let [(drained, candidate, parts)] = candidates.as_slice() {
-                    let covers = parts.arguments.as_deref().is_none_or(|buffer| {
-                        buffer.trim().is_empty()
-                            || crate::json_utils::parse_tool_arguments(buffer).is_ok_and(
-                                |partial| partial.is_null() || json_subsumes(&arguments, &partial),
-                            )
-                    });
-                    if parts
-                        .name
-                        .as_deref()
-                        .is_none_or(|name| name.is_empty() || name == call.name)
-                        && covers
-                    {
-                        let (drained, candidate) = (*drained, *candidate);
-                        part = if drained {
-                            self.unclosed_tools.remove(&candidate)
-                        } else {
-                            self.tools.remove(&candidate)
-                        };
-                        slot = candidate;
-                    }
+        if part.is_none()
+            && !call.id.is_empty()
+            && !call.call_id.is_empty()
+            && let Ok(arguments) = call.arguments.parse()
+        {
+            let candidates: Vec<_> = self
+                .tools
+                .iter()
+                .map(|(slot, part)| (false, *slot, part))
+                .chain(
+                    self.unclosed_tools
+                        .iter()
+                        .map(|(slot, part)| (true, *slot, part)),
+                )
+                .filter(|(_, _, part)| part.item_id.is_none())
+                .collect();
+            if let [(drained, candidate, parts)] = candidates.as_slice() {
+                let covers = parts.arguments.as_deref().is_none_or(|buffer| {
+                    buffer.trim().is_empty()
+                        || crate::json_utils::parse_tool_arguments(buffer).is_ok_and(|partial| {
+                            partial.is_null() || json_subsumes(&arguments, &partial)
+                        })
+                });
+                if parts
+                    .name
+                    .as_deref()
+                    .is_none_or(|name| name.is_empty() || name == call.name)
+                    && covers
+                {
+                    let (drained, candidate) = (*drained, *candidate);
+                    part = if drained {
+                        self.unclosed_tools.remove(&candidate)
+                    } else {
+                        self.tools.remove(&candidate)
+                    };
+                    slot = candidate;
                 }
             }
         }
@@ -1722,10 +1722,10 @@ impl ObservedAssembler {
                     signature,
                     true,
                 )?,
-                item @ (Output::Unknown(_) | Output::Compaction(_)) => {
-                    if !self.provider_slots.contains(&(slot as u64)) {
-                        self.done(slot as u64, item, out)?;
-                    }
+                item @ (Output::Unknown(_) | Output::Compaction(_))
+                    if !self.provider_slots.contains(&(slot as u64)) =>
+                {
+                    self.done(slot as u64, item, out)?;
                 }
                 // Selected terminal-only known tools remain raw-only.
                 _ => {}
@@ -1766,7 +1766,7 @@ impl ObservedAssembler {
         }
         self.unclosed_tools.extend(std::mem::take(&mut self.tools));
         if response.usage.is_some() {
-            self.terminal_usage = response.usage.clone();
+            self.terminal_usage = response.usage;
         }
         if !response.id.is_empty() {
             self.terminal_response_id = Some(response.id.clone());
@@ -1784,7 +1784,7 @@ impl ObservedAssembler {
         // optional fields are omitted, and later absence retains prior metadata.
         // Connection request IDs are stamped on the normalized response only.
         for (key, value) in [
-            ("usage", serde_json::to_value(&response.usage)),
+            ("usage", serde_json::to_value(response.usage)),
             (
                 "reasoning_metadata",
                 serde_json::to_value(&response.reasoning_metadata),

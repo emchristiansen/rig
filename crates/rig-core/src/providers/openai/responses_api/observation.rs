@@ -280,10 +280,10 @@ impl ObservationWriter {
     pub(crate) fn append(&mut self, original: String) -> Result<(), ObservationHandle> {
         let mut ledger = self.handle.lock();
         if ledger.fault.is_some() {
-            if let Some(fault) = ledger.fault.as_mut() {
-                if fault.offending_string.is_none() {
-                    fault.offending_string = Some(original);
-                }
+            if let Some(fault) = ledger.fault.as_mut()
+                && fault.offending_string.is_none()
+            {
+                fault.offending_string = Some(original);
             }
             return Err(self.handle.clone());
         }
