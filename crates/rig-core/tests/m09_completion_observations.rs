@@ -1453,7 +1453,10 @@ async fn first_terminal_ignores_later_terminals() {
         assert_eq!(http.body_polls.load(Ordering::SeqCst), expected_polls);
         handle.inspect(|view| {
             assert_eq!(view.stage, ObservationStage::AwaitingNativeFinalization);
-            assert_eq!(view.committed_prefix, &originals[..1]);
+            assert_eq!(
+                view.committed_prefix,
+                originals.get(..1).expect("first terminal fixture")
+            );
         });
         let result = stream.finish().expect("retained terminal finalization");
         assert!(handle.same_operation(&result.observation));
@@ -1482,7 +1485,10 @@ async fn first_terminal_ignores_later_terminals() {
         drop(result);
         handle.inspect(|view| {
             assert_eq!(view.stage, ObservationStage::NativeSucceeded);
-            assert_eq!(view.committed_prefix, &originals[..1]);
+            assert_eq!(
+                view.committed_prefix,
+                originals.get(..1).expect("first terminal fixture")
+            );
             assert!(view.native_cause.is_none());
         });
         assert_eq!(http.body_polls.load(Ordering::SeqCst), expected_polls);
