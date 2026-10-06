@@ -109,9 +109,9 @@ websocket = []
 # as the Codex backend. Native only: zstd is a C library that does not build
 # for the browser target, where the feature compiles to nothing.
 request-compression = ["dep:zstd"]
-# Send helpers for Live call and session creation
-# (`LiveCalls::create_call`, `PublicLiveSessions::create_session`) and the
-# `providers::live_support` paths. Adds no dependency.
+# The `providers::live_support` aliases. Live call and session creation
+# helpers are part of the core API independently of this feature.
+# Adds no dependency.
 live = []
 # `live` plus the websocket control channel a Live call uses.
 live-websocket = ["live", "websocket"]

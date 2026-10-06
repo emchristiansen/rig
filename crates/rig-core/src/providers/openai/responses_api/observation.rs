@@ -426,7 +426,8 @@ use std::{
 };
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-type ObservedSource = futures::stream::BoxStream<'static, Result<ObservedSourceEvent, ProviderError>>;
+type ObservedSource =
+    futures::stream::BoxStream<'static, Result<ObservedSourceEvent, ProviderError>>;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 type ObservedSource =
     futures::stream::LocalBoxStream<'static, Result<ObservedSourceEvent, ProviderError>>;

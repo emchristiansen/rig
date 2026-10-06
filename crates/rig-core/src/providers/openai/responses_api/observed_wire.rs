@@ -339,9 +339,7 @@ impl<'de> Deserialize<'de> for CompletionResponse {
             usage: response.usage,
             output: response.output,
             tools: response.tools,
-            additional_parameters: AdditionalParameters::from_response_metadata(
-                response.metadata,
-            ),
+            additional_parameters: AdditionalParameters::from_response_metadata(response.metadata),
         })
     }
 }
@@ -528,12 +526,6 @@ pub enum ReasoningSummary {
 }
 
 impl ReasoningSummary {
-    fn new(input: &str) -> Self {
-        Self::SummaryText {
-            text: input.to_owned(),
-        }
-    }
-
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::SummaryText { text } => Some(text),
@@ -914,10 +906,7 @@ impl FunctionCallArguments {
     /// equality of the parsed values, so spelling differences the parse
     /// erases (whitespace, key order) agree, and an empty string agrees with
     /// `{}` because both are a parameterless invocation.
-    pub fn reconcile(
-        &self,
-        other: &Self,
-    ) -> Result<serde_json::Value, ReconcileArgumentsError> {
+    pub fn reconcile(&self, other: &Self) -> Result<serde_json::Value, ReconcileArgumentsError> {
         match (self.classify(), other.classify()) {
             (ClassifiedArguments::Unparseable(_), ClassifiedArguments::Unparseable(_)) => {
                 Err(ReconcileArgumentsError::Unparseable(UnparseableSide::Both))
@@ -1109,15 +1098,6 @@ pub(crate) fn refusal_marker() -> Option<crate::message::AdditionalParams> {
         OPENAI_RESPONSES_PART_KEY,
         serde_json::json!({ "kind": REFUSAL_PART_KIND }),
     )))
-}
-
-/// Whether a text block is marked as a refusal.
-pub(crate) fn is_refusal(additional_params: Option<&crate::message::AdditionalParams>) -> bool {
-    additional_params
-        .and_then(|params| params.wire_extras(OPENAI_RESPONSES_PART_KEY))
-        .and_then(|part| part.get("kind"))
-        .and_then(Value::as_str)
-        == Some(REFUSAL_PART_KIND)
 }
 
 /// Record an output message's `phase` on a text block's own-wire extras so

@@ -12,9 +12,7 @@ use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use rig_core::{
     completion::{CompletionRequest, CompletionRequestBuilder},
     driver,
-    http_client::{
-        self, BoxedStream, HttpClientExt, LazyBody, MultipartForm, StreamingResponse,
-    },
+    http_client::{self, BoxedStream, HttpClientExt, LazyBody, MultipartForm, StreamingResponse},
     providers::{
         chatgpt,
         live_support::{
@@ -621,6 +619,73 @@ async fn missing_codex_indices_repair_without_replacing_the_original_payload() {
         matches!(result.body.response.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "hello")
     );
     handle.inspect(|view| assert_eq!(view.committed_prefix, [delta, done]));
+}
+
+/// A malformed known event keeps the classifier's typed failure and original string.
+#[tokio::test]
+async fn corrupt_known_frame_keeps_native_evidence_and_original_prefix() {
+    let original = " {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":17} ".to_owned();
+    let (handle, mut stream) = open(ScriptedHttp::frames(vec![original.clone()])).await;
+    let failure = stream
+        .next()
+        .await
+        .expect("corrupt frame item")
+        .expect_err("invalid typed delta");
+    assert_eq!(failure.kind, ObservedFailureKind::Stream);
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert_eq!(view.committed_prefix, [original.clone()]);
+        let corrupt = view
+            .native_error
+            .expect("native corrupt-frame error")
+            .corrupt_frame()
+            .expect("typed corrupt frame");
+        assert_eq!(corrupt.event_type(), Some("response.output_text.delta"));
+        assert_eq!(
+            corrupt.evidence(),
+            &rig_core::error::FrameEvidence::Text(original)
+        );
+    });
+    assert!(stream.next().await.is_none());
+    assert_eq!(
+        stream
+            .finish()
+            .expect_err("retained corrupt-frame failure")
+            .kind,
+        ObservedFailureKind::Stream
+    );
+}
+
+/// Missing provider identifiers retain the minted native correlation in malformed-input errors.
+#[tokio::test]
+async fn malformed_tool_without_provider_ids_keeps_minted_native_identity() {
+    let original = json!({
+        "type": "response.output_item.done", "output_index": 0,
+        "sequence_number": 3,
+        "item": {
+            "type": "function_call", "id": "", "call_id": "",
+            "name": "broken", "arguments": "{", "status": "completed",
+        },
+    })
+    .to_string();
+    let (handle, mut stream) = open(ScriptedHttp::frames(vec![original.clone()])).await;
+    let failure = loop {
+        if let Err(failure) = stream.next().await.expect("malformed tool failure") {
+            break failure;
+        }
+    };
+    assert_eq!(failure.kind, ObservedFailureKind::Stream);
+    assert!(matches!(
+        &failure.diagnostic_basis,
+        ExistingDiagnosticBasis::Stream(report)
+            if matches!(report.detail.as_ref(), Some(ErrorDetail::MalformedToolInput(detail))
+                if detail.id == rig_core::message::ToolCallId::minted(0)
+                    && detail.provider.is_none() && detail.name == "broken" && detail.raw == "{")
+    ));
+    handle.inspect(|view| {
+        assert_eq!(view.stage, ObservationStage::NativeFailed);
+        assert_eq!(view.committed_prefix, [original]);
+    });
 }
 
 /// Finalization without a genuine terminal differs from a completed malformed tool item.
@@ -1376,7 +1441,10 @@ async fn observed_and_ordinary_streams_send_the_same_request() {
     let ordinary: Value = serde_json::from_slice(ordinary.body()).expect("ordinary request JSON");
     let observed: Value = serde_json::from_slice(observed.body()).expect("observed request JSON");
     assert_eq!(observed, ordinary);
-    assert_eq!(observed.get("instructions"), Some(&json!("caller preamble")));
+    assert_eq!(
+        observed.get("instructions"),
+        Some(&json!("caller preamble"))
+    );
     assert_eq!(observed.get("model"), Some(&json!("requested-model")));
     assert_eq!(observed.get("stream"), Some(&json!(true)));
     assert_eq!(observed.get("store"), Some(&json!(false)));
@@ -1440,7 +1508,8 @@ async fn refused_statuses_report_what_the_ordinary_stream_reports() {
             assert_eq!(head.headers, headers);
             assert!(!head.accepted_sse);
             assert_eq!(
-                view.native_error.and_then(|error| error.provider_response_status()),
+                view.native_error
+                    .and_then(|error| error.provider_response_status()),
                 Some(status)
             );
         });

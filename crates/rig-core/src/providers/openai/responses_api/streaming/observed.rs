@@ -1,7 +1,7 @@
 use super::super::ToolStatus;
 use super::super::{observed_types as ot, observed_wire as ow};
-use crate::providers::internal::wire::{self, WireEvent};
 use crate::error::{ErrorReport, ProviderError};
+use crate::providers::internal::wire::{self, WireEvent};
 use ow::FunctionCallArguments;
 use ow::{Output, ReasoningSummary};
 use serde::{Deserialize, Serialize};
@@ -548,21 +548,7 @@ impl ObservedAssembler {
                 value: value.value().clone(),
             }),
             WireEvent::Corrupt(error) => {
-                #[derive(Deserialize)]
-                struct Discriminator {
-                    #[serde(rename = "type")]
-                    kind: Option<String>,
-                }
-                // Failed discriminator scans establish no event type.
-                let event_type = serde_json::from_str::<Discriminator>(data)
-                    .ok()
-                    .and_then(|tag| tag.kind);
-                return Err(ProviderError::CorruptFrame(
-                    crate::error::CorruptFrame::text(
-                        event_type, data, error,
-                    ),
-                )
-                .into());
+                return Err(ProviderError::CorruptFrame(error).into());
             }
             WireEvent::Known(Payload::Sentinel) => {}
             WireEvent::Known(Payload::Failure(raw)) => {
@@ -714,9 +700,7 @@ impl ObservedAssembler {
             ow::AssistantContent::Unknown(value) => {
                 ow::opaque_message_part(part.text.additional_params.as_ref()) == Some(value)
             }
-            ow::AssistantContent::Refusal { refusal } => {
-                part.refusal && part.text.text == *refusal
-            }
+            ow::AssistantContent::Refusal { refusal } => part.refusal && part.text.text == *refusal,
             ow::AssistantContent::OutputText(text) => {
                 !part.refusal && !part.opaque && part.text.text == text.text
             }
@@ -876,9 +860,7 @@ impl ObservedAssembler {
         refusal: bool,
         out: &mut Vec<ObservedEvent>,
     ) -> Result<(), ObservedInterpretationError> {
-        if id.is_none_or(str::is_empty)
-            && !self.message_slots.values().any(|slot| *slot == index)
-        {
+        if id.is_none_or(str::is_empty) && !self.message_slots.values().any(|slot| *slot == index) {
             self.unattributed.insert(index);
         }
         let slot = self.slot(index, id, None);
@@ -1122,9 +1104,7 @@ impl ObservedAssembler {
                     let covers = parts.arguments.as_deref().is_none_or(|buffer| {
                         buffer.trim().is_empty()
                             || crate::json_utils::parse_tool_arguments(buffer).is_ok_and(
-                                |partial| {
-                                    partial.is_null() || json_subsumes(&arguments, &partial)
-                                },
+                                |partial| partial.is_null() || json_subsumes(&arguments, &partial),
                             )
                     });
                     if parts
@@ -1187,8 +1167,7 @@ impl ObservedAssembler {
                     .and_then(|part| part.item_id.clone())
                     .and_then(ot::ProviderCallId::new)
             });
-        let id =
-            ot::ToolCallId::for_provider_or(provider.as_ref(), ot::ToolCallId::minted(minted));
+        let id = ot::ToolCallId::for_provider_or(provider.as_ref(), ot::ToolCallId::minted(minted));
         let parsed = call.arguments.parse();
         let arguments = match parsed {
             Ok(value) => value,
@@ -1228,9 +1207,15 @@ impl ObservedAssembler {
                         }
                     }
                 };
-                use crate::error::{
-                    ErrorDetail, ErrorKind, MalformedToolInput,
-                };
+                use crate::error::{ErrorDetail, ErrorKind, MalformedToolInput};
+                let provider = provider.map(|provider| crate::message::ProviderCallId {
+                    call_id: provider.call_id,
+                    item_id: provider.item_id,
+                });
+                let id = crate::message::ToolCallId::for_provider_or(
+                    provider.as_ref(),
+                    crate::message::ToolCallId::minted(minted),
+                );
                 return Err(ObservedInterpretationError::NativeReport(
                     ErrorReport::new(
                         ErrorKind::Response,
@@ -1354,8 +1339,7 @@ impl ObservedAssembler {
                 ot::AssistantContent::ToolCall(ot::ToolCall {
                     id,
                     provider,
-                    function: ot::ToolFunction::new(name, arguments)
-                        .with_namespace(part.namespace),
+                    function: ot::ToolFunction::new(name, arguments).with_namespace(part.namespace),
                     signature: None,
                     additional_params: None,
                 }),
@@ -1461,10 +1445,7 @@ impl ObservedAssembler {
         self.next_content += 1;
         self.completed.insert(
             (slot, 0, order),
-            ot::AssistantContent::ProviderItem(ot::ProviderItem::new(
-                value,
-                self.provider.clone(),
-            )),
+            ot::AssistantContent::ProviderItem(ot::ProviderItem::new(value, self.provider.clone())),
         );
     }
     fn item(
@@ -1479,37 +1460,33 @@ impl ObservedAssembler {
         } = chunk;
         let part_done = matches!(data, ItemChunkKind::ContentPartDone(_));
         match data {
-            ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput { item, .. }) => {
-                match item {
-                    Output::Message(message) => self.message(slot, message, false, out)?,
-                    Output::Reasoning {
-                        id,
-                        summary,
-                        content,
-                        encrypted_content,
-                        signature,
-                        ..
-                    } => self.reasoning_snapshot(
-                        slot,
-                        id,
-                        summary,
-                        content,
-                        encrypted_content,
-                        signature,
-                        false,
-                    )?,
-                    Output::FunctionCall(call) => {
-                        let part = self.tool_slot(
-                            slot,
-                            (!call.call_id.is_empty()).then_some(call.id.as_str()),
-                        );
-                        part.name = Some(call.name);
-                        part.namespace = call.namespace;
-                        part.call_id = (!call.call_id.is_empty()).then_some(call.call_id);
-                    }
-                    _ => {}
+            ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput { item, .. }) => match item {
+                Output::Message(message) => self.message(slot, message, false, out)?,
+                Output::Reasoning {
+                    id,
+                    summary,
+                    content,
+                    encrypted_content,
+                    signature,
+                    ..
+                } => self.reasoning_snapshot(
+                    slot,
+                    id,
+                    summary,
+                    content,
+                    encrypted_content,
+                    signature,
+                    false,
+                )?,
+                Output::FunctionCall(call) => {
+                    let part = self
+                        .tool_slot(slot, (!call.call_id.is_empty()).then_some(call.id.as_str()));
+                    part.name = Some(call.name);
+                    part.namespace = call.namespace;
+                    part.call_id = (!call.call_id.is_empty()).then_some(call.call_id);
                 }
-            }
+                _ => {}
+            },
             ItemChunkKind::OutputItemDone(chunk) => self.done(slot, chunk.item, out)?,
             ItemChunkKind::OutputTextDelta(delta) => self.delta(
                 slot,
@@ -1634,12 +1611,7 @@ impl ObservedAssembler {
                                 std::slice::from_ref(&content),
                             )),
                         );
-                        self.message_conflict(
-                            slot,
-                            part.content_index,
-                            false,
-                            item_id.as_deref(),
-                        )?;
+                        self.message_conflict(slot, part.content_index, false, item_id.as_deref())?;
                         self.bind_message(slot, item_id.as_deref(), out)?;
                         self.snapshot_part(slot, part.content_index, content, None, out)?;
                     }
@@ -1694,13 +1666,7 @@ impl ObservedAssembler {
                 }
             }
             ItemChunkKind::ReasoningSummaryTextDone(part) => {
-                self.reasoning_conflict(
-                    slot,
-                    item_id.as_deref(),
-                    true,
-                    part.summary_index,
-                    false,
-                )?;
+                self.reasoning_conflict(slot, item_id.as_deref(), true, part.summary_index, false)?;
                 self.reasoning_parts(slot, item_id.as_deref())
                     .summary
                     .insert(
@@ -1780,9 +1746,7 @@ impl ObservedAssembler {
                     .content
                     .values()
                     .any(|p| matches!(p, ow::ReasoningTextContent::Unknown(_)));
-            if !self.finished_reasoning.contains(&slot)
-                && (parts.ready || parts.opened || opaque)
-            {
+            if !self.finished_reasoning.contains(&slot) && (parts.ready || parts.opened || opaque) {
                 let content = ow::reasoning_content_blocks(
                     parts.summary.into_values().collect(),
                     parts.content.into_values().collect(),
@@ -1853,10 +1817,13 @@ impl ObservedAssembler {
         Ok(())
     }
     /// Finalize after transport EOF or a whole response. A genuine terminal is required.
-    pub fn finish(
-        mut self,
-    ) -> Result<ObservedResponsesResultBody, ObservedInterpretationError> {
-        let native=self.terminal.take().ok_or_else(||Self::failure("provider stream ended without a terminal record; treating the turn as truncated".to_owned()))?;
+    pub fn finish(mut self) -> Result<ObservedResponsesResultBody, ObservedInterpretationError> {
+        let native = self.terminal.take().ok_or_else(|| {
+            Self::failure(
+                "provider stream ended without a terminal record; treating the turn as truncated"
+                    .to_owned(),
+            )
+        })?;
         if self.stopped {
             return Err(Self::failure(
                 "provider stream ended after an interpretation failure".to_owned(),
@@ -1903,9 +1870,7 @@ impl ObservedAssembler {
             super::super::ResponseStatus::Other(status) => {
                 Some(ot::FinishReason::Other(status.clone()))
             }
-            super::super::ResponseStatus::InProgress | super::super::ResponseStatus::Queued => {
-                None
-            }
+            super::super::ResponseStatus::InProgress | super::super::ResponseStatus::Queued => None,
         };
         self.prefix.extend(self.completed.into_values());
         let mut response = ot::CompletionResponse {

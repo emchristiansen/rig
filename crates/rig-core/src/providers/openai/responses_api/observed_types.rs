@@ -522,10 +522,7 @@ impl ProviderCallId {
     /// Without a nonempty `call_id`, uses a nonempty `tool_id` as the correlator.
     /// Returns `None` if neither supplies an identifier. For dual-ID protocols
     /// that forbid this fallback, use `new` and attach the item ID separately.
-    pub fn from_optional_wire(
-        call_id: Option<String>,
-        tool_id: Option<String>,
-    ) -> Option<Self> {
+    pub fn from_optional_wire(call_id: Option<String>, tool_id: Option<String>) -> Option<Self> {
         let call_id = call_id.filter(|call_id| !call_id.is_empty());
         match (call_id, tool_id) {
             (Some(call_id), tool_id) => Self::new(call_id).map(|provider| match tool_id {

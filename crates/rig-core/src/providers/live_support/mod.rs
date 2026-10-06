@@ -26,4 +26,3 @@ pub use crate::providers::openai::responses_api::codex_identity::{
     CodexIdentity, InvalidCodexIdentity,
 };
 pub use crate::providers::openai::wire::{CallerIdentity, InvalidCallerIdentity};
-
