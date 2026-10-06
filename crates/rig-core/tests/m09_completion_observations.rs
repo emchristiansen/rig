@@ -587,7 +587,7 @@ async fn terminal_only_output_preserves_opaque_parts_usage_and_the_whole_head() 
     );
     handle.inspect(|view| {
         assert_eq!(view.stage, ObservationStage::NativeSucceeded);
-        assert_eq!(view.committed_prefix, [original, "[DONE]".into()]);
+        assert_eq!(view.committed_prefix, [original]);
         let head = view.reply_head.expect("actual HTTP head");
         assert_eq!(head.status, StatusCode::OK);
         assert_eq!(head.headers, headers);
