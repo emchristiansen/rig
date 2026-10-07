@@ -16,6 +16,7 @@ use futures::{SinkExt, StreamExt};
 use rig_core::providers::chatgpt::{self, realtime};
 use rig_core::providers::openai::OpenAI;
 use rig_core::providers::openai::responses_api::codex_identity::CodexIdentity;
+use rig_core::providers::openai::responses_api::request_headers::RequestHeaders;
 use rig_core::providers::openai::wire::CallerIdentity;
 use rig_webrtc::{LivePeer, PeerEvent};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -154,6 +155,12 @@ async fn a_call_runs_end_to_end_against_local_servers() {
     let calls = realtime::LiveCalls::new(provider)
         .expect("the Codex backend")
         .with_identity(CodexIdentity::from_ids("session-1", "thread-1").expect("ids"))
+        .with_request_headers(
+            RequestHeaders::new()
+                .with("x-codex-turn-metadata", r#"{"thread_source":"user"}"#)
+                .expect("a valid header"),
+        )
+        .expect("not a Live header")
         .with_control_base_url(format!("ws://{ws_addr}/v1/live"));
 
     let peer = LivePeer::builder()
@@ -194,6 +201,7 @@ async fn a_call_runs_end_to_end_against_local_servers() {
         ("session-id", "session-1"),
         ("thread-id", "thread-1"),
         ("x-session-id", "session-1"),
+        ("x-codex-turn-metadata", r#"{"thread_source":"user"}"#),
     ];
     for (name, value) in expected_call_headers {
         assert_eq!(
