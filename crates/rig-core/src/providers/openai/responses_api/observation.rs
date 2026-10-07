@@ -627,6 +627,10 @@ pub struct ObservedRequestContext {
     pub base_url: String,
     /// Validated selected caller identity and optional version.
     pub caller_identity: crate::providers::live_support::CallerIdentity,
+    /// The conversation's Codex identity, sent as the dashed `session-id`
+    /// and `thread-id` headers. The caller keeps it stable across the
+    /// conversation's requests.
+    pub codex_identity: crate::providers::live_support::CodexIdentity,
 }
 
 #[cfg(test)]

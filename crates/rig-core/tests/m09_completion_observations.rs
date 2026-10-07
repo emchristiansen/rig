@@ -18,7 +18,7 @@ use rig_core::{
     providers::{
         chatgpt::{self, ChatGPTAuth},
         live_support::{
-            CallerIdentity,
+            CallerIdentity, CodexIdentity,
             error::{ErrorDetail, ProviderError},
         },
         openai::responses_api::{
@@ -201,6 +201,8 @@ fn context() -> ObservedRequestContext {
             Some("fixture-v1".into()),
         )
         .expect("synthetic caller identity"),
+        codex_identity: CodexIdentity::from_ids("observed-conversation", "observed-conversation")
+            .expect("synthetic Codex identity"),
     }
 }
 
@@ -562,6 +564,19 @@ async fn terminal_only_output_preserves_opaque_parts_usage_and_the_whole_head() 
         sent.headers().get("version").expect("sent version header"),
         "fixture-v1"
     );
+    assert_eq!(
+        sent.headers()
+            .get("session-id")
+            .expect("sent session-id header"),
+        "observed-conversation"
+    );
+    assert_eq!(
+        sent.headers()
+            .get("thread-id")
+            .expect("sent thread-id header"),
+        "observed-conversation"
+    );
+    assert!(sent.headers().get("session_id").is_none());
 }
 
 /// Missing usage and a reported cached zero are distinct provider facts.

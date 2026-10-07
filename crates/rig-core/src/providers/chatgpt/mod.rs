@@ -695,6 +695,7 @@ where
         responses_api::observation::ObservedFailure,
     > {
         use crate::providers::live_support::error::ProviderError;
+        use crate::providers::live_support::identity::{SESSION_ID_HEADER, THREAD_ID_HEADER};
         use responses_api::observation::{ObservedFailure, ObservedResponsesStream};
 
         let prepared = (|| -> Result<http::Request<Vec<u8>>, ProviderError> {
@@ -738,7 +739,8 @@ where
                 )
                 .header(http::header::CONTENT_TYPE, "application/json")
                 .header(http::header::ACCEPT, "text/event-stream")
-                .header("session_id", crate::id::generate());
+                .header(SESSION_ID_HEADER, context.codex_identity.session_id())
+                .header(THREAD_ID_HEADER, context.codex_identity.thread_id());
             if let Some(account_id) = &context.account_id {
                 builder = builder.header("ChatGPT-Account-Id", account_id);
             }
