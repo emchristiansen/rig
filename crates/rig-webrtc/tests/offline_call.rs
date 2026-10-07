@@ -9,7 +9,7 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
@@ -26,13 +26,36 @@ use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
 const CALL_ID: &str = "rtc_u2_offline";
 
-/// What a server received: request line, lowercase headers, body.
+/// What a server received: request line, every header as received with a
+/// lowercase name, body.
 #[derive(Debug, Default)]
 struct Received {
     method: String,
     target: String,
-    headers: BTreeMap<String, String>,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
+}
+
+impl Received {
+    /// The one value received under `name`; a missing or repeated header
+    /// fails the test.
+    fn single(&self, name: &str) -> &str {
+        let values: Vec<&str> = self
+            .headers
+            .iter()
+            .filter(|(received, _)| received == name)
+            .map(|(_, value)| value.as_str())
+            .collect();
+        let [value] = values.as_slice() else {
+            panic!("expected one `{name}`, received {values:?}");
+        };
+        value
+    }
+
+    /// The names received, once each.
+    fn names(&self) -> BTreeSet<&str> {
+        self.headers.iter().map(|(name, _)| name.as_str()).collect()
+    }
 }
 
 /// Serve one HTTP/1.1 request: record it, answer the offer in its body with
@@ -61,11 +84,9 @@ async fn serve_call(listener: TcpListener) -> (Received, common::AnsweringPeer) 
         let (name, value) = line.split_once(':').expect("a header");
         received
             .headers
-            .insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+            .push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
     }
-    let length: usize = received.headers["content-length"]
-        .parse()
-        .expect("a length");
+    let length: usize = received.single("content-length").parse().expect("a length");
     let mut body = buffer[head_end..].to_vec();
     while body.len() < length {
         let mut chunk = [0u8; 4096];
@@ -95,10 +116,10 @@ async fn serve_control(listener: TcpListener) -> (Received, Vec<serde_json::Valu
         handshake.method = request.method().to_string();
         handshake.target = request.uri().to_string();
         for (name, value) in request.headers() {
-            handshake.headers.insert(
+            handshake.headers.push((
                 name.as_str().to_owned(),
                 value.to_str().expect("ascii").to_owned(),
-            );
+            ));
         }
         Ok(response)
     };
@@ -204,24 +225,22 @@ async fn a_call_runs_end_to_end_against_local_servers() {
         ("x-codex-turn-metadata", r#"{"thread_source":"user"}"#),
     ];
     for (name, value) in expected_call_headers {
-        assert_eq!(
-            received.headers.get(name).map(String::as_str),
-            Some(value),
-            "{name}"
-        );
+        assert_eq!(received.single(name), value, "{name}");
     }
-    assert_eq!(received.headers["content-type"], "application/json");
-    let unexpected: Vec<&String> = received
-        .headers
-        .keys()
-        .filter(|name| {
-            !expected_call_headers
-                .iter()
-                .any(|(expected, _)| expected == name)
-                && !["content-type", "content-length", "host", "accept"].contains(&name.as_str())
-        })
+    assert_eq!(received.single("content-type"), "application/json");
+    assert_eq!(received.single("accept"), "*/*");
+    assert_eq!(received.single("host"), http_addr.to_string());
+    let call_names: BTreeSet<&str> = expected_call_headers
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(["content-type", "content-length", "host", "accept"])
         .collect();
-    assert!(unexpected.is_empty(), "unexpected headers {unexpected:?}");
+    assert_eq!(received.names(), call_names);
+    assert_eq!(
+        received.headers.len(),
+        call_names.len(),
+        "a repeated header"
+    );
     let body: serde_json::Value = serde_json::from_slice(&received.body).expect("JSON");
     assert_eq!(body["sdp"], offer);
     assert_eq!(body["session"]["model"], "gpt-live-1-codex");
@@ -293,13 +312,30 @@ async fn a_call_runs_end_to_end_against_local_servers() {
     assert_eq!(handshake.method, "GET");
     assert_eq!(handshake.target, format!("/v1/live/{CALL_ID}"));
     for (name, value) in expected_call_headers {
-        assert_eq!(
-            handshake.headers.get(name).map(String::as_str),
-            Some(value),
-            "{name}"
-        );
+        assert_eq!(handshake.single(name), value, "{name}");
     }
-    assert!(!handshake.headers.contains_key("content-type"));
+    assert_eq!(handshake.single("host"), ws_addr.to_string());
+    assert_eq!(handshake.single("connection"), "Upgrade");
+    assert_eq!(handshake.single("upgrade"), "websocket");
+    assert_eq!(handshake.single("sec-websocket-version"), "13");
+    assert!(!handshake.single("sec-websocket-key").is_empty());
+    let handshake_names: BTreeSet<&str> = expected_call_headers
+        .iter()
+        .map(|(name, _)| *name)
+        .chain([
+            "host",
+            "connection",
+            "upgrade",
+            "sec-websocket-version",
+            "sec-websocket-key",
+        ])
+        .collect();
+    assert_eq!(handshake.names(), handshake_names);
+    assert_eq!(
+        handshake.headers.len(),
+        handshake_names.len(),
+        "a repeated header"
+    );
     assert_eq!(
         client,
         [
