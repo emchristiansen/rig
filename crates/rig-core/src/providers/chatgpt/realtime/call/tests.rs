@@ -415,3 +415,52 @@ async fn a_credential_source_is_read_at_send_time() {
     assert_eq!(headers["chatgpt-account-id"], "rotated-account");
     assert_eq!(headers.get_all("authorization").iter().count(), 1);
 }
+
+/// The caller's headers follow the conversation identity on call creation
+/// and on the control handshake, exactly as given.
+#[test]
+fn the_callers_headers_reach_every_request_of_a_call() {
+    let thread_source = r#"{"thread_source":"user"}"#;
+    let calls = calls()
+        .with_request_headers(
+            RequestHeaders::new()
+                .with("x-codex-turn-metadata", thread_source)
+                .expect("a valid header"),
+        )
+        .expect("not a header this protocol owns");
+    let mut expected = call_headers();
+    expected.push(("x-codex-turn-metadata".to_owned(), thread_source.to_owned()));
+
+    let control = calls
+        .control_request(&CallId::new("rtc_1").expect("an id"))
+        .expect("builds");
+    let mut control_expected = expected.clone();
+    control_expected.sort();
+    assert_eq!(sorted_headers(control.headers()), control_expected);
+
+    let creation = calls
+        .call_request(OFFER, &SessionConfig::new("x"))
+        .expect("builds");
+    expected.push(("content-type".to_owned(), "application/json".to_owned()));
+    expected.sort();
+    assert_eq!(sorted_headers(creation.headers()), expected);
+}
+
+/// The headers this protocol sends itself cannot be supplied.
+#[test]
+fn the_protocols_own_headers_cannot_be_supplied() {
+    for name in ["openai-alpha", "x-session-id", "X-Session-Id"] {
+        let headers = RequestHeaders::new()
+            .with(name, "caller-value")
+            .expect("not reserved for Responses");
+        let refused = calls()
+            .with_request_headers(headers)
+            .expect_err("owned by this protocol");
+        assert_eq!(
+            refused,
+            InvalidRequestHeader::Reserved {
+                name: name.to_ascii_lowercase()
+            }
+        );
+    }
+}
