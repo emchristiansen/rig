@@ -303,3 +303,59 @@ async fn a_binary_frame_that_is_not_utf8_keeps_its_bytes() {
     );
     assert_eq!(corrupt.event_type(), None);
 }
+
+/// Under a credential source the handshake carries the caller's headers
+/// once, beside the re-stamped credential and account.
+#[tokio::test]
+async fn a_credential_source_keeps_the_callers_headers_on_the_handshake() {
+    struct Source;
+    impl crate::wire::CredentialSource for Source {
+        fn current(
+            &self,
+        ) -> WasmBoxedFuture<'_, Result<crate::wire::Credential, crate::wire::CredentialSourceError>>
+        {
+            Box::pin(async {
+                Ok(
+                    crate::wire::Credential::new("rotated-token")
+                        .with_account_id("rotated-account"),
+                )
+            })
+        }
+    }
+    let calls = LiveCalls::new(
+        OpenAI::with_key(&chatgpt::DIALECT, "test-token")
+            .with_account_id("acct-123")
+            .with_caller_identity(crate::test_utils::test_caller_identity())
+            .with_credential_source(Source),
+    )
+    .expect("the Codex backend")
+    .with_request_headers(
+        crate::providers::openai::responses_api::request_headers::RequestHeaders::new()
+            .with("x-codex-turn-metadata", r#"{"thread_source":"user"}"#)
+            .expect("a valid header"),
+    )
+    .expect("not a header this protocol owns");
+    let backend = Scripted::default();
+    calls
+        .connect_control(&backend, call_id())
+        .await
+        .expect("connects");
+    let state = backend.state();
+    let [handshake] = state.handshakes.as_slice() else {
+        panic!("one handshake, got {}", state.handshakes.len());
+    };
+    let all = |name: &str| -> Vec<&str> {
+        handshake
+            .headers()
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().expect("ascii"))
+            .collect()
+    };
+    assert_eq!(
+        all("x-codex-turn-metadata"),
+        [r#"{"thread_source":"user"}"#]
+    );
+    assert_eq!(all("authorization"), ["Bearer rotated-token"]);
+    assert_eq!(all("chatgpt-account-id"), ["rotated-account"]);
+}

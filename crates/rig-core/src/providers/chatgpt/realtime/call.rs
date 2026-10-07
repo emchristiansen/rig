@@ -11,6 +11,9 @@ use crate::providers::openai::OpenAI;
 use crate::providers::openai::responses_api::codex_identity::{
     CodexIdentity, InvalidCodexIdentity, NotACodexWire, SESSION_ID_HEADER, THREAD_ID_HEADER,
 };
+use crate::providers::openai::responses_api::request_headers::{
+    InvalidRequestHeader, RequestHeaders,
+};
 use crate::providers::openai::wire::ResponsesContract;
 use crate::wire::CredentialStamp;
 
@@ -114,14 +117,20 @@ pub struct RealtimeCall {
 /// Every request carries the provider's credential (read from its
 /// credential source when it has one), `ChatGPT-Account-Id` when an account
 /// is set, the exact caller identity, `openai-alpha: quicksilver=v2`, the
-/// dashed `session-id` and `thread-id`, and `x-session-id`.
+/// dashed `session-id` and `thread-id`, `x-session-id`, and the caller's
+/// [`RequestHeaders`].
 #[derive(Clone, Debug)]
 pub struct LiveCalls {
     provider: OpenAI,
     identity: CodexIdentity,
     realtime_session_id: String,
+    request_headers: RequestHeaders,
     control_base_url: String,
 }
+
+/// Headers this protocol sends itself, beyond those [`RequestHeaders`]
+/// already refuses.
+const LIVE_HEADERS: [&str; 2] = [OPENAI_ALPHA_HEADER, X_SESSION_ID_HEADER];
 
 /// The dialect is not the Codex subscription backend.
 pub type NotTheCodexBackend = NotACodexWire;
@@ -141,6 +150,7 @@ impl LiveCalls {
             realtime_session_id: identity.session_id().to_owned(),
             provider,
             identity,
+            request_headers: RequestHeaders::new(),
             control_base_url: CONTROL_SOCKET_BASE_URL.to_owned(),
         })
     }
@@ -171,6 +181,24 @@ impl LiveCalls {
         Ok(self)
     }
 
+    /// Send `headers` on every request of a call, call creation and the
+    /// control handshake alike, after the conversation identity. Rig builds
+    /// none of the values. Refuses `openai-alpha` and `x-session-id`, which
+    /// this protocol sends itself; [`RequestHeaders`] already refuses every
+    /// other header Rig owns.
+    pub fn with_request_headers(
+        mut self,
+        headers: RequestHeaders,
+    ) -> Result<Self, InvalidRequestHeader> {
+        if let Some((name, _)) = headers.iter().find(|(name, _)| LIVE_HEADERS.contains(name)) {
+            return Err(InvalidRequestHeader::Reserved {
+                name: name.to_owned(),
+            });
+        }
+        self.request_headers = headers;
+        Ok(self)
+    }
+
     /// Join control sockets under `base_url` instead of
     /// [`CONTROL_SOCKET_BASE_URL`]; the call id is appended as a path segment.
     #[must_use]
@@ -189,6 +217,12 @@ impl LiveCalls {
     #[must_use]
     pub fn realtime_session_id(&self) -> &str {
         &self.realtime_session_id
+    }
+
+    /// The caller's headers every request carries.
+    #[must_use]
+    pub fn request_headers(&self) -> &RequestHeaders {
+        &self.request_headers
     }
 
     /// The call-creation request for `offer_sdp` and `session`, with the
@@ -248,11 +282,13 @@ impl LiveCalls {
         if let Some(account_id) = &self.provider.account_id {
             builder = builder.header("ChatGPT-Account-Id", account_id);
         }
-        Ok(builder
-            .header(OPENAI_ALPHA_HEADER, QUICKSILVER_V2)
-            .header(SESSION_ID_HEADER, self.identity.session_id())
-            .header(THREAD_ID_HEADER, self.identity.thread_id())
-            .header(X_SESSION_ID_HEADER, &self.realtime_session_id))
+        Ok(self.request_headers.stamp(
+            builder
+                .header(OPENAI_ALPHA_HEADER, QUICKSILVER_V2)
+                .header(SESSION_ID_HEADER, self.identity.session_id())
+                .header(THREAD_ID_HEADER, self.identity.thread_id())
+                .header(X_SESSION_ID_HEADER, &self.realtime_session_id),
+        ))
     }
 
     /// The reply header naming the provider's request id.

@@ -415,3 +415,129 @@ async fn a_credential_source_is_read_at_send_time() {
     assert_eq!(headers["chatgpt-account-id"], "rotated-account");
     assert_eq!(headers.get_all("authorization").iter().count(), 1);
 }
+
+/// The caller's headers follow the conversation identity on call creation
+/// and on the control handshake, exactly as given.
+#[test]
+fn the_callers_headers_reach_every_request_of_a_call() {
+    let thread_source = r#"{"thread_source":"user"}"#;
+    let calls = calls()
+        .with_request_headers(
+            RequestHeaders::new()
+                .with("x-codex-turn-metadata", thread_source)
+                .expect("a valid header"),
+        )
+        .expect("not a header this protocol owns");
+    let mut expected = call_headers();
+    expected.push(("x-codex-turn-metadata".to_owned(), thread_source.to_owned()));
+
+    let control = calls
+        .control_request(&CallId::new("rtc_1").expect("an id"))
+        .expect("builds");
+    let mut control_expected = expected.clone();
+    control_expected.sort();
+    assert_eq!(sorted_headers(control.headers()), control_expected);
+
+    let creation = calls
+        .call_request(OFFER, &SessionConfig::new("x"))
+        .expect("builds");
+    expected.push(("content-type".to_owned(), "application/json".to_owned()));
+    expected.sort();
+    assert_eq!(sorted_headers(creation.headers()), expected);
+}
+
+/// The headers this protocol sends itself cannot be supplied.
+#[test]
+fn the_protocols_own_headers_cannot_be_supplied() {
+    for name in [
+        "openai-alpha",
+        "OpenAI-Alpha",
+        "x-session-id",
+        "X-Session-Id",
+    ] {
+        let headers = RequestHeaders::new()
+            .with(name, "caller-value")
+            .expect("not reserved for Responses");
+        let refused = calls()
+            .with_request_headers(headers)
+            .expect_err("owned by this protocol");
+        assert_eq!(
+            refused,
+            InvalidRequestHeader::Reserved {
+                name: name.to_ascii_lowercase()
+            }
+        );
+    }
+}
+
+/// The headers the transport writes itself cannot be supplied either, in any
+/// case.
+#[test]
+fn the_transports_own_headers_cannot_be_supplied() {
+    for name in [
+        "Host",
+        "Connection",
+        "Upgrade",
+        "Sec-WebSocket-Key",
+        "Sec-WebSocket-Version",
+        "Content-Length",
+        "Accept",
+    ] {
+        assert_eq!(
+            RequestHeaders::new().with(name, "caller-value"),
+            Err(InvalidRequestHeader::Reserved {
+                name: name.to_ascii_lowercase()
+            }),
+            "{name}"
+        );
+    }
+}
+
+/// A credential source re-stamps the credential and account without
+/// touching the caller's headers.
+#[tokio::test]
+async fn a_credential_source_keeps_the_callers_headers() {
+    struct Source;
+    impl crate::wire::CredentialSource for Source {
+        fn current(
+            &self,
+        ) -> crate::wasm_compat::WasmBoxedFuture<
+            '_,
+            Result<crate::wire::Credential, crate::wire::CredentialSourceError>,
+        > {
+            Box::pin(async {
+                Ok(
+                    crate::wire::Credential::new("rotated-token")
+                        .with_account_id("rotated-account"),
+                )
+            })
+        }
+    }
+    let calls = LiveCalls::new(provider().with_credential_source(Source))
+        .expect("Codex")
+        .with_request_headers(
+            RequestHeaders::new()
+                .with("x-codex-turn-metadata", r#"{"thread_source":"user"}"#)
+                .expect("a valid header"),
+        )
+        .expect("not a header this protocol owns");
+    let backend = Backend::created("/calls/rtc_1");
+    calls
+        .create_call(&backend, OFFER, &SessionConfig::new("x"))
+        .await
+        .expect("created");
+    let headers = &backend.requests()[0].headers;
+    let all = |name: &str| -> Vec<&str> {
+        headers
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().expect("ascii"))
+            .collect()
+    };
+    assert_eq!(
+        all("x-codex-turn-metadata"),
+        [r#"{"thread_source":"user"}"#]
+    );
+    assert_eq!(all("authorization"), ["Bearer rotated-token"]);
+    assert_eq!(all("chatgpt-account-id"), ["rotated-account"]);
+}
