@@ -1,0 +1,62 @@
+//! Ollama reasoning + tool roundtrip tests (thinking model calls a tool, then
+//! answers from the tool result).
+//!
+//! Replays by default; set `RIG_PROVIDER_TEST_MODE=record` to record against a
+//! local Ollama server.
+//!
+//! The non-streaming test additionally asserts the assistant's reasoning is
+//! preserved in the caller-owned chat history — this is the direct regression
+//! for #1926 (non-streaming responses used to drop the reasoning, so it never
+//! entered history and was never sent back to Ollama). Thinking is the
+//! daemon's default for `qwen3:4b`.
+
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+
+use rig::completion::Message;
+use rig::message::AssistantContent;
+
+use super::super::support::with_ollama_cassette;
+use crate::reasoning::{self, WeatherTool};
+
+const MODEL: &str = "qwen3:4b";
+
+#[tokio::test]
+async fn nonstreaming() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    with_ollama_cassette(
+        "reasoning_tool_roundtrip/nonstreaming",
+        |client| async move {
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
+                .preamble(reasoning::TOOL_SYSTEM_PROMPT)
+                .tool(WeatherTool::new(call_count.clone()))
+                .default_max_turns(2)
+                .build();
+
+            let mut chat_history = Vec::<Message>::new();
+            let result = agent
+                .chat(reasoning::TOOL_USER_PROMPT, &mut chat_history)
+                .await
+                .expect("[ollama] non-streaming chat failed");
+
+            reasoning::assert_nonstreaming_universal(&result.output(), &call_count, "ollama");
+            // #1926: the tool-call turn's `thinking` must survive into history as
+            // an AssistantContent::Reasoning. Pre-fix, the non-streaming choice
+            // contained only the ToolCall and this assertion failed.
+            reasoning::assert_chat_history_preserves_reasoning_tool_roundtrip(
+                &chat_history,
+                &result.output(),
+                "ollama",
+            );
+            assert!(
+                chat_history.iter().any(|msg| matches!(
+                    msg,
+                    Message::Assistant(rig::message::AssistantMessage { content, .. })
+                        if content.iter().any(|c| matches!(c, AssistantContent::Reasoning(_)))
+                )),
+                "[ollama] expected at least one assistant turn carrying Reasoning in history",
+            );
+        },
+    )
+    .await;
+}

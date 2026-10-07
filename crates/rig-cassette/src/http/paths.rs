@@ -45,7 +45,6 @@ fn independent_downstream_graph_excludes_smithy_and_agent_runtimes() {
     for forbidden in [
         "rig",
         "rig-agent",
-        "rig-ecs",
         "aws-smithy-eventstream",
         "aws-smithy-types",
     ] {
@@ -221,7 +220,7 @@ async fn both_constructors_replay_from_an_external_fixture_root() {
     for direct in [false, true] {
         let cassette = if direct {
             ProviderCassette::start_via(
-                Transport::Direct,
+                RecordVia::Direct,
                 &root,
                 "example",
                 "unary",

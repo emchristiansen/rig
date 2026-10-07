@@ -1,31 +1,37 @@
 use crate::message::ImageDetail;
 
 use super::*;
-use crate::providers::openai::completion::ToolChoice as OpenAIToolChoice;
 use crate::providers::openai::responses_api::openapi_schema::{self, Schema};
 use crate::providers::openai::responses_api::{
-    AdditionalParameters, DeclaredResponsesTool, ReasoningSummaryLevel, ResponsesRequestTool,
-    ResponsesToolDefinition, ToolResult, ToolStatus,
+    DeclaredResponsesTool, ResponsesRequestTool, ResponsesToolDefinition,
 };
 
 fn identity(thread_id: &str) -> CodexIdentity {
     CodexIdentity::from_ids("session-a", thread_id).expect("the fixture ids are header-safe")
 }
 
-fn request(instructions: Option<&str>, tools: Vec<ResponsesRequestTool>) -> CompletionRequest {
-    CompletionRequest {
-        input: vec![InputItem::user_content(UserContent::InputText {
-            text: "hello".to_owned(),
-        })],
-        model: "gpt-6-sol".to_owned(),
-        instructions: instructions.map(str::to_owned),
-        max_output_tokens: None,
-        stream: Some(true),
-        temperature: None,
-        tool_choice: None,
-        tools,
-        additional_parameters: AdditionalParameters::default(),
+fn request(instructions: Option<&str>, tools: Vec<ResponsesRequestTool>) -> Map<String, Value> {
+    let mut body = serde_json::json!({
+        "input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],
+        "model": "gpt-6-sol",
+        "stream": true,
+    })
+    .as_object()
+    .expect("fixture body is an object")
+    .clone();
+    if let Some(instructions) = instructions {
+        body.insert(
+            "instructions".to_owned(),
+            Value::String(instructions.to_owned()),
+        );
     }
+    if !tools.is_empty() {
+        body.insert(
+            "tools".to_owned(),
+            serde_json::to_value(tools).expect("actual tools serialize"),
+        );
+    }
+    body
 }
 
 fn shaped_json(
@@ -33,9 +39,9 @@ fn shaped_json(
     tools: Vec<ResponsesRequestTool>,
     thread_id: &str,
 ) -> Value {
-    let mut request = request(instructions, tools);
-    shape_request(&mut request, &identity(thread_id)).expect("the fixture can be shaped");
-    serde_json::to_value(request).expect("the shaped request serializes")
+    let mut body = request(instructions, tools);
+    shape_body(&mut body, &identity(thread_id)).expect("the fixture can be shaped");
+    Value::Object(body)
 }
 
 fn prefix_ids(body: &Value) -> (String, Option<String>) {
@@ -115,89 +121,101 @@ fn exact_prefix_ids_are_stable_and_change_only_with_their_inputs() {
     );
 }
 
-#[test]
-fn plain_developer_message_keeps_its_standard_mode_wire_shape() {
-    let value = serde_json::json!({
-        "role": "developer",
-        "content": "ordinary developer instruction"
-    });
-    let decoded: Message =
-        serde_json::from_value(value.clone()).expect("the legacy developer alias still decodes");
-
-    assert_eq!(
-        serde_json::to_value(decoded).expect("the developer item serializes"),
-        serde_json::json!({
-            "role": "developer",
-            "content": [{"type":"input_text","text":"ordinary developer instruction"}]
-        })
-    );
+fn request_with_raw_item(item: Value) -> crate::completion::CompletionRequest {
+    use crate::message::{AssistantContent, AssistantMessage, CarriedPayload, Message, ProviderItem};
+    crate::completion::CompletionRequest::new("hello").message(Message::Assistant(
+        AssistantMessage::new(vec![AssistantContent::ProviderItem(ProviderItem {
+            payload: CarriedPayload::new(item, None),
+        })]),
+    ))
 }
 
 #[test]
-fn named_developer_message_keeps_its_name_when_typed_and_reencoded() {
-    let value = serde_json::json!({
+fn ordinary_developer_items_keep_their_standard_mode_wire_shape() {
+    let expected = serde_json::json!({
         "role": "developer",
-        "content": "ordinary developer instruction",
+        "content": [{"type":"input_text","text":"ordinary developer instruction"}]
+    });
+    let mut target = lite_wire();
+    target.codex_request_shape = CodexRequestShape::Standard;
+    let body = encoded_body(&target, request_with_raw_item(expected.clone()));
+    assert_eq!(body["input"][1], expected);
+
+    // The old DTO's string alias is retired. A raw item was always an
+    // independent reader path, and its string stays exact on that path.
+    let raw = serde_json::json!({
+        "role": "developer", "content": "ordinary developer instruction"
+    });
+    let body = encoded_body(&target, request_with_raw_item(raw.clone()));
+    assert_eq!(body["input"][1], raw);
+}
+
+#[test]
+fn named_developer_items_keep_their_name_at_the_real_request_boundary() {
+    let expected = serde_json::json!({
+        "role": "developer",
+        "content": [{"type":"input_text","text":"ordinary developer instruction"}],
         "name": "policy"
     });
-    let decoded: Message =
-        serde_json::from_value(value).expect("the named developer message decodes");
-
-    assert_eq!(
-        serde_json::to_value(decoded).expect("the named developer message reencodes"),
-        serde_json::json!({
-            "role": "developer",
-            "content": [{"type":"input_text","text":"ordinary developer instruction"}],
-            "name": "policy"
-        })
-    );
+    let mut target = lite_wire();
+    target.codex_request_shape = CodexRequestShape::Standard;
+    let body = encoded_body(&target, request_with_raw_item(expected.clone()));
+    assert_eq!(body["input"][1], expected);
+    assert_eq!(body["input"][1]["name"], "policy");
 }
 
 #[test]
-fn non_message_input_keeps_accepting_an_explicit_null_role() {
-    let value = serde_json::json!({
-        "type": "function_call",
-        "role": null,
-        "id": "fc_1",
-        "arguments": "{}",
-        "call_id": "call_1",
-        "name": "lookup",
-        "status": "completed"
+fn canonical_function_calls_omit_role_and_raw_null_role_items_remain_exact() {
+    use crate::message::{AssistantContent, AssistantMessage, Message, ToolCall, ToolFunction, ToolName};
+    let call = ToolCall::from_wire("call_1", ToolFunction::new(
+        ToolName::new("lookup").expect("nonempty name"), serde_json::json!({}),
+    ));
+    let mut target = lite_wire();
+    target.codex_request_shape = CodexRequestShape::Standard;
+    let request = crate::completion::CompletionRequest::new("hello").message(Message::Assistant(
+        AssistantMessage::new(vec![AssistantContent::ToolCall(call)]),
+    ));
+    let body = encoded_body(&target, request);
+    assert_eq!(body["input"][1]["type"], "function_call");
+    assert_eq!(body["input"][1].get("role"), None);
+    assert_eq!(body["input"][1]["call_id"], "call_1");
+    assert_eq!(body["input"][1]["name"], "lookup");
+    assert_eq!(body["input"][1]["arguments"], "{}");
+
+    let raw = serde_json::json!({
+        "type": "function_call", "role": null, "id": "fc_1",
+        "arguments": "{}", "call_id": "call_1", "name": "lookup", "status": "completed"
     });
-    let decoded: InputItem =
-        serde_json::from_value(value).expect("an explicit null role remains optional");
-    let encoded = serde_json::to_value(decoded).expect("the function call re-serializes");
-
-    assert_eq!(encoded["type"], "function_call");
-    assert_eq!(encoded.get("role"), None);
+    let body = encoded_body(&target, request_with_raw_item(raw.clone()));
+    assert_eq!(body["input"][1], raw);
+    assert_eq!(body["input"][1].get("role"), Some(&Value::Null));
 }
 
 #[test]
-fn generated_lite_prefix_round_trips_without_accepting_a_conflicting_role() {
-    let value = shaped_json(Some("base"), Vec::new(), "thread-a");
-    let decoded: CompletionRequest =
-        serde_json::from_value(value.clone()).expect("the generated Lite request decodes");
-    for item in &decoded.input {
-        let encoded = serde_json::to_string(item).expect("the input item serializes");
+fn generated_lite_prefix_has_exact_bytes_and_its_schema_refuses_conflicting_role() {
+    let target = lite_wire();
+    let body = encoded_body(&target, crate::completion::CompletionRequest::new("hello").preamble("base"));
+    let expected = shaped_json(Some("base"), Vec::new(), "thread-a");
+    assert_eq!(&body["input"].as_array().expect("encoded input")[..2],
+        &expected["input"].as_array().expect("expected input")[..2]);
+    assert_eq!(prefix_ids(&body), prefix_ids(&expected));
+    assert_eq!(body["input"][1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        serde_json::json!(["model.base_instructions"]));
+    for item in body["input"].as_array().expect("input array") {
+        let encoded = serde_json::to_string(item).expect("actual input item serializes");
         if encoded.contains("\"role\"") {
-            assert_eq!(
-                encoded.matches("\"role\"").count(),
-                1,
-                "an input item must not serialize duplicate role keys: {encoded}"
-            );
+            assert_eq!(encoded.matches("\"role\"").count(), 1,
+                "an input item must not serialize duplicate role keys: {encoded}");
         }
     }
-    assert_eq!(
-        serde_json::to_value(decoded).expect("the decoded Lite request serializes"),
-        value
-    );
-
-    let mut conflicting = value;
-    conflicting["input"][0]["role"] = Value::String("user".to_owned());
-    assert!(
-        serde_json::from_value::<CompletionRequest>(conflicting).is_err(),
-        "an additional_tools prefix cannot silently normalize a conflicting role"
-    );
+    let serialized = serde_json::to_vec(&body).expect("actual request JSON bytes");
+    assert_eq!(serde_json::from_slice::<Value>(&serialized).expect("JSON bytes read back"), body);
+    openapi_schema::assert_valid(Schema::AdditionalToolsItem, &body["input"][0]);
+    openapi_schema::assert_valid(Schema::LiteInputItemView, &body["input"][0]);
+    let mut conflicting = body["input"][0].clone();
+    conflicting["role"] = Value::String("user".to_owned());
+    openapi_schema::assert_invalid(Schema::AdditionalToolsItem, &conflicting);
+    openapi_schema::assert_invalid(Schema::LiteInputItemView, &conflicting);
 }
 
 #[test]
@@ -342,7 +360,7 @@ fn malformed_functions_namespace_is_refused_instead_of_discarded() {
     );
 
     assert!(matches!(
-        shape_request(&mut request, &identity("thread-a")),
+        shape_body(&mut request, &identity("thread-a")),
         Err(ResponsesLiteError::MalformedFunctionsNamespace { field: "tools" })
     ));
 }
@@ -414,14 +432,13 @@ fn absent_lite_controls_are_defaulted_and_matching_values_are_retained() {
     assert_eq!(body["reasoning"]["context"], "all_turns");
 
     let mut request = request(None, Vec::new());
-    request.additional_parameters.parallel_tool_calls = Some(false);
-    request.tool_choice = Some(ToolChoice::Mode(OpenAIToolChoice::Auto));
-    request.additional_parameters.reasoning = Some(
-        Reasoning::new()
-            .with_context(ReasoningContext::AllTurns)
-            .with_summary_level(ReasoningSummaryLevel::Detailed),
+    request.insert("parallel_tool_calls".to_owned(), serde_json::json!(false));
+    request.insert("tool_choice".to_owned(), serde_json::json!("auto"));
+    request.insert(
+        "reasoning".to_owned(),
+        serde_json::json!({"context":"all_turns","summary":"detailed"}),
     );
-    shape_request(&mut request, &identity("thread-a")).expect("matching controls are valid");
+    shape_body(&mut request, &identity("thread-a")).expect("matching controls are valid");
     let body = serde_json::to_value(request).expect("the request serializes");
     assert_eq!(body["reasoning"]["summary"], "detailed");
 }
@@ -429,57 +446,293 @@ fn absent_lite_controls_are_defaulted_and_matching_values_are_retained() {
 #[test]
 fn explicit_conflicting_lite_controls_are_refused_by_name() {
     let mut parallel = request(None, Vec::new());
-    parallel.additional_parameters.parallel_tool_calls = Some(true);
+    parallel.insert("parallel_tool_calls".to_owned(), serde_json::json!(true));
     assert!(matches!(
-        shape_request(&mut parallel, &identity("thread-a")),
+        shape_body(&mut parallel, &identity("thread-a")),
         Err(ResponsesLiteError::ParallelToolCalls)
     ));
 
     let mut choice = request(None, Vec::new());
-    choice.tool_choice = Some(ToolChoice::Mode(OpenAIToolChoice::Required));
+    choice.insert("tool_choice".to_owned(), serde_json::json!("required"));
     assert!(matches!(
-        shape_request(&mut choice, &identity("thread-a")),
+        shape_body(&mut choice, &identity("thread-a")),
         Err(ResponsesLiteError::ToolChoice)
     ));
 
     let mut context = request(None, Vec::new());
-    context.additional_parameters.reasoning =
-        Some(Reasoning::new().with_context(ReasoningContext::CurrentTurn));
+    context.insert(
+        "reasoning".to_owned(),
+        serde_json::json!({"context":"current_turn"}),
+    );
     assert!(matches!(
-        shape_request(&mut context, &identity("thread-a")),
+        shape_body(&mut context, &identity("thread-a")),
         Err(ResponsesLiteError::ReasoningContext)
     ));
 }
 
+fn lite_wire() -> super::super::wire::Responses {
+    let mut config = crate::providers::openai::OpenAIConfig::with_key(
+        &crate::providers::chatgpt::DIALECT,
+        "test-key",
+    );
+    config = config.with_caller_identity(
+        crate::providers::openai::wire::CallerIdentity::new("fixture-origin", "fixture-agent/1.0", None)
+            .expect("caller headers are valid"),
+    );
+    config.instructions = None;
+    super::super::wire::Responses::new(config, "gpt-6-sol")
+        .with_codex_identity(identity("thread-a"))
+        .expect("Codex accepts its identity")
+        .with_responses_lite()
+        .expect("Codex supports Lite")
+}
+
+fn encoded_body(
+    target: &super::super::wire::Responses,
+    request: crate::completion::CompletionRequest,
+) -> Value {
+    use crate::wire::Wire;
+    let encoded = target
+        .encode(request, crate::wire::Mode::Unary)
+        .expect("real Responses request encodes");
+    crate::test_utils::json_body(&encoded.request)
+}
+
 #[test]
 fn full_and_delta_image_details_are_omitted_in_every_supported_location() {
-    let image_message = InputItem::user_content(UserContent::InputImage {
-        image_url: "https://example.test/image.png".to_owned(),
-        detail: Some(ImageDetail::High),
-    });
-    let function_output = InputItem {
-        role: None,
-        input: InputContent::FunctionCallOutput(ToolResult {
-            call_id: "call-1".to_owned(),
-            output: ToolResultOutput::Content(vec![ToolResultOutputContent::InputImage {
-                image_url: Some("https://example.test/result.png".to_owned()),
-                file_id: None,
-                detail: Some(ImageDetail::Low),
-            }]),
-            status: ToolStatus::Completed,
-        }),
+    use crate::message::{
+        AssistantContent, AssistantMessage, Message, ToolCall, ToolFunction, ToolName,
+        ToolResultContent, UserContent,
     };
-
-    let mut full = request(None, Vec::new());
-    full.input = vec![image_message.clone(), function_output.clone()];
-    shape_request(&mut full, &identity("thread-a")).expect("the full request shapes");
+    let image_message = Message::User {
+        content: vec![UserContent::image_url(
+            "https://example.test/image.png",
+            None,
+            Some(ImageDetail::High),
+        )],
+    };
+    let call = ToolCall::from_wire(
+        "call-1",
+        ToolFunction::new(
+            ToolName::new("lookup").expect("nonempty tool"),
+            serde_json::json!({}),
+        ),
+    );
+    let function_output =
+        Message::tool_results(vec![call.result(vec![ToolResultContent::image_url(
+            "https://example.test/result.png",
+            None,
+            Some(ImageDetail::Low),
+        )])]);
+    let history = vec![
+        image_message,
+        Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+            call,
+        )])),
+        function_output,
+    ];
+    let target = lite_wire();
+    let request = crate::completion::CompletionRequest::from(history.clone());
+    let full = target
+        .responses_request(
+            &request,
+            super::super::Delivery::Http(crate::wire::Mode::Unary),
+        )
+        .expect("the actual full request shapes");
     let full = serde_json::to_value(full).expect("the full request serializes");
     assert!(full["input"][1]["content"][0].get("detail").is_none());
-    assert!(full["input"][2]["output"][0].get("detail").is_none());
+    assert!(full["input"][3]["output"][0].get("detail").is_none());
+    assert_eq!(
+        full["input"][1]["content"][0]["image_url"],
+        "https://example.test/image.png"
+    );
+    assert_eq!(
+        full["input"][3]["output"][0]["image_url"],
+        "https://example.test/result.png"
+    );
+    assert_eq!(full["input"][3]["call_id"], "call-1");
+    assert_eq!(full["input"][3]["status"], "completed");
 
-    let mut delta = vec![image_message, function_output];
-    shape_delta(&mut delta);
-    let delta = serde_json::to_value(delta).expect("the delta serializes");
+    // Incremental input uses the same typed converter before the captured
+    // envelope supplies its existing Lite prefix and controls.
+    let delta = super::super::input(
+        &history,
+        &target,
+        &target.model,
+        &mut super::super::Custom {
+            tools: Default::default(),
+            calls: Default::default(),
+        },
+        true,
+    )
+    .expect("actual typed delta input converts");
     assert!(delta[0]["content"][0].get("detail").is_none());
-    assert!(delta[1]["output"][0].get("detail").is_none());
+    assert!(delta[2]["output"][0].get("detail").is_none());
+    assert_eq!(
+        &full["input"].as_array().expect("input array")[1..],
+        delta.as_slice()
+    );
+
+    let mut standard = target.clone();
+    standard.codex_request_shape = CodexRequestShape::Standard;
+    let input = super::super::input(
+        &history,
+        &standard,
+        &standard.model,
+        &mut super::super::Custom {
+            tools: Default::default(),
+            calls: Default::default(),
+        },
+        true,
+    )
+    .expect("standard image input converts");
+    assert_eq!(input[0]["content"][0]["detail"], "high");
+    assert_eq!(input[2]["output"][0]["detail"], "low");
+}
+
+#[test]
+fn raw_whole_items_keep_image_lookalikes_verbatim_in_full_and_websocket_bodies() {
+    use crate::message::{
+        AssistantContent, AssistantMessage, CarriedPayload, Message, ProviderItem,
+    };
+    let raw = vec![
+        serde_json::json!({"type":"message","role":"user","content":[{"type":"input_image","image_url":"https://example.test/image.png","detail":"high","future":{"detail":"nested"}}],"future_item":true}),
+        serde_json::json!({"type":"function_call_output","call_id":"call-1","output":[{"type":"input_image","image_url":"https://example.test/result.png","detail":"low"}],"status":"completed"}),
+    ];
+    let target = lite_wire();
+    let carried = crate::completion::CompletionRequest::from(vec![
+        Message::user("hello"),
+        Message::Assistant(AssistantMessage::new(
+            raw.iter()
+                .cloned()
+                .map(|item| {
+                    AssistantContent::ProviderItem(ProviderItem {
+                        payload: CarriedPayload::new(item, None),
+                    })
+                })
+                .collect(),
+        )),
+    ]);
+    for delivery in [
+        super::super::Delivery::Http(crate::wire::Mode::Unary),
+        super::super::Delivery::WebSocket,
+    ] {
+        let request = &carried;
+        let body = target
+            .responses_request_with_identity(
+                request,
+                delivery,
+                target.codex_identity.as_ref(),
+                super::super::InputRequirement::NonEmpty,
+            )
+            .expect("the real typed/full request boundary preserves raw items");
+        let input = body
+            .get("input")
+            .and_then(Value::as_array)
+            .expect("input array");
+        assert_eq!(&input[input.len() - raw.len()..], raw.as_slice());
+        for item in &raw {
+            assert!(input.contains(item));
+        }
+    }
+    let encoded = encoded_body(&target, carried);
+    let input = encoded["input"].as_array().expect("encoded input array");
+    assert_eq!(&input[input.len() - raw.len()..], raw.as_slice());
+}
+
+#[test]
+fn malformed_merged_body_members_are_typed_failures_without_fabricated_defaults() {
+    for (field, invalid, diagnostic) in [
+        (
+            "tools",
+            serde_json::json!({}),
+            "the Responses tools collection did not serialize as an array",
+        ),
+        (
+            "tools",
+            Value::Null,
+            "the Responses tools collection did not serialize as an array",
+        ),
+        (
+            "input",
+            serde_json::json!("untyped prompt"),
+            "the Responses input collection did not serialize as an array",
+        ),
+        (
+            "instructions",
+            serde_json::json!(7),
+            "the Responses instructions did not serialize as a string",
+        ),
+    ] {
+        let mut body = request(None, Vec::new());
+        body.insert(field.to_owned(), invalid.clone());
+        let error = shape_body(&mut body, &identity("thread-a"))
+            .expect_err("malformed merged member refuses");
+        assert!(matches!(error, ResponsesLiteError::ToolSerialization(_)));
+        assert_eq!(
+            error.to_string(),
+            format!("Responses Lite could not serialize the effective tools: {diagnostic}")
+        );
+        assert_eq!(body.get(field), Some(&invalid));
+    }
+}
+
+#[test]
+fn whitespace_instructions_and_unknown_body_fields_keep_exact_values() {
+    let instructions = "  base\n\n ";
+    let mut body = request(Some(instructions), Vec::new());
+    body.insert(
+        "future".to_owned(),
+        serde_json::json!({"exact":[null,"  untouched "]}),
+    );
+    let original_input = body["input"].clone();
+    shape_body(&mut body, &identity("thread-a")).expect("shape exact instruction bytes");
+    let input = body["input"].as_array().expect("input array");
+    assert_eq!(input[1]["content"][0]["text"], instructions);
+    assert_eq!(
+        input[1]["id"],
+        format!(
+            "msg_{}",
+            Uuid::new_v5(
+                &Uuid::new_v5(&Uuid::NAMESPACE_OID, b"thread-a"),
+                instructions.as_bytes()
+            )
+        )
+    );
+    assert_eq!(input[2], original_input[0]);
+    assert_eq!(
+        body["future"],
+        serde_json::json!({"exact":[null,"  untouched "]})
+    );
+    let empty = shaped_json(Some(""), Vec::new(), "thread-a");
+    assert_eq!(empty["input"].as_array().expect("input array").len(), 2);
+    assert!(empty.get("instructions").is_none());
+}
+
+#[cfg(feature = "websocket")]
+#[test]
+fn websocket_marker_merges_exact_metadata_and_refuses_a_non_object() {
+    let mut body =
+        serde_json::json!({"client_metadata":{"session_id":"session-a","future":[null,1]}})
+            .as_object()
+            .expect("object")
+            .clone();
+    stamp_websocket_marker(&mut body).expect("existing metadata accepts marker");
+    assert_eq!(
+        body["client_metadata"],
+        serde_json::json!({
+            "session_id":"session-a", "future":[null,1],
+            "ws_request_header_x_openai_internal_codex_responses_lite":"true",
+        })
+    );
+    let mut invalid = serde_json::json!({"client_metadata":17})
+        .as_object()
+        .expect("object")
+        .clone();
+    let error = stamp_websocket_marker(&mut invalid).expect_err("non-object metadata refuses");
+    assert_eq!(
+        error.to_string(),
+        "RequestError: the Codex request's `client_metadata` must be a JSON object to carry the Responses Lite marker, got 17"
+    );
+    assert_eq!(invalid["client_metadata"], 17);
 }

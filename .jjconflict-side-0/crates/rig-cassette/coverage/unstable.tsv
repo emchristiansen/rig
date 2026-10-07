@@ -1,0 +1,3 @@
+file	source	region	code	reason
+crates/rig-candle/src/runtime.rs	429e34fe07f9380c	54.0.0	while *blocked {	a generation waits on the test gate only when it reaches the gate before the test opens it, which depends on when the blocking thread runs
+crates/rig-candle/src/runtime.rs	429e34fe07f9380c	55	blocked = self.gate_changed.wait(blocked).map_err(|_| {	a generation waits on the test gate only when it reaches the gate before the test opens it, which depends on when the blocking thread runs

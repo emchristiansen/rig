@@ -1,0 +1,28 @@
+{
+  "header": {
+    "run_spec": 11761598427705777809,
+    "handlers": [
+      {
+        "key": "golden/model:default",
+        "family": {
+          "family": "completion",
+          "model": "default",
+          "capabilities": {
+            "composes_native_output_with_tools": false
+          }
+        },
+        "layers": [
+          "DenyAllLayer"
+        ]
+      }
+    ],
+    "signature": {},
+    "hooks": [
+      "DenyAllLayer"
+    ],
+    "required": {
+      "golden/model:default": "completion"
+    }
+  },
+  "records": []
+}

@@ -9,9 +9,10 @@ use std::fmt::Display;
 
 use rig_core::{
     Embed,
-    embeddings::{Embedding, EmbeddingModel},
+    embeddings::Embedding,
     vector_store::{
-        InsertDocuments, VectorStoreError, VectorStoreIndex,
+        InsertDocuments, VectorSearchIdResult, VectorSearchResult, VectorStoreError,
+        VectorStoreIndex,
         request::{DynamicSearchFilter, Filter, FilterError, SearchFilter, VectorSearchRequest},
     },
     wasm_compat::WasmCompatSend,
@@ -27,13 +28,13 @@ pub use surrealdb::engine::remote::ws::{Ws, Wss};
 
 /// Vector store backed by a SurrealDB table.
 ///
-/// Queries are embedded with the same model `M` that populated the table, so
+/// Queries are embedded with the same model that populated the table, so
 /// results are meaningless under another model.
-pub struct SurrealVectorStore<C, M>
+pub struct SurrealVectorStore<C>
 where
     C: Connection,
 {
-    model: M,
+    model: rig_core::DynModel<rig_core::operation::Embedding>,
     surreal: Surreal<C>,
     documents_table: String,
     distance_function: SurrealDistanceFunction,
@@ -86,11 +87,14 @@ pub struct SearchResultOnlyId {
 }
 
 impl SearchResult {
-    pub fn into_result<T: DeserializeOwned>(self) -> Result<(f64, String, T), VectorStoreError> {
-        let document: T =
-            serde_json::from_str(&self.document).map_err(VectorStoreError::JsonError)?;
-
-        Ok((self.distance, record_key_to_string(&self.id.key), document))
+    pub fn into_result<T: DeserializeOwned>(
+        self,
+    ) -> Result<VectorSearchResult<T>, VectorStoreError> {
+        Ok(VectorSearchResult {
+            score: self.distance,
+            id: record_key_to_string(&self.id.key),
+            document: serde_json::from_str(&self.document).map_err(VectorStoreError::JsonError)?,
+        })
     }
 }
 
@@ -103,7 +107,7 @@ fn record_key_to_string(key: &RecordIdKey) -> String {
     }
 }
 
-impl<C, M: EmbeddingModel> InsertDocuments for SurrealVectorStore<C, M>
+impl<C> InsertDocuments for SurrealVectorStore<C>
 where
     C: Connection,
 {
@@ -146,17 +150,9 @@ impl SurrealSearchFilter {
     }
 }
 
-impl TryFrom<Filter<serde_json::Value>> for SurrealSearchFilter {
-    type Error = FilterError;
-
-    fn try_from(value: Filter<serde_json::Value>) -> Result<Self, Self::Error> {
-        value.try_interpret(|v| Ok(Value::from_t(v)))
-    }
-}
-
 impl DynamicSearchFilter for SurrealSearchFilter {
     fn from_dynamic_filter(filter: Filter<serde_json::Value>) -> Result<Self, FilterError> {
-        Self::try_from(filter)
+        filter.try_interpret(|v| Ok(Value::from_t(v)))
     }
 }
 
@@ -256,18 +252,18 @@ impl SurrealSearchFilter {
     }
 }
 
-impl<C, M: EmbeddingModel> SurrealVectorStore<C, M>
+impl<C> SurrealVectorStore<C>
 where
     C: Connection,
 {
     pub fn new(
-        model: M,
+        model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
         surreal: Surreal<C>,
         documents_table: Option<String>,
         distance_function: SurrealDistanceFunction,
     ) -> Self {
         Self {
-            model,
+            model: model.into(),
             surreal,
             documents_table: documents_table.unwrap_or_else(|| String::from("documents")),
             distance_function,
@@ -278,7 +274,10 @@ where
         &self.surreal
     }
 
-    pub fn with_defaults(model: M, surreal: Surreal<C>) -> Self {
+    pub fn with_defaults(
+        model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
+        surreal: Surreal<C>,
+    ) -> Self {
         Self::new(model, surreal, None, SurrealDistanceFunction::Cosine)
     }
 
@@ -301,7 +300,7 @@ where
             .bind((
                 "filter",
                 req.filter()
-                    .clone()
+                    .cloned()
                     .map_or("true".into(), SurrealSearchFilter::inner),
             ))
             .await
@@ -327,23 +326,23 @@ where
     }
 }
 
-impl<C, M: EmbeddingModel> VectorStoreIndex for SurrealVectorStore<C, M>
+impl<C> VectorStoreIndex for SurrealVectorStore<C>
 where
     C: Connection,
 {
     type Filter = SurrealSearchFilter;
 
-    /// Returns matches as `(distance, record id, document)` ordered by descending
+    /// Returns matches scored by distance and keyed by record id, ordered by descending
     /// distance value. Errors when a stored document does not deserialize into `T`.
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<SurrealSearchFilter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         let mut response = self.run_search_query(&req, true).await?;
 
         let rows: Vec<SearchResult> = response.take(0).map_err(VectorStoreError::datastore)?;
 
-        let rows: Vec<(f64, String, T)> = rows
+        let rows: Vec<VectorSearchResult<T>> = rows
             .into_iter()
             .map(SearchResult::into_result)
             .collect::<Result<Vec<_>, _>>()?;
@@ -351,21 +350,24 @@ where
         Ok(rows)
     }
 
-    /// Like `top_n` but returns `(distance, record id)` without deserializing
-    /// documents.
+    /// Like `top_n` but returns only scores and record ids, without
+    /// deserializing documents.
     async fn top_n_ids(
         &self,
         req: VectorSearchRequest<SurrealSearchFilter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
         let mut response = self.run_search_query(&req, false).await?;
 
         let rows: Vec<SearchResultOnlyId> = response
             .take::<Vec<SearchResultOnlyId>>(0)
             .map_err(VectorStoreError::datastore)?;
 
-        let rows: Vec<(f64, String)> = rows
+        let rows: Vec<VectorSearchIdResult> = rows
             .into_iter()
-            .map(|row| (row.distance, record_key_to_string(&row.id.key)))
+            .map(|row| VectorSearchIdResult {
+                score: row.distance,
+                id: record_key_to_string(&row.id.key),
+            })
             .collect();
 
         Ok(rows)

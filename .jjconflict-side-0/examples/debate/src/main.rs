@@ -1,0 +1,90 @@
+use anyhow::Result;
+use rig::prelude::*;
+use rig::{
+    agent::Agent,
+    message::Message,
+    providers::{
+        cohere::{self, Cohere},
+        openai::{self, OpenAI},
+    },
+};
+
+struct Debater {
+    gpt_4: Agent,
+    coral: Agent,
+}
+
+impl Debater {
+    fn new(position_a: &str, position_b: &str) -> Result<Self> {
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_target(false)
+            .init();
+        let openai_client = OpenAI::from_env()?;
+        let cohere_client = Cohere::from_env()?;
+
+        Ok(Self {
+            gpt_4: AgentBuilder::new(openai_client.completion(openai::GPT_4))
+                .preamble(position_a)
+                .build(),
+            coral: AgentBuilder::new(cohere_client.completion(cohere::COMMAND_A_03_2025))
+                .preamble(position_b)
+                .build(),
+        })
+    }
+
+    async fn rounds(&self, n: usize) -> Result<()> {
+        let mut history_a: Vec<Message> = vec![];
+        let mut history_b: Vec<Message> = vec![];
+        let mut last_resp_b: Option<String> = None;
+        for _ in 0..n {
+            let prompt_a = if let Some(msg_b) = &last_resp_b {
+                msg_b.clone()
+            } else {
+                "Plead your case!".into()
+            };
+            let resp_a = self
+                .gpt_4
+                .prompt(prompt_a.as_str())
+                .history(&history_a)
+                .await?;
+            let answer_a = resp_a.output();
+            // Append this round to the history for the next one.
+            history_a.extend(resp_a.messages);
+            println!("GPT-4:\n{answer_a}");
+            println!("================================================================");
+            let resp_b = self
+                .coral
+                .prompt(answer_a.as_str())
+                .history(&history_b)
+                .await?;
+            let answer_b = resp_b.output();
+            // Append this round to the history for the next one.
+            history_b.extend(resp_b.messages);
+            println!("Coral:\n{answer_b}");
+            println!("================================================================");
+            last_resp_b = Some(answer_b);
+        }
+        Ok(())
+    }
+}
+#[tokio::main]
+async fn main() -> Result<(), anyhow::Error> {
+    // Create model
+    let debator = Debater::new(
+        "You believe that religion is a useful concept. \
+        This could be for security, financial, ethical, philosophical, metaphysical, religious or any kind of other reason. \
+        You choose what your arguments are. \
+        I will argue against you and you must rebuke me and try to convince me that I am wrong. \
+        Make your statements short and concise.",
+        "You believe that religion is a harmful concept. \
+        This could be for security, financial, ethical, philosophical, metaphysical, religious or any kind of other reason. \
+        You choose what your arguments are. \
+        I will argue against you and you must rebuke me and try to convince me that I am wrong. \
+        Make your statements short and concise.",
+    )?;
+
+    // Run the debate for 4 rounds
+    debator.rounds(4).await?;
+    Ok(())
+}

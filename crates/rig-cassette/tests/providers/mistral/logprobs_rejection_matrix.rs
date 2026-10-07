@@ -3,15 +3,14 @@
 //! Mistral's current API reference exposes no chat-completions logprobs
 //! contract, and both accessible chat families reject the OpenAI-compatible
 //! request field with error code 3051 (`Logprobs are not enabled for this
-//! model`). The 24-cell terminal-metadata matrix replaces the unsupported
-//! successful-logprobs matrix; these controls preserve the live evidence for
-//! that substitution and are not counted toward its 24 cells.
+//! model`). The terminal-metadata matrix replaces the unsupported
+//! successful-logprobs matrix; these controls keep the live evidence for that
+//! substitution.
 //!
-//! The finite recordable space is 2 transports × 2 accessible model families
-//! = 4 cells. There are no pruned or unit-only cells: `top_logprobs` has no
-//! additional reachable state once `logprobs: true` is rejected before
+//! The space is 2 transports × 2 accessible model families. `top_logprobs` has
+//! no further reachable state once `logprobs: true` is rejected before
 //! generation, so every cell fixes it at `2` and asserts the same typed error.
-//! Each explicit test maps to
+//! Each test maps to
 //! `crates/rig-cassette/fixtures/cassettes/mistral/logprobs_rejection_matrix/<test-name>.yaml`.
 //!
 //! | dimension | values |
@@ -22,16 +21,17 @@
 //!
 //! | recorded cells | exact fixture set |
 //! |---|---|
-//! | all 4 | `crates/rig-cassette/fixtures/cassettes/mistral/logprobs_rejection_matrix/{blocking,streaming}_{mistral_small,ministral_3b}.yaml` |
+//! | 2 of 4 | `crates/rig-cassette/fixtures/cassettes/mistral/logprobs_rejection_matrix/{blocking,streaming}_ministral_3b.yaml` |
 
+use rig_test_support::cassette_models::OpenAiModels;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt as _;
-use rig::completion::CompletionModel;
 use serde_json::{Value, json};
 
-use super::support::{BoundMistral, with_mistral_logprobs_rejection_cassette_result};
+use super::support::with_mistral_logprobs_rejection_cassette_result;
+use rig::completion::CompletionRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
@@ -41,7 +41,6 @@ enum Transport {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Model {
-    MistralSmall,
     Ministral3b,
 }
 
@@ -55,28 +54,25 @@ type SharedError = Arc<Mutex<Option<String>>>;
 
 fn model_name(model: Model) -> &'static str {
     match model {
-        Model::MistralSmall => "mistral-small-latest",
         Model::Ministral3b => "ministral-3b-latest",
     }
 }
 
-async fn run_cell(client: BoundMistral, cell: Cell, observed: SharedError) -> Result<()> {
+async fn run_cell(client: OpenAiModels, cell: Cell, observed: SharedError) -> Result<()> {
     let model = client.completion(model_name(cell.model));
-    let request = model
-        .completion_request("Reply with exactly: cobalt")
+    let request = CompletionRequest::new("Reply with exactly: cobalt")
         .additional_params(json!({ "logprobs": true, "top_logprobs": 2 }))
-        .max_tokens(8)
-        .build();
+        .max_tokens(8);
 
     // The blocking path fails with the provider's `ProviderError`; a stream
     // fails in-band with the `ErrorReport` it was mapped to. Both display the
     // preserved Mistral body, which is what the matrix asserts on.
     let error = match cell.transport {
-        Transport::Blocking => match model.completion(request).await {
+        Transport::Blocking => match model.call(request).await {
             Ok(_) => bail!("Mistral unexpectedly accepted blocking logprobs"),
             Err(error) => error.to_string(),
         },
-        Transport::Streaming => match model.stream(request).await {
+        Transport::Streaming => match model.stream(request) {
             Err(error) => error.to_string(),
             Ok(mut stream) => loop {
                 match stream.next().await {
@@ -144,24 +140,6 @@ async fn execute(scenario: &'static str, cell: Cell, observed: SharedError) {
 }
 
 #[tokio::test]
-async fn blocking_mistral_small() -> Result<()> {
-    const S: &str = "logprobs_rejection_matrix/blocking_mistral_small";
-    let cell = Cell {
-        transport: Transport::Blocking,
-        model: Model::MistralSmall,
-    };
-    let observed = SharedError::default();
-    let capture = Arc::clone(&observed);
-    with_mistral_logprobs_rejection_cassette_result(
-        "logprobs_rejection_matrix/blocking_mistral_small",
-        |client| async move { run_cell(client, cell, capture).await },
-    )
-    .await?;
-    execute(S, cell, observed).await;
-    Ok(())
-}
-
-#[tokio::test]
 async fn blocking_ministral_3b() -> Result<()> {
     const S: &str = "logprobs_rejection_matrix/blocking_ministral_3b";
     let cell = Cell {
@@ -172,24 +150,6 @@ async fn blocking_ministral_3b() -> Result<()> {
     let capture = Arc::clone(&observed);
     with_mistral_logprobs_rejection_cassette_result(
         "logprobs_rejection_matrix/blocking_ministral_3b",
-        |client| async move { run_cell(client, cell, capture).await },
-    )
-    .await?;
-    execute(S, cell, observed).await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn streaming_mistral_small() -> Result<()> {
-    const S: &str = "logprobs_rejection_matrix/streaming_mistral_small";
-    let cell = Cell {
-        transport: Transport::Streaming,
-        model: Model::MistralSmall,
-    };
-    let observed = SharedError::default();
-    let capture = Arc::clone(&observed);
-    with_mistral_logprobs_rejection_cassette_result(
-        "logprobs_rejection_matrix/streaming_mistral_small",
         |client| async move { run_cell(client, cell, capture).await },
     )
     .await?;

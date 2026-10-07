@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 16853303954472180534,
+    "run_spec": 9389567249194015575,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -132,51 +132,39 @@
             {
               "type": "toolcall",
               "id": {
-                "origin": "explicit",
-                "id": "call-1"
-              },
-              "provider": {
-                "call_id": "call-1"
+                "provider": "call-1"
               },
               "function": {
                 "name": "lookup",
                 "arguments": {
                   "q": "What is the capital of France?"
                 }
-              },
-              "signature": null,
-              "additional_params": null
+              }
             }
           ],
           "usage": {},
-          "message_id": null,
-          "response_id": null,
+          "origin": {
+            "api": "mock.script",
+            "provider": "mock",
+            "model": "mock-model"
+          },
           "finish_reason": null,
-          "provider": "mock",
-          "model": null,
           "raw": {
             "choice": [
               {
                 "type": "toolcall",
                 "id": {
-                  "origin": "explicit",
-                  "id": "call-1"
-                },
-                "provider": {
-                  "call_id": "call-1"
+                  "provider": "call-1"
                 },
                 "function": {
                   "name": "lookup",
                   "arguments": {
                     "q": "What is the capital of France?"
                   }
-                },
-                "signature": null,
-                "additional_params": null
+                }
               }
             ],
             "usage": {},
-            "message_id": null,
             "response_id": null,
             "provider_request_id": null,
             "finish_reason": null
@@ -276,27 +264,26 @@
             },
             {
               "role": "assistant",
-              "id": null,
               "content": [
                 {
                   "type": "toolcall",
                   "id": {
-                    "origin": "explicit",
-                    "id": "call-1"
-                  },
-                  "provider": {
-                    "call_id": "call-1"
+                    "provider": "call-1"
                   },
                   "function": {
                     "name": "lookup",
                     "arguments": {
                       "q": "What is the capital of France?"
                     }
-                  },
-                  "signature": null,
-                  "additional_params": null
+                  }
                 }
-              ]
+              ],
+              "origin": {
+                "api": "mock.script",
+                "provider": "mock",
+                "model": "mock-model"
+              },
+              "stop": "tool_use"
             },
             {
               "role": "user",
@@ -304,11 +291,7 @@
                 {
                   "type": "toolresult",
                   "call": {
-                    "origin": "explicit",
-                    "id": "call-1"
-                  },
-                  "provider": {
-                    "call_id": "call-1"
+                    "provider": "call-1"
                   },
                   "name": "lookup",
                   "answers": "function",
@@ -363,11 +346,12 @@
             }
           ],
           "usage": {},
-          "message_id": null,
-          "response_id": null,
+          "origin": {
+            "api": "mock.script",
+            "provider": "mock",
+            "model": "mock-model"
+          },
           "finish_reason": null,
-          "provider": "mock",
-          "model": null,
           "raw": {
             "choice": [
               {
@@ -376,7 +360,6 @@
               }
             ],
             "usage": {},
-            "message_id": null,
             "response_id": null,
             "provider_request_id": null,
             "finish_reason": null

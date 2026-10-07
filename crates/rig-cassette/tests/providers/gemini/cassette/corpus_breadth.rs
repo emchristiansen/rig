@@ -5,15 +5,14 @@
 //! recording under `crates/rig-cassette/fixtures/cassettes/gemini/corpus_breadth/`.
 
 use futures::StreamExt;
-use rig::agent::{AgentBuilder, MultiTurnStreamItem, StreamingError};
+use rig::agent::{AgentBuilder, MultiTurnStreamItem};
 use rig::bus::Bus;
 use rig::completion::PromptError;
-use rig::driver::{Bound, Socket};
 use rig::effect::{EffectFamily, HandlerKey};
-use rig::prelude::*;
-use rig::providers::gemini::{self, Gemini};
+use rig::providers::gemini::{self};
 use rig::run::OutputMode;
 use rig_cassette::agent::AgentReplayExt;
+use rig_test_support::cassette_models::GeminiModels;
 
 use super::super::support::with_gemini_corpus_breadth_cassette;
 use crate::goldens::{
@@ -43,21 +42,20 @@ async fn final_output(stream: &mut rig::agent::StreamingResult) -> Result<String
     let mut output = None;
     while let Some(item) = stream.next().await {
         match item {
-            Ok(MultiTurnStreamItem::FinalResponse(response)) => output = Some(response.output),
+            Ok(MultiTurnStreamItem::FinalResponse(response)) => output = Some(response.output()),
             Ok(_) => {}
-            Err(StreamingError::Prompt(error)) => match error {
-                PromptError::PromptCancelled { reason, .. } => return Err(reason),
+            Err(error) => match error {
+                PromptError::Cancelled { reason, .. } => return Err(reason),
                 other => panic!("the stream yields: {other:?}"),
             },
-            Err(other) => panic!("the stream yields: {other:?}"),
         }
     }
     Ok(output.expect("a final response"))
 }
 
 /// A host's bus with the model, and the host's note taker or embedding model.
-fn host_bus<H: Socket>(
-    client: &Bound<Gemini, H>,
+fn host_bus(
+    client: &GeminiModels,
     notes: bool,
     embeds: bool,
 ) -> (
@@ -71,7 +69,7 @@ fn host_bus<H: Socket>(
     driver
         .register_erased(
             model_key.clone(),
-            rig::serve::ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
+            rig::serve::ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                 "default",
                 client.completion(MODEL),
             )),
@@ -89,7 +87,7 @@ fn host_bus<H: Socket>(
         driver
             .register_erased(
                 HandlerKey::from(EMBED_KEY),
-                rig::serve::ErasedHandler::new(rig::serve::adapters::EmbedAdapter::new(
+                rig::serve::ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                     "host",
                     client.embedding(gemini::embedding::EMBEDDING_001, None),
                 )),
@@ -107,8 +105,7 @@ async fn output_tool_streamed_effect_log_is_the_golden_fixture() {
         "corpus_breadth/output_tool_streamed",
         |client| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-            let agent = client
-                .agent(MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .name("golden")
                 .preamble(BASIC_PREAMBLE)
                 .temperature(0.0)
@@ -135,8 +132,7 @@ async fn output_tool_streamed_effect_log_is_the_golden_fixture() {
 async fn text_delta_stop_effect_log_is_the_golden_fixture() {
     with_gemini_corpus_breadth_cassette("corpus_breadth/text_delta_stop", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
-        let agent = client
-            .agent(MODEL)
+        let agent = rig::AgentBuilder::new(client.completion(MODEL))
             .name("golden")
             .preamble(BASIC_PREAMBLE)
             .temperature(0.0)
@@ -177,8 +173,7 @@ async fn tool_dispatch_cancelled_effect_log_is_the_golden_fixture() {
         "corpus_breadth/tool_dispatch_cancelled",
         |client| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-            let agent = client
-                .agent(MODEL)
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .name("golden")
                 .preamble(TOOLS_PREAMBLE)
                 .temperature(0.0)
@@ -190,7 +185,7 @@ async fn tool_dispatch_cancelled_effect_log_is_the_golden_fixture() {
                 .await
                 .expect_err("the hook stops the run");
             assert!(
-                matches!(&error, PromptError::PromptCancelled { reason, .. } if reason == CANCEL_ADD_DISPATCH),
+                matches!(&error, PromptError::Cancelled { reason, .. } if reason == CANCEL_ADD_DISPATCH),
                 "{error:?}"
             );
             let log = agent.stamp(recorder.take());
@@ -223,7 +218,7 @@ async fn custom_at_outcome_effect_log_is_the_golden_fixture() {
             .max_turns(3)
             .await
             .expect("the agent answers")
-            .output;
+            .output();
         assert!(output.contains("42"), "{output}");
         let log = agent.stamp(recorder.take());
         drop((agent, dispatcher, registrar));
@@ -247,8 +242,7 @@ async fn custom_at_outcome_effect_log_is_the_golden_fixture() {
 async fn output_tool_unary_effect_log_is_the_golden_fixture() {
     with_gemini_corpus_breadth_cassette("corpus_breadth/output_tool_unary", |client| async move {
         let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = client
-            .agent(MODEL)
+        let agent = rig::AgentBuilder::new(client.completion(MODEL))
             .name("golden")
             .preamble(BASIC_PREAMBLE)
             .temperature(0.0)
@@ -260,7 +254,7 @@ async fn output_tool_unary_effect_log_is_the_golden_fixture() {
             .prompt(STRUCTURED_OUTPUT_PROMPT)
             .await
             .expect("the agent answers");
-        assert_event(&response.output);
+        assert_event(&response.output());
         let log = agent.stamp(recorder.take());
         assert_eq!(families(&log), [EffectFamily::Completion]);
         crate::goldens::golden_effects("gemini_breadth_output_tool_unary", &log);
@@ -287,7 +281,7 @@ async fn embed_prompt_effect_log_is_the_golden_fixture() {
             .prompt(PROMPT)
             .await
             .expect("the agent answers")
-            .output;
+            .output();
         assert!(!output.is_empty());
         let log = agent.stamp(recorder.take());
         drop((agent, dispatcher, registrar));

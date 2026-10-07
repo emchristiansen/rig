@@ -1,0 +1,16 @@
+when:
+  path: /v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":64,"messages":[{"content":"Write alpha BANANA omega.","role":"user"}],"model":"Qwen/Qwen3.5-9B","stop":["BANANA"]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  body: '{"choices":[{"finish_reason":"stop","index":0,"message":{"reasoning_content":"Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Input: \"Write alpha ","reasoning_details":[{"format":"unknown","index":0,"text":"Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Input: \"Write alpha ","type":"reasoning.text"}],"refusal":null,"role":"assistant"}}],"created":0,"id":"resp_c0603d60-c109-46f5-917d-5d8fc10d4d5f","model":"Qwen/Qwen3.5-9B","object":"chat.completion","system_fingerprint":"vllm-0.23.0-ed3ef83f","usage":{"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_24h_input_tokens":0,"ephemeral_5m_input_tokens":0},"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"completion_tokens":24,"completion_tokens_details":{"audio_tokens":0,"image_tokens":0,"reasoning_tokens":21},"prompt_tokens":16,"prompt_tokens_details":{"audio_tokens":0,"cache_write_tokens":0,"cached_tokens":0,"video_tokens":0},"total_tokens":40}}'

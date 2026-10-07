@@ -25,7 +25,7 @@ use rig_agent::{
 use rig_cassette::effect_log::EffectLogRecorder;
 use rig_core::serve::ServingPolicy;
 use rig_core::{
-    completion::CompletionRequestBuilder,
+    completion::CompletionRequest,
     effect::{EffectKind, EffectRecord},
     test_utils::{MockCompletionModel, MockTurn},
     transcript,
@@ -122,7 +122,11 @@ fn model_for(case: &Case) -> MockCompletionModel {
             id += 1;
             rig_core::message::AssistantContent::ToolCall(rig_core::message::ToolCall::from_wire(
                 format!("tc-{id}"),
-                rig_core::message::ToolFunction::new(tool_name(*tool).to_owned(), json!({"n": n})),
+                rig_core::message::ToolFunction::new(
+                    rig_core::message::ToolName::new(tool_name(*tool).to_owned())
+                        .expect("tool name"),
+                    json!({"n": n}),
+                ),
             ))
         })),
     }))
@@ -174,7 +178,7 @@ async fn bus_interpreter(case: &Case) -> (String, Trace) {
         )),
         "only completions and tool calls in this program"
     );
-    (response.output, trace_of(log.iter()))
+    (response.output(), trace_of(log.iter()))
 }
 
 async fn hand_interpreter(case: &Case) -> (String, Trace) {
@@ -234,22 +238,17 @@ async fn hand_interpreter(case: &Case) -> (String, Trace) {
                 )
                 .expect("prepared");
                 run.advertise_tools(turn, prepared.tools.clone());
-                let executable = prepared.executable_tool_names.clone();
-                let allowed = prepared.allowed_tool_names.clone();
-                let request = prepared
-                    .apply(CompletionRequestBuilder::unbound(prompt))
-                    .build();
-                let response =
-                    tokio::time::timeout(Duration::from_secs(5), model.complete(request))
-                        .await
-                        .expect("never hangs")
-                        .expect("the model");
+                let policy = prepared.policy.clone();
+                let request = prepared.apply(CompletionRequest::new(prompt));
+                let response = tokio::time::timeout(Duration::from_secs(5), model.call(request))
+                    .await
+                    .expect("never hangs")
+                    .expect("the model");
                 run.model_response(ModelTurn::new(
-                    None,
+                    response.head(),
                     response.choice,
                     response.usage,
-                    executable,
-                    allowed,
+                    policy,
                     response.raw,
                 ))
                 .expect("a model turn");
@@ -262,7 +261,7 @@ async fn hand_interpreter(case: &Case) -> (String, Trace) {
                         Duration::from_secs(5),
                         tool_handle(&name).call(
                             name.clone(),
-                            call.tool_call.function.arguments.to_string(),
+                            call.tool_call.function.arguments_value().to_string(),
                             ToolContext::new(),
                         ),
                     )
@@ -271,14 +270,13 @@ async fn hand_interpreter(case: &Case) -> (String, Trace) {
                     .expect("the tool");
                     results.push(transcript::tool_result_output(
                         call.tool_call.id.clone(),
-                        call.tool_call.provider.clone(),
                         name,
-                        answer.result.output().clone(),
+                        &answer.result,
                     ));
                 }
                 run.tool_results(results).expect("tool results");
             }
-            AgentRunStep::Done(response) => break response.output,
+            AgentRunStep::Done(response) => break response.output(),
         }
     };
     drop((model, dispatcher, agent));

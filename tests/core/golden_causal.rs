@@ -78,7 +78,7 @@ async fn over_host(host: Host) -> EffectLog {
     driver
         .register_erased(
             model_key.clone(),
-            rig::serve::ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
+            rig::serve::ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                 "default",
                 script(),
             )),
@@ -151,7 +151,7 @@ async fn over_host(host: Host) -> EffectLog {
                 .await
                 .expect("a nested dispatch never hangs the run")
                 .expect("the agent answers")
-                .output;
+                .output();
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "refused or served, never queued behind itself"

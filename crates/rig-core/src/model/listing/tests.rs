@@ -1,70 +1,16 @@
 use super::*;
 
 #[test]
-fn test_model_from_id() {
-    let model = Model::from_id("gpt-4");
-    assert_eq!(model.id, "gpt-4");
-    assert_eq!(model.name, None);
-    assert_eq!(model.description, None);
-    assert_eq!(model.r#type, None);
-    assert_eq!(model.created_at, None);
-    assert_eq!(model.owned_by, None);
-    assert_eq!(model.context_length, None);
-}
-
-#[test]
 fn test_model_new() {
-    let model = Model::new("gpt-4", "GPT-4");
+    let model = ModelInfo::new("gpt-4", "GPT-4");
     assert_eq!(model.id, "gpt-4");
     assert_eq!(model.name, Some("GPT-4".to_string()));
 }
 
 #[test]
-fn test_model_display_name() {
-    let model_with_name = Model::new("gpt-4", "GPT-4");
-    assert_eq!(model_with_name.display_name(), "GPT-4");
-
-    let model_without_name = Model::from_id("gpt-4");
-    assert_eq!(model_without_name.display_name(), "gpt-4");
-}
-
-#[test]
 fn test_model_display() {
-    let model = Model::new("gpt-4", "GPT-4");
+    let model = ModelInfo::new("gpt-4", "GPT-4");
     assert_eq!(format!("{model}"), "GPT-4");
-}
-
-#[test]
-fn test_model_list_new() {
-    let list = ModelList::new(vec![Model::from_id("gpt-4")]);
-    assert_eq!(list.len(), 1);
-}
-
-#[test]
-fn test_model_list_empty() {
-    let list = ModelList::new(vec![]);
-    assert!(list.is_empty());
-    assert_eq!(list.len(), 0);
-}
-
-#[test]
-fn test_model_list_iter() {
-    let list = ModelList::new(vec![
-        Model::from_id("gpt-4"),
-        Model::from_id("gpt-3.5-turbo"),
-    ]);
-    let models: Vec<_> = list.iter().collect();
-    assert_eq!(models.len(), 2);
-}
-
-#[test]
-fn test_model_list_into_iter() {
-    let list = ModelList::new(vec![
-        Model::from_id("gpt-4"),
-        Model::from_id("gpt-3.5-turbo"),
-    ]);
-    let models: Vec<_> = list.into_iter().collect();
-    assert_eq!(models.len(), 2);
 }
 
 #[test]
@@ -92,7 +38,7 @@ fn a_rejected_listing_names_its_provider_and_path() {
 fn a_listing_that_did_not_parse_names_its_provider_and_path() {
     let json = serde_json::from_str::<serde_json::Value>("{").expect_err("malformed");
     for error in [
-        ProviderError::Json(json),
+        ProviderError::Json(json.into()),
         ProviderError::Response("Invalid JSON".to_owned()),
     ] {
         let ProviderError::Response(message) = with_route(error, "openai", "/v1/models") else {
@@ -105,13 +51,13 @@ fn a_listing_that_did_not_parse_names_its_provider_and_path() {
 #[test]
 fn a_listing_transport_failure_is_unchanged_by_its_route() {
     let error = with_route(
-        ProviderError::Http(crate::http_client::Error::StreamEnded),
+        ProviderError::Http(crate::http_client::Error::StreamEnded.into()),
         "openai",
         "/v1/models",
     );
     assert!(matches!(
         error,
-        ProviderError::Http(crate::http_client::Error::StreamEnded)
+        ProviderError::Http(ref error) if matches!(**error, crate::http_client::Error::StreamEnded)
     ));
     assert!(error.is_retryable());
 }
@@ -135,7 +81,7 @@ fn a_listing_route_is_a_diagnostic_and_is_not_serialized() {
 
 #[test]
 fn test_model_serde() {
-    let model = Model {
+    let model = ModelInfo {
         id: "gpt-4".to_string(),
         name: Some("GPT-4".to_string()),
         description: None,
@@ -150,7 +96,7 @@ fn test_model_serde() {
     assert!(json.contains("gpt-4"));
     assert!(json.contains("GPT-4"));
 
-    let deserialized: Model = serde_json::from_str(&json).unwrap();
+    let deserialized: ModelInfo = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.id, "gpt-4");
     assert_eq!(deserialized.name, Some("GPT-4".to_string()));
 }
@@ -158,7 +104,7 @@ fn test_model_serde() {
 #[test]
 fn test_model_list_serde() {
     let list = ModelList {
-        data: vec![Model::from_id("gpt-4")],
+        data: vec![ModelInfo::from_id("gpt-4")],
     };
 
     let json = serde_json::to_string(&list).unwrap();
@@ -166,12 +112,6 @@ fn test_model_list_serde() {
 
     let deserialized: ModelList = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.len(), 1);
-}
-
-#[test]
-fn test_format_response_body_preview_without_truncation() {
-    let preview = format_response_body_preview(br#"{"ok":true}"#);
-    assert_eq!(preview, r#"{"ok":true}"#);
 }
 
 #[test]

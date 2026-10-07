@@ -1,0 +1,570 @@
+{
+  "agent/max_tokens.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "text": "We are to explain Rust in one or two sentences, focusing on what it is and why memory safety matters.\n Rust is",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 42,
+      "output_tokens": 24,
+      "total_tokens": 66
+    },
+    "response_id": "chatcmpl-46",
+    "finish_reason": "length",
+    "model": "qwen3:4b",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "message": {
+            "content": "We are to explain Rust in one or two sentences, focusing on what it is and why memory safety matters.\n Rust is",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-46",
+      "model": "qwen3:4b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_ollama",
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 42,
+        "total_tokens": 66
+      }
+    }
+  },
+  "agentic/native_mode.yaml#1": {
+    "mode": "unary",
+    "choice": [
+      {
+        "text": "{\n  \"city\": \"Tokyo\",\n  \"summary\": \"Sunny with light clouds, 72°F (22°C), humidity 45%, wind 8 mph from the northwest.\"\n}\n",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 870,
+      "output_tokens": 44,
+      "total_tokens": 914
+    },
+    "response_id": "chatcmpl-347",
+    "finish_reason": "stop",
+    "model": "qwen3:4b",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "{\n  \"city\": \"Tokyo\",\n  \"summary\": \"Sunny with light clouds, 72°F (22°C), humidity 45%, wind 8 mph from the northwest.\"\n}\n",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-347",
+      "model": "qwen3:4b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_ollama",
+      "usage": {
+        "completion_tokens": 44,
+        "prompt_tokens": 870,
+        "total_tokens": 914
+      }
+    }
+  },
+  "agentic/streaming_structured_output_with_tools.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "Okay, the user is asking for the current weather in Tokyo. I need to use the get_weather tool provided. Let me check the function signature. The function requires a city name as a parameter. The city here is Tokyo.\n\nSo I should call get_weather with city set to \"Tokyo\". The response should be a JSON object with the function name and arguments. The arguments need to be a JSON object where the key is \"city\" and the value is \"Tokyo\".\n\nWait, the function's parameters are defined as having a city which is a string. The description says \"City name to get weather for\". So yes, I need to pass \"Tokyo\" as the city parameter.\n\nLet me make sure there's no typo in the city name. The user said Tokyo, which is correct.\n\nSo the tool call would be:\n\n{\n  \"name\": \"get_weather\",\n  \"arguments\": {\n    \"city\": \"Tokyo\"\n  }\n}\n\nYes, that seems right. I don't need to do anything else since the user just wants the tool call. The next step would be to get the response from the tool and then return the city name and a one-sentence summary. But for now, the task is to generate the tool call. So this is the correct JSON in the tool_call tags.\n</think>\n\n",
+        "native": null
+      },
+      {
+        "tool_call": {
+          "id": "call_7bvcwd02",
+          "name": "get_weather",
+          "arguments": {
+            "city": "Tokyo"
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"city\":\"Tokyo\"}",
+                "name": "get_weather"
+              },
+              "id": "call_7bvcwd02",
+              "type": "function"
+            },
+            "fingerprint": "816b698cb08776d3"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 195,
+      "output_tokens": 291,
+      "total_tokens": 486
+    },
+    "response_id": "chatcmpl-325",
+    "finish_reason": "tool_calls",
+    "model": "qwen3:4b",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "Okay, the user is asking for the current weather in Tokyo. I need to use the get_weather tool provided. Let me check the function signature. The function requires a city name as a parameter. The city here is Tokyo.\n\nSo I should call get_weather with city set to \"Tokyo\". The response should be a JSON object with the function name and arguments. The arguments need to be a JSON object where the key is \"city\" and the value is \"Tokyo\".\n\nWait, the function's parameters are defined as having a city which is a string. The description says \"City name to get weather for\". So yes, I need to pass \"Tokyo\" as the city parameter.\n\nLet me make sure there's no typo in the city name. The user said Tokyo, which is correct.\n\nSo the tool call would be:\n\n{\n  \"name\": \"get_weather\",\n  \"arguments\": {\n    \"city\": \"Tokyo\"\n  }\n}\n\nYes, that seems right. I don't need to do anything else since the user just wants the tool call. The next step would be to get the response from the tool and then return the city name and a one-sentence summary. But for now, the task is to generate the tool call. So this is the correct JSON in the tool_call tags.\n</think>\n\n",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"city\":\"Tokyo\"}",
+                  "name": "get_weather"
+                },
+                "id": "call_7bvcwd02",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-325",
+      "model": "qwen3:4b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_ollama",
+      "usage": {
+        "completion_tokens": 291,
+        "prompt_tokens": 195,
+        "total_tokens": 486
+      }
+    }
+  },
+  "agentic/streaming_structured_output_with_tools.yaml#1": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "{\n  \"city\": \"Tokyo\",\n  \"summary\": \"Sunny with light clouds, 72F (22C), humidity 45%, wind 8 mph NW\"\n}\n",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 526,
+      "output_tokens": 42,
+      "total_tokens": 568
+    },
+    "response_id": "chatcmpl-96",
+    "finish_reason": "stop",
+    "model": "qwen3:4b",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\n  \"city\": \"Tokyo\",\n  \"summary\": \"Sunny with light clouds, 72F (22C), humidity 45%, wind 8 mph NW\"\n}\n",
+            "role": "assistant"
+          },
+          "finish_reason": "stop",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-96",
+      "model": "qwen3:4b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_ollama",
+      "usage": {
+        "completion_tokens": 42,
+        "prompt_tokens": 526,
+        "total_tokens": 568
+      }
+    }
+  },
+  "history_survival_matrix/streaming.yaml#3": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Okay, let's see. The user wants me to look up the alpha and beta records, verify each code, and report both with their verification status.\n\nFirst, I tried looking up \"alpha\" and \"beta\" via lookup_record. But there was a parsing error because the arguments were missing the 'record' field instead of 'name'. So I corrected that by using the right field name 'record' as per the tool's definition.\n\nThen, the lookups succeeded, returning codes \"alpha-code-7431\" and \"beta-code-2286\". Next, I called verify_code for each code.\n\nFor alpha-code-7431, the verify succeeded. But for beta-code-2286, the tool failed. The user said if a tool reports a transient failure, try again once. So I need to retry the verify for beta.\n\nWait, the latest tool response says \"the tool failed\" for beta. So I should retry the verify_code for beta-code-2286 once.\n\nSo the next step is to call verify_code again for beta-code-2286.\n\nLet me structure the tool call for that.\n\nThe function is verify_code with the code \"beta-code-2286\".\n\nSo the tool_call should be:\n\n{\"name\": \"verify_code\", \"arguments\": {\"code\": \"beta-code-2286\"}}\n\nAfter retrying, if it succeeds, report status. If still fails, maybe handle differently, but the user says to retry once.\n\nSo the answer here is to retry the beta verification.\n",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning": "Okay, let's see. The user wants me to look up the alpha and beta records, verify each code, and report both with their verification status.\n\nFirst, I tried looking up \"alpha\" and \"beta\" via lookup_record. But there was a parsing error because the arguments were missing the 'record' field instead of 'name'. So I corrected that by using the right field name 'record' as per the tool's definition.\n\nThen, the lookups succeeded, returning codes \"alpha-code-7431\" and \"beta-code-2286\". Next, I called verify_code for each code.\n\nFor alpha-code-7431, the verify succeeded. But for beta-code-2286, the tool failed. The user said if a tool reports a transient failure, try again once. So I need to retry the verify for beta.\n\nWait, the latest tool response says \"the tool failed\" for beta. So I should retry the verify_code for beta-code-2286 once.\n\nSo the next step is to call verify_code again for beta-code-2286.\n\nLet me structure the tool call for that.\n\nThe function is verify_code with the code \"beta-code-2286\".\n\nSo the tool_call should be:\n\n{\"name\": \"verify_code\", \"arguments\": {\"code\": \"beta-code-2286\"}}\n\nAfter retrying, if it succeeds, report status. If still fails, maybe handle differently, but the user says to retry once.\n\nSo the answer here is to retry the beta verification.\n"
+            },
+            "fingerprint": "48776623fb56df5a"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "id": "call_1mh4447p",
+          "name": "verify_code",
+          "arguments": {
+            "code": "beta-code-2286"
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"code\":\"beta-code-2286\"}",
+                "name": "verify_code"
+              },
+              "id": "call_1mh4447p",
+              "type": "function"
+            },
+            "fingerprint": "d97bb7e6d6a274dc"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 4752,
+      "output_tokens": 351,
+      "total_tokens": 5103
+    },
+    "response_id": "chatcmpl-986",
+    "finish_reason": "tool_calls",
+    "model": "qwen3:4b",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": null,
+            "reasoning": "Okay, let's see. The user wants me to look up the alpha and beta records, verify each code, and report both with their verification status.\n\nFirst, I tried looking up \"alpha\" and \"beta\" via lookup_record. But there was a parsing error because the arguments were missing the 'record' field instead of 'name'. So I corrected that by using the right field name 'record' as per the tool's definition.\n\nThen, the lookups succeeded, returning codes \"alpha-code-7431\" and \"beta-code-2286\". Next, I called verify_code for each code.\n\nFor alpha-code-7431, the verify succeeded. But for beta-code-2286, the tool failed. The user said if a tool reports a transient failure, try again once. So I need to retry the verify for beta.\n\nWait, the latest tool response says \"the tool failed\" for beta. So I should retry the verify_code for beta-code-2286 once.\n\nSo the next step is to call verify_code again for beta-code-2286.\n\nLet me structure the tool call for that.\n\nThe function is verify_code with the code \"beta-code-2286\".\n\nSo the tool_call should be:\n\n{\"name\": \"verify_code\", \"arguments\": {\"code\": \"beta-code-2286\"}}\n\nAfter retrying, if it succeeds, report status. If still fails, maybe handle differently, but the user says to retry once.\n\nSo the answer here is to retry the beta verification.\n",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"code\":\"beta-code-2286\"}",
+                  "name": "verify_code"
+                },
+                "id": "call_1mh4447p",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-986",
+      "model": "qwen3:4b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_ollama",
+      "usage": {
+        "completion_tokens": 351,
+        "prompt_tokens": 4752,
+        "total_tokens": 5103
+      }
+    }
+  },
+  "history_survival_matrix/unary.yaml#6": {
+    "mode": "unary",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Okay, let's see. The user asked to verify the alpha code once more and confirm if it's unchanged. So I made the tool call for verify_code on alpha-code-7431. The response was \"verified alpha-code-7431\". That means the code is still valid and unchanged.\n\nNow I need to report back to the user. The previous messages showed that both alpha and beta were verified successfully after some retries. Since this latest verification for alpha succeeded again, I should state that it's unchanged. The user wanted confirmation of whether it's still unchanged, and the tool response confirms it's verified, so it's unchanged.\n\nI'll phrase it concisely as \"Alpha code alpha-code-7431 remains unchanged and verified.\" That covers the request without extra details.\n",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning": "Okay, let's see. The user asked to verify the alpha code once more and confirm if it's unchanged. So I made the tool call for verify_code on alpha-code-7431. The response was \"verified alpha-code-7431\". That means the code is still valid and unchanged.\n\nNow I need to report back to the user. The previous messages showed that both alpha and beta were verified successfully after some retries. Since this latest verification for alpha succeeded again, I should state that it's unchanged. The user wanted confirmation of whether it's still unchanged, and the tool response confirms it's verified, so it's unchanged.\n\nI'll phrase it concisely as \"Alpha code alpha-code-7431 remains unchanged and verified.\" That covers the request without extra details.\n"
+            },
+            "fingerprint": "caea5f39e13bcb59"
+          }
+        }
+      },
+      {
+        "text": "Alpha code alpha-code-7431 remains unchanged and verified.",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 1577,
+      "output_tokens": 180,
+      "total_tokens": 1757
+    },
+    "response_id": "chatcmpl-642",
+    "finish_reason": "stop",
+    "model": "qwen3:4b",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "Alpha code alpha-code-7431 remains unchanged and verified.",
+            "reasoning": "Okay, let's see. The user asked to verify the alpha code once more and confirm if it's unchanged. So I made the tool call for verify_code on alpha-code-7431. The response was \"verified alpha-code-7431\". That means the code is still valid and unchanged.\n\nNow I need to report back to the user. The previous messages showed that both alpha and beta were verified successfully after some retries. Since this latest verification for alpha succeeded again, I should state that it's unchanged. The user wanted confirmation of whether it's still unchanged, and the tool response confirms it's verified, so it's unchanged.\n\nI'll phrase it concisely as \"Alpha code alpha-code-7431 remains unchanged and verified.\" That covers the request without extra details.\n",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-642",
+      "model": "qwen3:4b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_ollama",
+      "usage": {
+        "completion_tokens": 180,
+        "prompt_tokens": 1577,
+        "total_tokens": 1757
+      }
+    }
+  },
+  "raw_capture_agent_matrix/hooks_observe_raw_streamed.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "Hmm, the user just asked me to reply with exactly the single word \"pong\". That's pretty straightforward. \n\nOkay, let me think about this. The user seems to be testing a very specific instruction - they want nothing but the word \"pong\" with no extra characters or explanations. \n\nI recall that in computing",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 18,
+      "output_tokens": 64,
+      "total_tokens": 82
+    },
+    "response_id": "chatcmpl-473",
+    "finish_reason": "length",
+    "model": "qwen3:4b",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "Hmm, the user just asked me to reply with exactly the single word \"pong\". That's pretty straightforward. \n\nOkay, let me think about this. The user seems to be testing a very specific instruction - they want nothing but the word \"pong\" with no extra characters or explanations. \n\nI recall that in computing",
+            "role": "assistant"
+          },
+          "finish_reason": "length",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-473",
+      "model": "qwen3:4b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_ollama",
+      "usage": {
+        "completion_tokens": 64,
+        "prompt_tokens": 18,
+        "total_tokens": 82
+      }
+    }
+  },
+  "raw_capture_agent_matrix/multi_turn_tool_run_records_distinct_raw_blocking.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "text": "Okay, let's see. The user wants me to use the add tool to add 2 and 3, then state the result.\n\nFirst, I need to check the tools provided. The tool given is a function called add that takes two numbers, x and y. So the function is add with parameters x and y, both numbers.\n\nThe user is asking to add 2 and 3. So x should be 2 and y should be 3. I need to make a tool call with those numbers.\n\nWait, the tool's description says the function is add, and the arguments are x and y as numbers. So I should structure the tool call as {\"name\": \"add\", \"arguments\": {\"x\": 2, \"y\": 3}}.\n\nThen, after that tool call, the result should be 5. But the user says to state the result after using the tool. So I need to output the tool call first, then the result.\n\nWait, the instructions say for each function call, return a json object within tool_call tags. Then after the tool call, the model should provide the answer. But in this case, the user wants me to do the addition and state the result.\n\nSo first, I create the tool call. Then the system would probably return the result, but since this is a simulation, I have to imagine that after the tool call, the result is 5.\n\nWait, the user says \"Use the add tool to add 2 and 3, then state the result.\" So the assistant should first call the add function with 2 and 3, then output the result.\n\nSo the tool_call here would be:\n\n{\n  \"name\": \"add\",\n  \"arguments\": {\n    \"x\": 2,\n    \"y\": 3\n  }\n}\n\nThen the result is 5. So the final answer is 5.\n\nI need to make sure that the tool is called correctly. The function's parameters are x and y as numbers. So yes, 2 and 3.\n\nI think that's it. So the tool call is as above, and the result is 5.\n</think>\n\n",
+        "native": null
+      },
+      {
+        "tool_call": {
+          "id": "call_9ej0q8ms",
+          "name": "add",
+          "arguments": {
+            "x": 2,
+            "y": 3
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"x\":2,\"y\":3}",
+                "name": "add"
+              },
+              "id": "call_9ej0q8ms",
+              "type": "function"
+            },
+            "fingerprint": "e47f2007fd182616"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 192,
+      "output_tokens": 466,
+      "total_tokens": 658
+    },
+    "response_id": "chatcmpl-782",
+    "finish_reason": "tool_calls",
+    "model": "qwen3:4b",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "message": {
+            "content": "Okay, let's see. The user wants me to use the add tool to add 2 and 3, then state the result.\n\nFirst, I need to check the tools provided. The tool given is a function called add that takes two numbers, x and y. So the function is add with parameters x and y, both numbers.\n\nThe user is asking to add 2 and 3. So x should be 2 and y should be 3. I need to make a tool call with those numbers.\n\nWait, the tool's description says the function is add, and the arguments are x and y as numbers. So I should structure the tool call as {\"name\": \"add\", \"arguments\": {\"x\": 2, \"y\": 3}}.\n\nThen, after that tool call, the result should be 5. But the user says to state the result after using the tool. So I need to output the tool call first, then the result.\n\nWait, the instructions say for each function call, return a json object within tool_call tags. Then after the tool call, the model should provide the answer. But in this case, the user wants me to do the addition and state the result.\n\nSo first, I create the tool call. Then the system would probably return the result, but since this is a simulation, I have to imagine that after the tool call, the result is 5.\n\nWait, the user says \"Use the add tool to add 2 and 3, then state the result.\" So the assistant should first call the add function with 2 and 3, then output the result.\n\nSo the tool_call here would be:\n\n{\n  \"name\": \"add\",\n  \"arguments\": {\n    \"x\": 2,\n    \"y\": 3\n  }\n}\n\nThen the result is 5. So the final answer is 5.\n\nI need to make sure that the tool is called correctly. The function's parameters are x and y as numbers. So yes, 2 and 3.\n\nI think that's it. So the tool call is as above, and the result is 5.\n</think>\n\n",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"x\":2,\"y\":3}",
+                  "name": "add"
+                },
+                "id": "call_9ej0q8ms",
+                "index": 0,
+                "type": "function"
+              }
+            ]
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-782",
+      "model": "qwen3:4b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_ollama",
+      "usage": {
+        "completion_tokens": 466,
+        "prompt_tokens": 192,
+        "total_tokens": 658
+      }
+    }
+  },
+  "raw_stream_capture_matrix/stream_terminal_reproduces_the_usage_chunk.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Hmm, the user wants me to reply with exactly one word: \"streamed\" and nothing else. \n\nThis seems straightforward - they're testing if I can follow precise instructions without adding anything. \n\nI recall the instruction says \"exactly this one word and nothing else\" so I must avoid any extra spaces, punctuation, or text. \n\nThe word \"streamed\" is already in the correct format. \n\nI'll just output it as requested - no explanations, no modifications. \n\nUser probably wants to see if I can be minimalist in responses. Maybe they're debugging something or testing AI behavior. \n\nOkay, response is locked in: just \"streamed\"\n",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning": "Hmm, the user wants me to reply with exactly one word: \"streamed\" and nothing else. \n\nThis seems straightforward - they're testing if I can follow precise instructions without adding anything. \n\nI recall the instruction says \"exactly this one word and nothing else\" so I must avoid any extra spaces, punctuation, or text. \n\nThe word \"streamed\" is already in the correct format. \n\nI'll just output it as requested - no explanations, no modifications. \n\nUser probably wants to see if I can be minimalist in responses. Maybe they're debugging something or testing AI behavior. \n\nOkay, response is locked in: just \"streamed\"\n"
+            },
+            "fingerprint": "b7b97f2b16092cef"
+          }
+        }
+      },
+      {
+        "text": "streamed",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 21,
+      "output_tokens": 139,
+      "total_tokens": 160
+    },
+    "response_id": "chatcmpl-584",
+    "finish_reason": "stop",
+    "model": "qwen3:4b",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "streamed",
+            "reasoning": "Hmm, the user wants me to reply with exactly one word: \"streamed\" and nothing else. \n\nThis seems straightforward - they're testing if I can follow precise instructions without adding anything. \n\nI recall the instruction says \"exactly this one word and nothing else\" so I must avoid any extra spaces, punctuation, or text. \n\nThe word \"streamed\" is already in the correct format. \n\nI'll just output it as requested - no explanations, no modifications. \n\nUser probably wants to see if I can be minimalist in responses. Maybe they're debugging something or testing AI behavior. \n\nOkay, response is locked in: just \"streamed\"\n",
+            "role": "assistant"
+          },
+          "finish_reason": "stop",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-584",
+      "model": "qwen3:4b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_ollama",
+      "usage": {
+        "completion_tokens": 139,
+        "prompt_tokens": 21,
+        "total_tokens": 160
+      }
+    }
+  },
+  "tools/optional_argument.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "reasoning": {
+          "text": "Okay, let's see. The user wants me to use the repeat_text tool to repeat the word \"banana\" three times and then show the exact result.\n\nFirst, I need to check the function definition. The repeat_text function takes a text and an optional times parameter that defaults to 2. So in this case, the user wants 3 repetitions. \n\nSo the text is \"banana\" and times should be 3. I need to make sure that the parameters are correctly set. The function expects a JSON object with \"text\" and \"times\". \n\nWait, the example shows that times is an integer or null. Since the user says 3 times, I should set times to 3. \n\nSo the tool call would be repeat_text with text \"banana\" and times 3. Then the result should be \"bananabananabanana\".\n\nLet me confirm. The function's description says \"Repeat `text`. `times` is optional and defaults to 2.\" So by specifying times as 3, it will output the text three times.\n\nI think that's it. So I just need to output the tool_call JSON with name \"repeat_text\" and arguments {\"text\": \"banana\", \"times\": 3}.\n",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning": "Okay, let's see. The user wants me to use the repeat_text tool to repeat the word \"banana\" three times and then show the exact result.\n\nFirst, I need to check the function definition. The repeat_text function takes a text and an optional times parameter that defaults to 2. So in this case, the user wants 3 repetitions. \n\nSo the text is \"banana\" and times should be 3. I need to make sure that the parameters are correctly set. The function expects a JSON object with \"text\" and \"times\". \n\nWait, the example shows that times is an integer or null. Since the user says 3 times, I should set times to 3. \n\nSo the tool call would be repeat_text with text \"banana\" and times 3. Then the result should be \"bananabananabanana\".\n\nLet me confirm. The function's description says \"Repeat `text`. `times` is optional and defaults to 2.\" So by specifying times as 3, it will output the text three times.\n\nI think that's it. So I just need to output the tool_call JSON with name \"repeat_text\" and arguments {\"text\": \"banana\", \"times\": 3}.\n"
+            },
+            "fingerprint": "9ce18d57cd86db06"
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "id": "call_3028r4qi",
+          "name": "repeat_text",
+          "arguments": {
+            "text": "banana",
+            "times": 3
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"text\":\"banana\",\"times\":3}",
+                "name": "repeat_text"
+              },
+              "id": "call_3028r4qi",
+              "type": "function"
+            },
+            "fingerprint": "32e598682bb8b8cd"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 203,
+      "output_tokens": 277,
+      "total_tokens": 480
+    },
+    "response_id": "chatcmpl-65",
+    "finish_reason": "tool_calls",
+    "model": "qwen3:4b",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "message": {
+            "content": "",
+            "reasoning": "Okay, let's see. The user wants me to use the repeat_text tool to repeat the word \"banana\" three times and then show the exact result.\n\nFirst, I need to check the function definition. The repeat_text function takes a text and an optional times parameter that defaults to 2. So in this case, the user wants 3 repetitions. \n\nSo the text is \"banana\" and times should be 3. I need to make sure that the parameters are correctly set. The function expects a JSON object with \"text\" and \"times\". \n\nWait, the example shows that times is an integer or null. Since the user says 3 times, I should set times to 3. \n\nSo the tool call would be repeat_text with text \"banana\" and times 3. Then the result should be \"bananabananabanana\".\n\nLet me confirm. The function's description says \"Repeat `text`. `times` is optional and defaults to 2.\" So by specifying times as 3, it will output the text three times.\n\nI think that's it. So I just need to output the tool_call JSON with name \"repeat_text\" and arguments {\"text\": \"banana\", \"times\": 3}.\n",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"text\":\"banana\",\"times\":3}",
+                  "name": "repeat_text"
+                },
+                "id": "call_3028r4qi",
+                "index": 0,
+                "type": "function"
+              }
+            ]
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-65",
+      "model": "qwen3:4b",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_ollama",
+      "usage": {
+        "completion_tokens": 277,
+        "prompt_tokens": 203,
+        "total_tokens": 480
+      }
+    }
+  }
+}

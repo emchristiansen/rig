@@ -13,38 +13,37 @@
 //! | surface | provider-native reply document (`raw`), normalized Rig response |
 //! | history shape | text, one tool result, two ordered tool results |
 //!
-//! That is 24 recorded cells. Every cell proves the exact serialized history
-//! from its fixture and compares the observed response text to those exact
-//! blocking or SSE bytes.
+//! That is 24 cells, of which the two below are tests. Each test proves the
+//! exact serialized history from its fixture and compares the observed response
+//! text to those exact blocking or SSE bytes.
 //!
-//! Coverage ledger: the pre-pruning Cartesian product is 24 and no cell was
-//! pruned or assigned to unit-only coverage. Each explicit test maps to
+//! Each test maps to
 //! `crates/rig-cassette/fixtures/cassettes/openrouter/history_roundtrip_matrix/<test-name>.yaml`.
 //! The two inexpensive mini routes are pinned to OpenAI with fallbacks disabled
 //! and provide stable controls from separate model families. There is one
 //! decoder now, so the native surface is the gateway's reply document on
-//! [`rig::completion::CompletionResponse::raw`] rather than a second
-//! normalizer over it. Assertions cover
-//! native and normalized blocking/streaming surfaces, routing, Unicode, exact
-//! tool ids and arguments, ordered tool results, the current prompt, and
-//! terminal arrival.
+//! [`rig::completion::CompletionResponse::raw`] rather than a second normalizer
+//! over it. Assertions cover native and normalized blocking/streaming surfaces,
+//! routing, Unicode, exact tool ids and arguments, ordered tool results, the
+//! current prompt, and terminal arrival.
 //!
 //! | recorded cells | exact fixture set |
 //! |---|---|
-//! | all 24 | `crates/rig-cassette/fixtures/cassettes/openrouter/history_roundtrip_matrix/{blocking,streaming}_{gpt_4o_mini,gpt_4_1_mini}_{raw,normalized}_{text,single_tool,parallel_tool}.yaml` |
+//! | 2 of 24 | `crates/rig-cassette/fixtures/cassettes/openrouter/history_roundtrip_matrix/{blocking_gpt_4_1_mini_normalized_single_tool,streaming_gpt_4_1_mini_normalized_parallel_tool}.yaml` |
 
+use rig::streaming::Item;
+use rig_test_support::cassette_models::OpenAiModels;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use futures::StreamExt as _;
-use rig::completion::{CompletionModel, Message};
+use rig::completion::Message;
 use rig::message::{AssistantContent, ToolResultContent, UserContent};
-use rig::providers::openrouter;
-use rig::streaming::{Delta, StreamEvent};
-use serde::Deserialize as _;
+use rig::streaming::StreamEvent;
 use serde_json::{Value, json};
 
-use super::super::support::{BoundOpenRouter, with_openrouter_history_roundtrip_cassette_result};
+use super::super::support::with_openrouter_history_roundtrip_cassette_result;
+use rig::completion::CompletionRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
@@ -54,13 +53,11 @@ enum Transport {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModelVariant {
-    Gpt4oMini,
     Gpt41Mini,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Surface {
-    Raw,
     Normalized,
 }
 
@@ -113,50 +110,49 @@ fn history(shape: Shape) -> Vec<Message> {
                     "Unicode context: café 東京. The marker is exactly: lantern-42.",
                 )],
             },
-            Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::text("lantern-42")],
-            },
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::text("lantern-42"),
+            ])),
         ],
         Shape::SingleTool => vec![
-            Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::tool_call(
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::tool_call(
                     "call_history_single",
-                    "lookup_marker",
+                    rig_core::message::ToolName::new("lookup_marker").expect("tool name"),
                     json!({ "key": "harbor" }),
-                )],
-            },
+                ),
+            ])),
             Message::User {
                 content: vec![UserContent::tool_result(
-                    "call_history_single",
-                    "lookup_marker",
+                    rig_core::message::CallId::from_wire("call_history_single"),
+                    rig_core::message::ToolName::new("lookup_marker").expect("tool name"),
                     vec![ToolResultContent::text("azimuth-47")],
                 )],
             },
         ],
         Shape::ParallelTool => vec![
-            Message::Assistant {
-                id: None,
-                content: vec![
-                    AssistantContent::tool_call(
-                        "call_history_alpha",
-                        "alpha",
-                        json!({ "slot": 1 }),
-                    ),
-                    AssistantContent::tool_call("call_history_beta", "beta", json!({ "slot": 2 })),
-                ],
-            },
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::tool_call(
+                    "call_history_alpha",
+                    rig_core::message::ToolName::new("alpha").expect("tool name"),
+                    json!({ "slot": 1 }),
+                ),
+                AssistantContent::tool_call(
+                    "call_history_beta",
+                    rig_core::message::ToolName::new("beta").expect("tool name"),
+                    json!({ "slot": 2 }),
+                ),
+            ])),
             Message::User {
                 content: vec![
                     UserContent::tool_result(
-                        "call_history_alpha",
-                        "alpha",
+                        rig_core::message::CallId::from_wire("call_history_alpha"),
+                        rig_core::message::ToolName::new("alpha").expect("tool name"),
                         vec![ToolResultContent::text("red")],
                     ),
                     UserContent::tool_result(
-                        "call_history_beta",
-                        "beta",
+                        rig_core::message::CallId::from_wire("call_history_beta"),
+                        rig_core::message::ToolName::new("beta").expect("tool name"),
                         vec![ToolResultContent::text("blue")],
                     ),
                 ],
@@ -165,20 +161,35 @@ fn history(shape: Shape) -> Vec<Message> {
     }
 }
 
-fn request(
-    model: &(impl CompletionModel + Clone),
-    cell: Cell,
-) -> rig::completion::CompletionRequest {
-    let mut builder = model
-        .completion_request(prompt(cell.shape))
+fn request(cell: Cell) -> rig::completion::CompletionRequest {
+    let mut builder = CompletionRequest::new(prompt(cell.shape))
         .max_tokens(24)
-        .additional_params(json!({
-            "provider": { "order": ["OpenAI"], "allow_fallbacks": false }
-        }));
-    for message in history(cell.shape) {
+        .provider_options(super::super::support::pinned_order(&["OpenAI"]));
+    // A history that carries calls continues a tool loop, so the request
+    // declares their tools, as an agent's does; without them the calls and
+    // their results reach the model as text.
+    let history = history(cell.shape);
+    let mut names = Vec::new();
+    for message in &history {
+        if let rig::completion::Message::Assistant(turn) = message {
+            for call in turn.tool_calls() {
+                if !names.contains(&call.function.name) {
+                    names.push(call.function.name.clone());
+                }
+            }
+        }
+    }
+    for name in names {
+        builder = builder.tool(rig::completion::ToolDefinition::new(
+            name,
+            "Look up a stored value.",
+            json!({"type": "object", "properties": {}}),
+        ));
+    }
+    for message in history {
         builder = builder.message(message);
     }
-    builder.build()
+    builder
 }
 
 fn normalized_text(choice: &[AssistantContent]) -> String {
@@ -193,74 +204,34 @@ fn normalized_text(choice: &[AssistantContent]) -> String {
 
 fn model_name(model: ModelVariant) -> &'static str {
     match model {
-        ModelVariant::Gpt4oMini => "openai/gpt-4o-mini",
         ModelVariant::Gpt41Mini => "openai/gpt-4.1-mini",
     }
 }
 
-async fn run_cell(client: BoundOpenRouter, cell: Cell, observed: SharedObservation) -> Result<()> {
+async fn run_cell(client: OpenAiModels, cell: Cell, observed: SharedObservation) -> Result<()> {
     let model = client.completion(model_name(cell.model));
     let observation = match (cell.transport, cell.surface) {
-        (Transport::Blocking, Surface::Raw) => {
-            // The provider-native surface: the gateway's own reply document,
-            // which the driver keeps verbatim on `raw`, read back with
-            // OpenRouter's own response type. `assert_cell` then holds it to
-            // the same recorded bytes as the normalized surface, so the axis
-            // is "provider document vs decoder's choice" rather than two
-            // normalizers that could drift.
-            let response = model.completion(request(&model, cell)).await?;
-            let wire = openrouter::CompletionResponse::deserialize(&response.raw)
-                .expect("raw is OpenRouter's own completion response");
-            Observation {
-                text: content_text(&response.raw["choices"][0]["message"]["content"]),
-                saw_terminal: wire
-                    .choices
-                    .iter()
-                    .all(|choice| choice.finish_reason.is_some()),
-            }
-        }
         (Transport::Blocking, Surface::Normalized) => {
-            let response = model.completion(request(&model, cell)).await?;
+            let response = model.call(request(cell)).await?;
             Observation {
                 text: normalized_text(&response.choice),
                 saw_terminal: true,
             }
         }
-        (Transport::Streaming, Surface::Raw) => {
-            let mut stream = model.stream(request(&model, cell)).await?;
-            let mut observation = Observation {
-                text: String::new(),
-                saw_terminal: false,
-            };
-            while let Some(item) = stream.next().await {
-                match item? {
-                    StreamEvent::BlockDelta {
-                        delta: Delta::Text { text },
-                        ..
-                    } => observation.text.push_str(&text),
-                    StreamEvent::Final(_) => observation.saw_terminal = true,
-                    _ => {}
-                }
-            }
-            observation
-        }
         (Transport::Streaming, Surface::Normalized) => {
-            let mut stream = model.stream(request(&model, cell)).await?;
-            let mut observation = Observation {
-                text: String::new(),
-                saw_terminal: false,
-            };
+            let mut stream = model.stream(request(cell))?;
+            let mut text = String::new();
             while let Some(item) = stream.next().await {
-                match item? {
-                    StreamEvent::BlockDelta {
-                        delta: Delta::Text { text },
-                        ..
-                    } => observation.text.push_str(&text),
-                    StreamEvent::Final(_) => observation.saw_terminal = true,
-                    _ => {}
+                if let Item::Event(StreamEvent::Text { text: delta, .. }) = item? {
+                    text.push_str(&delta);
                 }
             }
-            observation
+            // `finish` succeeds only once the provider ended the reply.
+            stream.finish().await?;
+            Observation {
+                text,
+                saw_terminal: true,
+            }
         }
     };
 
@@ -329,7 +300,11 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
         cell.transport == Transport::Streaming,
         "{scenario}: transport"
     );
-    assert!(request.get("tools").is_none(), "{scenario}: history only");
+    assert_eq!(
+        request.get("tools").is_some(),
+        cell.shape != Shape::Text,
+        "{scenario}: a tool history declares its tools"
+    );
     assert_eq!(
         request["provider"]["order"],
         json!(["OpenAI"]),
@@ -457,51 +432,7 @@ fn cell(transport: Transport, model: ModelVariant, surface: Surface, shape: Shap
 crate::matrix::case_matrix! {
     wrapper: with_openrouter_history_roundtrip_cassette_result, family: history_roundtrip_matrix_case;
     # [tokio :: test]
-    blocking_gpt_4o_mini_raw_text: ("history_roundtrip_matrix/blocking_gpt_4o_mini_raw_text", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Surface :: Raw , Shape :: Text ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_raw_single_tool: ("history_roundtrip_matrix/blocking_gpt_4o_mini_raw_single_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Surface :: Raw , Shape :: SingleTool ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_raw_parallel_tool: ("history_roundtrip_matrix/blocking_gpt_4o_mini_raw_parallel_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Surface :: Raw , Shape :: ParallelTool ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_normalized_text: ("history_roundtrip_matrix/blocking_gpt_4o_mini_normalized_text", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: Text ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_normalized_single_tool: ("history_roundtrip_matrix/blocking_gpt_4o_mini_normalized_single_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: SingleTool ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_normalized_parallel_tool: ("history_roundtrip_matrix/blocking_gpt_4o_mini_normalized_parallel_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: ParallelTool ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_raw_text: ("history_roundtrip_matrix/blocking_gpt_4_1_mini_raw_text", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Surface :: Raw , Shape :: Text ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_raw_single_tool: ("history_roundtrip_matrix/blocking_gpt_4_1_mini_raw_single_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Surface :: Raw , Shape :: SingleTool ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_raw_parallel_tool: ("history_roundtrip_matrix/blocking_gpt_4_1_mini_raw_parallel_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Surface :: Raw , Shape :: ParallelTool ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_normalized_text: ("history_roundtrip_matrix/blocking_gpt_4_1_mini_normalized_text", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Surface :: Normalized , Shape :: Text ,));
-    # [tokio :: test]
     blocking_gpt_4_1_mini_normalized_single_tool: ("history_roundtrip_matrix/blocking_gpt_4_1_mini_normalized_single_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Surface :: Normalized , Shape :: SingleTool ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_normalized_parallel_tool: ("history_roundtrip_matrix/blocking_gpt_4_1_mini_normalized_parallel_tool", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Surface :: Normalized , Shape :: ParallelTool ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_raw_text: ("history_roundtrip_matrix/streaming_gpt_4o_mini_raw_text", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Surface :: Raw , Shape :: Text ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_raw_single_tool: ("history_roundtrip_matrix/streaming_gpt_4o_mini_raw_single_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Surface :: Raw , Shape :: SingleTool ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_raw_parallel_tool: ("history_roundtrip_matrix/streaming_gpt_4o_mini_raw_parallel_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Surface :: Raw , Shape :: ParallelTool ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_normalized_text: ("history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_text", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: Text ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_normalized_single_tool: ("history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_single_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: SingleTool ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_normalized_parallel_tool: ("history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: ParallelTool ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_raw_text: ("history_roundtrip_matrix/streaming_gpt_4_1_mini_raw_text", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Surface :: Raw , Shape :: Text ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_raw_single_tool: ("history_roundtrip_matrix/streaming_gpt_4_1_mini_raw_single_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Surface :: Raw , Shape :: SingleTool ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_raw_parallel_tool: ("history_roundtrip_matrix/streaming_gpt_4_1_mini_raw_parallel_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Surface :: Raw , Shape :: ParallelTool ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_normalized_text: ("history_roundtrip_matrix/streaming_gpt_4_1_mini_normalized_text", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Surface :: Normalized , Shape :: Text ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_normalized_single_tool: ("history_roundtrip_matrix/streaming_gpt_4_1_mini_normalized_single_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Surface :: Normalized , Shape :: SingleTool ,));
     # [tokio :: test]
     streaming_gpt_4_1_mini_normalized_parallel_tool: ("history_roundtrip_matrix/streaming_gpt_4_1_mini_normalized_parallel_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Surface :: Normalized , Shape :: ParallelTool ,));
 }

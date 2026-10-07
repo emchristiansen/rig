@@ -1,0 +1,15 @@
+mod history;
+mod streaming_conformance;
+mod support;
+
+mod cassette {
+    mod agent;
+    mod embeddings;
+    mod model_ids;
+    mod raw_capture_matrix;
+    mod raw_provider_data;
+    mod raw_stream_capture_matrix;
+    mod raw_streaming;
+    mod streaming;
+    mod tool_choice;
+}

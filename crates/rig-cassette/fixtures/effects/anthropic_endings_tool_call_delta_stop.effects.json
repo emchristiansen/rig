@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 1956647414268051610,
+    "run_spec": 15511205635824629453,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -120,21 +120,28 @@
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "wire:toolu_01BSMczbffLFfKZSqxrFCv3j",
-          "kind": {
-            "kind": "tool_call"
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
+            "kind": "tool_call",
+            "name": "write_note"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01BSMczbffLFfKZSqxrFCv3j",
-          "delta": {
-            "delta": "tool_name",
-            "name": "write_note"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "{\"title\": \"Rust"
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "anthropic.messages",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6"
+      }
     }
   ]
 }

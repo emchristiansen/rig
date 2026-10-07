@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 1030837007388641174,
+    "run_spec": 14716740328437968975,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -91,12 +91,7 @@
             {
               "type": "toolcall",
               "id": {
-                "origin": "explicit",
-                "id": "call_smewKkzEg9vHkYrDlNpbRFlv"
-              },
-              "provider": {
-                "call_id": "call_smewKkzEg9vHkYrDlNpbRFlv",
-                "item_id": "fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71"
+                "provider": "call_smewKkzEg9vHkYrDlNpbRFlv"
               },
               "function": {
                 "name": "final_result",
@@ -106,8 +101,17 @@
                   "summary": "Join fellow Rust enthusiasts in Seattle for an evening of networking, discussions, and presentations on Rust programming. Whether you're a beginner or an expert, this meetup is a great opportunity to learn and share knowledge about Rust."
                 }
               },
-              "signature": null,
-              "additional_params": null
+              "native": {
+                "item": {
+                  "arguments": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"Join fellow Rust enthusiasts in Seattle for an evening of networking, discussions, and presentations on Rust programming. Whether you're a beginner or an expert, this meetup is a great opportunity to learn and share knowledge about Rust.\"}",
+                  "call_id": "call_smewKkzEg9vHkYrDlNpbRFlv",
+                  "id": "fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
+                  "name": "final_result",
+                  "status": "completed",
+                  "type": "function_call"
+                },
+                "fingerprint": "94e6584fdb2d2fa6"
+              }
             }
           ],
           "usage": {
@@ -115,18 +119,126 @@
             "output_tokens": 66,
             "total_tokens": 204,
             "cached_input_tokens": 0,
-            "reasoning_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost": {
+              "input": 0.000345,
+              "output": 0.00066,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.001005
+            }
           },
-          "message_id": null,
-          "response_id": "resp_0cb36fe4ea03a21b006ab395f1137487d095f4a6ca8f5038ae",
+          "origin": {
+            "api": "openai.responses",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "response_model": "gpt-4o-2024-08-06",
+            "response_id": "resp_0cb36fe4ea03a21b006ab395f1137487d095f4a6ca8f5038ae"
+          },
           "provider_request_id": "req_98db09ef93e9458f9ee1cfe62c0f0e8e",
           "finish_reason": "tool_calls",
-          "provider": "openai",
-          "model": "gpt-4o-2024-08-06",
           "raw": {
+            "access_programs": null,
+            "background": false,
+            "completed_at": 0,
+            "created_at": 0,
+            "error": null,
+            "frequency_penalty": 0.0,
+            "id": "resp_0cb36fe4ea03a21b006ab395f1137487d095f4a6ca8f5038ae",
+            "incomplete_details": null,
+            "instructions": "You are a concise assistant. Answer directly.\n\nWhen you have gathered enough information to answer, call the `final_result` tool exactly once with your final answer. Its arguments are the structured result and must satisfy the required schema. Do not return the final answer as plain text.",
+            "max_output_tokens": null,
+            "max_tool_calls": null,
+            "metadata": {},
+            "model": "gpt-4o-2024-08-06",
+            "moderation": null,
+            "object": "response",
+            "output": [
+              {
+                "arguments": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"Join fellow Rust enthusiasts in Seattle for an evening of networking, discussions, and presentations on Rust programming. Whether you're a beginner or an expert, this meetup is a great opportunity to learn and share knowledge about Rust.\"}",
+                "call_id": "call_smewKkzEg9vHkYrDlNpbRFlv",
+                "id": "fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
+                "name": "final_result",
+                "status": "completed",
+                "type": "function_call"
+              }
+            ],
+            "parallel_tool_calls": true,
+            "presence_penalty": 0.0,
+            "previous_response_id": null,
+            "prompt_cache_key": null,
+            "prompt_cache_retention": "in_memory",
+            "reasoning": {
+              "context": null,
+              "effort": null,
+              "summary": null
+            },
+            "safety_identifier": null,
+            "service_tier": "default",
+            "status": "completed",
+            "store": true,
+            "temperature": 0.0,
+            "text": {
+              "format": {
+                "type": "text"
+              },
+              "verbosity": "medium"
+            },
+            "tool_choice": "auto",
+            "tool_usage": {
+              "image_gen": {
+                "input_tokens": 0,
+                "input_tokens_details": {
+                  "image_tokens": 0,
+                  "text_tokens": 0
+                },
+                "output_tokens": 0,
+                "output_tokens_details": {
+                  "image_tokens": 0,
+                  "text_tokens": 0
+                },
+                "total_tokens": 0
+              },
+              "web_search": {
+                "num_requests": 0
+              }
+            },
+            "tools": [
+              {
+                "description": "Call this tool exactly once with your final answer when you are done. Its arguments are the structured result and must satisfy the output schema.",
+                "name": "final_result",
+                "output_schema": null,
+                "parameters": {
+                  "properties": {
+                    "category": {
+                      "type": "string"
+                    },
+                    "summary": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "title",
+                    "category",
+                    "summary"
+                  ],
+                  "type": "object"
+                },
+                "strict": false,
+                "type": "function"
+              }
+            ],
+            "top_logprobs": 0,
+            "top_p": 1.0,
+            "truncation": "disabled",
             "usage": {
               "input_tokens": 138,
               "input_tokens_details": {
+                "cache_write_tokens": 0,
                 "cached_tokens": 0
               },
               "output_tokens": 66,
@@ -135,560 +247,506 @@
               },
               "total_tokens": 204
             },
-            "reasoning_metadata": {
-              "context": null,
-              "effort": null,
-              "summary": null
-            },
-            "status": "completed",
-            "response_id": "resp_0cb36fe4ea03a21b006ab395f1137487d095f4a6ca8f5038ae",
-            "model": "gpt-4o-2024-08-06"
+            "user": null
           }
         }
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "source_order": {
-            "primary": 0,
-            "secondary": 0
-          },
-          "kind": {
-            "kind": "tool_call"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_name",
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
+            "kind": "tool_call",
             "name": "final_result"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "{\""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "{\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "title"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "title"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "\":\""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "\":\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "Seattle"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "Seattle"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " Rust"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " Rust"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " Meetup"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " Meetup"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "\",\""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "\",\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "category"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "category"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "\":\""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "\":\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "Technology"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "Technology"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "\",\""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "\",\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "summary"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "summary"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "\":\""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "\":\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "Join"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "Join"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " fellow"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " fellow"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " Rust"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " Rust"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " enthusiasts"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " enthusiasts"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " in"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " in"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " Seattle"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " Seattle"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " for"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " for"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " an"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " an"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " evening"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " evening"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " of"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " of"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " networking"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " networking"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ","
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": ","
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " discussions"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " discussions"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ","
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": ","
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " and"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " and"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " presentations"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " presentations"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " on"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " on"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " Rust"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " Rust"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " programming"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " programming"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "."
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "."
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " Whether"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " Whether"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " you're"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " you're"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " a"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " a"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " beginner"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " beginner"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " or"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " or"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " an"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " an"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " expert"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " expert"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ","
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": ","
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " this"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " this"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " meetup"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " meetup"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " is"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " is"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " a"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " a"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " great"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " great"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " opportunity"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " opportunity"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " to"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " to"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " learn"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " learn"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " and"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " and"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " share"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " share"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " knowledge"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " knowledge"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " about"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " about"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": " Rust"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": " Rust"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ".\""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": ".\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "}"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "}"
           }
         },
         {
-          "event": "block_end",
-          "id": "wire:fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-          "end": {
-            "close": "tool_call",
-            "tool_id": "fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
-            "name": "final_result",
-            "arguments": {
-              "title": "Seattle Rust Meetup",
-              "category": "Technology",
-              "summary": "Join fellow Rust enthusiasts in Seattle for an evening of networking, discussions, and presentations on Rust programming. Whether you're a beginner or an expert, this meetup is a great opportunity to learn and share knowledge about Rust."
-            },
-            "call_id": "call_smewKkzEg9vHkYrDlNpbRFlv",
-            "on_unparseable": "drop"
-          },
-          "block": {
-            "type": "toolcall",
-            "id": {
-              "origin": "explicit",
-              "id": "call_smewKkzEg9vHkYrDlNpbRFlv"
-            },
-            "provider": {
-              "call_id": "call_smewKkzEg9vHkYrDlNpbRFlv",
-              "item_id": "fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71"
-            },
-            "function": {
-              "name": "final_result",
-              "arguments": {
-                "title": "Seattle Rust Meetup",
-                "category": "Technology",
-                "summary": "Join fellow Rust enthusiasts in Seattle for an evening of networking, discussions, and presentations on Rust programming. Whether you're a beginner or an expert, this meetup is a great opportunity to learn and share knowledge about Rust."
+          "item": "event",
+          "value": {
+            "event": "end",
+            "part": 0,
+            "content": {
+              "type": "toolcall",
+              "id": {
+                "provider": "call_smewKkzEg9vHkYrDlNpbRFlv"
+              },
+              "function": {
+                "name": "final_result",
+                "arguments": {
+                  "title": "Seattle Rust Meetup",
+                  "category": "Technology",
+                  "summary": "Join fellow Rust enthusiasts in Seattle for an evening of networking, discussions, and presentations on Rust programming. Whether you're a beginner or an expert, this meetup is a great opportunity to learn and share knowledge about Rust."
+                }
+              },
+              "native": {
+                "item": {
+                  "arguments": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"Join fellow Rust enthusiasts in Seattle for an evening of networking, discussions, and presentations on Rust programming. Whether you're a beginner or an expert, this meetup is a great opportunity to learn and share knowledge about Rust.\"}",
+                  "call_id": "call_smewKkzEg9vHkYrDlNpbRFlv",
+                  "id": "fc_0cb36fe4ea03a21b006ab395f30dbc87d09ae36fa988355e71",
+                  "name": "final_result",
+                  "status": "completed",
+                  "type": "function_call"
+                },
+                "fingerprint": "94e6584fdb2d2fa6"
               }
-            },
-            "signature": null,
-            "additional_params": null
-          }
-        },
-        {
-          "event": "final",
-          "usage": {
-            "input_tokens": 138,
-            "output_tokens": 66,
-            "total_tokens": 204,
-            "cached_input_tokens": 0,
-            "reasoning_tokens": 0
-          },
-          "finish_reason": "tool_calls",
-          "message_id": null,
-          "response_id": "resp_0cb36fe4ea03a21b006ab395f1137487d095f4a6ca8f5038ae",
-          "provider_request_id": "req_98db09ef93e9458f9ee1cfe62c0f0e8e",
-          "provider": "openai",
-          "model": "gpt-4o-2024-08-06",
-          "raw": {
-            "usage": {
-              "input_tokens": 138,
-              "input_tokens_details": {
-                "cached_tokens": 0
-              },
-              "output_tokens": 66,
-              "output_tokens_details": {
-                "reasoning_tokens": 0
-              },
-              "total_tokens": 204
-            },
-            "reasoning_metadata": {
-              "context": null,
-              "effort": null,
-              "summary": null
-            },
-            "status": "completed",
-            "response_id": "resp_0cb36fe4ea03a21b006ab395f1137487d095f4a6ca8f5038ae",
-            "model": "gpt-4o-2024-08-06"
+            }
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "openai.responses",
+        "provider": "openai",
+        "model": "gpt-4o"
+      }
     }
   ]
 }

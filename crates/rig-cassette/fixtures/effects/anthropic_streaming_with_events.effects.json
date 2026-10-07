@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 9258363232016223254,
+    "run_spec": 5045485198770768583,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -163,11 +163,7 @@
             {
               "type": "toolcall",
               "id": {
-                "origin": "explicit",
-                "id": "toolu_01V2zN6zxg7HrvLLtA5nf4qD"
-              },
-              "provider": {
-                "call_id": "toolu_01V2zN6zxg7HrvLLtA5nf4qD"
+                "provider": "toolu_01GmCL1fghqcG9yf4uWRdvv4"
               },
               "function": {
                 "name": "subtract",
@@ -176,8 +172,21 @@
                   "y": 5
                 }
               },
-              "signature": null,
-              "additional_params": null
+              "native": {
+                "item": {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01GmCL1fghqcG9yf4uWRdvv4",
+                  "input": {
+                    "x": 2,
+                    "y": 5
+                  },
+                  "name": "subtract",
+                  "type": "tool_use"
+                },
+                "fingerprint": "af4726672f68ddb6"
+              }
             }
           ],
           "usage": {
@@ -185,138 +194,138 @@
             "output_tokens": 69,
             "total_tokens": 772,
             "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "cost": {
+              "input": 0.002109,
+              "output": 0.001035,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.003144
+            }
           },
-          "message_id": "msg_011CfLcfeMPTQ7hQGcs6RF7F",
-          "response_id": null,
-          "provider_request_id": "req_011CfLcfdwL8XPMZFgu8dcoE",
+          "origin": {
+            "api": "anthropic.messages",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "response_model": "claude-sonnet-4-6",
+            "response_id": "msg_011CfikjYrsag8ZVhbTBoNM8"
+          },
+          "provider_request_id": "req_011CfikjYVYm3irAxDYPqpWe",
           "finish_reason": "tool_calls",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
           "raw": {
-            "usage": {
-              "output_tokens": 69,
-              "input_tokens": 703,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
-              },
-              "cache_read_input_tokens": 0
-            },
+            "container": null,
+            "content": [
+              {
+                "caller": {
+                  "type": "direct"
+                },
+                "id": "toolu_01GmCL1fghqcG9yf4uWRdvv4",
+                "input": {
+                  "x": 2,
+                  "y": 5
+                },
+                "name": "subtract",
+                "type": "tool_use"
+              }
+            ],
+            "diagnostics": null,
+            "id": "msg_011CfikjYrsag8ZVhbTBoNM8",
+            "model": "claude-sonnet-4-6",
+            "role": "assistant",
+            "stop_details": null,
             "stop_reason": "tool_use",
-            "message_id": "msg_011CfLcfeMPTQ7hQGcs6RF7F",
-            "model": "claude-sonnet-4-6"
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "inference_geo": "global",
+              "input_tokens": 703,
+              "output_tokens": 69,
+              "service_tier": "standard"
+            }
           }
         }
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "wire:toolu_01V2zN6zxg7HrvLLtA5nf4qD",
-          "kind": {
-            "kind": "tool_call"
-          }
-        },
-        {
-          "event": "block_delta",
-          "id": "wire:toolu_01V2zN6zxg7HrvLLtA5nf4qD",
-          "delta": {
-            "delta": "tool_name",
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
+            "kind": "tool_call",
             "name": "subtract"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01V2zN6zxg7HrvLLtA5nf4qD",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ""
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "{\"x\": 2"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01V2zN6zxg7HrvLLtA5nf4qD",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "{\"x\": 2"
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": ", \"y\": 5"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01V2zN6zxg7HrvLLtA5nf4qD",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": ", \"y\": "
+          "item": "event",
+          "value": {
+            "event": "arguments",
+            "part": 0,
+            "json": "}"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:toolu_01V2zN6zxg7HrvLLtA5nf4qD",
-          "delta": {
-            "delta": "tool_arguments",
-            "arguments": "5}"
-          }
-        },
-        {
-          "event": "block_end",
-          "id": "wire:toolu_01V2zN6zxg7HrvLLtA5nf4qD",
-          "end": {
-            "close": "tool_call",
-            "on_unparseable": "error"
-          },
-          "block": {
-            "type": "toolcall",
-            "id": {
-              "origin": "explicit",
-              "id": "toolu_01V2zN6zxg7HrvLLtA5nf4qD"
-            },
-            "provider": {
-              "call_id": "toolu_01V2zN6zxg7HrvLLtA5nf4qD"
-            },
-            "function": {
-              "name": "subtract",
-              "arguments": {
-                "x": 2,
-                "y": 5
-              }
-            },
-            "signature": null,
-            "additional_params": null
-          }
-        },
-        {
-          "event": "final",
-          "usage": {
-            "input_tokens": 703,
-            "output_tokens": 69,
-            "total_tokens": 772,
-            "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
-          },
-          "finish_reason": "tool_calls",
-          "message_id": "msg_011CfLcfeMPTQ7hQGcs6RF7F",
-          "response_id": null,
-          "provider_request_id": "req_011CfLcfdwL8XPMZFgu8dcoE",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
-          "raw": {
-            "usage": {
-              "output_tokens": 69,
-              "input_tokens": 703,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
+          "item": "event",
+          "value": {
+            "event": "end",
+            "part": 0,
+            "content": {
+              "type": "toolcall",
+              "id": {
+                "provider": "toolu_01GmCL1fghqcG9yf4uWRdvv4"
               },
-              "cache_read_input_tokens": 0
-            },
-            "stop_reason": "tool_use",
-            "message_id": "msg_011CfLcfeMPTQ7hQGcs6RF7F",
-            "model": "claude-sonnet-4-6"
+              "function": {
+                "name": "subtract",
+                "arguments": {
+                  "x": 2,
+                  "y": 5
+                }
+              },
+              "native": {
+                "item": {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01GmCL1fghqcG9yf4uWRdvv4",
+                  "input": {
+                    "x": 2,
+                    "y": 5
+                  },
+                  "name": "subtract",
+                  "type": "tool_use"
+                },
+                "fingerprint": "af4726672f68ddb6"
+              }
+            }
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "anthropic.messages",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6"
+      }
     },
     {
       "tool_output": {},
@@ -366,16 +375,11 @@
             },
             {
               "role": "assistant",
-              "id": "msg_011CfLcfeMPTQ7hQGcs6RF7F",
               "content": [
                 {
                   "type": "toolcall",
                   "id": {
-                    "origin": "explicit",
-                    "id": "toolu_01V2zN6zxg7HrvLLtA5nf4qD"
-                  },
-                  "provider": {
-                    "call_id": "toolu_01V2zN6zxg7HrvLLtA5nf4qD"
+                    "provider": "toolu_01GmCL1fghqcG9yf4uWRdvv4"
                   },
                   "function": {
                     "name": "subtract",
@@ -384,10 +388,31 @@
                       "y": 5
                     }
                   },
-                  "signature": null,
-                  "additional_params": null
+                  "native": {
+                    "item": {
+                      "caller": {
+                        "type": "direct"
+                      },
+                      "id": "toolu_01GmCL1fghqcG9yf4uWRdvv4",
+                      "input": {
+                        "x": 2,
+                        "y": 5
+                      },
+                      "name": "subtract",
+                      "type": "tool_use"
+                    },
+                    "fingerprint": "af4726672f68ddb6"
+                  }
                 }
-              ]
+              ],
+              "origin": {
+                "api": "anthropic.messages",
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-6",
+                "response_model": "claude-sonnet-4-6",
+                "response_id": "msg_011CfikjYrsag8ZVhbTBoNM8"
+              },
+              "stop": "tool_use"
             },
             {
               "role": "user",
@@ -395,11 +420,7 @@
                 {
                   "type": "toolresult",
                   "call": {
-                    "origin": "explicit",
-                    "id": "toolu_01V2zN6zxg7HrvLLtA5nf4qD"
-                  },
-                  "provider": {
-                    "call_id": "toolu_01V2zN6zxg7HrvLLtA5nf4qD"
+                    "provider": "toolu_01GmCL1fghqcG9yf4uWRdvv4"
                   },
                   "name": "subtract",
                   "answers": "function",
@@ -472,7 +493,14 @@
           "choice": [
             {
               "type": "text",
-              "text": "The result of 2 - 5 is **-3**."
+              "text": "The result of 2 - 5 is **-3**.",
+              "native": {
+                "item": {
+                  "text": "The result of 2 - 5 is **-3**.",
+                  "type": "text"
+                },
+                "fingerprint": "3b0989211b6b5a92"
+              }
             }
           ],
           "usage": {
@@ -480,95 +508,112 @@
             "output_tokens": 18,
             "total_tokens": 804,
             "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "cost": {
+              "input": 0.002358,
+              "output": 0.00027,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.0026279999999999997
+            }
           },
-          "message_id": "msg_011CfLcfkpLD1jT3VsNfjqY3",
-          "response_id": null,
-          "provider_request_id": "req_011CfLcfkN3PSfnwN7HqgS8N",
+          "origin": {
+            "api": "anthropic.messages",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "response_model": "claude-sonnet-4-6",
+            "response_id": "msg_011CfikjekKsitR1EQagC7RD"
+          },
+          "provider_request_id": "req_011CfikjeMX6haL9RtCfSchy",
           "finish_reason": "stop",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
           "raw": {
-            "usage": {
-              "output_tokens": 18,
-              "input_tokens": 786,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
-              },
-              "cache_read_input_tokens": 0
-            },
+            "container": null,
+            "content": [
+              {
+                "text": "The result of 2 - 5 is **-3**.",
+                "type": "text"
+              }
+            ],
+            "diagnostics": null,
+            "id": "msg_011CfikjekKsitR1EQagC7RD",
+            "model": "claude-sonnet-4-6",
+            "role": "assistant",
+            "stop_details": null,
             "stop_reason": "end_turn",
-            "message_id": "msg_011CfLcfkpLD1jT3VsNfjqY3",
-            "model": "claude-sonnet-4-6"
+            "stop_sequence": null,
+            "type": "message",
+            "usage": {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "inference_geo": "global",
+              "input_tokens": 786,
+              "output_tokens": 18,
+              "service_tier": "standard"
+            }
           }
         }
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "minted:block:0",
-          "kind": {
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
             "kind": "text"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
-            "text": "The result of 2 -"
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
+            "text": "The result of"
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
-            "text": " 5 is **-3"
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
+            "text": " 2 - 5 "
           }
         },
         {
-          "event": "block_delta",
-          "id": "minted:block:0",
-          "delta": {
-            "delta": "text",
-            "text": "**."
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
+            "text": "is **-3**."
           }
         },
         {
-          "event": "final",
-          "usage": {
-            "input_tokens": 786,
-            "output_tokens": 18,
-            "total_tokens": 804,
-            "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
-          },
-          "finish_reason": "stop",
-          "message_id": "msg_011CfLcfkpLD1jT3VsNfjqY3",
-          "response_id": null,
-          "provider_request_id": "req_011CfLcfkN3PSfnwN7HqgS8N",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
-          "raw": {
-            "usage": {
-              "output_tokens": 18,
-              "input_tokens": 786,
-              "cache_creation_input_tokens": 0,
-              "cache_creation": {
-                "ephemeral_5m_input_tokens": 0,
-                "ephemeral_1h_input_tokens": 0
-              },
-              "cache_read_input_tokens": 0
-            },
-            "stop_reason": "end_turn",
-            "message_id": "msg_011CfLcfkpLD1jT3VsNfjqY3",
-            "model": "claude-sonnet-4-6"
+          "item": "event",
+          "value": {
+            "event": "end",
+            "part": 0,
+            "content": {
+              "type": "text",
+              "text": "The result of 2 - 5 is **-3**.",
+              "native": {
+                "item": {
+                  "text": "The result of 2 - 5 is **-3**.",
+                  "type": "text"
+                },
+                "fingerprint": "3b0989211b6b5a92"
+              }
+            }
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "anthropic.messages",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6"
+      }
     }
   ]
 }

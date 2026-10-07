@@ -2,7 +2,6 @@
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use rig::message::{ImageMediaType, Message, UserContent};
-use rig::prelude::*;
 use tokio::fs;
 
 use super::{
@@ -35,7 +34,7 @@ async fn image_prompt_from_fixture() {
         })
         .await
         .expect("image prompt should succeed")
-        .output;
+        .output();
 
     assert_nonempty_response(&response);
     assert_contains_any_case_insensitive(&response, &["ant", "insect"]);

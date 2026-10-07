@@ -1,4 +1,5 @@
-//! Conversation validation and constructors for real or synthetic tool results.
+//! Conversation validation and repair, assistant-turn classification, and
+//! constructors for real or synthetic tool results.
 //!
 //! ```
 //! use rig_core::{message::Message, transcript::validate_canonical};
@@ -10,10 +11,10 @@
 use std::collections::BTreeMap;
 
 use crate::message::{
-    AnsweredToolCall, AssistantContent, Message, ProviderCallId, ToolCallId, ToolResultContent,
+    self, AnsweredToolCall, AssistantContent, CallId, Message, ToolName, ToolResultContent,
     UserContent,
 };
-use crate::tool::ToolOutput;
+use crate::tool::ToolResult;
 
 /// Why a history is not a canonical transcript. See [`validate_canonical`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -30,7 +31,7 @@ pub enum TranscriptError {
         /// Index of the assistant message carrying the call.
         index: usize,
         /// The unanswered call id.
-        call_id: ToolCallId,
+        call_id: CallId,
     },
     /// A tool result that answers no call from the immediately preceding
     /// assistant message.
@@ -41,11 +42,9 @@ pub enum TranscriptError {
         /// Index of the user message carrying the result.
         index: usize,
         /// The orphan result's call id.
-        call_id: ToolCallId,
+        call_id: CallId,
     },
-    /// A tool result states that it answers a different kind of call than the
-    /// call it pairs with (e.g. a function result for a custom call), so a
-    /// wire with more than one result shape would emit the wrong item.
+    /// A result answers a different call kind than the preceding call.
     #[error(
         "tool result `{call_id}` at index {index} answers a {answers:?} call, but the call it pairs with is a {call:?} call"
     )]
@@ -53,29 +52,25 @@ pub enum TranscriptError {
         /// Index of the user message carrying the result.
         index: usize,
         /// The result's call id.
-        call_id: ToolCallId,
-        /// The kind of the call the result pairs with.
+        call_id: CallId,
+        /// The kind of the preceding call.
         call: AnsweredToolCall,
         /// The kind the result states it answers.
         answers: AnsweredToolCall,
     },
 }
 
-/// Rejects consecutive assistant messages, unanswered tool-call IDs, results
-/// without a pending call, and results whose [`ToolResult::answers`] kind
-/// differs from the kind of the call they pair with. Each pending ID must be
-/// answered once in the next user message, before another assistant message or
-/// the end of history.
-///
-/// [`ToolResult::answers`]: crate::message::ToolResult::answers
+/// Rejects consecutive assistant messages, unanswered tool-call IDs, and results
+/// without a pending call or answering the wrong call kind. Each pending ID must be answered once in the next user
+/// message, before another assistant message or the end of history.
 /// System messages reset the consecutive-assistant check but retain pending calls.
 /// Duplicate call IDs are treated as one pending ID.
 pub fn validate_canonical(messages: &[Message]) -> Result<(), TranscriptError> {
-    let mut prev_assistant_calls: Option<BTreeMap<ToolCallId, AnsweredToolCall>> = None;
+    let mut prev_assistant_calls: Option<BTreeMap<CallId, AnsweredToolCall>> = None;
     let mut prev_was_assistant = false;
     for (index, message) in messages.iter().enumerate() {
         match message {
-            Message::Assistant { content, .. } => {
+            Message::Assistant(turn) => {
                 if prev_was_assistant {
                     return Err(TranscriptError::ConsecutiveAssistant { index });
                 }
@@ -88,17 +83,19 @@ pub fn validate_canonical(messages: &[Message]) -> Result<(), TranscriptError> {
                         call_id,
                     });
                 }
-                let mut calls: BTreeMap<ToolCallId, AnsweredToolCall> = BTreeMap::new();
-                for item in content {
-                    let (id, kind) = match item {
+                let mut calls = BTreeMap::new();
+                for part in &turn.content {
+                    let (id, kind) = match part {
                         AssistantContent::ToolCall(call) => (&call.id, call.answered_by()),
                         AssistantContent::CustomToolCall(call) => (&call.id, call.answered_by()),
                         AssistantContent::Text(_)
                         | AssistantContent::Reasoning(_)
                         | AssistantContent::Image(_)
+                        | AssistantContent::Opaque(_)
+                        | AssistantContent::CarriedText(_)
+                        | AssistantContent::CarriedReasoning(_)
                         | AssistantContent::ProviderItem(_) => continue,
                     };
-                    // Duplicate IDs are one pending ID; the first call's kind binds.
                     calls.entry(id.clone()).or_insert(kind);
                 }
                 prev_assistant_calls = (!calls.is_empty()).then_some(calls);
@@ -150,37 +147,102 @@ pub fn validate_canonical(messages: &[Message]) -> Result<(), TranscriptError> {
     Ok(())
 }
 
-fn tool_result_with(
-    call: ToolCallId,
-    provider: Option<ProviderCallId>,
-    name: String,
-    content: Vec<ToolResultContent>,
-) -> UserContent {
-    // Replay protocols require the executed tool's name separately from its call ID.
-    UserContent::tool_result_for(call, provider, name, content)
+/// Shape a function tool's result as the tool result the model reads, without
+/// reparsing text. Anything but a success is an error result.
+pub fn tool_result_output(call: CallId, name: ToolName, result: &ToolResult) -> UserContent {
+    UserContent::ToolResult(message::ToolResult {
+        call,
+        name,
+        answers: AnsweredToolCall::Function,
+        content: result.output().clone().into_content(),
+        is_error: !result.is_success(),
+    })
 }
 
-/// Shape a canonical real tool output as a tool result answering a function
-/// call, without reparsing text. A rig tool is a function tool.
-pub fn tool_result_output(
-    call: ToolCallId,
-    provider: Option<ProviderCallId>,
-    name: String,
-    output: ToolOutput,
-) -> UserContent {
-    tool_result_with(call, provider, name, output.into_content())
+/// Constructs the error result of a function call that never ran, its text verbatim,
+/// such as recovery feedback or a skip reason. JSON-shaped text is not
+/// reinterpreted as structured or multimodal output.
+pub fn tool_result_message(call: CallId, name: ToolName, message: String) -> UserContent {
+    UserContent::ToolResult(message::ToolResult {
+        call,
+        name,
+        answers: AnsweredToolCall::Function,
+        content: vec![ToolResultContent::text(message)],
+        is_error: true,
+    })
 }
 
-/// Constructs a synthetic tool result answering a function call, containing
-/// verbatim text such as recovery feedback or a skip reason. JSON-shaped text is
-/// not reinterpreted as structured or multimodal output.
-pub fn tool_result_message(
-    call: ToolCallId,
-    provider: Option<ProviderCallId>,
-    name: String,
-    message: String,
-) -> UserContent {
-    tool_result_with(call, provider, name, vec![ToolResultContent::text(message)])
+/// What the model reads when its call to `tool` sent `raw`, arguments that
+/// are not a JSON object: the tool never ran, and the model calls it again.
+pub fn invalid_arguments_feedback(tool: &str, raw: &str) -> String {
+    format!(
+        "The arguments for tool `{tool}` are not a JSON object: {raw}. \
+         Call the tool again with a JSON object as its arguments."
+    )
+}
+
+/// The result every other call of a turn gets when one call was retried or
+/// skipped: none of the turn's calls ran.
+pub const TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER: &str =
+    "Tool not executed because another tool call in the same assistant turn was invalid.";
+
+/// The tool results answering a turn with an invalid call, in call order:
+/// `feedback` for the call `invalid`, [`TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER`]
+/// for every other call. Empty when `content` has no tool calls.
+pub fn invalid_call_feedback(
+    content: &[AssistantContent],
+    invalid: &CallId,
+    feedback: &str,
+) -> Vec<UserContent> {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantContent::ToolCall(call) if &call.id == invalid => Some(tool_result_message(
+                call.id.clone(),
+                call.function.name.clone(),
+                feedback.to_owned(),
+            )),
+            AssistantContent::ToolCall(call) => Some(not_executed(call)),
+            AssistantContent::CustomToolCall(call) => {
+                Some(UserContent::ToolResult(call.error_result(vec![
+                    ToolResultContent::text(if &call.id == invalid {
+                        feedback
+                    } else {
+                        TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER
+                    }),
+                ])))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The result of a call the run did not execute because a call beside it
+/// was invalid.
+pub fn not_executed(call: &crate::message::ToolCall) -> UserContent {
+    tool_result_message(
+        call.id.clone(),
+        call.function.name.clone(),
+        TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER.to_owned(),
+    )
+}
+
+/// Whether a generated assistant turn is empty: every part is blank
+/// ([`AssistantContent::is_blank`], the rule replay drops parts by). An
+/// empty turn must not enter history.
+pub fn is_empty_assistant_turn(content: &[AssistantContent]) -> bool {
+    content.iter().all(AssistantContent::is_blank)
+}
+
+/// The text parts of an assistant turn, concatenated.
+pub fn assistant_text_from_choice(content: &[AssistantContent]) -> String {
+    content
+        .iter()
+        .filter_map(|part| match part {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]

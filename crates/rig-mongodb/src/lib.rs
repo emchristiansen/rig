@@ -10,9 +10,10 @@ use mongodb::bson::{self, Bson, Document, doc, to_bson};
 
 use rig_core::{
     Embed,
-    embeddings::embedding::{Embedding, EmbeddingModel},
+    embeddings::embedding::Embedding,
     vector_store::{
-        InsertDocuments, VectorStoreError, VectorStoreIndex,
+        InsertDocuments, VectorSearchIdResult, VectorSearchResult, VectorStoreError,
+        VectorStoreIndex,
         request::{DynamicSearchFilter, Filter, FilterError, SearchFilter, VectorSearchRequest},
     },
     wasm_compat::WasmCompatSend,
@@ -67,14 +68,13 @@ struct Field {
 
 /// Vector index over a MongoDB collection.
 ///
-/// Queries are embedded with the same model `M` that populated the collection,
+/// Queries are embedded with the same model that populated the collection,
 /// so results are meaningless under another model.
 ///
 /// # Example
 /// ```no_run
 /// use rig_mongodb::{MongoDbVectorIndex, SearchParams};
-/// use rig_core::{providers::openai::{self, wire::OpenAI}, vector_store::{VectorStoreIndex, VectorSearchRequest}};
-/// use rig_reqwest::prelude::*;
+/// use rig_core::{providers::openai::{self, OpenAI}, vector_store::{VectorStoreIndex, VectorSearchRequest}};
 ///
 /// # async fn example() -> anyhow::Result<()> {
 /// #[derive(serde::Deserialize, serde::Serialize, Debug)]
@@ -86,11 +86,12 @@ struct Field {
 /// }
 ///
 /// let mongodb_client = mongodb::Client::with_uri_str("mongodb://localhost:27017").await?; // <-- replace with your mongodb uri.
-/// let openai = OpenAI::from_env()?.bound()?;
+/// let openai = OpenAI::from_env()?;
 ///
 /// let collection = mongodb_client.database("db").collection::<WordDefinition>(""); // <-- replace with your mongodb collection.
 ///
-/// let model = openai.embedding(openai::TEXT_EMBEDDING_ADA_002, None); // <-- replace with your embedding model.
+/// // <-- replace with your embedding model.
+/// let model = openai.embedding(openai::TEXT_EMBEDDING_ADA_002, None);
 /// let index = MongoDbVectorIndex::new(
 ///     collection,
 ///     model,
@@ -112,18 +113,18 @@ struct Field {
 /// # }
 /// # let _ = example();
 /// ```
-pub struct MongoDbVectorIndex<C, M>
+pub struct MongoDbVectorIndex<C>
 where
     C: Send + Sync,
 {
     collection: mongodb::Collection<C>,
-    model: M,
+    model: rig_core::DynModel<rig_core::operation::Embedding>,
     index_name: String,
     embedded_field: String,
     search_params: SearchParams,
 }
 
-impl<C, M: EmbeddingModel> MongoDbVectorIndex<C, M>
+impl<C> MongoDbVectorIndex<C>
 where
     C: Send + Sync,
 {
@@ -232,7 +233,7 @@ where
     }
 }
 
-impl<C, M: EmbeddingModel> MongoDbVectorIndex<C, M>
+impl<C> MongoDbVectorIndex<C>
 where
     C: Send + Sync,
 {
@@ -243,7 +244,7 @@ where
     /// on creating vector indexes.
     pub async fn new(
         collection: mongodb::Collection<C>,
-        model: M,
+        model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
         index_name: &str,
         search_params: SearchParams,
     ) -> Result<Self, VectorStoreError> {
@@ -267,7 +268,7 @@ where
 
         Ok(Self {
             collection,
-            model,
+            model: model.into(),
             index_name: index_name.to_string(),
             embedded_field,
             search_params,
@@ -379,31 +380,25 @@ impl MongoDbSearchFilter {
     }
 }
 
-impl From<Filter<serde_json::Value>> for MongoDbSearchFilter {
-    /// Values that cannot be represented in BSON become `Bson::Null`.
-    fn from(value: Filter<serde_json::Value>) -> Self {
-        value.interpret_with(|v| to_bson(&v).unwrap_or(Bson::Null))
-    }
-}
-
 impl DynamicSearchFilter for MongoDbSearchFilter {
+    /// Values that cannot be represented in BSON become `Bson::Null`.
     fn from_dynamic_filter(filter: Filter<serde_json::Value>) -> Result<Self, FilterError> {
-        Ok(filter.into())
+        Ok(filter.interpret_with(|v| to_bson(&v).unwrap_or(Bson::Null)))
     }
 }
 
-impl<C, M: EmbeddingModel> VectorStoreIndex for MongoDbVectorIndex<C, M>
+impl<C> VectorStoreIndex for MongoDbVectorIndex<C>
 where
     C: Sync + Send,
 {
     type Filter = MongoDbSearchFilter;
 
-    /// Returns matches as `(score, id, document)`. The embedding field is
+    /// Returns matches with the search score. The embedding field is
     /// projected out, so `T` must not require it.
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<MongoDbSearchFilter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         let project_stage = doc! {
             "$project": {
                 self.embedded_field.clone(): 0
@@ -415,7 +410,11 @@ where
             .into_iter()
             .map(|(score, id, doc)| {
                 let doc_t: T = serde_json::from_value(doc).map_err(VectorStoreError::JsonError)?;
-                Ok((score, id, doc_t))
+                Ok(VectorSearchResult {
+                    score,
+                    id,
+                    document: doc_t,
+                })
             })
             .collect()
     }
@@ -424,7 +423,7 @@ where
     async fn top_n_ids(
         &self,
         req: VectorSearchRequest<MongoDbSearchFilter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
         let project_stage = doc! {
             "$project": {
                 "_id": 1,
@@ -436,12 +435,12 @@ where
             .run_search_pipeline(&req, project_stage)
             .await?
             .into_iter()
-            .map(|(score, id, _)| (score, id))
+            .map(|(score, id, _)| VectorSearchIdResult { score, id })
             .collect())
     }
 }
 
-impl<C, M: EmbeddingModel> InsertDocuments for MongoDbVectorIndex<C, M>
+impl<C> InsertDocuments for MongoDbVectorIndex<C>
 where
     C: Send + Sync,
 {

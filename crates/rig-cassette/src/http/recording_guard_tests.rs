@@ -3,7 +3,9 @@
 //! exchanges go to the attempt root, and the ledger names what was created.
 
 use super::*;
+use futures::FutureExt;
 use serde_json::json;
+use std::panic::AssertUnwindSafe;
 
 fn client() -> rig_reqwest::reqwest::Client {
     rig_reqwest::reqwest::Client::builder()
@@ -32,7 +34,7 @@ impl Session {
 
     async fn start(&self, spec: CassetteSpec, upstream: &httpmock::MockServer) -> ProviderCassette {
         ProviderCassette::start_with_attempts(
-            Transport::Proxy,
+            RecordVia::Proxy,
             "openai",
             spec,
             &format!("{}/v1", upstream.base_url()),

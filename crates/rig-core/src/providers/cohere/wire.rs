@@ -1,48 +1,49 @@
-//! Cohere configuration and chat, text-embedding, and image-embedding wires.
+//! Cohere's configuration, and its chat wire: the OpenAI Compatibility API
+//! by default, or the native chat API when the wire's route opts in.
 //!
-//! ```no_run
-//! use rig_core::providers::cohere::{Cohere, EMBED_V4};
-//! let wire = Cohere::from_env()?.embeddings(EMBED_V4, None);
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//! use rig_core::providers::cohere::{ChatRoute, CohereConfig};
+//! let config = CohereConfig::new("key").with_base_url("https://api.cohere.ai/");
+//! assert_eq!(config.base_url, "https://api.cohere.ai");
+//! let chat = config.completion("command-a-03-2025");
+//! assert_eq!(chat.route, ChatRoute::Compatibility);
+//! let chat = chat.with_route(ChatRoute::Auto);
+//! assert_eq!(chat.route, ChatRoute::Auto);
 //! ```
 
 use crate::client::env::{self, EnvError};
-use crate::completion::CompletionRequest;
-use crate::driver::{HasEmbedding, HasImageEmbedding};
-use crate::embeddings::Embedding as Vector;
-use crate::error::EncodeError;
-use crate::error::ProviderError;
-use crate::json_utils;
-use crate::operation::{Completion, Embedding, EmbeddingCapabilities, ImageEmbedding};
+use crate::completion::{CompletionRequest, ReplayTarget};
+use crate::error::{EncodeError, ProviderError};
+use crate::operation::Completion;
+use crate::providers::openai::wire::{COHERE, Chat, OpenAIConfig};
 use crate::wire::{
-    Body, Decoder, Encoded, Framing, HasCompletion, Mode, Output, Secret, Sink, Wire, WireEvent,
-    WireFrame,
+    Decoder, Descriptor, Encoded, Flow, Mode, Out, Secret, Wire, WireEvent, WireFrame,
 };
 use serde::{Deserialize, Serialize};
 
-use super::completion::{CohereCompletionRequest, PROVIDER_NAME};
-use super::embeddings::{
-    EmbeddingResponse as CohereEmbeddingResponse, ErrorEnvelope as CohereErrorEnvelope,
-    ImageEmbeddingResponse as CohereImageEmbeddingResponse, image_data_url, validate_image,
-};
-use super::streaming::ChatDecoder;
+use super::NativeChat;
 
 /// Cohere's API root.
 const BASE_URL: &str = "https://api.cohere.ai";
 
+/// Where Cohere's OpenAI Compatibility API sits under the API root.
+const COMPATIBILITY_PATH: &str = "/compatibility/v1";
+
 /// The environment variable carrying the API key.
 const API_KEY_ENV: &str = "COHERE_API_KEY";
 
-/// The shared configuration of a Cohere provider.
+/// The settings of a Cohere provider: serializable, and the credential is
+/// never serialized. [`connect`](Self::connect) puts it on a transport as a
+/// [`Cohere`](super::Cohere) client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Cohere {
+pub struct CohereConfig {
     /// The API key, sent as `Authorization: Bearer`.
     pub api_key: Secret,
     /// The API root, without a trailing slash.
     pub base_url: String,
 }
 
-impl Cohere {
+impl CohereConfig {
     /// Cohere with default settings.
     pub fn new(api_key: impl Into<Secret>) -> Self {
         Self {
@@ -62,395 +63,250 @@ impl Cohere {
         self
     }
 
-    /// The chat wire for `model`.
-    pub fn chat(&self, model: impl Into<String>) -> Chat {
-        Chat {
-            provider: self.clone(),
-            model: model.into(),
-        }
-    }
-
-    /// Build a text-embedding wire reporting the supplied or known model width,
-    /// or zero if unknown. This width is metadata, not a request parameter.
-    pub fn embeddings(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
+    /// The chat wire for `model` under this API root, on the
+    /// [`ChatRoute::Compatibility`] route.
+    pub fn completion(&self, model: impl Into<String>) -> CohereChat {
         let model = model.into();
-        let ndims = ndims
-            .or_else(|| super::model_dimensions_from_identifier(&model))
-            .unwrap_or_default();
-        Embeddings {
-            provider: self.clone(),
-            model,
-            ndims,
-            input_type: DEFAULT_INPUT_TYPE.to_owned(),
+        CohereChat {
+            compatibility_api: OpenAIConfig::with_key(&COHERE, self.api_key.clone())
+                .with_base_url(format!("{}{COMPATIBILITY_PATH}", self.base_url))
+                .chat(model.clone()),
+            native_api: NativeChat::new(self.clone(), model),
+            route: ChatRoute::Compatibility,
         }
-    }
-
-    /// The image-embedding wire.
-    ///
-    /// Cohere Embed v3 embeds images with one fixed model, so this wire
-    /// names no model.
-    pub fn image_embeddings(&self) -> ImageEmbeddings {
-        ImageEmbeddings {
-            provider: self.clone(),
-        }
-    }
-
-    /// One request, authenticated and typed as JSON.
-    fn post(&self, path: &str) -> http::request::Builder {
-        http::Request::post(format!("{}{path}", self.base_url))
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .header(
-                http::header::AUTHORIZATION,
-                format!("Bearer {}", self.api_key.expose()),
-            )
     }
 }
 
-/// The chat wire: `POST /v2/chat`, SSE when streamed.
+/// Which Cohere API a chat request goes to. The default is
+/// [`Compatibility`](Self::Compatibility); the native API is opt-in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRoute {
+    /// The native API for a request that carries documents, so Cohere
+    /// grounds the answer in them and cites them, and the Compatibility
+    /// API for any other.
+    Auto,
+    /// The native API for every request.
+    Native,
+    /// The Compatibility API for every request, with documents sent as
+    /// text in the history.
+    #[default]
+    Compatibility,
+}
+
+/// Cohere chat: each request goes to the OpenAI Compatibility API or the
+/// native chat API, as [`ChatRoute`] says. Requests stay on the
+/// Compatibility API unless [`with_route`](Self::with_route) opts in to
+/// the native one.
+///
+/// The two are different APIs to history replay. A turn made on one route
+/// replays on the other from its canonical fields only, so its citations
+/// and tool plan stay behind. [`ChatRoute::Native`] keeps a whole
+/// conversation on the native API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Chat {
-    /// The provider this wire speaks to.
-    pub provider: Cohere,
-    /// The model to address.
-    pub model: String,
+pub struct CohereChat {
+    /// The Compatibility API's wire.
+    pub compatibility_api: Chat,
+    /// The native API's wire.
+    pub native_api: NativeChat,
+    /// Which API each request goes to.
+    pub route: ChatRoute,
 }
 
-impl Wire for Chat {
-    type Op = Completion;
-    type Decoder = ChatDecoder;
-
-    fn name(&self) -> &str {
-        PROVIDER_NAME
+impl CohereChat {
+    /// Send requests by `route`.
+    pub fn with_route(mut self, route: ChatRoute) -> Self {
+        self.route = route;
+        self
     }
 
-    fn model(&self) -> Option<&str> {
-        Some(&self.model)
+    /// Ask both APIs to hold every tool call to its tool's schema.
+    pub fn with_strict_tools(mut self) -> Self {
+        self.compatibility_api = self.compatibility_api.with_strict_tools();
+        self.native_api = self.native_api.with_strict_tools();
+        self
+    }
+
+    /// Whether `request` goes to the native API.
+    fn native_for(&self, request: &CompletionRequest) -> bool {
+        match self.route {
+            ChatRoute::Auto => !request.documents.is_empty(),
+            ChatRoute::Native => true,
+            ChatRoute::Compatibility => false,
+        }
+    }
+}
+
+impl Wire for CohereChat {
+    type Op = Completion;
+    type Payload = Encoded;
+    type Frame = WireFrame;
+    type Decoder<'id> = CohereDecoder;
+    type Reassembler = document::Routed;
+
+    /// The Compatibility API's description, naming this wire as the replay
+    /// target that routes each request.
+    fn describe(&self) -> Descriptor<'_> {
+        self.compatibility_api.describe().replay(self)
     }
 
     fn encode(&self, request: CompletionRequest, mode: Mode) -> Result<Encoded, EncodeError> {
-        let mut body = CohereCompletionRequest::try_from((self.model.as_str(), request))?;
-        if mode == Mode::Streaming {
-            body.additional_params = Some(json_utils::merge(
-                body.additional_params
-                    .take()
-                    .unwrap_or_else(|| serde_json::json!({})),
-                serde_json::json!({ "stream": true }),
-            ));
+        if self.native_for(&request) {
+            self.native_api.encode(request, mode)
+        } else {
+            self.compatibility_api.encode(request, mode)
         }
-        crate::providers::internal::trace_json(
-            crate::providers::internal::LogTarget::Completions,
-            "Cohere completion request",
-            &body,
-        );
-        let request = self
-            .provider
-            .post("/v2/chat")
-            .body(Body::Bytes(serde_json::to_vec(&body)?))?;
-        // Cohere reports no request-id response header: its
-        // `x-debug-trace-id` is a debug trace handle, not a documented
-        // request id, so the normalized id stays unset by design.
-        Ok(Encoded::new(
-            request,
-            match mode {
-                Mode::Unary => Framing::Whole,
-                Mode::Streaming => Framing::Sse,
-            },
-        ))
     }
 
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
-        ChatDecoder::default()
-    }
-}
-
-/// Default retrieval role for embeddings of stored document chunks.
-const DEFAULT_INPUT_TYPE: &str = "search_document";
-
-/// The most texts Cohere embeds in one `/v1/embed` call.
-const MAX_DOCUMENTS: usize = 96;
-
-/// The width Cohere's image embeddings come back at.
-const IMAGE_NDIMS: usize = 1_024;
-
-/// Recognized embedding and error-envelope markers, including errors on HTTP 200.
-const EMBED_REPLY_MARKERS: &[&str] = &["embeddings", "message"];
-
-/// The key that recognizes the error envelope on its own.
-const EMBED_ERROR_MARKERS: &[&str] = &["message"];
-
-/// One `/v1/embed` reply: the answer, or the error envelope Cohere can
-/// answer a **200** with instead.
-pub enum EmbedReply<T> {
-    /// The vectors Cohere returned.
-    Reply(T),
-    /// The provider's error envelope, verbatim.
-    Failure(String),
-}
-
-/// Decode embeddings, then an error envelope on failure. Retain the embedding
-/// diagnostic if neither shape decodes.
-fn classify_embed_reply<T>(data: &str) -> WireEvent<EmbedReply<T>>
-where
-    T: serde::de::DeserializeOwned,
-{
-    crate::providers::internal::wire::classify_or(
-        data,
-        |data| {
-            crate::providers::internal::wire::classify_marker_keyed_frame::<T>(
-                data,
-                EMBED_REPLY_MARKERS,
-            )
-            .map(EmbedReply::Reply)
-        },
-        |data| {
-            crate::providers::internal::wire::classify_marker_keyed_frame::<CohereErrorEnvelope>(
-                data,
-                EMBED_ERROR_MARKERS,
-            )
-            .map(|_| EmbedReply::Failure(data.to_owned()))
-        },
-    )
-}
-
-/// The text-embedding wire: `POST /v1/embed`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Embeddings {
-    /// The provider this wire speaks to.
-    pub provider: Cohere,
-    /// The model to address.
-    pub model: String,
-    /// The width this wire reports, from the caller or the model's published
-    /// dimensions. `0` means neither named one.
-    pub ndims: usize,
-    /// Cohere's retrieval prompt: `search_document` for stored chunks,
-    /// `search_query` for queries, `classification`, `clustering`.
-    pub input_type: String,
-}
-
-impl Embeddings {
-    /// Embed for a different purpose than storing chunks.
-    pub fn with_input_type(mut self, input_type: impl Into<String>) -> Self {
-        self.input_type = input_type.into();
-        self
-    }
-}
-
-impl Wire for Embeddings {
-    type Op = Embedding;
-    type Decoder = EmbeddingsDecoder;
-
-    fn name(&self) -> &str {
-        PROVIDER_NAME
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
+        CohereDecoder {
+            native_api: Wire::decoder(&self.native_api),
+            compatibility_api: Wire::decoder(&self.compatibility_api),
+            native_seen: false,
+        }
     }
 
-    fn model(&self) -> Option<&str> {
-        Some(&self.model)
-    }
-
-    fn encode(&self, texts: Vec<String>, _mode: Mode) -> Result<Encoded, EncodeError> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "texts": texts,
-            "input_type": self.input_type,
-        });
-        let request = self
-            .provider
-            .post("/v1/embed")
-            .body(Body::Bytes(serde_json::to_vec(&body)?))?;
-        Ok(Encoded::new(request, Framing::Whole))
-    }
-
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
-        EmbeddingsDecoder
-    }
-
-    fn capabilities(&self) -> EmbeddingCapabilities {
-        EmbeddingCapabilities::new(MAX_DOCUMENTS, self.ndims)
-    }
-}
-
-/// Decodes one `/v1/embed` reply for texts.
-pub struct EmbeddingsDecoder;
-
-impl Decoder<Embedding> for EmbeddingsDecoder {
-    type Event = EmbedReply<CohereEmbeddingResponse>;
-
-    fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        classify_embed_reply(&frame.as_str())
-    }
-
-    fn interpret(&mut self, reply: Self::Event, out: &mut Output<Embedding>) {
-        let reply = match reply {
-            EmbedReply::Reply(reply) => reply,
-            // Preserve the error body so the driver can attach its HTTP status.
-            EmbedReply::Failure(body) => {
-                out.push(Err(ProviderError::from_provider_body(body)));
-                return;
-            }
-        };
-        let raw = match serde_json::to_value(&reply) {
-            Ok(raw) => raw,
-            Err(error) => {
-                out.push(Err(error.into()));
-                return;
-            }
-        };
-        let usage = reply
-            .meta
-            .as_ref()
-            .map(|meta| meta.billed_units.to_usage())
-            .unwrap_or_default();
-        // The vectors only; the operation's fold pairs them with the texts
-        // that were sent, which no `/v1/embed` reply is trusted to echo
-        // back in order.
-        let vectors = reply
-            .embeddings
-            .into_iter()
-            .map(|vector| Vector {
-                document: String::new(),
-                vec: vector.into_iter().filter_map(|n| n.as_f64()).collect(),
-            })
-            .collect();
-        // Cohere's `/v1/embed` reply names no model.
-        out.push(Ok(crate::embeddings::EmbeddingResponse::new(
-            vectors,
-            PROVIDER_NAME,
+    fn reassembler(&self) -> Self::Reassembler {
+        document::Routed::new(
+            Wire::reassembler(&self.native_api),
+            Wire::reassembler(&self.compatibility_api),
         )
-        .with_response_id(reply.id)
-        .with_usage(usage)
-        .with_raw(raw)));
     }
 }
 
-/// The image-embedding wire: `POST /v1/embed`, one image per request.
-///
-/// Cohere Embed v3 accepts a single image per call, so a batch is a batch of
-/// requests ([`Encoded::batch`]) whose replies the operation's fold
-/// concatenates in input order.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ImageEmbeddings {
-    /// The provider this wire speaks to.
-    pub provider: Cohere,
-}
-
-impl Wire for ImageEmbeddings {
-    type Op = ImageEmbedding;
-    type Decoder = ImageEmbeddingsDecoder;
-
-    fn name(&self) -> &str {
-        PROVIDER_NAME
-    }
-
-    fn model(&self) -> Option<&str> {
-        Some(super::EMBED_ENGLISH_V3)
-    }
-
-    fn encode(&self, images: Vec<Vec<u8>>, _mode: Mode) -> Result<Encoded, EncodeError> {
-        let requests = images
-            .into_iter()
-            .map(|image| {
-                // Reject invalid images before any batch request can be sent.
-                let media_type = validate_image(&image)?;
-                let body = serde_json::json!({
-                    "model": super::EMBED_ENGLISH_V3,
-                    "images": [image_data_url(&image, media_type)],
-                    "input_type": "image",
-                    "embedding_types": ["float"],
-                });
-                self.provider
-                    .post("/v1/embed")
-                    .body(Body::Bytes(serde_json::to_vec(&body)?))
-                    .map_err(EncodeError::from)
-            })
-            .collect::<Result<Vec<_>, EncodeError>>()?;
-        Ok(Encoded::batch(requests, Framing::Whole))
-    }
-
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
-        ImageEmbeddingsDecoder
-    }
-
-    fn capabilities(&self) -> EmbeddingCapabilities {
-        EmbeddingCapabilities::new(1, IMAGE_NDIMS)
-    }
-}
-
-/// Decodes one `/v1/embed` reply for a single image.
-pub struct ImageEmbeddingsDecoder;
-
-impl Decoder<ImageEmbedding> for ImageEmbeddingsDecoder {
-    type Event = EmbedReply<CohereImageEmbeddingResponse>;
-
-    fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        classify_embed_reply(&frame.as_str())
-    }
-
-    fn interpret(&mut self, reply: Self::Event, out: &mut Output<ImageEmbedding>) {
-        let reply = match reply {
-            EmbedReply::Reply(reply) => reply,
-            // Same 200-with-an-envelope reply as the text route: the body
-            // verbatim, with the driver stamping the status.
-            EmbedReply::Failure(body) => {
-                out.push(Err(ProviderError::from_provider_body(body)));
-                return;
-            }
-        };
-        // Each request carries one image, so any other vector count is invalid.
-        let [vector] = reply.embeddings.values.as_slice() else {
-            out.push(Err(ProviderError::Response(format!(
-                "Expected 1 image embedding, got {}",
-                reply.embeddings.values.len()
-            ))));
-            return;
-        };
-        let usage = reply
-            .meta
-            .as_ref()
-            .map(|meta| meta.billed_units.to_usage())
-            .unwrap_or_default();
-        let vector = Vector {
-            // The fold names the input: an image has no text, and its bytes
-            // must never travel back in a response.
-            document: String::new(),
-            vec: vector.iter().filter_map(|n| n.as_f64()).collect(),
-        };
-        // The driver captures all batch reply bodies; setting raw here would
-        // let the fold retain only the first page's metadata.
-        let mut response =
-            crate::embeddings::ImageEmbeddingResponse::new(vec![vector], PROVIDER_NAME)
-                .with_usage(usage);
-        if let Some(id) = reply.id {
-            response = response.with_response_id(id);
+/// Every request names its route, so these are only what the replay of a
+/// history adapted to the wire as a whole reads: the Compatibility API's.
+impl ReplayTarget for CohereChat {
+    /// The answer of the API `request` goes to.
+    fn map_options(
+        &self,
+        request: &CompletionRequest,
+        fields: crate::completion::options::OptionFields<'_>,
+    ) -> crate::completion::options::OptionMap {
+        if self.native_for(request) {
+            self.native_api.map_options(request, fields)
+        } else {
+            self.compatibility_api.map_options(request, fields)
         }
-        out.push(Ok(response));
+    }
+
+    fn api(&self) -> crate::message::Api {
+        self.compatibility_api.api()
+    }
+
+    fn provider(&self) -> &str {
+        ReplayTarget::provider(&self.compatibility_api)
+    }
+
+    fn model(&self) -> &str {
+        ReplayTarget::model(&self.compatibility_api)
+    }
+
+    fn accepts(&self, model: &str) -> crate::completion::Accepts {
+        self.compatibility_api.accepts(model)
+    }
+
+    fn route(&self, request: &CompletionRequest) -> Option<&dyn ReplayTarget> {
+        Some(if self.native_for(request) {
+            &self.native_api
+        } else {
+            &self.compatibility_api
+        })
     }
 }
 
-impl HasCompletion for Cohere {
-    type Wire = Chat;
+/// One frame of a Cohere chat reply, from whichever API answered.
+pub enum CohereEvent {
+    /// A native chat event or reply.
+    Native(super::streaming::ChatEvent),
+    /// A Compatibility API chunk, reply or signal.
+    Compatibility(crate::providers::openai::wire::chat::ChatEvent),
+    /// Cohere's error envelope delivered with a success status, which fails
+    /// the turn.
+    Failure(ProviderError),
+}
 
-    fn completion(&self, model: impl Into<String>) -> Chat {
-        self.chat(model)
+/// Decodes a Cohere chat reply from either API. The decoder is not told
+/// which API a request went to, so each frame is read by its shape: a
+/// native event carries a `type`, a native reply a `message` object, and
+/// Cohere's error envelope a `message` string.
+pub struct CohereDecoder {
+    native_api: super::streaming::ChatDecoder,
+    compatibility_api: crate::providers::openai::wire::chat::ChatDecoder,
+    /// Whether a native frame arrived, so the end of the frames is read as
+    /// the native API's.
+    native_seen: bool,
+}
+
+/// How a frame's shape names the API that sent it.
+#[derive(Debug, Clone, Copy)]
+enum Shape {
+    Native,
+    Compatibility,
+    /// `{"id": ..., "message": "..."}`, Cohere's error body.
+    Error,
+}
+
+/// Which API sent `data`, read off its top-level keys.
+fn shape(data: &str) -> Shape {
+    let Ok(serde_json::Value::Object(frame)) = serde_json::from_str(data) else {
+        return Shape::Compatibility;
+    };
+    if frame.get("type").is_some_and(serde_json::Value::is_string) {
+        return Shape::Native;
+    }
+    if frame.contains_key("choices") {
+        return Shape::Compatibility;
+    }
+    match frame.get("message") {
+        Some(serde_json::Value::Object(_)) => Shape::Native,
+        Some(serde_json::Value::String(_)) => Shape::Error,
+        _ => Shape::Compatibility,
     }
 }
 
-impl HasEmbedding for Cohere {
-    type Wire = Embeddings;
+impl<'id> Decoder<'id, Completion> for CohereDecoder {
+    type Event = CohereEvent;
 
-    fn embedding(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
-        self.embeddings(model, ndims)
+    fn classify(&self, frame: WireFrame) -> WireEvent<CohereEvent> {
+        let data = frame.as_str();
+        match shape(&data) {
+            Shape::Error => WireEvent::Known(CohereEvent::Failure(
+                ProviderError::from_provider_body(data.into_owned()),
+            )),
+            Shape::Native => self.native_api.classify(frame).map(CohereEvent::Native),
+            Shape::Compatibility => self
+                .compatibility_api
+                .classify(frame)
+                .map(CohereEvent::Compatibility),
+        }
+    }
+
+    fn decode(
+        &mut self,
+        event: CohereEvent,
+        out: Out<'id, Completion>,
+    ) -> Result<Flow, ProviderError> {
+        match event {
+            CohereEvent::Native(event) => {
+                self.native_seen = true;
+                self.native_api.decode(event, out)
+            }
+            CohereEvent::Compatibility(event) => self.compatibility_api.decode(event, out),
+            CohereEvent::Failure(error) => Err(error),
+        }
+    }
+
+    fn eof(&mut self, out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
+        if self.native_seen {
+            self.native_api.eof(out)
+        } else {
+            self.compatibility_api.eof(out)
+        }
     }
 }
 
-impl HasImageEmbedding for Cohere {
-    type Wire = ImageEmbeddings;
-
-    fn image_embedding(&self, _model: impl Into<String>, _ndims: Option<usize>) -> ImageEmbeddings {
-        // Cohere Embed v3 embeds images with one fixed model at one fixed
-        // width, so neither argument has anywhere to go.
-        self.image_embeddings()
-    }
-}
+mod document;
 
 #[cfg(test)]
 mod tests;

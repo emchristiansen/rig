@@ -1,6 +1,6 @@
-use rig::driver::{Bind, Bound};
-use rig::http_client::{BoxedHttpClient, ReqwestClient};
-use rig::providers::openai::{OpenAI, Route};
+use rig::http_client::DynHttpClient;
+use rig::providers::openai::{OpenAIConfig, Route};
+use rig_test_support::cassette_models::OpenAiModels;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 
@@ -44,30 +44,31 @@ pub(super) fn accepting_streamed_incomplete(
 /// wires serve every other OpenAI REST route (embeddings, transcriptions,
 /// images, speech, model listing, verification). So the same credential is
 /// held here on both routes, and a cell spells the route it drives by the
-/// field it reads: `client.openai.agent(model)` beside
-/// `client.chat.agent(model)`, with `.chat(model)` / `.responses(model)`
+/// field it reads: `rig::AgentBuilder::new(client.openai.completion(model))` beside
+/// `rig::AgentBuilder::new(client.chat.completion(model))`, with `.chat(model)` / `.responses(model)`
 /// still naming a typed wire when a cell reads the native reply.
-pub(super) struct OpenAiCassette<H = BoxedHttpClient> {
-    /// The configuration on its flagship route, over the cassette's socket.
-    pub(super) openai: Bound<OpenAI, H>,
-    /// The same configuration routed to Chat Completions.
-    pub(super) chat: Bound<OpenAI, H>,
+pub(super) struct OpenAiCassette {
+    /// The models of the configuration on its flagship route.
+    pub(super) openai: OpenAiModels,
+    /// The models of the same configuration routed to Chat Completions.
+    pub(super) chat: OpenAiModels,
 }
 
-impl<H: Clone> OpenAiCassette<H> {
+impl OpenAiCassette {
     /// The configuration for `api_key` at `base_url`, over `http`.
-    fn new(api_key: impl Into<String>, base_url: impl Into<String>, http: H) -> Self {
-        let openai = OpenAI::new(api_key).with_base_url(base_url).bind(http);
-        let chat = openai
-            .clone()
-            .map_wire(|openai| openai.with_route(Route::Chat));
-        Self { openai, chat }
+    fn new(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        http: impl rig::http_client::HttpClientExt + 'static,
+    ) -> Self {
+        let http = DynHttpClient::new(http);
+        let openai = OpenAIConfig::new(api_key).with_base_url(base_url);
+        let chat = openai.clone().with_route(Route::Chat);
+        Self {
+            openai: OpenAiModels::new(openai, http.clone()),
+            chat: OpenAiModels::new(chat, http),
+        }
     }
-}
-
-/// The bundled transport, erased — the socket the deleted client built.
-fn bundled() -> BoxedHttpClient {
-    ReqwestClient::default().boxed()
 }
 
 async fn openai_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, OpenAiCassette) {
@@ -81,7 +82,7 @@ async fn openai_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, Op
     let openai = OpenAiCassette::new(
         cassette.api_key("OPENAI_API_KEY"),
         cassette.base_url(),
-        bundled(),
+        rig_test_support::cassettes::local_http(),
     );
 
     (cassette, openai)
@@ -89,64 +90,9 @@ async fn openai_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, Op
 
 async fn openai_completions_cassette(
     spec: impl Into<CassetteSpec>,
-) -> (ProviderCassette, Bound<OpenAI>) {
+) -> (ProviderCassette, OpenAiModels) {
     let (cassette, openai) = openai_cassette(spec).await;
     (cassette, openai.chat)
-}
-
-/// Like [`with_openai_cassette`], but the client sends through the erased
-/// [`BoxedHttpClient`] wrapping the same bundled transport — the client type
-/// names no concrete `H`. Replaying a recorded scenario through it proves the
-/// erasure is byte-transparent: the replay server matches on body bytes.
-pub(super) async fn with_openai_boxed_cassette<F, Fut>(spec: impl Into<CassetteSpec>, test_body: F)
-where
-    F: FnOnce(OpenAiCassette) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let cassette = ProviderCassette::start(
-        &crate::cassettes::cassette_root(),
-        "openai",
-        spec,
-        "https://api.openai.com/v1",
-    )
-    .await;
-    let openai = OpenAiCassette::new(
-        cassette.api_key("OPENAI_API_KEY"),
-        cassette.base_url(),
-        ReqwestClient::default().boxed(),
-    );
-    let result = AssertUnwindSafe(test_body(openai)).catch_unwind().await;
-    cassette.finish_after_test(result).await;
-}
-
-/// Cassette wrapper for the run-lifecycle matrix (PR #2407): the client sends
-/// through a [`BoxedHttpClient`] carrying the supplied [`HttpMiddleware`], so
-/// the same recorded exchange exercises the transport middleware seam and the
-/// run lifecycle hooks together (see
-/// `crates/rig-cassette/fixtures/cassettes/openai/lifecycle_matrix/`).
-pub(super) async fn with_openai_lifecycle_cassette<M, F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    middleware: M,
-    test_body: F,
-) where
-    M: rig::http_client::HttpMiddleware + 'static,
-    F: FnOnce(OpenAiCassette) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let cassette = ProviderCassette::start(
-        &crate::cassettes::cassette_root(),
-        "openai",
-        spec,
-        "https://api.openai.com/v1",
-    )
-    .await;
-    let openai = OpenAiCassette::new(
-        cassette.api_key("OPENAI_API_KEY"),
-        cassette.base_url(),
-        ReqwestClient::default().boxed().with_middleware(middleware),
-    );
-    let result = AssertUnwindSafe(test_body(openai)).catch_unwind().await;
-    cassette.finish_after_test(result).await;
 }
 
 /// The effect corpus's retrieval matrix (Matrix A):
@@ -221,23 +167,71 @@ where
     cassette.finish_after_test(result).await;
 }
 
-/// Per-bug wrapper for the model-turn termination-metadata matrix
-/// (`crates/rig-cassette/fixtures/cassettes/openai/turn_termination_matrix/`), rig#2184.
-pub(super) async fn with_openai_turn_metadata_cassette<F, Fut>(
+/// Long-run caching recordings
+/// (`crates/rig-cassette/fixtures/cassettes/openai/long_run_caching/`). The
+/// body gets both routes' models and the session's clock, whose record-only
+/// pause spaces a retried turn; it returns whatever the test asserts on after
+/// the session is finished.
+pub(super) async fn with_openai_long_run_cassette<F, Fut, R>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
-) where
-    F: FnOnce(OpenAiCassette) -> Fut,
-    Fut: Future<Output = ()>,
+) -> R
+where
+    F: FnOnce(OpenAiCassette, crate::cassettes::CassetteClock) -> Fut,
+    Fut: Future<Output = R>,
 {
-    with_openai_cassette(spec, test_body).await;
+    let spec = spec.into();
+    let (cassette, openai) = openai_cassette(spec).await;
+    let result = AssertUnwindSafe(test_body(openai, cassette.clock()))
+        .catch_unwind()
+        .await;
+    crate::cassettes::checkpoint_attempt(&cassette, "openai", spec.scenario()).await;
+    match result {
+        Ok(value) => {
+            cassette.finish_after_test(Ok(())).await;
+            value
+        }
+        Err(payload) => {
+            cassette.finish_after_test(Err(payload)).await;
+            unreachable!("finishing a failed session resumes its panic")
+        }
+    }
+}
+
+/// One model's recorded session
+/// (`crates/rig-cassette/fixtures/cassettes/openai/models/<model>/`): both
+/// routes' models and the session's clock.
+pub(super) async fn with_openai_model_session_cassette<F, Fut>(
+    spec: impl Into<CassetteSpec>,
+    test_body: F,
+) -> rig_test_support::model_session::Session
+where
+    F: FnOnce(OpenAiCassette, crate::cassettes::CassetteClock) -> Fut,
+    Fut: Future<Output = rig_test_support::model_session::Session>,
+{
+    let spec = spec.into();
+    let (cassette, openai) = openai_cassette(spec).await;
+    let result = AssertUnwindSafe(test_body(openai, cassette.clock()))
+        .catch_unwind()
+        .await;
+    crate::cassettes::checkpoint_attempt(&cassette, "openai", spec.scenario()).await;
+    match result {
+        Ok(session) => {
+            cassette.finish_after_test(Ok(())).await;
+            session
+        }
+        Err(payload) => {
+            cassette.finish_after_test(Err(payload)).await;
+            unreachable!("finishing a failed session resumes its panic")
+        }
+    }
 }
 
 pub(super) async fn with_openai_completions_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
-    F: FnOnce(Bound<OpenAI>) -> Fut,
+    F: FnOnce(OpenAiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     let (cassette, chat) = openai_completions_cassette(spec).await;
@@ -263,7 +257,7 @@ pub(super) async fn with_openai_completions_cassette_result<F, Fut, E>(
     test_body: F,
 ) -> Result<(), E>
 where
-    F: FnOnce(Bound<OpenAI>) -> Fut,
+    F: FnOnce(OpenAiModels) -> Fut,
     Fut: Future<Output = Result<(), E>>,
 {
     let (cassette, chat) = openai_completions_cassette(spec).await;
@@ -290,18 +284,6 @@ pub(super) async fn with_openai_refusal_cassette<F, Fut>(
 /// Per-bug wrapper for the output-token-cap spelling matrix
 /// (`crates/rig-cassette/fixtures/cassettes/openai/max_completion_tokens_matrix/`).
 pub(super) async fn with_openai_max_tokens_cassette<F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) where
-    F: FnOnce(OpenAiCassette) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    with_openai_cassette(spec, test_body).await;
-}
-
-/// Per-bug wrapper for the truncated-turn matrix
-/// (`crates/rig-cassette/fixtures/cassettes/openai/truncated_turn_matrix/`).
-pub(super) async fn with_openai_truncation_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
@@ -405,11 +387,11 @@ pub(super) async fn with_openai_transcription_cassette<F, Fut>(
 /// zero bytes. The direct path stores non-UTF-8 bodies as base64.
 pub(super) async fn with_openai_audio_cassette<F, Fut>(spec: impl Into<CassetteSpec>, test_body: F)
 where
-    F: FnOnce(OpenAiCassette<DirectRecordingHttpClient>) -> Fut,
+    F: FnOnce(OpenAiCassette) -> Fut,
     Fut: Future<Output = ()>,
 {
     let cassette = ProviderCassette::start_via(
-        rig_cassette::http::Transport::Direct,
+        rig_cassette::http::RecordVia::Direct,
         &crate::cassettes::cassette_root(),
         "openai",
         spec,
@@ -453,7 +435,7 @@ pub(super) async fn with_openai_websocket_cassette<F, Fut>(
     let openai = OpenAiCassette::new(
         "sk-invalid-websocket-edge-matrix-key",
         cassette.base_url(),
-        bundled(),
+        rig_test_support::cassettes::local_http(),
     );
     let result = AssertUnwindSafe(test_body(openai)).catch_unwind().await;
     cassette.finish_after_test(result).await;
@@ -477,7 +459,11 @@ pub(super) async fn with_openai_cassette_bogus_key<F, Fut>(
     .await;
     // The rejected credential is this wrapper's subject.
     cassette.expect_account_failure(crate::cassettes::AccountFailure::Auth);
-    let openai = OpenAiCassette::new("sk-invalid-edge-matrix-key", cassette.base_url(), bundled());
+    let openai = OpenAiCassette::new(
+        "sk-invalid-edge-matrix-key",
+        cassette.base_url(),
+        rig_test_support::cassettes::local_http(),
+    );
     let result = AssertUnwindSafe(test_body(openai)).catch_unwind().await;
     cassette.finish_after_test(result).await;
 }
@@ -564,18 +550,35 @@ pub(super) async fn with_openai_prompt_caching_cassette<F, Fut>(
     with_openai_cassette(spec, test_body).await;
 }
 
-/// [`with_openai_prompt_caching_cassette`] for the chat-completions wire.
-///
-/// OpenAI's two surfaces are two *different* cache paths with two different
-/// usage mappings (`prompt_tokens_details.cached_tokens` versus
-/// `input_tokens_details.cached_tokens`), so each is recorded separately rather
-/// than assumed to behave like its sibling.
-pub(super) async fn with_openai_completions_prompt_caching_cassette<F, Fut>(
-    spec: impl Into<CassetteSpec>,
-    test_body: F,
-) where
-    F: FnOnce(Bound<OpenAI>) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    with_openai_completions_cassette(spec, test_body).await;
+/// `options` as OpenAI's typed provider options.
+pub(super) fn openai_options(
+    options: rig::providers::openai::extension::OpenAiOptions,
+) -> rig::completion::ProviderOptions {
+    rig::completion::ProviderOptions::new().set(options)
+}
+
+/// OpenAI's shared provider options: `store`, and `prompt_cache_key` when
+/// given.
+pub(super) fn shared_options(
+    store: Option<bool>,
+    prompt_cache_key: Option<&str>,
+) -> rig::completion::ProviderOptions {
+    let mut options = rig::providers::openai::extension::OpenAiOptions::new();
+    if let Some(store) = store {
+        options = options.store(store);
+    }
+    if let Some(key) = prompt_cache_key {
+        options = options.prompt_cache_key(key);
+    }
+    openai_options(options)
+}
+
+/// `store: false` as a typed provider option.
+pub(super) fn stateless() -> rig::completion::ProviderOptions {
+    shared_options(Some(false), None)
+}
+
+/// A reasoning effort as typed generation options.
+pub(super) fn effort(effort: rig::completion::Effort) -> rig::completion::GenerationOptions {
+    rig::completion::GenerationOptions::default().reasoning(effort)
 }

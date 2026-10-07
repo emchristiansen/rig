@@ -1,0 +1,108 @@
+//! Handing an image *back* to the model through a tool result.
+//!
+//! Official OpenAI cannot do this on Chat Completions: `gpt-4o` answers 400
+//! (*"Image URLs are only allowed for messages with role 'user'"*) and the
+//! GPT-5 family answers 200 with the image discarded, the model then describing
+//! what it never received. llama.cpp does honour it, which is why
+//! the `LLAMACPP` dialect's `supports_image_tool_results` quirk is `true` and
+//! the shared conversion is gated rather than hard-coded.
+//!
+//! **Server**: the `--mmproj` vision configuration —
+//! `ggml-org/Qwen3-VL-2B-Instruct-GGUF` Q8_0 with its `mmproj`,
+//! `--jinja --seed 42 --temp 0 -c 4096`, `llama-server` b10964-b29c606e2. The
+//! subject and its control were recorded in one run so the negative half
+//! cannot be explained away by a bad image or a blind model.
+//!
+//! Run cassette tests in replay mode by default, or set
+//! `RIG_PROVIDER_TEST_MODE=record` to record against a local llama.cpp server.
+
+use rig::message::{CallId, ImageMediaType, ToolResult, ToolResultContent};
+
+use super::super::cassette_support::*;
+use rig::completion::CompletionRequest;
+
+/// 16x16 solid magenta. Distinctive on purpose: "red" and "blue" are plausible
+/// blind guesses for "what colour is this image", so a cell using them could
+/// pass without the model ever receiving the bytes.
+const MAGENTA_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGP4z/CfJMQwqmFUw/DVAAAg0/4QF5nKuAAAAABJRU5ErkJggg==";
+
+/// The vision model the fixture was recorded against.
+const VISION_MODEL: &str = "Qwen3-VL-2B-Instruct-Q8_0";
+
+fn image_tool_result() -> ToolResult {
+    ToolResult {
+        is_error: false,
+        call: CallId::from_wire("call_1"),
+        name: rig_core::message::ToolName::new("view_file".to_string()).expect("tool name"),
+        content: vec![ToolResultContent::image_base64(
+            MAGENTA_PNG_BASE64,
+            Some(ImageMediaType::PNG),
+            None,
+        )],
+    }
+}
+
+fn tool_call_turn() -> rig::message::Message {
+    rig::message::Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        rig::message::AssistantContent::tool_call(
+            "call_1",
+            rig_core::message::ToolName::new("view_file").expect("tool name"),
+            serde_json::json!({}),
+        ),
+    ]))
+}
+
+fn assistant_text(response: &rig::completion::CompletionResponse) -> String {
+    response
+        .choice
+        .iter()
+        .filter_map(|c| match c {
+            rig::message::AssistantContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// The image reaches the model through a `role:"tool"` message.
+///
+/// The assertion is the colour, not a 200. A cell that only checked the request
+/// was accepted would pass against a server that took the image and dropped it
+/// — which is exactly what the GPT-5 family does, and exactly the failure worth
+/// catching.
+#[tokio::test]
+async fn a_tool_result_image_is_read_by_the_model() {
+    with_llamacpp_vision_cassette(
+        "image_tool_result/a_tool_result_image_is_read_by_the_model",
+        |client| async move {
+            let model = client.completion(VISION_MODEL);
+            let request = CompletionRequest::new(
+                "Call view_file, then reply with ONLY the dominant colour name.",
+            )
+            .max_tokens(30)
+            .temperature(0.0)
+            // The request continues a tool loop, so it declares the tool;
+            // without one, the result reaches the model as text.
+            .tool(crate::support::zero_arg_tool_definition("view_file"))
+            .messages(vec![
+                tool_call_turn(),
+                rig::message::Message::User {
+                    content: vec![rig::message::UserContent::ToolResult(image_tool_result())],
+                },
+            ]);
+
+            let response = model
+                .call(request)
+                .await
+                .expect("llama.cpp accepts an image in a tool result");
+
+            let said = assistant_text(&response);
+            assert!(
+                said.contains("pink") || said.contains("magenta"),
+                "the model has to have seen the image to name its colour; said: {said:?}"
+            );
+        },
+    )
+    .await;
+}

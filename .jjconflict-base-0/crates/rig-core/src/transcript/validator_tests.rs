@@ -1,0 +1,192 @@
+use super::*;
+use crate::message::{
+    CustomToolCall, LocalCallId, ProviderCallId, ToolCall, ToolFunction, ToolName,
+};
+
+fn function_call(id: CallId) -> ToolCall {
+    ToolCall::new(
+        id,
+        ToolFunction::new(
+            ToolName::new("add").expect("tool name"),
+            serde_json::json!({}),
+        ),
+    )
+}
+
+fn call(id: &str) -> AssistantContent {
+    AssistantContent::ToolCall(function_call(CallId::from_wire(id)))
+}
+
+fn result(id: &str) -> UserContent {
+    UserContent::ToolResult(
+        function_call(CallId::from_wire(id)).result(vec![ToolResultContent::text("3")]),
+    )
+}
+
+fn assistant(content: Vec<AssistantContent>) -> Message {
+    Message::Assistant(crate::message::AssistantMessage::new(content))
+}
+
+#[test]
+fn canonical_transcripts_pass() {
+    let history = vec![
+        Message::user("hi"),
+        assistant(vec![call("c1")]),
+        Message::User {
+            content: vec![result("c1")],
+        },
+        assistant(vec![AssistantContent::text("done")]),
+        Message::user("thanks"),
+    ];
+    assert_eq!(validate_canonical(&history), Ok(()));
+    assert!(validate_canonical(&[]).is_ok());
+}
+
+#[test]
+fn consecutive_assistant_is_rejected() {
+    let history = vec![
+        assistant(vec![AssistantContent::text("a")]),
+        assistant(vec![AssistantContent::text("b")]),
+    ];
+    assert_eq!(
+        validate_canonical(&history),
+        Err(TranscriptError::ConsecutiveAssistant { index: 1 })
+    );
+}
+
+#[test]
+fn unanswered_and_orphan_results_are_rejected() {
+    let unanswered = vec![assistant(vec![call("c1")]), Message::user("no result")];
+    assert!(matches!(
+        validate_canonical(&unanswered),
+        Err(TranscriptError::UnansweredToolCall { .. })
+    ));
+    let orphan = vec![
+        Message::user("hi"),
+        Message::User {
+            content: vec![result("ghost")],
+        },
+    ];
+    assert!(matches!(
+        validate_canonical(&orphan),
+        Err(TranscriptError::OrphanToolResult { .. })
+    ));
+    let trailing = vec![assistant(vec![call("c1")])];
+    assert!(matches!(
+        validate_canonical(&trailing),
+        Err(TranscriptError::UnansweredToolCall { .. })
+    ));
+}
+
+/// Equal-looking IDs from separate namespaces answer only their own calls.
+#[test]
+fn typed_identity_transcripts_preserve_namespaces_and_completion_scope() {
+    let generated = CallId::Local(LocalCallId::new());
+    let explicit =
+        CallId::Provider(ProviderCallId::new(generated.wire().into_owned()).expect("explicit ID"));
+    assert_eq!(generated.wire(), explicit.wire());
+    assert_ne!(generated, explicit);
+    let call_for = |id: CallId| AssistantContent::ToolCall(function_call(id));
+    let result_for = |id: CallId| {
+        UserContent::ToolResult(function_call(id).result(vec![ToolResultContent::text("3")]))
+    };
+    let history = vec![
+        assistant(vec![
+            call_for(generated.clone()),
+            call_for(explicit.clone()),
+        ]),
+        Message::User {
+            content: vec![result_for(explicit.clone()), result_for(generated.clone())],
+        },
+        assistant(vec![call_for(generated.clone())]),
+        Message::User {
+            content: vec![result_for(generated.clone())],
+        },
+    ];
+    assert_eq!(validate_canonical(&history), Ok(()));
+    let mismatched = vec![
+        assistant(vec![call_for(generated)]),
+        Message::User {
+            content: vec![result_for(explicit)],
+        },
+    ];
+    assert!(matches!(
+        validate_canonical(&mismatched),
+        Err(TranscriptError::OrphanToolResult { .. })
+    ));
+}
+
+/// A result must answer the kind of call it pairs with; a custom call is a
+/// call like any other for pairing.
+#[test]
+fn results_pair_with_calls_of_their_own_kind() {
+    let custom = CustomToolCall::new(
+        CallId::from_wire("c1"),
+        ToolName::new("patch").expect("tool name"),
+        "raw",
+    );
+    let answered = |answers| {
+        let mut result = custom.result(vec![ToolResultContent::text("ok")]);
+        result.answers = answers;
+        Message::User {
+            content: vec![UserContent::ToolResult(result)],
+        }
+    };
+    let turn = assistant(vec![AssistantContent::CustomToolCall(custom.clone())]);
+    validate_canonical(&[
+        Message::user("go"),
+        turn.clone(),
+        answered(custom.answered_by()),
+    ])
+    .expect("a custom result answers a custom call");
+    assert_eq!(
+        validate_canonical(&[
+            Message::user("go"),
+            turn.clone(),
+            answered(function_call(custom.id.clone()).answered_by()),
+        ]),
+        Err(TranscriptError::MispairedToolResult {
+            index: 2,
+            call_id: custom.id.clone(),
+            call: AnsweredToolCall::Custom,
+            answers: AnsweredToolCall::Function,
+        })
+    );
+    assert_eq!(
+        validate_canonical(&[Message::user("go"), turn]),
+        Err(TranscriptError::UnansweredToolCall {
+            index: 1,
+            call_id: custom.id,
+        }),
+        "an unanswered custom call is caught like a function call"
+    );
+}
+
+#[test]
+fn stored_results_require_the_kind_of_call_they_answer() {
+    let function = function_call(CallId::from_wire("function"));
+    let custom = CustomToolCall::new(
+        CallId::from_wire("custom"),
+        ToolName::new("patch").expect("tool name"),
+        "raw",
+    );
+    for (result, kind) in [
+        (function.result(vec![]), "function"),
+        (custom.result(vec![]), "custom"),
+    ] {
+        let mut stored = serde_json::to_value(&result).expect("serialize the result");
+        assert_eq!(
+            serde_json::from_value::<crate::message::ToolResult>(stored.clone())
+                .expect("the complete result should deserialize"),
+            result,
+        );
+        let removed = stored
+            .as_object_mut()
+            .expect("a result serializes as an object")
+            .remove("answers");
+        assert_eq!(removed, Some(serde_json::json!(kind)));
+        let error = serde_json::from_value::<crate::message::ToolResult>(stored)
+            .expect_err("a result with no kind must not be inferred");
+        assert!(error.to_string().contains("missing field `answers`"));
+    }
+}

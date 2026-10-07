@@ -1,0 +1,306 @@
+# The PR gate. Every job runs one check from xtask/src/verify/checks.rs, the
+# same definitions `cargo xtask verify` selects from locally; the slow lanes
+# (all-features run with the Docker suites, dependency floors) live in
+# slow.yaml. Each job that has a warm entry restores it and saves only on a
+# trusted push (cd.yaml on main, cache-warm.yaml on the development base),
+# so fork PRs never write shared caches.
+name: Lint & Test
+
+on:
+  pull_request:
+    branches: ["**"]
+  merge_group:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# One run per PR: a newer push cancels the in-flight run. Keyed on the PR
+# number, not head_ref, so two forks with the same branch name do not cancel
+# each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  # Formatting, the migration-guide preamble, CWD-independent fixture paths,
+  # the browser worker's JavaScript test, sibling-file test layout, the
+  # scenario catalog, xtask's own tests, the cassette acceptance index and
+  # the reply bank.
+  # Compiles only xtask.
+  guards:
+    name: stable / guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
+      - run: cargo xtask verify --check fmt
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check source-guards
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check tooling
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check acceptance
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check bank
+
+  # CHANGELOG.md, crates/*/CHANGELOG.md, MIGRATING.md and docs/migrations/ are
+  # written on the release PR only. Release PRs (a `release-plz-*` head or the
+  # `release` label) are exempt; on the cd.yaml call there is no PR to guard.
+  frozen-release-docs:
+    name: stable / release docs untouched
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' &&
+      !startsWith(github.head_ref, 'release-plz-') &&
+      !contains(github.event.pull_request.labels.*.name, 'release')
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          bash .github/scripts/check-frozen-release-docs.sh
+
+  # `cargo check` of the root test targets with default features only: the
+  # sweep below adds `bedrock`, so this is the only default-feature compile
+  # of those targets. Its own job because it shares no artifacts with the
+  # sweep (different feature hash, check mode).
+  check-default:
+    name: stable / check default features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+      - run: cargo xtask verify --check default-check
+
+  # The default-member sweep plus the facade's `bedrock` feature (the bedrock
+  # wire-conformance suite compiles into that binary). No provider keys
+  # anywhere in CI: cassettes replay with a dummy key and live tests are
+  # `#[ignore]`. The cache entry is the one cache-warm.yaml populates.
+  test:
+    name: stable / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          nextest: "true"
+          # The repository-repair tests format proposed patches.
+          components: rustfmt
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
+      - run: cargo xtask verify --check default-tests
+
+  # The effect-corpus lane owns the agent golden producers and the
+  # golden-pairing guard; default-tests and bus-verification exclude them.
+  effect-corpus:
+    name: stable / effect corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          nextest: "true"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
+      - run: cargo xtask verify --check effect-corpus
+
+  # Cross-crate contract tripwires, each with its own feature configuration:
+  # rig-core/rig-agent under all features with zero retries for the telemetry
+  # contracts, the bus verification suite, the telemetry macro-hygiene
+  # consumer (a nested Cargo build), and the out-of-facade streaming
+  # conformance binaries. `binary()` selectors, not `test()`: a filter that
+  # matches nothing still exits 0.
+  test-guards:
+    name: stable / test guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          nextest: "true"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
+      - run: cargo xtask verify --check core-all
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check bus-verification
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check macro-hygiene
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check conformance
+
+  # rig-derive is outside default-members (its proc-macro test binary needs
+  # the dylib component), so nothing else runs its trybuild cases and
+  # dependency-rename fixtures.
+  test-derive:
+    name: stable / test rig-derive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
+      - run: cargo xtask verify --check derive
+
+  # The coverage gate's cheap parts: line and branch coverage of every
+  # production file, from an instrumented all-features run of the local
+  # nextest profile, and the cassette corpus's request facts and reply
+  # shapes, each against crates/rig-cassette/coverage. Mutation is too slow
+  # for every PR; `cargo xtask coverage --check --mutants` runs it locally.
+  # No warm cache: the instrumented build shares no artifacts with the rest.
+  # A failed run prints the unstable.tsv rows for every lost region and
+  # uploads its measurement, so a race this runner exposes can be adopted.
+  coverage:
+    name: stable / coverage gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: llvm-tools
+          nextest: "true"
+          protoc: "true"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo xtask verify --check coverage
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-measurement
+          path: target/coverage/*.tsv
+          if-no-files-found: ignore
+
+  # Every interleaving of the bus's wait/wake models under loom.
+  loom:
+    name: stable / loom models
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
+      - run: cargo xtask verify --check loom
+
+  # nextest does not run doctests. All features, so feature-gated examples
+  # compile; the `all-features` entry is the same dependency graph slow.yaml's
+  # test-all-features restores and cache-warm.yaml populates.
+  doctest:
+    name: stable / doctest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          protoc: "true"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: all-features
+          save-if: "false"
+      - run: cargo xtask verify --check doctests
+
+  doc:
+    name: stable / doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rust-docs
+          protoc: "true"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
+      - run: cargo xtask verify --check docs
+
+  clippy:
+    name: stable / clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: clippy
+          protoc: "true"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
+      - run: cargo xtask verify --check clippy
+
+  # Each package checked on its own for the browser target (cargo unifies
+  # features across packages built together, which hides a manifest that
+  # forgot a feature), plus the two crates that must fail on wasm with
+  # exactly one diagnostic. One runner, one dependency build; every step runs
+  # even after an earlier one fails so independent breaks stay visible.
+  wasm-check:
+    name: stable / check wasm targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
+      - run: cargo xtask verify --check wasm-rig-core
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check wasm-rig-http
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check wasm-rig-cassette
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check wasm-rig-reqwest
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check wasm-rig-agent
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check wasm-rig
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check wasm-rig-candle
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check wasm-candle_wasm_chat
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check native-only-rig-rmcp
+      - if: ${{ !cancelled() }}
+        run: cargo xtask verify --check native-only-rig-tungstenite
+
+  # The executed wasm suites, under wasm-bindgen-test-runner on Node. The
+  # CLI must match the lock file's wasm-bindgen version.
+  wasm-test:
+    name: stable / test wasm suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/rust-setup
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.repository == '0xPlaygrounds/rig' && github.event_name == 'push' }}
+      - id: wasm-bindgen
+        run: |
+          version=$(awk '/^name = "wasm-bindgen"$/ { getline; sub(/^version = "/, ""); sub(/"$/, ""); print; exit }' Cargo.lock)
+          [ -n "$version" ] || { echo "::error::Cargo.lock resolves no wasm-bindgen"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wasm-bindgen.outputs.version }}
+      - env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo xtask verify --check wasm-rig-agent-bus_wasm

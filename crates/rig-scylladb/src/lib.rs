@@ -6,9 +6,10 @@
 
 use rig_core::{
     Embed,
-    embeddings::{Embedding, EmbeddingModel},
+    embeddings::Embedding,
     vector_store::{
-        InsertDocuments, VectorStoreError, VectorStoreIndex,
+        InsertDocuments, VectorSearchIdResult, VectorSearchResult, VectorStoreError,
+        VectorStoreIndex,
         request::{
             DynamicSearchFilter, Filter, FilterError, SearchFilter, SqlCondition,
             VectorSearchRequest,
@@ -31,11 +32,11 @@ use uuid::Uuid;
 
 /// Vector store backed by a ScyllaDB table.
 ///
-/// Queries are embedded with the same model `M` that populated the table, so
+/// Queries are embedded with the same model that populated the table, so
 /// results are meaningless under another model. Every search reads the matching
 /// rows and ranks them client-side.
-pub struct ScyllaDbVectorStore<M> {
-    model: M,
+pub struct ScyllaDbVectorStore {
+    model: rig_core::DynModel<rig_core::operation::Embedding>,
     pub session: Arc<Session>,
     keyspace: String,
     table: String,
@@ -164,21 +165,13 @@ impl ScyllaSearchFilter {
     }
 }
 
-impl TryFrom<Filter<serde_json::Value>> for ScyllaSearchFilter {
-    type Error = FilterError;
-
-    fn try_from(value: Filter<serde_json::Value>) -> Result<Self, Self::Error> {
-        value.try_interpret(cql_value_from_json)
-    }
-}
-
 impl DynamicSearchFilter for ScyllaSearchFilter {
     fn from_dynamic_filter(filter: Filter<serde_json::Value>) -> Result<Self, FilterError> {
-        Self::try_from(filter)
+        filter.try_interpret(cql_value_from_json)
     }
 }
 
-impl<M: EmbeddingModel> ScyllaDbVectorStore<M> {
+impl ScyllaDbVectorStore {
     /// Creates a store, creating the keyspace and table when absent and
     /// preparing the fixed statements.
     ///
@@ -186,7 +179,7 @@ impl<M: EmbeddingModel> ScyllaDbVectorStore<M> {
     /// `keyspace` and `table` are spliced into every statement verbatim.
     /// `dimensions` is the vector width insertion enforces.
     pub async fn new(
-        model: M,
+        model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
         session: Session,
         keyspace: &str,
         table: &str,
@@ -241,7 +234,7 @@ impl<M: EmbeddingModel> ScyllaDbVectorStore<M> {
             .map_err(VectorStoreError::datastore)?;
 
         Ok(Self {
-            model,
+            model: model.into(),
             session,
             keyspace: keyspace.to_string(),
             table: table.to_string(),
@@ -376,7 +369,6 @@ impl<M: EmbeddingModel> ScyllaDbVectorStore<M> {
         let statement = self.get_filter_statement_or_default(req).await?;
         let params = req
             .filter()
-            .as_ref()
             .map(ScyllaSearchFilter::params)
             .unwrap_or_default();
 
@@ -414,7 +406,7 @@ impl<M: EmbeddingModel> ScyllaDbVectorStore<M> {
     }
 }
 
-impl<M: EmbeddingModel> InsertDocuments for ScyllaDbVectorStore<M> {
+impl InsertDocuments for ScyllaDbVectorStore {
     async fn insert_documents<Doc: Serialize + Embed + WasmCompatSend>(
         &self,
         documents: Vec<(Doc, Vec<Embedding>)>,
@@ -450,33 +442,39 @@ impl<M: EmbeddingModel> InsertDocuments for ScyllaDbVectorStore<M> {
     }
 }
 
-impl<M: EmbeddingModel> VectorStoreIndex for ScyllaDbVectorStore<M> {
+impl VectorStoreIndex for ScyllaDbVectorStore {
     type Filter = ScyllaSearchFilter;
 
-    /// Returns matches as `(cosine similarity, row id, document)`. Scoring reads
+    /// Returns matches scored by cosine similarity and keyed by row id. Scoring reads
     /// every row the filter admits, so cost grows with the scanned table.
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<ScyllaSearchFilter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         self.search_candidates(&req)
             .await?
             .into_iter()
-            .map(|(score, id, metadata)| Ok((score, id, serde_json::from_str(&metadata)?)))
+            .map(|(score, id, metadata)| {
+                Ok(VectorSearchResult {
+                    score,
+                    id,
+                    document: serde_json::from_str(&metadata)?,
+                })
+            })
             .collect()
     }
 
-    /// Like `top_n` but returns `(cosine similarity, row id)` without
-    /// deserializing documents.
+    /// Like `top_n` but returns scores and row ids without deserializing
+    /// documents.
     async fn top_n_ids(
         &self,
         req: VectorSearchRequest<ScyllaSearchFilter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
         Ok(self
             .search_candidates(&req)
             .await?
             .into_iter()
-            .map(|(score, id, _)| (score, id))
+            .map(|(score, id, _)| VectorSearchIdResult { score, id })
             .collect())
     }
 }

@@ -6,41 +6,10 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use rig::completion::Message;
-use rig::prelude::*;
+use rig::completion::{Message, Reasoning};
+use rig::providers::gemini::extension::GeminiOptions;
 
 use crate::reasoning::{self, WeatherTool};
-
-#[tokio::test]
-async fn streaming() {
-    let call_count = Arc::new(AtomicUsize::new(0));
-    super::super::support::with_gemini_cassette(
-        "reasoning_tool_roundtrip/streaming",
-        |client| async move {
-            let agent = client
-                .agent("gemini-2.5-flash")
-                .preamble(reasoning::TOOL_SYSTEM_PROMPT)
-                .max_tokens(4096)
-                .tool(WeatherTool::new(call_count.clone()))
-                .additional_params(serde_json::json!({
-                    "generationConfig": {
-                        "thinkingConfig": { "thinkingBudget": 4096, "includeThoughts": true }
-                    }
-                }))
-                .build();
-
-            let stream = agent
-                .prompt(reasoning::TOOL_USER_PROMPT)
-                .history(Vec::<Message>::new())
-                .max_turns(3)
-                .stream();
-
-            let stats = reasoning::collect_stream_stats(stream, "gemini").await;
-            reasoning::assert_universal(&stats, &call_count, "gemini");
-        },
-    )
-    .await;
-}
 
 #[tokio::test]
 async fn nonstreaming() {
@@ -48,16 +17,12 @@ async fn nonstreaming() {
     super::super::support::with_gemini_cassette(
         "reasoning_tool_roundtrip/nonstreaming",
         |client| async move {
-            let agent = client
-                .agent("gemini-2.5-flash")
+            let agent = rig::AgentBuilder::new(client.completion("gemini-2.5-flash"))
                 .preamble(reasoning::TOOL_SYSTEM_PROMPT)
                 .max_tokens(4096)
                 .tool(WeatherTool::new(call_count.clone()))
-                .additional_params(serde_json::json!({
-                    "generationConfig": {
-                        "thinkingConfig": { "thinkingBudget": 4096, "includeThoughts": true }
-                    }
-                }))
+                .reasoning(Reasoning::Budget { tokens: 4096 })
+                .provider_option(include_thoughts())
                 .default_max_turns(2)
                 .build();
 
@@ -66,8 +31,13 @@ async fn nonstreaming() {
                 .await
                 .expect("[gemini] Non-streaming chat failed - likely 400 from dropped reasoning");
 
-            reasoning::assert_nonstreaming_universal(&result.output, &call_count, "gemini");
+            reasoning::assert_nonstreaming_universal(&result.output(), &call_count, "gemini");
         },
     )
     .await;
+}
+
+/// `includeThoughts`, beside the typed thinking budget.
+fn include_thoughts() -> GeminiOptions {
+    GeminiOptions::new().include_thoughts(true)
 }

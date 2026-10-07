@@ -11,10 +11,9 @@
 //! shared policy for the state llama.cpp produces here: a turn that ran out of
 //! output budget mid-arguments comes back with `finish_reason: "length"` and
 //! `tool_calls[].function.arguments` cut partway through the JSON object. The
-//! decoder tolerates unparseable arguments **only** when the outer finish
-//! reason maps to `Length`, drops the unusable call, and keeps the rest of the
-//! turn; an ordinary completed `tool_calls` response with malformed JSON stays
-//! a decode error.
+//! decoder now keeps the call, as pi does: its arguments are what pi's
+//! tolerant parse reads, and its text is kept as `invalid_arguments`, so the
+//! agent answers it with an error result and never runs it.
 //!
 //! That policy was derived from DeepSeek and Mistral. llama.cpp is a third
 //! wire that produces the same state, from a completely different server, and
@@ -25,29 +24,28 @@
 //!
 //! | Cell | Transport | Pinned |
 //! | --- | --- | --- |
-//! | [`a_tool_call_cut_mid_arguments_does_not_destroy_the_turn`] | blocking | the response decodes; the unusable call is dropped, not returned half-parsed |
-//! | [`the_streaming_path_drops_the_same_cut_call`] | streaming | the same boundary, and the stream still terminates cleanly |
-//! | [`a_complete_call_under_the_same_cap_survives`] | blocking | the control: a cap large enough to finish yields a usable call |
+//! | [`a_tool_call_cut_mid_arguments_does_not_destroy_the_turn`] | blocking | the response decodes; the cut call is kept with its text, so nothing runs it |
+//! | [`the_streaming_path_keeps_the_same_cut_call`] | streaming | the same boundary, and the stream still terminates cleanly |
 
-use rig::completion::{CompletionModel, FinishReason};
+use rig::completion::FinishReason;
 use rig::message::AssistantContent;
+use rig::streaming::Item;
 use serde_json::Value;
 
 use crate::cassettes::{recorded_sse_json_frames, recorded_statuses_and_bodies};
 
 use super::super::cassette_support::*;
+use rig::completion::CompletionRequest;
 
 const NOTE_PROMPT: &str = "/no_think Record this note: The quarterly incident review found \
      three unrelated regressions in the billing pipeline.";
 
 /// A budget measured to cut inside the argument object rather than before it.
 const CUTTING_CAP: u64 = 20;
-/// A budget measured to be enough for the whole call.
-const COMPLETE_CAP: u64 = 256;
 
 fn record_tool() -> rig::completion::ToolDefinition {
     rig::completion::ToolDefinition {
-        name: "record".to_string(),
+        name: rig_core::message::ToolName::new("record").expect("tool name"),
         description: "Record a long note.".to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -83,13 +81,11 @@ async fn a_tool_call_cut_mid_arguments_does_not_destroy_the_turn() {
         |client| async move {
             let model = client.completion(CASSETTE_MODEL);
             let response = model
-                .completion(
-                    model
-                        .completion_request(NOTE_PROMPT)
+                .call(
+                    CompletionRequest::new(NOTE_PROMPT)
                         .tool(record_tool())
                         .tool_choice(rig::message::ToolChoice::Required)
-                        .max_tokens(CUTTING_CAP)
-                        .build(),
+                        .max_tokens(CUTTING_CAP),
                 )
                 .await
                 .expect(
@@ -103,14 +99,20 @@ async fn a_tool_call_cut_mid_arguments_does_not_destroy_the_turn() {
                 Some(FinishReason::Length),
                 "the turn ran out of budget, and that is what authorizes the tolerance"
             );
+            let calls: Vec<&rig::message::ToolCall> = response
+                .choice
+                .iter()
+                .filter_map(|item| match item {
+                    AssistantContent::ToolCall(call) => Some(call),
+                    _ => None,
+                })
+                .collect();
+            let [call] = calls.as_slice() else {
+                panic!("the cut call is kept: {:?}", response.choice);
+            };
             assert!(
-                !response
-                    .choice
-                    .iter()
-                    .any(|item| matches!(item, AssistantContent::ToolCall(_))),
-                "a call whose arguments never parse is unusable and must be dropped, \
-                 not handed to the caller half-formed: {:?}",
-                response.choice
+                call.function.invalid_arguments.is_some(),
+                "a call whose arguments never parse keeps their text, so nothing runs it: {call:?}"
             );
             assert!(
                 response.usage.output_tokens.is_some_and(|n| n > 0),
@@ -139,7 +141,7 @@ async fn a_tool_call_cut_mid_arguments_does_not_destroy_the_turn() {
 
 /// The streaming path applies the same boundary.
 #[tokio::test]
-async fn the_streaming_path_drops_the_same_cut_call() {
+async fn the_streaming_path_keeps_the_same_cut_call() {
     use futures::StreamExt as _;
     use rig::streaming::StreamEvent;
 
@@ -149,37 +151,30 @@ async fn the_streaming_path_drops_the_same_cut_call() {
             let model = client.completion(CASSETTE_MODEL);
             let mut stream = model
                 .stream(
-                    model
-                        .completion_request(NOTE_PROMPT)
+                    CompletionRequest::new(NOTE_PROMPT)
                         .tool(record_tool())
                         .tool_choice(rig::message::ToolChoice::Required)
-                        .max_tokens(CUTTING_CAP)
-                        .build(),
+                        .max_tokens(CUTTING_CAP),
                 )
-                .await
                 .expect("stream should start");
 
-            let mut completed_calls = 0usize;
-            let mut terminated = false;
+            let mut invalid_calls = 0usize;
             while let Some(item) = stream.next().await {
-                match item.expect("no stream item may be an error") {
-                    StreamEvent::BlockEnd {
-                        block: Some(AssistantContent::ToolCall(_)),
-                        ..
-                    } => completed_calls += 1,
-                    StreamEvent::Final(_) => terminated = true,
-                    _ => {}
+                if let Item::Event(StreamEvent::End {
+                    content: AssistantContent::ToolCall(call),
+                    ..
+                }) = item.expect("no stream item may be an error")
+                    && call.function.invalid_arguments.is_some()
+                {
+                    invalid_calls += 1
                 }
             }
-
-            assert!(
-                terminated,
-                "the stream must terminate cleanly even though its only tool call was \
-                 unusable"
+            stream.finish().await.expect(
+                "the stream must terminate cleanly even though its only tool call was unusable",
             );
             assert_eq!(
-                completed_calls, 0,
-                "a call cut before its arguments parse must not be emitted as complete"
+                invalid_calls, 1,
+                "a call cut before its arguments parse is kept with their text"
             );
         },
     )
@@ -209,55 +204,4 @@ async fn the_streaming_path_drops_the_same_cut_call() {
             .any(|frame| frame["choices"][0]["finish_reason"] == serde_json::json!("length")),
         "and it must end under `length`, which is what authorizes dropping the call"
     );
-}
-
-/// The control: the same request with room to finish yields a usable call.
-///
-/// Without it, the two cells above would pass against a provider that had
-/// simply stopped calling the tool.
-#[tokio::test]
-async fn a_complete_call_under_the_same_cap_survives() {
-    with_llamacpp_competent_cassette(
-        "truncation_matrix/complete_call_control",
-        |client| async move {
-            let model = client.completion(CASSETTE_MODEL);
-            let response = model
-                .completion(
-                    model
-                        .completion_request(NOTE_PROMPT)
-                        .tool(record_tool())
-                        .tool_choice(rig::message::ToolChoice::Required)
-                        .max_tokens(COMPLETE_CAP)
-                        .build(),
-                )
-                .await
-                .expect("a generous budget should succeed");
-
-            let call = response
-                .choice
-                .iter()
-                .find_map(|item| match item {
-                    AssistantContent::ToolCall(call) => Some(call.clone()),
-                    _ => None,
-                })
-                .expect("the same request with room to finish must produce a call");
-            assert_eq!(call.function.name, "record");
-            assert!(
-                call.function.arguments["note"]
-                    .as_str()
-                    .is_some_and(|note| !note.is_empty()),
-                "and its arguments must be complete: {:?}",
-                call.function.arguments
-            );
-        },
-    )
-    .await;
-
-    let (finish_reason, arguments) = recorded_call("truncation_matrix/complete_call_control");
-    assert_eq!(
-        finish_reason, "tool_calls",
-        "the control turn finished on its own"
-    );
-    serde_json::from_str::<Value>(&arguments.expect("a call"))
-        .expect("the control's arguments must parse");
 }

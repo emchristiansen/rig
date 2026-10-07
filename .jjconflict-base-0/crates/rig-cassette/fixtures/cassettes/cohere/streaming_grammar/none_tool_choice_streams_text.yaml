@@ -1,0 +1,26 @@
+when:
+  path: /compatibility/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: text/event-stream
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":32,"messages":[{"content":"Calculate 8 - 3. Answer directly without calling a tool.","role":"user"}],"model":"command-a-03-2025","stream":true,"stream_options":{"include_usage":true},"tool_choice":"none","tools":[{"function":{"description":"Subtract y from x (i.e.: x - y)","name":"subtract","parameters":{"properties":{"x":{"description":"The number to subtract from","type":"integer"},"y":{"description":"The number to subtract","type":"integer"}},"required":["x","y"],"type":"object"}},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: text/event-stream
+  body: |+
+    data: {"choices":[{"delta":{"content":"","role":"assistant"},"finish_reason":null,"index":0,"logprobs":null}],"created":0,"id":"28556a08-7b5b-44d5-b840-74975eb4f984","model":"command-a-03-2025","object":"chat.completion.chunk","usage":null}
+
+    data: {"choices":[{"delta":{"content":"5"},"finish_reason":null,"index":0,"logprobs":null}],"created":0,"id":"28556a08-7b5b-44d5-b840-74975eb4f984","model":"command-a-03-2025","object":"chat.completion.chunk","usage":null}
+
+    data: {"choices":[{"delta":{},"finish_reason":"stop","index":0,"logprobs":null}],"created":0,"id":"28556a08-7b5b-44d5-b840-74975eb4f984","model":"command-a-03-2025","object":"chat.completion.chunk","usage":null}
+
+    data: {"choices":[],"created":0,"id":"28556a08-7b5b-44d5-b840-74975eb4f984","model":"command-a-03-2025","object":"chat.completion.chunk","usage":{"completion_tokens":1,"completion_tokens_details":{"accepted_prediction_tokens":0,"audio_tokens":0,"reasoning_tokens":0,"rejected_prediction_tokens":0},"prompt_tokens":70,"prompt_tokens_details":{"audio_tokens":0,"cached_tokens":0},"total_tokens":71}}
+
+    data: [DONE]
+

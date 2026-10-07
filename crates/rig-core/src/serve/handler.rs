@@ -15,10 +15,9 @@ use std::{
 use futures::{StreamExt, channel::oneshot};
 
 use crate::{
-    completion::CompletionResponse,
     effect::{EffectId, EffectKind, HandlerDescriptor, Outcome},
     error::{ErrorKind, ErrorReport},
-    streaming::{BlockAccumulator, StreamEvent, StreamEvents, StreamFinal},
+    streaming::{Item, Relayed, StreamEvent, StreamEvents},
     wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync},
 };
 
@@ -31,8 +30,8 @@ pub type HandlerFuture<'a> = WasmBoxedFuture<'a, Reply>;
 /// A registered effect handler returning an outcome or an owned stream.
 ///
 /// Provider and tool authors do not implement this directly: the adapters
-/// in [`crate::serve::adapters`] wrap the impl-side traits (`CompletionModel`,
-/// `Tool`, `EmbeddingModel`, `ConversationMemory`, `VectorStoreIndex`). A
+/// in [`crate::serve::adapters`] wrap models, tools, memories and indexes
+/// (`Model`, `Tool`, `ConversationMemory`, `VectorStoreIndex`). A
 /// host implements it for out-of-tree kinds ([`EffectKind::Custom`], typed
 /// through [`crate::effect::CustomEffect`]) or for a replayer.
 ///
@@ -45,6 +44,32 @@ pub type HandlerFuture<'a> = WasmBoxedFuture<'a, Reply>;
 /// browser wasm). `Self::Family` is what a typed key can be proven against
 /// (a typed registration on the bus); a handler with no one
 /// family names [`crate::effect::family::Dynamic`].
+///
+/// A handler holding an `Rc` or a `Cell` is refused natively:
+///
+/// ```compile_fail
+/// use std::rc::Rc;
+/// use rig_core::{serve::{Dispatch, Reply, Serve}, effect::{EffectKind, HandlerDescriptor, family}};
+///
+/// struct Local(Rc<u8>);
+/// impl Serve for Local {
+///     type Family = family::Dynamic;
+///     fn descriptor(&self) -> HandlerDescriptor { unimplemented!() }
+///     async fn serve(&self, _kind: EffectKind, _dispatch: Dispatch) -> Reply { unimplemented!() }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use std::cell::Cell;
+/// use rig_core::{serve::{Dispatch, Reply, Serve}, effect::{EffectKind, HandlerDescriptor, family}};
+///
+/// struct Local(Cell<u8>);
+/// impl Serve for Local {
+///     type Family = family::Dynamic;
+///     fn descriptor(&self) -> HandlerDescriptor { unimplemented!() }
+///     async fn serve(&self, _kind: EffectKind, _dispatch: Dispatch) -> Reply { unimplemented!() }
+/// }
+/// ```
 pub trait Serve: WasmCompatSend + WasmCompatSync {
     /// The family this handler serves, or `Dynamic`.
     type Family: crate::effect::Served;
@@ -171,24 +196,30 @@ pub trait Observe: Send + Sync {
     /// events. A resolved response retains content that has no stream block,
     /// such as images emitted as unknown events.
     fn outcome(&mut self, outcome: &Result<Outcome, ErrorReport>);
-    /// Whether streamed events are wanted verbatim ([`Self::event`]).
+    /// Whether streamed items are wanted verbatim ([`Self::event`]).
     fn keep_events(&self) -> bool;
-    /// One event pulled from the original handler stream. This is recording
+    /// One item pulled from the original handler stream. This is recording
     /// evidence, not acknowledgement that a consumer received the item.
-    fn event(&mut self, event: &StreamEvent);
-    /// An error item in a kept stream, including errors after `Final`.
+    fn event(&mut self, item: &Item<StreamEvent>);
+    /// An error item in a kept stream.
     fn stream_error(&mut self, _error: &ErrorReport) {}
+    /// Who a streamed reply is from, before its first item. Required, so a
+    /// recording observer cannot drop it: a replayed stream cut short needs
+    /// it to know its origin.
+    fn origin(&mut self, origin: &crate::message::Origin);
     /// Observe one stream item together with its first folded outcome, if any.
     /// Drivers that snapshot recording concurrently with cancellation can override
     /// this operation to make the item and its answer one observation boundary.
     fn stream_item(
         &mut self,
-        item: &Result<StreamEvent, ErrorReport>,
+        item: &Result<Relayed, ErrorReport>,
         outcome: Option<&Result<Outcome, ErrorReport>>,
     ) {
         if self.keep_events() {
             match item {
-                Ok(event) => self.event(event),
+                Ok(Relayed::Origin(origin)) => self.origin(origin),
+                Ok(Relayed::Item(item)) => self.event(item),
+                Ok(Relayed::Done(_)) => {}
                 Err(error) => self.stream_error(error),
             }
         }
@@ -205,186 +236,58 @@ pub trait Observe: Send + Sync {
     fn patch(&mut self, kind: &EffectKind);
 }
 
-fn finish_unary(
-    accumulator: &mut BlockAccumulator,
-    message_id: Option<String>,
-    terminal: StreamFinal,
-) -> Result<Outcome, ErrorReport> {
-    let choice = crate::streaming::stamp_reasoning(
-        std::mem::replace(accumulator, BlockAccumulator::new()).finish(),
-        terminal.issuer(),
-    );
-    let mut response = CompletionResponse::new(
-        choice,
-        terminal.usage,
-        terminal.provider.clone(),
-        terminal.raw,
-    )
-    .with_optional_finish_reason(terminal.finish_reason.clone());
-    response.message_id = message_id.or(terminal.message_id.clone());
-    response.response_id = terminal.response_id.clone();
-    response.provider_request_id = terminal.provider_request_id.clone();
-    response.provider_response_headers = terminal.provider_response_headers.clone();
-    response.model = terminal.model.clone();
-    Ok(Outcome::Completion(response))
-}
-
-/// Re-emits completion content as stream events followed by `Final`. Images
-/// become unknown payloads; serialization failures become error items.
-pub(crate) fn events_from_response(
-    response: &CompletionResponse,
-) -> Vec<Result<StreamEvent, ErrorReport>> {
-    use crate::{
-        message::AssistantContent,
-        operation::AdapterOutput,
-        streaming::{BlockId, CustomToolCallEnd, MintKind, ToolCallEnd},
-    };
-
-    let mut out = AdapterOutput::new();
-    if let Some(message_id) = &response.message_id {
-        out.message_id(message_id.clone());
-    }
-    for (index, content) in response.choice.iter().enumerate() {
-        let index = index as u64;
-        match content {
-            AssistantContent::Text(text) => {
-                let id = BlockId::minted(MintKind::Text, index);
-                out.text_start(id.clone(), text.additional_params.clone());
-                out.text(text.text.clone());
-                out.text_end(id);
-            }
-            AssistantContent::Reasoning(reasoning) => {
-                let id = reasoning
-                    .id
-                    .as_deref()
-                    .map(BlockId::wire)
-                    .unwrap_or_else(|| BlockId::minted(MintKind::Reasoning, index));
-                out.reasoning_end(id, Some(reasoning.clone()), None, true);
-            }
-            // Images never stream (no adapter emits one, the accumulator has
-            // no block for one); a unary answer carrying an image reaches a
-            // stream consumer as an unmodeled item, verbatim.
-            AssistantContent::Image(image) => match serde_json::to_value(image) {
-                Ok(value) => out.unknown(crate::streaming::UnknownPayload::new(value)),
-                Err(error) => out.error(crate::error::ProviderError::Json(error)),
-            },
-            AssistantContent::ToolCall(call) => {
-                // The durable handle is separate from the assembly key and
-                // provider metadata. Local names are never inferred to be
-                // wire IDs merely because they do not look minted.
-                let mut end =
-                    ToolCallEnd::whole(call.function.name.clone(), call.function.arguments.clone())
-                        .with_namespace(call.function.namespace.clone())
-                        .with_durable_id(call.id.clone())
-                        .with_signature(call.signature.clone())
-                        .with_additional_params(call.additional_params.clone());
-                if let Some(provider) = &call.provider {
-                    end = match &provider.item_id {
-                        Some(item_id) => end
-                            .with_call_id(provider.call_id.clone())
-                            .with_tool_id(item_id.clone()),
-                        None => end.with_tool_id(provider.call_id.clone()),
-                    };
-                }
-                // Re-emission creates a fresh assembly occurrence; durable
-                // identity and provider handles are preserved on `end`.
-                out.tool_call(BlockId::minted(MintKind::Tool, index), end);
-            }
-            AssistantContent::CustomToolCall(call) => {
-                let mut end = CustomToolCallEnd::new(call.name.clone(), call.input.clone())
-                    .with_durable_id(call.id.clone())
-                    .with_namespace(call.namespace.clone());
-                if let Some(provider) = &call.provider {
-                    end = match &provider.item_id {
-                        Some(item_id) => end
-                            .with_call_id(provider.call_id.clone())
-                            .with_tool_id(item_id.clone()),
-                        None => end.with_tool_id(provider.call_id.clone()),
-                    };
-                }
-                out.custom_tool_call(BlockId::minted(MintKind::Tool, index), end);
-            }
-            // Re-emitted whole, keyed by its position like the other parts.
-            AssistantContent::ProviderItem(item) => {
-                out.provider_item(BlockId::minted(MintKind::Output, index), item.clone());
-            }
-        }
-    }
-    let mut terminal = StreamFinal::new(
-        response.provider.clone(),
-        response.usage,
-        response.raw.clone(),
-    )
-    .with_optional_finish_reason(response.finish_reason());
-    terminal.message_id = response.message_id.clone();
-    terminal.response_id = response.response_id.clone();
-    terminal.provider_request_id = response.provider_request_id.clone();
-    terminal.provider_response_headers = response.provider_response_headers.clone();
-    terminal.model = response.model.clone();
-    out.final_record(terminal);
-    // An item that failed to re-emit (an image that did not serialize) is
-    // delivered as the error it is, not dropped.
-    out.drain()
-        .map(|item| item.map_err(|error| ErrorReport::from(&error)))
-        .collect()
-}
-
-/// The one fold of a stream into the completion a unary consumer, or the
-/// record, holds: what a unary consumer runs over a streaming handler's
-/// events, what the driver's observer runs over a streaming dispatch, what
-/// a layer runs for its verdict.
+/// What a unary consumer, the record, or a layer's verdict takes from a
+/// stream: its outcome, the response the stream ends with or the first
+/// error item. The origin folded the response; the tap only watches for it.
 #[derive(Default)]
 pub struct StreamTap {
-    accumulator: BlockAccumulator,
-    message_id: Option<String>,
+    /// The tap yielded its outcome.
+    finished: bool,
 }
 
 impl StreamTap {
-    /// An empty fold.
+    /// A new stream tap.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Folds an event, returning an outcome on `Final`, an error item, or an
-    /// accumulation failure. Callers decide whether to stop after an outcome.
+    /// Returns the stream's outcome once: the response it ends with, or the
+    /// first error item. Every later call returns `None`.
     pub fn observe(
         &mut self,
-        item: &Result<StreamEvent, ErrorReport>,
+        item: &Result<Relayed, ErrorReport>,
     ) -> Option<Result<Outcome, ErrorReport>> {
-        match item {
-            Err(report) => Some(Err(report.clone())),
-            Ok(StreamEvent::Final(terminal)) => Some(finish_unary(
-                &mut self.accumulator,
-                self.message_id.take(),
-                terminal.clone(),
-            )),
-            Ok(event) => {
-                if let StreamEvent::BlockStart {
-                    id,
-                    kind: crate::streaming::BlockKind::Message,
-                    ..
-                } = event
-                    && let Some(wire) = id.wire_str()
-                {
-                    self.message_id = Some(wire.to_owned());
-                }
-                if let Err(report) = self.accumulator.apply(event) {
-                    return Some(Err(report));
-                }
-                None
-            }
+        if self.finished {
+            return None;
         }
+        let outcome = match item {
+            Ok(Relayed::Origin(_) | Relayed::Item(_)) => None,
+            Ok(Relayed::Done(response)) => Some(Ok(Outcome::Completion((**response).clone()))),
+            Err(report) => Some(Err(report.clone())),
+        };
+        self.finished = outcome.is_some();
+        outcome
     }
 }
 
-/// Returns a retryable response error for a stream that ended before its terminal
-/// record. Retryability does not guarantee a subsequent attempt will succeed.
+/// The retryable report of a reply that ended before the provider ended it
+/// ([`ProviderError::Truncated`](crate::error::ProviderError::Truncated)).
+/// Retryability does not guarantee a subsequent attempt will succeed.
 pub fn stream_truncated() -> ErrorReport {
-    ErrorReport::new(
-        ErrorKind::Response,
-        "the stream ended before its terminal record",
-    )
-    .with_retryable(true)
+    serving_provider_report(&crate::error::ProviderError::Truncated)
+}
+
+/// Serving preserves its established truncation diagnostic at the typed
+/// provider boundary. Shared provider errors and relayed reports retain theirs.
+pub(super) fn serving_provider_report(error: &crate::error::ProviderError) -> ErrorReport {
+    match error {
+        crate::error::ProviderError::Truncated => ErrorReport::new(
+            ErrorKind::Response,
+            "the stream ended before its terminal record",
+        )
+        .with_retryable(true),
+        error => ErrorReport::from(error),
+    }
 }
 
 /// An answer, or an owned stream whose execution belongs to the driver.
@@ -423,12 +326,21 @@ impl Reply {
         }
     }
 
-    /// Convert a completion into events; incompatible outcomes become errors.
+    /// Convert a completion into its events, then the response;
+    /// incompatible outcomes become errors.
     pub fn into_stream(self) -> StreamEvents {
         match self {
             Self::Stream(stream) => stream,
             Self::Outcome(outcome) => Box::pin(futures::stream::iter(match outcome {
-                Ok(Outcome::Completion(response)) => events_from_response(&response),
+                Ok(Outcome::Completion(response)) => {
+                    match crate::operation::completion::events_of(&response) {
+                        Ok(items) => std::iter::once(Ok(Relayed::Origin(response.origin.clone())))
+                            .chain(items.into_iter().map(|item| Ok(Relayed::Item(item))))
+                            .chain(std::iter::once(Ok(Relayed::Done(Box::new(response)))))
+                            .collect(),
+                        Err(error) => vec![Err(serving_provider_report(&error))],
+                    }
+                }
                 Ok(other) => vec![Err(wrong_stream_answer(&other))],
                 Err(report) => vec![Err(report)],
             })),
@@ -467,7 +379,7 @@ impl Reply {
                 let outcome = if finished { None } else { fold.observe(item) };
                 if let Some(seen) = &mut seen {
                     let recorded = outcome.as_ref().map(|outcome| {
-                        if matches!(item, Ok(StreamEvent::Final(_))) {
+                        if matches!(item, Ok(Relayed::Done(_))) {
                             original.as_ref().unwrap_or(outcome)
                         } else {
                             outcome
@@ -673,7 +585,7 @@ impl Observed {
 
     fn item(
         &mut self,
-        item: &Result<StreamEvent, ErrorReport>,
+        item: &Result<Relayed, ErrorReport>,
         outcome: Option<&Result<Outcome, ErrorReport>>,
     ) {
         let outcome = outcome.filter(|_| !self.told);

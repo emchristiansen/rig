@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use rig_core::effect::{EffectId, EffectRecord, EffectRow, HandlerDescriptor};
 use rig_core::error::{ErrorKind, ErrorReport};
+use rig_core::json_utils::to_canonical_string;
 use rig_core::serve::ServingPolicy;
 use serde::{Deserialize, Serialize};
 
@@ -59,8 +60,9 @@ pub struct LogHeader {
     /// order under either policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus: Option<ServingPolicy>,
-    /// Required effects and policy hashes per `EffectRecord::scope` for shared
-    /// world logs. Single-agent logs use `run_spec` and `required` instead.
+    /// Required effects and policy hashes per `EffectRecord::scope` for logs
+    /// shared by several programs. Single-agent logs use `run_spec` and
+    /// `required` instead.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub programs: BTreeMap<String, ProgramIdentity>,
 }
@@ -261,13 +263,76 @@ impl<'a> IntoIterator for &'a EffectLog {
 /// sorted object keys, or a serialization error.
 /// Sorting makes identity independent of JSON map insertion order.
 pub fn stable_hash<T: Serialize>(value: &T) -> Result<u64, serde_json::Error> {
-    let json = serde_json::to_vec(&Canonical::from(serde_json::to_value(value)?))?;
+    let json = to_canonical_string(&serde_json::to_value(value)?);
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in json {
+    for byte in json.into_bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     Ok(hash)
+}
+
+/// `log` with each rig-issued call id (a random uuid) renamed, in order of
+/// first appearance, to a fixed one. Rig issues its ids afresh on every run,
+/// so two runs that differ only in them record and replay the same log.
+///
+/// ```
+/// let issued = serde_json::json!({"local": "7ecaf57b-5bbb-4b9e-a440-63738a5939ec"});
+/// assert_eq!(
+///     rig_cassette::effect_log::canonical_local_ids(issued),
+///     serde_json::json!({"local": "00000000-0000-4000-8000-000000000000"}),
+/// );
+/// ```
+pub fn canonical_local_ids(mut log: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    fn issued(value: &Value, ids: &mut Vec<String>) {
+        match value {
+            Value::Object(object) => {
+                if let (1, Some(Value::String(id))) = (object.len(), object.get("local"))
+                    && !ids.contains(id)
+                {
+                    ids.push(id.clone());
+                }
+                object.values().for_each(|value| issued(value, ids));
+            }
+            Value::Array(values) => values.iter().for_each(|value| issued(value, ids)),
+            _ => {}
+        }
+    }
+    fn rename(value: &mut Value, ids: &[String], order: &mut Vec<String>) {
+        match value {
+            Value::String(text) => {
+                // Mark every id first, so a fixed id that is also an issued
+                // one is never renamed twice.
+                let mut marked = text.clone();
+                for id in ids.iter().filter(|id| text.contains(id.as_str())) {
+                    let index = order.iter().position(|seen| seen == id).unwrap_or_else(|| {
+                        order.push(id.clone());
+                        order.len() - 1
+                    });
+                    marked = marked.replace(id.as_str(), &format!("\u{0}{index}\u{0}"));
+                }
+                for index in 0..order.len() {
+                    marked = marked.replace(
+                        &format!("\u{0}{index}\u{0}"),
+                        &format!("00000000-0000-4000-8000-{index:012}"),
+                    );
+                }
+                *text = marked;
+            }
+            Value::Object(object) => object
+                .values_mut()
+                .for_each(|value| rename(value, ids, order)),
+            Value::Array(values) => values
+                .iter_mut()
+                .for_each(|value| rename(value, ids, order)),
+            _ => {}
+        }
+    }
+    let mut ids = Vec::new();
+    issued(&log, &mut ids);
+    rename(&mut log, &ids, &mut Vec::new());
+    log
 }
 
 /// A tool call's JSON arguments with object keys sorted, or the text as is
@@ -276,42 +341,8 @@ pub fn stable_hash<T: Serialize>(value: &T) -> Result<u64, serde_json::Error> {
 /// `serde_json`'s `preserve_order` feature is unified into it.
 pub(crate) fn canonical_tool_args(args: &str) -> String {
     serde_json::from_str::<serde_json::Value>(args)
-        .ok()
-        .and_then(|value| serde_json::to_string(&Canonical::from(value)).ok())
-        .unwrap_or_else(|| args.to_owned())
-}
-
-/// A JSON value whose objects serialize with sorted keys whatever
-/// `serde_json`'s map type is.
-#[derive(Serialize)]
-#[serde(untagged)]
-enum Canonical {
-    Null,
-    Bool(bool),
-    Number(serde_json::Number),
-    String(String),
-    Array(Vec<Canonical>),
-    Object(BTreeMap<String, Canonical>),
-}
-
-impl From<serde_json::Value> for Canonical {
-    fn from(value: serde_json::Value) -> Self {
-        match value {
-            serde_json::Value::Null => Self::Null,
-            serde_json::Value::Bool(bool) => Self::Bool(bool),
-            serde_json::Value::Number(number) => Self::Number(number),
-            serde_json::Value::String(string) => Self::String(string),
-            serde_json::Value::Array(items) => {
-                Self::Array(items.into_iter().map(Self::from).collect())
-            }
-            serde_json::Value::Object(fields) => Self::Object(
-                fields
-                    .into_iter()
-                    .map(|(key, value)| (key, Self::from(value)))
-                    .collect(),
-            ),
-        }
-    }
+        .map(|value| to_canonical_string(&value))
+        .unwrap_or_else(|_| args.to_owned())
 }
 
 // A log serializes and crosses threads on every target.

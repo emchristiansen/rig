@@ -1,0 +1,18 @@
+when:
+  path: /v1/audio/transcriptions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: multipart/form-data; boundary=0c2ecbb98a9220f8-7377f1e01a425b8f-7b19986a3e689f00-81feecb35c2f6ea0
+  body: null
+then:
+  status: 400
+  header:
+  - name: content-type
+    value: application/json
+  - name: x-request-id
+    value: req_25a3d194a8014c61a04b0289a21f1d68
+  body: '{"error":{"code":null,"message":"[{''type'': ''enum'', ''loc'': (''body'', ''response_format''), ''msg'': \"Input should be ''json'', ''text'', ''vtt'', ''srt'' or ''verbose_json''\", ''ctx'': {''expected'': \"''json'', ''text'', ''vtt'', ''srt'' or ''verbose_json''\"}}]","param":null,"type":"invalid_request_error"}}'

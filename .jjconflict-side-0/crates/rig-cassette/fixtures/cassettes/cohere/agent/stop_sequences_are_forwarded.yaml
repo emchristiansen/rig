@@ -1,0 +1,16 @@
+when:
+  path: /compatibility/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":32,"messages":[{"content":"Output exactly this sequence: alpha<END>omega","role":"user"}],"model":"command-a-03-2025","seed":7,"stop":["<END>"],"temperature":0.0}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  body: '{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"alpha","role":"assistant"}}],"created":0,"id":"be1532d7-d783-41bc-85c6-2b0a949fddb4","model":"command-a-03-2025","object":"chat.completion","usage":{"completion_tokens":1,"completion_tokens_details":{"accepted_prediction_tokens":0,"audio_tokens":0,"reasoning_tokens":0,"rejected_prediction_tokens":0},"prompt_tokens":10,"prompt_tokens_details":{"audio_tokens":0,"cached_tokens":0},"total_tokens":11}}'

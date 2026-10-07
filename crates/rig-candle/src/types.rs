@@ -178,6 +178,13 @@ pub enum CandleError {
         /// Original portable value.
         value: u64,
     },
+    /// A pose frame's size or pixel buffer is invalid, or a request has no
+    /// frames.
+    #[error("invalid image: {0}")]
+    InvalidImage(String),
+    /// A pose model setting is out of range.
+    #[error("invalid pose setting: {0}")]
+    InvalidPoseSetting(String),
     /// The native inference concurrency limit is invalid.
     #[error("max_concurrent_requests must be greater than zero")]
     InvalidConcurrencyLimit,
@@ -211,11 +218,6 @@ pub enum CandleError {
         /// Result/call identifier supplied in history.
         result_id: String,
     },
-    /// `CompletionModel::make` cannot load a byte-backed model.
-    #[error(
-        "`CompletionModel::make` is unsupported for rig-candle; use a byte-backed `CandleModel` constructor or builder"
-    )]
-    UnsupportedMake,
     /// A native blocking inference task could not be joined.
     #[cfg(not(target_family = "wasm"))]
     #[error("Candle blocking task failed: {0}")]
@@ -280,16 +282,14 @@ pub const PROVIDER_NAME: &str = "candle";
 
 impl From<&CandleCompletionResponse> for Usage {
     fn from(response: &CandleCompletionResponse) -> Self {
-        Usage {
-            input_tokens: Some(response.prompt_tokens),
-            output_tokens: Some(response.generated_tokens),
-            total_tokens: Some(
+        Usage::new()
+            .input_tokens(response.prompt_tokens)
+            .output_tokens(response.generated_tokens)
+            .total_tokens(
                 response
                     .prompt_tokens
                     .saturating_add(response.generated_tokens),
-            ),
-            ..Usage::default()
-        }
+            )
     }
 }
 

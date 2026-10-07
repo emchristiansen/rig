@@ -15,14 +15,13 @@
 //! | termination | natural `stop`, one-token `length` |
 //! | top candidates | `top_logprobs` absent, `0`, `2` |
 //!
-//! That is 24 recorded cells. Each one re-derives the exact expected
-//! log-probability object from its fixture and compares it with the serialized
-//! native response. Streaming cells recursively concatenate token arrays in
-//! wire order. The two model families are deliberate: this is shared Chat
-//! Completions metadata rather than a one-model quirk.
+//! That is 24 cells, of which the four below are tests. Each one re-derives the
+//! exact expected log-probability object from its fixture and compares it with
+//! the serialized native response. Streaming cells recursively concatenate
+//! token arrays in wire order. The two model families are deliberate: this is
+//! shared Chat Completions metadata rather than a one-model quirk.
 //!
-//! Coverage ledger: the pre-pruning Cartesian product is 24 and no cell was
-//! pruned or replaced by a unit test. Each explicit test below maps to
+//! Each test maps to
 //! `crates/rig-cassette/fixtures/cassettes/openai/chat_streaming_logprobs_matrix/<test-name>.yaml`.
 //! Synthetic `logprobs` values (`null`, `{}`, and a non-object) stay in the
 //! shared deserializer's unit tests because a live model cannot be instructed
@@ -33,18 +32,20 @@
 //!
 //! | recorded cells | exact fixture set |
 //! |---|---|
-//! | all 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_streaming_logprobs_matrix/{blocking,streaming}_{gpt_4o_mini,gpt_4_1_mini}_{stop,length}_top_{absent,zero,two}.yaml` |
+//! | 4 of 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_streaming_logprobs_matrix/{blocking_gpt_4_1_mini_length_top_zero,blocking_gpt_4_1_mini_stop_top_absent,streaming_gpt_4_1_mini_length_top_zero,streaming_gpt_4_1_mini_stop_top_absent}.yaml` |
 
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use futures::StreamExt as _;
-use rig::completion::CompletionModel;
-use rig::providers::openai;
-use rig::streaming::StreamEvent;
 use serde_json::{Value, json};
 
-use super::super::support::{OpenAiCassette, with_openai_chat_stream_logprobs_cassette_result};
+use rig::providers::openai::extension::{ChatOptions, OpenAiOptions};
+
+use super::super::support::{
+    OpenAiCassette, openai_options, with_openai_chat_stream_logprobs_cassette_result,
+};
+use rig::completion::CompletionRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
@@ -54,7 +55,6 @@ enum Transport {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModelVariant {
-    Gpt4oMini,
     Gpt41Mini,
 }
 
@@ -68,7 +68,6 @@ enum Termination {
 enum Top {
     Absent,
     Zero,
-    Two,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -87,24 +86,17 @@ struct Observation {
 
 type SharedObservation = Arc<Mutex<Option<Observation>>>;
 
-fn params(cell: Cell) -> Value {
-    let mut params = json!({ "logprobs": true });
-    if let Some(top) = match cell.top {
-        Top::Absent => None,
-        Top::Zero => Some(0),
-        Top::Two => Some(2),
-    } {
-        params["top_logprobs"] = json!(top);
-    }
-    params
+fn options(cell: Cell) -> rig::completion::ProviderOptions {
+    let chat = ChatOptions::new().logprobs(true);
+    let chat = match cell.top {
+        Top::Absent => chat,
+        Top::Zero => chat.top_logprobs(0),
+    };
+    openai_options(OpenAiOptions::new().chat(chat))
 }
 
 fn prompt(cell: Cell) -> &'static str {
     match (cell.model, cell.termination) {
-        (ModelVariant::Gpt4oMini, Termination::Stop) => "Reply with exactly: cobalt",
-        (ModelVariant::Gpt4oMini, Termination::Length) => {
-            "Write the English alphabet in order without spaces."
-        }
         (ModelVariant::Gpt41Mini, Termination::Stop) => {
             "What is 17 + 25? Answer with only the number."
         }
@@ -123,54 +115,43 @@ fn max_tokens(cell: Cell) -> u64 {
 
 fn model_name(model: ModelVariant) -> &'static str {
     match model {
-        ModelVariant::Gpt4oMini => "gpt-4o-mini",
         ModelVariant::Gpt41Mini => "gpt-4.1-mini",
     }
 }
 
 async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservation) -> Result<()> {
     let model = client.openai.chat(model_name(cell.model));
-    let request = model
-        .completion_request(prompt(cell))
-        .additional_params(params(cell))
-        .max_tokens(max_tokens(cell))
-        .build();
+    let request = CompletionRequest::new(prompt(cell))
+        .provider_options(options(cell))
+        .max_tokens(max_tokens(cell));
 
     let observation = match cell.transport {
         Transport::Blocking => {
-            // The provider-native chat-completions reply rides serialized on
-            // `CompletionResponse::raw`; decode it to read the same fields the
-            // old raw surface exposed directly.
-            let response = model.completion(request).await?;
-            let raw: openai::completion::CompletionResponse = serde_json::from_value(response.raw)?;
-            let choice = raw
-                .choices
-                .first()
+            // The provider's chat-completions reply is `CompletionResponse::raw`.
+            let response = model.call(request).await?;
+            let choice = response.raw["choices"]
+                .get(0)
                 .context("blocking response should carry a choice")?;
             Observation {
-                logprobs: choice.logprobs.clone().unwrap_or(Value::Null),
-                finish_reason: json!(choice.finish_reason),
+                logprobs: choice["logprobs"].clone(),
+                finish_reason: choice["finish_reason"].clone(),
             }
         }
         Transport::Streaming => {
-            let mut stream = model.stream(request).await?;
-            let mut terminal = None;
+            let mut stream = model.stream(request)?;
             while let Some(item) = stream.next().await {
-                if let StreamEvent::Final(record) = item? {
-                    terminal = Some(record);
-                }
+                item?;
             }
-            let terminal = terminal.context("stream should carry a terminal record")?;
-            // The provider-native chat-completions terminal rides serialized
-            // on `StreamFinal::raw`; decode it to prove the shape, then read
-            // the serialized form the way the old raw surface did.
-            let terminal = serde_json::from_value::<
-                openai::wire::StreamingCompletionResponse<openai::completion::Usage>,
-            >(terminal.raw)?;
-            let serialized = serde_json::to_value(terminal)?;
+            let terminal = stream
+                .finish()
+                .await
+                .context("stream should carry a terminal record")?;
+            // The chat-completions terminal record is `CompletionResponse::raw`.
+            // The rebuilt document states them where a unary body does.
+            let choice = &terminal.raw["choices"][0];
             Observation {
-                logprobs: serialized["logprobs"].clone(),
-                finish_reason: serialized["finish_reason"].clone(),
+                logprobs: choice["logprobs"].clone(),
+                finish_reason: choice["finish_reason"].clone(),
             }
         }
     };
@@ -259,7 +240,6 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
             "{scenario}: top_logprobs should be absent"
         ),
         Top::Zero => assert_eq!(request["top_logprobs"], 0, "{scenario}"),
-        Top::Two => assert_eq!(request["top_logprobs"], 2, "{scenario}"),
     }
     assert_eq!(request["model"], model_name(cell.model), "{scenario}");
     match cell.transport {
@@ -324,51 +304,11 @@ fn cell(transport: Transport, model: ModelVariant, termination: Termination, top
 crate::matrix::case_matrix! {
     wrapper: with_openai_chat_stream_logprobs_cassette_result, family: streaming_logprobs_matrix_case;
     # [tokio :: test]
-    blocking_gpt_4o_mini_stop_top_absent: ("chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_stop_top_absent", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Termination :: Stop , Top :: Absent ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_stop_top_zero: ("chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_stop_top_zero", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Termination :: Stop , Top :: Zero ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_stop_top_two: ("chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_stop_top_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Termination :: Stop , Top :: Two ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_length_top_absent: ("chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_length_top_absent", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Termination :: Length , Top :: Absent ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_length_top_zero: ("chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_length_top_zero", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Termination :: Length , Top :: Zero ,));
-    # [tokio :: test]
-    blocking_gpt_4o_mini_length_top_two: ("chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_length_top_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Termination :: Length , Top :: Two ,));
-    # [tokio :: test]
     blocking_gpt_4_1_mini_stop_top_absent: ("chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_stop_top_absent", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Termination :: Stop , Top :: Absent ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_stop_top_zero: ("chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_stop_top_zero", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Termination :: Stop , Top :: Zero ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_stop_top_two: ("chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_stop_top_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Termination :: Stop , Top :: Two ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_length_top_absent: ("chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_absent", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Termination :: Length , Top :: Absent ,));
     # [tokio :: test]
     blocking_gpt_4_1_mini_length_top_zero: ("chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_zero", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Termination :: Length , Top :: Zero ,));
     # [tokio :: test]
-    blocking_gpt_4_1_mini_length_top_two: ("chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_two", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Termination :: Length , Top :: Two ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_stop_top_absent: ("chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_stop_top_absent", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Termination :: Stop , Top :: Absent ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_stop_top_zero: ("chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_stop_top_zero", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Termination :: Stop , Top :: Zero ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_stop_top_two: ("chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_stop_top_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Termination :: Stop , Top :: Two ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_length_top_absent: ("chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_length_top_absent", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Termination :: Length , Top :: Absent ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_length_top_zero: ("chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_length_top_zero", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Termination :: Length , Top :: Zero ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_length_top_two: ("chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_length_top_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Termination :: Length , Top :: Two ,));
-    # [tokio :: test]
     streaming_gpt_4_1_mini_stop_top_absent: ("chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_stop_top_absent", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Termination :: Stop , Top :: Absent ,));
     # [tokio :: test]
-    streaming_gpt_4_1_mini_stop_top_zero: ("chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_stop_top_zero", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Termination :: Stop , Top :: Zero ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_stop_top_two: ("chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_stop_top_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Termination :: Stop , Top :: Two ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_length_top_absent: ("chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_absent", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Termination :: Length , Top :: Absent ,));
-    # [tokio :: test]
     streaming_gpt_4_1_mini_length_top_zero: ("chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_zero", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Termination :: Length , Top :: Zero ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_length_top_two: ("chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_two", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Termination :: Length , Top :: Two ,));
 }

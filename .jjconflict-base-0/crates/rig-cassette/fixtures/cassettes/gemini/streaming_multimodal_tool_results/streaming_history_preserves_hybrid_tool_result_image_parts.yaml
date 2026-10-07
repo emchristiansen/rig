@@ -1,0 +1,41 @@
+when:
+  path: /v1beta/models/gemini-3-flash-preview:streamGenerateContent
+  method: POST
+  query_param:
+  - name: alt
+    value: sse
+  - name: key
+    value: '[REDACTED]'
+  header:
+  - name: accept
+    value: text/event-stream
+  - name: content-type
+    value: application/json
+  body: '{"contents":[{"parts":[{"text":"Use the tool once, then answer with the dominant color in the returned image.","thought":false}],"role":"user"}],"generationConfig":{},"safetySettings":null,"systemInstruction":{"parts":[{"text":"You are a precise assistant. Call `render_reference_image` exactly once before answering. After the tool result arrives, do not call any more tools. Answer in one short sentence.","thought":false}],"role":"model"},"toolConfig":null,"tools":[{"codeExecution":null,"functionDeclarations":[{"description":"Return a reference image the assistant must inspect before answering.","name":"render_reference_image","parametersJsonSchema":{"properties":{},"required":[],"type":"object"}}]}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: text/event-stream
+  body: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"args\":{},\"id\":\"call_1792605\",\"name\":\"render_reference_image\"},\"thoughtSignature\":\"EukCCuYCAWkUfRODkCjzmMXR1DqQmsfP6u0m7s09lZc4tS0HLVLbsqBqvl97n7zHoIN0NEnADdVFjOMw/J795+OwpdwizDKQsLl+WOmS9Qx3xLdNUy9fccxZ8sVAnuT4GX84zWgi6kUk74tORtuf66f5AtE9QJAiT5ewjUHIo2ClvZwsoAwJWIGZPCal4NHtOBB1wvPvlXLBpshbRTSGZ6UfTeP8+IUy/f2YCgq5AZp45w8Y3mDr+l3q495B7jhTBV80Z9aqfM20FdB30SGLiyZXMJv6lUlhRQoJOXpPoPbpmylzt1BpZFqJjqVBjbmyq3LvYSU8rqFbXI0BOkc/Bbru6U8I2TYA2cP+CqSGCTMaaKlHnCk0WC63HjKAwYKuqt7Pl4qsk8qLcw1tWlr7fzQdXGSK4b2KXw+vSbD5Rg5XK6mam2L17jv8xRSsmb3d6NFep3rL/amRN45AfRDqafIyIv7YaXv7WF1sFw==\"}],\"role\":\"model\"},\"index\":0}],\"modelVersion\":\"gemini-3-flash-preview\",\"responseId\":\"RQ7BavqfL4PkqtsPv7aGwAM\",\"usageMetadata\":{\"candidatesTokenCount\":12,\"promptTokenCount\":90,\"promptTokensDetails\":[{\"modality\":\"TEXT\",\"tokenCount\":90}],\"serviceTier\":\"standard\",\"thoughtsTokenCount\":60,\"totalTokenCount\":162}}\r\n\r\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"modelVersion\":\"gemini-3-flash-preview\",\"responseId\":\"RQ7BavqfL4PkqtsPv7aGwAM\",\"usageMetadata\":{\"candidatesTokenCount\":12,\"promptTokenCount\":90,\"promptTokensDetails\":[{\"modality\":\"TEXT\",\"tokenCount\":90}],\"serviceTier\":\"standard\",\"thoughtsTokenCount\":60,\"totalTokenCount\":162}}\r\n\r\n"
+---
+when:
+  path: /v1beta/models/gemini-3-flash-preview:streamGenerateContent
+  method: POST
+  query_param:
+  - name: alt
+    value: sse
+  - name: key
+    value: '[REDACTED]'
+  header:
+  - name: accept
+    value: text/event-stream
+  - name: content-type
+    value: application/json
+  body: '{"contents":[{"parts":[{"text":"Use the tool once, then answer with the dominant color in the returned image.","thought":false}],"role":"user"},{"parts":[{"functionCall":{"args":{},"id":"call_1792605","name":"render_reference_image"},"thoughtSignature":"EukCCuYCAWkUfRODkCjzmMXR1DqQmsfP6u0m7s09lZc4tS0HLVLbsqBqvl97n7zHoIN0NEnADdVFjOMw/J795+OwpdwizDKQsLl+WOmS9Qx3xLdNUy9fccxZ8sVAnuT4GX84zWgi6kUk74tORtuf66f5AtE9QJAiT5ewjUHIo2ClvZwsoAwJWIGZPCal4NHtOBB1wvPvlXLBpshbRTSGZ6UfTeP8+IUy/f2YCgq5AZp45w8Y3mDr+l3q495B7jhTBV80Z9aqfM20FdB30SGLiyZXMJv6lUlhRQoJOXpPoPbpmylzt1BpZFqJjqVBjbmyq3LvYSU8rqFbXI0BOkc/Bbru6U8I2TYA2cP+CqSGCTMaaKlHnCk0WC63HjKAwYKuqt7Pl4qsk8qLcw1tWlr7fzQdXGSK4b2KXw+vSbD5Rg5XK6mam2L17jv8xRSsmb3d6NFep3rL/amRN45AfRDqafIyIv7YaXv7WF1sFw=="}],"role":"model"},{"parts":[{"functionResponse":{"id":"call_1792605","name":"render_reference_image","parts":[{"inlineData":{"data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==","mimeType":"image/png"}}],"response":{"result":{"instruction":"Use the image part to answer the user''s question."}}},"thought":false}],"role":"user"}],"generationConfig":{},"safetySettings":null,"systemInstruction":{"parts":[{"text":"You are a precise assistant. Call `render_reference_image` exactly once before answering. After the tool result arrives, do not call any more tools. Answer in one short sentence.","thought":false}],"role":"model"},"toolConfig":null,"tools":[{"codeExecution":null,"functionDeclarations":[{"description":"Return a reference image the assistant must inspect before answering.","name":"render_reference_image","parametersJsonSchema":{"properties":{},"required":[],"type":"object"}}]}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: text/event-stream
+  body: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"The dominant color in the image\"}],\"role\":\"model\"},\"index\":0}],\"modelVersion\":\"gemini-3-flash-preview\",\"responseId\":\"Rg7BarDbJ7iKqtsP_vWfiQg\",\"usageMetadata\":{\"candidatesTokenCount\":6,\"promptTokenCount\":131,\"promptTokensDetails\":[{\"modality\":\"TEXT\",\"tokenCount\":131}],\"serviceTier\":\"standard\",\"thoughtsTokenCount\":15,\"totalTokenCount\":152}}\r\n\r\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" is red.\"}],\"role\":\"model\"},\"index\":0}],\"modelVersion\":\"gemini-3-flash-preview\",\"responseId\":\"Rg7BarDbJ7iKqtsP_vWfiQg\",\"usageMetadata\":{\"candidatesTokenCount\":9,\"promptTokenCount\":131,\"promptTokensDetails\":[{\"modality\":\"TEXT\",\"tokenCount\":131}],\"serviceTier\":\"standard\",\"thoughtsTokenCount\":15,\"totalTokenCount\":155}}\r\n\r\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\",\"thoughtSignature\":\"ErIBCq8BAWkUfROGAm33cfRVISBJ36U+LyMhJcyachurjqd9qCIG/8Qp18naGnGsba73pdPMP3YCCV7U1n79UM1Ig/xxq6DB7ch3RbU2iAPV3S/QWQhdJRGdP1U3iabufbOQuMr65q7AwIlUHtMF89IpeHK4ZhajLtU/Gnn3OD5LwOabCB1WNAUrkjD9YDEIAIZhtF/lRtFx1VP8Vh4PFYtsqWU+AC2nvctaX5CLPwZw1j8PCg==\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"modelVersion\":\"gemini-3-flash-preview\",\"responseId\":\"Rg7BarDbJ7iKqtsP_vWfiQg\",\"usageMetadata\":{\"candidatesTokenCount\":9,\"promptTokenCount\":1280,\"promptTokensDetails\":[{\"modality\":\"TEXT\",\"tokenCount\":191},{\"modality\":\"IMAGE\",\"tokenCount\":1089}],\"serviceTier\":\"standard\",\"thoughtsTokenCount\":15,\"totalTokenCount\":1304}}\r\n\r\n"

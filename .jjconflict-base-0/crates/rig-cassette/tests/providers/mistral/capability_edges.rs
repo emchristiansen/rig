@@ -1,0 +1,236 @@
+//! Cassette-backed coverage for Mistral's listing and embedding capabilities.
+//!
+//! Three defects live here, all found by comparing what the live API returns
+//! and accepts against what rig models:
+//!
+//! - `EmbeddingsBuilder` chunked by the shared OpenAI cap of 1024 inputs;
+//!   Mistral rejects anything over 256. The cap itself is pinned live here;
+//!   that rig now chunks *below* it is a unit assertion, because recording a
+//!   256-input success would commit ~5 MB of returned vectors to a fixture.
+//! - Every Mistral embedding model reported `ndims() == 0`, because the
+//!   default-dimension table consulted is OpenAI's and has no Mistral entry.
+//! - Model listing dropped `description` and `max_context_length`, both of
+//!   which `Model` has slots for.
+
+use anyhow::Result;
+use futures::StreamExt;
+use rig::providers::mistral;
+use rig::streaming::Item;
+
+use super::support::with_mistral_capability_cassette;
+use rig::completion::CompletionRequest;
+
+/// One more than Mistral's real per-request cap, so a single un-chunked
+/// request would be rejected and only correct chunking can succeed.
+const OVER_ONE_BATCH: usize = 257;
+
+#[tokio::test]
+async fn one_request_over_mistrals_batch_cap_is_rejected() -> Result<()> {
+    with_mistral_capability_cassette(
+        "capability_edges/one_request_over_mistrals_batch_cap_is_rejected",
+        |client| async move {
+            let model = client.embedding(mistral::embedding::MISTRAL_EMBED, None);
+            // Straight through the model, bypassing the builder's chunking, so
+            // the cell pins Mistral's own cap rather than rig's arithmetic.
+            let error = model
+                .call(
+                    (0..OVER_ONE_BATCH)
+                        .map(|i| format!("document {i}"))
+                        .collect::<Vec<_>>(),
+                )
+                .await
+                .map(|response| response.embeddings)
+                // `Vec<Embedding>` is not `Debug`; map the Ok side away.
+                .map(|_| ())
+                .expect_err("Mistral must reject a batch over its cap");
+            assert_batch_cap_rejection(&error);
+            Ok::<_, anyhow::Error>(())
+        },
+    )
+    .await
+}
+
+fn assert_batch_cap_rejection(error: &rig::error::ProviderError) {
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("Too many inputs"),
+        "the rejection must be Mistral's batch-cap error, not some other failure: {rendered}"
+    );
+}
+
+/// `n > 1` streams as interleaved chunks distinguished only by
+/// `choices[].index`. The blocking path answers such a request from candidate
+/// 0 alone; the streamed twin used to concatenate every candidate's deltas
+/// into one answer that is not any candidate the model produced.
+///
+/// Recorded against `temperature: 1` so the two candidates genuinely differ —
+/// with identical candidates the merge would be invisible.
+#[tokio::test]
+async fn streaming_with_two_candidates_answers_from_the_first() -> Result<()> {
+    with_mistral_capability_cassette(
+        "capability_edges/streaming_with_two_candidates_answers_from_the_first",
+        |client| async move {
+            let model = client.completion(mistral::MISTRAL_SMALL);
+            let mut stream: rig::streaming::CompletionStream = model.stream(
+                CompletionRequest::new("Say one random word.")
+                    .temperature(1.0)
+                    .max_tokens(8)
+                    .additional_params(serde_json::json!({"n": 2})),
+            )?;
+
+            let mut text = String::new();
+            while let Some(item) = stream.next().await {
+                if let Item::Event(rig::streaming::StreamEvent::Text { text: chunk, .. }) = item? {
+                    text.push_str(&chunk);
+                }
+            }
+            assert_answers_from_candidate_zero(
+                "capability_edges/streaming_with_two_candidates_answers_from_the_first",
+                &text,
+            );
+            Ok::<_, anyhow::Error>(())
+        },
+    )
+    .await
+}
+
+/// Assert the streamed text is candidate 0 exactly, derived from the
+/// cassette's own bytes rather than hard-coded — the model picks different
+/// words on every recording.
+///
+/// The cell's premise is checked too: if the recorded turn stopped carrying a
+/// *second*, different candidate, a merge would be invisible and this cell
+/// would pass while covering nothing.
+fn assert_answers_from_candidate_zero(scenario: &str, streamed: &str) {
+    let (first, second) = recorded_candidates(scenario);
+    assert_ne!(
+        first, second,
+        "the recorded turn must carry two different candidates, or a merged stream would look \
+         identical to a correct one"
+    );
+    assert_eq!(
+        streamed.trim(),
+        first,
+        "the stream must deliver candidate 0 whole; interleaving the two yields neither"
+    );
+}
+
+/// Concatenated `delta.content` per candidate index, read back out of the
+/// recorded SSE body.
+fn recorded_candidates(scenario: &str) -> (String, String) {
+    let raw = std::fs::read_to_string(crate::cassettes::cassette_path("mistral", scenario))
+        .expect("cassette should be readable");
+    let mut candidates = [String::new(), String::new()];
+    for line in raw.split("data: ").skip(1) {
+        let payload = line.trim_start();
+        let Some(end) = payload.rfind('}') else {
+            continue;
+        };
+        let Ok(chunk) = serde_json::from_str::<serde_json::Value>(&payload[..=end]) else {
+            continue;
+        };
+        let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for choice in choices {
+            let index = choice.get("index").and_then(serde_json::Value::as_u64);
+            let text = choice
+                .get("delta")
+                .and_then(|delta| delta.get("content"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if let Some(slot) = index.and_then(|i| candidates.get_mut(i as usize)) {
+                slot.push_str(text);
+            }
+        }
+    }
+    let [first, second] = candidates;
+    (first, second)
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+struct SumReport {
+    total: i64,
+}
+
+/// Mistral accepts a response format beside tools only under
+/// `tool_choice: auto` — anything that *forces* a call is a 400:
+/// "`json_schema` response type with tools is only compatible with
+/// `tool_choice: auto`".
+///
+/// Rig builds exactly that combination by itself: a structured-output agent
+/// defers `response_format` until a tool result exists, then emits it beside
+/// the caller's standing `tool_choice`. So the turn *after* the first tool
+/// call is rejected — after the tool has already run.
+///
+/// The cell drives that turn directly rather than through the agent loop: a
+/// standing `ToolChoice::Required` forces a tool call on every turn by design,
+/// so a loop with it never converges and the max-turns failure would mask the
+/// wire error this is about.
+#[tokio::test]
+async fn a_forced_tool_choice_beside_a_response_format_is_accepted() -> Result<()> {
+    with_mistral_capability_cassette(
+        "capability_edges/a_forced_tool_choice_beside_a_response_format_is_accepted",
+        |client| async move {
+            let model = client.completion(mistral::MISTRAL_SMALL);
+            let response = model
+                .call(
+                    CompletionRequest::new("Add 2 and 3, then report the total.")
+                        .preamble("Use the add tool, then report the total.")
+                        .messages(turn_one_history())
+                        .tools(vec![add_tool_definition()])
+                        .tool_choice(rig::message::ToolChoice::Required)
+                        .output_schema(schemars::schema_for!(SumReport))
+                        .temperature(0.0)
+                        .max_tokens(64),
+                )
+                .await?;
+
+            assert_turn_two_was_accepted(&response.choice);
+            Ok::<_, anyhow::Error>(())
+        },
+    )
+    .await
+}
+
+/// The history rig itself would have accumulated after turn 1: the model's
+/// tool call and the result of running it.
+fn turn_one_history() -> Vec<rig::completion::Message> {
+    vec![
+        rig::completion::Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            rig::message::AssistantContent::tool_call(
+                "call_REDACTED_1",
+                rig_core::message::ToolName::new("add").expect("tool name"),
+                serde_json::json!({"x": 2, "y": 3}),
+            ),
+        ])),
+        rig::completion::Message::User {
+            content: vec![rig::message::UserContent::tool_result(
+                rig_core::message::CallId::from_wire("call_REDACTED_1"),
+                rig_core::message::ToolName::new("add").expect("tool name"),
+                vec![rig::message::ToolResultContent::text("5")],
+            )],
+        },
+    ]
+}
+
+fn add_tool_definition() -> rig::completion::ToolDefinition {
+    rig::completion::ToolDefinition {
+        name: rig_core::message::ToolName::new("add").expect("tool name"),
+        description: "Add two integers.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}},
+            "required": ["x", "y"]
+        }),
+    }
+}
+
+/// The point is that the turn was *accepted*: before the fix it was a hard
+/// 400 and there was no response at all.
+fn assert_turn_two_was_accepted(choice: &[rig::completion::AssistantContent]) {
+    assert!(
+        !choice.is_empty(),
+        "the turn after a tool result must reach Mistral and come back with content"
+    );
+}

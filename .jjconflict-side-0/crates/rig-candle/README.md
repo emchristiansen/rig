@@ -1,0 +1,238 @@
+# rig-candle
+
+`rig-candle` runs validated local checkpoints through Rig's model and agent
+APIs: `CandleModel::completion()` is the model a loaded checkpoint serves, and
+`CandlePoseModel::pose()` estimates human poses (see
+[Pose estimation](#pose-estimation)). The crate receives byte buffers and
+performs no filesystem or network access itself.
+
+```rust,no_run
+use rig_agent::agent::AgentBuilder;
+use rig_candle::{CandleModel, ModelData};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model = CandleModel::from_safetensors_async(ModelData {
+        config: std::fs::read("./model/config.json")?,
+        tokenizer: std::fs::read("./model/tokenizer.json")?,
+        weights: std::fs::read("./model/model.safetensors")?,
+    })
+    .await?;
+    let agent = AgentBuilder::new(model.completion())
+        .preamble("You are a concise assistant.")
+        .build();
+    println!("{}", agent.prompt("Explain ownership briefly.").await?.output());
+    Ok(())
+}
+```
+
+## Validated model profiles
+
+- Llama 3 instruct: one unsharded safetensors checkpoint, explicit Llama 3
+  conversation formatting, text conversations.
+- SmolLM2-360M-Instruct: Q4_K_M GGUF using Candle's quantized Llama backend,
+  explicit ChatML formatting. This remains the small native/WASM demo model.
+- Qwen3-4B: the official `Qwen3-4B-Q4_K_M.gguf`, using Candle's
+  quantized Qwen3 backend and the explicit Qwen Hermes tool protocol. This is
+  the native-only agent-conformance profile; it is rejected on wasm32 because
+  its runtime memory cannot fit reliably in wasm32 linear memory.
+
+`ModelArtifacts` selects safetensors versus GGUF explicitly. Native async
+constructors and `build_async` perform validation and model construction on
+Tokio's blocking pool; synchronous constructors remain available. A load that
+has entered the blocking pool runs to completion even if its awaiting future is
+dropped. `builder_from_gguf_bytes` gives borrowed GGUF buffers the same
+generation/concurrency settings as owned artifacts without copying them,
+including static buffers such as `include_bytes!`.
+Arbitrary Qwen, Qwen2, Qwen3 MoE/vision, other sizes, shards, and unvalidated
+quantizations are rejected rather than treated as Llama.
+
+The loader validates architecture metadata before tensor allocation, exact
+profile dimensions and special-token agreement, the complete GGUF vocabulary,
+required tensor names/shapes, and the allowed Q4_K_M tensor mix. The effective
+GGUF context limit is currently 4096 tokens because that is Candle 0.11's
+quantized cache capacity.
+
+## Qwen3 tools and output behavior
+
+Qwen3 supports function name, description, and arbitrary object-shaped JSON
+Schema parameters, including optional properties, enums, nested objects, and
+arrays. `Auto`, `None`, `Required`, and `Specific` tool choices are represented
+explicitly. `Specific` exposes only the named functions; `Required` and
+`Specific` add a mandatory-call instruction and reject a model turn with no
+call. Malformed/non-object arguments, duplicate IDs, truncated envelopes, and
+unmatched results are typed Candle completion errors. Syntactically valid
+unknown or disallowed names reach Rig's agent dispatcher, where fail, repair,
+retry, or skip handling produces the corresponding typed `PromptError` and
+never executes the rejected call.
+
+Argument validation is intentionally split: `rig-candle` validates the JSON
+envelope and requires arguments to be an object, while Rig's registered tool
+performs typed deserialization/schema validation before execution. Tool
+execution always remains in Rig's agent driver. Assistant tool calls and
+correlated text or JSON results round-trip through history. Multimodal tool
+results and provider-hosted tools are rejected. Caller-controlled text, tool
+schemas, arguments, and results containing reserved chat-template delimiters
+are rejected before rendering so they cannot create structural prompt content.
+
+Qwen tool syntax can cross token boundaries, so streaming buffers one model
+turn, parses it, then emits ordered text/reasoning items and whole tool calls
+(a `Start`/`End` pair per call on the stream) followed by the terminal
+record. This keeps model XML out of user-visible text
+while preserving cancellation, bounded backpressure, and the same parsed result
+as buffered completion.
+
+The explicit prompt requests Qwen's no-thinking mode. If a checkpoint emits a
+leading `<think>` block anyway, it is represented as Rig reasoning content and
+omitted from later rendered history; control syntax is never exposed as normal
+text.
+
+Direct `CompletionRequest::output_schema` returns a typed unsupported-feature
+error: decoding is not grammar constrained. Rig's `OutputMode::Tool` works and
+is the supported path for a real tool followed by a synthetic structured final
+result. That mode is best-effort and Rig validates the returned JSON; it is not
+native grammar enforcement.
+
+## Pinned live model
+
+Download the official artifacts with the reproducible helper:
+
+```bash
+export RIG_CANDLE_TEST_MODEL_DIR="$PWD/crates/rig-candle/test-models/qwen3-4b-q4-k-m"
+./crates/rig-candle/tests/download_qwen3.sh
+cargo test --release -p rig-candle --test live_conformance \
+  -- --ignored --nocapture --test-threads=1
+```
+
+The script uses immutable revisions, retries resumable temporary downloads,
+checks size and SHA-256, then atomically installs each file. Verified files are
+reused and `test-models/` is ignored.
+
+| artifact | revision | bytes | SHA-256 |
+|---|---|---:|---|
+| `Qwen3-4B-Q4_K_M.gguf` | `bc640142c66e1fdd12af0bd68f40445458f3869b` | 2,497,280,256 (2.33 GiB) | `7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5` |
+| `tokenizer.json` | `1cfa9a7208912126459214e8b04321603b3df60c` | 11,422,654 (10.89 MiB) | `aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4` |
+| `config.json` | `1cfa9a7208912126459214e8b04321603b3df60c` | 726 | `8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a` |
+
+The live test loads the model once, reuses cheap `CandleModel` clones with a
+fresh KV cache per request, applies greedy decoding and a fixed seed, enforces
+timeouts, and prints tokens, tool counts, history size, timings, throughput, and
+safe output. On the ARM64 development host used for the release-mode
+verification, it passed a direct completion plus sixteen portable reports:
+buffered/raw-streaming text
+parity, optional arguments, parallel calls, serial host execution of a parallel
+batch, a zero-argument tool, string/JSON result serialization, complex nested
+Unicode and escaped arguments, invalid-call fail/repair/retry/skip recovery,
+hook rewrite chaining with turn-local request patches, cancellation and
+max-turn diagnostics, structured extraction with usage, sequential tools,
+streamed tool execution, buffered and streamed synthetic structured output,
+and all tool-choice modes. Actual resident memory and speed depend on the target
+and concurrent system load; the loaded quantized tensors are based on a
+2.33-GiB GGUF, KV cache grows with context, and loading temporarily also holds
+the 2.33-GiB input byte buffer alongside constructed tensors. Plan for more than
+twice the checkpoint size during loading rather than treating file size as a
+hard memory bound.
+
+## Conformance boundary
+
+Portable model-contract helpers live under `rig_core::test_utils`. The
+artifact-backed Candle suite calls the model-driving scenarios directly.
+Provider cassette suites reuse the same runners where their recorded request
+already represents the scenario, and reuse the typed validators when transport
+fixtures need provider-specific prompts or schemas. Current adoption covers
+Gemini parallel/zero-argument/result-serialization, recovery, cancellation,
+hook, extraction, and structured-output cases; OpenAI extraction and structured
+output; Anthropic hook rewrites, extraction, and structured output; and Ollama
+optional and sequential tools.
+
+The universal model contract covers semantic text, typed arguments, canonical
+call/result history, streaming finalization and usage, hook-visible outcomes,
+extraction, and structured output. Parallel model emission, structured
+reasoning, provider-assigned IDs, native constrained decoding, and hosted tools
+remain optional capabilities and are selected independently rather than hidden
+behind a passing umbrella test. Provider suites retain HTTP serialization,
+authentication, SSE framing, hosted tools, remote files, and provider-specific
+reasoning/session assertions; those are transport conformance, not local model
+quality.
+
+## Pose estimation
+
+`rig_candle::pose` runs YOLOv8 pose checkpoints in the safetensors layout of
+Candle's YOLOv8 example (`lmz/candle-yolo-v8`, sizes n, s, m, l and x). Its
+`PoseEstimation` operation takes RGB frames and yields one `FramePoses` event
+per frame, in order: every person's box, confidence and the 17 COCO
+keypoints, in the frame's pixels. A call folds the events into a `PoseTrack`.
+The model is a `Local<PoseEstimation>` wire on the loaded checkpoint, so it
+streams, erases to `DynModel<PoseEstimation>` and swaps transports like any
+other Rig model.
+
+```rust,no_run
+use futures::StreamExt;
+use rig_candle::pose::{BodyPart, CandlePoseModel, ImageFrame, PoseRequest};
+use rig_core::streaming::Item;
+
+# async fn run(weights: Vec<u8>, video: Vec<(u32, u32, Vec<u8>)>) -> Result<(), Box<dyn std::error::Error>> {
+let model = CandlePoseModel::builder(weights)
+    .confidence_threshold(0.5)
+    .build_async()
+    .await?
+    .pose();
+let frames = video
+    .into_iter()
+    .map(|(width, height, rgb)| ImageFrame::from_rgb8(width, height, rgb))
+    .collect::<Result<PoseRequest, _>>()?;
+let mut poses = model.stream(frames)?;
+while let Some(item) = poses.next().await {
+    if let Item::Event(frame) = item? {
+        for person in frame.people {
+            println!("{:?}", person.keypoint(BodyPart::LeftWrist));
+        }
+    }
+}
+# Ok(())
+# }
+```
+
+The loader reads the size from the checkpoint and refuses a detection or
+non-COCO checkpoint before allocating tensors. Frames are resized so their
+longest side is the builder's `input_size` (640 by default, a multiple of 32)
+and the other keeps the aspect ratio; overlapping boxes above
+`iou_threshold` are suppressed. Frames run one at a time on a blocking worker,
+and dropping the stream stops it before the next frame. A reply that ends
+before every frame was answered fails the call.
+
+The weights are Ultralytics' YOLOv8 pose weights and are licensed under
+AGPL-3.0; rig-candle neither ships nor downloads them. Check that license
+before you ship them. `examples/candle_pose` runs the model on JPEG or PNG
+files, and the opt-in live test checks the nano checkpoint on a photo:
+
+```bash
+./crates/rig-candle/tests/download_yolov8_pose.sh
+cargo test --release -p rig-candle --test live_pose -- --ignored --nocapture
+```
+
+| artifact | revision | bytes | SHA-256 |
+|---|---|---:|---|
+| `yolov8n-pose.safetensors` (`lmz/candle-yolo-v8`) | `be388c6fab95ae3035a039070e1b883b9c5a1325` | 6,650,412 | `08c76047b41744c027c8150e81d1dbbd94f996656cf5be266491367ae7fad072` |
+| `bike.jpg` (`huggingface/candle`) | `7a62aad24a5d8b1d8cb351e5ef77a7b3457a74b8` | 182,991 | `317e4a9d2d2be7859ba0ab8726a526f5ece9d77daf92857f3e93fb7b367824c1` |
+
+## Runtime behavior and limits
+
+Builder defaults can be overridden by request `max_tokens` and `temperature`,
+by the `GenerationOptions` `top_p` and `seed`, and by the `CandleOptions`
+provider options `top_k`, `repeat_penalty` and `repeat_last_n`
+(`rig_candle::extension`). The same five keys are accepted in
+`additional_params`, which take precedence; unknown keys are errors. Omitting
+`top_k` or `top_p` inherits its builder default, while an explicit JSON `null`
+in `additional_params` disables it.
+Native inference runs in `spawn_blocking`; model loading and each complete
+inference operation run inside Candle's CPU context so its private Rayon pool
+stays active. `max_concurrent_requests` defaults to one. Every request owns its
+cache and sampler. Cancellation is cooperative between Candle forwards, and the
+bounded stream channel has capacity eight.
+
+WASM inference is synchronous and should run in an application-owned Web Worker.
+The maintained browser example embeds SmolLM2 at compile time, rejects modified
+artifacts during its build, bounds input/history growth, and includes both a
+model-independent worker test and an opt-in real-artifact smoke test. CPU only;
+no CUDA/Metal selection, batching, multimodal prompts, or checkpoint shards.

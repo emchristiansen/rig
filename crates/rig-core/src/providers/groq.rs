@@ -1,14 +1,15 @@
 //! Groq's model identifiers.
 //!
-//! Configure requests with [`crate::providers::openai::wire::GROQ`]. Reasoning
-//! options such as `reasoning_format` belong in request `additional_params`.
+//! [`from_env`] and [`new`] build a client on the [`GROQ`](crate::providers::openai::wire::GROQ) dialect. A
+//! request sets its reasoning effort with
+//! [`GenerationOptions::reasoning`](crate::completion::GenerationOptions::reasoning);
+//! Groq's own fields such as `reasoning_format` are typed in [`extension`].
 //!
 //! ```no_run
 //! use rig_core::providers::groq;
-//! use rig_core::providers::openai::wire::{GROQ, OpenAI};
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let gpt_oss = OpenAI::from_env_with(&GROQ)?.chat(groq::GPT_OSS_120B);
+//! let gpt_oss = groq::from_env()?.chat(groq::GPT_OSS_120B);
 //! # let _ = gpt_oss;
 //! # Ok(())
 //! # }
@@ -33,3 +34,11 @@ pub const MINIMAX_M2_7: &str = "minimaxai/minimax-m2.7";
 pub const WHISPER_LARGE_V3: &str = "whisper-large-v3";
 /// The `whisper-large-v3-turbo` transcription model.
 pub const WHISPER_LARGE_V3_TURBO: &str = "whisper-large-v3-turbo";
+
+pub mod extension;
+
+/// The provider key: the dialect name, a reply's `Origin::provider` and
+/// the typed provider-options key.
+pub const PROVIDER_NAME: &str = "groq";
+
+crate::client::macros::openai_vendor!(crate::providers::openai::wire::GROQ, "Groq");

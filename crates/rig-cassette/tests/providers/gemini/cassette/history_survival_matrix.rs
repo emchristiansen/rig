@@ -1,11 +1,15 @@
 //! Gemini history survival: thought signatures and function-call ids across
 //! three prompts, plus an image tool result.
 
-use rig::completion::CompletionModel;
-
-use super::super::support::{BoundGemini, with_gemini_cassette};
+use super::super::support::with_gemini_cassette;
+use crate::history_survival::Options;
 use crate::history_survival::driver::{Cell, Expect, Transport};
+use rig::completion::{GenerationOptions, ProviderOptions, Reasoning};
+use rig::providers::gemini::extension::GeminiOptions;
+use rig_test_support::cassette_models::GeminiModels;
 
+/// Raw parameters for the image cell: its model takes a thinking level, so
+/// the typed budget is refused there.
 fn params() -> Option<serde_json::Value> {
     Some(serde_json::json!({
         "generationConfig": {
@@ -14,7 +18,22 @@ fn params() -> Option<serde_json::Value> {
     }))
 }
 
-fn model(client: BoundGemini, cell: Cell) -> impl CompletionModel + 'static {
+fn no_params() -> Option<serde_json::Value> {
+    None
+}
+
+fn options() -> Options {
+    Options::new(
+        GenerationOptions::default().reasoning(Reasoning::Budget { tokens: 1024 }),
+        ProviderOptions::new().set(GeminiOptions::new().include_thoughts(true)),
+    )
+}
+
+fn model(
+    client: GeminiModels,
+    cell: Cell,
+) -> rig::Model<rig::providers::gemini::completion::GenerateContent, rig::http_client::DynHttpClient>
+{
     client.completion(cell.model)
 }
 
@@ -22,7 +41,8 @@ const fn cell(transport: Transport, expect: Expect) -> Cell {
     Cell {
         provider: "gemini",
         model: "gemini-2.5-flash",
-        params,
+        params: no_params,
+        options,
         max_tokens: 4096,
         transport,
         expect,
@@ -35,14 +55,14 @@ const fn cell(transport: Transport, expect: Expect) -> Cell {
 const fn image_cell(transport: Transport, expect: Expect) -> Cell {
     Cell {
         model: rig::providers::gemini::completion::GEMINI_3_FLASH_PREVIEW,
+        params,
+        options: Options::none,
         ..cell(transport, expect)
     }
 }
 
 crate::matrix::case_matrix! {
     wrapper: with_gemini_cassette, family: history_survival_case;
-    #[tokio::test]
-    unary: ("history_survival_matrix/unary", configured, cell(Transport::Unary, Expect::SIGNED));
     #[tokio::test]
     streaming: ("history_survival_matrix/streaming", configured, cell(Transport::Streaming, Expect::SIGNED));
     #[tokio::test]

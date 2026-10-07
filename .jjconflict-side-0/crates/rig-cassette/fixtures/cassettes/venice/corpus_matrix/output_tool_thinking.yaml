@@ -1,0 +1,16 @@
+when:
+  path: /api/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":4096,"messages":[{"content":[{"text":"You are a concise assistant. Answer directly.\n\nWhen you have gathered enough information to answer, call the `final_result` tool exactly once with your final answer. Its arguments are the structured result and must satisfy the required schema. Do not return the final answer as plain text.","type":"text"}],"role":"system"},{"content":"Return a concise event object for a local Rust meetup in Seattle.","role":"user"}],"model":"qwen3-235b-a22b-thinking-2507","tools":[{"function":{"description":"Call this tool exactly once with your final answer when you are done. Its arguments are the structured result and must satisfy the output schema.","name":"final_result","parameters":{"properties":{"category":{"type":"string"},"summary":{"type":"string"},"title":{"type":"string"}},"required":["title","category","summary"],"type":"object"}},"type":"function"}],"venice_parameters":{"strip_thinking_response":false}}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json; charset=utf-8
+  body: '{"choices":[{"finish_reason":"tool_calls","index":0,"logprobs":null,"message":{"content":"","name":null,"reasoning_content":"The user wants a concise event object for a local Rust meetup in Seattle. This is a creative/fictional request to create a structured event object. I''ll create a realistic Rust meetup event object for Seattle.\n","role":"assistant","tool_calls":[{"function":{"arguments":"{\"title\": \"Seattle Rust Users Group - Monthly Meetup\", \"category\": \"local\", \"summary\": \"Monthly gathering for Rust developers in the Seattle area. Topics include ecosystem updates, project showcases, and hands-on workshops. All skill levels welcome.\"}","name":"final_result"},"id":"chatcmpl-tool-b8b90b15c78651d7","type":"function"}]}}],"cost":{"diem":0,"usd":0.0010572000000000001},"created":0,"id":"chatcmpl-R3Ed76K5r6FJYM1PEpLJv1FF","model":"qwen3-235b-a22b-thinking-2507","object":"chat.completion","service_tier":"default","usage":{"completion_tokens":129,"prompt_tokens":1346,"total_tokens":1475},"venice_parameters":{"disable_thinking":false,"enable_e2ee":true,"enable_web_citations":false,"enable_web_scraping":false,"enable_web_search":"off","enable_x_search":false,"include_search_results_in_stream":false,"include_venice_system_prompt":true,"return_search_results_as_documents":false,"strip_thinking_response":false,"web_search_citations":[]}}'

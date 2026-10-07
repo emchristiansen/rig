@@ -1,30 +1,30 @@
 use super::*;
-use crate::message::{ToolCall, ToolFunction, ToolResult};
+use crate::message::{
+    CustomToolCall, LocalCallId, ProviderCallId, ToolCall, ToolFunction, ToolName,
+};
+
+fn function_call(id: CallId) -> ToolCall {
+    ToolCall::new(
+        id,
+        ToolFunction::new(
+            ToolName::new("add").expect("tool name"),
+            serde_json::json!({}),
+        ),
+    )
+}
 
 fn call(id: &str) -> AssistantContent {
-    AssistantContent::ToolCall(ToolCall {
-        id: ToolCallId::new_or_minted(id, 0),
-        provider: None,
-        function: ToolFunction {
-            name: "add".into(),
-            namespace: None,
-            arguments: serde_json::json!({}),
-        },
-        additional_params: None,
-        signature: None,
-    })
+    AssistantContent::ToolCall(function_call(CallId::from_wire(id)))
 }
+
 fn result(id: &str) -> UserContent {
-    UserContent::ToolResult(ToolResult {
-        call: ToolCallId::new_or_minted(id, 0),
-        provider: None,
-        name: "add".into(),
-        answers: crate::message::AnsweredToolCall::Function,
-        content: vec![ToolResultContent::text("3")],
-    })
+    UserContent::ToolResult(
+        function_call(CallId::from_wire(id)).result(vec![ToolResultContent::text("3")]),
+    )
 }
+
 fn assistant(content: Vec<AssistantContent>) -> Message {
-    Message::Assistant { id: None, content }
+    Message::Assistant(crate::message::AssistantMessage::new(content))
 }
 
 #[test]
@@ -81,22 +81,14 @@ fn unanswered_and_orphan_results_are_rejected() {
 /// Equal-looking IDs from separate namespaces answer only their own calls.
 #[test]
 fn typed_identity_transcripts_preserve_namespaces_and_completion_scope() {
-    let generated = ToolCallId::minted(0);
-    let explicit = ToolCallId::new("tool-0").expect("explicit ID");
-    let call_for = |id: ToolCallId| {
-        AssistantContent::ToolCall(ToolCall::new(
-            id,
-            ToolFunction::new("add".into(), serde_json::json!({})),
-        ))
-    };
-    let result_for = |id: ToolCallId| {
-        UserContent::ToolResult(ToolResult {
-            call: id,
-            provider: None,
-            name: "add".into(),
-            answers: crate::message::AnsweredToolCall::Function,
-            content: vec![ToolResultContent::text("3")],
-        })
+    let generated = CallId::Local(LocalCallId::new());
+    let explicit =
+        CallId::Provider(ProviderCallId::new(generated.wire().into_owned()).expect("explicit ID"));
+    assert_eq!(generated.wire(), explicit.wire());
+    assert_ne!(generated, explicit);
+    let call_for = |id: CallId| AssistantContent::ToolCall(function_call(id));
+    let result_for = |id: CallId| {
+        UserContent::ToolResult(function_call(id).result(vec![ToolResultContent::text("3")]))
     };
     let history = vec![
         assistant(vec![
@@ -128,33 +120,30 @@ fn typed_identity_transcripts_preserve_namespaces_and_completion_scope() {
 /// call like any other for pairing.
 #[test]
 fn results_pair_with_calls_of_their_own_kind() {
-    use crate::message::AnsweredToolCall;
-    let custom =
-        crate::message::CustomToolCall::from_dual_wire("ctc_1", "c1", "patch", None, "raw");
-    let answered = |answers| Message::User {
-        content: vec![UserContent::tool_result_for_answering(
-            custom.id.clone(),
-            custom.provider.clone(),
-            "patch",
-            answers,
-            vec![ToolResultContent::text("ok")],
-        )],
+    let custom = CustomToolCall::new(
+        CallId::from_wire("c1"),
+        ToolName::new("patch").expect("tool name"),
+        "raw",
+    );
+    let answered = |answers| {
+        let mut result = custom.result(vec![ToolResultContent::text("ok")]);
+        result.answers = answers;
+        Message::User {
+            content: vec![UserContent::ToolResult(result)],
+        }
     };
-    let turn = Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::CustomToolCall(custom.clone())],
-    };
+    let turn = assistant(vec![AssistantContent::CustomToolCall(custom.clone())]);
     validate_canonical(&[
         Message::user("go"),
         turn.clone(),
-        answered(AnsweredToolCall::Custom),
+        answered(custom.answered_by()),
     ])
     .expect("a custom result answers a custom call");
     assert_eq!(
         validate_canonical(&[
             Message::user("go"),
             turn.clone(),
-            answered(AnsweredToolCall::Function),
+            answered(function_call(custom.id.clone()).answered_by()),
         ]),
         Err(TranscriptError::MispairedToolResult {
             index: 2,
@@ -171,4 +160,33 @@ fn results_pair_with_calls_of_their_own_kind() {
         }),
         "an unanswered custom call is caught like a function call"
     );
+}
+
+#[test]
+fn stored_results_require_the_kind_of_call_they_answer() {
+    let function = function_call(CallId::from_wire("function"));
+    let custom = CustomToolCall::new(
+        CallId::from_wire("custom"),
+        ToolName::new("patch").expect("tool name"),
+        "raw",
+    );
+    for (result, kind) in [
+        (function.result(vec![]), "function"),
+        (custom.result(vec![]), "custom"),
+    ] {
+        let mut stored = serde_json::to_value(&result).expect("serialize the result");
+        assert_eq!(
+            serde_json::from_value::<crate::message::ToolResult>(stored.clone())
+                .expect("the complete result should deserialize"),
+            result,
+        );
+        let removed = stored
+            .as_object_mut()
+            .expect("a result serializes as an object")
+            .remove("answers");
+        assert_eq!(removed, Some(serde_json::json!(kind)));
+        let error = serde_json::from_value::<crate::message::ToolResult>(stored)
+            .expect_err("a result with no kind must not be inferred");
+        assert!(error.to_string().contains("missing field `answers`"));
+    }
 }

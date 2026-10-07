@@ -1,0 +1,16 @@
+when:
+  path: /compatibility/v1/chat/completions
+  method: POST
+  query_param: []
+  header:
+  - name: accept
+    value: '*/*'
+  - name: content-type
+    value: application/json
+  body: '{"max_tokens":128,"messages":[{"content":"Use the subtract tool to calculate 11 - 6.","role":"user"}],"model":"command-a-03-2025","tool_choice":"required","tools":[{"function":{"description":"Subtract y from x (i.e.: x - y)","name":"subtract","parameters":{"additionalProperties":false,"properties":{"x":{"description":"The number to subtract from","type":"integer"},"y":{"description":"The number to subtract","type":"integer"}},"required":["x","y"],"type":"object"},"strict":true},"type":"function"}]}'
+then:
+  status: 200
+  header:
+  - name: content-type
+    value: application/json
+  body: '{"choices":[{"finish_reason":"tool_calls","index":0,"logprobs":null,"message":{"content":null,"role":"assistant","tool_calls":[{"function":{"arguments":"{\"x\":11,\"y\":6}","name":"subtract"},"id":"subtract_kh6gny0v5sp2","type":"function"}]}}],"created":0,"id":"26bd0146-6661-4e3c-ac0b-c548e943e36e","model":"command-a-03-2025","object":"chat.completion","usage":{"completion_tokens":25,"completion_tokens_details":{"accepted_prediction_tokens":0,"audio_tokens":0,"reasoning_tokens":0,"rejected_prediction_tokens":0},"prompt_tokens":74,"prompt_tokens_details":{"audio_tokens":0,"cached_tokens":0},"total_tokens":99}}'

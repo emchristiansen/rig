@@ -1,0 +1,719 @@
+{
+  "capability_edges/a_forced_tool_choice_beside_a_response_format_is_accepted.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "text": "{\"total\": 5} {\"type\": \"object\", \"properties\": {\"total\": {\"type\": \"integer\", \"format\": \"int64\"}}, \"required\": [\"total\"], \"title\": \"SumReport\", \"additionalProperties\": false}",
+        "native": null
+      },
+      {
+        "tool_call": {
+          "id": "aVbxHpPgC",
+          "name": "add",
+          "arguments": {
+            "x": 2
+          },
+          "native": null
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 114,
+      "output_tokens": 64,
+      "total_tokens": 178,
+      "cached_input_tokens": 0
+    },
+    "response_id": "5d7ad8cb497e4737b5e72042cb5239af",
+    "finish_reason": "length",
+    "model": "mistral-small-latest",
+    "provider_request_id": "01a1032a-c237-794e-8fd7-7f0de9132c5e",
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "message": {
+            "content": "{\"total\": 5} {\"type\": \"object\", \"properties\": {\"total\": {\"type\": \"integer\", \"format\": \"int64\"}}, \"required\": [\"total\"], \"title\": \"SumReport\", \"additionalProperties\": false}",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"x\": 2, \"y\":",
+                  "name": "add"
+                },
+                "id": "aVbxHpPgC",
+                "index": 0,
+                "type": "function"
+              }
+            ]
+          }
+        }
+      ],
+      "created": 0,
+      "id": "5d7ad8cb497e4737b5e72042cb5239af",
+      "model": "mistral-small-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 64,
+        "prompt_tokens": 114,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "service_tier": "standard",
+        "total_tokens": 178
+      }
+    }
+  },
+  "capability_edges/streaming_with_two_candidates_answers_from_the_first.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "Aardvark",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 20,
+      "output_tokens": 8,
+      "total_tokens": 28,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-REDACTED_1",
+    "finish_reason": "stop",
+    "model": "mistral-small-latest",
+    "provider_request_id": "req_REDACTED_1",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "Aardvark",
+            "role": "assistant"
+          },
+          "finish_reason": "stop",
+          "index": 0
+        },
+        {
+          "message": {
+            "content": "Whisper",
+            "role": "assistant"
+          },
+          "finish_reason": "stop",
+          "index": 1
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-REDACTED_1",
+      "model": "mistral-small-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 8,
+        "prompt_tokens": 20,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "service_tier": "standard",
+        "total_tokens": 28
+      }
+    }
+  },
+  "history_survival_matrix/streaming.yaml#4": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "XP0JeWaIu",
+          "name": "verify_code",
+          "arguments": {
+            "code": "alpha-code-7431"
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"code\": \"alpha-code-7431\"}",
+                "name": "verify_code"
+              },
+              "id": "XP0JeWaIu",
+              "type": "function"
+            },
+            "fingerprint": "c45e209f28bb65b8"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 381,
+      "output_tokens": 17,
+      "total_tokens": 398,
+      "cached_input_tokens": 320
+    },
+    "response_id": "2b244bc2e0ab4f2bb663dc5f948d8559",
+    "finish_reason": "tool_calls",
+    "model": "mistral-small-latest",
+    "provider_request_id": "01a10308-a4df-7ed7-b5e6-01027f7fb755",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"code\": \"alpha-code-7431\"}",
+                  "name": "verify_code"
+                },
+                "id": "XP0JeWaIu",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "2b244bc2e0ab4f2bb663dc5f948d8559",
+      "model": "mistral-small-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 17,
+        "prompt_tokens": 381,
+        "prompt_tokens_details": {
+          "cached_tokens": 320
+        },
+        "service_tier": "standard",
+        "total_tokens": 398
+      }
+    }
+  },
+  "multimodal_content/blocking_raw_model_sends_audio.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "text": "The sun was setting slowly, casting long shadows across the empty field.",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 386,
+      "output_tokens": 15,
+      "total_tokens": 401,
+      "cached_input_tokens": 9
+    },
+    "response_id": "chatcmpl-REDACTED_1",
+    "finish_reason": "stop",
+    "model": "voxtral-small-latest",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "The sun was setting slowly, casting long shadows across the empty field.",
+            "role": "assistant",
+            "tool_calls": null
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-REDACTED_1",
+      "model": "voxtral-small-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 15,
+        "prompt_audio_seconds": 5,
+        "prompt_tokens": 11,
+        "prompt_tokens_details": {
+          "audio_tokens": 375,
+          "cached_tokens": 9
+        },
+        "service_tier": "standard",
+        "total_tokens": 401
+      }
+    }
+  },
+  "multimodal_content/streaming_agent_sends_audio.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "The sun was setting slowly, casting long shadows across the empty field.",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 386,
+      "output_tokens": 15,
+      "total_tokens": 401,
+      "cached_input_tokens": 9
+    },
+    "response_id": "chatcmpl-REDACTED_1",
+    "finish_reason": "stop",
+    "model": "voxtral-small-latest",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "The sun was setting slowly, casting long shadows across the empty field.",
+            "role": "assistant"
+          },
+          "finish_reason": "stop",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-REDACTED_1",
+      "model": "voxtral-small-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 15,
+        "prompt_audio_seconds": 5,
+        "prompt_tokens": 11,
+        "prompt_tokens_details": {
+          "audio_tokens": 375,
+          "cached_tokens": 9
+        },
+        "service_tier": "standard",
+        "total_tokens": 401
+      }
+    }
+  },
+  "prompt_caching/streaming_probe.yaml#1": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "cache probe ready",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 1783,
+      "output_tokens": 4,
+      "total_tokens": 1787,
+      "cached_input_tokens": 0
+    },
+    "response_id": "86fdadeb7da147cfa4650139ff2d0faf",
+    "finish_reason": "stop",
+    "model": "mistral-large-latest",
+    "provider_request_id": "01a10308-f61e-7ee9-a4e9-162b8369fc4c",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "cache probe ready",
+            "role": "assistant"
+          },
+          "finish_reason": "stop",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "86fdadeb7da147cfa4650139ff2d0faf",
+      "model": "mistral-large-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 4,
+        "prompt_tokens": 1783,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "service_tier": "standard",
+        "total_tokens": 1787
+      }
+    }
+  },
+  "request_shape_matrix/streaming_mistral_small_json_any.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "{\"total\": 42}",
+        "native": null
+      },
+      {
+        "tool_call": {
+          "id": "call_REDACTED_1",
+          "name": "add",
+          "arguments": {
+            "x": 20,
+            "y": 22
+          },
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{\"x\": 20, \"y\": 22}",
+                "name": "add"
+              },
+              "id": "call_REDACTED_1",
+              "type": "function"
+            },
+            "fingerprint": "229ff4b4fc4bc7b0"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 88,
+      "output_tokens": 25,
+      "total_tokens": 113,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-REDACTED_1",
+    "finish_reason": "tool_calls",
+    "model": "mistral-small-latest",
+    "provider_request_id": "req_REDACTED_1",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "{\"total\": 42}",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"x\": 20, \"y\": 22}",
+                  "name": "add"
+                },
+                "id": "call_REDACTED_1",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "tool_calls",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-REDACTED_1",
+      "model": "mistral-small-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 25,
+        "prompt_tokens": 88,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "service_tier": "standard",
+        "total_tokens": 113
+      }
+    }
+  },
+  "terminal_metadata_matrix/blocking_ministral_3b_roomy_plain_one.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "text": "Cobalt.",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 8,
+      "output_tokens": 5,
+      "total_tokens": 13,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-REDACTED_1",
+    "finish_reason": "stop",
+    "model": "ministral-3b-latest",
+    "provider_request_id": "req_REDACTED_1",
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "Cobalt.",
+            "role": "assistant",
+            "tool_calls": null
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-REDACTED_1",
+      "model": "ministral-3b-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 5,
+        "prompt_tokens": 8,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "service_tier": "standard",
+        "total_tokens": 13
+      }
+    }
+  },
+  "terminal_metadata_matrix/blocking_ministral_3b_tiny_tool.yaml#0": {
+    "mode": "unary",
+    "choice": [],
+    "usage": {
+      "input_tokens": 116,
+      "output_tokens": 1,
+      "total_tokens": 117,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-REDACTED_1",
+    "finish_reason": "length",
+    "model": "ministral-3b-latest",
+    "provider_request_id": "req_REDACTED_1",
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "length",
+          "index": 0,
+          "message": {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": null
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-REDACTED_1",
+      "model": "ministral-3b-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 1,
+        "prompt_tokens": 116,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "service_tier": "standard",
+        "total_tokens": 117
+      }
+    }
+  },
+  "terminal_metadata_matrix/streaming_ministral_3b_tiny_plain_one.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "Here",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 18,
+      "output_tokens": 1,
+      "total_tokens": 19,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-REDACTED_1",
+    "finish_reason": "length",
+    "model": "ministral-3b-latest",
+    "provider_request_id": "req_REDACTED_1",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "Here",
+            "role": "assistant"
+          },
+          "finish_reason": "length",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-REDACTED_1",
+      "model": "ministral-3b-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 1,
+        "prompt_tokens": 18,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "service_tier": "standard",
+        "total_tokens": 19
+      }
+    }
+  },
+  "terminal_metadata_matrix/streaming_mistral_small_tiny_plain_two.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "text": "c",
+        "native": null
+      }
+    ],
+    "usage": {
+      "input_tokens": 30,
+      "output_tokens": 2,
+      "total_tokens": 32,
+      "cached_input_tokens": 0
+    },
+    "response_id": "chatcmpl-REDACTED_1",
+    "finish_reason": "length",
+    "model": "mistral-small-latest",
+    "provider_request_id": "req_REDACTED_1",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": "c",
+            "role": "assistant"
+          },
+          "finish_reason": "length",
+          "index": 0
+        },
+        {
+          "message": {
+            "content": "c",
+            "role": "assistant"
+          },
+          "finish_reason": "length",
+          "index": 1
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-REDACTED_1",
+      "model": "mistral-small-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 2,
+        "prompt_tokens": 30,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "service_tier": "standard",
+        "total_tokens": 32
+      }
+    }
+  },
+  "tool_lifecycle_matrix/blocking_ministral_3b_zero_agent.yaml#0": {
+    "mode": "unary",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "jGRWgIDZG",
+          "name": "ping",
+          "arguments": {},
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "{}",
+                "name": "ping"
+              },
+              "id": "jGRWgIDZG",
+              "type": "function"
+            },
+            "fingerprint": "bad04ab093eca0be"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 74,
+      "output_tokens": 5,
+      "total_tokens": 79,
+      "cached_input_tokens": 0
+    },
+    "response_id": "0a235c0fc56145eda21d038934c46cb1",
+    "finish_reason": "tool_calls",
+    "model": "ministral-3b-latest",
+    "provider_request_id": "01a10309-5df3-7017-b0ff-8be314a7634e",
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "tool_calls",
+          "index": 0,
+          "message": {
+            "content": "",
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{}",
+                  "name": "ping"
+                },
+                "id": "jGRWgIDZG",
+                "index": 0,
+                "type": "function"
+              }
+            ]
+          }
+        }
+      ],
+      "created": 0,
+      "id": "0a235c0fc56145eda21d038934c46cb1",
+      "model": "ministral-3b-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 5,
+        "prompt_tokens": 74,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "service_tier": "standard",
+        "total_tokens": 79
+      }
+    }
+  },
+  "tool_truncation_matrix/streaming_ministral_3b_low_model.yaml#0": {
+    "mode": "streaming",
+    "choice": [
+      {
+        "tool_call": {
+          "id": "28MDcpEFf",
+          "name": "file_report",
+          "arguments": {},
+          "native": {
+            "item": {
+              "function": {
+                "arguments": "",
+                "name": "file_report"
+              },
+              "id": "28MDcpEFf",
+              "type": "function"
+            },
+            "fingerprint": "f803e9b79a60d643"
+          }
+        }
+      }
+    ],
+    "usage": {
+      "input_tokens": 125,
+      "output_tokens": 4,
+      "total_tokens": 129,
+      "cached_input_tokens": 0
+    },
+    "response_id": "112ceb9c68b54ab4ae4ff26489777dd9",
+    "finish_reason": "length",
+    "model": "ministral-3b-latest",
+    "provider_request_id": "01a1030b-9169-7594-a108-83ebd9c26435",
+    "raw": {
+      "choices": [
+        {
+          "message": {
+            "content": null,
+            "role": "assistant",
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "",
+                  "name": "file_report"
+                },
+                "id": "28MDcpEFf",
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": "length",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "112ceb9c68b54ab4ae4ff26489777dd9",
+      "model": "ministral-3b-latest",
+      "object": "chat.completion",
+      "usage": {
+        "completion_tokens": 4,
+        "prompt_tokens": 125,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "service_tier": "standard",
+        "total_tokens": 129
+      }
+    }
+  }
+}

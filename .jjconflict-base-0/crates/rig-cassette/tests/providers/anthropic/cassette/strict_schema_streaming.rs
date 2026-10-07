@@ -1,0 +1,219 @@
+//! Live-recorded streaming coverage for Anthropic strict tools.
+
+use rig::completion::{CacheRetention, GenerationOptions, ToolDefinition};
+use rig::driver::Model;
+use rig::message::ToolChoice;
+use rig::providers::anthropic;
+use rig::providers::anthropic::wire::Messages;
+use rig_test_support::cassette_models::AnthropicModels;
+use rig_test_support::cassette_models::MapWire;
+use serde_json::{Value, json};
+
+use super::super::support::with_anthropic_cassette;
+use crate::support::collect_raw_stream_observation;
+use rig::completion::CompletionRequest;
+
+async fn assert_streaming_strict_tool_call(
+    client: AnthropicModels,
+    tool_name: &str,
+    prompt: &str,
+    parameters: Value,
+    tool_choice: ToolChoice,
+    expected_arguments: Value,
+) {
+    let model = client
+        .completion(anthropic::completion::CLAUDE_SONNET_4_6)
+        .map_wire(|wire| wire.with_strict_tools());
+    assert_model_streaming_tool_call(
+        model,
+        tool_name,
+        prompt,
+        parameters,
+        tool_choice,
+        expected_arguments,
+        None,
+    )
+    .await;
+}
+
+async fn assert_model_streaming_tool_call(
+    model: Model<Messages>,
+    tool_name: &str,
+    prompt: &str,
+    parameters: Value,
+    tool_choice: ToolChoice,
+    expected_arguments: Value,
+    output_schema: Option<schemars::Schema>,
+) {
+    assert_model_streaming_tool_call_with(
+        GenerationOptions::default(),
+        model,
+        tool_name,
+        prompt,
+        parameters,
+        tool_choice,
+        expected_arguments,
+        output_schema,
+    )
+    .await;
+}
+
+/// [`assert_model_streaming_tool_call`], with `options` on the request.
+#[allow(clippy::too_many_arguments)]
+async fn assert_model_streaming_tool_call_with(
+    options: GenerationOptions,
+    model: Model<Messages>,
+    tool_name: &str,
+    prompt: &str,
+    parameters: Value,
+    tool_choice: ToolChoice,
+    expected_arguments: Value,
+    output_schema: Option<schemars::Schema>,
+) {
+    let request = CompletionRequest::new(prompt)
+        .options(options)
+        .preamble("Call the requested tool exactly once with the requested values.")
+        .max_tokens(1024)
+        .tool_choice(tool_choice)
+        .tool(ToolDefinition {
+            name: rig_core::message::ToolName::new(tool_name).expect("tool name"),
+            description: "Record the requested values in a streaming strict tool call.".to_string(),
+            parameters,
+        })
+        .output_schema(output_schema);
+
+    let observation = collect_raw_stream_observation(
+        model
+            .stream(request)
+            .expect("strict streaming request should start"),
+    )
+    .await;
+    assert!(
+        observation.errors.is_empty(),
+        "strict stream should not emit errors: {:?}",
+        observation.errors
+    );
+    assert!(
+        observation.got_final,
+        "strict stream should emit a final event"
+    );
+    assert_eq!(
+        observation.tool_calls.len(),
+        1,
+        "strict stream should contain exactly one tool call"
+    );
+    assert_eq!(observation.tool_calls[0].function.name, tool_name);
+    assert_eq!(
+        observation.tool_calls[0].function.arguments_value(),
+        expected_arguments
+    );
+}
+
+#[tokio::test]
+async fn one_of_and_const_stream_with_specific_choice() {
+    with_anthropic_cassette(
+        "strict_schema_streaming/one_of_and_const_stream_with_specific_choice",
+        |client| async move {
+            assert_streaming_strict_tool_call(
+                client,
+                "stream_event",
+                "Record a created event with id = 9.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "event": {
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": { "const": "created" },
+                                        "id": { "type": "integer" }
+                                    },
+                                    "required": ["kind", "id"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": { "const": "deleted" },
+                                        "id": { "type": "integer" }
+                                    },
+                                    "required": ["kind", "id"]
+                                }
+                            ]
+                        }
+                    },
+                    "required": ["event"]
+                }),
+                ToolChoice::Specific {
+                    function_names: vec![
+                        rig_core::message::ToolName::new("stream_event").expect("tool name"),
+                    ],
+                },
+                json!({ "event": { "kind": "created", "id": 9 } }),
+            )
+            .await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn structured_output_and_strict_tool_use_stream_together() {
+    with_anthropic_cassette(
+        "strict_schema_streaming/structured_output_and_strict_tool_use_stream_together",
+        |client| async move {
+            let model = client
+                .completion(anthropic::completion::CLAUDE_SONNET_4_6)
+                .map_wire(|wire| wire.with_strict_tools());
+            let output_schema = serde_json::from_value(json!({
+                "type": "object",
+                "properties": { "summary": { "type": "string" } },
+                "required": ["summary"]
+            }))
+            .expect("output schema should parse");
+            assert_model_streaming_tool_call(
+                model,
+                "stream_combined",
+                "Call stream_combined with value = combined-stream.",
+                json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "required": ["value"]
+                }),
+                ToolChoice::Required,
+                json!({ "value": "combined-stream" }),
+                Some(output_schema),
+            )
+            .await;
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn automatic_prompt_caching_and_strict_tools_stream_together() {
+    with_anthropic_cassette(
+        "strict_schema_streaming/automatic_prompt_caching_and_strict_tools_stream_together",
+        |client| async move {
+            let model = client
+                .completion(anthropic::completion::CLAUDE_SONNET_4_6)
+                .map_wire(|wire| wire.with_strict_tools());
+            assert_model_streaming_tool_call_with(
+                GenerationOptions::default().cache(CacheRetention::Short),
+                model,
+                "stream_cached",
+                "Call stream_cached with value = automatic-stream.",
+                json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "required": ["value"]
+                }),
+                ToolChoice::Required,
+                json!({ "value": "automatic-stream" }),
+                None,
+            )
+            .await;
+        },
+    )
+    .await;
+}

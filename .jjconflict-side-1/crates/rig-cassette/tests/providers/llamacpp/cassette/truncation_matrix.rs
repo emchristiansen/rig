@@ -1,0 +1,207 @@
+//! What an output-budget cut does to a tool call, on both transports.
+//!
+//! **Server**: the competent tier — `unsloth/Qwen3-8B-GGUF` Q4_K_M,
+//! `--jinja --seed 42 --temp 0 -c 8192`, `llama-server` b10964-b29c606e2. A
+//! model that reliably makes the call is the precondition for cutting one in
+//! half.
+//!
+//! # Why this dimension exists
+//!
+//! [#2359](https://github.com/0xPlaygrounds/rig/pull/2359) established a
+//! shared policy for the state llama.cpp produces here: a turn that ran out of
+//! output budget mid-arguments comes back with `finish_reason: "length"` and
+//! `tool_calls[].function.arguments` cut partway through the JSON object. The
+//! decoder now keeps the call, as pi does: its arguments are what pi's
+//! tolerant parse reads, and its text is kept as `invalid_arguments`, so the
+//! agent answers it with an error result and never runs it.
+//!
+//! That policy was derived from DeepSeek and Mistral. llama.cpp is a third
+//! wire that produces the same state, from a completely different server, and
+//! nothing had checked the policy against it. Measured on b10499-6d05498 with
+//! `tool_choice: required`, the cut lands exactly where the budget runs out:
+//! 12 tokens gives `{`, 20 gives `{"note": "The`, 28 gives
+//! `{"note": "The quarterly incident review found three unrelate`.
+//!
+//! | Cell | Transport | Pinned |
+//! | --- | --- | --- |
+//! | [`a_tool_call_cut_mid_arguments_does_not_destroy_the_turn`] | blocking | the response decodes; the cut call is kept with its text, so nothing runs it |
+//! | [`the_streaming_path_keeps_the_same_cut_call`] | streaming | the same boundary, and the stream still terminates cleanly |
+
+use rig::completion::FinishReason;
+use rig::message::AssistantContent;
+use rig::streaming::Item;
+use serde_json::Value;
+
+use crate::cassettes::{recorded_sse_json_frames, recorded_statuses_and_bodies};
+
+use super::super::cassette_support::*;
+use rig::completion::CompletionRequest;
+
+const NOTE_PROMPT: &str = "/no_think Record this note: The quarterly incident review found \
+     three unrelated regressions in the billing pipeline.";
+
+/// A budget measured to cut inside the argument object rather than before it.
+const CUTTING_CAP: u64 = 20;
+
+fn record_tool() -> rig::completion::ToolDefinition {
+    rig::completion::ToolDefinition {
+        name: rig_core::message::ToolName::new("record").expect("tool name"),
+        description: "Record a long note.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": { "note": { "type": "string" } },
+            "required": ["note"],
+        }),
+    }
+}
+
+/// The recorded `(finish_reason, arguments)` of a blocking turn.
+fn recorded_call(scenario: &str) -> (String, Option<String>) {
+    let recorded = recorded_statuses_and_bodies("llamacpp", scenario);
+    let (status, body) = recorded.last().expect("an interaction");
+    assert_eq!(*status, 200, "{scenario}: {body}");
+    let response: Value = serde_json::from_str(body).expect("response should be JSON");
+    let choice = &response["choices"][0];
+    (
+        choice["finish_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        choice["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .map(str::to_string),
+    )
+}
+
+/// A tool call cut mid-arguments must not take the turn down with it.
+#[tokio::test]
+async fn a_tool_call_cut_mid_arguments_does_not_destroy_the_turn() {
+    with_llamacpp_competent_cassette(
+        "truncation_matrix/tool_call_cut_mid_arguments",
+        |client| async move {
+            let model = client.completion(CASSETTE_MODEL);
+            let response = model
+                .call(
+                    CompletionRequest::new(NOTE_PROMPT)
+                        .tool(record_tool())
+                        .tool_choice(rig::message::ToolChoice::Required)
+                        .max_tokens(CUTTING_CAP),
+                )
+                .await
+                .expect(
+                    "a budget cut mid-arguments must still decode — losing the turn's \
+                     usage, id and finish reason with the unusable call is the defect \
+                     #2359 fixed",
+                );
+
+            assert_eq!(
+                response.finish_reason(),
+                Some(FinishReason::Length),
+                "the turn ran out of budget, and that is what authorizes the tolerance"
+            );
+            let calls: Vec<&rig::message::ToolCall> = response
+                .choice
+                .iter()
+                .filter_map(|item| match item {
+                    AssistantContent::ToolCall(call) => Some(call),
+                    _ => None,
+                })
+                .collect();
+            let [call] = calls.as_slice() else {
+                panic!("the cut call is kept: {:?}", response.choice);
+            };
+            assert!(
+                call.function.invalid_arguments.is_some(),
+                "a call whose arguments never parse keeps their text, so nothing runs it: {call:?}"
+            );
+            assert!(
+                response.usage.output_tokens.is_some_and(|n| n > 0),
+                "the rest of the turn survives, usage included: {:?}",
+                response.usage
+            );
+        },
+    )
+    .await;
+
+    // The premise, from the bytes: the wire really did carry a truncated
+    // argument string under `length`.
+    let (finish_reason, arguments) = recorded_call("truncation_matrix/tool_call_cut_mid_arguments");
+    assert_eq!(finish_reason, "length");
+    let arguments = arguments.expect("the wire carried a tool call");
+    assert!(
+        serde_json::from_str::<Value>(&arguments).is_err(),
+        "the recorded arguments must be *unparseable* for this cell to be about \
+         truncation at all: {arguments:?}"
+    );
+    assert!(
+        arguments.starts_with('{'),
+        "and they must be a cut-off object rather than an empty string: {arguments:?}"
+    );
+}
+
+/// The streaming path applies the same boundary.
+#[tokio::test]
+async fn the_streaming_path_keeps_the_same_cut_call() {
+    use futures::StreamExt as _;
+    use rig::streaming::StreamEvent;
+
+    with_llamacpp_competent_cassette(
+        "truncation_matrix/streaming_tool_call_cut_mid_arguments",
+        |client| async move {
+            let model = client.completion(CASSETTE_MODEL);
+            let mut stream = model
+                .stream(
+                    CompletionRequest::new(NOTE_PROMPT)
+                        .tool(record_tool())
+                        .tool_choice(rig::message::ToolChoice::Required)
+                        .max_tokens(CUTTING_CAP),
+                )
+                .expect("stream should start");
+
+            let mut invalid_calls = 0usize;
+            while let Some(item) = stream.next().await {
+                if let Item::Event(StreamEvent::End {
+                    content: AssistantContent::ToolCall(call),
+                    ..
+                }) = item.expect("no stream item may be an error")
+                    && call.function.invalid_arguments.is_some()
+                {
+                    invalid_calls += 1
+                }
+            }
+            stream.finish().await.expect(
+                "the stream must terminate cleanly even though its only tool call was unusable",
+            );
+            assert_eq!(
+                invalid_calls, 1,
+                "a call cut before its arguments parse is kept with their text"
+            );
+        },
+    )
+    .await;
+
+    let frames = recorded_sse_json_frames(
+        "llamacpp",
+        "truncation_matrix/streaming_tool_call_cut_mid_arguments",
+    );
+    let accumulated: String = frames
+        .iter()
+        .flat_map(|frame| {
+            frame["choices"][0]["delta"]["tool_calls"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|call| call["function"]["arguments"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !accumulated.is_empty() && serde_json::from_str::<Value>(&accumulated).is_err(),
+        "the recorded stream must accumulate to an unparseable fragment: {accumulated:?}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| frame["choices"][0]["finish_reason"] == serde_json::json!("length")),
+        "and it must end under `length`, which is what authorizes dropping the call"
+    );
+}

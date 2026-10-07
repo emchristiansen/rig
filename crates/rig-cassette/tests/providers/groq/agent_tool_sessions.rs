@@ -5,15 +5,15 @@
 //! owned history, JSON response formats, explicit tool choice, usage accounting,
 //! and provider metadata preservation.
 
+use rig::streaming::Item;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use futures::StreamExt;
-use rig::completion::{CompletionModel, Message};
+use rig::completion::Message;
 use rig::message::{AssistantContent, ToolChoice};
-use rig::prelude::*;
 use rig::providers::openai;
-use rig::streaming::{Delta, StreamEvent};
+use rig::streaming::StreamEvent;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ use crate::support::{
 };
 
 use super::support::with_groq_cassette_result;
+use rig::completion::CompletionRequest;
 
 const SESSION_MODEL: &str = "qwen/qwen3.8-27b";
 /// Groq rejects `qwen/qwen3.8-27b` requests whose output cap exceeds its
@@ -399,12 +400,12 @@ fn history_tool_calls(history: &[Message]) -> Vec<HistoryToolCall> {
         .iter()
         .enumerate()
         .flat_map(|(message_index, message)| match message {
-            Message::Assistant { content, .. } => content
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content
                 .iter()
                 .filter_map(move |content| match content {
                     AssistantContent::ToolCall(tool_call) => Some(HistoryToolCall {
                         message_index,
-                        name: tool_call.function.name.clone(),
+                        name: tool_call.function.name.clone().into(),
                     }),
                     _ => None,
                 })
@@ -457,8 +458,7 @@ fn assert_history_records_sequential_tool_roundtrips(history: &[Message], expect
 
 /// The Groq wire metadata the normalized response deliberately does not carry.
 ///
-/// The typed view of the reply document is local to the helper that reads it,
-/// so the fields the parity assertions need are captured out of it first.
+/// The fields the parity assertions need are read out of the reply document.
 struct RawResponseMetadata {
     id: String,
     model: String,
@@ -468,17 +468,18 @@ struct RawResponseMetadata {
 }
 
 impl RawResponseMetadata {
-    fn capture(raw: &openai::CompletionResponse) -> Self {
+    fn capture(raw: &serde_json::Value) -> Self {
         Self {
-            id: raw.id.clone(),
-            model: raw.model.clone(),
-            system_fingerprint: raw.system_fingerprint.clone(),
-            finish_reasons: raw
-                .choices
-                .iter()
-                .map(|choice| choice.finish_reason.clone())
+            id: raw["id"].as_str().unwrap_or_default().to_owned(),
+            model: raw["model"].as_str().unwrap_or_default().to_owned(),
+            system_fingerprint: raw["system_fingerprint"].as_str().map(str::to_owned),
+            finish_reasons: raw["choices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|choice| choice["finish_reason"].as_str().map(str::to_owned))
                 .collect(),
-            usage: raw.usage,
+            usage: serde_json::from_value(raw["usage"].clone()).ok(),
         }
     }
 }
@@ -492,14 +493,15 @@ impl RawResponseMetadata {
 /// (`system_fingerprint`, Groq's queue and total timings): it holds the
 /// provider's reply verbatim, so reading it back as the shared OpenAI type
 /// keeps both views on a single cassette interaction.
-async fn raw_and_normalized_completion(
-    model: &(impl CompletionModel + Clone),
+async fn raw_and_normalized_completion<
+    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
+    T: rig_core::driver::Transport<W>,
+>(
+    model: &rig_core::driver::Model<W, T>,
     request: rig::completion::CompletionRequest,
 ) -> Result<(RawResponseMetadata, rig::completion::CompletionResponse)> {
-    let normalized = model.completion(request).await?;
-    let raw = openai::CompletionResponse::deserialize(&normalized.raw)
-        .map_err(|error| anyhow::anyhow!("captured raw is the shared OpenAI reply: {error}"))?;
-    let metadata = RawResponseMetadata::capture(&raw);
+    let normalized = model.call(request).await?;
+    let metadata = RawResponseMetadata::capture(&normalized.raw);
     Ok((metadata, normalized))
 }
 
@@ -563,19 +565,17 @@ async fn raw_stream_complex_tool_call_deltas_have_object_arguments() -> Result<(
             let log = Arc::new(Mutex::new(Vec::new()));
             let model = client.completion(SESSION_MODEL);
             let tool = InspectManifest { log };
-            let request = model
-                .completion_request(
+            let request = CompletionRequest::new(
                     "Call inspect_manifest exactly once for project rig-groq with critical=true, retries=2, \
                      steps [{name: plan, weight: 1}, {name: verify, weight: 2}], and note `streamed nested JSON`. \
                      Do not write normal text before the tool call.",
                 )
-                .preamble("Use the requested tool call and no prose before it.".to_string())
+                .preamble("Use the requested tool call and no prose before it.")
                 .tool(rig::tool::tool_definition(&tool))
                 .tool_choice(ToolChoice::Required)
-                .max_tokens(SESSION_MAX_TOKENS)
-                .build();
+                .max_tokens(SESSION_MAX_TOKENS);
 
-            let observation = collect_raw_stream_observation(model.stream(request).await?).await;
+            let observation = collect_raw_stream_observation(model.stream(request)?).await;
 
             assert_raw_stream_tool_call_arguments_are_objects(
                 &observation,
@@ -610,57 +610,45 @@ async fn tool_choice_auto_required_specific_and_none() -> Result<()> {
             let model = client.completion(SESSION_MODEL);
 
             let auto = model
-                .completion(
-                    model
-                        .completion_request("Call lookup_harbor_label exactly once with an empty object.")
+                .call(CompletionRequest::new("Call lookup_harbor_label exactly once with an empty object.")
                         .tool(rig::tool::tool_definition(&AlphaSignal))
                         .tool_choice(ToolChoice::Auto)
-                        .max_tokens(SESSION_MAX_TOKENS)
-                        .build(),
-                )
+                        .max_tokens(SESSION_MAX_TOKENS))
                 .await?;
             anyhow::ensure!(
                 auto.choice.iter().any(|content| matches!(
                     content,
                     AssistantContent::ToolCall(tool_call)
                         if tool_call.function.name == AlphaSignal::NAME
-                            && tool_call.function.arguments == json!({})
+                            && tool_call.function.arguments_value() == json!({})
                 )),
                 "auto tool choice should allow lookup_harbor_label"
             );
 
             let required = model
-                .completion(
-                    model
-                        .completion_request("Call lookup_harbor_label exactly once with an empty object and do not answer in prose.")
+                .call(CompletionRequest::new("Call lookup_harbor_label exactly once with an empty object and do not answer in prose.")
                         .tool(rig::tool::tool_definition(&AlphaSignal))
                         .tool_choice(ToolChoice::Required)
-                        .max_tokens(SESSION_MAX_TOKENS)
-                        .build(),
-                )
+                        .max_tokens(SESSION_MAX_TOKENS))
                 .await?;
             anyhow::ensure!(
                 required.choice.iter().any(|content| matches!(
                     content,
                     AssistantContent::ToolCall(tool_call)
                         if tool_call.function.name == AlphaSignal::NAME
-                            && tool_call.function.arguments == json!({})
+                            && tool_call.function.arguments_value() == json!({})
                 )),
                 "required tool choice should force lookup_harbor_label"
             );
 
             let specific = model
-                .completion(
-                    model
-                        .completion_request("Call the orchard-label tool exactly once with an empty object and do not call any other tool.")
+                .call(CompletionRequest::new("Call the orchard-label tool exactly once with an empty object and do not call any other tool.")
                         .tool(rig::tool::tool_definition(&AlphaSignal))
                         .tool(rig::tool::tool_definition(&BetaSignal))
                         .tool_choice(ToolChoice::Specific {
-                            function_names: vec![BetaSignal::NAME.to_string()],
+                            function_names: vec![rig_core::message::ToolName::new(BetaSignal::NAME).expect("tool name")],
                         })
-                        .max_tokens(SESSION_MAX_TOKENS)
-                        .build(),
-                )
+                        .max_tokens(SESSION_MAX_TOKENS))
                 .await?;
             let specific_calls = specific
                 .choice
@@ -677,14 +665,10 @@ async fn tool_choice_auto_required_specific_and_none() -> Result<()> {
 
             let none_model = client.completion(TOOL_CHOICE_NONE_MODEL);
             let none = none_model
-                .completion(
-                    none_model
-                        .completion_request("Do not call tools. Reply with exactly this phrase: no-tool-answer")
+                .call(CompletionRequest::new("Do not call tools. Reply with exactly this phrase: no-tool-answer")
                         .tool(rig::tool::tool_definition(&AlphaSignal))
                         .tool_choice(ToolChoice::None)
-                        .max_tokens(SESSION_MAX_TOKENS)
-                        .build(),
-                )
+                        .max_tokens(SESSION_MAX_TOKENS))
                 .await?;
             let none_text = assistant_text_response(&none.choice)
                 .ok_or_else(|| anyhow::anyhow!("ToolChoice::None response should contain text"))?;
@@ -708,14 +692,12 @@ async fn json_object_response_format_roundtrip() -> Result<()> {
         "agent_tool_sessions/json_object_response_format_roundtrip",
         |client| async move {
             let model = client.completion(JSON_OBJECT_MODEL);
-            let request = model
-                .completion_request(
+            let request = CompletionRequest::new(
                     "Return a JSON object with release lane canary, risk low, and checks compile=true and replay=true.",
                 )
-                .preamble("Return only valid JSON. No markdown.".to_string())
+                .preamble("Return only valid JSON. No markdown.")
                 .additional_params(json!({"response_format": { "type": "json_object" }}))
-                .max_tokens(128)
-                .build();
+                .max_tokens(128);
 
             let (raw, response) = raw_and_normalized_completion(&model, request).await?;
             let text = assistant_text_response(&response.choice)
@@ -754,14 +736,12 @@ async fn json_schema_structured_output_roundtrip() -> Result<()> {
         "agent_tool_sessions/json_schema_structured_output_roundtrip",
         |client| async move {
             let model = client.completion(JSON_SCHEMA_MODEL);
-            let request = model
-                .completion_request(
-                    "Return lane=canary, risk=low, checks.compile=true, and checks.replay=true.",
-                )
-                .preamble("Return only the requested structured object.".to_string())
-                .output_schema(schemars::schema_for!(StructuredReleasePlan))
-                .max_tokens(128)
-                .build();
+            let request = CompletionRequest::new(
+                "Return lane=canary, risk=low, checks.compile=true, and checks.replay=true.",
+            )
+            .preamble("Return only the requested structured object.")
+            .output_schema(schemars::schema_for!(StructuredReleasePlan))
+            .max_tokens(128);
 
             let (raw, response) = raw_and_normalized_completion(&model, request).await?;
             let text = assistant_text_response(&response.choice)
@@ -787,36 +767,25 @@ async fn low_latency_streaming_text_surfaces_final_usage() -> Result<()> {
         |client| async move {
             let model = client.completion(SESSION_MODEL);
             let mut stream = model
-                .stream(
-                    model
-                        .completion_request(
+                .stream(CompletionRequest::new(
                             "Reply with exactly this comma-separated sequence and no extra words: alpha,beta,gamma,delta,epsilon,zeta,eta,theta",
                         )
-                        .preamble("Stream the requested short sequence exactly.".to_string())
-                        .max_tokens(64)
-                        .build(),
-                )
-                .await?;
+                        .preamble("Stream the requested short sequence exactly.")
+                        .max_tokens(64))
+                ?;
 
             let mut text_chunks = 0usize;
-            let mut final_usage = None;
             while let Some(item) = stream.next().await {
                 match item? {
-                    StreamEvent::BlockDelta {
-                        delta: Delta::Text { text },
-                        ..
-                    } if !text.is_empty() => {
+                    Item::Event(StreamEvent::Text { text, .. }) if !text.is_empty() => {
                         text_chunks += 1;
-                    }
-                    StreamEvent::Final(response) => {
-                        final_usage = Some(response.usage);
                     }
                     _ => {}
                 }
             }
+            let usage = stream.finish().await?.usage;
 
             anyhow::ensure!(text_chunks > 0, "stream should emit text deltas");
-            let usage = final_usage.ok_or_else(|| anyhow::anyhow!("stream should emit final usage"))?;
             let input_tokens = usage.input_tokens.unwrap_or(0);
             let output_tokens = usage.output_tokens.unwrap_or(0);
             anyhow::ensure!(input_tokens > 0, "stream usage should include input tokens");

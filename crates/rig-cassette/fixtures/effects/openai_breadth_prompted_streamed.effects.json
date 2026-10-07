@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 17759422913336850263,
+    "run_spec": 11199885832449262870,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -66,7 +66,24 @@
           "choice": [
             {
               "type": "text",
-              "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"Join local Rust enthusiasts for networking and discussions on Rust programming.\"}"
+              "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"Join local Rust enthusiasts for networking and discussions on Rust programming.\"}",
+              "native": {
+                "item": {
+                  "content": [
+                    {
+                      "annotations": [],
+                      "logprobs": [],
+                      "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"Join local Rust enthusiasts for networking and discussions on Rust programming.\"}",
+                      "type": "output_text"
+                    }
+                  ],
+                  "id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+                  "role": "assistant",
+                  "status": "completed",
+                  "type": "message"
+                },
+                "fingerprint": "669baafdec3f0f5c"
+              }
             }
           ],
           "usage": {
@@ -74,18 +91,105 @@
             "output_tokens": 27,
             "total_tokens": 124,
             "cached_input_tokens": 0,
-            "reasoning_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost": {
+              "input": 0.0002425,
+              "output": 0.00027,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.0005125
+            }
           },
-          "message_id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "response_id": "resp_051be6577c9430e6006ab395f289cc87d0be6be0726fac40ff",
+          "origin": {
+            "api": "openai.responses",
+            "provider": "openai",
+            "model": "gpt-4o",
+            "response_model": "gpt-4o-2024-08-06",
+            "response_id": "resp_051be6577c9430e6006ab395f289cc87d0be6be0726fac40ff"
+          },
           "provider_request_id": "req_e2d2a525378f453cbaf7fe55dfbbfafd",
           "finish_reason": "stop",
-          "provider": "openai",
-          "model": "gpt-4o-2024-08-06",
           "raw": {
+            "access_programs": null,
+            "background": false,
+            "completed_at": 0,
+            "created_at": 0,
+            "error": null,
+            "frequency_penalty": 0.0,
+            "id": "resp_051be6577c9430e6006ab395f289cc87d0be6be0726fac40ff",
+            "incomplete_details": null,
+            "instructions": "You are a concise assistant. Answer directly.\n\nRespond with ONLY a single JSON object that conforms to this JSON Schema. Do not include any prose, explanation, or markdown code fences.\n{\"properties\":{\"category\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"}},\"required\":[\"title\",\"category\",\"summary\"],\"type\":\"object\"}",
+            "max_output_tokens": null,
+            "max_tool_calls": null,
+            "metadata": {},
+            "model": "gpt-4o-2024-08-06",
+            "moderation": null,
+            "object": "response",
+            "output": [
+              {
+                "content": [
+                  {
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"Join local Rust enthusiasts for networking and discussions on Rust programming.\"}",
+                    "type": "output_text"
+                  }
+                ],
+                "id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+                "role": "assistant",
+                "status": "completed",
+                "type": "message"
+              }
+            ],
+            "parallel_tool_calls": true,
+            "presence_penalty": 0.0,
+            "previous_response_id": null,
+            "prompt_cache_key": null,
+            "prompt_cache_retention": "in_memory",
+            "reasoning": {
+              "context": null,
+              "effort": null,
+              "summary": null
+            },
+            "safety_identifier": null,
+            "service_tier": "default",
+            "status": "completed",
+            "store": true,
+            "temperature": 0.0,
+            "text": {
+              "format": {
+                "type": "text"
+              },
+              "verbosity": "medium"
+            },
+            "tool_choice": "auto",
+            "tool_usage": {
+              "image_gen": {
+                "input_tokens": 0,
+                "input_tokens_details": {
+                  "image_tokens": 0,
+                  "text_tokens": 0
+                },
+                "output_tokens": 0,
+                "output_tokens_details": {
+                  "image_tokens": 0,
+                  "text_tokens": 0
+                },
+                "total_tokens": 0
+              },
+              "web_search": {
+                "num_requests": 0
+              }
+            },
+            "tools": [],
+            "top_logprobs": 0,
+            "top_p": 1.0,
+            "truncation": "disabled",
             "usage": {
               "input_tokens": 97,
               "input_tokens_details": {
+                "cache_write_tokens": 0,
                 "cached_tokens": 0
               },
               "output_tokens": 27,
@@ -94,288 +198,261 @@
               },
               "total_tokens": 124
             },
-            "reasoning_metadata": {
-              "context": null,
-              "effort": null,
-              "summary": null
-            },
-            "status": "completed",
-            "message_id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-            "response_id": "resp_051be6577c9430e6006ab395f289cc87d0be6be0726fac40ff",
-            "model": "gpt-4o-2024-08-06"
+            "user": null
           }
         }
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "source_order": {
-            "primary": 0,
-            "secondary": 0
-          },
-          "kind": {
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
             "kind": "text"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "{\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "title"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "\":\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "Seattle"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " Rust"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " Meetup"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "\",\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "category"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "\":\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "Technology"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "\",\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "summary"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "\":\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "Join"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " local"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " Rust"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " enthusiasts"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " for"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " networking"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " and"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " discussions"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " on"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " Rust"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": " programming"
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": ".\""
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "}"
           }
         },
         {
-          "event": "block_start",
-          "id": "wire:msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "source_order": {
-            "primary": 0,
-            "secondary": 0
-          },
-          "kind": {
-            "kind": "message"
-          }
-        },
-        {
-          "event": "final",
-          "usage": {
-            "input_tokens": 97,
-            "output_tokens": 27,
-            "total_tokens": 124,
-            "cached_input_tokens": 0,
-            "reasoning_tokens": 0
-          },
-          "finish_reason": "stop",
-          "message_id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-          "response_id": "resp_051be6577c9430e6006ab395f289cc87d0be6be0726fac40ff",
-          "provider_request_id": "req_e2d2a525378f453cbaf7fe55dfbbfafd",
-          "provider": "openai",
-          "model": "gpt-4o-2024-08-06",
-          "raw": {
-            "usage": {
-              "input_tokens": 97,
-              "input_tokens_details": {
-                "cached_tokens": 0
-              },
-              "output_tokens": 27,
-              "output_tokens_details": {
-                "reasoning_tokens": 0
-              },
-              "total_tokens": 124
-            },
-            "reasoning_metadata": {
-              "context": null,
-              "effort": null,
-              "summary": null
-            },
-            "status": "completed",
-            "message_id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
-            "response_id": "resp_051be6577c9430e6006ab395f289cc87d0be6be0726fac40ff",
-            "model": "gpt-4o-2024-08-06"
+          "item": "event",
+          "value": {
+            "event": "end",
+            "part": 0,
+            "content": {
+              "type": "text",
+              "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"Join local Rust enthusiasts for networking and discussions on Rust programming.\"}",
+              "native": {
+                "item": {
+                  "content": [
+                    {
+                      "annotations": [],
+                      "logprobs": [],
+                      "text": "{\"title\":\"Seattle Rust Meetup\",\"category\":\"Technology\",\"summary\":\"Join local Rust enthusiasts for networking and discussions on Rust programming.\"}",
+                      "type": "output_text"
+                    }
+                  ],
+                  "id": "msg_051be6577c9430e6006ab395f3263087d0b879d750427b36bf",
+                  "role": "assistant",
+                  "status": "completed",
+                  "type": "message"
+                },
+                "fingerprint": "669baafdec3f0f5c"
+              }
+            }
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "openai.responses",
+        "provider": "openai",
+        "model": "gpt-4o"
+      }
     }
   ]
 }

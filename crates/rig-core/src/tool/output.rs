@@ -79,12 +79,12 @@ impl ToolOutput {
     /// Constructs explicit model content, rejecting an empty block list.
     /// Use [`Self::text`] with `""` to represent an empty text result.
     pub fn content(content: Vec<ToolResultContent>) -> Result<Self, ToolExecutionError> {
-        let content = crate::message::require_non_empty(content, || {
-            ToolExecutionError::other(
+        if content.is_empty() {
+            return Err(ToolExecutionError::other(
                 "tool output has no content blocks; return at least one block — \
                  an empty text block is valid",
-            )
-        })?;
+            ));
+        }
         Ok(Self { content })
     }
 
@@ -102,10 +102,7 @@ impl ToolOutput {
         }
 
         match self.content.first()? {
-            // `Some` params always carry data (`AdditionalParams` is
-            // non-empty by construction), so plain `is_none` is the whole
-            // annotation check.
-            ToolResultContent::Text(text) if text.additional_params.is_none() => Some(&text.text),
+            ToolResultContent::Text(text) if text.native.is_none() => Some(&text.text),
             ToolResultContent::Text(_)
             | ToolResultContent::Image(_)
             | ToolResultContent::Json { .. } => None,

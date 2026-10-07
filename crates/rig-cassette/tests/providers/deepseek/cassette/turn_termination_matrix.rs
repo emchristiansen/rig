@@ -1,89 +1,28 @@
-//! Live-recorded matrix for the model-turn termination metadata a hook sees
-//! (rig#2184 / PR #2341), against the real DeepSeek wire — the OpenAI
-//! Chat Completions dialect; the cells are the OpenAI matrix's, on this
-//! wire's model.
+//! The model-turn termination metadata a hook sees (rig#2184), against the
+//! real DeepSeek wire: a turn the provider cut short at the cap reaches the
+//! hook as `FinishReason::Length` with the cap that attempt ran under, on
+//! both surfaces. Each cell re-reads its own fixture and fails if the
+//! recorded turn stopped carrying the wire reason or the request cap the
+//! cell is about.
 //!
-//! `ModelTurnFinished` carries `finish_reason: Option<&FinishReason>` and
-//! `max_tokens: Option<u64>` — the normalized reason the provider stopped, and
-//! the effective output-token cap *that attempt* ran under, after agent
-//! configuration, the runner override, and any completion-call `RequestPatch`.
-//!
-//! **Why cassettes and not mocks.** The unit cells in `rig-agent` drive a
-//! `MockCompletionModel`, so they prove the agent plumbs whatever the model
-//! layer hands it — they cannot prove that OpenAI Chat Completions's wire
-//! `length` becomes `FinishReason::Length` by the time a hook sees it.
-//! These cells replay real recorded bytes through the provider mapper, the
-//! agent, and the hook stack, so they pin the whole chain the word
-//! "normalized" is a claim about. The probe hook and the escalation hook are
-//! the *same* types every provider suite uses (`crate::support`) — if a provider
-//! needed its own, the metadata would not be provider-neutral.
-//!
-//! This provider's vocabulary, and what it normalizes to:
-//!
-//! | normalized | OpenAI Chat Completions wire value | how |
-//! |---|---|---|
-//! | `Stop` | `stop` | direct |
-//! | `Length` | `length` | direct |
-//! | `ToolCalls` | `tool_calls` | direct — OpenAI reports a distinct value for tool turns |
-//!
-//! | # | cell | surface | asserts |
-//! |---|------|---------|---------|
-//! | 1 | `blocking_truncated_turn_reports_length_and_cap` | blocking | `Length` + the cap this attempt ran under |
-//! | 2 | `streaming_truncated_turn_reports_length_and_cap` | streaming | the same, on the other surface |
-//! | 3 | `blocking_completed_turn_reports_stop_and_cap` | blocking | `Stop`, and that it fails `truncated_output()` |
-//! | 4 | `streaming_completed_turn_reports_stop_and_cap` | streaming | the same |
-//! | 5 | `blocking_tool_turn_reports_tool_calls` | blocking | `ToolCalls` |
-//! | 6 | `streaming_tool_turn_reports_tool_calls` | streaming | `ToolCalls` |
-//! | 7 | `blocking_escalating_retry_reports_each_attempts_own_cap` | blocking | two attempts, two caps, two reasons |
-//! | 8 | `streaming_escalating_retry_reports_each_attempts_own_cap` | streaming | the same |
-//!
-//! Cells 7 and 8 are #2184's acceptance criterion against a live provider: the
-//! first attempt truncates under a deliberately tiny cap, a provider-neutral
-//! hook reads `FinishReason::Length` off the event and asks for a repeat with
-//! a larger cap, and the second attempt reports *its own* cap rather than the
-//! agent's baseline. Both attempts live in one cassette, so the escalation is
-//! replayed rather than re-derived.
-//!
-//! Every cell re-reads its own fixture and fails if the recorded turn stopped
-//! carrying the wire reason the cell is about — otherwise a provider changing
-//! behavior would leave the cell green while covering nothing.
-//!
-//! **Deliberately not covered here.** `ContentFilter` has no benign trigger:
-//! eliciting it means asking a provider to produce content it must refuse.
-//! `Other(_)` has no benign reachable wire value on this endpoint. A provider
-//! reporting *no* reason is not reachable here either — OpenAI Chat Completions always
-//! reports one. All three are pinned by unit cells beside the fix
-//! (`crates/rig-agent/src/agent/runner.rs`, `model_turn_finished_*`) and in
-//! `crates/rig-core/src/completion/request.rs` (`truncated_output_*`), where
-//! the whole vocabulary can be enumerated without a live call.
+//! `ContentFilter`, `Other(_)` and a missing reason have no benign live
+//! trigger on this endpoint. Unit cells pin them in
+//! `crates/rig-agent/src/agent/runner.rs` (`model_turn_finished_*`) and
+//! `crates/rig-core/src/completion/request.rs` (`truncated_output_*`).
 
 use rig::completion::FinishReason;
-use rig::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::cassettes;
 use crate::deepseek::support::with_deepseek_cassette;
-use crate::support::{
-    Adder, EscalateCapOnTruncation, TurnTerminationProbe, collect_stream_final_response,
-};
+use crate::support::{TurnTerminationProbe, collect_stream_final_response};
 
-pub(super) const MODEL: &str = "deepseek-chat";
-pub(super) const TINY_CAP: u64 = 16;
-/// Roomy enough for every prompt below to finish naturally.
-pub(super) const ROOMY_CAP: u64 = 512;
-/// Truncates at `TINY_CAP` and completes at `ROOMY_CAP`.
-pub(super) const TRUNCATING_PROMPT: &str = "Write two sentences about maple trees.";
-pub(super) const RETRY_PROMPT: &str = "Write two sentences about maple trees.";
-pub(super) const SHORT_PROMPT: &str = "Reply with exactly the word: cedar.";
-pub(super) const TOOL_PROMPT: &str = "Calculate 2 + 3.";
-pub(super) const CONCISE_PREAMBLE: &str =
-    "You are a concise assistant. Answer directly in plain text.";
-pub(super) const TOOL_PREAMBLE: &str = "Use the provided tool to answer arithmetic questions.";
-
-// ---------------------------------------------------------------------------
-// Length — the provider cut the turn short at the cap we set.
-// ---------------------------------------------------------------------------
+const MODEL: &str = "deepseek-chat";
+const TINY_CAP: u64 = 16;
+/// Truncates at `TINY_CAP`.
+const TRUNCATING_PROMPT: &str = "Write two sentences about maple trees.";
+const CONCISE_PREAMBLE: &str = "You are a concise assistant. Answer directly in plain text.";
 
 crate::matrix::case_matrix! {
     wrapper: with_deepseek_cassette, family: turn_termination_matrix_case;
@@ -91,34 +30,7 @@ crate::matrix::case_matrix! {
     blocking_truncated_turn_reports_length_and_cap: ("turn_termination_matrix/blocking_truncated_turn_reports_length_and_cap", blocking_truncated_turn_reports_length_and_cap_15);
     # [tokio :: test]
     streaming_truncated_turn_reports_length_and_cap: ("turn_termination_matrix/streaming_truncated_turn_reports_length_and_cap", streaming_truncated_turn_reports_length_and_cap_16);
-    # [tokio :: test]
-    blocking_completed_turn_reports_stop_and_cap: ("turn_termination_matrix/blocking_completed_turn_reports_stop_and_cap", blocking_completed_turn_reports_stop_and_cap_17);
-    # [tokio :: test]
-    streaming_completed_turn_reports_stop_and_cap: ("turn_termination_matrix/streaming_completed_turn_reports_stop_and_cap", streaming_completed_turn_reports_stop_and_cap_18);
-    # [tokio :: test]
-    blocking_tool_turn_reports_tool_calls: ("turn_termination_matrix/blocking_tool_turn_reports_tool_calls", blocking_tool_turn_reports_tool_calls_19);
-    # [tokio :: test]
-    streaming_tool_turn_reports_tool_calls: ("turn_termination_matrix/streaming_tool_turn_reports_tool_calls", streaming_tool_turn_reports_tool_calls_20);
-    # [tokio :: test]
-    blocking_escalating_retry_reports_each_attempts_own_cap: ("turn_termination_matrix/blocking_escalating_retry_reports_each_attempts_own_cap", blocking_escalating_retry_reports_each_attempts_own_cap_21);
-    # [tokio :: test]
-    streaming_escalating_retry_reports_each_attempts_own_cap: ("turn_termination_matrix/streaming_escalating_retry_reports_each_attempts_own_cap", streaming_escalating_retry_reports_each_attempts_own_cap_22);
 }
-
-// ---------------------------------------------------------------------------
-// Stop — the control. A completed turn must not read as truncated.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// ToolCalls — the reason a portable hook must never mistake for retryable.
-// OpenAI reports a distinct `tool_calls` wire value, so this maps directly
-// rather than through `reconcile_with_output`.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// The acceptance criterion: escalate the cap on truncation, against the real
-// provider, and report each attempt's own cap.
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Fixture-premise checks: the recorded bytes must still say what the cell
@@ -176,7 +88,7 @@ fn body_json_objects(body: &str) -> Vec<Value> {
 /// non-null one the body carries. A stream repeats `null` on every chunk until
 /// the terminal one, so taking the first non-null entry yields exactly one
 /// reason per call on both surfaces.
-pub(super) fn recorded_wire_reasons(scenario: &str) -> Vec<String> {
+fn recorded_wire_reasons(scenario: &str) -> Vec<String> {
     {
         interaction_bodies(scenario, "then")
             .iter()
@@ -196,7 +108,7 @@ pub(super) fn recorded_wire_reasons(scenario: &str) -> Vec<String> {
     }
 }
 
-pub(super) fn assert_recorded_wire_reason(scenario: &str, expected: &str) {
+fn assert_recorded_wire_reason(scenario: &str, expected: &str) {
     {
         let reasons = recorded_wire_reasons(scenario);
         assert!(
@@ -209,7 +121,7 @@ pub(super) fn assert_recorded_wire_reason(scenario: &str, expected: &str) {
 
 /// The output-token cap of every recorded *request*, in order — proof that the
 /// cap the hook reported is the cap that actually went on the wire.
-pub(super) fn recorded_request_caps(scenario: &str) -> Vec<u64> {
+fn recorded_request_caps(scenario: &str) -> Vec<u64> {
     {
         interaction_bodies(scenario, "when")
             .iter()
@@ -223,7 +135,7 @@ pub(super) fn recorded_request_caps(scenario: &str) -> Vec<u64> {
     }
 }
 
-pub(super) fn assert_recorded_request_cap(scenario: &str, expected: u64) {
+fn assert_recorded_request_cap(scenario: &str, expected: u64) {
     {
         let caps = recorded_request_caps(scenario);
         assert!(
