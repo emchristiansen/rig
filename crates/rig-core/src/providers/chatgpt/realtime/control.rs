@@ -105,7 +105,10 @@ impl ControlSocket {
                 Some(Frame::Binary(bytes)) => {
                     String::from_utf8(bytes.to_vec()).map_err(|error| {
                         let reason = serde::de::Error::custom(error.utf8_error());
-                        ProviderError::CorruptFrame(CorruptFrame::bytes(error.into_bytes(), reason))
+                        ProviderError::CorruptFrame(std::sync::Arc::new(CorruptFrame::bytes(
+                            error.into_bytes(),
+                            reason,
+                        )))
                     })?
                 }
             };

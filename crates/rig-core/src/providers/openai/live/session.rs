@@ -282,7 +282,7 @@ pub struct FunctionTool {
 impl From<ToolDefinition> for FunctionTool {
     fn from(tool: ToolDefinition) -> Self {
         Self {
-            name: tool.name,
+            name: tool.name.as_str().to_owned(),
             description: Some(tool.description),
             parameters: Some(tool.parameters),
             strict: None,
