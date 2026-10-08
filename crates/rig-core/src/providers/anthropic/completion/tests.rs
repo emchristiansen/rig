@@ -45,10 +45,12 @@ fn request_body_with(params: Params<'_>, strict: bool) -> Result<Value, EncodeEr
 fn convert(message: message::Message) -> Result<Option<Value>, EncodeError> {
     let wire = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
     let history = [message];
-    let ids = WireIds::for_target(&history, &wire, CLAUDE_SONNET_4_6);
+    let ids =
+        WireIds::for_target(&history, &wire, CLAUDE_SONNET_4_6).map_err(EncodeError::request)?;
     history
         .iter()
-        .map(|message| message_json(message, &wire, &ids))
+        .enumerate()
+        .map(|(index, message)| message_json(index, message, &wire, &ids))
         .next()
         .unwrap_or(Ok(None))
 }

@@ -257,10 +257,11 @@ fn base(
     let mut tools = tools(request.tools.clone(), input.raw_tools()?, strict, eager);
     let (mut system, history) =
         split_system(&request.chat_history, takes_mid_conversation_system(model));
-    let ids = WireIds::for_target(&history, wire, model);
+    let ids =
+        WireIds::for_target(&request.chat_history, wire, model).map_err(EncodeError::request)?;
     let mut messages: Vec<Value> = Vec::new();
-    for message in &history {
-        messages.extend(message_json(message, wire, &ids)?);
+    for (message_index, message) in &history {
+        messages.extend(message_json(*message_index, message, wire, &ids)?);
     }
     // MiniMax honours a cache through block markers the manual placement
     // writes.
@@ -282,7 +283,7 @@ fn base(
     let container = input
         .param("container")
         .is_none()
-        .then(|| container(&history))
+        .then(|| container(&request.chat_history))
         .flatten();
     Ok(object([
         ("model", Some(json!(model))),
@@ -319,6 +320,7 @@ pub(super) fn object<const N: usize>(fields: [(&str, Option<Value>); N]) -> Map<
 /// `message` on the wire, its tool ids spelled by `ids`. `None` when no
 /// block is left to send.
 fn message_json(
+    message_index: usize,
     message: &Message,
     target: &Messages,
     ids: &WireIds,
@@ -327,8 +329,8 @@ fn message_json(
         Message::System { content } => ("system", vec![text(content)]),
         Message::User { content } => {
             let mut parts = Vec::with_capacity(content.len());
-            for part in content {
-                parts.extend(user_part(part, ids)?);
+            for (content_index, part) in content.iter().enumerate() {
+                parts.extend(user_part(part, ids, message_index, content_index)?);
             }
             ("user", parts)
         }
@@ -336,7 +338,10 @@ fn message_json(
             "assistant",
             turn.content
                 .iter()
-                .map(|block| assistant_parts(block, target, ids))
+                .enumerate()
+                .map(|(content_index, block)| {
+                    assistant_parts(block, target, ids.of(message_index, content_index))
+                })
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .flatten()
@@ -348,7 +353,12 @@ fn message_json(
 
 /// One user block on the wire. `None` for blank text, which Anthropic
 /// rejects (pi's rule).
-fn user_part(part: &UserContent, ids: &WireIds) -> Result<Option<Value>, EncodeError> {
+fn user_part(
+    part: &UserContent,
+    ids: &WireIds,
+    message_index: usize,
+    content_index: usize,
+) -> Result<Option<Value>, EncodeError> {
     let image = |image: &message::Image| {
         let source = image_source(image).ok_or_else(unsendable)?;
         Ok::<_, EncodeError>(json!({ "type": "image", "source": source }))
@@ -374,7 +384,13 @@ fn user_part(part: &UserContent, ids: &WireIds) -> Result<Option<Value>, EncodeE
             }
             Value::Object(object([
                 ("type", Some(json!("tool_result"))),
-                ("tool_use_id", Some(json!(ids.spell(&result.call)))),
+                (
+                    "tool_use_id",
+                    Some(json!(
+                        ids.spell(message_index, content_index)
+                            .map_err(EncodeError::request)?
+                    )),
+                ),
                 ("content", Some(Value::Array(content))),
                 ("is_error", result.is_error.then_some(Value::Bool(true))),
             ]))
@@ -434,7 +450,7 @@ pub(super) fn document_part(document: &message::Document) -> Result<Value, Encod
 pub(super) fn assistant_parts(
     block: &AssistantContent,
     target: &Messages,
-    ids: &WireIds,
+    wire_id: Option<&str>,
 ) -> Result<Vec<Value>, EncodeError> {
     message::json_only_wire_tool_call(ANTHROPIC_MESSAGES_WIRE, block)?;
     if let AssistantContent::ProviderItem(item) = block {
@@ -448,7 +464,7 @@ pub(super) fn assistant_parts(
             .into_iter()
             .collect());
     }
-    let identity = match block.replay(target, ids) {
+    let identity = match block.replay(target, wire_id) {
         Replay::Item(item) => {
             if item.get("type").and_then(Value::as_str) == Some("text") {
                 super::streaming::validate_content(&item)?;
@@ -476,7 +492,12 @@ pub(super) fn assistant_parts(
         AssistantContent::ToolCall(call) => {
             let mut part = object([
                 ("type", Some(json!("tool_use"))),
-                ("id", Some(json!(ids.spell(&call.id)))),
+                (
+                    "id",
+                    Some(json!(wire_id.ok_or_else(|| EncodeError::request(
+                        "Anthropic tool call has no planned wire ID"
+                    ))?)),
+                ),
                 ("name", Some(json!(call.function.name.as_str()))),
                 (
                     "input",
@@ -655,26 +676,19 @@ fn tools(
     rig.chain(extra).collect()
 }
 
-/// Split `history` into the top-level `system` blocks and the messages.
-///
-/// On a model that takes mid-conversation system messages, one in a position
-/// Anthropic rejects (after an assistant turn, or before a user turn) moves to
-/// the next valid slot: right after the next user turn that ends the array or
-/// precedes an assistant turn. Hoisting it into `system` instead would change
-/// the prompt prefix, which misses the cache from the first token and, on
-/// models that bind thinking blocks to their conversation, turns every earlier
-/// thinking block into a 400. It is hoisted only when no such slot exists.
-pub(super) fn split_system(history: &[Message], mid: bool) -> (Vec<Value>, Vec<Message>) {
+/// Split systems from conversation turns while retaining their original indices.
+/// Invalid system positions are hoisted separately; valid neighbors stay in place.
+pub(super) fn split_system(history: &[Message], mid: bool) -> (Vec<Value>, Vec<(usize, &Message)>) {
     let mut system = Vec::new();
     let mut remaining = Vec::new();
     for (index, message) in history.iter().enumerate() {
         match message {
             Message::System { content } if content.is_empty() => {}
             Message::System { .. } if mid && valid_system_message(history, index) => {
-                remaining.push(message.clone());
+                remaining.push((index, message));
             }
             Message::System { content } => system.push(text(content)),
-            other => remaining.push(other.clone()),
+            other => remaining.push((index, other)),
         }
     }
     (system, remaining)

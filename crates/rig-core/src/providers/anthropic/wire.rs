@@ -668,9 +668,8 @@ impl crate::completion::ReplayTarget for Messages {
 
     /// What the encoder sends for the block, so the two never disagree.
     fn sends_alone(&self, block: &crate::message::AssistantContent) -> bool {
-        let ids = crate::providers::internal::wire_ids::WireIds::default();
         // Keep an unrepresentable block until encoding can return its typed refusal.
-        super::completion::assistant_parts(block, self, &ids)
+        super::completion::assistant_parts(block, self, None)
             .map_or(true, |parts| !parts.is_empty())
     }
 

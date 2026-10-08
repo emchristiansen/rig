@@ -234,7 +234,7 @@ async fn zeroed_terminal_input_is_observed_before_gateway_normalization() {
     while let Some(item) = stream.next().await {
         item.expect("decodes");
     }
-    let response = stream.finish().expect("provider terminal");
+    let response = stream.finish().await.expect("provider terminal");
     assert_eq!(response.usage.input_tokens, Some(5));
     let usages: Vec<_> = adapter_events(&log)
         .into_iter()
