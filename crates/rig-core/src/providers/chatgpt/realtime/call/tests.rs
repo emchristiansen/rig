@@ -163,8 +163,8 @@ async fn a_response_less_body_failure_stays_a_transport_error() {
 
 /// The identity the Codex client stamps: `originator`, its user agent and
 /// its version, all three exactly as given.
-fn provider() -> OpenAI {
-    OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+fn provider() -> OpenAIConfig {
+    OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
         .with_account_id(ACCOUNT_ID)
         .with_caller_identity(
             crate::providers::openai::wire::CallerIdentity::new(
@@ -353,7 +353,7 @@ fn the_control_handshake_carries_the_call_headers() {
 /// dialect is refused by name.
 #[test]
 fn calls_need_the_codex_backend_and_the_callers_identity() {
-    let anonymous = LiveCalls::new(OpenAI::with_key(&chatgpt::DIALECT, ACCESS_TOKEN))
+    let anonymous = LiveCalls::new(OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN))
         .expect("the ChatGPT dialect is the Codex backend");
     assert!(
         anonymous
@@ -366,7 +366,7 @@ fn calls_need_the_codex_backend_and_the_callers_identity() {
             .is_err()
     );
 
-    let refused = LiveCalls::new(OpenAI::new("sk-test")).expect_err("not the Codex backend");
+    let refused = LiveCalls::new(OpenAIConfig::new("sk-test")).expect_err("not the Codex backend");
     assert_eq!(refused.dialect, "openai");
 }
 

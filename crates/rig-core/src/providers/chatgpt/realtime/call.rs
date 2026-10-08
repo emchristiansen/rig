@@ -7,7 +7,7 @@ use super::{
 };
 use crate::error::{EncodeError, ProviderError};
 use crate::http_client;
-use crate::providers::openai::OpenAI;
+use crate::providers::openai::OpenAIConfig;
 use crate::providers::openai::responses_api::codex_identity::{
     CodexIdentity, InvalidCodexIdentity, NotACodexWire, SESSION_ID_HEADER, THREAD_ID_HEADER,
 };
@@ -121,7 +121,7 @@ pub struct RealtimeCall {
 /// [`RequestHeaders`].
 #[derive(Clone, Debug)]
 pub struct LiveCalls {
-    provider: OpenAI,
+    provider: OpenAIConfig,
     identity: CodexIdentity,
     realtime_session_id: String,
     request_headers: RequestHeaders,
@@ -136,10 +136,10 @@ const LIVE_HEADERS: [&str; 2] = [OPENAI_ALPHA_HEADER, X_SESSION_ID_HEADER];
 pub type NotTheCodexBackend = NotACodexWire;
 
 impl LiveCalls {
-    /// Calls over `provider`, with a fresh identity whose session id is also
-    /// the realtime session id. Refuses a provider whose dialect does not
-    /// speak the Codex contract.
-    pub fn new(provider: OpenAI) -> Result<Self, NotTheCodexBackend> {
+    /// Calls configured by `provider`, with a fresh identity whose session id
+    /// is also the realtime session id. Refuses a configuration whose dialect
+    /// does not speak the Codex contract.
+    pub fn new(provider: OpenAIConfig) -> Result<Self, NotTheCodexBackend> {
         if provider.dialect.quirks.responses.contract != ResponsesContract::Codex {
             return Err(NotACodexWire {
                 dialect: provider.dialect.name,

@@ -16,7 +16,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use rig_core::providers::chatgpt::{self, realtime};
-use rig_core::providers::openai::OpenAI;
+use rig_core::providers::openai::OpenAIConfig;
 use rig_core::providers::openai::wire::CallerIdentity;
 use rig_webrtc::{LivePeer, OpusPacket};
 
@@ -46,7 +46,7 @@ async fn a_live_call_starts_reports_usage_and_closes() {
         std::env::var("CHATGPT_VERSION").ok(),
     )
     .expect("a valid caller identity");
-    let provider = OpenAI::with_key(&chatgpt::DIALECT, env("CHATGPT_ACCESS_TOKEN"))
+    let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, env("CHATGPT_ACCESS_TOKEN"))
         .with_account_id(env("CHATGPT_ACCOUNT_ID"))
         .with_caller_identity(identity);
     let calls = realtime::LiveCalls::new(provider).expect("the Codex backend");

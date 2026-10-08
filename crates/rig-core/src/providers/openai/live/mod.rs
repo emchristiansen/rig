@@ -12,7 +12,7 @@
 //! server events reports when a backend response's calls need outputs.
 //!
 //! ```no_run
-//! use rig_core::providers::openai::{OpenAI, live::{
+//! use rig_core::providers::openai::{OpenAIConfig, live::{
 //!     Delegation, PublicLiveSessions, ResponsesDelegation, SessionConfig, Voice,
 //! }};
 //!
@@ -20,7 +20,7 @@
 //! #     http: &impl rig_core::http_client::HttpClientExt,
 //! #     offer_sdp: &str,
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
-//! let sessions = PublicLiveSessions::new(OpenAI::new("api-key"))?;
+//! let sessions = PublicLiveSessions::new(OpenAIConfig::new("api-key"))?;
 //! let session = SessionConfig::new()
 //!     .with_instructions("Be concise.")
 //!     .with_voice(Voice::Marin)

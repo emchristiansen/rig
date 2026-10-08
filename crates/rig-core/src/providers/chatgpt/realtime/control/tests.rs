@@ -5,7 +5,7 @@
 use super::*;
 use crate::http_client::{self, NoBody, Request};
 use crate::providers::chatgpt;
-use crate::providers::openai::OpenAI;
+use crate::providers::openai::OpenAIConfig;
 use crate::wasm_compat::{WasmBoxedFuture, WasmCompatSend};
 use crate::ws_client::CloseFrame;
 use std::collections::VecDeque;
@@ -116,7 +116,7 @@ impl WebSocketClientExt for Scripted {
 
 fn calls() -> LiveCalls {
     LiveCalls::new(
-        OpenAI::with_key(&chatgpt::DIALECT, "test-token")
+        OpenAIConfig::with_key(&chatgpt::DIALECT, "test-token")
             .with_account_id("acct-123")
             .with_caller_identity(crate::test_utils::test_caller_identity()),
     )
@@ -323,7 +323,7 @@ async fn a_credential_source_keeps_the_callers_headers_on_the_handshake() {
         }
     }
     let calls = LiveCalls::new(
-        OpenAI::with_key(&chatgpt::DIALECT, "test-token")
+        OpenAIConfig::with_key(&chatgpt::DIALECT, "test-token")
             .with_account_id("acct-123")
             .with_caller_identity(crate::test_utils::test_caller_identity())
             .with_credential_source(Source),

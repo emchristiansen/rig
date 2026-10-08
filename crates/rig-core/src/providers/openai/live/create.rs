@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 use super::{LIVE_SESSIONS_PATH, SessionConfig};
 use crate::ProviderResponseError;
 use crate::error::{EncodeError, ProviderError};
-use crate::providers::openai::OpenAI;
+use crate::providers::openai::OpenAIConfig;
 use crate::providers::openai::wire::OPENAI;
 use crate::wire::CredentialStamp;
 
@@ -343,15 +343,15 @@ impl From<LiveApiError> for ProviderError {
 /// identity, if any.
 #[derive(Clone, Debug)]
 pub struct PublicLiveSessions {
-    provider: OpenAI,
+    provider: OpenAIConfig,
 }
 
 impl PublicLiveSessions {
-    /// Sessions over `provider`. Refuses a provider whose dialect is not
-    /// [`OPENAI`], including the Codex subscription backend and every other
+    /// Sessions configured by `provider`. Refuses a configuration whose dialect
+    /// is not [`OPENAI`], including the Codex subscription backend and every other
     /// OpenAI-shaped gateway. The base URL is the provider's own, so a custom
     /// one is kept.
-    pub fn new(provider: OpenAI) -> Result<Self, NotOfficialOpenAi> {
+    pub fn new(provider: OpenAIConfig) -> Result<Self, NotOfficialOpenAi> {
         if provider.dialect.name != OPENAI.name {
             return Err(NotOfficialOpenAi {
                 dialect: provider.dialect.name,
