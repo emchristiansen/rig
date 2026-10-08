@@ -29,7 +29,7 @@ pub struct InvalidCallId(pub String);
 
 impl From<InvalidCallId> for ProviderError {
     fn from(error: InvalidCallId) -> Self {
-        ProviderError::Request(Box::new(error))
+        ProviderError::request(error)
     }
 }
 

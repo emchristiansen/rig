@@ -23,7 +23,7 @@ pub struct NotOfficialOpenAi {
 
 impl From<NotOfficialOpenAi> for ProviderError {
     fn from(error: NotOfficialOpenAi) -> Self {
-        ProviderError::Request(Box::new(error))
+        ProviderError::request(error)
     }
 }
 
