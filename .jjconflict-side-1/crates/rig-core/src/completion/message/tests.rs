@@ -64,9 +64,8 @@ fn system_message_constructor_and_serde_roundtrip() {
 }
 
 #[test]
-fn a_rig_issued_call_id_round_trips_as_local() {
-    // A call the provider sent without an id carries a rig-issued one, and
-    // the round trip never turns it into a provider id.
+fn current_schema_tool_call_json_round_trips_without_provider_promotion() {
+    // A call without a provider ID remains local through the round trip.
     let call = super::ToolCall::from_wire(
         "",
         super::ToolFunction::new(
@@ -77,6 +76,7 @@ fn a_rig_issued_call_id_round_trips_as_local() {
     assert!(call.id.is_local());
 
     let json = serde_json::to_value(&call).expect("serialize");
+    assert!(json.get("call_id").is_none());
     let roundtrip: super::ToolCall = serde_json::from_value(json).expect("deserialize");
     assert!(roundtrip.id.provider().is_none());
     assert_eq!(roundtrip, call);
@@ -317,4 +317,293 @@ fn document_data_keeps_its_json_and_reads_the_string_spelling() {
         DocumentData::default(),
         DocumentData::File(DocumentSourceKind::Unknown)
     );
+}
+
+/// Namespaces, custom calls, and the call kind a result answers — the typed
+/// tool-call surface — pinned as serialized bytes, so serde drift in the
+/// canonical format is a visible test failure.
+mod typed_tool_calls {
+    use super::super::{
+        AnsweredToolCall, AssistantContent, CustomToolCall, ToolCall, ToolFunction, ToolResult,
+        ToolResultContent, UndispatchableToolCall, UnrepresentableToolCall, UserContent,
+        json_only_wire_tool_call, name_dispatchable_call,
+    };
+
+    const FUNCTION_CALL: &str = r#"{"type":"toolcall","id":{"provider":"call_1"},"function":{"name":"add","arguments":{"x":1}},"native":{"item":{"call_id":"call_1","id":"fc_1"},"fingerprint":"5e62f7d16726783d"}}"#;
+    const NAMESPACED_CALL: &str = r#"{"type":"toolcall","id":{"provider":"call_1"},"function":{"name":"add","namespace":"math","arguments":{"x":1}},"native":{"item":{"call_id":"call_1","id":"fc_1"},"fingerprint":"13a06c1314125750"}}"#;
+    const CUSTOM_CALL: &str = r#"{"type":"customtoolcall","id":{"provider":"call_2"},"name":"apply_patch","namespace":"repo","input":"*** Begin Patch\n{\"x\": 1}","native":{"item":{"call_id":"call_2","id":"ctc_2"},"fingerprint":"02487528e677fca4"}}"#;
+    const FUNCTION_RESULT: &str = r#"{"type":"toolresult","call":{"provider":"call_1"},"name":"add","answers":"function","content":[{"type":"text","text":"2"}]}"#;
+    const CUSTOM_RESULT: &str = r#"{"type":"toolresult","call":{"provider":"call_2"},"name":"apply_patch","answers":"custom","content":[{"type":"text","text":"applied"}]}"#;
+
+    fn function_call() -> AssistantContent {
+        AssistantContent::tool_call(
+            "call_1",
+            super::super::ToolName::new("add").expect("tool name"),
+            serde_json::json!({"x": 1}),
+        )
+        .with_native(serde_json::json!({"call_id":"call_1","id":"fc_1"}))
+    }
+
+    fn namespaced_call() -> AssistantContent {
+        AssistantContent::ToolCall(
+            ToolCall::from_wire(
+                "call_1",
+                ToolFunction::new(
+                    super::super::ToolName::new("add").expect("tool name"),
+                    serde_json::json!({"x": 1}),
+                ),
+            )
+            .with_namespace(Some("math".to_owned())),
+        )
+        .with_native(serde_json::json!({"call_id":"call_1","id":"fc_1"}))
+    }
+
+    /// Input that happens to be valid JSON after a prefix line: it must stay
+    /// the verbatim string it arrived as.
+    fn custom_call() -> CustomToolCall {
+        let content = AssistantContent::custom_tool_call(
+            "call_2",
+            super::super::ToolName::new("apply_patch").expect("tool name"),
+            Some("repo".to_owned()),
+            "*** Begin Patch\n{\"x\": 1}",
+        )
+        .with_native(serde_json::json!({"call_id":"call_2","id":"ctc_2"}));
+        let AssistantContent::CustomToolCall(call) = content else {
+            unreachable!()
+        };
+        call
+    }
+
+    fn assert_pinned<T>(value: &T, pinned: &str)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        assert_eq!(serde_json::to_string(value).expect("serialize"), pinned);
+        let decoded: T = serde_json::from_str(pinned).expect("the pinned bytes decode");
+        assert_eq!(&decoded, value, "the pinned bytes decode to the same value");
+    }
+
+    #[test]
+    fn a_function_call_keeps_the_upstream_bytes() {
+        assert_pinned(&function_call(), FUNCTION_CALL);
+    }
+
+    #[test]
+    fn a_namespaced_call_carries_its_namespace_beside_the_name() {
+        assert_pinned(&namespaced_call(), NAMESPACED_CALL);
+    }
+
+    #[test]
+    fn a_custom_call_is_its_own_variant_with_verbatim_input() {
+        let call = AssistantContent::CustomToolCall(custom_call());
+        assert_pinned(&call, CUSTOM_CALL);
+        let AssistantContent::CustomToolCall(decoded) =
+            serde_json::from_str::<AssistantContent>(CUSTOM_CALL).expect("decode")
+        else {
+            panic!("a custom call decodes as the custom variant");
+        };
+        assert_eq!(decoded.input, "*** Begin Patch\n{\"x\": 1}");
+    }
+
+    #[test]
+    fn a_custom_call_whose_input_is_json_is_still_a_custom_call() {
+        let call = AssistantContent::custom_tool_call(
+            "call_3",
+            super::super::ToolName::new("t").expect("tool name"),
+            None,
+            r#"{"a":1}"#,
+        );
+        let json = serde_json::to_value(&call).expect("serialize");
+        assert_eq!(json["type"], "customtoolcall");
+        assert_eq!(
+            json["input"],
+            serde_json::json!(r#"{"a":1}"#),
+            "a string, not an object"
+        );
+        let decoded: AssistantContent = serde_json::from_value(json).expect("decode");
+        assert_eq!(decoded, call);
+    }
+
+    #[test]
+    fn results_state_the_kind_they_answer() {
+        let AssistantContent::ToolCall(call) = function_call() else {
+            unreachable!()
+        };
+        let function = UserContent::ToolResult(call.result(vec![ToolResultContent::text("2")]));
+        assert_pinned(&function, FUNCTION_RESULT);
+
+        let custom =
+            UserContent::ToolResult(custom_call().result(vec![ToolResultContent::text("applied")]));
+        assert_pinned(&custom, CUSTOM_RESULT);
+        assert_eq!(
+            custom,
+            UserContent::ToolResult(ToolResult {
+                call: super::super::CallId::from_wire("call_2"),
+                name: super::super::ToolName::new("apply_patch").expect("tool name"),
+                answers: AnsweredToolCall::Custom,
+                content: vec![ToolResultContent::text("applied")],
+                is_error: false,
+            }),
+            "the relay constructor states what the call-derived one derives"
+        );
+    }
+
+    #[test]
+    fn a_result_that_does_not_say_what_it_answers_is_rejected() {
+        let mut json: serde_json::Value = serde_json::from_str(FUNCTION_RESULT).expect("json");
+        json.as_object_mut().expect("object").remove("answers");
+        let error =
+            serde_json::from_value::<UserContent>(json.clone()).expect_err("`answers` is required");
+        assert!(error.to_string().contains("answers"), "{error}");
+        json.as_object_mut().expect("object").remove("type");
+        assert!(serde_json::from_value::<ToolResult>(json).is_err());
+    }
+
+    #[test]
+    fn the_answered_kind_derives_from_the_held_call() {
+        let AssistantContent::ToolCall(call) = function_call() else {
+            unreachable!()
+        };
+        let UserContent::ToolResult(result) =
+            UserContent::ToolResult(call.result(vec![ToolResultContent::text("2")]))
+        else {
+            unreachable!()
+        };
+        assert_eq!(result.answers, AnsweredToolCall::Function);
+        assert_eq!(result.call, call.id);
+        assert_eq!(custom_call().answered_by(), AnsweredToolCall::Custom);
+    }
+
+    #[test]
+    fn an_absent_namespace_is_omitted_and_every_present_spelling_is_kept() {
+        let bare = ToolFunction::new(
+            super::super::ToolName::new("add").expect("tool name"),
+            serde_json::json!({}),
+        );
+        let json = serde_json::to_value(&bare).expect("serialize");
+        assert!(json.get("namespace").is_none(), "{json}");
+        for spelling in ["", "functions", "math"] {
+            let qualified = bare.clone().with_namespace(Some(spelling.to_owned()));
+            let json = serde_json::to_value(&qualified).expect("serialize");
+            assert_eq!(
+                json["namespace"], spelling,
+                "no spelling normalizes to absence"
+            );
+            assert_eq!(
+                serde_json::from_value::<ToolFunction>(json).expect("decode"),
+                qualified
+            );
+        }
+    }
+
+    #[test]
+    fn json_only_wires_refuse_custom_and_namespaced_calls_by_name() {
+        let AssistantContent::ToolCall(plain) = function_call() else {
+            unreachable!()
+        };
+        assert_eq!(
+            json_only_wire_tool_call("Test Wire", &function_call()),
+            Ok(Some(&plain))
+        );
+        assert_eq!(
+            json_only_wire_tool_call("Test Wire", &AssistantContent::text("hi")),
+            Ok(None)
+        );
+        // `""` and `"functions"` are refused too: no JSON-only wire here has
+        // evidence that it treats either as its default namespace.
+        for spelling in ["", "functions", "math"] {
+            let call =
+                AssistantContent::ToolCall(plain.clone().with_namespace(Some(spelling.to_owned())));
+            assert_eq!(
+                json_only_wire_tool_call("Test Wire", &call),
+                Err(UnrepresentableToolCall::Namespace {
+                    wire: "Test Wire",
+                    name: super::super::ToolName::new("add").expect("tool name"),
+                    namespace: spelling.to_owned(),
+                })
+            );
+        }
+        let refusal = json_only_wire_tool_call(
+            "Test Wire",
+            &AssistantContent::CustomToolCall(custom_call()),
+        )
+        .expect_err("a custom call is refused");
+        assert_eq!(
+            refusal.to_string(),
+            "Test Wire carries JSON tool arguments only, so custom tool call `apply_patch` and its raw input cannot be sent on it"
+        );
+        // Refusals are request failures in the shared error vocabulary.
+        let provider: crate::error::ProviderError = crate::error::EncodeError::from(refusal).into();
+        assert_eq!(provider.kind(), crate::error::ErrorKind::Request);
+    }
+
+    #[test]
+    fn name_keyed_dispatch_refuses_namespaced_and_custom_calls() {
+        let AssistantContent::ToolCall(plain) = function_call() else {
+            unreachable!()
+        };
+        assert_eq!(name_dispatchable_call(&function_call()), Ok(Some(&plain)));
+        assert_eq!(
+            name_dispatchable_call(&namespaced_call()),
+            Err(UndispatchableToolCall::Namespaced {
+                id: plain.id.clone(),
+                name: super::super::ToolName::new("add").expect("tool name"),
+                namespace: "math".to_owned(),
+            })
+        );
+        let json_input = AssistantContent::custom_tool_call(
+            "call_3",
+            super::super::ToolName::new("t").expect("tool name"),
+            None,
+            r#"{"a":1}"#,
+        );
+        assert!(
+            matches!(
+                name_dispatchable_call(&json_input),
+                Err(UndispatchableToolCall::Custom { .. })
+            ),
+            "custom input that parses as JSON is still refused"
+        );
+        assert_eq!(
+            super::super::first_undispatchable_call(&[
+                AssistantContent::text("x"),
+                function_call(),
+                AssistantContent::CustomToolCall(custom_call()),
+            ]),
+            Some(UndispatchableToolCall::Custom {
+                id: custom_call().id,
+                name: super::super::ToolName::new("apply_patch").expect("tool name"),
+                namespace: Some("repo".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn missing_ids_are_minted_across_both_call_kinds() {
+        let content = vec![
+            AssistantContent::ToolCall(ToolCall::from_wire(
+                "",
+                ToolFunction::new(
+                    super::super::ToolName::new("a").expect("tool name"),
+                    serde_json::json!({}),
+                ),
+            )),
+            AssistantContent::custom_tool_call(
+                "",
+                super::super::ToolName::new("b").expect("tool name"),
+                None,
+                "raw",
+            ),
+        ];
+        let ids: Vec<_> = content
+            .iter()
+            .map(|item| match item {
+                AssistantContent::ToolCall(call) => call.id.clone(),
+                AssistantContent::CustomToolCall(call) => call.id.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert!(ids.iter().all(super::super::CallId::is_local));
+        assert_ne!(ids[0], ids[1], "two id-less calls never share a handle");
+    }
 }
