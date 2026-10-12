@@ -1346,24 +1346,48 @@ pub async fn multi_part_same_id_reasoning_keeps_every_part(
         drained.completed_cleanly(),
         || "the reasoning stream must complete without errors",
     )?;
-    let items: Vec<String> = drained
-        .choice_reasoning()
-        .iter()
-        .filter_map(|item| item.native.as_ref())
-        .map(|native| native.item.to_string())
-        .collect();
-    let in_order = |item: &String| {
-        let mut rest = item.as_str();
-        expected_parts.iter().all(|part| match rest.find(part) {
-            Some(at) => {
-                rest = &rest[at + part.len()..];
-                true
-            }
-            None => false,
-        })
+    use crate::message::CarriedReasoningPart;
+
+    let part_value = |part: &CarriedReasoningPart| match part {
+        CarriedReasoningPart::Summary(text) | CarriedReasoningPart::Text { text, .. } => {
+            text.clone()
+        }
+        CarriedReasoningPart::Encrypted(data) | CarriedReasoningPart::Redacted { data } => {
+            data.clone()
+        }
+        CarriedReasoningPart::OpaqueSummary(payload)
+        | CarriedReasoningPart::OpaqueContent(payload) => payload.item.to_string(),
     };
-    let observed = items;
-    checks.require(observed.len() == 1 && observed.iter().all(in_order), || {
+    let mut observed = Vec::new();
+    for content in &drained.choice {
+        match content {
+            AssistantContent::CarriedReasoning(reasoning) => {
+                observed.extend(reasoning.content.iter().map(&part_value));
+            }
+            AssistantContent::Reasoning(reasoning) => {
+                if let Some(native) = reasoning.native.as_ref().filter(|native| {
+                    native.item.get("type").and_then(serde_json::Value::as_str) == Some("reasoning")
+                }) {
+                    let carried = crate::providers::openai::responses_api::carried_reasoning(
+                        &native.item,
+                        None,
+                    )
+                    .map_err(|error| {
+                        ConformanceError::contract(
+                            "multi_part_same_id_reasoning_keeps_every_part",
+                            driver.provider,
+                            format!("cannot project the retained reasoning item: {error}"),
+                        )
+                    })?;
+                    observed.extend(carried.content.iter().map(&part_value));
+                } else {
+                    observed.push(reasoning.text.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    checks.require(observed == expected_parts, || {
         format!(
             "every same-id reasoning part must survive in order: expected {expected_parts:?}, observed {observed:?}"
         )
@@ -1503,11 +1527,29 @@ fn assert_reasoning_tool_reasoning(
         .iter()
         .map(|content| match content {
             AssistantContent::Reasoning(reasoning) => format!("reasoning:{}", reasoning.text),
+            AssistantContent::CarriedReasoning(reasoning) => {
+                if reasoning.has_opaque_parts() {
+                    "opaque_reasoning".to_string()
+                } else {
+                    format!("reasoning:{}", reasoning.display_text())
+                }
+            }
+            AssistantContent::CarriedText(text) => {
+                if matches!(text.content, crate::message::CarriedTextContent::Opaque(_)) {
+                    format!("opaque_text:{}", text.text())
+                } else {
+                    format!("text:{}", text.text())
+                }
+            }
             AssistantContent::ToolCall(tool_call) => {
                 format!("tool:{}", tool_call.function.name)
             }
+            AssistantContent::CustomToolCall(call) => format!("custom_tool:{}", call.name),
             AssistantContent::Text(text) => format!("text:{}", text.text),
             AssistantContent::Image(_) => "image".to_string(),
+            AssistantContent::ProviderItem(item) => {
+                format!("provider_item:{}", item.item_type().unwrap_or_default())
+            }
             AssistantContent::Opaque(opaque) => format!("opaque:{}", opaque.kind().unwrap_or("")),
         })
         .collect();
@@ -2023,6 +2065,7 @@ pub mod fixtures {
                             &crate::providers::chatgpt::DIALECT,
                             "test-token",
                         )
+                        .with_caller_identity(crate::test_utils::test_caller_identity())
                         .with_account_id("account-id")
                         .responses("gpt-5.4"),
                         crate::test_utils::RecordingHttpClient::new(body),

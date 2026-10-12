@@ -2,10 +2,11 @@
 //!
 //! The streaming sibling of `rig-agent`'s `model_conformance`: each scenario
 //! drives raw wire bytes (SSE or NDJSON) through a provider's *complete*
-//! streaming path — bytes → decode → normalize → aggregated
-//! [`StreamingCompletionResponse`](crate::streaming::StreamingCompletionResponse)
-//! — and asserts the [`StreamFinal`] contract
-//! table documented on that type. Scenarios state the contract; a per-provider
+//! streaming path — bytes → decode → the writer's parts →
+//! [`CompletionStream`](crate::streaming::CompletionStream) → its response
+//! — and asserts the streaming contract: an error is the stream's last item,
+//! a reply the provider did not end has no response, and every part the
+//! stream emits reaches the response exactly once. Scenarios state the contract; a per-provider
 //! [`ProviderWireFixture`] supplies the frames, since each wire format spells
 //! the same event differently.
 //!
@@ -25,14 +26,14 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 
+use crate::completion::{CompletionRequest, CompletionResponse};
 use crate::error::ProviderError;
-use crate::streaming::BlockId;
 use crate::{
     completion::FinishReason,
     error::ErrorReport,
     http_client,
     message::AssistantContent,
-    streaming::{Delta, StreamEvent, StreamFinal},
+    streaming::{Item, StreamEvent},
 };
 
 /// Typed failure from a wire-conformance scenario.
@@ -171,9 +172,9 @@ impl SuiteCapabilities {
 pub const CANONICAL_SCENARIOS: &[&str] = &[
     "truncation_preserves_content_without_terminal",
     "transport_error_after_tool_call_yields_err_then_end",
-    "malformed_frame_surfaces_err_and_terminal_still_completes",
+    "malformed_frame_ends_the_reply",
     "unknown_event_is_skipped",
-    "defective_known_event_surfaces_err",
+    "defective_known_event_ends_the_reply",
     "delta_less_choice_prelude_is_a_noop",
     "refusal_frames_deliver_text_without_error",
     "bare_terminal_after_only_unparseable_frames_fabricates_nothing",
@@ -194,8 +195,6 @@ pub const WIRE_FAMILIES: &[&str] = &[
     "gemini_rest",
     "gemini_interactions",
     "gemini_grpc",
-    "cohere",
-    "ollama",
     "xai",
     "copilot",
     "bedrock",
@@ -369,58 +368,47 @@ pub fn transport_error_chunk() -> http_client::Result<WireInput> {
 ///
 /// Laws (universal — they hold for truncated and errored streams too):
 ///
-/// 1. **Terminal latch.** At most one [`StreamEvent::Final`],
-///    and no content item (text, reasoning, tool call or delta) follows it —
-///    only in-band errors and `Unknown` passthrough may.
+/// 1. **Terminal error.** An error is the stream's last item: nothing
+///    follows it.
 /// 2. **Text conservation.** The aggregated text is exactly the
 ///    concatenation of the yielded text deltas: accumulated delta content
 ///    equals the payload the aggregate delivers.
 /// 3. **Completed-call conservation.** Every completed tool call yielded on
 ///    the stream appears in the aggregated choice exactly once, and vice
 ///    versa (counts match; aggregation neither drops nor duplicates).
-/// 4. **Delta-before-completion.** A completed call correlated with
-///    fragments (same `block_id`) never precedes its own deltas.
-/// 5. **Reasoning provenance.** The aggregate contains a reasoning part only
-///    if the stream yielded reasoning items; and when only deltas were
-///    yielded (no full block), the aggregated reasoning text is exactly
-///    their concatenation.
+/// 4. **Sequence.** The events read back through
+///    [`Transcript::parse_prefix`](crate::streaming::Transcript::parse_prefix):
+///    each part starts once, in position, grows only while open, and ends
+///    once.
+/// 5. **Reasoning provenance.** The response contains a reasoning part only
+///    if the stream ended one.
 pub fn assert_valid_event_stream(
-    items: &[Result<StreamEvent, ErrorReport>],
+    items: &[Result<Item<StreamEvent>, ErrorReport>],
     choice: &[AssistantContent],
 ) {
     use crate::message::AssistantContent;
 
-    let ok_items: Vec<&StreamEvent> = items.iter().filter_map(|item| item.as_ref().ok()).collect();
-
-    // Law 1: terminal latch.
-    let final_count = ok_items
-        .iter()
-        .filter(|item| matches!(item, StreamEvent::Final(_)))
-        .count();
-    assert!(
-        final_count <= 1,
-        "law 1 (terminal latch): {final_count} terminal records yielded"
-    );
-    if let Some(final_index) = ok_items
-        .iter()
-        .position(|item| matches!(item, StreamEvent::Final(_)))
-    {
-        for item in ok_items.get(final_index + 1..).unwrap_or_default() {
-            assert!(
-                matches!(item, StreamEvent::Unknown(_)),
-                "law 1 (terminal latch): content item after the terminal record: {item:?}"
-            );
-        }
+    // Law 1: an error is the last item.
+    if let Some(error_index) = items.iter().position(Result::is_err) {
+        assert_eq!(
+            error_index + 1,
+            items.len(),
+            "law 1 (terminal error): an item followed the stream's error"
+        );
     }
-
-    // Law 2: text conservation.
-    let streamed_text: String = ok_items
+    let events: Vec<&StreamEvent> = items
         .iter()
         .filter_map(|item| match item {
-            StreamEvent::BlockDelta {
-                delta: Delta::Text { text },
-                ..
-            } => Some(text.as_str()),
+            Ok(Item::Event(event)) => Some(event),
+            _ => None,
+        })
+        .collect();
+
+    // Law 2: text conservation.
+    let streamed_text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            StreamEvent::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -433,17 +421,17 @@ pub fn assert_valid_event_stream(
         .collect();
     assert_eq!(
         aggregated_text, streamed_text,
-        "law 2 (text conservation): aggregated text differs from the streamed deltas"
+        "law 2 (text conservation): aggregated text differs from the streamed fragments"
     );
 
     // Law 3: completed-call conservation.
-    let yielded_calls = ok_items
+    let yielded_calls = events
         .iter()
-        .filter(|item| {
+        .filter(|event| {
             matches!(
-                item,
-                StreamEvent::BlockEnd {
-                    block: Some(AssistantContent::ToolCall(_)),
+                event,
+                StreamEvent::End {
+                    content: AssistantContent::ToolCall(_),
                     ..
                 }
             )
@@ -459,75 +447,30 @@ pub fn assert_valid_event_stream(
          {aggregated_calls} aggregated"
     );
 
-    // Law 4: delta-before-completion.
-    let mut seen_delta_ids: Vec<BlockId> = Vec::new();
-    let mut completed_ids: Vec<BlockId> = Vec::new();
-    for item in &ok_items {
-        match item {
-            StreamEvent::BlockDelta {
-                id,
-                delta: Delta::ToolName { .. } | Delta::ToolArguments { .. },
-            } => {
-                assert!(
-                    !completed_ids.contains(id),
-                    "law 4: a delta for block {id} arrived after its completed call"
-                );
-                seen_delta_ids.push(id.clone());
-            }
-            StreamEvent::BlockEnd {
-                id,
-                block: Some(AssistantContent::ToolCall(_)),
-                ..
-            } => completed_ids.push(id.clone()),
-            _ => {}
-        }
-    }
-
-    // Law 4b: reasoning correlation. Every completed reasoning block
-    // carries a block id no other completed block shares (a delta-only
-    // part may legitimately have no completed block — e.g. a visible chain
-    // of thought whose synthesized end stays silent — so delta ids are not
-    // required to appear among the completed ids).
-    let mut completed_reasoning_ids: Vec<&BlockId> = Vec::new();
-    for item in &ok_items {
-        if let StreamEvent::BlockEnd {
-            id,
-            block: Some(AssistantContent::Reasoning(_)),
-            ..
-        } = item
-        {
-            assert!(
-                id.wire_str() != Some(""),
-                "law 4b (reasoning correlation): a completed block carries an empty wire id"
-            );
-            assert!(
-                !completed_reasoning_ids.contains(&id),
-                "law 4b (reasoning correlation): two completed blocks share block id {id}"
-            );
-            completed_reasoning_ids.push(id);
-        }
-    }
+    // Law 4: the sequence reads back.
+    let serialized = serde_json::to_value(
+        items
+            .iter()
+            .filter_map(|item| item.as_ref().ok())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_default();
+    let read_back = crate::streaming::Transcript::parse_prefix(serialized);
+    assert!(
+        read_back.is_ok(),
+        "law 4 (sequence): the stream's events do not read back: {read_back:?}"
+    );
 
     // Law 5: reasoning provenance.
-    let yielded_full_block = ok_items.iter().any(|item| {
+    let yielded_reasoning = events.iter().any(|event| {
         matches!(
-            item,
-            StreamEvent::BlockEnd {
-                block: Some(AssistantContent::Reasoning(_)),
+            event,
+            StreamEvent::End {
+                content: AssistantContent::Reasoning(_),
                 ..
             }
         )
     });
-    let yielded_reasoning = yielded_full_block
-        || ok_items.iter().any(|item| {
-            matches!(
-                item,
-                StreamEvent::BlockDelta {
-                    delta: Delta::Reasoning { .. },
-                    ..
-                }
-            )
-        });
     let aggregated_reasoning = choice
         .iter()
         .any(|content| matches!(content, AssistantContent::Reasoning(_)));
@@ -535,85 +478,58 @@ pub fn assert_valid_event_stream(
         yielded_reasoning || !aggregated_reasoning,
         "law 5 (reasoning provenance): aggregated reasoning with no reasoning yielded"
     );
-    if yielded_reasoning && !yielded_full_block {
-        let streamed_reasoning: String = ok_items
-            .iter()
-            .filter_map(|item| match item {
-                StreamEvent::BlockDelta {
-                    delta: Delta::Reasoning { text },
-                    ..
-                } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        let aggregated_reasoning_text: String = choice
-            .iter()
-            .filter_map(|content| match content {
-                AssistantContent::Reasoning(reasoning) => Some(reasoning.content.iter()),
-                _ => None,
-            })
-            .flatten()
-            .filter_map(|part| match part {
-                crate::message::ReasoningContent::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            aggregated_reasoning_text, streamed_reasoning,
-            "law 5 (reasoning conservation): with no full block, the aggregated reasoning \
-             must be exactly the concatenated deltas"
-        );
-    }
 }
 
 /// Everything the consumer observed from one full pipeline run: the yielded
-/// items in order, plus the aggregated choice and terminal record.
+/// items in order, plus the response they folded into.
 #[derive(Debug)]
 pub struct DrainedStream {
     /// Every item the stream yielded, in order.
-    pub items: Vec<Result<StreamEvent, ErrorReport>>,
-    /// The final aggregated assistant message.
+    pub items: Vec<Result<Item<StreamEvent>, ErrorReport>>,
+    /// The parts that ended, in position: the response's choice, or what
+    /// arrived before the stream stopped.
     pub choice: Vec<AssistantContent>,
-    /// The normalized terminal record, absent on truncation or terminal error.
-    pub response: Option<StreamFinal>,
+    /// The response, absent on truncation or a terminal error.
+    pub response: Option<CompletionResponse>,
 }
 
 impl DrainedStream {
-    /// Text deltas yielded to the consumer, in order.
+    fn events(&self) -> impl Iterator<Item = &StreamEvent> {
+        self.items.iter().filter_map(|item| match item {
+            Ok(Item::Event(event)) => Some(event),
+            _ => None,
+        })
+    }
+
+    /// Text fragments yielded to the consumer, in order.
     pub fn texts(&self) -> Vec<&str> {
-        self.items
-            .iter()
-            .filter_map(|item| match item {
-                Ok(StreamEvent::BlockDelta {
-                    delta: Delta::Text { text },
-                    ..
-                }) => Some(text.as_str()),
+        self.events()
+            .filter_map(|event| match event {
+                StreamEvent::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect()
     }
 
-    /// Names of the complete tool calls yielded to the consumer, in order.
+    /// Names of the tool calls that ended on the stream, in order.
     pub fn tool_call_names(&self) -> Vec<&str> {
-        self.items
-            .iter()
-            .filter_map(|item| match item {
-                Ok(StreamEvent::BlockEnd {
-                    block: Some(AssistantContent::ToolCall(tool_call)),
+        self.events()
+            .filter_map(|event| match event {
+                StreamEvent::End {
+                    content: AssistantContent::ToolCall(tool_call),
                     ..
-                }) => Some(tool_call.function.name.as_str()),
+                } => Some(tool_call.function.name.as_str()),
                 _ => None,
             })
             .collect()
     }
 
-    /// Raw payloads of the `Unknown` passthrough items the stream yielded,
-    /// in order.
+    /// Raw payloads of the `Unknown` items the stream yielded, in order.
     pub fn unknown_values(&self) -> Vec<&serde_json::Value> {
         self.items
             .iter()
             .filter_map(|item| match item {
-                Ok(StreamEvent::Unknown(value)) => Some(value.value()),
+                Ok(Item::Unknown(value)) => Some(value.value()),
                 _ => None,
             })
             .collect()
@@ -624,24 +540,13 @@ impl DrainedStream {
         self.items.iter().filter(|item| item.is_err()).count()
     }
 
-    /// Number of terminal records the stream yielded.
-    pub fn final_count(&self) -> usize {
-        self.items
-            .iter()
-            .filter(|item| matches!(item, Ok(StreamEvent::Final(_))))
-            .count()
-    }
-
-    /// Whether the run produced a terminal record at all, yielded or folded
-    /// into the response. Truncation and terminal transport errors must
-    /// produce neither.
+    /// Whether the provider ended the reply: it has a response.
     fn has_terminal(&self) -> bool {
-        self.response.is_some() || self.final_count() != 0
+        self.response.is_some()
     }
 
-    /// Whether the stream reached the provider's genuine terminal with no
-    /// `Err` item — the clean-completion precondition the content-shape
-    /// scenarios share.
+    /// Whether the stream reached the provider's end with no `Err` item —
+    /// the clean-completion precondition the content-shape scenarios share.
     fn completed_cleanly(&self) -> bool {
         self.error_count() == 0 && self.response.is_some()
     }
@@ -651,7 +556,7 @@ impl DrainedStream {
         self.items.iter().position(std::result::Result::is_err)
     }
 
-    /// Text blocks in the aggregated choice, in order.
+    /// Text parts in the aggregated choice, in order.
     pub fn choice_texts(&self) -> Vec<&str> {
         self.choice
             .iter()
@@ -662,7 +567,7 @@ impl DrainedStream {
             .collect()
     }
 
-    /// Reasoning items in the aggregated choice, in order.
+    /// Reasoning parts in the aggregated choice, in order.
     pub fn choice_reasoning(&self) -> Vec<&crate::message::Reasoning> {
         self.choice
             .iter()
@@ -681,7 +586,7 @@ type DriveFn = Box<
 /// One provider's full streaming pipeline over scripted wire chunks.
 ///
 /// The closure builds a fresh provider client over a scripted HTTP double
-/// (`SequencedStreamingHttpClient`), opens `CompletionModel::stream`, drains
+/// (`SequencedStreamingHttpClient`), opens `Model::stream`, drains
 /// it, and returns everything the consumer observed.
 pub struct WireDriver {
     /// Stable descriptor name of the provider under test.
@@ -771,7 +676,7 @@ impl BufferedBodyDriver {
 /// Per-provider wire frames for the shared scenario set.
 ///
 /// `Option` fields cover sequence shapes a wire family cannot spell (e.g.
-/// ollama's NDJSON has no event types, so no "unknown event type" frame).
+/// an NDJSON wire has no event types, so no "unknown event type" frame).
 pub struct ProviderWireFixture {
     /// The provider's full pipeline.
     pub driver: WireDriver,
@@ -915,7 +820,7 @@ impl Checks {
 }
 
 /// Truncation at every position — EOF before content, mid-text, mid-tool-args,
-/// after a fully-delivered tool call — must preserve delivered content and
+/// after a tool call's frames — must preserve the content that ended and
 /// never produce a terminal record.
 ///
 /// Pins the truncation family from round one (`rig-2257-code-review-findings-ec9f2625.md`):
@@ -965,35 +870,37 @@ pub async fn truncation_preserves_content_without_terminal(
         checks.note("EOF mid-tool-args: no terminal");
     }
 
-    // EOF after a fully-delivered tool call, before the stream terminal.
+    // EOF after a tool call's frames, before the provider's end. A call is
+    // visible once it closes: on a wire that closes calls at the end, the
+    // cut call never surfaces.
     let drained = fixture
         .driver
         .drive(ok_chunks(fixture.tool_call_frames.clone()))
         .await?;
     checks.require(
-        drained.tool_call_names() == vec![fixture.expected_tool_name],
+        drained
+            .tool_call_names()
+            .iter()
+            .all(|name| *name == fixture.expected_tool_name),
         || {
             format!(
-                "a fully-delivered tool call must survive truncation: observed {:?}",
+                "only the delivered call may surface: observed {:?}",
                 drained.tool_call_names()
             )
         },
     )?;
     checks.require(
         !drained.has_terminal(),
-        || "EOF after a delivered tool call must not synthesize a terminal record",
+        || "EOF after a tool call must not synthesize a terminal record",
     )?;
-    checks.note("EOF after tool-complete: tool call preserved, no terminal");
+    checks.note("EOF after a tool call: no terminal");
 
     Ok(checks.report())
 }
 
-/// A transport failure after a fully-delivered tool call must yield the tool
-/// call, then the `Err`, then end — with no terminal record after the error.
-///
-/// Pins the flush-before-terminal-error ordering from round five
-/// (`rig-2257-code-review-findings-5c73639c.md`): a first-`Err`-stop consumer
-/// must still see delivered tool calls.
+/// A transport failure after a tool call's frames ends the reply: the `Err`
+/// is the last item, and there is no terminal record. A call the wire closed
+/// before the failure precedes it; one still open never surfaces.
 pub async fn transport_error_after_tool_call_yields_err_then_end(
     fixture: &ProviderWireFixture,
 ) -> Result<ScenarioReport, ConformanceError> {
@@ -1007,10 +914,13 @@ pub async fn transport_error_after_tool_call_yields_err_then_end(
     let drained = fixture.driver.drive(chunks).await?;
 
     checks.require(
-        drained.tool_call_names() == vec![fixture.expected_tool_name],
+        drained
+            .tool_call_names()
+            .iter()
+            .all(|name| *name == fixture.expected_tool_name),
         || {
             format!(
-                "the delivered tool call must precede the transport error: observed {:?}",
+                "only the delivered call may precede the transport error: observed {:?}",
                 drained.tool_call_names()
             )
         },
@@ -1027,23 +937,17 @@ pub async fn transport_error_after_tool_call_yields_err_then_end(
         || "a transport failure must not be papered over with a terminal record",
     )?;
 
-    checks.note("tool call, then Err, then end; no terminal");
+    checks.note("Err, then end; no terminal");
     Ok(checks.report())
 }
 
-/// A malformed frame between valid content and the genuine terminal must
-/// surface as an `Err` item while the stream keeps consuming, so the terminal
-/// still completes it.
-///
-/// Pins the malformed-frame policy row of the [`StreamFinal`] contract table
-/// (round four, `rig-2257-code-review-findings-1e5a7ad8.md`).
-pub async fn malformed_frame_surfaces_err_and_terminal_still_completes(
+/// A malformed frame between valid content and the provider's end ends the
+/// reply: it surfaces as the stream's last item, content before it is kept,
+/// and there is no response.
+pub async fn malformed_frame_ends_the_reply(
     fixture: &ProviderWireFixture,
 ) -> Result<ScenarioOutcome, ConformanceError> {
-    let mut checks = Checks::new(
-        "malformed_frame_surfaces_err_and_terminal_still_completes",
-        fixture.driver.provider,
-    );
+    let mut checks = Checks::new("malformed_frame_ends_the_reply", fixture.driver.provider);
     let Some(malformed) = &fixture.malformed_frame else {
         return Ok(checks.skip("wire family cannot spell a frame-level decode failure"));
     };
@@ -1062,15 +966,19 @@ pub async fn malformed_frame_surfaces_err_and_terminal_still_completes(
         )
     })?;
     checks.require(
-        drained.texts() == fixture.expected_texts,
-        || "content around the malformed frame must be preserved",
+        drained.first_error_index() == Some(drained.items.len() - 1),
+        || "the malformed frame's error must be the stream's last item",
     )?;
     checks.require(
-        drained.response.is_some(),
-        || "the genuine terminal after a recoverable parse error must still complete the stream",
+        drained.texts() == fixture.expected_texts,
+        || "content before the malformed frame must be preserved",
+    )?;
+    checks.require(
+        !drained.has_terminal(),
+        || "a reply cut by a corrupt frame has no response",
     )?;
 
-    checks.note("Err surfaced, terminal still completed");
+    checks.note("Err surfaced last; content kept; no response");
     Ok(checks.ran())
 }
 
@@ -1128,18 +1036,16 @@ pub async fn unknown_event_is_skipped(
     Ok(checks.ran())
 }
 
-/// A *known* event whose payload is schema-defective must surface as an `Err`
-/// item (and the stream keeps consuming to the genuine terminal).
+/// A *known* event whose payload is schema-defective ends the reply: it
+/// surfaces as the stream's last item, and there is no response.
 ///
-/// Pins the round-5 known-type strictness policy and its silent revert for
-/// OpenAI Responses content parts — the open P2 in
-/// `rig-2257-code-review-findings-34ee8ba5.md` ("Round-5 known-type strictness
-/// silently reverted for content parts").
-pub async fn defective_known_event_surfaces_err(
+/// Pins the round-5 known-type strictness policy (a defective known event is
+/// never demoted to an unknown one).
+pub async fn defective_known_event_ends_the_reply(
     fixture: &ProviderWireFixture,
 ) -> Result<ScenarioOutcome, ConformanceError> {
     let mut checks = Checks::new(
-        "defective_known_event_surfaces_err",
+        "defective_known_event_ends_the_reply",
         fixture.driver.provider,
     );
     let Some(defective) = &fixture.defective_known_frame else {
@@ -1162,11 +1068,11 @@ pub async fn defective_known_event_surfaces_err(
         )
     })?;
     checks.require(
-        drained.response.is_some(),
-        || "the genuine terminal must still complete the stream after the defective frame",
+        !drained.has_terminal(),
+        || "a reply cut by a defective event has no response",
     )?;
 
-    checks.note("defective known event surfaced as Err; stream completed");
+    checks.note("defective known event ended the reply with its Err");
     Ok(checks.ran())
 }
 
@@ -1320,7 +1226,7 @@ pub async fn bare_terminal_after_only_unparseable_frames_fabricates_nothing(
 /// usage metrics must complete with no counter reported rather than being
 /// suppressed or invented.
 ///
-/// Pins the absent-usage contract on [`StreamFinal::usage`]
+/// Pins the absent-usage contract on [`CompletionResponse::usage`](crate::completion::CompletionResponse::usage)
 /// (round one, `rig-2257-code-review-findings-ec9f2625.md`).
 pub async fn usage_variants_are_reported_or_absent(
     fixture: &ProviderWireFixture,
@@ -1346,11 +1252,12 @@ pub async fn usage_variants_are_reported_or_absent(
         },
     )?;
     checks.require(
-        response.finish_reason == fixture.expected_finish_reason,
+        response.finish_reason() == fixture.expected_finish_reason,
         || {
             format!(
                 "terminal finish reason must be normalized: expected {:?}, observed {:?}",
-                fixture.expected_finish_reason, response.finish_reason
+                fixture.expected_finish_reason,
+                response.finish_reason()
             )
         },
     )?;
@@ -1403,13 +1310,8 @@ pub async fn reasoning_summary_deltas_are_superseded_without_duplication(
     let reasoning = drained.choice_reasoning();
     let occurrences: usize = reasoning
         .iter()
-        .flat_map(|item| item.content.iter())
-        .filter(|content| match content {
-            crate::message::ReasoningContent::Summary(text)
-            | crate::message::ReasoningContent::Text { text, .. } => text.contains(summary_text),
-            _ => false,
-        })
-        .count();
+        .map(|item| item.text.matches(summary_text).count())
+        .sum();
     checks.require(occurrences == 1, || {
         format!(
             "the summary must appear exactly once in the aggregated choice, observed {occurrences} across {reasoning:?}"
@@ -1427,12 +1329,8 @@ pub async fn reasoning_summary_deltas_are_superseded_without_duplication(
 }
 
 /// A reasoning item whose `output_item.done` carries several parts under one
-/// item id (summary parts, text, encrypted) must keep every part, in order —
-/// same-id sibling blocks append, they never replace each other.
-///
-/// Pins the open P1 in `rig-2257-code-review-findings-34ee8ba5.md` ("The by-id
-/// fallback collapses multi-part same-id reasoning items"): the `rposition`
-/// fallback replaces the just-appended same-id sibling.
+/// item id (summary parts, text, encrypted) must keep every part, in order:
+/// the item is one block whose provider item holds them all.
 pub async fn multi_part_same_id_reasoning_keeps_every_part(
     driver: &WireDriver,
     frames: Vec<WireInput>,
@@ -1448,17 +1346,47 @@ pub async fn multi_part_same_id_reasoning_keeps_every_part(
         drained.completed_cleanly(),
         || "the reasoning stream must complete without errors",
     )?;
-    let observed: Vec<String> = drained
-        .choice_reasoning()
-        .iter()
-        .flat_map(|item| item.content.iter())
-        .map(|content| match content {
-            crate::message::ReasoningContent::Summary(text) => text.clone(),
-            crate::message::ReasoningContent::Text { text, .. } => text.clone(),
-            crate::message::ReasoningContent::Encrypted(data) => data.clone(),
-            crate::message::ReasoningContent::Redacted { data } => data.clone(),
-        })
-        .collect();
+    use crate::message::CarriedReasoningPart;
+
+    let part_value = |part: &CarriedReasoningPart| match part {
+        CarriedReasoningPart::Summary(text) | CarriedReasoningPart::Text { text, .. } => {
+            text.clone()
+        }
+        CarriedReasoningPart::Encrypted(data) | CarriedReasoningPart::Redacted { data } => {
+            data.clone()
+        }
+        CarriedReasoningPart::OpaqueSummary(payload)
+        | CarriedReasoningPart::OpaqueContent(payload) => payload.item.to_string(),
+    };
+    let mut observed = Vec::new();
+    for content in &drained.choice {
+        match content {
+            AssistantContent::CarriedReasoning(reasoning) => {
+                observed.extend(reasoning.content.iter().map(&part_value));
+            }
+            AssistantContent::Reasoning(reasoning) => {
+                if let Some(native) = reasoning.native.as_ref().filter(|native| {
+                    native.item.get("type").and_then(serde_json::Value::as_str) == Some("reasoning")
+                }) {
+                    let carried = crate::providers::openai::responses_api::carried_reasoning(
+                        &native.item,
+                        None,
+                    )
+                    .map_err(|error| {
+                        ConformanceError::contract(
+                            "multi_part_same_id_reasoning_keeps_every_part",
+                            driver.provider,
+                            format!("cannot project the retained reasoning item: {error}"),
+                        )
+                    })?;
+                    observed.extend(carried.content.iter().map(&part_value));
+                } else {
+                    observed.push(reasoning.text.clone());
+                }
+            }
+            _ => {}
+        }
+    }
     checks.require(observed == expected_parts, || {
         format!(
             "every same-id reasoning part must survive in order: expected {expected_parts:?}, observed {observed:?}"
@@ -1501,14 +1429,7 @@ pub async fn interleaved_reasoning_aggregates_to_one_item(
             reasoning.len()
         )
     })?;
-    let carries_text = reasoning
-        .iter()
-        .flat_map(|item| item.content.iter())
-        .any(|content| match content {
-            crate::message::ReasoningContent::Summary(text)
-            | crate::message::ReasoningContent::Text { text, .. } => text == expected_text,
-            _ => false,
-        });
+    let carries_text = reasoning.iter().any(|item| item.text == expected_text);
     checks.require(carries_text, || {
         format!("the reasoning item must carry the completed block's text {expected_text:?}")
     })?;
@@ -1582,17 +1503,10 @@ pub async fn interleaved_signed_full_reasoning_does_not_erase_prior_thought(
         || "the interleaved stream must complete without errors",
     )?;
     assert_reasoning_tool_reasoning(&checks, &drained, first, tool_name, second)?;
-    let signed = drained.choice_reasoning().last().is_some_and(|reasoning| {
-        reasoning.content.iter().any(|content| {
-            matches!(
-                content,
-                crate::message::ReasoningContent::Text {
-                    signature: Some(_),
-                    ..
-                }
-            )
-        })
-    });
+    let signed = drained
+        .choice_reasoning()
+        .last()
+        .is_some_and(|reasoning| reasoning.native.is_some());
     checks.require(signed, || "the post-boundary block must keep its signature")?;
 
     checks.note("pre-boundary thought survived; signed block completed the post-boundary part");
@@ -1612,25 +1526,31 @@ fn assert_reasoning_tool_reasoning(
         .choice
         .iter()
         .map(|content| match content {
-            AssistantContent::Reasoning(reasoning) => {
-                let text: String = reasoning
-                    .content
-                    .iter()
-                    .filter_map(|content| match content {
-                        crate::message::ReasoningContent::Summary(text)
-                        | crate::message::ReasoningContent::Text { text, .. } => {
-                            Some(text.as_str())
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                format!("reasoning:{text}")
+            AssistantContent::Reasoning(reasoning) => format!("reasoning:{}", reasoning.text),
+            AssistantContent::CarriedReasoning(reasoning) => {
+                if reasoning.has_opaque_parts() {
+                    "opaque_reasoning".to_string()
+                } else {
+                    format!("reasoning:{}", reasoning.display_text())
+                }
+            }
+            AssistantContent::CarriedText(text) => {
+                if matches!(text.content, crate::message::CarriedTextContent::Opaque(_)) {
+                    format!("opaque_text:{}", text.text())
+                } else {
+                    format!("text:{}", text.text())
+                }
             }
             AssistantContent::ToolCall(tool_call) => {
                 format!("tool:{}", tool_call.function.name)
             }
+            AssistantContent::CustomToolCall(call) => format!("custom_tool:{}", call.name),
             AssistantContent::Text(text) => format!("text:{}", text.text),
             AssistantContent::Image(_) => "image".to_string(),
+            AssistantContent::ProviderItem(item) => {
+                format!("provider_item:{}", item.item_type().unwrap_or_default())
+            }
+            AssistantContent::Opaque(opaque) => format!("opaque:{}", opaque.kind().unwrap_or("")),
         })
         .collect();
     let expected = vec![
@@ -1646,22 +1566,28 @@ fn assert_reasoning_tool_reasoning(
 /// Per-provider wire fixtures for the shared scenario set.
 pub mod fixtures {
     use super::*;
-    use crate::completion::CompletionModel;
+    use crate::driver::{Model, Transport};
+    use crate::operation::Completion;
     use crate::test_utils::SequencedStreamingHttpClient;
+    use crate::wire::Wire;
     use serde_json::json;
 
     /// Drain a full normalized stream into everything the consumer observed.
     /// Public so provider-crate conformance suites (the typed-event wires)
     /// can reuse it in their drivers.
-    pub async fn drain(mut stream: crate::streaming::StreamingCompletionResponse) -> DrainedStream {
+    pub async fn drain(mut stream: crate::streaming::CompletionStream) -> DrainedStream {
         let mut items = Vec::new();
         while let Some(item) = stream.next().await {
-            items.push(item);
+            items.push(item.map_err(|error| ErrorReport::from(&error)));
         }
+        let partial = stream.partial().choice;
+        let response = stream.finish().await.ok();
         let drained = DrainedStream {
             items,
-            choice: stream.snapshot(),
-            response: stream.response.clone(),
+            choice: response
+                .as_ref()
+                .map_or(partial, |response| response.choice.clone()),
+            response,
         };
         // Every fixture and cassette that drains through this helper runs
         // the lifecycle validator — the prose invariants as one executable
@@ -1674,10 +1600,14 @@ pub mod fixtures {
     /// wire threads the context it is handed: the trace must show the
     /// request it sent and how the attempt closed, or the wire has silently
     /// taken the context-discarding default.
-    pub async fn drain_observed<M: CompletionModel>(
-        model: &M,
+    pub async fn drain_observed<W, T>(
+        model: &Model<W, T>,
         request: crate::completion::CompletionRequest,
-    ) -> Result<DrainedStream, ProviderError> {
+    ) -> Result<DrainedStream, ProviderError>
+    where
+        W: Wire<Op = Completion>,
+        T: Transport<W>,
+    {
         let log = std::sync::Arc::new(crate::observe::ObservationLog::default());
         let context = crate::observe::AdapterContext::new(
             log.clone(),
@@ -1686,7 +1616,7 @@ pub mod fixtures {
         );
         // A stream that fails to open still sent (or failed to send) a
         // request: the facts are asserted before the error propagates.
-        let drained = match model.stream_with_context(request, Some(context)).await {
+        let drained = match model.stream_observed(request, context) {
             Ok(stream) => Ok(drain(stream).await),
             Err(error) => Err(error),
         };
@@ -1739,14 +1669,17 @@ pub mod fixtures {
     /// Every byte-wire conformance driver is this walk; since the wire
     /// unification they differ only in which wire they name, so the walk is
     /// written once and each family supplies its own `bind`.
-    fn byte_driver<M: CompletionModel + Clone + 'static>(
+    fn byte_driver<W>(
         provider: &'static str,
-        bind: fn(SequencedStreamingHttpClient) -> M,
-    ) -> WireDriver {
+        bind: fn(SequencedStreamingHttpClient) -> Model<W, SequencedStreamingHttpClient>,
+    ) -> WireDriver
+    where
+        W: Wire<Op = Completion, Payload = crate::wire::Encoded, Frame = crate::wire::WireFrame>,
+    {
         WireDriver::new(provider, move |chunks| {
             Box::pin(async move {
                 let model = bind(SequencedStreamingHttpClient::new(byte_chunks(chunks)?));
-                let request = model.completion_request("hello").build();
+                let request = CompletionRequest::new("hello");
                 drain_observed(&model, request).await
             })
         })
@@ -1758,10 +1691,6 @@ pub mod fixtures {
 
     fn sse_raw(data: &str) -> WireInput {
         WireInput::Bytes(Bytes::from(format!("data: {data}\n\n")))
-    }
-
-    fn ndjson(frame: &serde_json::Value) -> WireInput {
-        WireInput::Bytes(Bytes::from(format!("{frame}\n")))
     }
 
     /// The frame's SSE text, for buffered-body pipelines that re-parse a
@@ -1779,14 +1708,14 @@ pub mod fixtures {
 
         fn driver() -> WireDriver {
             byte_driver("openai", |transport| {
-                crate::driver::Bind::bind(
-                    crate::providers::openai::wire::OpenAI::with_key(
+                crate::driver::Model::new(
+                    crate::providers::openai::wire::OpenAIConfig::with_key(
                         &crate::providers::openai::wire::OPENAI,
                         "test-key",
-                    ),
+                    )
+                    .chat("gpt-4o"),
                     transport,
                 )
-                .chat("gpt-4o")
             })
         }
 
@@ -1855,7 +1784,9 @@ pub mod fixtures {
                 // A wrongly-typed `content` is tolerated by the lenient delta
                 // decode; a wrongly-typed `choices` is a genuine schema defect
                 // of the known chunk shape.
-                defective_known_frame: Some(sse_raw(r#"{"choices": 42}"#)),
+                // The Chat decoder reads leniently, as pi does: `choices`
+                // of another type is a chunk with no choices, not a defect.
+                defective_known_frame: None,
                 // The Azure `prompt_filter_results` prelude: a choice with no
                 // `delta` at all.
                 delta_less_prelude_frame: Some(sse_raw(
@@ -1885,11 +1816,10 @@ pub mod fixtures {
         /// The driver alone, for the reasoning-specific scenarios.
         pub fn driver() -> WireDriver {
             byte_driver("openai", |transport| {
-                crate::driver::Bind::bind(
-                    crate::providers::openai::OpenAI::new("test-key"),
+                crate::driver::Model::new(
+                    crate::providers::openai::OpenAIConfig::new("test-key").responses("gpt-5.4"),
                     transport,
                 )
-                .responses("gpt-5.4")
             })
         }
 
@@ -2099,16 +2029,9 @@ pub mod fixtures {
                     "sequence_number": 4,
                     "item_id": "ws_1",
                 }))),
-                // The P2 probe shape from `rig-2257-code-review-findings-34ee8ba5.md`:
-                // a known part tag (`output_text`) with a schema-defective payload.
-                defective_known_frame: Some(sse(&json!({
-                    "type": "response.content_part.added",
-                    "item_id": "msg_1",
-                    "output_index": 0,
-                    "content_index": 0,
-                    "sequence_number": 5,
-                    "part": {"type": "output_text", "text": 42},
-                }))),
+                // The decoder reads only the fields it builds blocks from, and
+                // reads those leniently, so no known event fails a reply (#2668).
+                defective_known_frame: None,
                 delta_less_prelude_frame: None,
                 refusal: Some(RefusalFixture {
                     frames: vec![sse(&json!({
@@ -2129,7 +2052,7 @@ pub mod fixtures {
         /// is re-parsed after the fact and merged with the terminal response
         /// body, per content kind.
         ///
-        /// Drives the *real* entry — `CompletionModel::completion` on the
+        /// Drives the *real* entry — `Model::call` on the
         /// ChatGPT wire whose HTTP double answers the `/responses` POST with
         /// the scripted SSE body — so the scenario exercises the buffered
         /// fold itself rather than a mirrored copy of it (#2258 review, F8
@@ -2137,17 +2060,18 @@ pub mod fixtures {
         pub fn buffered_driver() -> BufferedBodyDriver {
             BufferedBodyDriver::new("chatgpt", |body| {
                 Box::pin(async move {
-                    let model = crate::driver::Bind::bind(
-                        crate::providers::openai::OpenAI::with_key(
+                    let model = crate::driver::Model::new(
+                        crate::providers::openai::OpenAIConfig::with_key(
                             &crate::providers::chatgpt::DIALECT,
                             "test-token",
                         )
-                        .with_account_id("account-id"),
+                        .with_caller_identity(crate::test_utils::test_caller_identity())
+                        .with_account_id("account-id")
+                        .responses("gpt-5.4"),
                         crate::test_utils::RecordingHttpClient::new(body),
-                    )
-                    .responses("gpt-5.4");
-                    let request = model.completion_request("hello").build();
-                    let response = model.completion(request).await?;
+                    );
+                    let request = CompletionRequest::new("hello");
+                    let response = model.call(request).await?;
                     Ok(response.choice)
                 })
             })
@@ -2260,9 +2184,22 @@ pub mod fixtures {
                     "output_index": 0,
                     "content_index": 0,
                     "sequence_number": 1,
-                    "delta": "thinking",
+                    "delta": "full ",
                 })),
-                tool_call_done(),
+                // The call is the reply's next output item.
+                sse(&json!({
+                    "type": "response.output_item.done",
+                    "output_index": 1,
+                    "sequence_number": 2,
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "arguments": "{\"city\":\"Tokyo\"}",
+                        "call_id": "call_1",
+                        "name": "get_weather",
+                        "status": "completed",
+                    },
+                })),
                 reasoning_done_item(
                     "rs_2",
                     &json!([]),
@@ -2281,11 +2218,12 @@ pub mod fixtures {
 
         fn driver() -> WireDriver {
             byte_driver("gemini", |transport| {
-                crate::driver::Bind::bind(
-                    crate::providers::gemini::Gemini::new("test-key"),
+                crate::driver::Model::new(
+                    crate::providers::gemini::GeminiConfig::new("test-key").completion(
+                        crate::providers::gemini::completion::GEMINI_2_5_PRO_PREVIEW_06_05,
+                    ),
                     transport,
                 )
-                .completion(crate::providers::gemini::completion::GEMINI_2_5_PRO_PREVIEW_06_05)
             })
         }
 
@@ -2413,8 +2351,8 @@ pub mod fixtures {
 
         fn driver() -> WireDriver {
             byte_driver("gemini", |transport| {
-                crate::driver::Bind::bind(
-                    crate::providers::gemini::Gemini::new("test-key")
+                crate::driver::Model::new(
+                    crate::providers::gemini::GeminiConfig::new("test-key")
                         .interactions("gemini-2.5-pro"),
                     transport,
                 )
@@ -2474,8 +2412,8 @@ pub mod fixtures {
                     "event_type": "future.event",
                     "index": 0,
                 }))),
-                // A known tag (`step.delta`) with a schema-defective payload
-                // must classify `Corrupt`, never `Unknown`.
+                // A known tag (`step.delta`) whose delta, the content of its
+                // block, is not an object fails the reply, never skipped.
                 defective_known_frame: Some(sse_raw(
                     r#"{"event_type":"step.delta","index":0,"delta":42}"#,
                 )),
@@ -2485,9 +2423,8 @@ pub mod fixtures {
             }
         }
 
-        /// Thought-summary delta, interleaved function call, thought-summary
-        /// delta, terminal — the constant-id (`reasoning-0`) interleaving
-        /// shape on the Interactions wire.
+        /// A thought step, a function-call step, a second thought step,
+        /// terminal: each step is its own block on the Interactions wire.
         fn interleaved_thought_fixture() -> InterleavedReasoningFixture {
             let frames = vec![
                 sse(&json!({
@@ -2500,7 +2437,7 @@ pub mod fixtures {
                 })),
                 sse(&json!({
                     "event_type": "step.delta",
-                    "index": 0,
+                    "index": 1,
                     "delta": {
                         "type": "function_call",
                         "name": "get_weather",
@@ -2510,7 +2447,7 @@ pub mod fixtures {
                 })),
                 sse(&json!({
                     "event_type": "step.delta",
-                    "index": 0,
+                    "index": 2,
                     "delta": {
                         "type": "thought_summary",
                         "content": {"type": "text", "text": "after tool"},
@@ -2537,11 +2474,11 @@ pub mod fixtures {
 
         fn driver() -> WireDriver {
             byte_driver("anthropic", |transport| {
-                crate::driver::Bind::bind(
-                    crate::providers::anthropic::wire::Anthropic::new("test-key"),
+                crate::driver::Model::new(
+                    crate::providers::anthropic::wire::AnthropicConfig::new("test-key")
+                        .completion(crate::providers::anthropic::completion::CLAUDE_SONNET_4_6),
                     transport,
                 )
-                .completion(crate::providers::anthropic::completion::CLAUDE_SONNET_4_6)
             })
         }
 
@@ -2643,227 +2580,6 @@ pub mod fixtures {
                 delta_less_prelude_frame: None,
                 refusal: None,
                 interleaved_reasoning: None,
-            }
-        }
-    }
-
-    /// Cohere v2 chat SSE wire.
-    pub mod cohere {
-        use super::*;
-
-        fn driver() -> WireDriver {
-            byte_driver("cohere", |transport| {
-                crate::driver::Bind::bind(
-                    crate::providers::cohere::wire::Cohere::new("test-key"),
-                    transport,
-                )
-                .completion(crate::providers::cohere::COMMAND_R_08_2024)
-            })
-        }
-
-        /// The Cohere fixture.
-        pub fn fixture() -> ProviderWireFixture {
-            ProviderWireFixture {
-                driver: driver(),
-                text_frames: vec![
-                    sse(&json!({"type": "message-start", "id": "msg_1"})),
-                    sse(&json!({
-                        "type": "content-delta",
-                        "delta": {"message": {"content": {"text": "hi"}}},
-                    })),
-                ],
-                expected_texts: vec!["hi"],
-                tool_call_frames: vec![
-                    sse(&json!({
-                        "type": "tool-call-start",
-                        "delta": {"message": {"tool_calls": {
-                            "id": "call_1",
-                            "function": {"name": "get_weather", "arguments": ""},
-                        }}},
-                    })),
-                    sse(&json!({
-                        "type": "tool-call-delta",
-                        "delta": {"message": {"tool_calls": {
-                            "function": {"arguments": "{\"city\":\"Tokyo\"}"},
-                        }}},
-                    })),
-                    sse(&json!({"type": "tool-call-end"})),
-                ],
-                expected_tool_name: "get_weather",
-                partial_tool_call_frames: Some(vec![sse(&json!({
-                    "type": "tool-call-start",
-                    "delta": {"message": {"tool_calls": {
-                        "id": "call_1",
-                        "function": {"name": "get_weather", "arguments": "{\"cit"},
-                    }}},
-                }))]),
-                terminal_frames: vec![sse(&json!({
-                    "type": "message-end",
-                    "delta": {
-                        "finish_reason": "COMPLETE",
-                        "usage": {"tokens": {"input_tokens": 10, "output_tokens": 4}},
-                    },
-                }))],
-                expected_usage_total: 14,
-                expected_finish_reason: Some(FinishReason::Stop),
-                zero_usage_terminal_frames: Some(vec![sse(&json!({"type": "message-end"}))]),
-                bare_terminal_frames: None,
-                malformed_frame: Some(sse_raw("{not json")),
-                unknown_event_frame: Some(sse(&json!({
-                    "type": "citation-start",
-                    "delta": {"message": {"citations": {}}},
-                }))),
-                defective_known_frame: Some(sse_raw(r#"{"type":"content-delta","delta":42}"#)),
-                delta_less_prelude_frame: None,
-                refusal: None,
-                interleaved_reasoning: Some(interleaved_thinking_fixture()),
-            }
-        }
-
-        /// Thinking delta, interleaved tool call, thinking delta, terminal —
-        /// the constant-id (`reasoning-0`) interleaving shape on the Cohere
-        /// v2 SSE wire.
-        fn interleaved_thinking_fixture() -> InterleavedReasoningFixture {
-            let frames = vec![
-                sse(&json!({"type": "message-start", "id": "msg_1"})),
-                sse(&json!({
-                    "type": "content-delta",
-                    "delta": {"message": {"content": {"thinking": "before tool"}}},
-                })),
-                sse(&json!({
-                    "type": "tool-call-start",
-                    "delta": {"message": {"tool_calls": {
-                        "id": "call_1",
-                        "function": {"name": "get_weather", "arguments": "{\"city\":\"Tokyo\"}"},
-                    }}},
-                })),
-                sse(&json!({"type": "tool-call-end"})),
-                sse(&json!({
-                    "type": "content-delta",
-                    "delta": {"message": {"content": {"thinking": "after tool"}}},
-                })),
-                sse(&json!({
-                    "type": "message-end",
-                    "delta": {
-                        "finish_reason": "COMPLETE",
-                        "usage": {"tokens": {"input_tokens": 10, "output_tokens": 4}},
-                    },
-                })),
-            ];
-            InterleavedReasoningFixture {
-                frames,
-                first_reasoning: "before tool",
-                tool_name: "get_weather",
-                second_reasoning: "after tool",
-            }
-        }
-    }
-
-    /// Ollama `/api/chat` NDJSON wire.
-    pub mod ollama {
-        use super::*;
-
-        fn driver() -> WireDriver {
-            byte_driver("ollama", |transport| {
-                crate::driver::Bind::bind(crate::providers::ollama::wire::Ollama::new(), transport)
-                    .completion("llama3.2")
-            })
-        }
-
-        /// The Ollama fixture.
-        pub fn fixture() -> ProviderWireFixture {
-            ProviderWireFixture {
-                driver: driver(),
-                text_frames: vec![ndjson(&json!({
-                    "model": "llama3.2",
-                    "created_at": "2023-08-04T19:22:45.499127Z",
-                    "message": {"role": "assistant", "content": "hi"},
-                    "done": false,
-                }))],
-                expected_texts: vec!["hi"],
-                tool_call_frames: vec![ndjson(&json!({
-                    "model": "llama3.2",
-                    "created_at": "2023-08-04T19:22:45.499127Z",
-                    "message": {"role": "assistant", "content": "", "tool_calls": [{
-                        "function": {"name": "get_weather", "arguments": {"city": "Tokyo"}},
-                    }]},
-                    "done": false,
-                }))],
-                expected_tool_name: "get_weather",
-                // NDJSON delivers tool calls whole; arguments never stream.
-                partial_tool_call_frames: None,
-                terminal_frames: vec![ndjson(&json!({
-                    "model": "llama3.2",
-                    "created_at": "2023-08-04T19:22:47.499127Z",
-                    "message": {"role": "assistant", "content": ""},
-                    "done": true,
-                    "done_reason": "stop",
-                    "prompt_eval_count": 10,
-                    "eval_count": 4,
-                }))],
-                expected_usage_total: 14,
-                expected_finish_reason: Some(FinishReason::Stop),
-                zero_usage_terminal_frames: Some(vec![ndjson(&json!({
-                    "model": "llama3.2",
-                    "created_at": "2023-08-04T19:22:47.499127Z",
-                    "message": {"role": "assistant", "content": ""},
-                    "done": true,
-                    "done_reason": "stop",
-                }))]),
-                bare_terminal_frames: None,
-                malformed_frame: Some(WireInput::Bytes(Bytes::from_static(b"{not json\n"))),
-                unknown_event_frame: None,
-                defective_known_frame: Some(ndjson(&json!({
-                    "model": "llama3.2",
-                    "created_at": "2023-08-04T19:22:46.499127Z",
-                    "message": {"role": "assistant", "content": 42},
-                    "done": false,
-                }))),
-                delta_less_prelude_frame: None,
-                refusal: None,
-                interleaved_reasoning: Some(interleaved_thinking_fixture()),
-            }
-        }
-
-        /// Thinking delta, interleaved tool call, thinking delta, terminal —
-        /// the constant-id (`reasoning-0`) interleaving shape on NDJSON.
-        fn interleaved_thinking_fixture() -> InterleavedReasoningFixture {
-            let frames = vec![
-                ndjson(&json!({
-                    "model": "llama3.2",
-                    "created_at": "2023-08-04T19:22:45.499127Z",
-                    "message": {"role": "assistant", "content": "", "thinking": "before tool"},
-                    "done": false,
-                })),
-                ndjson(&json!({
-                    "model": "llama3.2",
-                    "created_at": "2023-08-04T19:22:45.599127Z",
-                    "message": {"role": "assistant", "content": "", "tool_calls": [{
-                        "function": {"name": "get_weather", "arguments": {"city": "Tokyo"}},
-                    }]},
-                    "done": false,
-                })),
-                ndjson(&json!({
-                    "model": "llama3.2",
-                    "created_at": "2023-08-04T19:22:45.699127Z",
-                    "message": {"role": "assistant", "content": "", "thinking": "after tool"},
-                    "done": false,
-                })),
-                ndjson(&json!({
-                    "model": "llama3.2",
-                    "created_at": "2023-08-04T19:22:47.499127Z",
-                    "message": {"role": "assistant", "content": ""},
-                    "done": true,
-                    "done_reason": "stop",
-                    "prompt_eval_count": 10,
-                    "eval_count": 4,
-                })),
-            ];
-            InterleavedReasoningFixture {
-                frames,
-                first_reasoning: "before tool",
-                tool_name: "get_weather",
-                second_reasoning: "after tool",
             }
         }
     }
