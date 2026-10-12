@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use crate::completion::{CompletionResponse, Usage};
+use crate::message::{CarriedPayload, CarriedReasoning, CarriedReasoningPart};
 use crate::error::ProviderError;
 use crate::operation::{Block, CallFragment, Completion, Finish};
 use crate::wire::{Decoder, Flow, Out, WireEvent};
@@ -29,8 +30,48 @@ fn fixture_item(value: serde_json::Value) -> Result<Option<serde_json::Value>, P
         serde_json::Value::Object(map) if map.is_empty() => Ok(None),
         serde_json::Value::Object(map) => Ok(Some(serde_json::Value::Object(map))),
         other => Err(ProviderError::Provider(format!(
-            "mock stream fixture provider item must be a JSON object, got: {other}"
+            "mock stream fixture `additional_params` must be a JSON object, got: {other}"
         ))),
+    }
+}
+
+// MOCK-R1-006: private composition at the two scripted text metadata sites.
+fn merge_fixture_metadata(
+    item: &mut serde_json::Value,
+    fields: serde_json::Map<String, serde_json::Value>,
+) {
+    fn merge_value(existing: &mut serde_json::Value, incoming: serde_json::Value) {
+        match (existing, incoming) {
+            (serde_json::Value::Object(existing), serde_json::Value::Object(incoming)) => {
+                for (key, value) in incoming {
+                    match existing.get_mut(&key) {
+                        Some(existing) => merge_value(existing, value),
+                        None => { existing.insert(key, value); }
+                    }
+                }
+            }
+            (serde_json::Value::Array(existing), serde_json::Value::Array(mut incoming)) => {
+                existing.append(&mut incoming);
+            }
+            (existing, incoming) => *existing = incoming,
+        }
+    }
+    if !item.is_object() {
+        *item = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let Some(item) = item.as_object_mut() else { return; };
+    for (key, value) in fields {
+        let atomic = key == "openai_responses_part"
+            && value.get("kind").and_then(serde_json::Value::as_str) == Some("opaque")
+            && value.get("value").is_some();
+        if atomic {
+            item.insert(key, value);
+        } else {
+            match item.get_mut(&key) {
+                Some(existing) => merge_value(existing, value),
+                None => { item.insert(key, value); }
+            }
+        }
     }
 }
 
@@ -69,9 +110,11 @@ pub enum MockStreamEvent {
     /// what they carried, as a wire's step-stop does.
     ToolCallEnd { id: String },
     /// Complete reasoning event.
-    Reasoning { id: String, text: String },
+    Reasoning { id: String, content: CarriedReasoningPart },
     /// Reasoning delta event.
     ReasoningDelta { id: String, reasoning: String },
+    /// The genuine provider-issued assistant message ID, independent of the terminal.
+    MessageId(String),
     /// Provider-native output item that Rig does not model.
     Unknown(serde_json::Value),
     /// The transport request id of this turn. The mock transport reports
@@ -169,7 +212,10 @@ impl MockStreamEvent {
     pub fn reasoning(reasoning: impl Into<String>) -> Self {
         Self::Reasoning {
             id: "reasoning-0".to_string(),
-            text: reasoning.into(),
+            content: CarriedReasoningPart::Text {
+                text: reasoning.into(),
+                signature: None,
+            },
         }
     }
 
@@ -194,6 +240,11 @@ impl MockStreamEvent {
             id: id.into(),
             reasoning: reasoning.into(),
         }
+    }
+
+    /// Create a provider-issued assistant message-ID event.
+    pub fn message_id(id: impl Into<String>) -> Self {
+        Self::MessageId(id.into())
     }
 
     /// Create an unmodeled provider output item.
@@ -262,6 +313,29 @@ impl crate::wire::document::Reassemble<MockFrame> for MockDocument {
     }
 }
 
+// MOCK-R1-005: the exact F assembly bound remains private to this mock.
+const MOCK_TOOL_INPUT_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Default)]
+struct MockCallInput {
+    raw: String,
+    overflowed: bool,
+    named: bool,
+}
+
+impl MockCallInput {
+    fn append(&mut self, fragment: &str) {
+        if self.raw.trim() == "null" && !fragment.trim().is_empty() {
+            self.raw.clear();
+        }
+        if self.raw.len().saturating_add(fragment.len()) > MOCK_TOOL_INPUT_BYTES {
+            self.overflowed = true;
+        } else {
+            self.raw.push_str(fragment);
+        }
+    }
+}
+
 /// The decoder of [`MockScript`](super::MockScript): each scripted step is
 /// written through the completion writer.
 #[derive(Default)]
@@ -270,6 +344,12 @@ pub struct MockDecoder<'id> {
     reasoning: Vec<(String, usize)>,
     /// The item index each scripted call id streams under.
     calls: HashMap<String, usize>,
+    /// One empty-script-key assembly; the keyed map never stores an empty key.
+    empty_call: Option<usize>,
+    /// F's bounded argument assembly, scoped to each actual open call index.
+    call_inputs: HashMap<usize, MockCallInput>,
+    /// An explicit scripted message-ID event outranks the terminal field, as in F.
+    message_id: Option<crate::completion::ProviderMessageId>,
     brand: std::marker::PhantomData<fn(&'id ()) -> &'id ()>,
 }
 
@@ -283,13 +363,19 @@ fn id_item(id: &str) -> serde_json::Value {
 
 impl<'id> MockDecoder<'id> {
     fn call_index(&mut self, out: &mut Out<'id, Completion>, id: &str) -> usize {
+        if id.is_empty() {
+            if let Some(index) = self.empty_call {
+                return index;
+            }
+            let index = out.fresh_index();
+            self.empty_call = Some(index);
+            return index;
+        }
         if let Some(index) = self.calls.get(id) {
             return *index;
         }
         let index = out.fresh_index();
-        if !id.is_empty() {
-            self.calls.insert(id.to_owned(), index);
-        }
+        self.calls.insert(id.to_owned(), index);
         index
     }
 
@@ -308,8 +394,10 @@ impl<'id> MockDecoder<'id> {
             } => {
                 out.end_run()?;
                 let index = out.run(Block::Text, "")?;
-                if let Some(item) = additional_params.map(fixture_item).transpose()?.flatten() {
-                    out.edit(index, |slot| *slot = item)?;
+                if let Some(serde_json::Value::Object(fields)) =
+                    additional_params.map(fixture_item).transpose()?.flatten()
+                {
+                    out.edit(index, |slot| merge_fixture_metadata(slot, fields))?;
                 }
             }
             MockStreamEvent::TextAdditionalParams(additional_params) => {
@@ -323,14 +411,7 @@ impl<'id> MockDecoder<'id> {
                     ));
                 };
                 let index = out.run(Block::Text, "")?;
-                out.edit(index, |item| {
-                    if !item.is_object() {
-                        *item = serde_json::Value::Object(serde_json::Map::new());
-                    }
-                    if let Some(item) = item.as_object_mut() {
-                        item.extend(fields);
-                    }
-                })?;
+                out.edit(index, |item| merge_fixture_metadata(item, fields))?;
             }
             MockStreamEvent::ToolCall {
                 id,
@@ -342,10 +423,27 @@ impl<'id> MockDecoder<'id> {
                 // An id-less call is a wire that sends none: rig issues the
                 // id. A call scripted as fragments under this id is the one
                 // this restatement closes.
-                let index = match self.calls.remove(&id) {
-                    Some(index) => index,
-                    None => out.fresh_index(),
+                let held = if id.is_empty() {
+                    self.empty_call.take()
+                } else {
+                    self.calls.remove(&id)
                 };
+                if let Some(index) = held {
+                    drop(self.call_inputs.remove(&index));
+                }
+                let index = held.unwrap_or_else(|| out.fresh_index());
+                let restated_object = arguments.is_object();
+                if restated_object && held.is_none() {
+                    // Keep the whole-only arguments available before its first Start.
+                    out.fragment(
+                        Some(index),
+                        CallFragment {
+                            id: call_id.as_deref().or(fixture_provider_id(&id)),
+                            ..CallFragment::default()
+                        },
+                    )?;
+                    out.restate(index, &arguments.to_string())?;
+                }
                 out.fragment(
                     Some(index),
                     CallFragment {
@@ -354,12 +452,21 @@ impl<'id> MockDecoder<'id> {
                         ..CallFragment::default()
                     },
                 )?;
-                out.announce(index, arguments)?;
+                if restated_object {
+                    if held.is_some() {
+                        out.restate(index, &arguments.to_string())?;
+                    }
+                } else {
+                    out.announce(index, arguments)?;
+                }
                 out.finish(index)?;
             }
             MockStreamEvent::ToolCallNameDelta { id, name } => {
                 out.end_run()?;
                 let index = self.call_index(&mut out, &id);
+                if !name.is_empty() {
+                    self.call_inputs.entry(index).or_default().named = true;
+                }
                 out.fragment(
                     Some(index),
                     CallFragment {
@@ -372,6 +479,7 @@ impl<'id> MockDecoder<'id> {
             MockStreamEvent::ToolCallArgumentsDelta { id, arguments } => {
                 out.end_run()?;
                 let index = self.call_index(&mut out, &id);
+                self.call_inputs.entry(index).or_default().append(&arguments);
                 out.fragment(
                     Some(index),
                     CallFragment {
@@ -382,26 +490,79 @@ impl<'id> MockDecoder<'id> {
                 )?;
             }
             MockStreamEvent::ToolCallEnd { id } => {
-                let index = self.call_index(&mut out, &id);
-                self.calls.remove(&id);
+                let index = if id.is_empty() {
+                    self.empty_call.take()
+                } else {
+                    self.calls.remove(&id)
+                };
+                let Some(index) = index else { return Ok(Flow::More); };
+                let input = self.call_inputs.remove(&index).unwrap_or_default();
+                if input.named {
+                    let parsed = crate::json_utils::parse_tool_arguments(&input.raw)
+                        .and_then(|arguments| {
+                            if input.overflowed {
+                                Err(<serde_json::Error as serde::de::Error>::custom(
+                                    "tool-call input exceeded the accumulation bound",
+                                ))
+                            } else {
+                                Ok(arguments)
+                            }
+                        });
+                    if let Err(error) = parsed {
+                        let provider = fixture_provider_id(&id)
+                            .and_then(crate::message::ProviderCallId::new)
+                            .map(|call_id| crate::error::ProviderCallEvidence {
+                                call_id,
+                                item_id: None,
+                            });
+                        return Err(out.malformed_call_error(
+                            index, input.raw, error.to_string(), provider,
+                        ));
+                    }
+                }
                 out.finish(index)?;
             }
-            MockStreamEvent::Reasoning { id, text } => {
+            ref received @ MockStreamEvent::Reasoning { ref id, ref content } => {
+                // Capture the received record before moving or converting its content.
+                let item = serde_json::to_value(received)?;
                 out.end_run()?;
-                // A whole reasoning closes the part streamed under its id.
-                match self.reasoning.iter().position(|(open, _)| *open == id) {
-                    Some(at) => {
-                        let (_, index) = self.reasoning.remove(at);
-                        out.finish(index)?;
+                match content {
+                    CarriedReasoningPart::Text { text, signature: None } => {
+                        // The unsigned helper retains U's delta-close behavior.
+                        match self.reasoning.iter().position(|(open, _)| open == id) {
+                            Some(at) => {
+                                let (_, index) = self.reasoning.remove(at);
+                                out.finish(index)?;
+                            }
+                            None => {
+                                let index = out.fresh_index();
+                                out.whole(
+                                    index,
+                                    Block::Reasoning { redacted: false },
+                                    id_item(id),
+                                    text,
+                                )?;
+                            }
+                        }
                     }
-                    None => {
-                        let index = out.fresh_index();
-                        out.whole(
-                            index,
-                            Block::Reasoning { redacted: false },
-                            id_item(&id),
-                            &text,
-                        )?;
+                    CarriedReasoningPart::Text { signature: Some(_), .. }
+                    | CarriedReasoningPart::Summary(_)
+                    | CarriedReasoningPart::Encrypted(_)
+                    | CarriedReasoningPart::Redacted { .. }
+                    | CarriedReasoningPart::OpaqueSummary(_)
+                    | CarriedReasoningPart::OpaqueContent(_) => {
+                        let reasoning = CarriedReasoning::new(
+                            vec![content.clone()],
+                            CarriedPayload::new(item, Some(MOCK_PROVIDER.to_owned())),
+                        ).with_id(fixture_provider_id(id).map(str::to_owned));
+                        match self.reasoning.iter().position(|(open, _)| open == id) {
+                            Some(at) => {
+                                let (_, index) = self.reasoning.remove(at);
+                                out.restate(index, &reasoning.display_text())?;
+                                out.finish_carried_reasoning(index, reasoning)?;
+                            }
+                            None => out.carried_reasoning(reasoning)?,
+                        }
                     }
                 }
             }
@@ -418,9 +579,15 @@ impl<'id> MockDecoder<'id> {
                 };
                 out.push(index, &reasoning)?;
             }
+            MockStreamEvent::MessageId(id) => {
+                if let Some(id) = crate::completion::ProviderMessageId::new(id) {
+                    self.message_id = Some(id);
+                }
+            }
             MockStreamEvent::Unknown(value) => out.unknown(value.into()),
             MockStreamEvent::RequestId(_) => {}
-            MockStreamEvent::FinalResponse(finish) => {
+            MockStreamEvent::FinalResponse(mut finish) => {
+                finish.message_id = self.message_id.clone().or(finish.message_id);
                 out.end_run()?;
                 for (_, index) in std::mem::take(&mut self.reasoning) {
                     out.finish(index)?;
@@ -443,6 +610,7 @@ impl<'id> MockDecoder<'id> {
         Ok(out.end(Finish {
             usage: response.usage,
             reason: response.finish_reason(),
+            message_id: response.message_id.clone(),
             response_id: response.response_id().map(str::to_owned),
             model: response.model().map(str::to_owned),
             error: response.error.clone(),

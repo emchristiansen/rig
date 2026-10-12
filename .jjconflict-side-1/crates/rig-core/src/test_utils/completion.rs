@@ -60,8 +60,12 @@ pub struct MockTurn {
 struct MockTurnResponse {
     choice: Vec<AssistantContent>,
     usage: Usage,
+    #[serde(default)]
+    message_id: Option<crate::completion::ProviderMessageId>,
     response_id: Option<String>,
     provider_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "crate::completion::ProviderResponseHeaders::is_empty")]
+    provider_response_headers: crate::completion::ProviderResponseHeaders,
     finish_reason: Option<crate::completion::FinishReason>,
     /// A scripted provider document, when the test supplies one; otherwise
     /// the turn itself, serialized, is the mock's document. Absent from the
@@ -140,8 +144,10 @@ impl MockTurn {
             response: Ok(MockTurnResponse {
                 choice: vec![content],
                 usage: Usage::default(),
+                message_id: None,
                 response_id: None,
                 provider_request_id: None,
+                provider_response_headers: Default::default(),
                 finish_reason: None,
                 raw: None,
             }),
@@ -157,8 +163,10 @@ impl MockTurn {
             response: Ok(MockTurnResponse {
                 choice: content.into_iter().collect(),
                 usage: Usage::default(),
+                message_id: None,
                 response_id: None,
                 provider_request_id: None,
+                provider_response_headers: Default::default(),
                 finish_reason: None,
                 raw: None,
             }),
@@ -187,6 +195,14 @@ impl MockTurn {
         self
     }
 
+    /// Set the genuine provider-issued assistant message ID for this turn.
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        if let Ok(response) = &mut self.response {
+            response.message_id = crate::completion::ProviderMessageId::new(message_id);
+        }
+        self
+    }
+
     /// Set a provider-assigned response-scoped ID for this turn.
     pub fn with_response_id(mut self, response_id: impl Into<String>) -> Self {
         if let Ok(response) = &mut self.response {
@@ -199,6 +215,17 @@ impl MockTurn {
     pub fn with_provider_request_id(mut self, request_id: impl Into<String>) -> Self {
         if let Ok(response) = &mut self.response {
             response.provider_request_id = Some(request_id.into());
+        }
+        self
+    }
+
+    /// Set the captured success-reply headers for this turn.
+    pub fn with_provider_response_headers(
+        mut self,
+        headers: crate::completion::ProviderResponseHeaders,
+    ) -> Self {
+        if let Ok(response) = &mut self.response {
+            response.provider_response_headers = headers;
         }
         self
     }
@@ -252,8 +279,10 @@ impl MockTurn {
         let mut origin = crate::message::Origin::new(MOCK_API, MOCK_PROVIDER, "");
         origin.response_id = response.response_id;
         let mut completion = CompletionResponse::new(response.choice, response.usage, origin, raw)
+            .with_optional_message_id(response.message_id)
             .with_optional_finish_reason(response.finish_reason);
         completion.provider_request_id = response.provider_request_id;
+        completion.provider_response_headers = response.provider_response_headers;
         Ok(completion)
     }
 }
@@ -276,6 +305,7 @@ pub struct MockScript {
     name: String,
     id: Option<String>,
     capabilities: Capabilities,
+    takes_documents: bool,
 }
 
 impl MockScript {
@@ -286,12 +316,21 @@ impl MockScript {
             name: name.into(),
             id: None,
             capabilities: Capabilities::default(),
+            takes_documents: false,
         }
     }
 
     /// The same wire, addressing the model `id`.
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    /// Keep documents on the prepared request for tests whose subject is
+    /// document delivery. The default script folds documents into history,
+    /// exactly as a wire that does not send them itself does.
+    pub fn with_documents(mut self) -> Self {
+        self.takes_documents = true;
         self
     }
 
@@ -359,6 +398,10 @@ impl crate::completion::ReplayTarget for MockScript {
     /// The model the script addresses: its id, or [`MOCK_MODEL`].
     fn model(&self) -> &str {
         self.id.as_deref().unwrap_or(MOCK_MODEL)
+    }
+
+    fn takes_documents(&self) -> bool {
+        self.takes_documents
     }
 
     fn accepts(&self, _model: &str) -> crate::completion::Accepts {
@@ -521,12 +564,14 @@ impl Transport<MockScript> for MockRuntime {
                     Ok(response) => {
                         let document = response.raw.clone();
                         let request_id = response.provider_request_id.clone();
+                        let headers = response.provider_response_headers.clone();
                         Opening::ready(
                             Opened::new(futures::stream::iter([Ok(MockFrame::Response(
                                 Box::new(response),
                             ))]))
                             .with_document(document)
-                            .with_request_id(request_id),
+                            .with_request_id(request_id)
+                            .with_captured_response_headers(headers),
                         )
                     }
                     Err(error) => Opening::ready(Opened::failed(error)),

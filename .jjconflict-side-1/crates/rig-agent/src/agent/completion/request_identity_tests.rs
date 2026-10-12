@@ -241,6 +241,7 @@ const GOLDEN: &str = r#"
         "role": "user",
         "content": [
           {
+            "answers": "function",
             "type": "toolresult",
             "call": {
               "provider": "tc1"
@@ -365,6 +366,7 @@ const GOLDEN: &str = r#"
         "role": "user",
         "content": [
           {
+            "answers": "function",
             "type": "toolresult",
             "call": {
               "provider": "tc1"
