@@ -50,6 +50,7 @@ pub fn decode<W: Wire<Op = Completion>>(
             provider: describe.name.to_owned(),
             raw: serde_json::Value::Null,
             provider_request_id: None,
+            response_headers: crate::completion::ProviderResponseHeaders::new(),
         },
     )
     .outcome

@@ -100,5 +100,6 @@ fn reply_of(provider: &str) -> Reply {
         provider: provider.to_owned(),
         raw: Value::Null,
         provider_request_id: None,
+        response_headers: crate::completion::ProviderResponseHeaders::new(),
     }
 }
