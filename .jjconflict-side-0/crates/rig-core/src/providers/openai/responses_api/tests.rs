@@ -2179,41 +2179,22 @@ fn mocked_second_turn_request_omits_unreplayable_reasoning() {
     assert_eq!(assistant_items[0]["content"][0]["text"], "final answer");
 }
 
-/// Summing usage where one side reports no input-token breakdown leaves the
-/// cached count unknown, whichever side it is and whether the breakdown is
-/// missing or empty: absence is not zero, so the other side's count alone is
-/// never reported as the total. Output breakdowns, whose counters are
-/// required, keep the side that has one.
+// The retired Responses detail DTO made any unreported cached part unknown.
+// Current production Usage retains the reported count. Missing and empty
+// input-token details have the same normalized representation.
 #[test]
-fn a_usage_sum_with_an_unreported_cached_count_leaves_it_unknown() {
-    let usage =
-        |input_tokens_details: Option<InputTokensDetails>,
-         output_tokens_details: Option<OutputTokensDetails>| ResponsesUsage {
-            input_tokens: 10,
-            input_tokens_details,
-            output_tokens: 20,
-            output_tokens_details,
-            total_tokens: 30,
-        };
-    let reported = || {
-        usage(
-            Some(InputTokensDetails {
-                cached_tokens: Some(2),
-            }),
-            Some(OutputTokensDetails {
-                reasoning_tokens: 4,
-            }),
-        )
+fn a_usage_sum_retains_a_reported_cached_count() {
+    let usage = |cached: Option<u64>, reasoning: Option<u64>| {
+        completion::Usage::new()
+            .input_tokens(10)
+            .output_tokens(20)
+            .total_tokens(30)
+            .cached_input_tokens(cached)
+            .reasoning_tokens(reasoning)
     };
+    let reported = || usage(Some(2), Some(4));
     let missing = || usage(None, None);
-    let empty = || {
-        usage(
-            Some(InputTokensDetails {
-                cached_tokens: None,
-            }),
-            None,
-        )
-    };
+    let empty = || usage(None, None);
 
     for (label, sum) in [
         ("missing + reported", missing() + reported()),
@@ -2221,19 +2202,16 @@ fn a_usage_sum_with_an_unreported_cached_count_leaves_it_unknown() {
         ("empty + reported", empty() + reported()),
         ("reported + empty", reported() + empty()),
     ] {
-        let token_usage = crate::completion::Usage::from(&sum);
-        assert_eq!(token_usage.cached_input_tokens, None, "{label}");
-        assert_eq!(token_usage.input_tokens, Some(20), "{label}");
-        assert_eq!(token_usage.output_tokens, Some(40), "{label}");
-        assert_eq!(token_usage.reasoning_tokens, Some(4), "{label}");
-        assert_eq!(token_usage.total_tokens, Some(60), "{label}");
+        assert_eq!(sum.cached_input_tokens, Some(2), "{label}");
+        assert_eq!(sum.input_tokens, Some(20), "{label}");
+        assert_eq!(sum.output_tokens, Some(40), "{label}");
+        assert_eq!(sum.reasoning_tokens, Some(4), "{label}");
+        assert_eq!(sum.total_tokens, Some(60), "{label}");
     }
 
-    // Both sides reported: the counts add.
-    let both = crate::completion::Usage::from(&(reported() + reported()));
+    let both = reported() + reported();
     assert_eq!(both.cached_input_tokens, Some(4));
-    // Neither side reported: still no breakdown at all.
-    assert!((missing() + missing()).input_tokens_details.is_none());
+    assert_eq!((missing() + missing()).cached_input_tokens, None);
 }
 
 #[test]
@@ -3119,19 +3097,15 @@ fn an_omitted_cached_token_count_is_absent_not_zero() {
     assert_eq!(completion::Usage::from(&zero).cached_input_tokens, Some(0));
 }
 
-/// Summing usage details keeps absence: a total is known only when every part
-/// is, so one omitted count makes the sum absent rather than undercounting.
+/// Production keeps the reported cached part when the other is absent;
+/// this differs from the retired detail DTO's unknown-on-any-missing sum.
 #[test]
-fn summed_cached_token_counts_are_known_only_when_every_part_is() {
-    let known = InputTokensDetails {
-        cached_tokens: Some(4),
-    };
-    let absent = InputTokensDetails {
-        cached_tokens: None,
-    };
-    assert_eq!((known + known).cached_tokens, Some(8));
-    assert_eq!((known + absent).cached_tokens, None);
-    assert_eq!((absent + known).cached_tokens, None);
+fn summed_cached_token_counts_retain_the_reported_parts() {
+    let known = completion::Usage::new().cached_input_tokens(4);
+    let absent = completion::Usage::new();
+    assert_eq!((known + known).cached_input_tokens, Some(8));
+    assert_eq!((known + absent).cached_input_tokens, Some(4));
+    assert_eq!((absent + known).cached_input_tokens, Some(4));
 }
 
 #[test]
