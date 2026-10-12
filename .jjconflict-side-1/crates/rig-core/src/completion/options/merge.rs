@@ -967,7 +967,7 @@ fn apply(
                 && let Some(schema) = &request.output_schema
             {
                 typed.insert("responseMimeType".to_owned(), Value::from("application/json"));
-                typed.insert("responseJsonSchema".to_owned(), schema.to_value());
+                typed.insert("responseJsonSchema".to_owned(), schema.clone().to_value());
             }
             if matches!(rewrite, Rewrite::VertexTypedControls) {
                 typed.insert("candidateCount".to_owned(), Value::from(1));
