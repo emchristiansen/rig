@@ -311,7 +311,7 @@ impl GenerateContentDecoder {
                 let payload = CarriedPayload::new(item, Some(super::completion::PROVIDER_NAME.to_owned()))
                     .with_position(position);
                 return out.finish_carried_text(index, CarriedText::new(
-                    CarriedTextContent::InspectionOnlyText(text), payload,
+                    CarriedTextContent::InspectionOnlyMedia(text), payload,
                 ));
             }
         }

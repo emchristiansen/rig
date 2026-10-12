@@ -17,6 +17,48 @@ use crate::wire::{Mode, Operation, Wire};
 
 const MODEL: &str = "qwen3:8b";
 
+#[test]
+fn carried_known_content_uses_canonical_text_without_issuer_gating() {
+    use crate::message::{
+        CarriedPayload, CarriedReasoning, CarriedReasoningPart, CarriedText, CarriedTextContent,
+    };
+
+    let turn = AssistantMessage {
+        content: vec![
+            AssistantContent::CarriedText(CarriedText::new(
+                CarriedTextContent::InspectionOnlyMedia("answer".to_owned()),
+                CarriedPayload::new(
+                    json!({"unknown": "inspection data"}),
+                    Some("foreign".to_owned()),
+                ),
+            )),
+            AssistantContent::CarriedReasoning(CarriedReasoning::new(
+                vec![
+                    CarriedReasoningPart::Summary("first".to_owned()),
+                    CarriedReasoningPart::Text {
+                        text: "second".to_owned(),
+                        signature: None,
+                    },
+                ],
+                CarriedPayload::new(
+                    json!({"unknown": "reasoning data"}),
+                    Some("foreign".to_owned()),
+                ),
+            )),
+        ],
+        origin: None,
+        stop: None,
+    };
+    let message = wire()
+        .assistant(&turn, 0, &super::WireIds::default())
+        .expect("known content encodes")
+        .expect("known content sends");
+    assert_eq!(
+        message,
+        json!({"role":"assistant", "content":"answer", "thinking":"first\nsecond"})
+    );
+}
+
 fn wire() -> Chat {
     OllamaConfig::new().native_completion(MODEL)
 }

@@ -29,6 +29,50 @@ fn typed(request: &CompletionRequest, base: Value) -> FinalBody {
 }
 
 #[test]
+fn vertex_controls_preserve_single_candidate_and_do_not_apply_schema() {
+    let target = GenerateContent::new(GeminiConfig::new("test-key"), "gemini-3-flash-preview");
+    let request = CompletionRequest::new("hi")
+        .temperature(0.2)
+        .max_tokens(64)
+        .output_schema(serde_json::from_value(json!({"type":"object"})).expect("schema"))
+        .additional_params(json!({"generationConfig": {
+            "temperature":0.9, "maxOutputTokens":900, "candidateCount":4,
+            "responseMimeType":"text/plain", "responseJsonSchema":{"type":"number"},
+            "unmodeled":{"kept":true}
+        }}));
+    let body = crate::providers::gemini::completion::request_body_for_vertex(
+        &request,
+        &target,
+        "gemini-3-flash-preview",
+        None,
+        |_| {},
+    ).expect("Vertex request body");
+    assert_eq!(body.pointer("/generationConfig/temperature"), Some(&json!(0.2)));
+    assert_eq!(body.pointer("/generationConfig/maxOutputTokens"), Some(&json!(64)));
+    assert_eq!(body.pointer("/generationConfig/candidateCount"), Some(&json!(1)));
+    assert_eq!(body.pointer("/generationConfig/responseMimeType"), Some(&json!("text/plain")));
+    assert_eq!(body.pointer("/generationConfig/responseJsonSchema"), Some(&json!({"type":"number"})));
+    assert_eq!(body.pointer("/generationConfig/unmodeled"), Some(&json!({"kept":true})));
+}
+
+#[test]
+fn vertex_without_legacy_controls_still_requests_one_candidate() {
+    let target = GenerateContent::new(GeminiConfig::new("test-key"), "gemini-3-flash-preview");
+    let request = CompletionRequest::new("hi")
+        .additional_params(json!({"generationConfig":{"candidateCount":4,"temperature":0.9}}));
+    let body = crate::providers::gemini::completion::request_body_for_vertex(
+        &request,
+        &target,
+        "gemini-3-flash-preview",
+        None,
+        |_| {},
+    ).expect("Vertex request body");
+    assert_eq!(body.pointer("/generationConfig/candidateCount"), Some(&json!(1)));
+    assert_eq!(body.pointer("/generationConfig/temperature"), Some(&json!(0.9)));
+    assert_eq!(body.pointer("/generationConfig/responseJsonSchema"), None);
+}
+
+#[test]
 fn explicit_temperature_beats_raw_without_changing_other_fields() {
     let request = CompletionRequest::new("hi")
         .temperature(0.2)

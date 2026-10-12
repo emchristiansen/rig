@@ -164,20 +164,23 @@ impl Chat {
     /// The history as `/api/chat` messages, each call and result spelled by
     /// one [`WireIds`].
     fn messages(&self, history: &[Message], model: &str) -> Result<Vec<Value>, EncodeError> {
-        let ids = WireIds::for_target(history, self, model);
+        let ids = WireIds::for_target(history, self, model).map_err(EncodeError::request)?;
         let mut messages = Vec::new();
-        for message in history {
+        for (message_index, message) in history.iter().enumerate() {
             match message {
                 Message::System { content } => {
                     messages.push(json!({"role": "system", "content": content}));
                 }
                 Message::User { content } => {
                     let mut user = UserParts::default();
-                    for part in content {
+                    for (content_index, part) in content.iter().enumerate() {
                         match part {
                             UserContent::ToolResult(result) => {
                                 user.push_to(&mut messages);
-                                messages.push(tool_message(result, &ids)?);
+                                let wire_id = ids
+                                    .spell(message_index, content_index)
+                                    .map_err(EncodeError::request)?;
+                                messages.push(tool_message(result, &wire_id)?);
                             }
                             part => user.add(part)?,
                         }
@@ -185,7 +188,7 @@ impl Chat {
                     user.push_to(&mut messages);
                 }
                 Message::Assistant(turn) => {
-                    messages.extend(self.assistant(turn, &ids));
+                    messages.extend(self.assistant(turn, message_index, &ids)?);
                 }
             }
         }
@@ -199,16 +202,60 @@ impl Chat {
 
     /// One assistant turn: its text joined as `content`, its reasoning as
     /// `thinking`, and its calls. A turn with none of them is `None`.
-    fn assistant(&self, turn: &AssistantMessage, ids: &WireIds) -> Option<Value> {
+    fn assistant(
+        &self,
+        turn: &AssistantMessage,
+        message_index: usize,
+        ids: &WireIds,
+    ) -> Result<Option<Value>, EncodeError> {
         let (mut text, mut thinking, mut calls) = (String::new(), Vec::new(), Vec::new());
-        for block in &turn.content {
+        for (content_index, block) in turn.content.iter().enumerate() {
+            crate::message::json_only_wire_tool_call("Ollama native chat", block)?;
             match block {
                 AssistantContent::Text(block) => text.push_str(&block.text),
+                AssistantContent::CarriedText(block) => {
+                    let Some(known) = block.known_text_projection() else {
+                        return Err(crate::message::UnrepresentableOpaqueContent::new(
+                            "Ollama native chat",
+                        )
+                        .into());
+                    };
+                    text.push_str(known);
+                }
                 AssistantContent::Reasoning(block) if !block.text.is_empty() => {
-                    thinking.push(block.text.as_str());
+                    thinking.push(block.text.clone());
+                }
+                AssistantContent::CarriedReasoning(block) => {
+                    if block.has_opaque_parts() {
+                        return Err(crate::message::UnrepresentableOpaqueContent::new(
+                            "Ollama native chat",
+                        )
+                        .into());
+                    }
+                    let display = block.display_text();
+                    if !display.is_empty() {
+                        thinking.push(display);
+                    }
                 }
                 AssistantContent::ToolCall(call) => {
-                    calls.push(call_item(call, block.replay(self, ids), ids));
+                    let wire_id = ids
+                        .spell(message_index, content_index)
+                        .map_err(EncodeError::request)?;
+                    calls.push(call_item(
+                        call,
+                        block.replay(self, Some(&wire_id)),
+                        &wire_id,
+                    ));
+                }
+                AssistantContent::CustomToolCall(call) => {
+                    return Err(call.refused_by_json_only_wire("Ollama native chat").into());
+                }
+                AssistantContent::ProviderItem(item) => {
+                    return Err(crate::message::UnreplayableProviderItem::new(
+                        "Ollama native chat",
+                        item,
+                    )
+                    .into());
                 }
                 AssistantContent::Reasoning(_)
                 | AssistantContent::Image(_)
@@ -216,7 +263,7 @@ impl Chat {
             }
         }
         if text.is_empty() && thinking.is_empty() && calls.is_empty() {
-            return None;
+            return Ok(None);
         }
         let mut message = Map::from_iter([
             ("role".to_owned(), Value::from("assistant")),
@@ -228,7 +275,7 @@ impl Chat {
         if !calls.is_empty() {
             message.insert("tool_calls".to_owned(), Value::Array(calls));
         }
-        Some(Value::Object(message))
+        Ok(Some(Value::Object(message)))
     }
 }
 
@@ -288,7 +335,7 @@ fn unsendable(what: &str) -> EncodeError {
 
 /// A result as the `tool` message answering its call: its text joined into
 /// one string, with the tool's name and the call's id.
-fn tool_message(result: &ToolResult, ids: &WireIds) -> Result<Value, EncodeError> {
+fn tool_message(result: &ToolResult, wire_id: &str) -> Result<Value, EncodeError> {
     let texts = result
         .content
         .iter()
@@ -302,13 +349,13 @@ fn tool_message(result: &ToolResult, ids: &WireIds) -> Result<Value, EncodeError
         "role": "tool",
         "content": texts.join("\n"),
         "tool_name": result.name,
-        "tool_call_id": ids.spell(&result.call),
+        "tool_call_id": wire_id,
     }))
 }
 
 /// `call` as a `tool_calls` entry: its item as the daemon sent it when it is
 /// current, with the canonical name and arguments and the call's spelled id.
-fn call_item(call: &ToolCall, replay: Replay<'_>, ids: &WireIds) -> Value {
+fn call_item(call: &ToolCall, replay: Replay<'_>, wire_id: &str) -> Value {
     let mut item = match replay {
         Replay::Item(item) => match item.into_owned() {
             Value::Object(item) => item,
@@ -317,7 +364,7 @@ fn call_item(call: &ToolCall, replay: Replay<'_>, ids: &WireIds) -> Value {
         Replay::Identity(identity) => identity,
         Replay::Rebuild => Map::new(),
     };
-    item.insert("id".to_owned(), Value::String(ids.spell(&call.id)));
+    item.insert("id".to_owned(), Value::String(wire_id.to_owned()));
     let function = item
         .entry("function")
         .or_insert_with(|| Value::Object(Map::new()));
@@ -473,10 +520,16 @@ impl ReplayTarget for Chat {
     /// A message needs content, thinking or calls.
     fn sends_alone(&self, block: &AssistantContent) -> bool {
         match block {
-            AssistantContent::ToolCall(_) => true,
+            AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => true,
             AssistantContent::Text(text) => !text.text.is_empty(),
+            AssistantContent::CarriedText(text) => text
+                .known_text_projection()
+                .is_some_and(|text| !text.is_empty()),
             AssistantContent::Reasoning(reasoning) => !reasoning.text.is_empty(),
-            AssistantContent::Image(_) | AssistantContent::Opaque(_) => false,
+            AssistantContent::CarriedReasoning(reasoning) => !reasoning.display_text().is_empty(),
+            AssistantContent::Image(_)
+            | AssistantContent::Opaque(_)
+            | AssistantContent::ProviderItem(_) => false,
         }
     }
 }

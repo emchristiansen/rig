@@ -153,6 +153,7 @@ impl StreamWriter {
             provider: self.origin.provider.clone(),
             raw: std::mem::take(&mut self.raw),
             provider_request_id: self.request_id.take(),
+            response_headers: crate::completion::ProviderResponseHeaders::new(),
         };
         let turn = std::mem::replace(&mut self.turn, Turn::new(self.origin.clone()));
         let item = match turn.finish(finish, reply) {

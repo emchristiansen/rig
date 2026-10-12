@@ -203,7 +203,7 @@ pub(super) fn prepare_whole_calls(
     frame: &mut Value,
     source: &str,
     quirks: &Quirks,
-) -> Result<(), crate::error::ProviderError> {
+) -> Result<(), crate::error::CorruptFrame> {
     let Some(choices) = frame.get_mut("choices").and_then(Value::as_array_mut) else {
         return Ok(());
     };
@@ -240,12 +240,10 @@ pub(super) fn prepare_whole_calls(
             if let Err(error) =
                 serde_json::from_value::<Vec<BudgetFunctionCall>>(Value::Array(probe))
             {
-                return Err(crate::error::ProviderError::CorruptFrame(
-                    std::sync::Arc::new(crate::error::CorruptFrame::text(
-                        Some("chat.completion".to_owned()),
-                        source,
-                        error,
-                    )),
+                return Err(crate::error::CorruptFrame::text(
+                    Some("chat.completion".to_owned()),
+                    source,
+                    error,
                 ));
             }
         }
@@ -267,12 +265,10 @@ pub(super) fn prepare_whole_calls(
                 continue;
             }
             if let Err(error) = parsed {
-                return Err(crate::error::ProviderError::CorruptFrame(
-                    std::sync::Arc::new(crate::error::CorruptFrame::text(
-                        Some("chat.completion".to_owned()),
-                        source,
-                        error,
-                    )),
+                return Err(crate::error::CorruptFrame::text(
+                    Some("chat.completion".to_owned()),
+                    source,
+                    error,
                 ));
             }
             kept.push(call);
@@ -317,7 +313,7 @@ struct BudgetFunction {
 pub(super) fn check_choice_list(
     frame: &Value,
     source: &str,
-) -> Result<(), crate::error::ProviderError> {
+) -> Result<(), crate::error::CorruptFrame> {
     #[derive(serde::Deserialize)]
     struct Choices {
         #[serde(rename = "choices")]
@@ -328,12 +324,10 @@ pub(super) fn check_choice_list(
         .is_some_and(|choices| !choices.is_null() && !choices.is_array())
     {
         if let Err(error) = serde_json::from_str::<Choices>(source) {
-            return Err(crate::error::ProviderError::CorruptFrame(
-                std::sync::Arc::new(crate::error::CorruptFrame::text(
-                    frame.str("object").map(str::to_owned),
-                    source,
-                    error,
-                )),
+            return Err(crate::error::CorruptFrame::text(
+                frame.str("object").map(str::to_owned),
+                source,
+                error,
             ));
         }
     }

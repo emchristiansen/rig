@@ -40,14 +40,14 @@ impl Ollama {
     /// The chat model for `model`, on the daemon's native `/api/chat`.
     /// It takes `think`, `keep_alive` and model `options` such as `num_ctx`.
     pub fn completion(&self, model: impl Into<String>) -> Model<ollama::Chat> {
-        self.model(self.config.completion(model))
+        self.model(self.config.native_completion(model))
     }
 
     /// The explicit OpenAI-compatible `/v1/chat/completions` model.
     /// It takes `keep_alive` and `reasoning_effort`; native `num_ctx` and
     /// `options` are refused as on the upstream compatibility route.
     pub fn compatible_completion(&self, model: impl Into<String>) -> Model<Chat> {
-        self.model(self.config.compatible_completion(model))
+        self.model(self.config.completion(model))
     }
 
     /// The chat model for `model`, on the daemon's native `/api/chat`, which

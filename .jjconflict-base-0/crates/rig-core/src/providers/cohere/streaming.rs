@@ -219,7 +219,15 @@ impl ChatDecoder {
         ) {
             Ok(name) => {
                 let id = CallId::from_wire(&id);
-                out.open(index, Block::Call { id, name }, item)?;
+                out.open(
+                    index,
+                    Block::Call {
+                        id,
+                        name,
+                        namespace: None,
+                    },
+                    item,
+                )?;
             }
             // A nameless call: the writer drops it with a warning.
             Err(_) => out.fragment(
@@ -362,6 +370,10 @@ impl ChatDecoder {
         Ok(out.end(Finish {
             usage,
             reason: reason.map(finish_of),
+            message_id: self
+                .message_id
+                .clone()
+                .and_then(crate::completion::ProviderMessageId::new),
             response_id: self.message_id.clone(),
             model: None,
             error,

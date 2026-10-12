@@ -150,26 +150,31 @@ impl NativeChat {
     /// The history as Cohere messages, each call and result spelled by one
     /// [`WireIds`].
     fn messages(&self, history: &[Message], model: &str) -> Result<Vec<Value>, EncodeError> {
-        let ids = WireIds::for_target(history, self, model);
+        let ids = WireIds::for_target(history, self, model).map_err(EncodeError::request)?;
         let mut messages = Vec::new();
-        for message in history {
+        for (message_index, message) in history.iter().enumerate() {
             match message {
                 Message::System { content } => {
                     messages.push(json!({"role": "system", "content": content}));
                 }
                 Message::User { content } => {
                     let mut parts = Vec::new();
-                    for part in content {
+                    for (content_index, part) in content.iter().enumerate() {
                         if let UserContent::ToolResult(result) = part {
                             user_message(&mut messages, &mut parts);
-                            messages.push(tool_message(result, &ids));
+                            let wire_id = ids
+                                .spell(message_index, content_index)
+                                .map_err(EncodeError::request)?;
+                            messages.push(tool_message(result, &wire_id));
                         } else {
                             parts.push(user_part(part)?);
                         }
                     }
                     user_message(&mut messages, &mut parts);
                 }
-                Message::Assistant(turn) => messages.extend(self.assistant(turn, &ids)),
+                Message::Assistant(turn) => {
+                    messages.extend(self.assistant(turn, message_index, &ids)?);
+                }
             }
         }
         if messages.is_empty() {
@@ -185,11 +190,17 @@ impl NativeChat {
     /// the citations each block's item holds, pointed at the part they
     /// cite. A current item goes back as it came, less its citations. A
     /// turn with nothing to send is `None`.
-    fn assistant(&self, turn: &AssistantMessage, ids: &WireIds) -> Option<Value> {
+    fn assistant(
+        &self,
+        turn: &AssistantMessage,
+        message_index: usize,
+        ids: &WireIds,
+    ) -> Result<Option<Value>, EncodeError> {
         let (mut content, mut plan, mut calls, mut citations) =
             (Vec::new(), String::new(), Vec::new(), Vec::new());
-        for block in &turn.content {
-            let replay = block.replay(self, ids);
+        for (content_index, block) in turn.content.iter().enumerate() {
+            crate::message::json_only_wire_tool_call("Cohere native chat", block)?;
+            let replay = block.replay(self, ids.of(message_index, content_index));
             let kind = replay_kind(&replay);
             let mut item = match replay {
                 Replay::Item(item) => match item.into_owned() {
@@ -214,6 +225,41 @@ impl NativeChat {
                 AssistantContent::Reasoning(reasoning) if !reasoning.text.is_empty() => {
                     json!({"type": "thinking", "thinking": reasoning.text})
                 }
+                AssistantContent::CarriedReasoning(reasoning) => {
+                    if reasoning.has_opaque_parts() {
+                        return Err(crate::message::UnrepresentableOpaqueContent::new(
+                            "Cohere native chat",
+                        )
+                        .into());
+                    }
+                    let thinking = reasoning.display_text();
+                    if thinking.is_empty() {
+                        continue;
+                    }
+                    json!({"type": "thinking", "thinking": thinking})
+                }
+                AssistantContent::CarriedText(text) => {
+                    let Some(text) = text.known_text_projection() else {
+                        return Err(crate::message::UnrepresentableOpaqueContent::new(
+                            "Cohere native chat",
+                        )
+                        .into());
+                    };
+                    if text.is_empty() {
+                        continue;
+                    }
+                    json!({"type": "text", "text": text})
+                }
+                AssistantContent::CustomToolCall(call) => {
+                    return Err(call.refused_by_json_only_wire("Cohere native chat").into());
+                }
+                AssistantContent::ProviderItem(item) => {
+                    return Err(crate::message::UnreplayableProviderItem::new(
+                        "Cohere native chat",
+                        item,
+                    )
+                    .into());
+                }
                 AssistantContent::Opaque(opaque)
                     if opaque.replay && opaque.item.get("type").is_some() =>
                 {
@@ -223,7 +269,10 @@ impl NativeChat {
                 AssistantContent::ToolCall(call) => {
                     item.entry("type")
                         .or_insert_with(|| Value::from("function"));
-                    item.insert("id".to_owned(), Value::String(ids.spell(&call.id)));
+                    let wire_id = ids
+                        .spell(message_index, content_index)
+                        .map_err(EncodeError::request)?;
+                    item.insert("id".to_owned(), Value::String(wire_id));
                     let function = item
                         .entry("function")
                         .or_insert_with(|| Value::Object(Map::new()));
@@ -254,7 +303,7 @@ impl NativeChat {
             });
         }
         if content.is_empty() && calls.is_empty() {
-            return None;
+            return Ok(None);
         }
         let fields = [
             ("role", Some(Value::from("assistant"))),
@@ -275,12 +324,12 @@ impl NativeChat {
                 (!citations.is_empty()).then_some(Value::Array(citations)),
             ),
         ];
-        Some(Value::Object(
+        Ok(Some(Value::Object(
             fields
                 .into_iter()
                 .filter_map(|(key, value)| Some((key.to_owned(), value?)))
                 .collect(),
-        ))
+        )))
     }
 }
 
@@ -302,7 +351,7 @@ fn replay_kind(replay: &Replay<'_>) -> Option<String> {
 
 /// The kind of item `block` replays as on `target`.
 fn kind(block: &AssistantContent, target: &NativeChat) -> Option<String> {
-    replay_kind(&block.replay(target, &WireIds::default()))
+    replay_kind(&block.replay(target, None))
 }
 
 /// `citations` as a request sends them back: each at `content_index`, the
@@ -376,7 +425,7 @@ fn user_message(messages: &mut Vec<Value>, parts: &mut Vec<Value>) {
 }
 
 /// A result as the `tool` message that answers its call, its parts as text.
-fn tool_message(result: &ToolResult, ids: &WireIds) -> Value {
+fn tool_message(result: &ToolResult, wire_id: &str) -> Value {
     let content: Vec<Value> = result
         .content
         .iter()
@@ -387,7 +436,7 @@ fn tool_message(result: &ToolResult, ids: &WireIds) -> Value {
         })
         .map(|text| json!({"type": "text", "text": text}))
         .collect();
-    json!({"role": "tool", "tool_call_id": ids.spell(&result.call), "content": content})
+    json!({"role": "tool", "tool_call_id": wire_id, "content": content})
 }
 
 impl Wire for NativeChat {
@@ -569,12 +618,16 @@ impl crate::completion::ReplayTarget for NativeChat {
     fn sends_alone(&self, block: &AssistantContent) -> bool {
         match block {
             AssistantContent::Text(text) => !text.text.is_empty(),
+            AssistantContent::CarriedText(text) => text
+                .known_text_projection()
+                .is_some_and(|text| !text.is_empty()),
             AssistantContent::Reasoning(reasoning) => {
                 !reasoning.text.is_empty() && kind(block, self).as_deref() != Some(PLAN)
             }
+            AssistantContent::CarriedReasoning(reasoning) => !reasoning.display_text().is_empty(),
             AssistantContent::Opaque(opaque) => opaque.item.get("type").is_some(),
-            AssistantContent::ToolCall(_) => true,
-            AssistantContent::Image(_) => false,
+            AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => true,
+            AssistantContent::Image(_) | AssistantContent::ProviderItem(_) => false,
         }
     }
 }

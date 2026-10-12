@@ -53,11 +53,9 @@ impl ServerEvent {
     /// decodes as [`ServerEvent::Unknown`].
     pub fn parse(payload: &str) -> Result<Self, ProviderError> {
         let corrupt = |kind: Option<&str>, error| {
-            ProviderError::CorruptFrame(CorruptFrame::text(
-                kind.map(ToOwned::to_owned),
-                payload,
-                error,
-            ))
+            ProviderError::CorruptFrame(
+                CorruptFrame::text(kind.map(ToOwned::to_owned), payload, error).into(),
+            )
         };
         let object: Map<String, Value> =
             serde_json::from_str(payload).map_err(|error| corrupt(None, error))?;

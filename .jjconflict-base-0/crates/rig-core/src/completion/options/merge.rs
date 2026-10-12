@@ -197,6 +197,12 @@ pub enum Rewrite {
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
     GeminiTypedControls,
+    /// Vertex AI: explicit legacy temperature and output cap replace their
+    /// fields after the raw merge, and every request asks for one candidate.
+    ///
+    /// For rig's own crates; not covered by semver.
+    #[doc(hidden)]
+    VertexTypedControls,
     /// Gemini Interactions: explicitly supplied legacy temperature, output
     /// cap and tool choice replace their fields after the raw merge.
     ///
@@ -955,11 +961,16 @@ fn apply(
                 crate::providers::gemini::completion::with_cached_content(body, name)?;
             }
         }
-        Rewrite::GeminiTypedControls => {
+        Rewrite::GeminiTypedControls | Rewrite::VertexTypedControls => {
             let mut typed = Map::new();
-            if let Some(schema) = &request.output_schema {
+            if matches!(rewrite, Rewrite::GeminiTypedControls)
+                && let Some(schema) = &request.output_schema
+            {
                 typed.insert("responseMimeType".to_owned(), Value::from("application/json"));
                 typed.insert("responseJsonSchema".to_owned(), schema.to_value());
+            }
+            if matches!(rewrite, Rewrite::VertexTypedControls) {
+                typed.insert("candidateCount".to_owned(), Value::from(1));
             }
             if let Some(temperature) = request.temperature {
                 typed.insert("temperature".to_owned(), Value::from(temperature));

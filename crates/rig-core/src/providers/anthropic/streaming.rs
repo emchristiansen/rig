@@ -503,7 +503,7 @@ impl MessagesDecoder {
                 crate::message::CarriedPayload::new(item, Some(super::PROVIDER_NAME.to_owned()))
                     .with_position(crate::message::CarriedPosition::MessageContent {
                         item_index: 0,
-                        part_index: index,
+                        part_index: index as u64,
                     });
             let text = crate::message::CarriedText::new(
                 crate::message::CarriedTextContent::Opaque(String::new()),

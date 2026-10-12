@@ -477,8 +477,11 @@ fn edited_and_canonical_reasoning_keep_their_kind() {
         origin: Some(crate::message::Origin::new(API, "cohere", MODEL)),
         stop: None,
     };
+    let ids = WireIds::for_target(&[Message::Assistant(turn.clone())], &native(), MODEL)
+        .expect("the call history plans");
     let message = native()
-        .assistant(&turn, &WireIds::default())
+        .assistant(&turn, 0, &ids)
+        .expect("the turn encodes")
         .expect("the turn sends");
     assert_eq!(message["tool_plan"], "newer plan");
     assert_eq!(
@@ -490,7 +493,57 @@ fn edited_and_canonical_reasoning_keep_their_kind() {
         origin: None,
         stop: None,
     };
-    assert!(native().assistant(&empty, &WireIds::default()).is_none());
+    assert!(
+        native()
+            .assistant(&empty, 0, &WireIds::default())
+            .expect("the empty turn encodes")
+            .is_none()
+    );
+}
+
+#[test]
+fn carried_known_content_uses_canonical_text_without_issuer_gating() {
+    use crate::message::{
+        CarriedPayload, CarriedReasoning, CarriedReasoningPart, CarriedText, CarriedTextContent,
+    };
+
+    let turn = AssistantMessage {
+        content: vec![
+            AssistantContent::CarriedText(CarriedText::new(
+                CarriedTextContent::InspectionOnlyMedia("answer".to_owned()),
+                CarriedPayload::new(
+                    json!({"unknown": "inspection data"}),
+                    Some("foreign".to_owned()),
+                ),
+            )),
+            AssistantContent::CarriedReasoning(CarriedReasoning::new(
+                vec![
+                    CarriedReasoningPart::Summary("first".to_owned()),
+                    CarriedReasoningPart::Text {
+                        text: "second".to_owned(),
+                        signature: None,
+                    },
+                ],
+                CarriedPayload::new(
+                    json!({"unknown": "reasoning data"}),
+                    Some("foreign".to_owned()),
+                ),
+            )),
+        ],
+        origin: None,
+        stop: None,
+    };
+    let message = native()
+        .assistant(&turn, 0, &WireIds::default())
+        .expect("known content encodes")
+        .expect("known content sends");
+    assert_eq!(
+        message,
+        json!({"role":"assistant", "content":[
+            {"type":"text", "text":"answer"},
+            {"type":"thinking", "thinking":"first\nsecond"}
+        ]})
+    );
 }
 
 /// What replay reads of the native target.

@@ -2538,10 +2538,7 @@ impl<'id> Decoder<'id, Completion> for ChatDecoder {
         });
         match classified {
             WireEvent::Known(Ok(event)) => WireEvent::Known(event),
-            WireEvent::Known(Err(ProviderError::CorruptFrame(error))) => {
-                WireEvent::Corrupt((*error).clone())
-            }
-            WireEvent::Known(Err(error)) => WireEvent::Known(ChatEvent::Failure(error)),
+            WireEvent::Known(Err(error)) => WireEvent::Corrupt(error),
             WireEvent::Unknown { event_type, value } => WireEvent::Unknown { event_type, value },
             WireEvent::Corrupt(error) => WireEvent::Corrupt(error),
         }

@@ -817,7 +817,7 @@ fn create_base(
 
 /// Encode the canonical tool selection for `generation_config.tool_choice`.
 pub(crate) fn legacy_tool_choice(
-    choice: &crate::completion::ToolChoice,
+    choice: &Choice,
 ) -> Result<serde_json::Value, crate::error::EncodeError> {
     let converted = match choice {
         Choice::Auto => json!("auto"),
@@ -1013,7 +1013,9 @@ fn assistant_step(
     wire_id: Option<&str>,
 ) -> Result<Option<Value>, EncodeError> {
     match block {
-        AssistantContent::ToolCall(call) => call.for_json_only_wire("Gemini Interactions")?,
+        AssistantContent::ToolCall(call) => {
+            call.for_json_only_wire("Gemini Interactions")?;
+        }
         AssistantContent::CustomToolCall(call) => {
             return Err(call.refused_by_json_only_wire("Gemini Interactions").into());
         }

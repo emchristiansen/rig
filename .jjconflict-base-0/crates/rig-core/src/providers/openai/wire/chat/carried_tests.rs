@@ -1136,9 +1136,7 @@ fn budget_cut_drops_empty_arguments_but_retains_compound_defects() {
     let source = bad.to_string();
     let error = carried::prepare_whole_calls(&mut bad, &source, &Quirks::openai())
         .expect_err("compound defect");
-    assert!(
-        matches!(error,ProviderError::CorruptFrame(ref corrupt) if corrupt.frame()==Some(source.as_str()))
-    );
+    assert_eq!(error.frame(), Some(source.as_str()));
 }
 
 #[tokio::test]

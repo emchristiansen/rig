@@ -255,7 +255,15 @@ impl ChatDecoder {
         self.called = true;
         let id = CallId::from_wire(call.str("id").unwrap_or_default());
         let index = out.fresh_index();
-        out.open(index, Block::Call { id, name }, call.clone())?;
+        out.open(
+            index,
+            Block::Call {
+                id,
+                name,
+                namespace: None,
+            },
+            call.clone(),
+        )?;
         out.push(index, &arguments)?;
         out.finish(index)
     }
