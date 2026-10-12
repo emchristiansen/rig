@@ -159,6 +159,15 @@ struct Custom {
     calls: std::collections::HashMap<String, bool>,
 }
 
+/// The full request's resolved context for lowering later canonical deltas.
+#[cfg(feature = "websocket")]
+#[derive(Clone, Debug)]
+pub(crate) struct DeltaContext {
+    pub(crate) model: String,
+    pub(crate) custom: std::collections::HashSet<String>,
+    pub(crate) stateless: bool,
+}
+
 /// A custom result has one verbatim string and cannot carry an image.
 fn custom_result_output(content: &[ToolResultContent]) -> Result<String, EncodeError> {
     let mut output = String::new();
@@ -208,11 +217,13 @@ fn input(
     custom: &mut Custom,
     stateless: bool,
     system_items: &mut Vec<(usize, String)>,
+    mut boundaries: Option<&mut Vec<std::ops::Range<usize>>>,
 ) -> Result<Vec<Value>, EncodeError> {
     let ids = WireIds::for_target(history, target, model).map_err(EncodeError::request)?;
     let omit_image_detail = target.codex_request_shape.is_lite();
     let mut items = Vec::new();
     for (position, message) in history.iter().enumerate() {
+        let start = items.len();
         match message {
             Message::System { content } => {
                 system_items.push((items.len(), content.clone()));
@@ -272,7 +283,9 @@ fn input(
                                     }
                                     // Gemini signatures and inspection-only raw fields never
                                     // become Responses request authority.
-                                    let item = if let Some(id) = text.item_id.as_ref().filter(|id| !id.is_empty()) {
+                                    let item = if let Some(id) =
+                                        text.item_id.as_ref().filter(|id| !id.is_empty())
+                                    {
                                         json!({"type":"message", "role":"assistant", "status":"completed", "id":id,
                                             "content":[{"type":"output_text", "text":known, "annotations":[]}]})
                                     } else {
@@ -427,12 +440,10 @@ fn input(
                                     .function
                                     .invalid_arguments
                                     .as_ref()
-                                    .map(|raw| {
-                                        match serde_json::from_str::<Value>(raw) {
-                                            Ok(value) if !value.is_object() => value.to_string(),
-                                            Ok(_) => arguments.clone(),
-                                            Err(_) => raw.clone(),
-                                        }
+                                    .map(|raw| match serde_json::from_str::<Value>(raw) {
+                                        Ok(value) if !value.is_object() => value.to_string(),
+                                        Ok(_) => arguments.clone(),
+                                        Err(_) => raw.clone(),
                                     })
                                     .unwrap_or(arguments);
                                 ("function_call", "arguments", arguments, "fc_")
@@ -488,6 +499,9 @@ fn input(
                     items.push(item);
                 }
             }
+        }
+        if let Some(boundaries) = &mut boundaries {
+            boundaries.push(start..items.len());
         }
     }
     Ok(items)
@@ -727,6 +741,17 @@ pub(crate) enum InputRequirement {
     MayBeEmpty,
 }
 
+#[cfg(feature = "websocket")]
+impl InputRequirement {
+    pub(crate) fn for_create(options: &websocket::ResponsesWebSocketCreateOptions) -> Self {
+        if options.generate == Some(false) {
+            Self::MayBeEmpty
+        } else {
+            Self::NonEmpty
+        }
+    }
+}
+
 impl wire::Responses {
     /// The Responses request body this wire sends: its encoding of the
     /// request, then the mapped options, then the provider options, then
@@ -752,6 +777,136 @@ impl wire::Responses {
         delivery: Delivery,
         identity: Option<&codex_identity::CodexIdentity>,
         input_requirement: InputRequirement,
+    ) -> Result<FinalBody, EncodeError> {
+        self.responses_request_with_rewrites(
+            request,
+            delivery,
+            identity,
+            input_requirement,
+            &[],
+            #[cfg(feature = "websocket")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "websocket")]
+    pub(crate) fn websocket_request_with_identity(
+        &self,
+        request: &completion::CompletionRequest,
+        identity: Option<&codex_identity::CodexIdentity>,
+        input_requirement: InputRequirement,
+        create: websocket::WebSocketCreate,
+    ) -> Result<FinalBody, EncodeError> {
+        let delta = matches!(&create.input, websocket::WebSocketCreateInput::Delta { .. });
+        let rewrites = [Rewrite::ResponsesWebSocketCreate(Box::new(create))];
+        if delta {
+            return request_params(
+                self,
+                request,
+                |_| {
+                    Err(EncodeError::request(
+                        "a captured WebSocket delta cannot rebuild its request body",
+                    ))
+                },
+                RawAt::Top,
+                &rewrites,
+            );
+        }
+        self.responses_request_with_rewrites(
+            request,
+            Delivery::WebSocket,
+            identity,
+            input_requirement,
+            &rewrites,
+            None,
+        )
+    }
+
+    /// Build a full frame and retain the context its input was lowered with.
+    /// The context is returned only after the merged body passes catalog checks.
+    #[cfg(feature = "websocket")]
+    pub(crate) fn prepare_websocket_request_with_identity(
+        &self,
+        request: &completion::CompletionRequest,
+        identity: Option<&codex_identity::CodexIdentity>,
+        input_requirement: InputRequirement,
+        create: websocket::WebSocketCreate,
+    ) -> Result<(FinalBody, DeltaContext), EncodeError> {
+        if !matches!(&create.input, websocket::WebSocketCreateInput::Full) {
+            return Err(EncodeError::request(
+                "a websocket delta context must be captured from a full request",
+            ));
+        }
+        let mut context = None;
+        let body = self.responses_request_with_rewrites(
+            request,
+            Delivery::WebSocket,
+            identity,
+            input_requirement,
+            &[Rewrite::ResponsesWebSocketCreate(Box::new(create))],
+            Some(&mut context),
+        )?;
+        let context = context.ok_or_else(|| {
+            EncodeError::request("the full websocket request did not capture its delta context")
+        })?;
+        Ok((body, context))
+    }
+
+    /// Lower canonical messages as one history, preserving literal raw items
+    /// in their original positions. Delta systems remain in input.
+    #[cfg(feature = "websocket")]
+    pub(crate) fn lower_websocket_delta(
+        &self,
+        delta: websocket::InputDelta,
+        context: &DeltaContext,
+    ) -> Result<websocket::WireDelta, EncodeError> {
+        let entries = delta.into_vec();
+        let history: Vec<Message> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                websocket::InputDeltaItem::Canonical(message) => Some(message.clone()),
+                websocket::InputDeltaItem::Raw(_) => None,
+            })
+            .collect();
+        let mut custom = Custom {
+            tools: context.custom.clone(),
+            calls: Default::default(),
+        };
+        let mut boundaries = Vec::with_capacity(history.len());
+        let canonical = input(
+            &history,
+            self,
+            &context.model,
+            &mut custom,
+            context.stateless,
+            &mut Vec::new(),
+            Some(&mut boundaries),
+        )?;
+        let mut boundaries = boundaries.into_iter();
+        let mut canonical = canonical.into_iter();
+        let mut items = Vec::new();
+        for entry in entries {
+            match entry {
+                websocket::InputDeltaItem::Canonical(_) => {
+                    let boundary = boundaries.next().ok_or_else(|| {
+                        EncodeError::request("a canonical websocket delta has no output boundary")
+                    })?;
+                    items.extend(canonical.by_ref().take(boundary.len()));
+                }
+                websocket::InputDeltaItem::Raw(value) => items.push(value),
+            }
+        }
+        websocket::WireDelta::new(items).map_err(EncodeError::request)
+    }
+
+    fn responses_request_with_rewrites(
+        &self,
+        request: &completion::CompletionRequest,
+        delivery: Delivery,
+        identity: Option<&codex_identity::CodexIdentity>,
+        input_requirement: InputRequirement,
+        ending_rewrites: &[Rewrite],
+        #[cfg(feature = "websocket")] delta_context: Option<&mut Option<DeltaContext>>,
     ) -> Result<FinalBody, EncodeError> {
         use crate::completion::ReplayTarget;
         self.check_provider_items(&request.chat_history)?;
@@ -808,10 +963,20 @@ impl wire::Responses {
         });
         rewrites.push(Rewrite::ResponsesReasoningCiphertext);
         rewrites.push(Rewrite::ResponsesIdentity(identity.cloned()));
+        rewrites.extend_from_slice(ending_rewrites);
         let body = request_params(
             self,
             request,
-            |layers| self.base(request, codex, input_requirement, layers),
+            |layers| {
+                self.base(
+                    request,
+                    codex,
+                    input_requirement,
+                    layers,
+                    #[cfg(feature = "websocket")]
+                    delta_context,
+                )
+            },
             RawAt::Top,
             &rewrites,
         )?;
@@ -832,6 +997,7 @@ impl wire::Responses {
         codex: bool,
         input_requirement: InputRequirement,
         layers: &mut BaseInput<'_>,
+        #[cfg(feature = "websocket")] delta_context: Option<&mut Option<DeltaContext>>,
     ) -> Result<Map<String, Value>, EncodeError> {
         let model = request.model.clone().unwrap_or_else(|| self.model.clone());
         if layers.param("__rig_tolerate_incomplete").is_some() {
@@ -875,6 +1041,32 @@ impl wire::Responses {
             calls: Default::default(),
         };
         let stateless = codex || layers.param("store") == Some(&json!(false));
+        #[cfg(feature = "websocket")]
+        if let Some(context) = delta_context {
+            let model = match layers.param("model") {
+                Some(Value::String(model)) => model.clone(),
+                None => model.clone(),
+                Some(_) => {
+                    return Err(EncodeError::request(
+                        "the full websocket request's model must be a string",
+                    ));
+                }
+            };
+            let custom = match layers.param("tools") {
+                Some(tools) => declared_tools(tools.clone())
+                    .map_err(EncodeError::request)?
+                    .iter()
+                    .filter(|tool| tool.definition().kind == "custom")
+                    .map(|tool| tool.definition().name.clone())
+                    .collect(),
+                None => custom.tools.clone(),
+            };
+            *context = Some(DeltaContext {
+                model,
+                custom,
+                stateless,
+            });
+        }
         let mut system_items = Vec::new();
         let mut items = input(
             &request.chat_history,
@@ -883,6 +1075,7 @@ impl wire::Responses {
             &mut custom,
             stateless,
             &mut system_items,
+            None,
         )?;
         let before = items.len();
         let mut lifted = Vec::new();
@@ -1308,11 +1501,20 @@ mod stateless_replay_tests;
 mod streaming_conformance;
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, feature = "websocket"))]
+mod websocket_delta_tests;
 
 /// Unknown parent-message fields have inspection custody, never request authority.
 pub(crate) fn unknown_message_fields(item: &Value) -> serde_json::Map<String, Value> {
-    item.as_object().into_iter().flat_map(|fields| fields.iter())
-        .filter(|(key, _)| !matches!(key.as_str(), "type" | "id" | "role" | "status" | "content" | "phase"))
+    item.as_object()
+        .into_iter()
+        .flat_map(|fields| fields.iter())
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "type" | "id" | "role" | "status" | "content" | "phase"
+            )
+        })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
 }

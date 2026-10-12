@@ -178,6 +178,14 @@ pub enum Rewrite {
     ResponsesIdentity(
         Option<crate::providers::openai::responses_api::codex_identity::CodexIdentity>,
     ),
+    /// Seal the transport fields of a Responses WebSocket create frame.
+    ///
+    /// For rig's own crates; not covered by semver.
+    #[cfg(feature = "websocket")]
+    #[doc(hidden)]
+    ResponsesWebSocketCreate(
+        Box<crate::providers::openai::responses_api::websocket::WebSocketCreate>,
+    ),
     /// The Chat Completions dialect's own rewrite.
     ///
     /// For rig's own crates; not covered by semver.
@@ -222,14 +230,18 @@ enum GenerationConfigKind {
 
 /// A malformed config cannot be replaced unseen by an explicit typed control.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("Gemini generationConfig must be an object or null when legacy typed controls are set, got {kind:?}")]
+#[error(
+    "Gemini generationConfig must be an object or null when legacy typed controls are set, got {kind:?}"
+)]
 struct GenerationConfigNotObject {
     kind: GenerationConfigKind,
 }
 
 /// Interactions uses a separate snake_case configuration field.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("Gemini generation_config must be an object or null when legacy typed controls are set, got {kind:?}")]
+#[error(
+    "Gemini generation_config must be an object or null when legacy typed controls are set, got {kind:?}"
+)]
 struct InteractionsGenerationConfigNotObject {
     kind: GenerationConfigKind,
 }
@@ -775,6 +787,19 @@ pub fn request_params(
     raw_at: RawAt,
     rewrites: &[Rewrite],
 ) -> Result<FinalBody, EncodeError> {
+    #[cfg(feature = "websocket")]
+    if let [rewrite @ Rewrite::ResponsesWebSocketCreate(create)] = rewrites
+        && let crate::providers::openai::responses_api::websocket::WebSocketCreateInput::Delta {
+            envelope,
+            ..
+        } = &create.input
+    {
+        // A captured delta keeps the already merged request. Re-running
+        // its raw options or full Lite shaping would change that envelope.
+        let mut body = envelope.0.clone();
+        apply(rewrite, request, &mut body, &[])?;
+        return Ok(FinalBody(body));
+    }
     unserialized(request)?;
     let settled = settle(target, request)?;
     let mut provider = provider_layer(target, request);
@@ -953,6 +978,45 @@ fn apply(
                 identity.stamp(body)?;
             }
         }
+        #[cfg(feature = "websocket")]
+        Rewrite::ResponsesWebSocketCreate(create) => {
+            use crate::providers::openai::responses_api::websocket::WebSocketCreateInput;
+            if let WebSocketCreateInput::Delta {
+                input,
+                previous_response_id,
+                ..
+            } = &create.input
+            {
+                body.insert("input".to_owned(), Value::Array(input.clone().into_vec()));
+                body.insert(
+                    "previous_response_id".to_owned(),
+                    Value::String(previous_response_id.clone()),
+                );
+            }
+            if let Some(previous) = &create.automatic_previous
+                && body.get("previous_response_id").is_none_or(Value::is_null)
+            {
+                body.insert(
+                    "previous_response_id".to_owned(),
+                    Value::String(previous.clone()),
+                );
+            }
+            if let Some(identity) = &create.identity {
+                identity.stamp(body)?;
+                if create.lite {
+                    crate::providers::openai::responses_api::responses_lite::stamp_websocket_marker(body)?;
+                }
+                body.insert("stream".to_owned(), Value::Bool(true));
+            } else {
+                body.shift_remove("stream");
+            }
+            deep_merge(body, create.stamps.clone());
+            body.insert("type".to_owned(), Value::from("response.create"));
+            body.shift_remove("background");
+            if let Some(generate) = create.generate {
+                body.insert("generate".to_owned(), Value::Bool(generate));
+            }
+        }
         Rewrite::ChatDialect(kind) => {
             crate::providers::openai::wire::chat::rewrite_body(*kind, body)?;
         }
@@ -966,7 +1030,10 @@ fn apply(
             if matches!(rewrite, Rewrite::GeminiTypedControls)
                 && let Some(schema) = &request.output_schema
             {
-                typed.insert("responseMimeType".to_owned(), Value::from("application/json"));
+                typed.insert(
+                    "responseMimeType".to_owned(),
+                    Value::from("application/json"),
+                );
                 typed.insert("responseJsonSchema".to_owned(), schema.clone().to_value());
             }
             if matches!(rewrite, Rewrite::VertexTypedControls) {
@@ -1006,9 +1073,8 @@ fn apply(
                 );
             }
             if !typed.is_empty() {
-                let not_object = |kind| {
-                    EncodeError::request(InteractionsGenerationConfigNotObject { kind })
-                };
+                let not_object =
+                    |kind| EncodeError::request(InteractionsGenerationConfigNotObject { kind });
                 let config = body.entry("generation_config").or_insert(Value::Null);
                 match config {
                     Value::Null => *config = Value::Object(typed),

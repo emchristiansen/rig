@@ -74,6 +74,30 @@ struct ResponseError {
     message: String,
 }
 
+#[cfg(any(feature = "websocket", test))]
+#[derive(Deserialize)]
+struct WebSocketErrorFields {
+    #[serde(rename = "code")]
+    _code: Option<String>,
+    #[serde(rename = "message")]
+    _message: String,
+}
+
+#[cfg(any(feature = "websocket", test))]
+#[derive(Deserialize)]
+struct WebSocketResponseRoot {
+    #[serde(rename = "id")]
+    _id: String,
+    #[serde(rename = "object")]
+    _object: ResponseObject,
+    #[serde(rename = "created_at")]
+    _created_at: u64,
+    #[serde(rename = "status")]
+    _status: String,
+    #[serde(rename = "model")]
+    _model: String,
+}
+
 #[allow(dead_code)]
 #[derive(Deserialize)]
 struct IncompleteDetails {
@@ -149,6 +173,60 @@ pub(super) fn whole(value: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Validate a sparse WebSocket terminal response without changing its evidence.
+/// Its id and status are strings; future status spellings remain valid.
+#[cfg(any(feature = "websocket", test))]
+pub(crate) fn websocket_done(value: &Value) -> Result<()> {
+    let response = value
+        .as_object()
+        .ok_or_else(|| invalid("response.done.response must be an object"))?;
+    for key in ["id", "status"] {
+        let value = response
+            .get(key)
+            .ok_or_else(|| invalid(format!("missing field `{key}`")))?;
+        let _: String = fields(value)?;
+    }
+    done_field::<ResponseObject>(value, "object")?;
+    done_field::<u64>(value, "created_at")?;
+    done_field::<String>(value, "model")?;
+    done_field::<Option<WebSocketErrorFields>>(value, "error")?;
+    done_field::<Option<IncompleteDetails>>(value, "incomplete_details")?;
+    done_field::<Option<String>>(value, "instructions")?;
+    done_field::<Option<u64>>(value, "max_output_tokens")?;
+    done_field::<Option<UsageFields>>(value, "usage")?;
+    if let Some(items) = response.get("output") {
+        for item in fields::<Vec<Value>>(items)? {
+            output(&item)?;
+        }
+    }
+    if let Some(tools) = response.get("tools") {
+        let _: Vec<super::super::ResponsesToolDefinition> = fields(tools)?;
+        for tool in fields::<Vec<Value>>(tools)? {
+            // WebSocket responses retain the original description
+            // contract, which accepts absence but requires a present string.
+            done_field::<String>(&tool, "description")?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate a full WebSocket lifecycle response without changing its evidence.
+/// Sparse terminal objects require the separate [`websocket_done`] entry.
+#[cfg(any(feature = "websocket", test))]
+pub(crate) fn websocket_response(value: &Value) -> Result<()> {
+    let _: WebSocketResponseRoot = fields(value)?;
+    websocket_done(value)
+}
+
+#[cfg(any(feature = "websocket", test))]
+fn done_field<T: serde::de::DeserializeOwned>(value: &Value, key: &str) -> Result<()> {
+    if let Some(field) = value.get(key) {
+        let _: T =
+            fields(field).map_err(|error| invalid(format!("WebSocket response.{key}: {error}")))?;
+    }
+    Ok(())
+}
+
 pub(super) fn output(value: &Value) -> Result<()> {
     match value.get("type").and_then(Value::as_str) {
         Some("message") => {
@@ -173,7 +251,9 @@ pub(super) fn output(value: &Value) -> Result<()> {
                 Value::String(_) => {}
                 Value::Array(content) => {
                     for content in content {
-                        if content.is_string() { continue; }
+                        if content.is_string() {
+                            continue;
+                        }
                         part(content, &["reasoning_text"])?;
                     }
                 }
@@ -271,6 +351,38 @@ impl<'de> Deserialize<'de> for Known {
     }
 }
 
+#[cfg(any(feature = "websocket", test))]
+struct WebSocketKnown(Value);
+
+#[cfg(any(feature = "websocket", test))]
+#[derive(Deserialize)]
+struct WebSocketLifecycleEnvelope {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(rename = "sequence_number")]
+    _sequence_number: u64,
+}
+
+#[cfg(any(feature = "websocket", test))]
+impl<'de> Deserialize<'de> for WebSocketKnown {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let envelope: WebSocketLifecycleEnvelope =
+            fields(&value).map_err(serde::de::Error::custom)?;
+        if super::is_lifecycle_event(&envelope.kind) {
+            let response = value
+                .get("response")
+                .ok_or_else(|| <D::Error as serde::de::Error>::missing_field("response"))?;
+            websocket_response(response).map_err(serde::de::Error::custom)?;
+        } else {
+            event(&value).map_err(serde::de::Error::custom)?;
+        }
+        Ok(Self(value))
+    }
+}
+
 fn event(value: &Value) -> Result<()> {
     let envelope: Envelope = fields(value)?;
     let required = |key: &str| {
@@ -346,6 +458,20 @@ impl<'de> Deserialize<'de> for Whole {
     }
 }
 
+#[cfg(any(feature = "websocket", test))]
+struct WebSocketWhole(Value);
+
+#[cfg(any(feature = "websocket", test))]
+impl<'de> Deserialize<'de> for WebSocketWhole {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        websocket_response(&value).map_err(serde::de::Error::custom)?;
+        Ok(Self(value))
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Deserialize)]
 struct ErrorEnvelope {
@@ -391,6 +517,38 @@ pub(super) fn classify(data: &str) -> WireEvent<ResponsesEvent> {
     })
 }
 
+#[cfg(any(feature = "websocket", test))]
+pub(super) fn classify_websocket(data: &str) -> WireEvent<ResponsesEvent> {
+    if data.trim() == "[DONE]" {
+        return WireEvent::Known(ResponsesEvent::Sentinel);
+    }
+    if serde_json::from_str::<Value>(data)
+        .is_ok_and(|v| v.get("type").and_then(Value::as_str) == Some("error"))
+    {
+        return WireEvent::Known(ResponsesEvent::Failure(data.to_owned()));
+    }
+    wire::classify_or_untagged(
+        data,
+        "type",
+        |data| {
+            wire::classify_tagged_frame::<WebSocketKnown>(
+                data,
+                "type",
+                is_known_responses_event_type,
+            )
+            .map(|WebSocketKnown(frame)| ResponsesEvent::Frame {
+                kind: frame["type"].as_str().expect("strict known tag").to_owned(),
+                frame,
+                raw: data.to_owned(),
+            })
+        },
+        |data| {
+            wire::classify_marker_keyed_frame::<WebSocketWhole>(data, super::WHOLE_BODY_MARKERS)
+                .map(|WebSocketWhole(body)| ResponsesEvent::Whole(body))
+        },
+    )
+}
+
 pub(super) fn repair(data: &str) -> Option<String> {
     let mut value: Value = serde_json::from_str(data).ok()?;
     let object = value.as_object_mut()?;
@@ -404,3 +562,6 @@ pub(super) fn repair(data: &str) -> Option<String> {
     }
     serde_json::to_string(&value).ok()
 }
+
+#[cfg(test)]
+mod tests;

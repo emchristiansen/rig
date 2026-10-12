@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
 
-use super::{ResponsesEvent, classify_document_payload, classify_reader_payload};
+use super::{ReaderPolicy, ResponsesEvent, classify_document_payload};
 use crate::json_utils::Lenient;
 use crate::wire::document::Reassemble;
 use crate::wire::{WireEvent, WireFrame};
@@ -24,7 +24,7 @@ use crate::wire::{WireEvent, WireFrame};
 pub struct Response {
     /// None retains upstream's lenient standalone document fixtures. A wire
     /// selects the decoder's strict acceptance, with its exact repair policy.
-    strict_reader: Option<bool>,
+    strict_reader: Option<ReaderPolicy>,
     /// The response object stated so far.
     response: Option<Value>,
     /// Whether `response` is the reply's last word.
@@ -39,7 +39,18 @@ pub struct Response {
 
 impl Response {
     pub(crate) fn with_strict_reader(repair_envelopes: bool) -> Self {
-        Self { strict_reader: Some(repair_envelopes), ..Self::default() }
+        Self {
+            strict_reader: Some(ReaderPolicy::HttpSse { repair_envelopes }),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(any(feature = "websocket", test))]
+    pub(crate) fn with_websocket_reader() -> Self {
+        Self {
+            strict_reader: Some(ReaderPolicy::WebSocket),
+            ..Self::default()
+        }
     }
 
     /// Keep `item` at the frame's output index, or after every item so far
@@ -103,14 +114,16 @@ impl Reassemble<WireFrame> for Response {
     fn absorb(&mut self, frame: &WireFrame) {
         let data = frame.as_str();
         let event = match self.strict_reader {
-            Some(repair) => classify_reader_payload(&data, repair),
+            Some(policy) => policy.classify(&data),
             None => classify_document_payload(&data),
         };
         match event {
             WireEvent::Known(ResponsesEvent::Frame { kind, frame, .. }) => match kind.as_str() {
                 "response.output_item.added" => self.item(&frame, false),
                 "response.output_item.done" => self.item(&frame, true),
-                kind if super::is_lifecycle_event(kind) || kind == "response.queued" => self.lifecycle(kind, &frame),
+                kind if super::is_lifecycle_event(kind) || kind == "response.queued" => {
+                    self.lifecycle(kind, &frame)
+                }
                 _ => {}
             },
             WireEvent::Known(ResponsesEvent::Whole(body)) if !self.terminal => {

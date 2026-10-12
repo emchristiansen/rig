@@ -17,6 +17,8 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod reader;
+#[cfg(feature = "websocket")]
+pub(crate) use reader::websocket_done;
 
 /// The protected accumulator's per-call fragment bound.
 const MAX_TOOL_INPUT_BYTES: usize = 32 * 1024 * 1024;
@@ -102,6 +104,30 @@ impl ResponsesStreamOptions {
 /// Strict discriminator-first classification, without envelope repair.
 pub fn classify_responses_payload(data: &str) -> WireEvent<ResponsesEvent> {
     reader::classify(data)
+}
+
+#[cfg(any(feature = "websocket", test))]
+pub(crate) fn classify_websocket_payload(data: &str) -> WireEvent<ResponsesEvent> {
+    ReaderPolicy::WebSocket.classify(data)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReaderPolicy {
+    HttpSse {
+        repair_envelopes: bool,
+    },
+    #[cfg(any(feature = "websocket", test))]
+    WebSocket,
+}
+
+impl ReaderPolicy {
+    fn classify(self, data: &str) -> WireEvent<ResponsesEvent> {
+        match self {
+            Self::HttpSse { repair_envelopes } => classify_reader_payload(data, repair_envelopes),
+            #[cfg(any(feature = "websocket", test))]
+            Self::WebSocket => reader::classify_websocket(data),
+        }
+    }
 }
 
 /// Strict tagged classification. Whole bodies use `classify_responses_payload`.
@@ -341,8 +367,13 @@ impl ReasoningState {
     }
 
     fn has_opaque(&self) -> bool {
-        self.summary.values().any(|part| reasoning_opaque(part, true))
-            || self.content.values().any(|part| reasoning_opaque(part, false))
+        self.summary
+            .values()
+            .any(|part| reasoning_opaque(part, true))
+            || self
+                .content
+                .values()
+                .any(|part| reasoning_opaque(part, false))
     }
 }
 
@@ -402,7 +433,7 @@ struct UndecidedPart {
 pub struct ResponsesDecoder {
     provider: String,
     options: ResponsesStreamOptions,
-    repair_envelopes: bool,
+    reader_policy: ReaderPolicy,
     upstream_reasoning_issuer: bool,
     messages: BTreeMap<u64, MessageState>,
     message_ids: HashMap<String, u64>,
@@ -428,7 +459,9 @@ impl ResponsesDecoder {
         Self {
             provider: provider.to_owned(),
             options,
-            repair_envelopes: false,
+            reader_policy: ReaderPolicy::HttpSse {
+                repair_envelopes: false,
+            },
             upstream_reasoning_issuer: false,
             messages: BTreeMap::new(),
             message_ids: HashMap::new(),
@@ -450,7 +483,17 @@ impl ResponsesDecoder {
     /// Repair only absent envelope coordinates, preserving invalid supplied
     /// coordinates as defects and retaining the original corruption evidence.
     pub fn with_envelope_repair(mut self) -> Self {
-        self.repair_envelopes = true;
+        match &mut self.reader_policy {
+            ReaderPolicy::HttpSse { repair_envelopes } => *repair_envelopes = true,
+            #[cfg(any(feature = "websocket", test))]
+            ReaderPolicy::WebSocket => {}
+        }
+        self
+    }
+
+    #[cfg(any(feature = "websocket", test))]
+    pub(crate) fn with_websocket_reader(mut self) -> Self {
+        self.reader_policy = ReaderPolicy::WebSocket;
         self
     }
 
@@ -479,9 +522,16 @@ impl ResponsesDecoder {
         }
         // Only a completed exact restatement can claim anonymous deltas. An
         // added item never aliases a distinct anonymous message by coincidence.
-        let own_empty = self.messages.get(&index).is_none_or(|message| message.parts.is_empty())
-            && !self.undecided.iter().any(|((slot, _), parts)| *slot == index
-                && parts.iter().any(|part| part.id.as_deref().is_none_or(|own| own == id)));
+        let own_empty = self
+            .messages
+            .get(&index)
+            .is_none_or(|message| message.parts.is_empty())
+            && !self.undecided.iter().any(|((slot, _), parts)| {
+                *slot == index
+                    && parts
+                        .iter()
+                        .any(|part| part.id.as_deref().is_none_or(|own| own == id))
+            });
         let anonymous = own_empty.then_some(snapshot).flatten().and_then(|content| {
             self.messages.iter().find_map(|(slot, message)| {
                 (message.id.is_none()
@@ -570,7 +620,12 @@ impl ResponsesDecoder {
         let part = message.parts.entry(part_index).or_default();
         part.refusal |= refusal;
         let at = text_at(part, index, part_index, out)?;
-        activate_text(&mut self.active_message_part, at, !part.text.is_empty(), out)?;
+        activate_text(
+            &mut self.active_message_part,
+            at,
+            !part.text.is_empty(),
+            out,
+        )?;
         part.text.push_str(delta);
         out.push(at, delta)
     }
@@ -645,10 +700,18 @@ impl ResponsesDecoder {
             let at = text_at(part, index, part_index, out)?;
             let metadata_changed = message_activation_metadata(part.raw.as_ref())
                 != message_activation_metadata(Some(&raw));
-            let phase_changed = phase.is_some_and(|phase| part.observed_phase.as_deref() != Some(phase));
-            let has_new_text = stated.strip_prefix(&part.text).is_some_and(|suffix| !suffix.is_empty());
+            let phase_changed =
+                phase.is_some_and(|phase| part.observed_phase.as_deref() != Some(phase));
+            let has_new_text = stated
+                .strip_prefix(&part.text)
+                .is_some_and(|suffix| !suffix.is_empty());
             if has_new_text || metadata_changed || phase_changed {
-                activate_text(&mut self.active_message_part, at, !part.text.is_empty(), out)?;
+                activate_text(
+                    &mut self.active_message_part,
+                    at,
+                    !part.text.is_empty(),
+                    out,
+                )?;
             }
             // Snapshots extend deltas; a shorter or contradictory snapshot
             // cannot erase text the consumer already received.
@@ -680,9 +743,20 @@ impl ResponsesDecoder {
         }
         self.bind(index, Parent::Message, item.str("id"), out)?;
         // F ignores snapshot phase once this message received a delta.
-        let phase = item.str("phase").filter(|_| self.messages.get(&index).is_none_or(|message| !message.delta));
+        let phase = item.str("phase").filter(|_| {
+            self.messages
+                .get(&index)
+                .is_none_or(|message| !message.delta)
+        });
         for (part, raw) in content.iter().enumerate() {
-            self.message_part_with_phase(index, part as u64, item.str("id"), raw.clone(), phase, out)?;
+            self.message_part_with_phase(
+                index,
+                part as u64,
+                item.str("id"),
+                raw.clone(),
+                phase,
+                out,
+            )?;
         }
         let message = self.messages.entry(index).or_default();
         if message.id.is_none() {
@@ -741,7 +815,11 @@ impl ResponsesDecoder {
         }
         let delta = append.then(|| raw.str("text").unwrap_or_default().to_owned());
         if append && let Some(previous) = parts.get_mut(&part) {
-            let mut text = previous.as_str().or_else(|| previous.str("text")).unwrap_or_default().to_owned();
+            let mut text = previous
+                .as_str()
+                .or_else(|| previous.str("text"))
+                .unwrap_or_default()
+                .to_owned();
             text.push_str(raw.str("text").unwrap_or_default());
             if previous.is_string() {
                 *previous = json!(text);
@@ -826,8 +904,7 @@ impl ResponsesDecoder {
                 nonempty(item.str("encrypted_content")).or_else(|| state.encrypted.clone());
         }
         if !state.complete || state.signature.is_none() {
-            state.signature = nonempty(item.str("signature"))
-                .or_else(|| state.signature.clone());
+            state.signature = nonempty(item.str("signature")).or_else(|| state.signature.clone());
         }
         if state.item.is_none() || !state.complete {
             state.item = Some(item.clone());
@@ -862,14 +939,19 @@ impl ResponsesDecoder {
                 if let Some(id) = item.str("call_id").filter(|id| !id.is_empty()) {
                     call.id = CallId::from_wire(id);
                 }
-                if call.item_id.is_none() { call.item_id = nonempty(item.str("id")); }
+                if call.item_id.is_none() {
+                    call.item_id = nonempty(item.str("id"));
+                }
                 call.namespace = item.str("namespace").map(str::to_owned);
                 out.qualify(call.at, call.namespace.clone())?;
-                out.fragment(Some(call.at), CallFragment {
-                    id: item.str("call_id").filter(|id| !id.is_empty()),
-                    name: Some(&call.name),
-                    arguments: None,
-                })?;
+                out.fragment(
+                    Some(call.at),
+                    CallFragment {
+                        id: item.str("call_id").filter(|id| !id.is_empty()),
+                        name: Some(&call.name),
+                        arguments: None,
+                    },
+                )?;
             }
             return Ok(());
         }
@@ -923,7 +1005,12 @@ impl ResponsesDecoder {
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
         self.active_message_part = None;
-        if self.finished_calls.contains(&index) || self.calls.get(&index).is_some_and(|call| call.ending.is_complete()) {
+        if self.finished_calls.contains(&index)
+            || self
+                .calls
+                .get(&index)
+                .is_some_and(|call| call.ending.is_complete())
+        {
             return Ok(());
         }
         if !self.calls.contains_key(&index) {
@@ -967,7 +1054,10 @@ impl ResponsesDecoder {
             .and_then(|id| self.call_items.get(id).copied())
             .unwrap_or(index);
         if self.finished_calls.contains(&index)
-            || self.calls.get(&index).is_some_and(|call| call.ending.is_complete())
+            || self
+                .calls
+                .get(&index)
+                .is_some_and(|call| call.ending.is_complete())
         {
             return Ok(());
         }
@@ -1074,11 +1164,18 @@ impl ResponsesDecoder {
     ) -> Result<(), ProviderError> {
         // A terminal cannot invent a tool name or close an unnamed slot.
         // Its real Part and already delivered arguments remain a prefix.
-        if self.calls.get(&index).is_some_and(|call| call.name.is_empty()) {
+        if self
+            .calls
+            .get(&index)
+            .is_some_and(|call| call.name.is_empty())
+        {
             return Ok(());
         }
         if boundary == FlushBoundary::Partial
-            && self.calls.get(&index).is_some_and(|call| !call.ending.is_complete())
+            && self
+                .calls
+                .get(&index)
+                .is_some_and(|call| !call.ending.is_complete())
         {
             return Ok(());
         }
@@ -1090,20 +1187,30 @@ impl ResponsesDecoder {
         match call.ending {
             CallEnding::Custom => return out.finish(call.at),
             CallEnding::Function(FunctionInput::Malformed {
-                confidence: CallConfidence::Incomplete, ..
+                confidence: CallConfidence::Incomplete,
+                ..
             }) => return out.discard_call(call.at, DiscardReason::Incomplete),
             CallEnding::Function(FunctionInput::Malformed {
-                error, confidence: CallConfidence::Asserted,
+                error,
+                confidence: CallConfidence::Asserted,
             }) => {
                 let provider = call.id.provider().map(|call_id| ProviderCallEvidence {
-                    call_id: call_id.clone(), item_id: call.item_id,
+                    call_id: call_id.clone(),
+                    item_id: call.item_id,
                 });
                 return Err(out.malformed_call_error(
-                    call.at, call.arguments, error.to_string(), provider,
+                    call.at,
+                    call.arguments,
+                    error.to_string(),
+                    provider,
                 ));
             }
             CallEnding::Pending => {
-                let arguments = if call.arguments.trim().is_empty() { "{}" } else { &call.arguments };
+                let arguments = if call.arguments.trim().is_empty() {
+                    "{}"
+                } else {
+                    &call.arguments
+                };
                 if call.overflowed || serde_json::from_str::<Value>(arguments).is_err() {
                     // Genuine terminal evidence closes this never-done assembly;
                     // neither item confidence nor a truncation cause is inferred.
@@ -1170,7 +1277,10 @@ impl ResponsesDecoder {
     ) -> Result<(), ProviderError> {
         let index = frame.u64("output_index").expect("strict output index");
         let id = frame.str("item_id");
-        let index = id.and_then(|id| self.message_ids.get(id)).copied().unwrap_or(index);
+        let index = id
+            .and_then(|id| self.message_ids.get(id))
+            .copied()
+            .unwrap_or(index);
         let part = frame.u64("content_index").unwrap_or(0);
         match kind {
             "response.output_item.added" => self.output(index, &frame["item"], false, out),
@@ -1268,11 +1378,18 @@ impl ResponsesDecoder {
 
     fn flush_messages(&mut self, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
         for (index, message) in std::mem::take(&mut self.messages) {
-            let unknown_fields = message.item.as_ref()
-                .map(super::unknown_message_fields).unwrap_or_default();
-            let carried = !unknown_fields.is_empty() || message.parts.len() != 1
+            let unknown_fields = message
+                .item
+                .as_ref()
+                .map(super::unknown_message_fields)
+                .unwrap_or_default();
+            let carried = !unknown_fields.is_empty()
+                || message.parts.len() != 1
                 || message.phase.is_some()
-                || message.item.as_ref().is_some_and(|item| item.str("phase").is_some())
+                || message
+                    .item
+                    .as_ref()
+                    .is_some_and(|item| item.str("phase").is_some())
                 || message.parts.values().any(|part| {
                     part.opaque
                         || part.refusal
@@ -1301,10 +1418,16 @@ impl ResponsesDecoder {
                     };
                     let at = text_at(&mut part, index, part_index, out)?;
                     if !part.opaque {
-                        out.set_citations(at, text.payload.item.arr("annotations").iter()
-                            .filter_map(source_of)
-                            .map(|source| WireCitation::new(None, vec![source]))
-                            .collect());
+                        out.set_citations(
+                            at,
+                            text.payload
+                                .item
+                                .arr("annotations")
+                                .iter()
+                                .filter_map(source_of)
+                                .map(|source| WireCitation::new(None, vec![source]))
+                                .collect(),
+                        );
                     }
                     out.finish_carried_text(at, text)?;
                 } else if let Some(at) = part.at {
@@ -1373,7 +1496,11 @@ impl ResponsesDecoder {
         Ok(())
     }
 
-    fn flush(&mut self, boundary: FlushBoundary, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
+    fn flush(
+        &mut self,
+        boundary: FlushBoundary,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
         for (_, parts) in std::mem::take(&mut self.undecided) {
             for part in parts {
                 out.unknown(part.raw.into());
@@ -1412,7 +1539,9 @@ impl ResponsesDecoder {
         whole: bool,
         mut out: Out<'_, Completion>,
     ) -> Result<Flow, ProviderError> {
-        let terminal_message_id = response.arr("output").iter()
+        let terminal_message_id = response
+            .arr("output")
+            .iter()
             .find(|item| item.str("type") == Some("message"))
             .and_then(|item| nonempty(item.str("id")));
         // Whole-response indices are source positions, not writer Part indices.
@@ -1429,7 +1558,12 @@ impl ResponsesDecoder {
         {
             let at = out.fresh_index();
             if whole {
-                out.whole_reasoning_with_authority(at, Value::Null, text, ReasoningAuthority::ProviderRestated)?;
+                out.whole_reasoning_with_authority(
+                    at,
+                    Value::Null,
+                    text,
+                    ReasoningAuthority::ProviderRestated,
+                )?;
             } else {
                 out.whole(at, Block::Reasoning { redacted: false }, Value::Null, text)?;
             }
@@ -1476,8 +1610,12 @@ fn conflicting_kind(
 
 fn part_matches(part: &MessagePart, raw: &Value) -> bool {
     match raw.str("type") {
-        Some("output_text") => !part.opaque && !part.refusal && raw.str("text") == Some(part.text.as_str()),
-        Some("refusal") => !part.opaque && part.refusal && raw.str("refusal") == Some(part.text.as_str()),
+        Some("output_text") => {
+            !part.opaque && !part.refusal && raw.str("text") == Some(part.text.as_str())
+        }
+        Some("refusal") => {
+            !part.opaque && part.refusal && raw.str("refusal") == Some(part.text.as_str())
+        }
         _ => part.opaque && part.raw.as_ref() == Some(raw),
     }
 }
@@ -1518,13 +1656,20 @@ fn activate_text(
 /// Raw sibling bytes stay intact in MessagePart and carried canonical text.
 fn message_activation_metadata(raw: Option<&Value>) -> (bool, serde_json::Map<String, Value>) {
     let refusal = raw.and_then(|raw| raw.str("type")) == Some("refusal");
-    let extras = raw.filter(|raw| raw.str("type") == Some("output_text"))
-        .and_then(Value::as_object).into_iter().flat_map(|fields| fields.iter())
-        .filter(|(key, value)| key.as_str() != "type" && key.as_str() != "text"
-            && !value.is_null()
-            && !value.as_array().is_some_and(Vec::is_empty)
-            && !value.as_object().is_some_and(serde_json::Map::is_empty))
-        .map(|(key, value)| (key.clone(), value.clone())).collect();
+    let extras = raw
+        .filter(|raw| raw.str("type") == Some("output_text"))
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|fields| fields.iter())
+        .filter(|(key, value)| {
+            key.as_str() != "type"
+                && key.as_str() != "text"
+                && !value.is_null()
+                && !value.as_array().is_some_and(Vec::is_empty)
+                && !value.as_object().is_some_and(serde_json::Map::is_empty)
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     (refusal, extras)
 }
 
@@ -1540,7 +1685,12 @@ fn reasoning_opaque(part: &Value, summary: bool) -> bool {
     if !summary && part.is_string() {
         return false;
     }
-    part.str("type") != Some(if summary { "summary_text" } else { "reasoning_text" })
+    part.str("type")
+        != Some(if summary {
+            "summary_text"
+        } else {
+            "reasoning_text"
+        })
 }
 
 /// Preserve the provider's exact incomplete reason without synthesizing a
@@ -1565,9 +1715,15 @@ pub(crate) fn finish_reason_of(response: &Value) -> (Option<FinishReason>, Optio
     };
     let error = match response.str("status") {
         Some(status @ ("failed" | "cancelled")) => {
-            let parts: Vec<_> = ["/error/code", "/error/message"].iter()
-                .filter_map(|key| response.at(key).and_then(Value::as_str)).collect();
-            Some(if parts.is_empty() { format!("Response {status}") } else { parts.join(": ") })
+            let parts: Vec<_> = ["/error/code", "/error/message"]
+                .iter()
+                .filter_map(|key| response.at(key).and_then(Value::as_str))
+                .collect();
+            Some(if parts.is_empty() {
+                format!("Response {status}")
+            } else {
+                parts.join(": ")
+            })
         }
         _ => None,
     };
@@ -1578,7 +1734,7 @@ impl<'id> Decoder<'id, Completion> for ResponsesDecoder {
     type Event = ResponsesEvent;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<ResponsesEvent> {
-        classify_reader_payload(&frame.as_str(), self.repair_envelopes)
+        self.reader_policy.classify(&frame.as_str())
     }
 
     fn decode(
@@ -1686,17 +1842,17 @@ fn classify_reader_payload(data: &str, repair_envelopes: bool) -> WireEvent<Resp
 }
 
 #[cfg(test)]
+mod authority_tests;
+#[cfg(test)]
 mod carried_reader_tests;
 #[cfg(test)]
 mod citation_tests;
-#[cfg(test)]
-mod authority_tests;
+pub(crate) mod document;
+#[cfg(feature = "completion-observations")]
+pub mod observed;
 #[cfg(test)]
 mod pending_tests;
 #[cfg(test)]
 mod resume_tests;
-pub(crate) mod document;
-#[cfg(feature = "completion-observations")]
-pub mod observed;
 #[cfg(test)]
 mod tests;
