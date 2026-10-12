@@ -1,7 +1,8 @@
 //! The decoder of GenerateContent replies, a whole `generateContent` body or
-//! a stream of `streamGenerateContent` chunks, read as REST JSON. The REST,
-//! Vertex AI and gRPC wires share it: each part becomes a block whose
-//! provider item is the part as Gemini sent it.
+//! a stream of `streamGenerateContent` chunks, read as REST JSON. Signed
+//! answers and reasoning retain
+//! their signatures in carried parts. Inline media remains inspection data.
+//! Hosted code stays in the raw diagnostic document.
 //!
 //! ```
 //! use rig_core::providers::gemini::streaming::GenerateContentDecoder;
@@ -16,11 +17,14 @@ use super::completion::blocked_prompt_error;
 use super::completion::{map_google_finish_reason, usage_of};
 use crate::error::ProviderError;
 use crate::json_utils::Lenient;
-use crate::message::{CallId, DocumentSourceKind, Image, MediaType, MimeType, ToolName};
+use crate::message::{CallId, ToolName};
+use crate::message::{CarriedPayload, CarriedPosition, CarriedText, CarriedTextContent, CarriedReasoning, CarriedReasoningPart,
+    GeminiSignedAnswer, GeminiThoughtSignature};
 use crate::operation::{Block, Completion, Finish};
 use crate::providers::internal::wire;
 use crate::wire::{
-    AdapterVerdict, Decoder, Flow, ObservationSink, Out, WireCitation, WireEvent, WireFrame,
+    AdapterVerdict, Decoder, Flow, IncompleteEof, Mode, ObservationSink, Out, WireCitation, WireEvent,
+    WireFrame,
 };
 
 /// The recognizability markers of a `streamGenerateContent` chunk: every
@@ -34,19 +38,30 @@ const RECOGNIZABLE_CHUNK_KEYS: &[&str] =
 
 /// A GenerateContent reply document in REST JSON: the whole
 /// `generateContent` body or one `streamGenerateContent` chunk.
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Default)]
 pub struct GenerateContentChunk(pub Map<String, Value>);
 
+pub(super) mod reader;
+
+impl<'de> serde::Deserialize<'de> for GenerateContentChunk {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = <Map<String, Value> as serde::Deserialize>::deserialize(deserializer)?;
+        reader::read(&fields).map_err(serde::de::Error::custom)?;
+        Ok(Self(fields))
+    }
+}
+
 /// Decode GenerateContent replies. A text or thought part continues the
-/// block of the part before it while the kind stays the same, and a part
-/// that carries only a thought signature joins that block; any other part is
-/// a block of its own. The provider's end is held until EOF because
+/// block of the part before it while the kind stays the same. A thought
+/// signature closes its reasoning part. Signed answer parts stay separate. The provider's end is held until EOF because
 /// hosted-tool rounds can report intermediate finish reasons. The
 /// candidate's grounding and recitation metadata cite the text blocks when
 /// the reply ends.
 #[derive(Debug, Default)]
 pub struct GenerateContentDecoder {
+    streaming: bool,
+    /// At least one content part was emitted.
+    delivered: bool,
     /// The latest `finishReason`.
     finish: Option<String>,
     /// The latest `usageMetadata`, as Gemini sent it.
@@ -76,6 +91,8 @@ pub struct GenerateContentDecoder {
     chunks: usize,
     /// The `citationMetadata` sources of every chunk, by block.
     recitations: Vec<(usize, WireCitation)>,
+    part_index: u64,
+    open_position: Option<CarriedPosition>,
 }
 
 impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
@@ -116,7 +133,16 @@ impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
         if let Some(error) = data.at("/error") {
             // An in-band failure is a provider error, not a truncation.
             let body = serde_json::json!({ "error": error }).to_string();
-            return Err(ProviderError::from_provider_body(body));
+            let status = error
+                .get("code")
+                .and_then(Value::as_u64)
+                .and_then(|code| u16::try_from(code).ok())
+                .and_then(|code| http::StatusCode::from_u16(code).ok())
+                .filter(|status| status.is_client_error() || status.is_server_error());
+            return Err(match status {
+                Some(status) => ProviderError::from_http_response(status, body),
+                None => ProviderError::from_provider_body(body),
+            });
         }
         if let Some(blocked) = data.get("promptFeedback").and_then(blocked_prompt_error) {
             return Err(blocked);
@@ -137,10 +163,11 @@ impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
         // Last one wins: an intermediate `finishReason` is superseded by the
         // reason the turn actually ended on. Proto3 JSON spells an enum
         // value its schema does not know as its number.
-        match candidate.get("finishReason") {
-            Some(Value::String(name)) => self.finish = Some(name.clone()),
-            Some(Value::Number(number)) => self.finish = Some(format!("FINISH_REASON_{number}")),
-            _ => {}
+        if let Some(reason) = candidate.get("finishReason").and_then(reader::finish_reason) {
+            self.finish = Some(reason);
+        }
+        if let Some(error) = tool_protocol_finish_reason_error(candidate) {
+            return Err(error);
         }
         let parts = match candidate.get("content") {
             None | Some(Value::Null) => None,
@@ -152,7 +179,15 @@ impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
             Some(Value::Array(parts)) => {
                 self.chunks += 1;
                 self.placed.clear();
-                for part in parts {
+                let mut previous_text = false;
+                for (part_index, part) in parts.iter().enumerate() {
+                    let text = part.as_object().and_then(reader::select) == Some(reader::SelectedKind::Text)
+                        && part.bool("thought") != Some(true);
+                    if text && previous_text {
+                        self.close(&mut out)?;
+                    }
+                    previous_text = text;
+                    self.part_index = part_index as u64;
                     self.part(part.clone(), &mut out)?;
                     self.placed.push(self.placement.take());
                 }
@@ -168,27 +203,59 @@ impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
             let recitations = grounding::recitations(metadata, &self.answer);
             self.recitations.extend(recitations);
         }
-        // A failure is final: nothing after it is read.
-        use crate::completion::FinishReason::{Length, Stop};
-        let reason = self.finish.as_deref().map(map_google_finish_reason);
-        match (reason, candidate.get("finishReason")) {
-            (None | Some(Stop | Length), _) | (_, None) => Ok(Flow::More),
-            _ => self.end(out),
-        }
+        Ok(Flow::More)
     }
 
     /// Gemini ends a reply at EOF, not at its first finish reason: a
     /// hosted-tool round can report one before more content arrives.
-    fn eof(&mut self, out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
-        self.end(out)
+    fn eof(&mut self, mut out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
+        let cut_short = self.normalized_finish().is_some_and(|reason| {
+            matches!(reason, crate::completion::FinishReason::Length | crate::completion::FinishReason::ContentFilter)
+        });
+        if !self.streaming && !self.delivered && !cut_short {
+            self.close(&mut out)?;
+            return Err(ProviderError::Response(crate::message::EMPTY_RESPONSE_ERROR.to_owned()));
+        }
+        if self.finish.is_some() {
+            return self.end(out);
+        }
+        self.close(&mut out)?;
+        if self.streaming {
+            Ok(Flow::More)
+        } else {
+            Err(ProviderError::Truncated)
+        }
+    }
+
+    fn incomplete_eof(&self) -> IncompleteEof {
+        if self.streaming { IncompleteEof::KeepPartial } else { IncompleteEof::Refuse }
+    }
+
+    fn flush_before_terminal_error(
+        &mut self,
+        mut out: Out<'id, Completion>,
+    ) -> Result<(), ProviderError> {
+        self.close(&mut out)
     }
 }
 
 impl GenerateContentDecoder {
+    pub(super) fn in_mode(mut self, mode: Mode) -> Self {
+        self.streaming = mode == Mode::Streaming;
+        self
+    }
+
+    fn normalized_finish(&self) -> Option<crate::completion::FinishReason> {
+        self.finish.as_deref()
+            .filter(|reason| *reason != "FINISH_REASON_UNSPECIFIED")
+            .map(map_google_finish_reason)
+    }
+
     /// End the reply on the finish reason the candidate holds. Without one
     /// the reply did not end.
     fn end(&mut self, mut out: Out<'_, Completion>) -> Result<Flow, ProviderError> {
-        let Some(reason) = self.finish.take() else {
+        let reason = self.normalized_finish();
+        let Some(_) = self.finish.take() else {
             return Err(ProviderError::Truncated);
         };
         self.close(&mut out)?;
@@ -203,7 +270,7 @@ impl GenerateContentDecoder {
         let response_id = self.response_id.take();
         Ok(out.end(Finish {
             usage,
-            reason: Some(map_google_finish_reason(&reason)),
+            reason,
             response_id,
             model,
             ..Finish::default()
@@ -212,9 +279,43 @@ impl GenerateContentDecoder {
 
     /// Finish the open text or thought run: Gemini states each part whole.
     fn close(&mut self, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
-        self.open
-            .take()
-            .map_or(Ok(()), |(index, _)| out.finish(index))
+        let Some((index, thought)) = self.open.take() else {
+            return Ok(());
+        };
+        let position = self.open_position.take().unwrap_or(CarriedPosition::Whole);
+        if thought {
+            let mut item = Value::Null;
+            out.edit(index, |held| item = held.clone())?;
+            let text = item.str("text").unwrap_or_default().to_owned();
+            let signature = item.str("thoughtSignature").map(str::to_owned);
+            let payload = CarriedPayload::new(item, Some(super::completion::PROVIDER_NAME.to_owned()))
+                .with_position(position);
+            return out.finish_carried_reasoning(index,
+                CarriedReasoning::new(vec![CarriedReasoningPart::Text { text, signature }], payload));
+        } else {
+            let mut item = Value::Null;
+            out.edit(index, |held| item = held.clone())?;
+            if let Some(signature) = item.str("thoughtSignature") {
+                let answer = GeminiSignedAnswer::new(item.str("text").unwrap_or_default(),
+                    GeminiThoughtSignature::new(signature));
+                let payload = CarriedPayload::new(item, Some(super::completion::PROVIDER_NAME.to_owned()))
+                    .with_position(position);
+                return out.finish_carried_text(index, CarriedText::new(
+                    CarriedTextContent::GeminiSignedAnswer(answer), payload,
+                ));
+            }
+            if item.as_object().is_some_and(|fields| fields.keys().any(|key|
+                !matches!(key.as_str(), "text" | "thought" | "thoughtSignature")
+            )) {
+                let text = item.str("text").unwrap_or_default().to_owned();
+                let payload = CarriedPayload::new(item, Some(super::completion::PROVIDER_NAME.to_owned()))
+                    .with_position(position);
+                return out.finish_carried_text(index, CarriedText::new(
+                    CarriedTextContent::InspectionOnlyText(text), payload,
+                ));
+            }
+        }
+        out.finish(index)
     }
 
     /// Write a block at a fresh index, closing the run before it. A text or
@@ -235,11 +336,12 @@ impl GenerateContentDecoder {
                 .entry("thoughtSignature")
                 .or_insert(Value::String(signature));
         }
+        self.delivered = true;
         self.last = Some(index);
         self.signed = item
             .get("thoughtSignature")
             .and_then(Value::as_str)
-            .is_some_and(|signature| !signature.is_empty());
+            .is_some();
         if matches!(block, Block::Text) {
             self.answer.open(index, text);
             self.placement = Some((index, 0));
@@ -252,6 +354,7 @@ impl GenerateContentDecoder {
         out.open(index, block, item)?;
         out.push(index, text)?;
         self.open = run.map(|thought| (index, thought));
+        self.open_position = run.map(|_| CarriedPosition::MessageContent { item_index: 0, part_index: self.part_index });
         self.open.map_or_else(|| out.finish(index), |_| Ok(()))
     }
 
@@ -264,18 +367,21 @@ impl GenerateContentDecoder {
         let Value::Object(fields) = &part else {
             return self.open(Block::Opaque { replay: false }, part, "", out);
         };
+        let selected = reader::select(fields);
         let thought = part.bool("thought") == Some(true);
-        let signature = part
-            .str("thoughtSignature")
-            .filter(|signature| !signature.is_empty());
-        if let Some(text) = part.str("text") {
+        let signature = part.str("thoughtSignature");
+        if let Some(text) = part.str("text").filter(|_| selected == Some(reader::SelectedKind::Text)) {
             // An empty part without a signature carries nothing.
             if text.is_empty() && signature.is_none() {
                 return Ok(());
             }
+            if !thought && signature.is_some() {
+                self.open(Block::Text, part.clone(), text, out)?;
+                return self.close(out);
+            }
             // A second signed part starts a block of its own, so each
             // signature stays with the part that carried it.
-            return match self.open {
+            let result = match self.open {
                 Some((index, kind)) if kind == thought && !(self.signed && signature.is_some()) => {
                     self.signed |= signature.is_some();
                     if !thought {
@@ -292,34 +398,53 @@ impl GenerateContentDecoder {
                 ),
                 _ => self.open(Block::Text, part.clone(), text, out),
             };
+            result?;
+            if thought && signature.is_some() { return self.close(out); }
+            return Ok(());
         }
-        if let Some(call) = part.obj("functionCall") {
-            let Ok(name) =
-                ToolName::new(call.get("name").and_then(Value::as_str).unwrap_or_default())
-            else {
-                tracing::warn!("Gemini sent a function call without a name; nothing can answer it");
-                return Ok(());
-            };
+        if let Some(call) = part.obj("functionCall").filter(|_| selected == Some(reader::SelectedKind::FunctionCall)) {
+            let name = ToolName::new(
+                call.get("name").and_then(Value::as_str).unwrap_or_default(),
+            ).map_err(ProviderError::request)?;
             // Proto3 JSON leaves out an empty `args` Struct.
             let args = call
                 .get("args")
                 .map_or_else(|| "{}".to_owned(), Value::to_string);
             let id = CallId::from_wire(call.get("id").and_then(Value::as_str).unwrap_or_default());
-            return self.open(Block::Call { id, name }, part.clone(), &args, out);
+            return self.open(Block::Call { id, name, namespace: None }, part.clone(), &args, out);
         }
-        if !thought
-            && let (Some(mime_type), Some(data)) =
-                (part.at("/inlineData/mimeType"), part.at("/inlineData/data"))
-            && let (Some(mime_type), Some(data)) = (mime_type.as_str(), data.as_str())
-            && let Some(MediaType::Image(media_type)) = MediaType::from_mime_type(mime_type)
-        {
-            let image = Image {
-                data: DocumentSourceKind::Base64(data.to_owned()),
-                media_type: Some(media_type),
-                detail: None,
-                native: None,
-            };
-            return self.open(Block::Image(image), part.clone(), "", out);
+        if selected == Some(reader::SelectedKind::InlineData) {
+            self.close(out)?;
+            self.delivered = true;
+            let index = out.fresh_index();
+            let payload = CarriedPayload::new(part.clone(), Some(super::completion::PROVIDER_NAME.to_owned()))
+                .with_position(CarriedPosition::MessageContent { item_index: 0, part_index: self.part_index });
+            out.open(index, Block::Text, Value::Null)?;
+            return out.finish_carried_text(index, CarriedText::new(
+                CarriedTextContent::InspectionOnlyMedia(String::new()), payload,
+            ));
+        }
+        match selected {
+            Some(reader::SelectedKind::ExecutableCode) => {
+                tracing::warn!(kind = "executableCode", "Gemini delivered an unmodeled hosted-code part");
+                return Ok(());
+            }
+            Some(reader::SelectedKind::CodeExecutionResult) => {
+                tracing::warn!(kind = "codeExecutionResult", "Gemini delivered an unmodeled hosted-code part");
+                return Ok(());
+            }
+            Some(reader::SelectedKind::FunctionResponse | reader::SelectedKind::FileData) => {
+                let kind = if selected == Some(reader::SelectedKind::FunctionResponse) {
+                    "functionResponse"
+                } else {
+                    "fileData"
+                };
+                return Err(ProviderError::Response(format!(
+                    "Gemini response part kind {kind} carries no assistant content rig can account for"
+                )));
+            }
+            Some(reader::SelectedKind::Text | reader::SelectedKind::InlineData | reader::SelectedKind::FunctionCall)
+                | None => {}
         }
         let bare = ["thought", "thoughtSignature", "partMetadata"];
         let data = fields.keys().any(|key| !bare.contains(&key.as_str()));
@@ -378,6 +503,22 @@ impl GenerateContentDecoder {
     }
 }
 
+fn tool_protocol_finish_reason_error(candidate: &Value) -> Option<ProviderError> {
+    let wire_reason = reader::finish_reason(candidate.get("finishReason")?)?;
+    let reason = match wire_reason.as_str() {
+        "MALFORMED_FUNCTION_CALL" => "MalformedFunctionCall",
+        "UNEXPECTED_TOOL_CALL" => "UnexpectedToolCall",
+        "MISSING_THOUGHT_SIGNATURE" => "MissingThoughtSignature",
+        "TOO_MANY_TOOL_CALLS" => "TooManyToolCalls",
+        "MALFORMED_RESPONSE" => "MalformedResponse",
+        _ => return None,
+    };
+    let message = candidate.str("finishMessage").unwrap_or("no finish message provided");
+    Some(ProviderError::Response(format!(
+        "Gemini stopped with finish_reason={reason}: {message}"
+    )))
+}
+
 fn malformed(what: &str) -> ProviderError {
     ProviderError::Response(format!("Gemini sent {what}"))
 }
@@ -406,3 +547,9 @@ mod grounding;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod decoder_tests;
+
+#[cfg(test)]
+mod upstream_tests;

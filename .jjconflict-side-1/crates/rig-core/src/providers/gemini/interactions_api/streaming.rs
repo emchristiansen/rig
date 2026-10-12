@@ -8,7 +8,7 @@
 //! # let _ = decoder;
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
@@ -16,12 +16,13 @@ use crate::completion::{FinishReason, Usage};
 use crate::error::ProviderError;
 use crate::json_utils::Lenient;
 use crate::message::{
-    DocumentRange, DocumentSourceKind, Image, ImageMediaType, MimeType, Source, SourceLocation,
+    CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart, CarriedText, CarriedTextContent, DocumentRange, Source, SourceLocation,
 };
 use crate::operation::completion::merge;
 use crate::operation::{Block, CallFragment, Completion, Finish};
 use crate::providers::internal::wire;
-use crate::wire::{Decoder, Flow, Out, SpanUnit, WireCitation, WireEvent, WireFrame, WireSpan};
+use super::PROVIDER_NAME;
+use crate::wire::{Decoder, Flow, IncompleteEof, Mode, Out, SpanUnit, WireCitation, WireEvent, WireFrame, WireSpan};
 
 /// Recognized Interactions SSE tags; unlisted tags classify as unknown.
 const KNOWN_EVENT_TYPES: &[&str] = &[
@@ -56,19 +57,20 @@ pub struct SseEvent {
     pub fields: Map<String, Value>,
 }
 
-/// The Gemini Interactions wire's decoder. Steps decode in step order: a
-/// thought, a call and any other step is one block, and a model output is
-/// one block per content item, whose provider item is the model output step
-/// holding that item alone. A step opens on `step.start`, grows with its
-/// `step.delta`s, and becomes its blocks' provider item on `step.stop`, where
-/// the API states it complete. A whole interaction states each step
-/// complete. A step still open when the reply ends keeps no provider item.
-/// A text item's annotations, stated with it or streamed after it, cite its
-/// block when the step stops.
+/// Decodes Interactions steps and preserves their original content order.
+/// Signatures close carried thoughts. Genuine completed events finalize
+/// announced calls; EOF retains partial content without a response terminal.
+/// Text annotations attach when their model output step closes. Unknown
+/// items keep the upstream opaque representation and replay policy.
 #[derive(Default)]
 pub struct InteractionsDecoder {
+    streaming: bool,
     /// The open steps, by wire index.
     steps: BTreeMap<usize, Open>,
+    call_order: Vec<usize>,
+    call_ids_by_step: BTreeMap<usize, crate::message::ProviderCallId>,
+    closed_full_calls: BTreeSet<crate::message::ProviderCallId>,
+    full_updates_by_step: BTreeMap<usize, crate::message::ProviderCallId>,
     /// The model `interaction.created` named, for a completion that does
     /// not.
     model: Option<String>,
@@ -78,67 +80,98 @@ pub struct InteractionsDecoder {
 
 /// What an open step decodes to.
 enum Open {
-    Thought,
+    Thought(Option<Thought>),
     /// A model output: the step's other fields, and each content item with
     /// its block's writer index.
     Output(Value, Vec<(usize, Value)>),
     /// A function call, with the argument JSON streamed so far.
-    Call(String),
-    Opaque,
+    Call { block: usize, arguments: Option<String> },
+    Opaque(usize),
 }
 
-/// Rig's usage for an interaction's `usage`, read leniently: input is
-/// `total_input_tokens` plus the tool-use tokens, output
-/// `total_output_tokens` plus the thought tokens, and the total their sum;
-/// without a base count, that side and the total stay absent.
+/// One thought run, retained after its provider step closes the signature.
+struct Thought {
+    index: usize,
+    text: String,
+    item: Value,
+}
+
+fn thought_text(item: &Value) -> String {
+    item.arr("summary").iter()
+        .filter(|part| part.str("type") == Some("text"))
+        .filter_map(|part| part.str("text"))
+        .collect()
+}
+
+fn open_thought(index: usize, item: Value, out: &mut Out<'_, Completion>) -> Result<Thought, ProviderError> {
+    let text = thought_text(&item);
+    out.open(index, Block::Reasoning { redacted: false }, Value::Null)?;
+    if !text.is_empty() { out.push(index, &text)?; }
+    Ok(Thought { index, text, item })
+}
+
+fn finish_thought(thought: Thought, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
+    let signature = thought.item.str("signature").map(str::to_owned);
+    if thought.text.is_empty() && signature.is_none() {
+        return out.finish(thought.index);
+    }
+    let reasoning = CarriedReasoning::new(
+        vec![CarriedReasoningPart::Text { text: thought.text, signature }],
+        CarriedPayload::new(thought.item, Some(PROVIDER_NAME.to_owned())),
+    );
+    out.finish_carried_reasoning(thought.index, reasoning)
+}
+
+/// Rig's usage for an interaction. Input and output stay separate from
+/// thought and tool-use counts. A reported total wins; its fallback counts
+/// every component only when both base counters exist.
 pub fn usage_of(usage: &Value) -> Usage {
+    let input_tokens = usage.u64("total_input_tokens");
+    let output_tokens = usage.u64("total_output_tokens");
     let tool_use = usage.u64("total_tool_use_tokens");
     let thoughts = usage.u64("total_thought_tokens");
-    let add = |key: &str, more: Option<u64>| usage.u64(key).map(|count| count + more.unwrap_or(0));
-    let (input_tokens, output_tokens) = (
-        add("total_input_tokens", tool_use),
-        add("total_output_tokens", thoughts),
-    );
+    let derived_total = input_tokens.zip(output_tokens).map(|(input, output)| {
+        input + output + thoughts.unwrap_or(0) + tool_use.unwrap_or(0)
+    });
     Usage {
         input_tokens,
         output_tokens,
         cached_input_tokens: usage.u64("total_cached_tokens"),
         reasoning_tokens: thoughts,
         tool_use_prompt_tokens: tool_use,
-        total_tokens: input_tokens
-            .zip(output_tokens)
-            .map(|(input, output)| input + output),
+        total_tokens: usage.u64("total_tokens").or(derived_total),
         cache_creation_input_tokens: None,
         cost: None,
     }
 }
 
-/// The image a content item states, when it has data or a URI.
-fn image_of(content: &Value) -> Option<Image> {
-    let data = match (content.str("data"), content.str("uri")) {
-        (Some(data), _) => DocumentSourceKind::Base64(data.to_owned()),
-        (None, Some(uri)) => DocumentSourceKind::Url(uri.to_owned()),
-        (None, None) => return None,
-    };
-    Some(Image {
-        data,
-        media_type: content
-            .str("mime_type")
-            .and_then(ImageMediaType::from_mime_type),
-        detail: None,
-        native: None,
-    })
-}
-
 /// Open the block for `content`, a model output's newest content item.
 fn open_content(
     content: Value,
+    step_index: usize,
+    content_index: usize,
     out: &mut Out<'_, Completion>,
 ) -> Result<(usize, Value), ProviderError> {
     let index = out.fresh_index();
+    if content.str("type") == Some("function_call") && content.str("name").is_some() {
+        call_fields(index, &content, out)?;
+        out.finish(index)?;
+        return Ok((index, content));
+    }
+    if content.str("type") == Some("thought") {
+        let thought = open_thought(index, content.clone(), out)?;
+        finish_thought(thought, out)?;
+        return Ok((index, content));
+    }
+    if content.str("type") == Some("image") {
+        out.open(index, Block::Text, Value::Null)?;
+        let payload = CarriedPayload::new(content.clone(), Some(PROVIDER_NAME.to_owned()))
+            .with_position(CarriedPosition::MessageContent { item_index: step_index as u64, part_index: content_index as u64 });
+        out.finish_carried_text(index, CarriedText::new(CarriedTextContent::InspectionOnlyMedia(String::new()), payload))?;
+        return Ok((index, content));
+    }
     let block = match content.str("type") {
         Some("text") => Block::Text,
-        Some("image") => image_of(&content).map_or(Block::Opaque { replay: true }, Block::Image),
         _ => Block::Opaque { replay: true },
     };
     let text = matches!(block, Block::Text);
@@ -150,6 +183,11 @@ fn open_content(
 }
 
 impl InteractionsDecoder {
+    pub(super) fn in_mode(mut self, mode: Mode) -> Self {
+        self.streaming = mode == Mode::Streaming;
+        self
+    }
+
     /// Open the step at `index` as it starts, writing the content it
     /// already states.
     fn start(
@@ -158,23 +196,33 @@ impl InteractionsDecoder {
         step: Value,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
+        if step.str("type") != Some("thought") {
+            self.flush_thoughts(out)?;
+        }
+        if step.str("type") == Some("function_call")
+            && let Some(Open::Call { block, .. }) = self.steps.get(&index)
+        {
+            call_fields(*block, &step, out)?;
+            if let Some(id) = step.str("id").and_then(crate::message::ProviderCallId::new) {
+                self.call_ids_by_step.insert(index, id);
+            }
+            out.edit(*block, |item| *item = step)?;
+            return Ok(());
+        }
         let open = match step.str("type") {
             Some("thought") => {
-                let summary: Vec<String> = step
-                    .arr("summary")
-                    .iter()
-                    .filter(|summary| summary.str("type") == Some("text"))
-                    .filter_map(|summary| summary.str("text").map(str::to_owned))
-                    .collect();
-                out.open(index, Block::Reasoning { redacted: false }, step)?;
-                for text in summary {
-                    out.push(index, &text)?;
+                let signed = step.str("signature").is_some();
+                let thought = open_thought(out.fresh_index(), step, out)?;
+                if signed {
+                    finish_thought(thought, out)?;
+                    Open::Thought(None)
+                } else {
+                    Open::Thought(Some(thought))
                 }
-                Open::Thought
             }
             Some("model_output") => {
                 let items = step.arr("content").iter();
-                let items = items.map(|content| open_content(content.clone(), out));
+                let items = items.enumerate().map(|(content_index, content)| open_content(content.clone(), index, content_index, out));
                 let items = items.collect::<Result<_, _>>()?;
                 let mut step = step;
                 if let Some(step) = step.as_object_mut() {
@@ -183,25 +231,31 @@ impl InteractionsDecoder {
                 Open::Output(step, items)
             }
             Some("function_call") => {
-                call_fields(index, &step, out)?;
-                out.edit(index, |slot| *slot = step)?;
-                Open::Call(String::new())
+                let block = out.fresh_index();
+                call_fields(block, &step, out)?;
+                if let Some(id) = step.str("id").and_then(crate::message::ProviderCallId::new) {
+                    self.call_ids_by_step.insert(index, id);
+                }
+                out.edit(block, |slot| *slot = step)?;
+                self.call_order.push(index);
+                Open::Call { block, arguments: None }
             }
             // Input a reply restates is kept and never sent back; a
             // hosted-tool step, or one rig does not know, replays.
             kind => {
                 let replay = !matches!(kind, Some("user_input" | "function_result"));
-                out.open(index, Block::Opaque { replay }, step)?;
-                Open::Opaque
+                let block = out.fresh_index();
+                out.open(block, Block::Opaque { replay }, step)?;
+                Open::Opaque(block)
             }
         };
         self.steps.insert(index, open);
         Ok(())
     }
 
-    /// Apply one delta to the step at `index`. A delta for a step that
-    /// never started opens the step it implies: a resumed stream can join
-    /// a step after its start.
+    /// Apply one delta to the step at `index`. An arguments delta refuses
+    /// when both an open call and a genuine retained association are absent.
+    /// Provider legitimacy of orphan or resumed fragments remains UNKNOWN.
     fn delta(
         &mut self,
         index: usize,
@@ -213,6 +267,70 @@ impl InteractionsDecoder {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
+        if kind == "arguments_delta"
+            && self.call_ids_by_step.get(&index)
+                .is_some_and(|id| self.closed_full_calls.contains(id))
+        {
+            return Ok(());
+        }
+        // CLOSED-STEP-REFUSAL-TEXT-TYPED-FORM-LOSS differs from F:
+        // Response retains the exact received delta only as compact JSON text.
+        if kind == "function_call"
+            && let Some(id) = delta.get("id").and_then(Value::as_str)
+                .and_then(crate::message::ProviderCallId::new)
+            && self.closed_full_calls.contains(&id)
+        {
+            return Err(ProviderError::Response(format!(
+                "interactions: second full function call for closed call {}; received {}",
+                id.as_str(), Value::Object(delta),
+            )));
+        }
+        if let Some(id) = self.call_ids_by_step.get(&index)
+            .filter(|id| self.closed_full_calls.contains(*id))
+        {
+            return Err(ProviderError::Response(format!(
+                "interactions: {kind} fragment at index {index} belongs to closed call {}; received {}",
+                id.as_str(), Value::Object(delta),
+            )));
+        }
+        if kind == "arguments_delta"
+            && !matches!(self.steps.get(&index), Some(Open::Call { .. }))
+            && !self.call_ids_by_step.contains_key(&index)
+        {
+            return Err(ProviderError::Response(format!(
+                "interactions: arguments fragment at index {index} has no open call; received {}",
+                Value::Object(delta),
+            )));
+        }
+        if kind == "function_call"
+            && let Some(id) = delta.get("id").and_then(Value::as_str)
+                .and_then(crate::message::ProviderCallId::new)
+            && !self.closed_full_calls.contains(&id)
+            && let Some(arguments) = delta.get("arguments").filter(|value| !value.is_object())
+        {
+            return Err(ProviderError::Response(format!(
+                "interactions full-kind function call arguments are not a JSON object: call_id={} arguments={arguments}",
+                id.as_str(),
+            )));
+        }
+        let full_known_call = kind == "function_call"
+            && delta.get("name").and_then(Value::as_str)
+                .is_some_and(|name| crate::message::ToolName::new(name.to_owned()).is_ok())
+            && delta.get("id").and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+            && delta.get("arguments").is_some_and(Value::is_object);
+        if full_known_call && !self.steps.contains_key(&index) {
+            self.flush_thoughts(out)?;
+            let block = out.fresh_index();
+            let call = Value::Object(delta);
+            call_fields(block, &call, out)?;
+            out.finish_call_at_terminal_without_native(block)?;
+            if let Some(id) = call.str("id").and_then(crate::message::ProviderCallId::new) {
+                self.call_ids_by_step.insert(index, id.clone());
+                self.closed_full_calls.insert(id);
+            }
+            return Ok(());
+        }
         if !self.steps.contains_key(&index) {
             let step = match kind.as_str() {
                 "text" | "text_annotation_delta" | "image" | "audio" | "document" | "video" => {
@@ -246,72 +364,101 @@ impl InteractionsDecoder {
                     Ok(())
                 }
                 _ => {
-                    items.push(open_content(Value::Object(delta), out)?);
+                    items.push(open_content(Value::Object(delta), index, items.len(), out)?);
                     Ok(())
                 }
             },
-            (Open::Thought, "thought_summary") => {
-                let content = delta.get("content").cloned().unwrap_or_default();
-                if let Some(text) = content
-                    .str("text")
-                    .filter(|_| content.str("type") == Some("text"))
-                {
-                    out.push(index, text)?;
+            (Open::Thought(thought), "thought_summary" | "thought_signature") => {
+                if thought.is_none() {
+                    *thought = Some(open_thought(out.fresh_index(), json!({"type":"thought"}), out)?);
                 }
-                out.edit(index, |item| {
-                    merge(
-                        item,
-                        &Map::from_iter([("summary".to_owned(), json!([content]))]),
-                    )
-                })
+                let Some(active) = thought.as_mut() else { return Ok(()); };
+                if kind == "thought_summary" {
+                    let content = delta.get("content").cloned().unwrap_or_default();
+                    if let Some(text) = content.str("text").filter(|_| content.str("type") == Some("text")) {
+                        active.text.push_str(text);
+                        out.push(active.index, text)?;
+                    }
+                    merge(&mut active.item, &Map::from_iter([("summary".to_owned(), json!([content]))]));
+                } else if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                    active.item["signature"] = json!(signature);
+                    if let Some(active) = thought.take() {
+                        finish_thought(active, out)?;
+                    }
+                }
+                Ok(())
             }
-            (Open::Call(arguments), "arguments_delta") => {
+            (Open::Call { block, arguments }, "arguments_delta") => {
                 let fragment = match delta.get("arguments") {
                     Some(Value::String(fragment)) => fragment.clone(),
-                    Some(Value::Null) | None => String::new(),
+                    Some(Value::Null) | None => return Ok(()),
                     Some(other) => other.to_string(),
                 };
-                arguments.push_str(&fragment);
+                arguments.get_or_insert_with(String::new).push_str(&fragment);
                 let fragment = CallFragment {
                     arguments: Some(&fragment),
                     ..CallFragment::default()
                 };
-                out.fragment(Some(index), fragment)
+                out.fragment(Some(*block), fragment)
             }
-            (open, _) => {
-                if matches!(open, Open::Call(_)) && kind == "function_call" {
-                    call_fields(index, &Value::Object(delta.clone()), out)?;
+            (Open::Thought(thought), _) => {
+                if let Some(thought) = thought { merge(&mut thought.item, &delta); }
+                Ok(())
+            }
+            (Open::Call { block, .. }, _) => {
+                let full_id = full_known_call.then(|| delta.get("id").and_then(Value::as_str)
+                    .and_then(crate::message::ProviderCallId::new)).flatten();
+                if kind == "function_call" {
+                    call_fields(*block, &Value::Object(delta.clone()), out)?;
                 }
-                // A delta that restates its step (it carries the step's own
-                // `type`) replaces the fields it names; any other merges.
-                out.edit(index, |item| {
+                out.edit(*block, |item| {
                     if item.get("type") != delta.get("type") {
                         merge(item, &delta);
                     } else if let Some(item) = item.as_object_mut() {
                         item.extend(delta);
                     }
-                })
+                })?;
+                if let Some(id) = full_id {
+                    self.call_ids_by_step.insert(index, id.clone());
+                    self.full_updates_by_step.insert(index, id);
+                }
+                Ok(())
             }
+            (Open::Opaque(block), _) => out.edit(*block, |item| {
+                if item.get("type") != delta.get("type") {
+                    merge(item, &delta);
+                } else if let Some(item) = item.as_object_mut() {
+                    item.extend(delta);
+                }
+            }),
         }
     }
 
     /// Finish the step at `index`: the API states it complete.
     fn stop(&mut self, index: usize, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
+        let full_id = self.full_updates_by_step.remove(&index);
         match self.steps.remove(&index) {
             None => Ok(()),
-            Some(Open::Call(arguments)) => {
+            Some(Open::Call { block, arguments }) => {
+                self.call_order.retain(|open| *open != index);
                 // Streamed fragments supersede the arguments the start
                 // announced.
-                if !arguments.is_empty()
-                    && let Ok(arguments) = crate::json_utils::parse_tool_arguments(&arguments)
-                {
-                    out.edit(index, |item| {
+                if let Some(arguments) = arguments {
+                    let arguments = crate::json_utils::parse_tool_arguments(&arguments).map_err(|error| {
+                        out.malformed_call_error(block, arguments.clone(), error.to_string(), None)
+                    })?;
+                    out.announce(block, arguments.clone())?;
+                    out.edit(block, |item| {
                         if let Some(item) = item.as_object_mut() {
                             item.insert("arguments".to_owned(), arguments);
                         }
                     })?;
                 }
-                out.finish(index)
+                out.finish(block)?;
+                if let Some(id) = full_id {
+                    self.closed_full_calls.insert(id);
+                }
+                Ok(())
             }
             // An output with no content is one empty text block holding it.
             Some(Open::Output(step, items)) if items.is_empty() => {
@@ -321,6 +468,10 @@ impl InteractionsDecoder {
             }
             Some(Open::Output(step, items)) => {
                 for (block, item) in items {
+                    if (item.str("type") == Some("function_call") && item.str("name").is_some())
+                        || matches!(item.str("type"), Some("thought" | "image")) {
+                        continue;
+                    }
                     for annotation in item.arr("annotations") {
                         if let Some(citation) = annotation_citation(annotation) {
                             out.cite(block, citation);
@@ -335,20 +486,41 @@ impl InteractionsDecoder {
                 }
                 Ok(())
             }
-            Some(Open::Thought | Open::Opaque) => out.finish(index),
+            Some(Open::Thought(Some(thought))) => finish_thought(thought, out),
+            Some(Open::Thought(None)) => Ok(()),
+            Some(Open::Opaque(block)) => out.finish(block),
         }
+    }
+
+    fn flush_thoughts(&mut self, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
+        for open in self.steps.values_mut() {
+            if let Open::Thought(thought) = open && let Some(thought) = thought.take() {
+                finish_thought(thought, out)?;
+            }
+        }
+        Ok(())
     }
 
     /// End the reply with the interaction resource it completed with.
     fn complete(&mut self, interaction: Map<String, Value>, out: Out<'_, Completion>) -> Flow {
         let interaction = Value::Object(interaction);
+        let status = interaction.str("status").map(str::to_owned).or_else(|| self.status.take());
+        let (reason, error) = ending(status.as_deref(), interaction.arr("errors"));
+        self.end_resource(interaction, reason, error, out)
+    }
+
+    fn end_resource(
+        &mut self,
+        interaction: Value,
+        reason: Option<FinishReason>,
+        error: Option<String>,
+        out: Out<'_, Completion>,
+    ) -> Flow {
         let field = |key: &str| interaction.str(key).map(str::to_owned);
         // An agent interaction names its agent in place of a model.
         let model = field("model")
             .or_else(|| field("agent"))
             .or_else(|| self.model.take());
-        let status = field("status").or_else(|| self.status.take());
-        let (reason, error) = ending(status.as_deref(), interaction.arr("errors"));
         let usage = interaction.get("usage").cloned().unwrap_or(Value::Null);
         let finish = Finish {
             usage: usage_of(&usage),
@@ -356,39 +528,21 @@ impl InteractionsDecoder {
             response_id: field("id"),
             model,
             error,
+            ..Finish::default()
         };
         out.end(finish)
     }
 }
 
-/// The finish an interaction's `status` states, and the failure it reports.
-/// `completed` and `requires_action` (calls wait for results) are
-/// successes; `incomplete` is the token or execution budget running out,
-/// and `budget_exceeded` its deprecated spelling. `failed` and `cancelled`
-/// are failures carrying the interaction's `errors`; `in_progress` and
-/// `queued` are an interaction read before it ended. An unknown status, or
-/// none, is a failure.
-fn ending(status: Option<&str>, errors: &[Value]) -> (Option<FinishReason>, Option<String>) {
-    let messages: Vec<&str> = errors
-        .iter()
-        .filter_map(|error| error.str("message"))
-        .collect();
-    let detail = (!messages.is_empty()).then(|| format!(": {}", messages.join("; ")));
-    let detail = detail.unwrap_or_default();
-    let other = |status: &str| Some(FinishReason::Other(status.to_owned()));
+/// Map the status reported by a completed interaction resource. Other statuses
+/// retain their exact spelling without synthesizing a lifecycle error. An SSE
+/// completion with no status retains its missing-status error.
+fn ending(status: Option<&str>, _errors: &[Value]) -> (Option<FinishReason>, Option<String>) {
     match status {
         Some("completed") => (Some(FinishReason::Stop), None),
         Some("requires_action") => (Some(FinishReason::ToolCalls), None),
-        Some("incomplete" | "budget_exceeded") => (Some(FinishReason::Length), None),
-        Some(status @ ("failed" | "cancelled")) => (
-            other(status),
-            Some(format!("The interaction {status}{detail}")),
-        ),
-        Some(status @ ("in_progress" | "queued")) => (
-            other(status),
-            Some(format!("The interaction was read while {status}")),
-        ),
-        Some(status) => (other(status), None),
+        Some("budget_exceeded") => (Some(FinishReason::Length), None),
+        Some(status) => (Some(FinishReason::Other(status.to_owned())), None),
         None => (None, Some("The interaction states no status".to_owned())),
     }
 }
@@ -489,6 +643,19 @@ impl<'id> Decoder<'id, Completion> for InteractionsDecoder {
         )
     }
 
+    fn incomplete_eof(&self) -> IncompleteEof {
+        if self.streaming { IncompleteEof::KeepPartial } else { IncompleteEof::Refuse }
+    }
+
+    fn eof(&mut self, mut out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
+        self.flush_thoughts(&mut out)?;
+        if self.streaming { Ok(Flow::More) } else { Err(ProviderError::Truncated) }
+    }
+
+    fn flush_before_terminal_error(&mut self, mut out: Out<'id, Completion>) -> Result<(), ProviderError> {
+        self.flush_thoughts(&mut out)
+    }
+
     fn decode(
         &mut self,
         event: InteractionsEvent,
@@ -504,6 +671,9 @@ impl<'id> Decoder<'id, Completion> for InteractionsDecoder {
                 for (index, step) in steps.arr("steps").iter().enumerate() {
                     self.start(index, step.clone(), &mut out)?;
                     self.stop(index, &mut out)?;
+                }
+                if !interaction.contains_key("status") {
+                    return Ok(self.end_resource(Value::Object(interaction), None, None, out));
                 }
                 return Ok(self.complete(interaction, out));
             }
@@ -552,6 +722,12 @@ impl<'id> Decoder<'id, Completion> for InteractionsDecoder {
                 }
             }
             "interaction.completed" => {
+                self.flush_thoughts(&mut out)?;
+                for index in std::mem::take(&mut self.call_order) {
+                    if let Some(Open::Call { block, .. }) = self.steps.remove(&index) {
+                        out.finish_call_at_terminal_without_native(block)?;
+                    }
+                }
                 let interaction = event.obj("interaction").cloned().unwrap_or_default();
                 return Ok(self.complete(interaction, out));
             }
@@ -574,3 +750,12 @@ pub mod document;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod status_tests;
+
+#[cfg(test)]
+mod terminal_tests;
+
+#[cfg(test)]
+mod upstream_tests;

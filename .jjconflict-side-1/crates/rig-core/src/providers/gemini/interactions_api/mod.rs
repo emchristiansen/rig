@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 use url::form_urlencoded;
 
 use crate::completion::{CompletionRequest, Media, Replay, ReplayTarget};
-use crate::error::EncodeError;
+use crate::error::{EncodeError, ProviderError};
 use crate::message::{
     AssistantContent, DocumentData, DocumentMediaType, DocumentSourceKind as Source, Message,
     MimeType, ToolChoice as Choice, ToolResultContent, UserContent,
@@ -59,10 +59,14 @@ impl crate::wire::Wire for Interactions {
     type Decoder<'id> = streaming::InteractionsDecoder;
     type Reassembler = streaming::document::Interaction;
 
+    #[allow(deprecated)]
     fn describe(&self) -> Descriptor<'_> {
         Descriptor::new(PROVIDER_NAME)
             .model(self.model.as_str())
-            .telemetry(|_| GenAiOperation::Chat)
+            .telemetry(|mode| match mode {
+                Mode::Unary => GenAiOperation::Interactions,
+                Mode::Streaming => GenAiOperation::InteractionsStreaming,
+            })
             .replay(self)
     }
 
@@ -105,7 +109,11 @@ impl crate::wire::Wire for Interactions {
     }
 
     fn decoder<'id>(&self) -> Self::Decoder<'id> {
-        streaming::InteractionsDecoder::default()
+        self.decoder_in(Mode::Unary)
+    }
+
+    fn decoder_in<'id>(&self, mode: Mode) -> Self::Decoder<'id> {
+        streaming::InteractionsDecoder::default().in_mode(mode)
     }
 }
 
@@ -135,6 +143,10 @@ impl ReplayTarget for Interactions {
     /// What the model reads, by the classifier every Gemini wire shares.
     fn accepts(&self, model: &str) -> crate::completion::Accepts {
         super::completion::accepts(model)
+    }
+
+    fn check_document(&self, document: &crate::message::Document) -> Result<(), EncodeError> {
+        document_content(document).map(|_| ())
     }
 
     fn encodes(&self, _model: &str, media: Media<'_>) -> bool {
@@ -186,11 +198,7 @@ fn encodes(media: Media<'_>) -> bool {
         }
         Media::Audio(audio) => audio.media_type.is_some() && carried(&audio.data),
         Media::Video(video) => video.media_type.is_some() && carried(&video.data),
-        Media::Document(document) => match (&document.media_type, &document.data) {
-            (_, DocumentData::Text(_)) => true,
-            (Some(DocumentMediaType::PDF), DocumentData::File(data)) => carried(data),
-            _ => false,
-        },
+        Media::Document(document) => document_content(document).is_ok(),
     }
 }
 
@@ -238,9 +246,13 @@ impl crate::wire::Wire for InteractionResume {
     /// The interaction names its own model; this wire addresses no model id.
     /// The decoder reports the model the interaction names, which the turn's
     /// origin takes.
+    #[allow(deprecated)]
     fn describe(&self) -> Descriptor<'_> {
         Descriptor::new(PROVIDER_NAME)
-            .telemetry(|_| GenAiOperation::Chat)
+            .telemetry(|mode| match mode {
+                Mode::Unary => GenAiOperation::Interactions,
+                Mode::Streaming => GenAiOperation::InteractionsStreaming,
+            })
             .replay(self)
     }
 
@@ -304,7 +316,11 @@ impl crate::wire::Wire for InteractionResume {
     }
 
     fn decoder<'id>(&self) -> Self::Decoder<'id> {
-        streaming::InteractionsDecoder::default()
+        self.decoder_in(Mode::Unary)
+    }
+
+    fn decoder_in<'id>(&self, mode: Mode) -> Self::Decoder<'id> {
+        streaming::InteractionsDecoder::default().in_mode(mode)
     }
 }
 
@@ -385,7 +401,7 @@ impl ReplayTarget for InteractionResume {
 /// The create-interaction body `request` sends on `wire`: the wire's own
 /// encoding, then the mapped options, then `additional_params`, merged by
 /// [`request_params`](crate::completion::options::request_params). Its
-/// `generation_config` merges over the typed fields key by key, its `tools`
+/// Explicit legacy controls replace their fields after raw merging. Raw `tools`
 /// add to the request's, and an `agent` takes the place of the model.
 /// System messages become the system instruction. `stream`, when set,
 /// overrides the one the parameters name.
@@ -394,23 +410,346 @@ impl ReplayTarget for InteractionResume {
 ///
 /// When an option is refused, `additional_params` is not an object, its
 /// `tools` are not an array, or it sets `response_format` without
-/// `response_mime_type`.
+/// `response_mime_type`. Original temperature and output-cap fields must
+/// have their numeric JSON types before explicit controls replace them.
 pub(crate) fn create_request_body(
     wire: &Interactions,
     request: &CompletionRequest,
     stream: Option<bool>,
 ) -> Result<crate::completion::options::FinalBody, EncodeError> {
-    let rewrites: Vec<_> = stream
+    check_original_fields(request)?;
+    let request = with_original_omissions(request)?;
+    let mut rewrites: Vec<_> = stream
         .map(crate::completion::options::Rewrite::Stream)
         .into_iter()
         .collect();
+    rewrites.push(crate::completion::options::Rewrite::GeminiInteractionsTypedControls);
     crate::completion::options::request_params(
         wire,
-        request,
-        |input| create_base(wire, request, input),
+        &request,
+        |input| create_base(wire, &request, input),
         crate::completion::options::RawAt::Top,
         &rewrites,
     )
+}
+
+/// Project the original generation fields and omit absent original parameters.
+fn with_original_omissions(request: &CompletionRequest) -> Result<CompletionRequest, EncodeError> {
+    let mut input = request.clone();
+    if let Some(params) = input.additional_params.as_mut().and_then(Value::as_object_mut) {
+        for field in ["store", "background"] {
+            if params.get(field).is_some_and(Value::is_null) {
+                params.shift_remove(field);
+            }
+        }
+        if let Some(config) = params.get("generation_config") {
+            match project_original_generation_config(config)? {
+                Some(projected) => { params.insert("generation_config".to_owned(), projected); }
+                None => { params.shift_remove("generation_config"); }
+            }
+        }
+        let agent = params.get("agent").is_some_and(|value| !value.is_null());
+        if !agent {
+            params.shift_remove("agent_config");
+        }
+    }
+    Ok(input)
+}
+
+/// Read only the original tool-choice union and its allowed-tools configuration.
+fn project_original_tool_choice(value: &Value) -> Result<Option<Value>, EncodeError> {
+    use serde::Deserialize as _;
+    if value.is_null() {
+        return Ok(None);
+    }
+    let mode = |value: &Value| -> Option<Value> {
+        let spelling = match value {
+            Value::String(value) => value.as_str(),
+            Value::Object(fields) if fields.len() == 1 => {
+                let (key, payload) = fields.iter().next()?;
+                if !payload.is_null() && !payload.as_object().is_some_and(Map::is_empty) {
+                    return None;
+                }
+                key.as_str()
+            }
+            _ => return None,
+        };
+        match spelling {
+            "auto" | "any" | "none" | "validated" => Some(Value::String(spelling.to_owned())),
+            _ => None,
+        }
+    };
+    if let Some(value) = mode(value) {
+        return Ok(Some(value));
+    }
+    let allowed = match value {
+        Value::Object(fields) => fields.get("allowed_tools"),
+        Value::Array(fields) if fields.len() == 1 => fields.first(),
+        _ => None,
+    };
+    let read_allowed = |value: &Value| -> Option<Value> {
+        let mut selected_mode = None;
+        let mut selected_tools = None;
+        let mut read_field = |field: &str, value: &Value| -> Option<()> {
+            if value.is_null() {
+                return Some(());
+            }
+            match field {
+                "mode" => selected_mode = Some(mode(value)?),
+                "tools" => selected_tools = Some(Value::Array(Vec::<String>::deserialize(value).ok()?.into_iter().map(Value::String).collect())),
+                _ => {}
+            }
+            Some(())
+        };
+        match value {
+            Value::Object(fields) => {
+                for (field, value) in fields {
+                    read_field(field, value)?;
+                }
+            }
+            Value::Array(fields) if fields.len() == 2 => {
+                for (field, value) in ["mode", "tools"].into_iter().zip(fields) {
+                    read_field(field, value)?;
+                }
+            }
+            _ => return None,
+        }
+        let mut fields = Map::new();
+        if let Some(value) = selected_mode { fields.insert("mode".to_owned(), value); }
+        if let Some(value) = selected_tools { fields.insert("tools".to_owned(), value); }
+        Some(Value::Object(fields))
+    };
+    if let Some(allowed) = allowed.and_then(read_allowed) {
+        return Ok(Some(json!({"allowed_tools": allowed})));
+    }
+    let error = <serde_json::Error as serde::de::Error>::custom(
+        "data did not match any variant of untagged enum ToolChoice",
+    );
+    Err(EncodeError::request(crate::error::ProviderError::from(error)))
+}
+
+const ORIGINAL_GENERATION_FIELDS: [&str; 9] = [
+    "temperature", "top_p", "seed", "stop_sequences", "tool_choice",
+    "thinking_level", "thinking_summaries", "max_output_tokens", "speech_config",
+];
+
+/// Project only the nine declared original generation members.
+fn project_original_generation_config(value: &Value) -> Result<Option<Value>, EncodeError> {
+    use serde::de::Error as _;
+    let json_error = |error: serde_json::Error| EncodeError::request(ProviderError::from(error));
+    let mut projected = Map::new();
+    match value {
+        Value::Null => return Ok(None),
+        Value::Object(fields) => {
+            let mut known_set = false;
+            let mut unknown = false;
+            // CFGEN-PROJ-MEMBER-ORDER differs from F's declaration-order output:
+            // surviving object members retain their received relative order.
+            for (field, value) in fields {
+                if ORIGINAL_GENERATION_FIELDS.contains(&field.as_str()) {
+                    if let Some(value) = project_original_generation_field(field, value)? {
+                        known_set = true;
+                        projected.insert(field.clone(), value);
+                    }
+                } else {
+                    // CFGEN-PROJ-KNOWN-UNKNOWN differs from F: unknown generation
+                    // members remain verbatim beside set known members.
+                    unknown = true;
+                    projected.insert(field.clone(), value.clone());
+                }
+            }
+            if !known_set && unknown {
+                // CF008-UNKNOWN-MEMBER-001 differs from F's whole-field omission:
+                // all-known-None plus unknown retains the entire raw object.
+                return Ok(Some(value.clone()));
+            }
+        }
+        Value::Array(fields) => {
+            for (position, field) in ORIGINAL_GENERATION_FIELDS.into_iter().enumerate() {
+                let Some(value) = fields.get(position) else {
+                    return Err(json_error(serde_json::Error::invalid_length(
+                        position, &"struct GenerationConfig with 9 elements",
+                    )));
+                };
+                if let Some(value) = project_original_generation_field(field, value)? {
+                    projected.insert(field.to_owned(), value);
+                }
+            }
+            if fields.len() > ORIGINAL_GENERATION_FIELDS.len() {
+                return Err(json_error(serde_json::Error::invalid_length(
+                    fields.len(), &"fewer elements in array",
+                )));
+            }
+        }
+        _ => {
+            use serde::Deserializer as _;
+            struct GenerationShape;
+            impl<'de> serde::de::Visitor<'de> for GenerationShape {
+                type Value = ();
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("struct GenerationConfig")
+                }
+            }
+            value.deserialize_struct("GenerationConfig", &ORIGINAL_GENERATION_FIELDS, GenerationShape)
+                .map_err(json_error)?;
+        }
+    }
+    Ok((!projected.is_empty()).then_some(Value::Object(projected)))
+}
+
+/// Project one declared generation member using its original leaf codec.
+fn project_original_generation_field(field: &str, value: &Value) -> Result<Option<Value>, EncodeError> {
+    use serde::Deserialize as _;
+    if value.is_null() {
+        return Ok(None);
+    }
+    if field == "tool_choice" {
+        return project_original_tool_choice(value);
+    }
+    if field == "speech_config" {
+        let values = Vec::<Value>::deserialize(value)
+            .map_err(|error| EncodeError::request(ProviderError::from(error)))?;
+        let projected = values.iter().map(project_original_speech_config).collect::<Result<Vec<_>, _>>()?;
+        return Ok(Some(Value::Array(projected)));
+    }
+    let projected = match field {
+        "temperature" | "top_p" => f64::deserialize(value).and_then(serde_json::to_value),
+        "seed" | "max_output_tokens" => u64::deserialize(value).and_then(serde_json::to_value),
+        "stop_sequences" => Vec::<String>::deserialize(value).and_then(serde_json::to_value),
+        "thinking_level" => project_original_thinking_level(value),
+        "thinking_summaries" => project_original_thinking_summaries(value),
+        _ => return Ok(None),
+    };
+    projected.map(Some).map_err(|error| EncodeError::request(ProviderError::from(error)))
+}
+
+/// Project the original thinking-level unit enum without changing its accepted forms.
+fn project_original_thinking_level(value: &Value) -> Result<Value, serde_json::Error> {
+    use serde::Deserializer as _;
+    struct ThinkingLevelProjection;
+    impl<'de> serde::de::Visitor<'de> for ThinkingLevelProjection {
+        type Value = Value;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("enum ThinkingLevel")
+        }
+        fn visit_enum<A>(self, data: A) -> Result<Value, A::Error>
+        where A: serde::de::EnumAccess<'de> {
+            use serde::de::{Error as _, VariantAccess as _};
+            let (variant, payload) = data.variant::<String>()?;
+            match variant.as_str() {
+                "minimal" | "low" | "medium" | "high" => {}
+                _ => return Err(A::Error::unknown_variant(&variant, &["minimal", "low", "medium", "high"])),
+            }
+            payload.unit_variant()?;
+            Ok(Value::String(variant))
+        }
+    }
+    value.deserialize_enum("ThinkingLevel", &["minimal", "low", "medium", "high"], ThinkingLevelProjection)
+}
+
+/// Project the original thinking-summary unit enum, including the set `none` variant.
+fn project_original_thinking_summaries(value: &Value) -> Result<Value, serde_json::Error> {
+    use serde::Deserializer as _;
+    struct ThinkingSummariesProjection;
+    impl<'de> serde::de::Visitor<'de> for ThinkingSummariesProjection {
+        type Value = Value;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("enum ThinkingSummaries")
+        }
+        fn visit_enum<A>(self, data: A) -> Result<Value, A::Error>
+        where A: serde::de::EnumAccess<'de> {
+            use serde::de::{Error as _, VariantAccess as _};
+            let (variant, payload) = data.variant::<String>()?;
+            match variant.as_str() {
+                "auto" | "none" => {}
+                _ => return Err(A::Error::unknown_variant(&variant, &["auto", "none"])),
+            }
+            payload.unit_variant()?;
+            Ok(Value::String(variant))
+        }
+    }
+    value.deserialize_enum("ThinkingSummaries", &["auto", "none"], ThinkingSummariesProjection)
+}
+
+/// Project only the three declared original speech members.
+fn project_original_speech_config(value: &Value) -> Result<Value, EncodeError> {
+    use serde::{Deserialize as _, de::Error as _};
+    const FIELDS: [&str; 3] = ["voice", "language", "speaker"];
+    let json_error = |error: serde_json::Error| EncodeError::request(ProviderError::from(error));
+    let mut projected = Map::new();
+    match value {
+        Value::Object(fields) => {
+            for (field, value) in fields {
+                if FIELDS.contains(&field.as_str()) {
+                    if !value.is_null() {
+                        let value = String::deserialize(value).map_err(json_error)?;
+                        projected.insert(field.clone(), Value::String(value));
+                    }
+                } else {
+                    // CFGEN-PROJ-SPEECH-UNKNOWN differs from F: unknown speech
+                    // members survive verbatim; their values are not projected.
+                    projected.insert(field.clone(), value.clone());
+                }
+            }
+        }
+        Value::Array(fields) => {
+            for (position, field) in FIELDS.into_iter().enumerate() {
+                let Some(value) = fields.get(position) else {
+                    return Err(json_error(serde_json::Error::invalid_length(
+                        position, &"struct SpeechConfig with 3 elements",
+                    )));
+                };
+                if !value.is_null() {
+                    let value = String::deserialize(value).map_err(json_error)?;
+                    projected.insert(field.to_owned(), Value::String(value));
+                }
+            }
+            if fields.len() > FIELDS.len() {
+                return Err(json_error(serde_json::Error::invalid_length(
+                    fields.len(), &"fewer elements in array",
+                )));
+            }
+        }
+        _ => {
+            use serde::Deserializer as _;
+            struct SpeechShape;
+            impl<'de> serde::de::Visitor<'de> for SpeechShape {
+                type Value = ();
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    formatter.write_str("struct SpeechConfig")
+                }
+            }
+            value.deserialize_struct("SpeechConfig", &FIELDS, SpeechShape).map_err(json_error)?;
+        }
+    }
+    Ok(Value::Object(projected))
+}
+
+/// Check the named original fields before merging explicit controls.
+fn check_original_fields(request: &CompletionRequest) -> Result<(), EncodeError> {
+    use serde::Deserialize as _;
+    let Some(params) = request.additional_params.as_ref().and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for (field, value) in params {
+        if value.is_null() {
+            continue;
+        }
+        if field == "generation_config" {
+            // CFGEN-PREFLIGHT-BEFORE-HISTORY differs from F's history-first order:
+            // original parameter failures take precedence at this existing seam.
+            project_original_generation_config(value)?;
+            continue;
+        }
+        let checked = match field.as_str() {
+            "store" | "background" | "stream" => bool::deserialize(value).map(|_| ()),
+            "agent" => String::deserialize(value).map(|_| ()),
+            "tools" => Vec::<Value>::deserialize(value).map(|_| ()),
+            _ => continue,
+        };
+        checked.map_err(|error| EncodeError::request(crate::error::ProviderError::from(error)))?;
+    }
+    Ok(())
 }
 
 /// The wire's own encoding of `request`: model, input steps, system
@@ -428,14 +767,11 @@ fn create_base(
             "response_mime_type is required when response_format is set",
         ));
     }
-    let choice = request.tool_choice.clone().map(|choice| match choice {
-        Choice::Auto => json!("auto"),
-        Choice::None => json!("none"),
-        Choice::Required => json!("any"),
-        Choice::Specific { function_names } => {
-            json!({ "allowed_tools": { "mode": "validated", "tools": function_names } })
-        }
-    });
+    let choice = request
+        .tool_choice
+        .as_ref()
+        .map(legacy_tool_choice)
+        .transpose()?;
     let config: Map<String, Value> = [
         ("temperature", request.temperature.map(Value::from)),
         ("max_output_tokens", request.max_tokens.map(Value::from)),
@@ -450,11 +786,13 @@ fn create_base(
         .map(|tool| json!({ "type": "function", "name": tool.name, "description": tool.description, "parameters": tool.parameters }))
         .collect();
     tools.extend(input.raw_tools()?);
+    let ids = WireIds::for_interactions(&request.chat_history, wire, &model)
+        .map_err(EncodeError::request)?;
     let (mut system, mut history) = (Vec::new(), Vec::new());
-    for message in &request.chat_history {
+    for (message_index, message) in request.chat_history.iter().enumerate() {
         match message {
             Message::System { content } => system.push(content.clone()),
-            message => history.push(message.clone()),
+            message => history.push((message_index, message.clone())),
         }
     }
     let mut body = Map::new();
@@ -472,29 +810,43 @@ fn create_base(
     }
     body.insert(
         "input".to_owned(),
-        Value::Array(steps(history, wire, &model)?),
+        Value::Array(steps(history, wire, &ids)?),
     );
     Ok(body)
+}
+
+/// Encode the canonical tool selection for `generation_config.tool_choice`.
+pub(crate) fn legacy_tool_choice(
+    choice: &crate::completion::ToolChoice,
+) -> Result<serde_json::Value, crate::error::EncodeError> {
+    let converted = match choice {
+        Choice::Auto => json!("auto"),
+        Choice::None => json!("none"),
+        Choice::Required => json!("any"),
+        Choice::Specific { function_names } => {
+            json!({ "allowed_tools": { "mode": "validated", "tools": function_names } })
+        }
+    };
+    Ok(serde_json::to_value(converted)?)
 }
 
 /// The steps `history` sends: a user message's content grouped into
 /// `user_input` steps around its function results, each a step of its own,
 /// and one step per assistant block.
 fn steps(
-    history: Vec<Message>,
+    history: Vec<(usize, Message)>,
     target: &dyn ReplayTarget,
-    model: &str,
+    ids: &WireIds,
 ) -> Result<Vec<Value>, EncodeError> {
-    let ids = WireIds::for_target(&history, target, model);
     let mut steps = Vec::new();
-    for message in history {
+    for (message_index, message) in history {
         match message {
             Message::System { content } => {
                 steps.push(json!({ "type": "user_input", "content": [{ "type": "text", "text": content }] }));
             }
             Message::User { content } => {
                 let mut run = Vec::new();
-                for part in content {
+                for (content_index, part) in content.into_iter().enumerate() {
                     let UserContent::ToolResult(result) = part else {
                         run.push(user_content(part)?);
                         continue;
@@ -503,6 +855,12 @@ fn steps(
                         steps.push(
                             json!({ "type": "user_input", "content": std::mem::take(&mut run) }),
                         );
+                    }
+                    if result.answers == crate::message::AnsweredToolCall::Custom {
+                        return Err(crate::message::UnrepresentableToolCall::CustomCall {
+                            wire: "Gemini Interactions",
+                            name: result.name.clone(),
+                        }.into());
                     }
                     let mut contents = result.content;
                     let value = match (contents.len(), contents.pop()) {
@@ -530,7 +888,7 @@ fn steps(
                     let mut step = json!({
                         "type": "function_result",
                         "name": result.name,
-                        "call_id": ids.of(&result.call),
+                        "call_id": ids.spell(message_index, content_index).map_err(EncodeError::request)?,
                         "result": value,
                     });
                     if let (true, Some(step)) = (result.is_error, step.as_object_mut()) {
@@ -543,8 +901,8 @@ fn steps(
                 }
             }
             Message::Assistant(turn) => {
-                for block in &turn.content {
-                    steps.extend(assistant_step(block, target, &ids)?);
+                for (content_index, block) in turn.content.iter().enumerate() {
+                    steps.extend(assistant_step(block, target, ids.of(message_index, content_index))?);
                 }
             }
         }
@@ -569,13 +927,60 @@ fn user_content(part: UserContent) -> Result<Value, EncodeError> {
         UserContent::Image(image) => media("image", image.media_type, image.data),
         UserContent::Audio(audio) => media("audio", audio.media_type, audio.data),
         UserContent::Video(video) => media("video", video.media_type, video.data),
-        UserContent::Document(document) => match document.data {
-            DocumentData::Text(text) => Ok(json!({ "type": "text", "text": text })),
-            DocumentData::File(data) => media("document", document.media_type, data),
-        },
+        UserContent::Document(document) => document_content(&document),
         UserContent::ToolResult(_) => {
             Err(EncodeError::request("a tool result is a step of its own"))
         }
+    }
+}
+
+fn document_content(document: &crate::message::Document) -> Result<Value, EncodeError> {
+    use base64::Engine;
+    let media_type = document.media_type.as_ref().ok_or_else(|| {
+        EncodeError::request("Media type for document is required for Gemini")
+    })?;
+    if *media_type == DocumentMediaType::TXT {
+        let bytes = match &document.data {
+            DocumentData::Text(text) => return Ok(json!({"type": "text", "text": text})),
+            DocumentData::File(Source::Base64(data)) => {
+                base64::engine::general_purpose::STANDARD.decode(data).map_err(|error| {
+                    EncodeError::request(format!("Failed to decode text document base64 data: {error}"))
+                })?
+            }
+            DocumentData::File(Source::Raw(data)) => data.clone(),
+            DocumentData::File(Source::Url(_)) => return Err(EncodeError::request(
+                "Text document URLs are not supported for Gemini Interactions inputs"
+            )),
+            DocumentData::File(Source::FileId(_)) => return Err(EncodeError::request(
+                "Provider file IDs are not supported for Gemini Interactions inputs"
+            )),
+            DocumentData::File(Source::Unknown) => return Err(EncodeError::request("Unknown content source")),
+        };
+        let text = String::from_utf8(bytes).map_err(|error| {
+            EncodeError::request(format!("Text document data must be UTF-8: {error}"))
+        })?;
+        return Ok(json!({"type": "text", "text": text}));
+    }
+    let mime_type = media_type.to_mime_type();
+    match &document.data {
+        DocumentData::Text(text) => Ok(json!({
+            "type": "document", "mime_type": mime_type,
+            "data": base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
+        })),
+        DocumentData::File(Source::Raw(data)) => Ok(json!({
+            "type": "document", "mime_type": mime_type,
+            "data": base64::engine::general_purpose::STANDARD.encode(data)
+        })),
+        DocumentData::File(Source::Base64(data)) => Ok(json!({
+            "type": "document", "mime_type": mime_type, "data": data
+        })),
+        DocumentData::File(Source::Url(uri)) => Ok(json!({
+            "type": "document", "mime_type": mime_type, "uri": uri
+        })),
+        DocumentData::File(Source::FileId(_)) => Err(EncodeError::request(
+            "Provider file IDs are not supported for Gemini Interactions inputs"
+        )),
+        DocumentData::File(Source::Unknown) => Err(EncodeError::request("Unknown content source")),
     }
 }
 
@@ -605,9 +1010,54 @@ fn media<M: MimeType>(
 fn assistant_step(
     block: &AssistantContent,
     target: &dyn ReplayTarget,
-    ids: &WireIds,
+    wire_id: Option<&str>,
 ) -> Result<Option<Value>, EncodeError> {
-    let identity = match block.replay(target, ids) {
+    match block {
+        AssistantContent::ToolCall(call) => call.for_json_only_wire("Gemini Interactions")?,
+        AssistantContent::CustomToolCall(call) => {
+            return Err(call.refused_by_json_only_wire("Gemini Interactions").into());
+        }
+        AssistantContent::ProviderItem(item) => {
+            return Err(crate::message::UnreplayableProviderItem::new("Gemini Interactions", item).into());
+        }
+        AssistantContent::CarriedText(part) => {
+            return match part.known_text_projection() {
+                Some(text) => Ok(Some(json!({"type": "model_output", "content": [{"type": "text", "text": text}]}))),
+                None => Err(crate::message::UnrepresentableOpaqueContent::new("Gemini Interactions").into()),
+            };
+        }
+        AssistantContent::CarriedReasoning(reasoning) => {
+            if reasoning.has_opaque_parts() {
+                return Err(crate::message::UnrepresentableOpaqueContent::new("Gemini Interactions").into());
+            }
+            let signature = reasoning.content.iter().find_map(|part| match part {
+                crate::message::CarriedReasoningPart::Text { signature, .. } => signature.as_deref(),
+                crate::message::CarriedReasoningPart::Summary(_)
+                | crate::message::CarriedReasoningPart::Encrypted(_)
+                | crate::message::CarriedReasoningPart::Redacted { .. }
+                | crate::message::CarriedReasoningPart::OpaqueSummary(_)
+                | crate::message::CarriedReasoningPart::OpaqueContent(_) => None,
+            });
+            let summary: Vec<Value> = reasoning.content.iter().filter_map(|part| {
+                let text = match part {
+                    crate::message::CarriedReasoningPart::Text { text, .. }
+                    | crate::message::CarriedReasoningPart::Summary(text)
+                    | crate::message::CarriedReasoningPart::Encrypted(text) => text,
+                    crate::message::CarriedReasoningPart::Redacted { data } => data,
+                    crate::message::CarriedReasoningPart::OpaqueSummary(_)
+                    | crate::message::CarriedReasoningPart::OpaqueContent(_) => return None,
+                };
+                (!text.is_empty()).then(|| json!({"type":"text", "text":text}))
+            }).collect();
+            let mut step = json!({"type":"thought"});
+            if !summary.is_empty() { step["summary"] = json!(summary); }
+            if let Some(signature) = signature { step["signature"] = json!(signature); }
+            return Ok(Some(step));
+        }
+        AssistantContent::Text(_) | AssistantContent::Reasoning(_)
+        | AssistantContent::Image(_) | AssistantContent::Opaque(_) => {}
+    }
+    let identity = match block.replay(target, wire_id) {
         Replay::Item(item) => return Ok(Some(item.into_owned())),
         Replay::Identity(identity) => identity,
         Replay::Rebuild => Map::new(),
@@ -634,11 +1084,21 @@ fn assistant_step(
             image.data.clone(),
         )?),
         AssistantContent::Opaque(opaque) => return Ok(Some(opaque.item.clone())),
+        AssistantContent::CarriedText(_) | AssistantContent::CarriedReasoning(_)
+        => {
+            return Err(crate::message::UnrepresentableOpaqueContent::new("Gemini Interactions").into());
+        }
+        AssistantContent::CustomToolCall(call) => {
+            return Err(call.refused_by_json_only_wire("Gemini Interactions").into());
+        }
+        AssistantContent::ProviderItem(item) => {
+            return Err(crate::message::UnreplayableProviderItem::new("Gemini Interactions", item).into());
+        }
     };
     if let Some(fields) = step.as_object_mut() {
         fields.extend(identity);
-        if let AssistantContent::ToolCall(call) = block {
-            fields.insert("id".to_owned(), json!(ids.of(&call.id)));
+        if let AssistantContent::ToolCall(_) = block {
+            fields.insert("id".to_owned(), json!(wire_id.ok_or_else(|| EncodeError::request("a function-call occurrence has no planned wire ID"))?));
         }
     }
     Ok(Some(step))
@@ -649,3 +1109,9 @@ mod tests;
 
 #[cfg(test)]
 mod history_tests;
+
+#[cfg(test)]
+mod interaction_usage_tests;
+
+#[cfg(test)]
+mod document_tests;
