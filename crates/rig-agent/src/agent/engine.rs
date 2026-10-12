@@ -964,16 +964,11 @@ impl TurnSource for StreamingTurnSource {
                             }
                         }
                         StreamedTurnEvent::UndispatchableToolCall(refused) => {
-                            let partial = assembler.partial_turn(
-                                stream.message_id.clone(),
-                                stream.reasoning_issuer(),
-                            );
+                            let partial = assembler.partial_turn(&stream.partial());
                             // Nothing of the call was authorized, dispatched or
                             // shown to a hook; the run fails naming it.
                             drop(stream);
-                            yield Err(StreamingError::Prompt(
-                                run.refuse_streamed_undispatchable(&partial, refused),
-                            ));
+                            yield Err(run.refuse_streamed_undispatchable(&partial, refused));
                             return;
                         }
                         StreamedTurnEvent::InvalidToolCall(invalid) => {
@@ -1097,61 +1092,46 @@ impl TurnSource for StreamingTurnSource {
                 yield Err(err);
                 return;
             }
-            if !turn_recovered {
-                let settlement = settle_model_turn(
-                    &runner.config.hooks,
-                    hook_ctx,
-                    run,
-                    AssembledTurn {
-                        dispatch_id,
-                        dispatch_kind: &dispatched_kind,
-                        provider: stream.provider(),
-                        content: &canonical_choice,
-                        usage: last_usage,
-                        identity: &identity,
-                        response_headers: &terminal.provider_response_headers,
-                        finish_reason: attempt_finish_reason.as_ref(),
-                        max_tokens: attempt_max_tokens,
-                        raw: attempt_raw,
-                    },
-                )
-                .await;
-                match settlement {
-                    Ok(ModelTurnDecision::Advance { replaced }) => {
-                        // The run keeps the replacement, and so does the final
-                        // item the consumer receives: the deltas it saw were
-                        // the provider's, the answer is the hook's.
-                        if let Some(choice) = replaced {
-                            final_turn_content = choice;
-                        }
+            let settlement = settle_model_turn(
+                runner,
+                hook_ctx,
+                run,
+                scope,
+                attempt_max_tokens,
+                turn_recovered,
+            )
+            .await;
+            match settlement {
+                Ok(ModelTurnDecision::Advance { replaced }) => {
+                    // The run keeps the replacement, and so does the final
+                    // item the consumer receives: the fragments it saw were
+                    // the provider's, the answer is the hook's.
+                    if let Some(choice) = replaced {
+                        final_turn_content = choice;
                     }
-                    Ok(ModelTurnDecision::Retried) => {
-                        yield Ok(MultiTurnStreamItem::ModelTurnRetried {
-                            turn: hook_ctx.turn(),
-                        });
-                        return;
-                    }
-                    Ok(ModelTurnDecision::Terminate(reason)) => {
-                        // A stop observes an already completed provider turn:
-                        // its buffered final and content telemetry stay
-                        // visible before the cancellation. Retry alone
-                        // suppresses the provisional final.
-                        self.record_turn_telemetry(
-                            agent_span,
-                            &chat_span,
-                            &canonical_choice,
-                            runner.config.record_telemetry_content,
-                        );
-                        if let Some(item) = pending_final.take() {
-                            yield Ok(MultiTurnStreamItem::stream_item(item));
-                        }
-                        yield Err(StreamingError::Prompt(run.cancel_error(reason)));
-                        return;
-                    }
-                    Err(err) => {
-                        yield Err(StreamingError::Prompt(err));
-                        return;
-                    }
+                }
+                Ok(ModelTurnDecision::Retried) => {
+                    yield Ok(MultiTurnStreamItem::ModelTurnRetried {
+                        turn: hook_ctx.turn(),
+                    });
+                    return;
+                }
+                Ok(ModelTurnDecision::Terminate(reason)) => {
+                    // A stop observes an already completed provider turn:
+                    // its content telemetry stays visible before the
+                    // cancellation.
+                    self.record_turn_telemetry(
+                        agent_span,
+                        &chat_span,
+                        scope.choice(),
+                        runner.config.record_telemetry_content,
+                    );
+                    yield Err(run.cancel_error(reason));
+                    return;
+                }
+                Err(err) => {
+                    yield Err(err);
+                    return;
                 }
             }
 
@@ -1230,33 +1210,8 @@ pub(crate) enum ModelTurnDecision {
     Terminate(String),
 }
 
-/// One attempt's assembled response, as both drivers hand it to
-/// [`settle_model_turn`]: the unary response under `run()`, the finished
-/// stream under `stream()`. Every field belongs to this attempt, and a retry
-/// re-enters with a fresh response, so a stale attempt's ids or payload can
-/// never be attributed here.
-pub(crate) struct AssembledTurn<'a> {
-    /// The completion dispatch this attempt answers: the outcome hook's
-    /// correlation id and the effect that was dispatched.
-    pub(crate) dispatch_id: EffectId,
-    pub(crate) dispatch_kind: &'a EffectKind,
-    /// The provider that answered, as the response names it.
-    pub(crate) provider: &'a str,
-    pub(crate) content: &'a Vec<AssistantContent>,
-    pub(crate) usage: Usage,
-    pub(crate) identity: &'a ResponseIdentity,
-    /// This attempt's captured success-reply headers, never an earlier
-    /// attempt's.
-    pub(crate) response_headers: &'a rig_core::completion::ProviderResponseHeaders,
-    pub(crate) finish_reason: Option<&'a FinishReason>,
-    /// The cap this attempt was prepared with, completion-call patches
-    /// included; read off the prepared request, never the agent config.
-    pub(crate) max_tokens: Option<u64>,
-    pub(crate) raw: &'a serde_json::Value,
-}
-
-/// Settle a parked model turn: fire [`AgentHook::on_outcome`] for the
-/// completion dispatch (a replacement lands on the parked turn, a
+/// Settle a parked model turn: close the completion `scope` with
+/// [`AgentHook::on_outcome`] (a replacement lands on the parked turn, a
 /// `Cancelled` replacement terminates), then
 /// [`AgentHook::on_model_turn_finished`] and apply its action to the sans-IO
 /// run. Both media close an accepted turn in this slot, after the run
@@ -1277,18 +1232,11 @@ pub(crate) async fn settle_model_turn<M>(
     max_tokens: Option<u64>,
     recovered: bool,
 ) -> Result<ModelTurnDecision, PromptError> {
-    let mut folded = rig_core::completion::CompletionResponse::new(
-        turn.content.clone(),
-        turn.usage,
-        turn.provider,
-        turn.raw.clone(),
-    )
-    .with_optional_finish_reason(turn.finish_reason.cloned());
-    folded.message_id = turn.identity.message_id.clone();
-    folded.response_id = turn.identity.response_id.clone();
-    folded.provider_request_id = turn.identity.provider_request_id.clone();
-    folded.provider_response_headers = turn.response_headers.clone();
-    let outcome: Result<Outcome, ErrorReport> = Ok(Outcome::Completion(folded));
+    if recovered {
+        return Ok(ModelTurnDecision::Advance { replaced: None });
+    }
+    let (action, response) = scope.close(runner, hook_ctx).await?;
+    let hooks = &runner.config.hooks;
     let mut replaced: Option<Vec<AssistantContent>> = None;
     match action {
         OutcomeAction::Proceed => {}
@@ -1500,7 +1448,6 @@ pub(crate) async fn run_single_tool(
             chat_history: error_history.to_vec(),
         });
     }
-    let tool_context = &runner.tool_context;
     let record_content = runner.config.record_telemetry_content;
     let tool_name = tool_call.function.name.as_str();
     if let Some(raw) = &tool_call.function.invalid_arguments {
@@ -1756,40 +1703,26 @@ impl TurnSource for UnaryTurnSource {
                     ModelTurnOutcome::Continue {
                         response_hook_suppressed,
                     } => {
-                        if !response_hook_suppressed {
-                            let identity = resp.identity();
-                            let settlement = settle_model_turn(
-                                &runner.config.hooks,
-                                hook_ctx,
-                                run,
-                                AssembledTurn {
-                                    dispatch_id,
-                                    dispatch_kind: &dispatched_kind,
-                                    provider: &resp.provider,
-                                    content: &resp.choice,
-                                    usage: resp.usage,
-                                    identity: &identity,
-                                    response_headers: &resp.provider_response_headers,
-                                    finish_reason: attempt_finish_reason.as_ref(),
-                                    max_tokens: attempt_max_tokens,
-                                    raw: &resp.raw,
-                                },
-                            )
-                            .await;
-                            match settlement {
-                                Ok(ModelTurnDecision::Advance { .. }) => {}
-                                Ok(ModelTurnDecision::Retried) => break,
-                                Ok(ModelTurnDecision::Terminate(reason)) => {
-                                    record_accepted_turn(run);
-                                    yield Err(StreamingError::Prompt(
-                                        run.cancel_error(reason),
-                                    ));
-                                    return;
-                                }
-                                Err(err) => {
-                                    yield Err(StreamingError::Prompt(err));
-                                    return;
-                                }
+                        let settlement = settle_model_turn(
+                            runner,
+                            hook_ctx,
+                            run,
+                            scope,
+                            attempt_max_tokens,
+                            response_hook_suppressed,
+                        )
+                        .await;
+                        match settlement {
+                            Ok(ModelTurnDecision::Advance { .. }) => {}
+                            Ok(ModelTurnDecision::Retried) => break,
+                            Ok(ModelTurnDecision::Terminate(reason)) => {
+                                record_accepted_turn(run);
+                                yield Err(run.cancel_error(reason));
+                                return;
+                            }
+                            Err(err) => {
+                                yield Err(err);
+                                return;
                             }
                         }
                         record_accepted_turn(run);

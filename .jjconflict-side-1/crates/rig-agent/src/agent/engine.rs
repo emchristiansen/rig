@@ -964,16 +964,11 @@ impl TurnSource for StreamingTurnSource {
                             }
                         }
                         StreamedTurnEvent::UndispatchableToolCall(refused) => {
-                            let partial = assembler.partial_turn(
-                                stream.message_id.clone(),
-                                stream.reasoning_issuer(),
-                            );
+                            let partial = assembler.partial_turn(&stream.partial());
                             // Nothing of the call was authorized, dispatched or
                             // shown to a hook; the run fails naming it.
                             drop(stream);
-                            yield Err(StreamingError::Prompt(
-                                run.refuse_streamed_undispatchable(&partial, refused),
-                            ));
+                            yield Err(run.refuse_streamed_undispatchable(&partial, refused));
                             return;
                         }
                         StreamedTurnEvent::InvalidToolCall(invalid) => {
@@ -1443,6 +1438,16 @@ pub(crate) async fn run_single_tool(
     malformed: Option<&InvalidToolCallContext>,
     error_history: &[Message],
 ) -> Result<ToolCallOutcome, PromptError> {
+    // The effect, its hooks and the catalog lookup below are keyed by the bare
+    // name: a namespaced call is refused before any of them. (A custom call is
+    // a different content variant and never reaches this function, so its raw
+    // input can never meet the `Value::String` fallback below.)
+    if let Err(call) = tool_call.name_dispatchable() {
+        return Err(PromptError::UndispatchableToolCall {
+            call,
+            chat_history: error_history.to_vec(),
+        });
+    }
     let record_content = runner.config.record_telemetry_content;
     let tool_name = tool_call.function.name.as_str();
     if let Some(raw) = &tool_call.function.invalid_arguments {
