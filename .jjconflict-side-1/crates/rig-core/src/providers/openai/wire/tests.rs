@@ -72,13 +72,15 @@ fn a_serialized_configuration_carries_no_key_material() {
 }
 
 /// The gateway-specific fields of the one configuration — the account, the
-/// instructions, the caller identity a Responses gateway asks for — travel
+/// instructions, the caller identity a Responses gateway requires — travel
 /// with it: a stored ChatGPT wire loads back as the same wire, minus the
 /// credential.
 #[test]
 fn a_gateway_configuration_round_trips_without_its_credential() {
     let chatgpt = crate::providers::chatgpt::DIALECT;
-    let config = OpenAIConfig::with_key(&chatgpt, "tok-secret").with_account_id("acct-1");
+    let config = OpenAIConfig::with_key(&chatgpt, "tok-secret")
+        .with_account_id("acct-1")
+        .with_caller_identity(crate::test_utils::test_caller_identity());
     assert_eq!(
         config.instructions.as_deref(),
         chatgpt.quirks.default_instructions
@@ -475,4 +477,413 @@ fn llamacpp_serves_its_operational_routes_unversioned() {
             );
         }
     }
+}
+
+fn client_exec_identity(version: Option<&str>) -> CallerIdentity {
+    CallerIdentity::new(
+        "client_exec",
+        "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)",
+        version.map(str::to_owned),
+    )
+    .expect("a valid identity")
+}
+
+fn identity_headers(provider: &OpenAIConfig) -> http::HeaderMap {
+    provider
+        .headers(http::Request::get("https://example.invalid/"))
+        .expect("the configuration has the identity its dialect needs")
+        .body(())
+        .expect("builds")
+        .headers()
+        .clone()
+}
+
+fn chatgpt(api_key: &str) -> OpenAIConfig {
+    OpenAIConfig::with_key(&crate::providers::chatgpt::DIALECT, api_key)
+}
+
+/// The configuration a ChatGPT caller sets programmatically — account,
+/// instructions and exact identity — reaches the request headers and the
+/// merged instructions.
+#[test]
+fn chatgpt_identity_setters_reach_the_request() {
+    let config = chatgpt("tok")
+        .with_account_id("acct-1")
+        .with_caller_identity(client_exec_identity(None))
+        .with_instructions("");
+    let sent = identity_headers(&config);
+    assert_eq!(sent["chatgpt-account-id"], "acct-1");
+    assert_eq!(sent["originator"], "client_exec");
+    assert_eq!(
+        sent["user-agent"],
+        "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)"
+    );
+    assert_eq!(config.instructions.as_deref(), Some(""));
+}
+
+/// A ChatGPT wire's HTTP request headers are exactly its credential, the
+/// caller's identity (`originator` and `user-agent`), a fresh `session_id`
+/// per request and its account — nothing else. Pinned so that the identity
+/// stamping `headers()` shares with the Codex websocket handshake cannot
+/// change what an HTTP request carries.
+#[test]
+fn chatgpt_http_headers_are_exactly_the_credential_identity_session_and_account() {
+    let provider = chatgpt("tok")
+        .with_account_id("acct-1")
+        .with_caller_identity(client_exec_identity(None));
+    let first = identity_headers(&provider);
+
+    let mut names: Vec<&str> = first.keys().map(http::HeaderName::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        [
+            "authorization",
+            "chatgpt-account-id",
+            "originator",
+            "session_id",
+            "user-agent"
+        ]
+    );
+    assert_eq!(first["authorization"], "Bearer tok");
+    assert_eq!(first["chatgpt-account-id"], "acct-1");
+    assert_eq!(first["originator"], "client_exec");
+    assert!(!first["session_id"].is_empty());
+    assert_eq!(first.len(), names.len(), "no header is repeated");
+
+    // The session id is fresh for every request.
+    assert_ne!(
+        identity_headers(&provider)["session_id"],
+        first["session_id"]
+    );
+}
+
+/// The ChatGPT dialect has no default identity: a configuration built from
+/// it carries none, and every request refuses before it is sent rather than
+/// identifying as Rig.
+#[test]
+fn chatgpt_refuses_to_send_without_the_caller_s_identity() {
+    let config = chatgpt("tok");
+    assert_eq!(config.identity, None, "no default identity");
+    assert_eq!(
+        config
+            .headers(http::Request::get("https://example.invalid/"))
+            .expect_err("no identity, no request"),
+        MissingCallerIdentity::Unset { dialect: "chatgpt" }
+    );
+}
+
+/// An originator alone is not the caller's exact identity: on the ChatGPT
+/// dialect it refuses, naming the originator, rather than sending the
+/// `rig/…` user agent Rig would derive for it. Setting the exact identity
+/// afterwards replaces it.
+#[test]
+fn chatgpt_refuses_an_originator_without_the_caller_s_user_agent() {
+    let config = chatgpt("tok").with_originator("ccc");
+    assert_eq!(
+        config
+            .headers(http::Request::get("https://example.invalid/"))
+            .expect_err("an originator alone is refused"),
+        MissingCallerIdentity::OriginatorOnly {
+            dialect: "chatgpt",
+            originator: "ccc".to_owned()
+        }
+    );
+    let exact = config.with_caller_identity(client_exec_identity(None));
+    assert_eq!(identity_headers(&exact)["originator"], "client_exec");
+}
+
+/// The request refusal a ChatGPT configuration without the caller's exact
+/// identity meets, as its typed cause.
+fn missing_identity(error: crate::error::ProviderError) -> MissingCallerIdentity {
+    match error {
+        crate::error::ProviderError::Request(inner) => inner
+            .downcast_ref::<MissingCallerIdentity>()
+            .cloned()
+            .unwrap_or_else(|| panic!("expected a missing identity, got {inner}")),
+        other => panic!("expected a request refusal, got {other:?}"),
+    }
+}
+
+/// The two configurations the ChatGPT dialect refuses, with the refusal each
+/// meets.
+fn refused_chatgpt_configurations() -> [(OpenAIConfig, MissingCallerIdentity); 2] {
+    [
+        (
+            chatgpt("tok"),
+            MissingCallerIdentity::Unset { dialect: "chatgpt" },
+        ),
+        (
+            chatgpt("tok").with_originator("ccc"),
+            MissingCallerIdentity::OriginatorOnly {
+                dialect: "chatgpt",
+                originator: "ccc".to_owned(),
+            },
+        ),
+    ]
+}
+
+/// A completion on the ChatGPT dialect without the caller's exact identity,
+/// unary or streamed, on either route, is refused with the typed cause and
+/// reaches no transport.
+#[tokio::test]
+async fn chatgpt_completions_refuse_without_the_caller_s_identity_and_send_nothing() {
+    for (provider, expected) in refused_chatgpt_configurations() {
+        for route in [Route::Responses, Route::Chat] {
+            let http = crate::test_utils::RecordingHttpClient::new("");
+            let model = crate::driver::Model::new(
+                provider.clone().with_route(route).completion("gpt-5.4"),
+                http.clone(),
+            );
+            let request = crate::completion::CompletionRequest::new("hello");
+            let error = model
+                .call(request.clone())
+                .await
+                .expect_err("no exact identity, no request");
+            assert_eq!(missing_identity(error), expected, "{route:?} unary");
+            let error = model
+                .stream(request)
+                .err()
+                .expect("no exact identity, no stream");
+            assert_eq!(missing_identity(error), expected, "{route:?} streamed");
+            assert!(http.requests().is_empty(), "{route:?}: nothing was sent");
+        }
+    }
+}
+
+/// A request other than a completion on the ChatGPT dialect reaches the
+/// same gateway, so it carries the caller's identity too, and refuses
+/// without it.
+#[test]
+fn chatgpt_modality_requests_carry_the_caller_s_identity_or_refuse() {
+    use crate::wire::{Mode, Wire};
+
+    for (provider, expected) in refused_chatgpt_configurations() {
+        let refused = provider
+            .models()
+            .encode((), Mode::Unary)
+            .expect_err("no exact identity, no request");
+        assert_eq!(missing_identity(refused.into()), expected);
+    }
+
+    let encoded = chatgpt("tok")
+        .with_caller_identity(client_exec_identity(Some("1.2.3")))
+        .models()
+        .encode((), Mode::Unary)
+        .expect("encodes");
+    let headers = encoded.request.headers();
+    assert_eq!(headers["originator"], "client_exec");
+    assert_eq!(headers[VERSION_HEADER], "1.2.3");
+}
+
+/// A dialect that asks for no caller identity is unchanged: without one it
+/// stamps none, and an originator alone still gains the `rig/…` user agent
+/// naming it.
+#[test]
+fn a_dialect_without_an_identity_requirement_keeps_its_behavior() {
+    let provider = OpenAIConfig::new("sk-test");
+    assert!(
+        provider.identity.is_none(),
+        "the OpenAI dialect asks for none"
+    );
+    let request = provider
+        .identify(http::Request::get("https://example.invalid/"))
+        .expect("nothing is required")
+        .body(())
+        .expect("builds");
+    assert!(request.headers().is_empty(), "got {:?}", request.headers());
+
+    let plain = identity_headers(&OpenAIConfig::new("sk-test").with_originator("ccc"));
+    assert_eq!(plain["originator"], "ccc");
+    assert_eq!(plain["user-agent"], default_user_agent("ccc").as_str());
+    assert!(plain.get(VERSION_HEADER).is_none());
+}
+
+/// A caller identity given whole reaches every request exactly as given: its
+/// `originator`, its `user-agent` (no default is derived), and its `version`
+/// header when it names one. It replaces any originator set before; without
+/// a version no `version` header is sent.
+#[test]
+fn a_whole_caller_identity_reaches_the_request_exactly_as_given() {
+    let identity = client_exec_identity(Some("1.2.3"));
+    let config = chatgpt("tok")
+        .with_originator("overridden")
+        .with_caller_identity(identity.clone());
+    let sent = identity_headers(&config);
+    assert_eq!(sent["originator"], "client_exec");
+    assert_eq!(
+        sent["user-agent"],
+        "client_exec/1.2.3 (Linux 6.18; x86_64) xterm (client_exec; 1.2.3)"
+    );
+    assert_eq!(sent[VERSION_HEADER], "1.2.3");
+    assert_eq!(
+        config.identity.as_ref(),
+        Some(&ConfiguredIdentity::Exact(identity.clone()))
+    );
+    assert_eq!(identity.originator(), "client_exec");
+    assert_eq!(identity.version(), Some("1.2.3"));
+
+    let unversioned =
+        identity_headers(&OpenAIConfig::new("sk-test").with_caller_identity(client_exec_identity(None)));
+    assert_eq!(unversioned["originator"], "client_exec");
+    assert!(unversioned.get(VERSION_HEADER).is_none());
+}
+
+/// The ChatGPT identity environment variables give the caller's exact
+/// identity only together: both set give it, neither gives none (and the
+/// requests refuse), and either one alone is refused, naming the missing
+/// variable, since Rig derives no half of an identity.
+#[test]
+fn chatgpt_identity_environment_variables_count_only_together() {
+    let identity = crate::providers::chatgpt::DIALECT
+        .quirks
+        .identity
+        .expect("the ChatGPT dialect requires a caller identity");
+    let from = |originator: Option<&str>, user_agent: Option<&str>| {
+        identity_from_env(identity, |name| {
+            Ok(match name {
+                "CHATGPT_ORIGINATOR" => originator.map(str::to_owned),
+                "CHATGPT_USER_AGENT" => user_agent.map(str::to_owned),
+                other => panic!("unexpected variable {other}"),
+            })
+        })
+    };
+
+    assert_eq!(
+        from(Some("client_exec"), Some("ua/1")).expect("both set"),
+        Some(CallerIdentity::new("client_exec", "ua/1", None).expect("valid"))
+    );
+    assert_eq!(from(None, None).expect("neither set"), None);
+    assert_eq!(from(Some(""), Some("")).expect("empty is unset"), None);
+
+    let missing = |result: Result<Option<CallerIdentity>, EnvError>| match result {
+        Err(EnvError::Invalid { name, .. }) => name,
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+    assert_eq!(missing(from(Some("ccc"), None)), "CHATGPT_USER_AGENT");
+    assert_eq!(missing(from(None, Some("ua/1"))), "CHATGPT_ORIGINATOR");
+    assert_eq!(
+        missing(from(Some("client_exec"), Some("line\nbreak"))),
+        "CHATGPT_USER_AGENT",
+        "an invalid value names its own variable"
+    );
+}
+
+/// A configured identity serializes with its kind, and a configuration
+/// serialized before the kind existed does not decode, so a derived `rig/…`
+/// user agent stored then cannot come back as the caller's exact one.
+#[test]
+fn a_configured_identity_keeps_its_kind_through_serialization() {
+    let exact = serde_json::to_value(
+        chatgpt("tok").with_caller_identity(client_exec_identity(Some("1.2.3"))),
+    )
+    .expect("serializes");
+    assert_eq!(exact["identity"]["kind"], "exact");
+    assert_eq!(exact["identity"]["originator"], "client_exec");
+    let decoded: OpenAIConfig = serde_json::from_value(exact.clone()).expect("decodes");
+    assert!(matches!(
+        decoded.identity,
+        Some(ConfiguredIdentity::Exact(_))
+    ));
+
+    let originator =
+        serde_json::to_value(OpenAIConfig::new("sk-test").with_originator("ccc")).expect("serializes");
+    assert_eq!(
+        originator["identity"],
+        serde_json::json!({"kind": "originator", "originator": "ccc"})
+    );
+    let decoded: OpenAIConfig = serde_json::from_value(originator).expect("decodes");
+    assert_eq!(
+        decoded.identity,
+        Some(ConfiguredIdentity::Originator {
+            originator: "ccc".to_owned()
+        })
+    );
+
+    let mut old = exact;
+    old["identity"] =
+        serde_json::json!({"originator": "rig", "user_agent": "rig/0 (linux x86_64; rig)"});
+    assert!(
+        serde_json::from_value::<OpenAIConfig>(old).is_err(),
+        "an identity without a kind does not decode"
+    );
+}
+
+/// A value no request could carry cannot become a caller identity, by the
+/// constructor or by deserialization, and the refusal names which value it
+/// was.
+#[test]
+fn a_caller_identity_no_request_could_carry_cannot_be_built() {
+    let refused = |originator: &str, user_agent: &str, version: Option<&str>| {
+        CallerIdentity::new(originator, user_agent, version.map(str::to_owned))
+            .expect_err("an invalid value is refused")
+    };
+    assert_eq!(
+        refused("", "ua", None),
+        InvalidCallerIdentity {
+            field: "originator",
+            value: String::new()
+        }
+    );
+    assert_eq!(
+        refused("client_exec", "line\nbreak", None),
+        InvalidCallerIdentity {
+            field: "user_agent",
+            value: "line\nbreak".to_owned()
+        }
+    );
+    assert_eq!(
+        refused("client_exec", "ua", Some("")),
+        InvalidCallerIdentity {
+            field: "version",
+            value: String::new()
+        }
+    );
+
+    for json in [
+        serde_json::json!({"originator": "", "user_agent": "ua"}),
+        serde_json::json!({"originator": "o", "user_agent": "ua", "version": "1\n2"}),
+    ] {
+        assert!(
+            serde_json::from_value::<CallerIdentity>(json.clone()).is_err(),
+            "{json} must not decode"
+        );
+    }
+    // Nor through a whole configuration.
+    let mut config = serde_json::to_value(
+        OpenAIConfig::with_key(&crate::providers::chatgpt::DIALECT, "tok")
+            .with_caller_identity(client_exec_identity(Some("1.2.3"))),
+    )
+    .expect("serializes");
+    assert!(
+        serde_json::from_value::<OpenAIConfig>(config.clone()).is_ok(),
+        "the configuration as serialized decodes, so the refusal below is the identity's"
+    );
+    config["identity"]["version"] = serde_json::json!("");
+    assert!(serde_json::from_value::<OpenAIConfig>(config).is_err());
+}
+
+/// A serialized identity without a version still decodes, and a version is
+/// written only when there is one.
+#[test]
+fn a_caller_identity_serializes_its_version_only_when_it_has_one() {
+    let old: CallerIdentity =
+        serde_json::from_str(r#"{"originator":"rig","user_agent":"rig/0 (linux x86_64; rig)"}"#)
+            .expect("an identity serialized before `version` existed decodes");
+    assert_eq!(old.version(), None);
+    assert_eq!(
+        serde_json::to_value(&old).expect("serializes"),
+        serde_json::json!({"originator": "rig", "user_agent": "rig/0 (linux x86_64; rig)"})
+    );
+    assert_eq!(
+        serde_json::to_value(client_exec_identity(Some("1.2.3"))).expect("serializes")["version"],
+        "1.2.3"
+    );
+    assert!(
+        serde_json::from_value::<CallerIdentity>(
+            serde_json::json!({"originator": "o", "user_agent": "ua", "extra": 1})
+        )
+        .is_err(),
+        "unknown fields are still refused"
+    );
 }
