@@ -8,6 +8,42 @@ use crate::wire::{Decoder, WireEvent, WireFrame};
 use serde_json::{Value, json};
 
 #[test]
+fn a_response_error_without_a_code_decodes_and_stays_absent() {
+    let error: super::WebSocketErrorFields =
+        serde_json::from_value(json!({"message": "overloaded"}))
+            .expect("an error without a code decodes");
+    assert_eq!(error._code, None);
+    assert_eq!(error._message, "overloaded");
+    assert_eq!(
+        serde_json::to_value(&error).expect("the error serializes"),
+        json!({"message": "overloaded"}),
+    );
+}
+
+#[test]
+fn a_bare_response_error_is_a_corrupt_frame_on_the_default_wire() {
+    const RAW: &str = r#"{"message":"overloaded"}"#;
+    let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict());
+    for event in [
+        classify_responses_payload(RAW),
+        decoder.classify(WireFrame::Text(RAW.to_owned())),
+    ] {
+        let error =
+            crate::driver::triage(event).expect_err("the bare error is not a wire response");
+        let crate::error::ProviderError::CorruptFrame(corrupt) = error else {
+            panic!("a wire-shape refusal retains CorruptFrame, not a provider failure");
+        };
+        assert_eq!(corrupt.frame(), Some(RAW));
+        assert_eq!(corrupt.frame_bytes(), Some(RAW.as_bytes()));
+        assert_eq!(
+            corrupt.evidence(),
+            &crate::error::FrameEvidence::Text(RAW.to_owned()),
+        );
+        assert_eq!(corrupt.event_type(), None);
+    }
+}
+
+#[test]
 fn sparse_done_accepts_full_field_subsets_and_keeps_unknown_evidence() {
     let optional = [
         ("object", json!("response")),

@@ -19,7 +19,7 @@ fn invalid(message: impl std::fmt::Display) -> serde_json::Error {
 }
 
 // Values validated here remain in the original Value, including unmodeled
-// siblings and explicit nulls. None of these proof structs is serialized.
+// siblings and explicit nulls. Proof structs never replace that input.
 #[allow(dead_code)]
 #[derive(Deserialize)]
 struct WholeFields {
@@ -75,9 +75,9 @@ struct ResponseError {
 }
 
 #[cfg(any(feature = "websocket", test))]
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct WebSocketErrorFields {
-    #[serde(rename = "code")]
+    #[serde(rename = "code", skip_serializing_if = "Option::is_none")]
     _code: Option<String>,
     #[serde(rename = "message")]
     _message: String,
