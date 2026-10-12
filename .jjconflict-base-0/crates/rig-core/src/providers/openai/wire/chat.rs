@@ -85,6 +85,28 @@ fn image_url(image: &crate::message::Image, user: bool) -> Result<Value, EncodeE
     Ok(json!({"type": "image_url", "image_url": part}))
 }
 
+/// Check the original PDF source before adaptation or direct encoding.
+/// No current dialect quirk declares URL-document support.
+fn check_pdf_document(document: &crate::message::Document) -> Result<(), EncodeError> {
+    if document.media_type != Some(DocumentMediaType::PDF) {
+        return Ok(());
+    }
+    match &document.data {
+        DocumentData::File(Source::Url(_)) => Err(EncodeError::request(
+            crate::message::MessageError::ConversionError(
+                "OpenAI chat completions does not accept URL files; use the Responses API or pass base64-encoded bytes".to_owned(),
+            ),
+        )),
+        DocumentData::File(Source::Raw(_)) => Err(EncodeError::request(
+            crate::message::MessageError::ConversionError(
+                "Raw files not supported, encode as base64 first".to_owned(),
+            ),
+        )),
+        DocumentData::Text(_)
+        | DocumentData::File(Source::Base64(_) | Source::FileId(_) | Source::Unknown) => Ok(()),
+    }
+}
+
 /// One user content part as Chat Completions carries it.
 fn user_part(part: &UserContent) -> Result<Value, EncodeError> {
     let file = |file: Value| json!({"type": "file", "file": file});
@@ -92,6 +114,7 @@ fn user_part(part: &UserContent) -> Result<Value, EncodeError> {
         UserContent::Text(text) => json!({"type": "text", "text": text.text}),
         UserContent::Image(image) => image_url(image, true)?,
         UserContent::Document(document) => {
+            check_pdf_document(document)?;
             let pdf = document.media_type == Some(DocumentMediaType::PDF);
             match &document.data {
                 DocumentData::Text(text) => json!({"type": "text", "text": text}),
@@ -100,7 +123,7 @@ fn user_part(part: &UserContent) -> Result<Value, EncodeError> {
                     "file_data": format!("data:application/pdf;base64,{data}"),
                     "filename": "document.pdf",
                 })),
-                // OpenRouter and Mistral fetch a PDF a URL names.
+                // The original PDF check above refuses the legacy URL projection.
                 DocumentData::File(Source::Url(url)) if pdf => {
                     file(json!({"file_data": url, "filename": "document.pdf"}))
                 }
@@ -431,7 +454,7 @@ impl Chat {
             if let Message::Assistant(turn) = message {
                 for block in &turn.content {
                     if let AssistantContent::ToolCall(call) = block {
-                        call.for_json_only_wire("OpenAI Chat Completions")?;
+                        call.for_json_only_wire("OpenAI-compatible Chat Completions")?;
                     }
                 }
             }
@@ -551,7 +574,7 @@ impl Chat {
                 }
                 AssistantContent::CustomToolCall(call) => {
                     return Err(call
-                        .refused_by_json_only_wire("OpenAI Chat Completions")
+                        .refused_by_json_only_wire("OpenAI-compatible Chat Completions")
                         .into());
                 }
                 AssistantContent::ProviderItem(item) => {
@@ -1298,6 +1321,10 @@ impl Wire for Chat {
 }
 
 impl crate::completion::ReplayTarget for Chat {
+    fn check_document(&self, document: &crate::message::Document) -> Result<(), EncodeError> {
+        check_pdf_document(document)
+    }
+
     /// Section 6.2 of the typed-options design, by dialect.
     fn map_options(
         &self,
@@ -1336,9 +1363,10 @@ impl crate::completion::ReplayTarget for Chat {
 
     /// What the Chat encoder carries, by dialect: an image as a URL or
     /// typed data; audio as data; video as a URL or typed data, except to
-    /// OpenAI, Azure and Mistral; a PDF as data, or as a URL OpenRouter or
-    /// Mistral fetches; a file id where the dialect takes one; and a text
-    /// document as text. DeepSeek and Mira take text only; Perplexity and
+    /// OpenAI, Azure and Mistral; a PDF as data, with original URL and raw
+    /// sources refused before adaptation; a file id where the dialect takes
+    /// one; and a text document as text. DeepSeek and Mira take text only;
+    /// Perplexity and
     /// Cohere take no media but images, and Ollama only images as data.
     fn encodes(&self, _model: &str, media: crate::completion::Media<'_>) -> bool {
         use crate::completion::Media;
@@ -1381,6 +1409,7 @@ impl crate::completion::ReplayTarget for Chat {
                     }
                     DocumentData::File(Source::Base64(_)) => files && pdf,
                     DocumentData::File(Source::Url(_)) => {
+                        // Original/direct PDF checks refuse this legacy URL predicate.
                         pdf && matches!(rewrite, BodyRewrite::OpenRouter | BodyRewrite::Mistral)
                     }
                     DocumentData::File(Source::Raw(_) | Source::Unknown) => false,
