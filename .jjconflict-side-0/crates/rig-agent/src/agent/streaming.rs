@@ -7,67 +7,63 @@
 //! ```
 
 use rig_core::error::ProviderError;
-use rig_core::streaming::BlockId;
-use rig_core::{message::AssistantContent, wasm_compat::WasmCompatSend};
+use rig_core::{
+    message::AssistantContent,
+    wasm_compat::{WasmBoxedStream, WasmCompatSend},
+};
 
 use crate::{
-    agent::engine::{DriveItem, StreamingTurnSource, drive_agent, streaming_error_into_prompt},
+    agent::engine::{DriveItem, StreamingTurnSource, drive_agent},
     agent::hook::{AgentHook, RunSettled, SettledOutcome, StepEventKind},
     agent::runner::{AgentRunner, RunOrigin},
-    streaming::{BlockClose, Delta, StreamEvent, StreamedUserContent},
+    streaming::{Item, StreamEvent},
 };
 use futures::{SinkExt, Stream, StreamExt, channel::mpsc, stream::FusedStream};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::pin::Pin;
 use tracing_futures::Instrument;
 
 use crate::completion::PromptError;
 use crate::run::response::{CompletionCall, PromptResponse};
-use crate::run::transcript::assistant_text_from_choice;
 use rig_core::message::Message;
 
-// Match core's browser-only relaxed bounds; a bare wasm32 check would also
-// relax Send on WASI, where core still requires it.
 /// The stream a streamed run yields: its items, then its ending.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-pub type StreamingResult =
-    Pin<Box<dyn Stream<Item = Result<MultiTurnStreamItem, StreamingError>> + Send>>;
+pub type StreamingResult = WasmBoxedStream<'static, Result<MultiTurnStreamItem, PromptError>>;
 
-/// The stream a streamed run yields: its items, then its ending.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub type StreamingResult = Pin<Box<dyn Stream<Item = Result<MultiTurnStreamItem, StreamingError>>>>;
-
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 /// One item of a streamed run: a provider stream event, a committed tool
-/// call, a lifecycle marker, or the run's final response.
+/// call, a lifecycle marker, or the run's final response. An item reads back
+/// from its serialized form on its own, without checking its order against
+/// the items around it; [`Transcript::parse`](rig_core::streaming::Transcript::parse)
+/// checks a run's provider stream items.
+#[non_exhaustive]
 pub enum MultiTurnStreamItem {
-    /// A provider stream event containing model-emitted content: block
-    /// starts and ends, text/reasoning deltas, tool-call deltas, the
-    /// terminal record, unmodeled passthrough items. Tool-call block ends
-    /// are not forwarded; the model's completed calls are reported as
-    /// [`ToolCall`](Self::ToolCall) when the turn commits.
-    StreamAssistantItem(StreamEvent),
+    /// A provider stream item containing model-emitted content: part
+    /// starts and ends, text and reasoning fragments, a tool call's
+    /// argument fragments as they stream (a call to a tool the turn does not
+    /// allow is held for its resolution), and unmodeled passthrough
+    /// payloads. A call's end carries the validated call. The model's
+    /// completed calls are also reported as [`ToolCall`](Self::ToolCall)
+    /// when the turn commits.
+    StreamAssistantItem(Item<StreamEvent>),
     /// A tool call the **model emitted**, reported when the model turn is
     /// committed, for each call Rig routes to execution. Such a call is
     /// reported whether or not the tool body ultimately runs (a hook skip
     /// still reports it); it is **not** an execution-lifecycle event (see
     /// [`ToolExecutionCommitted`](Self::ToolExecutionCommitted)).
     ///
-    /// Two kinds of model tool call are **not** reported here (their
-    /// arguments still stream as tool-call deltas): a call rejected and
+    /// Two kinds of model tool call are **not** reported here: a call rejected and
     /// handled by invalid-tool-call recovery (surfaced via that recovery
     /// path), and a structured-output Tool-mode output-tool call, which
     /// finalizes the run directly; its structured result is surfaced in
     /// the [`FinalResponse`](Self::FinalResponse) rather than as a completed
     /// call.
     ToolCall {
-        /// The call as the model emitted it.
+        /// The call as the model emitted it. Its id is equal on its
+        /// execution commit and its result.
         tool_call: rig_core::message::ToolCall,
-        /// The block this call streamed under (a buffered turn's call is
-        /// keyed by its durable id): equal on its deltas, its execution
-        /// commit and its result.
-        block_id: BlockId,
     },
     /// Confirmation that Rig **executed and committed** a tool call. This is not
     /// a real-time start notification: it is surfaced together with its
@@ -77,7 +73,7 @@ pub enum MultiTurnStreamItem {
     /// This item is emitted only for a tool whose body actually ran (it passed
     /// its `ToolCall` hook checks), never for a call dropped by a sibling's
     /// termination, skipped by a hook, or resolved by invalid-call recovery.
-    /// Correlate it with the model call and result through `block_id`.
+    /// Correlate it with the model call and result through the call's id.
     ToolExecutionCommitted {
         /// The tool call as **executed**: the model's call with any
         /// [`DispatchAction::Patch`](crate::agent::DispatchAction::Patch) hook rewrite
@@ -85,17 +81,16 @@ pub enum MultiTurnStreamItem {
         /// model's *original* call is reported via
         /// [`StreamAssistantItem`](Self::StreamAssistantItem).
         tool_call: rig_core::message::ToolCall,
-        /// The block id correlating this execution with the model tool call
-        /// ([`ToolCall::block_id`](Self::ToolCall)) and the resulting
-        /// [`StreamedUserContent::ToolResult`].
-        block_id: BlockId,
     },
-    /// A streamed user content item: the **result** of an executed (or
-    /// hook-skipped) tool call. The tool batch commits and surfaces atomically at
-    /// every `tool_concurrency` (including the sequential default): results are
-    /// surfaced in call order only after the whole batch settles successfully;
-    /// a run that terminates mid-batch surfaces no successful tool results.
-    StreamUserItem(StreamedUserContent),
+    /// The **result** of an executed (or hook-skipped) tool call. The tool
+    /// batch commits and surfaces atomically at every `tool_concurrency`
+    /// (including the sequential default): results are surfaced in call order
+    /// only after the whole batch settles successfully; a run that terminates
+    /// mid-batch surfaces no successful tool results.
+    ToolResult {
+        /// The result; `tool_result.call` is the id of the call it answers.
+        tool_result: rig_core::message::ToolResult,
+    },
     /// Details for one successfully completed completion request made by this agent stream.
     ///
     /// This is emitted when a provider call finishes. Usage is the provider's
@@ -139,17 +134,15 @@ fn final_response_from_content(
     content: Vec<AssistantContent>,
     aggregated_usage: crate::completion::Usage,
     completion_calls: Vec<CompletionCall>,
-    history: Option<Vec<Message>>,
+    history: Vec<Message>,
 ) -> PromptResponse {
-    let mut response = PromptResponse::new(assistant_text_from_choice(&content), aggregated_usage)
-        .with_content(content)
-        .with_completion_calls(completion_calls);
-    response.messages = history;
-    response
+    PromptResponse::from_content(content, aggregated_usage)
+        .with_completion_calls(completion_calls)
+        .with_messages(history)
 }
 
 impl MultiTurnStreamItem {
-    pub(crate) fn stream_item(item: StreamEvent) -> Self {
+    pub(crate) fn stream_item(item: Item<StreamEvent>) -> Self {
         Self::StreamAssistantItem(item)
     }
 
@@ -168,7 +161,7 @@ impl MultiTurnStreamItem {
     }
 
     /// Build a final response from structured content and aggregate usage.
-    /// Concatenates text for output; completion details and history remain unset.
+    /// Concatenates text for output; completion details and history remain empty.
     pub fn final_response(
         content: Vec<AssistantContent>,
         aggregated_usage: crate::completion::Usage,
@@ -177,7 +170,7 @@ impl MultiTurnStreamItem {
             content,
             aggregated_usage,
             Vec::new(),
-            None,
+            Vec::new(),
         ))
     }
 
@@ -185,7 +178,7 @@ impl MultiTurnStreamItem {
         content: Vec<AssistantContent>,
         aggregated_usage: crate::completion::Usage,
         completion_calls: Vec<CompletionCall>,
-        history: Option<Vec<Message>>,
+        history: Vec<Message>,
     ) -> Self {
         Self::FinalResponse(final_response_from_content(
             content,
@@ -193,74 +186,6 @@ impl MultiTurnStreamItem {
             completion_calls,
             history,
         ))
-    }
-}
-
-/// Drain a provider stream abandoned by invalid tool-call recovery so the
-/// reported usage for the recovered completion call is not lost.
-pub(crate) async fn drain_stream_usage(
-    stream: &mut crate::streaming::StreamingCompletionResponse,
-) -> Result<crate::completion::Usage, StreamingError> {
-    while let Some(content) = stream.next().await {
-        match content {
-            Ok(StreamEvent::Final(final_resp)) => {
-                return Ok(final_resp.usage);
-            }
-            Ok(_) => {}
-            Err(err) => return Err(err.into()),
-        }
-    }
-
-    Ok(crate::completion::Usage::default())
-}
-
-/// Replace calls and prose in a finished output-tool turn with final output text,
-/// retaining reasoning and images. Call only after finalization, when remaining
-/// calls are output-tool calls. Persisted history retains prose independently;
-/// returns `None` if no call is present.
-pub(crate) fn finalize_streamed_choice(
-    last_final_choice: &[AssistantContent],
-    output: &str,
-) -> Option<Vec<AssistantContent>> {
-    let finalized_via_output_tool = last_final_choice
-        .iter()
-        .any(|item| matches!(item, AssistantContent::ToolCall(_)));
-    if !finalized_via_output_tool {
-        return None;
-    }
-    let mut items: Vec<AssistantContent> = last_final_choice
-        .iter()
-        .filter(|item| {
-            !matches!(
-                item,
-                AssistantContent::ToolCall(_)
-                    | AssistantContent::CustomToolCall(_)
-                    | AssistantContent::Text(_)
-            )
-        })
-        .cloned()
-        .collect();
-    items.push(AssistantContent::text(output.to_string()));
-    Some(items)
-}
-
-/// Why a streamed run ended before its final response.
-#[derive(Debug, thiserror::Error)]
-pub enum StreamingError {
-    /// The provider stream failed.
-    #[error("CompletionError: {0}")]
-    Completion(#[from] ProviderError),
-    /// Structured failure from the bus, a handler, a hook, or a stream item.
-    #[error("{0}")]
-    Report(#[from] rig_core::error::ErrorReport),
-    /// The run failed for a reason the blocking surface reports the same way.
-    #[error("PromptError: {0}")]
-    Prompt(#[from] PromptError),
-}
-
-impl From<rig_core::memory::MemoryError> for StreamingError {
-    fn from(err: rig_core::memory::MemoryError) -> Self {
-        Self::Prompt(PromptError::MemoryError(err))
     }
 }
 
@@ -319,9 +244,9 @@ impl AgentRunner {
 
         let bus = self.config.bus.clone();
         let hook_ctx = self.hook_context(true);
-        // A resumed run loads nothing and saves nothing (see `run`).
+        // A resumed run loads nothing and appends what it adds (see `run`).
         let resolved = match &self.origin {
-            RunOrigin::Resume(_) => Ok((None, None)),
+            RunOrigin::Resume(_) => self.resumed_memory(),
             RunOrigin::Prompt(_) => {
                 let resolve = self.resolve_history_and_memory(&hook_ctx);
                 futures::pin_mut!(resolve);
@@ -336,7 +261,7 @@ impl AgentRunner {
                 // at the first failure cannot suppress the lifecycle notification.
                 let hooks = self.config.hooks.clone();
                 let stream = async_stream::stream! {
-                    let err = StreamingError::from(err);
+                    let err = PromptError::from(err);
                     if hooks.observes(StepEventKind::RunSettled) {
                         let reason = err.to_string();
                         hooks
@@ -486,9 +411,8 @@ impl AgentRunner {
                     Err(err) => {
                         // Drain after the terminal error so span and lineage teardown
                         // completes instead of being dropped at the yield.
-                        let error = streaming_error_into_prompt(err);
                         while stream.next().await.is_some() {}
-                        return Err(error);
+                        return Err(err);
                     }
                 };
                 match item {
@@ -508,7 +432,7 @@ impl AgentRunner {
                 }
             }
             response.ok_or_else(|| {
-                PromptError::CompletionError(ProviderError::Response(
+                PromptError::Provider(ProviderError::Response(
                     "agent run ended without producing a final response".to_string(),
                 ))
             })
@@ -517,51 +441,63 @@ impl AgentRunner {
     }
 }
 
-/// Helper function to stream assistant-visible completion output to stdout.
+/// Why [`stream_to_stdout`] returned no response.
+#[derive(Debug, thiserror::Error)]
+pub enum StreamToStdoutError {
+    /// The run failed.
+    #[error(transparent)]
+    Run(#[from] PromptError),
+    /// Writing to stdout failed.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// The stream ended without a final response.
+    #[error("the stream ended without a final response")]
+    Incomplete,
+}
+
+/// Print a streamed run's assistant text and reasoning to stdout and return
+/// its final response.
 ///
-/// This helper prints streamed assistant text and reasoning. Streaming metadata
-/// events, such as `MultiTurnStreamItem::CompletionCall`, are not printed;
-/// metadata is returned on the [`PromptResponse`] via accessors such as
-/// [`PromptResponse::completion_calls`]. A model-turn retry prints a visible
-/// boundary because text already written to stdout cannot be retracted.
+/// Streaming metadata events, such as `MultiTurnStreamItem::CompletionCall`,
+/// are not printed; metadata is returned on the [`PromptResponse`] via
+/// accessors such as [`PromptResponse::completion_calls`]. A model-turn retry
+/// prints a visible boundary because text already written to stdout cannot be
+/// retracted. Fails with the run's error as soon as the stream yields it, a
+/// stdout write failure, or [`StreamToStdoutError::Incomplete`] when the
+/// stream ends without a final response.
 pub async fn stream_to_stdout(
     stream: &mut StreamingResult,
-) -> Result<PromptResponse, std::io::Error> {
-    let mut final_res = PromptResponse::empty();
-    print!("Response: ");
+) -> Result<PromptResponse, StreamToStdoutError> {
+    let mut stdout = std::io::stdout();
+    write!(stdout, "Response: ")?;
     while let Some(content) = stream.next().await {
-        match content {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockDelta {
-                delta: Delta::Text { text },
+        match content? {
+            MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
+                text,
                 ..
             })) => {
-                print!("{text}");
-                std::io::Write::flush(&mut std::io::stdout())?;
+                write!(stdout, "{text}")?;
+                stdout.flush()?;
             }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockEnd {
-                end: BlockClose::Reasoning { .. },
-                block: Some(AssistantContent::Reasoning(reasoning)),
+            MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::End {
+                content: AssistantContent::Reasoning(reasoning),
                 ..
             })) => {
-                let reasoning = reasoning.display_text();
-                print!("{reasoning}");
-                std::io::Write::flush(&mut std::io::stdout())?;
+                write!(stdout, "{}", reasoning.text)?;
+                stdout.flush()?;
             }
-            Ok(MultiTurnStreamItem::FinalResponse(res)) => {
-                final_res = res;
-            }
-            Ok(MultiTurnStreamItem::ModelTurnRetried { turn }) => {
-                print!("\n[model turn {turn} rejected; retry requested]\nResponse: ");
-                std::io::Write::flush(&mut std::io::stdout())?;
-            }
-            Err(err) => {
-                eprintln!("Error: {err}");
+            MultiTurnStreamItem::FinalResponse(response) => return Ok(response),
+            MultiTurnStreamItem::ModelTurnRetried { turn } => {
+                write!(
+                    stdout,
+                    "\n[model turn {turn} rejected; retry requested]\nResponse: "
+                )?;
+                stdout.flush()?;
             }
             _ => {}
         }
     }
-
-    Ok(final_res)
+    Err(StreamToStdoutError::Incomplete)
 }
 
 #[cfg(test)]
