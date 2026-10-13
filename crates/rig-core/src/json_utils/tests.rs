@@ -355,3 +355,36 @@ mod partial_arguments {
         }
     }
 }
+
+#[test]
+fn partial_object_shared_container_nodes_keep_bounded_nested_values() {
+    let mut expected = serde_json::json!(1);
+    for _ in 0..24 {
+        expected = serde_json::json!([expected]);
+    }
+    let text = format!("{{\"x\":{}1", "[".repeat(24));
+    assert_eq!(
+        super::parse_partial_object(&text).map(serde_json::Value::Object),
+        Some(serde_json::json!({"x": expected})),
+    );
+}
+
+#[test]
+fn partial_object_closed_and_reopened_containers_keep_the_saved_ancestry() {
+    let text = r#"{"first":[{"n":1}],"next":{"values":[2,3"#;
+    assert_eq!(
+        super::parse_partial_object(text).map(serde_json::Value::Object),
+        Some(serde_json::json!({"first":[{"n":1}],"next":{"values":[2,3]}})),
+    );
+}
+
+#[test]
+fn partial_object_escaped_nested_text_keeps_its_value_at_a_cut() {
+    let text = r#"{"rows":[{"value":"a\"b"#;
+    for text in [text.to_owned(), format!("{text}\\")] {
+        assert_eq!(
+            super::parse_partial_object(&text).map(serde_json::Value::Object),
+            Some(serde_json::json!({"rows":[{"value":"a\"b"}]})),
+        );
+    }
+}

@@ -155,11 +155,19 @@ pub fn parse_partial_object(text: &str) -> Option<serde_json::Map<String, serde_
     // Bounds the work on a large cut-off input: the last valid cut is
     // almost always near its end.
     const MAX_ATTEMPTS: usize = 256;
-    let mut stack = Vec::new();
+    // Saved cuts share immutable container nodes instead of copying each
+    // nesting stack. Closing and reopening cannot alter an earlier cut.
+    let mut nodes: Vec<(u8, Option<usize>)> = Vec::new();
+    let mut stack = None;
     let mut in_string = false;
     let mut escaped = false;
-    // Prefix lengths a value just ended at, with the containers open there.
-    let mut cuts: Vec<(usize, Vec<u8>, bool)> = Vec::new();
+    let mut cuts = std::collections::VecDeque::with_capacity(MAX_ATTEMPTS);
+    let mut save_cut = |at, stack, quote| {
+        if cuts.len() == MAX_ATTEMPTS {
+            cuts.pop_front();
+        }
+        cuts.push_back((at, stack, quote));
+    };
     let bytes = text.as_bytes();
     for (at, byte) in bytes.iter().enumerate() {
         if in_string {
@@ -168,7 +176,7 @@ pub fn parse_partial_object(text: &str) -> Option<serde_json::Map<String, serde_
                 (false, b'\\') => escaped = true,
                 (false, b'"') => {
                     in_string = false;
-                    cuts.push((at + 1, stack.clone(), false));
+                    save_cut(at + 1, stack, false);
                 }
                 (false, _) => {}
             }
@@ -177,19 +185,20 @@ pub fn parse_partial_object(text: &str) -> Option<serde_json::Map<String, serde_
         match byte {
             b'"' => in_string = true,
             b'{' | b'[' => {
-                stack.push(*byte);
-                cuts.push((at + 1, stack.clone(), false));
+                nodes.push((*byte, stack));
+                stack = Some(nodes.len() - 1);
+                save_cut(at + 1, stack, false);
             }
             b'}' | b']' => {
-                stack.pop();
-                cuts.push((at + 1, stack.clone(), false));
+                stack = stack.and_then(|node| nodes[node].1);
+                save_cut(at + 1, stack, false);
             }
             b if b.is_ascii_alphanumeric() || *b == b'.' || *b == b'-' || *b == b'+' => {
                 let next = bytes.get(at + 1).copied();
                 if !next.is_some_and(|n| {
                     n.is_ascii_alphanumeric() || n == b'.' || n == b'-' || n == b'+'
                 }) {
-                    cuts.push((at + 1, stack.clone(), false));
+                    save_cut(at + 1, stack, false);
                 }
             }
             _ => {}
@@ -197,7 +206,7 @@ pub fn parse_partial_object(text: &str) -> Option<serde_json::Map<String, serde_
     }
     if in_string {
         let at = text.len() - usize::from(escaped);
-        cuts.push((at, stack.clone(), true));
+        save_cut(at, stack, true);
     }
     cuts.iter()
         .rev()
@@ -207,8 +216,11 @@ pub fn parse_partial_object(text: &str) -> Option<serde_json::Map<String, serde_
             if *quote {
                 candidate.push('"');
             }
-            for container in open.iter().rev() {
-                candidate.push(if *container == b'{' { '}' } else { ']' });
+            let mut open = *open;
+            while let Some(node) = open {
+                let (container, parent) = nodes[node];
+                candidate.push(if container == b'{' { '}' } else { ']' });
+                open = parent;
             }
             match serde_json::from_str(&candidate) {
                 Ok(serde_json::Value::Object(object)) => Some(object),
