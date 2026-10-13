@@ -155,21 +155,21 @@ mod chatgpt {
 /// stop every other scenario from measuring the strict default.
 mod openai_responses_opt_in {
     use super::*;
-    use rig_core::completion::CompletionModel as _;
     use rig_core::providers::openai::responses_api::streaming::IncompleteTerminal;
     use rig_core::test_utils::SequencedStreamingHttpClient;
 
     pub fn driver_tolerating_incomplete() -> conformance::WireDriver {
         conformance::WireDriver::new("openai", |chunks| {
             Box::pin(async move {
-                let model = rig_core::driver::Bind::bind(
-                    rig_core::providers::openai::OpenAI::new("test-key"),
+                let wire = rig_core::providers::openai::responses_api::wire::Responses::new(
+                    rig_core::providers::openai::OpenAIConfig::new("test-key"), "gpt-5.4",
+                ).with_streamed_incomplete(IncompleteTerminal::Accept);
+                let model = rig_core::driver::Model::new(
+                    wire,
                     SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
-                )
-                .responses("gpt-5.4")
-                .map_wire(|wire| wire.with_streamed_incomplete(IncompleteTerminal::Accept));
-                let request = model.completion_request("hello").build();
-                let stream = model.stream(request).await?;
+                );
+                let request = CompletionRequest::new("hello");
+                let stream = model.stream(request)?;
                 Ok(conformance::fixtures::drain(stream).await)
             })
         })

@@ -21,6 +21,7 @@ use rig::message::{
 use rig::providers::openai;
 use rig::streaming::Item;
 use rig::streaming::StreamEvent;
+use rig_test_support::cassette_models::MapWire as _;
 use serde_json::json;
 
 use rig::completion::Effort;
