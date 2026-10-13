@@ -1,6 +1,6 @@
 use super::*;
 use base64::Engine as _;
-use message::{
+use crate::message::{
     AssistantContent, AssistantMessage, CarriedPayload, CarriedReasoning, CarriedReasoningPart,
     Message,
 };

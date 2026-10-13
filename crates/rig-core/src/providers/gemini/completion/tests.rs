@@ -1436,6 +1436,7 @@ fn original_result_image_order_and_source_errors_survive_mixed_request_preflight
 
 #[test]
 fn original_result_text_and_json_preflight_adds_no_function_or_custom_policy() {
+    use crate::wire::Operation as _;
     use crate::message::{AnsweredToolCall, CallId, LocalCallId, ToolResult, ToolResultContent};
     for model in ["gemini-2.5-flash", "gemini-3-flash-preview"] {
         let target = wire(model);
@@ -1450,8 +1451,11 @@ fn original_result_text_and_json_preflight_adds_no_function_or_custom_policy() {
                 ],
                 is_error: true,
             };
+            let request = CompletionRequest::from(vec![message::Message::User {
+                content: vec![message::UserContent::ToolResult(result)],
+            }]);
             target
-                .check_tool_result(&result)
+                .check_documents(&request)
                 .expect("nonimage content is outside this image-only preflight");
         }
         let request = CompletionRequest::new("ordinary text");

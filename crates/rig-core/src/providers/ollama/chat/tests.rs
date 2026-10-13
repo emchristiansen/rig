@@ -234,6 +234,7 @@ fn the_output_schema_is_format_once_tools_are_answered() {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: CallId::from_wire("call_1"),
                 name: name("lookup"),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::text("found")],
                 is_error: false,
             })],
@@ -284,6 +285,7 @@ fn messages_carry_images_thinking_calls_and_results() {
                 UserContent::ToolResult(ToolResult {
                     call: CallId::from_wire("call_1"),
                     name: name("lookup"),
+                    answers: crate::message::AnsweredToolCall::Function,
                     content: vec![
                         ToolResultContent::text("a"),
                         ToolResultContent::Json {
@@ -347,6 +349,7 @@ fn a_same_model_turn_replays_its_call_items() {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: CallId::from_wire("call_9"),
                 name: name("lookup"),
+                answers: crate::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::text("found")],
                 is_error: false,
             })],
@@ -437,6 +440,7 @@ fn unprepared_content_is_refused() {
         unprepared(UserContent::ToolResult(ToolResult {
             call: CallId::from_wire("call_1"),
             name: name("lookup"),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::Image(image)],
             is_error: false,
         }))

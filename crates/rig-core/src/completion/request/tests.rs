@@ -198,7 +198,8 @@ mod carried_document_requests {
             matches!(
                 content,
                 UserContent::Document(document)
-                    if document.data.to_string().contains(&format!("<file id: {expected_id}>"))
+                    if matches!(&document.data, crate::message::DocumentData::Text(text)
+                        if text.contains(&format!("<file id: {expected_id}>")))
             )
         })
     }

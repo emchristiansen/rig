@@ -277,6 +277,7 @@ fn results_continuing_a_stored_interaction_are_sent() {
         content: vec![UserContent::ToolResult(ToolResult {
             call: CallId::from_wire("c_1"),
             name: ToolName::new("add").expect("a tool name"),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::text("18")],
             is_error: false,
         })],
@@ -308,6 +309,7 @@ fn a_multi_part_result_reaches_gemini_2_as_one_string() {
         content: vec![UserContent::ToolResult(ToolResult {
             call: CallId::from_wire("c_1"),
             name: ToolName::new("read").expect("a tool name"),
+            answers: crate::message::AnsweredToolCall::Function,
             content,
             is_error: false,
         })],
@@ -372,6 +374,7 @@ fn a_stored_continuation_keeps_its_results_without_declared_tools() {
         content: vec![UserContent::ToolResult(ToolResult {
             call: CallId::from_wire("c_1"),
             name: ToolName::new("add").expect("a tool name"),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::text("18")],
             is_error: false,
         })],

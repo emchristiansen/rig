@@ -378,7 +378,7 @@ fn multiple_tool_result_blocks_convert_to_distinct_content_parts() {
 
 #[test]
 fn test_openai_request_uses_request_model_override() {
-    let request = CoreCompletionRequest::new("Hello").model(Some("gpt-4.1"));
+    let request = CoreCompletionRequest::new("Hello").model(Some("gpt-4.1".to_owned()));
     use crate::wire::{Mode, Wire};
     let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
         .chat("gpt-4o-mini");

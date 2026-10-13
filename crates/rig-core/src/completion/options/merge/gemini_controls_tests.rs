@@ -34,7 +34,7 @@ fn vertex_controls_preserve_single_candidate_and_do_not_apply_schema() {
     let request = CompletionRequest::new("hi")
         .temperature(0.2)
         .max_tokens(64)
-        .output_schema(serde_json::from_value(json!({"type":"object"})).expect("schema"))
+        .output_schema(serde_json::from_value::<schemars::Schema>(json!({"type":"object"})).expect("schema"))
         .additional_params(json!({"generationConfig": {
             "temperature":0.9, "maxOutputTokens":900, "candidateCount":4,
             "responseMimeType":"text/plain", "responseJsonSchema":{"type":"number"},

@@ -22,7 +22,7 @@ fn getter_from_model_fold(configured: &str, requested: Option<&str>, expected: &
         assert_eq!(prepared.model.as_deref(), Some(expected));
         let mut call = Call::new(&descriptor, mode);
         let fold = Completion::fold(&prepared, &mut call);
-        let decoded = decode_with(fold, descriptor.name, |reply| {
+        let decoded = decode_with::<Completion>(fold, descriptor.name, |reply| {
             let out = reply.out();
             let before = out.lock().fold.origin.clone();
             let issuer = out.lock().fold.carried_issuer.clone();
