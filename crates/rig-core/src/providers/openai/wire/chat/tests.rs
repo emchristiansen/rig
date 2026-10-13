@@ -899,3 +899,6 @@ async fn per_choice_usage_is_observed_as_the_decoder_reads_it() {
         "the raw source total remains exact"
     );
 }
+
+// Original history matrix stages under G240/G241.
+mod history_originals;
