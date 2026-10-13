@@ -1,10 +1,9 @@
 //! OpenAI Chat Completions history on retained fixtures.
 //!
-//! Four normalized-text declarations preserve the original no-tools history,
-//! Unicode marker, prompts and exact response-text predicates. The existing
-//! parallel-tool control declares tools and remains a separate changed-input
-//! observation. The original tool-bearing histories and Raw subjects are
-//! separately ported in core Chat tests at their approved current boundaries.
+//! The retained parallel-tool control declares tools as a separate input.
+//! All original history subjects now live in core Chat tests at their current
+//! request and response boundaries. Their exact recordings remain unchanged;
+//! ordinary assistant text takes upstream's bare-string request shape.
 
 use rig::streaming::Item;
 use std::sync::{Arc, Mutex};
@@ -344,13 +343,5 @@ fn cell(transport: Transport, model: ModelVariant, surface: Surface, shape: Shap
 crate::matrix::case_matrix! {
     wrapper: with_openai_history_roundtrip_cassette_result, family: history_roundtrip_matrix_case;
     # [tokio :: test]
-    blocking_gpt_4o_mini_normalized_text: ("chat_history_roundtrip_matrix/blocking_gpt_4o_mini_normalized_text", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: Text ,));
-    # [tokio :: test]
-    blocking_gpt_4_1_mini_normalized_text: ("chat_history_roundtrip_matrix/blocking_gpt_4_1_mini_normalized_text", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Surface :: Normalized , Shape :: Text ,));
-    # [tokio :: test]
-    streaming_gpt_4o_mini_normalized_text: ("chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_text", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: Text ,));
-    # [tokio :: test]
     streaming_gpt_4o_mini_normalized_parallel_tool: ("chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: ParallelTool ,));
-    # [tokio :: test]
-    streaming_gpt_4_1_mini_normalized_text: ("chat_history_roundtrip_matrix/streaming_gpt_4_1_mini_normalized_text", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Surface :: Normalized , Shape :: Text ,));
 }
