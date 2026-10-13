@@ -1734,8 +1734,9 @@ impl ResponsesDecoder {
             }
         }
         if item.str("status") != Some("completed") {
-            // Matching noncompleted items keep the existing streamed route.
-            return Ok(false);
+            // A full terminal cannot promote an announced unfinished call.
+            // Keep its delivered prefix; the terminal restatement stays raw.
+            return Ok(true);
         }
         self.call_done(index, item, out)?;
         Ok(true)
@@ -1776,14 +1777,12 @@ impl ResponsesDecoder {
             if first_error.is_some() && item.str("type") != Some("reasoning") {
                 continue;
             }
-            if !whole {
-                match self.terminal_announced_function_call(item, &mut out) {
-                    Ok(true) => continue,
-                    Ok(false) => {},
-                    Err(error) => {
-                        first_error.get_or_insert(error);
-                        continue;
-                    }
+            match self.terminal_announced_function_call(item, &mut out) {
+                Ok(true) => continue,
+                Ok(false) => {},
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
                 }
             }
             // Other streamed terminal calls retain their existing route; only
