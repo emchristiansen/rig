@@ -66,7 +66,7 @@ impl Wire for GenerateContent {
         _mode: Mode,
     ) -> Result<vertexai::model::GenerateContentRequest, EncodeError> {
         let model = request.model.clone().unwrap_or_else(|| self.model.clone());
-        let body = rest::request_body(&request, self, &model, None, |body| {
+        let body = rest::request_body_for_vertex(&request, self, &model, None, |body| {
             let contents = body
                 .get_mut("contents")
                 .and_then(serde_json::Value::as_array_mut);
