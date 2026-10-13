@@ -171,8 +171,10 @@ async fn streamed_unary_vertex_carried_events_and_response_keep_their_actual_iss
 fn ordinary_gemini_decoder_keeps_its_existing_carried_issuer() -> TestResult {
     for signed in [false, true] {
         let (received, parts) = fixture(signed);
-        let wire = rig_core::providers::gemini::GeminiConfig::new("test-key")
-            .completion(crate::completion::GEMINI_2_5_FLASH);
+        let wire = rig_core::providers::gemini::completion::GenerateContent::new(
+            rig_core::providers::gemini::GeminiConfig::new("test-key"),
+            crate::completion::GEMINI_2_5_FLASH,
+        );
         let frame = WireFrame::Text(Value::Object(rest_chunk(&received)?).to_string());
         let response = rig_core::test_utils::history_conformance::decode(
             &wire,
