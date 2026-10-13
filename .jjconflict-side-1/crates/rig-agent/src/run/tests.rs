@@ -1092,6 +1092,81 @@ fn a_truncated_reasoning_only_turn_commits_nothing() {
     );
 }
 
+/// Name-keyed dispatch cannot honor a namespace or run a custom call's raw
+/// input, so both are refused as the turn arrives: before the allowed-set
+/// check (the bare name `add` IS allowed here), invalid-call recovery, or
+/// any tool step.
+#[test]
+fn namespaced_and_custom_calls_are_refused_before_any_tool_step() {
+    use rig_core::message::UndispatchableToolCall;
+    let namespaced = AssistantContent::ToolCall(
+        ToolCall::from_wire(
+            "call_1",
+            ToolFunction::new(rig_core::message::ToolName::new("add").expect("tool name"), json!({"x": 1})),
+        )
+        .with_namespace(Some("math".to_owned())),
+    );
+    // Custom input that parses as JSON — and would be valid `add` arguments —
+    // is refused all the same.
+    let custom = AssistantContent::custom_tool_call("call_2", rig_core::message::ToolName::new("add").expect("tool name"), None, r#"{"x": 1}"#);
+    for (content, streamed) in [
+        (namespaced.clone(), false),
+        (custom.clone(), false),
+        (namespaced, true),
+        (custom, true),
+    ] {
+        let mut run = AgentRun::new("call something");
+        expect_call_model(&mut run);
+        let turn = ModelTurn::new(
+            rig_core::message::AssistantMessage::default(),
+            vec![AssistantContent::text("calling"), content.clone()],
+            Usage::default(),
+            policy(&["add"]),
+            hand_raw(),
+        );
+        let err = if streamed {
+            run.record_streamed_completion_call(
+                Usage::default(),
+                ResponseIdentity::default(),
+                None,
+                hand_raw(),
+            )
+            .expect("record");
+            run.streamed_turn(StreamedTurn {
+                head: turn.head,
+                choice: turn.choice,
+                policy: turn.policy,
+                finish_reason: None,
+            })
+            .expect_err("refused")
+        } else {
+            run.model_response(turn).expect_err("refused")
+        };
+        let PromptError::UndispatchableToolCall { call, chat_history } = err else {
+            panic!("expected UndispatchableToolCall, got {err:?}");
+        };
+        match (&content, &call) {
+            (
+                AssistantContent::ToolCall(_),
+                UndispatchableToolCall::Namespaced {
+                    name, namespace, ..
+                },
+            ) => {
+                assert_eq!((name.as_str(), namespace.as_str()), ("add", "math"));
+            }
+            (AssistantContent::CustomToolCall(_), UndispatchableToolCall::Custom { name, .. }) => {
+                assert_eq!(name.as_str(), "add");
+            }
+            _ => panic!("wrong refusal {call:?} for {content:?}"),
+        }
+        let Some(Message::Assistant(last)) = chat_history.last() else {
+            panic!("the diagnostic history ends in the refused turn");
+        };
+        assert!(last.content.contains(&content));
+        assert!(run.next_step().is_err(), "the run is terminal");
+    }
+}
+
 /// An empty choice, or a retry with no tool calls to answer, builds no
 /// message, so nothing empty is appended to history.
 #[test]

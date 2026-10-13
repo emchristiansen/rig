@@ -103,7 +103,44 @@ impl NativeChat {
                 }})
             })
             .collect();
-        tools.extend(input.raw_tools()?);
+        let mandatory = matches!(
+            request.tool_choice,
+            Some(ToolChoice::Required | ToolChoice::Specific { .. })
+        );
+        // G32: the raw layer merges after the base. A conflicting explicit
+        // instruction must be refused before it can replace REQUIRED.
+        if mandatory
+            && input
+                .param("tool_choice")
+                .is_some_and(|choice| choice.as_str() != Some("REQUIRED"))
+        {
+            return Err(EncodeError::request(
+                "Cohere tool_choice conflicts with the requested mandatory tool call",
+            ));
+        }
+        for raw_tool in input.raw_tools()? {
+            if let Some(ToolChoice::Specific { function_names }) = &request.tool_choice {
+                let name = (raw_tool.get("type").and_then(Value::as_str) == Some("function"))
+                    .then(|| raw_tool.pointer("/function/name").and_then(Value::as_str))
+                    .flatten()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| EncodeError::request(
+                        "Cohere Specific tool choice requires every raw tool to be a named function",
+                    ))?;
+                if !function_names
+                    .iter()
+                    .any(|selected| selected.as_str() == name)
+                {
+                    continue;
+                }
+            }
+            tools.push(raw_tool);
+        }
+        if mandatory && tools.is_empty() {
+            return Err(EncodeError::request(
+                "Cohere mandatory tool choice has no effective tools",
+            ));
+        }
         let tool_choice = match &request.tool_choice {
             None | Some(ToolChoice::Auto) => None,
             Some(ToolChoice::None) => Some("NONE"),

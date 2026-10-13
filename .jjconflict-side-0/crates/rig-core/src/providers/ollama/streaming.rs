@@ -128,7 +128,29 @@ impl<'id> Decoder<'id, Completion> for ChatDecoder {
             reason(thinking, &mut out)?;
         }
         if let Some(content) = message.str("content").filter(|content| !content.is_empty()) {
-            self.content(content, &mut out)?;
+            // G33 restores F's terminal full-body fallback. The received
+            // qwen3 substring is F's heuristic, not proof of a template.
+            // Nonterminal content is never buffered for this boundary.
+            let omitted_start = record.bool("done") == Some(true)
+                && message.str("thinking").is_none_or(str::is_empty)
+                && self
+                    .model
+                    .as_deref()
+                    .is_some_and(|model| model.to_ascii_lowercase().contains("qwen3"))
+                && matches!(&self.split, Split::Opening(held) if held.is_empty())
+                && !content.trim_start().starts_with(THINK_OPEN);
+            let prefilled = omitted_start
+                .then(|| content.trim_start().split_once("\n</think>\n\n"))
+                .flatten();
+            if let Some((thinking, answer)) = prefilled {
+                self.split = Split::Text { trim: false };
+                if !thinking.trim().is_empty() {
+                    reason(thinking.trim(), &mut out)?;
+                }
+                self.content(answer.trim_start(), &mut out)?;
+            } else {
+                self.content(content, &mut out)?;
+            }
         }
         for call in message.arr("tool_calls") {
             self.call(call, &mut out)?;

@@ -73,6 +73,10 @@ async fn run_streamed_turn(
                 StreamedTurnEvent::EmitToolCallDelta
                 | StreamedTurnEvent::HoldToolCall
                 | StreamedTurnEvent::EmitToolCall { .. } => {}
+                StreamedTurnEvent::UndispatchableToolCall(refused) => {
+                    let partial = assembler.partial_turn(&stream.partial());
+                    return Err(run.refuse_streamed_undispatchable(&partial, refused));
+                }
                 StreamedTurnEvent::InvalidToolCall(invalid) => {
                     let partial = assembler.partial_turn(&stream.partial());
                     let context = run.streamed_invalid_tool_call_context(&partial, &invalid);

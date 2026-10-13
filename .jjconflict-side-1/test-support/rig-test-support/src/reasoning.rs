@@ -583,6 +583,33 @@ fn record_reasoning(
     );
 }
 
+/// Keep the known structured reasoning categories the original helper
+/// observed, through their actual current carried representation.
+fn record_carried_reasoning(
+    stats: &mut StreamStats,
+    reasoning: &rig_core::message::CarriedReasoning,
+) {
+    use rig_core::message::CarriedReasoningPart;
+    stats.reasoning_block_count += 1;
+    for part in &reasoning.content {
+        let kind = match part {
+            CarriedReasoningPart::Text { signature, .. } => {
+                stats.reasoning_has_signature |= signature.is_some();
+                "Text"
+            }
+            CarriedReasoningPart::Summary(_) => "Summary",
+            CarriedReasoningPart::Encrypted(_) => {
+                stats.reasoning_has_encrypted = true;
+                "Encrypted"
+            }
+            CarriedReasoningPart::Redacted { .. } => "Redacted",
+            CarriedReasoningPart::OpaqueSummary(_) => "OpaqueSummary",
+            CarriedReasoningPart::OpaqueContent(_) => "OpaqueContent",
+        };
+        stats.reasoning_content_types.push(kind);
+    }
+}
+
 /// Drain an agent stream into observations, retaining errors for later assertions.
 pub async fn collect_stream_stats(
     stream: impl futures::Stream<Item = Result<MultiTurnStreamItem, PromptError>>,
@@ -606,6 +633,10 @@ pub async fn collect_stream_stats(
                 }) => {
                     record_reasoning(&mut stats, reasoning, provider);
                 }
+                Item::Event(StreamEvent::End {
+                    content: AssistantContent::CarriedReasoning(ref reasoning),
+                    ..
+                }) => record_carried_reasoning(&mut stats, reasoning),
                 Item::Event(StreamEvent::Text { ref text, .. }) => {
                     stats.text_chunks += 1;
                     stats.final_turn_text.push_str(text);

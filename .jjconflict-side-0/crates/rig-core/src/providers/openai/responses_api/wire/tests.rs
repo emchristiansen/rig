@@ -5,12 +5,12 @@
 //! cassettes are read-only here.
 
 use super::*;
-use crate::completion::{CompletionModel, CompletionRequest};
-use crate::driver::Bound;
+use crate::completion::CompletionRequest;
 use crate::message::{self, Message};
 use crate::providers::chatgpt::DIALECT as CHATGPT;
 use crate::providers::openai::responses_api::openapi_schema::{self, Schema};
 use crate::providers::xai::DIALECT as XAI;
+use crate::test_utils::json_body;
 use crate::test_utils::{MockStreamingClient, RecordingHttpClient};
 use crate::wire::{Body, Mode};
 use bytes::Bytes;
@@ -87,47 +87,37 @@ fn terminal_response_body(sse: &str) -> String {
 }
 
 fn prompt() -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: vec![Message::user("say hi")],
-        documents: Vec::new(),
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    CompletionRequest::new("say hi")
 }
 
-/// Fold a recorded unary body through the wire, as [`crate::driver::call`]
+/// Fold a recorded unary body through the wire, as `Model::call`
 /// does.
 async fn folded_unary(wire: Responses, body: &str) -> completion::CompletionResponse {
-    Bound::new(wire, RecordingHttpClient::new(Bytes::from(body.to_owned())))
-        .completion(prompt())
+    crate::driver::Model::new(wire, RecordingHttpClient::new(Bytes::from(body.to_owned())))
+        .call(prompt())
         .await
         .expect("the recorded body folds")
 }
 
-/// Fold a recorded SSE body through the wire, as [`crate::driver::stream`]
+/// Fold a recorded SSE body through the wire, as `Model::stream`
 /// does, draining every event first.
 async fn folded_stream(wire: Responses, body: &str) -> completion::CompletionResponse {
-    let bound = Bound::new(
+    let bound = crate::driver::Model::new(
         wire,
         MockStreamingClient {
             sse_bytes: Bytes::from(body.to_owned()),
         },
     );
-    let mut response = bound.stream(prompt()).await.expect("the stream opens");
+    let mut response = bound.stream(prompt()).expect("the stream opens");
     while response.next().await.is_some() {}
     response
         .finish()
+        .await
         .expect("the stream produced a terminal record")
 }
 
 fn openai() -> Responses {
-    OpenAI::new("test-key").responses("gpt-4o")
+    OpenAIConfig::new("test-key").responses("gpt-4o")
 }
 
 // ── the property the model exists for ───────────────────────────────────
@@ -146,9 +136,9 @@ async fn a_unary_body_and_the_stream_of_the_same_turn_fold_alike() {
     assert_eq!(buffered.choice, streamed.choice);
     assert_eq!(buffered.usage, streamed.usage);
     assert_eq!(buffered.finish_reason(), streamed.finish_reason());
-    assert_eq!(buffered.model, streamed.model);
-    assert_eq!(buffered.message_id, streamed.message_id);
-    assert_eq!(buffered.response_id, streamed.response_id);
+    assert_eq!(buffered.model(), streamed.model());
+    assert_eq!(buffered.identity().message_id, streamed.identity().message_id);
+    assert_eq!(buffered.response_id(), streamed.response_id());
     assert_eq!(
         text_of(&buffered),
         Some("stream identity probe".to_owned()),
@@ -185,7 +175,7 @@ async fn a_unary_tool_turn_and_its_stream_fold_alike() {
 #[tokio::test]
 async fn a_chatgpt_replayed_body_folds_the_same_unary_and_streamed() {
     let sse = cassette_body("chatgpt/codex_tool_args/zero_argument_tool_call_nonstreaming.yaml");
-    let wire = OpenAI::with_key(&CHATGPT, "test-token")
+    let wire = OpenAIConfig::with_key(&CHATGPT, "test-token")
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .responses("gpt-5.4");
 
@@ -195,7 +185,7 @@ async fn a_chatgpt_replayed_body_folds_the_same_unary_and_streamed() {
     assert_eq!(buffered.choice, streamed.choice);
     assert_eq!(buffered.usage, streamed.usage);
     assert_eq!(buffered.finish_reason(), streamed.finish_reason());
-    assert_eq!(buffered.provider, "chatgpt");
+    assert_eq!(buffered.provider(), "chatgpt");
     assert!(
         buffered
             .choice
@@ -222,14 +212,18 @@ fn encoded_body(wire: &Responses, mode: Mode) -> serde_json::Value {
 /// One request's body, for a turn other than the bare [`prompt`].
 fn encoded_body_of(wire: &Responses, request: CompletionRequest, mode: Mode) -> serde_json::Value {
     let encoded = wire.encode(request, mode).expect("the request encodes");
-    let request = encoded
-        .requests
-        .first()
-        .expect("a Responses request is one request");
-    let Body::Bytes(body) = request.body() else {
-        panic!("a Responses body is bytes");
-    };
-    serde_json::from_slice(body).expect("the body is JSON")
+    let request = &encoded.request;
+    json_body(request)
+}
+
+/// [`encoded_body_of`] for `request` prepared as the driver prepares it.
+fn prepared_body_of(wire: &Responses, request: CompletionRequest) -> serde_json::Value {
+    let request = <crate::operation::Completion as crate::wire::Operation>::prepare(
+        request,
+        &wire.describe(),
+    )
+    .expect("the request prepares");
+    encoded_body_of(wire, request, Mode::Unary)
 }
 
 /// The bare [`prompt`] with a history of its own.
@@ -248,7 +242,7 @@ fn image_message(text: &str) -> Message {
                 data: message::DocumentSourceKind::Url("https://example.test/image.png".to_owned()),
                 media_type: None,
                 detail: None,
-                additional_params: None,
+                native: None,
             }),
         ],
     }
@@ -265,7 +259,7 @@ fn assert_string_map(value: &serde_json::Value, field: &str) {
 }
 
 fn chatgpt() -> Responses {
-    OpenAI::with_key(&CHATGPT, "test-token")
+    OpenAIConfig::with_key(&CHATGPT, "test-token")
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .responses("gpt-5.4")
 }
@@ -331,16 +325,21 @@ fn the_chatgpt_dialect_states_store_false_and_clears_nothing() {
 /// system message.
 fn muninn_shaped_codex_request() -> CompletionRequest {
     use crate::providers::openai::responses_api::{
-        AdditionalParameters, Include, Reasoning, ReasoningEffort,
+        RawParameterProjection, RawInclude, RawReasoning, RawReasoningEffort,
     };
-    let params = AdditionalParameters {
+    let params = RawParameterProjection {
         prompt_cache_key: Some("thread-7".to_string()),
         client_metadata: std::collections::BTreeMap::from([
             ("session_id".to_string(), "session-7".to_string()),
             ("thread_id".to_string(), "thread-7".to_string()),
         ]),
-        reasoning: Some(Reasoning::new().with_effort(ReasoningEffort::High)),
-        include: Some(vec![Include::ReasoningEncryptedContent]),
+        reasoning: Some(RawReasoning {
+            effort: Some(RawReasoningEffort::High),
+            summary: None,
+            mode: None,
+            context: None,
+        }),
+        include: Some(vec![RawInclude::ReasoningEncryptedContent]),
         store: Some(false),
         ..Default::default()
     };
@@ -354,7 +353,7 @@ fn muninn_shaped_codex_request() -> CompletionRequest {
 /// The ChatGPT wire configured as Muninn configures its client: explicit empty
 /// default instructions (`default_instructions("")` at the fork).
 fn muninn_configured_chatgpt() -> Responses {
-    OpenAI::with_key(&CHATGPT, "test-token")
+    OpenAIConfig::with_key(&CHATGPT, "test-token")
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .with_instructions("")
         .responses("gpt-5.4")
@@ -363,10 +362,7 @@ fn muninn_configured_chatgpt() -> Responses {
 /// The exact request bytes one encode sends.
 fn encoded_bytes(wire: &Responses, request: CompletionRequest, mode: Mode) -> String {
     let encoded = wire.encode(request, mode).expect("the request encodes");
-    let request = encoded
-        .requests
-        .first()
-        .expect("a Responses request is one request");
+    let request = &encoded.request;
     let Body::Bytes(body) = request.body() else {
         panic!("a Responses body is bytes");
     };
@@ -636,10 +632,9 @@ data: [DONE]"#;
 
 /// A gateway that answers every request with an event stream sends no reply
 /// document of its own, so the terminal `response.completed` *is* the
-/// document: `raw` must be that object — deserializable back into the wire
-/// type and re-serializing value-equal, carrying the fields rig does not
-/// normalize (`service_tier`) — whether or not its `output` restates the
-/// turn, and the choice comes from the deltas either way.
+/// document: `raw` must be that exact received object, carrying the fields
+/// rig does not normalize (`service_tier`), whether or not its `output`
+/// restates the turn. The choice comes from the deltas either way.
 #[tokio::test]
 async fn a_chatgpt_reply_captures_the_terminal_response_object_as_raw() {
     for (body, case) in [
@@ -648,16 +643,15 @@ async fn a_chatgpt_reply_captures_the_terminal_response_object_as_raw() {
     ] {
         let response = folded_unary(chatgpt(), body).await;
 
-        let typed: crate::providers::openai::responses_api::CompletionResponse =
-            serde_json::from_value(response.raw.clone())
-                .expect("raw must deserialize back into the wire type");
+        let received: serde_json::Value = serde_json::from_str(&terminal_response_body(body))
+            .expect("the received terminal response is JSON");
         assert_eq!(
-            serde_json::to_value(&typed).expect("re-serialize"),
             response.raw,
-            "{case}: the capture must be exactly what the wire type serializes to"
+            received,
+            "{case}: the capture must be exactly the received terminal response object"
         );
         assert_eq!(response.raw["service_tier"], "default", "{case}");
-        assert_eq!(typed.id, "resp_chatgpt_raw", "{case}");
+        assert_eq!(response.raw["id"], "resp_chatgpt_raw", "{case}");
 
         assert_eq!(
             response.choice,
@@ -673,33 +667,32 @@ async fn a_chatgpt_reply_captures_the_terminal_response_object_as_raw() {
     }
 }
 
-/// A Codex turn whose terminal restates an echoed `top_p` in a shape that does
-/// not fit its typed field. The typed projection drops only that key.
+/// A Codex turn whose terminal restates an echoed `top_p` object. The raw
+/// response keeps that unmodeled value exactly.
 const CHATGPT_MISTYPED_TOP_P: &str = r#"data: {"type":"response.output_text.delta","delta":"hi"}
 
 data: {"type":"response.completed","response":{"id":"resp_chatgpt_raw","object":"response","created_at":1,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-5.4","service_tier":"default","top_p":{"value":0.95},"usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2},"output":[],"tools":[]}}
 
 data: [DONE]"#;
 
-/// Lenient projection of echoed metadata is confined to the typed view: the
-/// captured `raw` keeps the provider's own value of a key the projection could
-/// not type, rather than discarding it so the typed key looks valid. The
-/// authoritative fields stay strict (see
-/// `known_terminal_with_malformed_usage_surfaces_error_without_terminal`).
+/// The captured `raw` keeps the provider's own echoed metadata value.
+/// Authoritative fields remain strict; unmodeled metadata survives the real
+/// decoder and response reassembler.
 #[tokio::test]
 async fn a_mistyped_echoed_metadata_key_survives_in_the_captured_raw() {
     let response = folded_unary(chatgpt(), CHATGPT_MISTYPED_TOP_P).await;
 
     assert_eq!(response.raw["top_p"], serde_json::json!({ "value": 0.95 }));
     assert_eq!(response.raw["service_tier"], "default");
-    let typed: crate::providers::openai::responses_api::CompletionResponse =
-        serde_json::from_value(response.raw.clone()).expect("raw still decodes");
-    assert_eq!(typed.additional_parameters.top_p, None);
+    let received: serde_json::Value =
+        serde_json::from_str(&terminal_response_body(CHATGPT_MISTYPED_TOP_P))
+            .expect("the received terminal response is JSON");
+    assert_eq!(response.raw, received);
     assert_eq!(response.usage.total_tokens, Some(2));
 }
 
 fn xai() -> Responses {
-    OpenAI::with_key(&XAI, "test-key").responses("grok-4")
+    OpenAIConfig::with_key(&XAI, "test-key").responses("grok-4")
 }
 
 /// xAI's endpoint lives under `/v1` and rejects top-level `instructions`, so
@@ -713,11 +706,11 @@ fn the_xai_dialect_keeps_every_system_message_in_input() {
         .encode(prompt(), Mode::Unary)
         .expect("the request encodes");
     assert_eq!(
-        encoded.requests.first().expect("one request").uri(),
+        encoded.request.uri(),
         "https://api.x.ai/v1/responses"
     );
 
-    let body = encoded_body_of(
+    let body = prepared_body_of(
         &wire,
         CompletionRequest {
             documents: vec![crate::completion::Document {
@@ -732,7 +725,6 @@ fn the_xai_dialect_keeps_every_system_message_in_input() {
                 Message::user("What is glarb-glarb?"),
             ])
         },
-        Mode::Unary,
     );
 
     assert_eq!(body.get("instructions"), None, "{body}");
@@ -767,10 +759,9 @@ fn the_xai_dialect_folds_tool_results_between_user_text_in_order() {
         turn(vec![Message::User {
             content: vec![
                 message::UserContent::text("before"),
-                message::UserContent::tool_result_with_call_id(
-                    "result-id",
-                    "call-id".to_owned(),
-                    "tool",
+                message::UserContent::tool_result(
+                    message::CallId::from_wire("call-id"),
+                    message::ToolName::new("tool").expect("nonempty fixture tool name"),
                     vec![message::ToolResultContent::json(
                         serde_json::json!({ "ok": true }),
                     )],
@@ -802,26 +793,25 @@ fn the_xai_dialect_replays_reasoning_by_wire_id_with_its_encrypted_payload() {
         &xai(),
         turn(vec![
             Message::user("Use the tool."),
-            Message::Assistant {
-                id: Some("msg_1".to_owned()),
-                content: vec![
-                    message::AssistantContent::Reasoning(message::Reasoning {
-                        provider: None,
-                        id: Some("rs_1".to_owned()),
-                        content: vec![
-                            message::ReasoningContent::Summary("explain".to_owned()),
-                            message::ReasoningContent::Redacted {
+            Message::Assistant(message::AssistantMessage::new(vec![
+                message::AssistantContent::CarriedReasoning(
+                    message::CarriedReasoning::new(
+                        vec![
+                            message::CarriedReasoningPart::Summary("explain".to_owned()),
+                            message::CarriedReasoningPart::Redacted {
                                 data: "opaque-redacted".to_owned(),
                             },
                         ],
-                    }),
-                    message::AssistantContent::tool_call(
-                        "call_1",
-                        "my_tool",
-                        serde_json::json!({"arg": "value"}),
-                    ),
-                ],
-            },
+                        message::CarriedPayload::new(serde_json::json!({}), None),
+                    )
+                    .with_id(Some("rs_1".to_owned())),
+                ),
+                message::AssistantContent::tool_call(
+                    "call_1",
+                    message::ToolName::new("my_tool").expect("nonempty fixture tool name"),
+                    serde_json::json!({"arg": "value"}),
+                ),
+            ])),
         ]),
         Mode::Unary,
     );
@@ -847,13 +837,13 @@ fn the_xai_dialect_replays_reasoning_by_wire_id_with_its_encrypted_payload() {
 /// that way.
 #[tokio::test]
 async fn an_error_envelope_on_a_success_fails_the_xai_call() {
-    let error = Bound::new(
+    let error = crate::driver::Model::new(
         xai(),
         RecordingHttpClient::new(Bytes::from_static(
             br#"{"error":{"message":"no capacity","code":"overloaded"}}"#,
         )),
     )
-    .completion(prompt())
+    .call(prompt())
     .await
     .expect_err("an error envelope fails the call");
 
@@ -994,8 +984,7 @@ fn derived_identity() -> super::super::codex_identity::CodexIdentity {
 }
 
 fn encoded_request(wire: &Responses, mode: Mode) -> http::Request<Body> {
-    let mut encoded = wire.encode(prompt(), mode).expect("the request encodes");
-    encoded.requests.remove(0)
+    wire.encode(prompt(), mode).expect("the request encodes").request
 }
 
 fn header_names(request: &http::Request<Body>) -> Vec<&str> {
@@ -1106,7 +1095,7 @@ fn exact_standard_http_create_response_satisfies_the_named_public_schema_view() 
 /// marker only as an HTTP header, and removes top-level tools/instructions.
 #[test]
 fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
-    let wire = OpenAI::with_key(&CHATGPT, "test-token")
+    let wire = OpenAIConfig::with_key(&CHATGPT, "test-token")
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .with_instructions("provider base")
         .responses("gpt-5.4")
@@ -1114,13 +1103,13 @@ fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
         .expect("the ChatGPT dialect supports Lite")
         .with_codex_identity(derived_identity())
         .expect("the ChatGPT dialect speaks the Codex contract");
-    let mut encoded = wire
+    let encoded = wire
         .encode(
             turn(vec![Message::system("caller base"), image_message("hello")]),
             Mode::Streaming,
         )
         .expect("the Lite request encodes");
-    let request = encoded.requests.remove(0);
+    let request = encoded.request;
 
     assert_eq!(
         request.headers()[super::super::responses_lite::HTTP_HEADER],
@@ -1351,10 +1340,10 @@ fn a_callers_own_cache_key_and_metadata_are_kept_over_http() {
         "prompt_cache_key": "caller-key",
         "client_metadata": {"session_id": "caller-session"},
     }));
-    let mut encoded = wire
+    let encoded = wire
         .encode(request, Mode::Unary)
         .expect("the request encodes");
-    let request = encoded.requests.remove(0);
+    let request = encoded.request;
     let Body::Bytes(body) = request.body() else {
         panic!("a Responses body is bytes");
     };
@@ -1371,15 +1360,14 @@ fn a_callers_own_cache_key_and_metadata_are_kept_over_http() {
 fn with_provider_item(provider: Option<&str>) -> CompletionRequest {
     turn(vec![
         Message::user("hi"),
-        Message::Assistant {
-            id: Some("msg_1".to_owned()),
-            content: vec![message::AssistantContent::ProviderItem(
-                message::ProviderItem {
-                    item: serde_json::json!({"type": "web_search_call", "id": "ws_1"}),
-                    provider: provider.map(str::to_owned),
-                },
-            )],
-        },
+        Message::Assistant(message::AssistantMessage::new(vec![
+            message::AssistantContent::ProviderItem(message::ProviderItem {
+                payload: message::CarriedPayload::new(
+                    serde_json::json!({"type": "web_search_call", "id": "ws_1"}),
+                    provider.map(str::to_owned),
+                ),
+            }),
+        ])),
         Message::user("again"),
     ])
 }
@@ -1431,10 +1419,7 @@ fn request_headers_reach_the_http_request_beside_rigs_own() {
         .expect("a Codex wire")
         .with_request_headers(headers);
     let encoded = wire.encode(prompt(), Mode::Streaming).expect("encodes");
-    let request = encoded
-        .requests
-        .first()
-        .expect("a Responses request is one request");
+    let request = &encoded.request;
     let sent = request.headers();
     assert_eq!(sent["x-codex-window-id"], "thread-1:0");
     assert_eq!(sent["x-codex-turn-state"], "state-1");
@@ -1458,7 +1443,7 @@ fn request_headers_reach_the_http_request_beside_rigs_own() {
     let plain = chatgpt()
         .encode(prompt(), Mode::Streaming)
         .expect("encodes");
-    let plain = plain.requests.first().expect("one request");
+    let plain = &plain.request;
     assert!(plain.headers().get("x-codex-window-id").is_none());
     assert!(
         serde_json::to_value(chatgpt())
@@ -1468,3 +1453,129 @@ fn request_headers_reach_the_http_request_beside_rigs_own() {
         "an empty set stays off the serialized wire"
     );
 }
+
+/// What each dialect's encoder carries: images as data or URLs, image file
+/// ids only where the endpoint keeps files and its `input_image` takes them,
+/// documents as files or text, and no audio, video or assistant image.
+#[test]
+fn each_dialect_encodes_what_its_endpoint_reads() {
+    use crate::completion::{Media, Place, ReplayTarget};
+    use crate::message::{
+        Audio, AudioMediaType, Document, DocumentMediaType, DocumentSourceKind as Source, Image,
+        ImageMediaType, Video, VideoMediaType,
+    };
+    let image = |data: Source, media_type: Option<ImageMediaType>| Image {
+        data,
+        media_type,
+        ..Image::default()
+    };
+    let document = |data: Source, media_type: Option<DocumentMediaType>| Document {
+        data: data.into(),
+        media_type,
+        additional_params: None,
+    };
+    let png = image(Source::base64("iVBORw0KGgo="), Some(ImageMediaType::PNG));
+    let untyped = image(Source::base64("AAAA"), None);
+    let url = image(Source::url("https://example.com/a.png"), None);
+    let image_file = image(Source::file_id("file-image"), None);
+    let pdf = document(Source::base64("JVBERi0="), Some(DocumentMediaType::PDF));
+    let pdf_url = document(Source::url("https://example.com/a.pdf"), None);
+    let text = Document {
+        data: crate::message::DocumentData::Text("plain".into()),
+        media_type: Some(DocumentMediaType::TXT),
+        additional_params: None,
+    };
+    let csv = document(Source::base64("YSxi"), Some(DocumentMediaType::CSV));
+    let document_file = document(Source::file_id("file-document"), None);
+    let audio = Audio {
+        data: Source::base64("SUQz"),
+        media_type: Some(AudioMediaType::MP3),
+    };
+    let video = Video {
+        data: Source::url("https://example.com/a.mp4"),
+        media_type: Some(VideoMediaType::MP4),
+        additional_params: None,
+    };
+    let copilot = Responses::new(
+        OpenAIConfig::with_key(&crate::providers::copilot::wire::DIALECT, "key"),
+        "gpt-5.3-codex",
+    );
+    // (dialect, image file ids, document file ids)
+    for (wire, image_files, document_files) in [
+        (openai(), true, true),
+        (xai(), false, true),
+        (chatgpt(), false, false),
+        (copilot, false, false),
+    ] {
+        let name = wire.provider.dialect.name;
+        let model = wire.model.clone();
+        let encodes = |media| wire.encodes(&model, media);
+        for place in [Place::User, Place::ToolResult] {
+            assert!(encodes(Media::Image(&png, place)), "{name}: data");
+            assert!(encodes(Media::Image(&url, place)), "{name}: URL");
+            assert_eq!(
+                encodes(Media::Image(&image_file, place)),
+                image_files,
+                "{name}: image file id"
+            );
+            assert!(!encodes(Media::Image(&untyped, place)), "{name}: untyped");
+        }
+        assert!(!encodes(Media::Image(&png, Place::Assistant)), "{name}");
+        assert!(!encodes(Media::Audio(&audio)), "{name}: audio");
+        assert!(!encodes(Media::Video(&video)), "{name}: video");
+        assert!(encodes(Media::Document(&pdf)), "{name}: PDF data");
+        assert!(encodes(Media::Document(&pdf_url)), "{name}: file URL");
+        assert!(encodes(Media::Document(&text)), "{name}: text");
+        assert!(
+            !encodes(Media::Document(&csv)),
+            "{name}: text data goes as its text"
+        );
+        assert_eq!(
+            encodes(Media::Document(&document_file)),
+            document_files,
+            "{name}: document file id"
+        );
+    }
+}
+
+/// An `error` event projects the envelope it carries and no verdict; a
+/// `response.failed` event projects its verdict and then its envelope.
+///
+/// Not a cassette test: a server error is a transient condition that cannot
+/// be recorded on demand, and the projection is a pure function of the frame.
+#[test]
+fn an_error_event_projects_only_the_envelope_it_carries() {
+    use crate::observe::{Action, AdapterContext, AdapterEvent, ObservationLog, Subject};
+    let projected = |payload: serde_json::Value| {
+        let log = std::sync::Arc::new(ObservationLog::default());
+        let context = AdapterContext::new(log.clone(), Subject::default(), "call");
+        let mut attempt = context
+            .attempt_for(&http::Request::new(()), "/responses")
+            .expect("an attempt starts");
+        attempt.project(|sink| project_payload(payload.to_string().as_bytes(), sink));
+        drop(attempt);
+        let trace = log.trace();
+        trace
+            .observations
+            .iter()
+            .filter_map(|o| match &o.action {
+                Action::Adapter { observation } => match &observation.event {
+                    AdapterEvent::Provider { .. } => Some("provider"),
+                    AdapterEvent::ErrorEnvelope { .. } => Some("error"),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let error = serde_json::json!({ "code": "server_error", "message": "boom" });
+    let event = serde_json::json!({ "type": "error", "error": error });
+    assert_eq!(projected(event), ["error"]);
+    let failed = serde_json::json!({
+        "type": "response.failed",
+        "response": { "id": "resp_1", "status": "failed", "error": error }
+    });
+    assert_eq!(projected(failed), ["provider", "error"]);
+}
+
+mod provider_options;

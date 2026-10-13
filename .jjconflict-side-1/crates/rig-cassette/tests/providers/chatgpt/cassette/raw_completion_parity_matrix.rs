@@ -72,13 +72,15 @@ fn weather_tool() -> ToolDefinition {
 }
 
 fn request() -> rig::completion::CompletionRequest {
-    CompletionRequest::new(PROMPT).max_tokens(64)
+    // No output-token cap: the Codex contract refuses a caller-set
+    // `max_output_tokens` by name.
+    CompletionRequest::new(PROMPT)
 }
 
 fn tool_request() -> rig::completion::CompletionRequest {
     CompletionRequest::new(TOOL_PROMPT)
         .tool(weather_tool())
-        .max_tokens(128)
+        
 }
 
 /// The `msg_…` id of the envelope's output message, when it issued one.

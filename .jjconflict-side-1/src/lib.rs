@@ -36,6 +36,15 @@ pub use rig_reqwest;
 #[cfg_attr(docsrs, doc(cfg(feature = "websocket")))]
 pub use rig_tungstenite;
 
+/// The WebRTC peer of a GPT-Live realtime call (`rig-webrtc`), on native
+/// targets: an Opus track and the `oai-events` data channel for calls created
+/// with [`providers::chatgpt::realtime`].
+#[cfg(all(feature = "webrtc", not(target_family = "wasm")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "webrtc")))]
+pub mod webrtc {
+    pub use rig_webrtc::*;
+}
+
 /// Provider clients, their configurations, and the models they build.
 pub mod providers {
     pub use rig_core::providers::*;

@@ -12,6 +12,7 @@ use rig::providers::openai::{GPT_5_MINI, GPT_5_NANO};
 
 use super::super::support::{OpenAiCassette, with_openai_cassette};
 use crate::corpus_matrix::{Wire, agent::run_agent, cells};
+use rig_test_support::cassette_models::MapWire;
 
 fn wire(client: &OpenAiCassette) -> Wire<rig::Model<rig::providers::openai::wire::OpenAiWire>> {
     Wire {
@@ -47,6 +48,31 @@ crate::matrix::golden_matrix! {
     reasoning_tool_streamed: ("reasoning_matrix_responses/tool_streamed", cells::REASONING_TOOL_STREAMED, "openai_responses_reasoning_tool_streamed");
     #[tokio::test]
     reasoning_capped: ("reasoning_matrix_responses/capped", cells::REASONING_CAPPED, "openai_responses_reasoning_capped");
+}
+
+/// The reasoning wire with the HTTP SSE incomplete-terminal opt-in: the
+/// capped streamed cell's recording ends in `response.incomplete`, which a
+/// streamed Responses reply accepts only by opt-in.
+fn reasoning_wire_accepting_incomplete(
+    client: &OpenAiCassette,
+) -> Wire<rig::Model<rig::providers::openai::wire::OpenAiWire>> {
+    Wire {
+        model: client
+            .openai
+            .completion(rig::providers::openai::GPT_5_MINI)
+            .map_wire(super::super::support::accepting_streamed_incomplete),
+        thinking: cells::ThinkingWire::OpenAiResponses,
+        route: None,
+        temperature: None,
+        additional_params: None,
+        options: None,
+    }
+}
+
+crate::matrix::golden_matrix! {
+    wrapper: with_openai_cassette, wire: reasoning_wire_accepting_incomplete, run: run_agent, oracle: crate::goldens::golden_effects;
+    #[tokio::test]
+    reasoning_capped_streamed: ("reasoning_matrix_responses/capped_streamed", cells::REASONING_CAPPED_STREAMED, "openai_responses_reasoning_capped_streamed");
 }
 
 #[ignore = "the Responses wire's `max_output_tokens` floor is 16; the corpus's second-turn cap is 5"]

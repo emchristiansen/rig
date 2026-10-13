@@ -200,6 +200,15 @@ pub enum StreamedTurnEvent {
     InvalidToolCall(StreamedInvalidToolCall),
 }
 
+/// A completed call refused by name-keyed dispatch, retained for diagnostics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefusedStreamedCall {
+    /// Why the call cannot be dispatched.
+    pub call: rig_core::message::UndispatchableToolCall,
+    /// The refused call as the stream delivered it.
+    pub content: AssistantContent,
+}
+
 /// A tool call still streaming: the tool it named as it started, whether
 /// its items stream live, and its argument text so far.
 #[derive(Clone, Serialize, Deserialize)]
@@ -341,6 +350,12 @@ impl StreamedTurnAssembler {
                 return Ok(vec![StreamedTurnEvent::EmitIngested]);
             }
         };
+        if let StreamEvent::End { part, content, .. } = event
+            && let Some(refused) = Self::refuse_undispatchable(content)
+        {
+            self.open_calls.remove(&part.index());
+            return Ok(vec![refused]);
+        }
         match event {
             StreamEvent::Text { text, .. } => {
                 self.text.push_str(text);
@@ -405,7 +420,11 @@ impl StreamedTurnAssembler {
                     call: tool_call.clone(),
                 }])
             }
-            StreamEvent::Start { .. } | StreamEvent::End { .. } => {
+            StreamEvent::Discard { part } => {
+                self.open_calls.remove(&part.index());
+                Ok(vec![StreamedTurnEvent::EmitIngested])
+            }
+            StreamEvent::Start { .. } | StreamEvent::End { .. } | StreamEvent::Input { .. } => {
                 Ok(vec![StreamedTurnEvent::EmitIngested])
             }
         }
@@ -486,6 +505,19 @@ impl StreamedTurnAssembler {
             policy: self.policy,
             finish_reason: response.finish_reason(),
         }
+    }
+
+    /// The refusal event for a completed call name-keyed dispatch cannot run,
+    /// or `None` for a dispatchable call or non-call content.
+    fn refuse_undispatchable(block: &AssistantContent) -> Option<StreamedTurnEvent> {
+        rig_core::message::name_dispatchable_call(block)
+            .err()
+            .map(|call| {
+                StreamedTurnEvent::UndispatchableToolCall(RefusedStreamedCall {
+                    call,
+                    content: block.clone(),
+                })
+            })
     }
 
     /// Park resolution on `tool_call` and surface it to the caller as an

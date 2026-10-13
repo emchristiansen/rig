@@ -14,17 +14,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::Value;
 
 use rig_agent::agent::AgentBuilder;
-use rig_agent::completion::CompletionModel;
 use rig_core::completion::CompletionResponse;
-use rig_core::driver::WireDriver;
+use rig_core::driver::{Exchange, Model, Opened, Opening, Transport};
 use rig_core::error::ProviderError;
 use rig_core::message::{AssistantContent, Message, ToolResult, ToolResultContent, UserContent};
-use rig_core::operation::{Completion, CompletionFold};
-use rig_core::providers::anthropic::wire::Anthropic;
-use rig_core::providers::gemini::Gemini;
+use rig_core::operation::Completion;
+use rig_core::providers::anthropic::wire::AnthropicConfig;
+use rig_core::providers::gemini::GeminiConfig;
 use rig_core::providers::gemini::completion::GenerateContent;
-use rig_core::providers::openai::wire::{DEEPSEEK, OpenAI};
-use rig_core::wire::{Fold, HasCompletion, Mode, Reply, Wire, WireFrame};
+use rig_core::providers::openai::wire::{DEEPSEEK, OpenAIConfig};
+use rig_core::wire::{Encoded, Wire, WireFrame};
 
 use super::{Dialect, response_tokens, string_values, unpaired_tool_calls};
 use crate::reasoning::{TOOL_SYSTEM_PROMPT, TOOL_USER_PROMPT, WeatherTool};
@@ -36,26 +35,31 @@ pub const SOURCE_SCENARIO: &str = "reasoning_tool_roundtrip/nonstreaming";
 pub const FOLLOW_UP: &str = "Using the weather you already retrieved, should I pack an umbrella \
     or sunscreen? Answer in one sentence and do not call any tool.";
 
+/// A transport that answers with one recorded whole body.
+#[derive(Clone)]
+struct Recorded(String);
+
+impl<W: Wire<Payload = Encoded, Frame = WireFrame>> Transport<W> for Recorded {
+    fn send(&self, payload: Encoded, _exchange: Exchange) -> Opening<WireFrame> {
+        let frames = payload.framing.split(self.0.as_bytes());
+        let mut opened = Opened::new(futures::stream::iter(frames.into_iter().map(Ok)));
+        if let Ok(document) = serde_json::from_str::<Value>(&self.0) {
+            opened = opened.with_document(document);
+        }
+        Opening::ready(opened)
+    }
+}
+
 /// Decode one whole recorded reply through the wire's own decoder and fold,
 /// without I/O: the exact normalization a live call would perform.
 pub fn decode_whole_reply<W>(wire: &W, body: &str) -> Result<CompletionResponse, ProviderError>
 where
-    W: Wire<Op = Completion>,
+    W: Wire<Op = Completion, Payload = Encoded, Frame = WireFrame>,
 {
-    let mut driver = WireDriver::new(wire.decoder(Mode::Unary));
-    driver.push(WireFrame::Text(body.to_owned()));
-    driver.finish();
-    let mut fold = CompletionFold::default();
-    for item in driver.drain() {
-        fold.absorb(item?)?;
-    }
-    let raw = serde_json::from_str::<Value>(body)
-        .map_err(|error| ProviderError::Response(error.to_string()))?;
-    fold.finish(Reply {
-        provider: wire.name().to_owned(),
-        raw,
-        provider_request_id: None,
-    })
+    let model = Model::new(wire.clone(), Recorded(body.to_owned()));
+    // The prompt is never sent, but it must not be blank: an encoder drops
+    // blank text and refuses a request left with no input.
+    futures::executor::block_on(model.call("restate"))
 }
 
 /// The wire whose recording supplies the ported turn.
@@ -111,18 +115,28 @@ impl Source {
         // Decoding needs no credential; the placeholder never reaches a socket.
         let decoded = match self {
             Self::Anthropic => decode_whole_reply(
-                &Anthropic::new("decode-only").completion("claude-sonnet-4-6"),
+                &AnthropicConfig::new("decode-only")
+                    .connect(crate::cassettes::local_http())
+                    .completion("claude-sonnet-4-6")
+                    .wire,
                 &body,
             ),
-            Self::OpenAiResponses => {
-                decode_whole_reply(&OpenAI::new("decode-only").responses("gpt-5.2"), &body)
-            }
+            Self::OpenAiResponses => decode_whole_reply(
+                &OpenAIConfig::new("decode-only")
+                    .connect(crate::cassettes::local_http())
+                    .responses("gpt-5.2")
+                    .wire,
+                &body,
+            ),
             Self::Gemini => decode_whole_reply(
-                &GenerateContent::new(Gemini::new("decode-only"), "gemini-2.5-flash"),
+                &GenerateContent::new(GeminiConfig::new("decode-only"), "gemini-2.5-flash"),
                 &body,
             ),
             Self::DeepSeek => decode_whole_reply(
-                &OpenAI::with_key(&DEEPSEEK, "decode-only").chat("deepseek-v4-flash"),
+                &OpenAIConfig::with_key(&DEEPSEEK, "decode-only")
+                    .connect(crate::cassettes::local_http())
+                    .chat("deepseek-v4-flash")
+                    .wire,
                 &body,
             ),
         };
@@ -146,9 +160,10 @@ impl Source {
                     .unwrap_or("Tokyo")
                     .to_owned();
                 UserContent::ToolResult(ToolResult {
+                    is_error: false,
                     call: call.id.clone(),
-                    provider: call.provider.clone(),
                     name: call.function.name.clone(),
+                    answers: call.answered_by(),
                     content: vec![ToolResultContent::text(weather_report(&city))],
                 })
             })
@@ -160,10 +175,7 @@ impl Source {
         );
         vec![
             Message::user(TOOL_USER_PROMPT),
-            Message::Assistant {
-                id: reply.message_id,
-                content: reply.choice,
-            },
+            Message::Assistant(reply.head().with_content(reply.choice.clone())),
             Message::User { content: results },
         ]
     }
@@ -189,14 +201,6 @@ pub struct Cell {
     pub source: Source,
 }
 
-/// Whether the source's reasoning issuer is the target model's own: direct
-/// Anthropic reasoning continued on Claude through OpenRouter.
-pub fn shares_issuer(cell: Cell) -> bool {
-    cell.source == Source::Anthropic
-        && cell.provider == "openrouter"
-        && cell.model.starts_with("anthropic/")
-}
-
 /// What the continuation produced.
 #[derive(Clone, Debug)]
 pub struct Observation {
@@ -212,10 +216,10 @@ pub struct Observation {
 pub type Observed = Arc<std::sync::Mutex<Option<Observation>>>;
 
 /// Continue the ported history on the target wire.
-pub async fn run<M>(model: M, cell: Cell) -> Observation
-where
-    M: CompletionModel + 'static,
-{
+pub async fn run(
+    model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    cell: Cell,
+) -> Observation {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut builder = AgentBuilder::new(model)
         .preamble(TOOL_SYSTEM_PROMPT)
@@ -238,7 +242,7 @@ where
         });
     Observation {
         history,
-        final_text: response.output,
+        final_text: response.output(),
         tool_calls: calls.load(Ordering::SeqCst),
     }
 }
@@ -311,29 +315,20 @@ pub fn assert_recorded(cell: Cell, scenario: &str) -> Forwarded {
         .collect();
     forwarded.sort();
     forwarded.dedup();
-    // Reasoning state is only meaningful to its issuer: none of it may reach
-    // another issuer's model. Tool-call ids are correlation, not state. Claude
-    // through OpenRouter shares the Anthropic issuer (its thinking signatures
-    // verified valid between OpenRouter and the Claude API both ways), so
-    // there the signature must arrive.
-    let shared = shares_issuer(cell);
+    // Reasoning state is only meaningful to the model that produced it: none
+    // of it may reach another model. Tool-call ids are correlation, not
+    // state, and a message's `phase` labels the message for every Responses
+    // dialect.
     let leaked: Vec<&str> = forwarded
         .iter()
         .copied()
-        .filter(|kind| *kind != "tool_call_id" && !(shared && *kind == "signature"))
+        .filter(|kind| *kind != "tool_call_id" && *kind != "phase")
         .collect();
     assert!(
         leaked.is_empty(),
         "[{provider} from {}] foreign reasoning state reached the target request: {leaked:?}",
         cell.source.provider()
     );
-    if shared {
-        assert!(
-            forwarded.contains(&"signature"),
-            "[{provider} from {}] the shared issuer's signature reaches the target",
-            cell.source.provider()
-        );
-    }
     let report = Forwarded {
         delivered,
         forwarded,

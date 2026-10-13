@@ -320,8 +320,7 @@ fn an_error_record_fails_and_a_cut_stream_is_truncated() {
 /// model, and a block that never closes is reasoning.
 #[test]
 fn inline_think_splits_the_same_whole_and_streamed() {
-    let qwen = "qwen3:4b";
-    let cases: [(&str, &str, &str, Vec<(&'static str, &str)>); 9] = [
+    let cases: [(&str, &str, &str, Vec<(&'static str, &str)>); 8] = [
         (
             "terminated",
             MODEL,
@@ -345,12 +344,6 @@ fn inline_think_splits_the_same_whole_and_streamed() {
             MODEL,
             "Just an answer.",
             vec![("text", "Just an answer.")],
-        ),
-        (
-            "a missing opening tag stays text, whatever the model",
-            qwen,
-            "private\n</think>\n\nThe answer.",
-            vec![("text", "private\n</think>\n\nThe answer.")],
         ),
         (
             "not at the start stays text",
@@ -673,4 +666,117 @@ async fn the_observed_usage_does_not_invent_a_total() {
     let totals: Vec<Option<u64>> = observed.iter().map(|usage| usage.total_tokens).collect();
     assert_eq!(totals, [None], "Ollama reports no total_tokens");
     assert_eq!(observed, [crate::wire::AdapterUsage::from(&usage)]);
+}
+
+// G33: the full terminal record restores the prefilled-opening case; the
+// same received shape works in either delivery mode.
+#[test]
+fn qwen_prefilled_full_content_separates_reasoning_from_answer() {
+    for (content, thinking, answer) in [
+        (
+            "private reasoning\n</think>\n\nvisible answer",
+            "private reasoning",
+            "visible answer",
+        ),
+        ("private\n</think>\n\nThe answer.", "private", "The answer."),
+    ] {
+        for mode in [Mode::Unary, Mode::Streaming] {
+            let reply = whole(
+                "qwen3:4b",
+                json!({"role":"assistant", "content":content}),
+                "stop",
+            );
+            let response = decode("qwen3:4b", mode, &[reply.clone()]).expect("full reply decodes");
+            assert_eq!(
+                blocks(&response),
+                [
+                    ("reasoning", thinking.to_owned()),
+                    ("text", answer.to_owned())
+                ]
+            );
+            assert_eq!(response.raw.at("/message/content"), Some(&json!(content)));
+        }
+    }
+}
+
+#[test]
+fn prefilled_fallback_keeps_unmatched_and_native_thinking_cases() {
+    for (model, content) in [
+        (MODEL, "private reasoning\n</think>\n\nvisible answer"),
+        ("qwen3:4b", "private reasoning\n</think>\nvisible answer"),
+        ("qwen3:4b", "The closing token </think> is XML-like."),
+        ("qwen3:4b", "Example:\n</think>\nis a closing tag."),
+        ("qwen3:4b", "  visible indentation"),
+    ] {
+        for mode in [Mode::Unary, Mode::Streaming] {
+            let reply = whole(
+                model,
+                json!({"role":"assistant", "content":content}),
+                "stop",
+            );
+            assert_eq!(
+                blocks(&decode(model, mode, &[reply]).expect("reply decodes")),
+                [("text", content.to_owned())]
+            );
+        }
+    }
+    let content = "private reasoning\n</think>\n\nvisible answer";
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let reply = whole(
+            "qwen3:4b",
+            json!({"role":"assistant", "thinking":"native reasoning", "content":content}),
+            "stop",
+        );
+        let response =
+            decode("qwen3:4b", mode, &[reply]).expect("native thinking takes precedence");
+        assert_eq!(
+            blocks(&response),
+            [
+                ("reasoning", "native reasoning".to_owned()),
+                ("text", content.to_owned())
+            ]
+        );
+    }
+}
+
+// G33 does not change F's nonterminal closing-only delivery. Buffering or
+// retroactively reclassifying those already emitted Text items is not chosen.
+#[test]
+fn closing_only_nonterminal_chunks_stay_text() {
+    for content in [
+        "private reasoning\n</think>\n\nvisible answer",
+        "private\n</think>\n\nThe answer.",
+    ] {
+        let mut records: Vec<Value> = content
+            .chars()
+            .map(|ch| {
+                record(
+                    "qwen3:4b",
+                    json!({"role":"assistant", "content":ch.to_string()}),
+                )
+            })
+            .collect();
+        records.push(done("qwen3:4b", "stop"));
+        let response =
+            decode("qwen3:4b", Mode::Streaming, &records).expect("record stream decodes");
+        assert_eq!(blocks(&response), [("text", content.to_owned())]);
+    }
+}
+
+// G34 deliberately differs from F's old helper: an unclosed leading block
+// remains Reasoning, rather than switching to Text at EOF.
+#[test]
+fn original_unterminated_think_literal_is_reasoning_in_both_modes() {
+    let content = "<think>unterminated";
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let reply = whole(
+            "qwen3:4b",
+            json!({"role":"assistant", "content":content}),
+            "stop",
+        );
+        assert_eq!(
+            blocks(&decode("qwen3:4b", mode, &[reply]).expect("reply decodes")),
+            [("reasoning", "unterminated".to_owned())]
+        );
+    }
 }

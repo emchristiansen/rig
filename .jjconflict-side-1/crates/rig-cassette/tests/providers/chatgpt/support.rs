@@ -1,11 +1,25 @@
 use rig::providers::chatgpt;
 use rig::providers::openai::OpenAIConfig;
+use rig::providers::openai::wire::CallerIdentity;
 use rig_test_support::cassette_models::OpenAiModels;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 
 use crate::cassettes::{CassetteSpec, ProviderCassette};
 use futures::FutureExt;
+
+/// The caller identity a ChatGPT cassette sends. Recording reads it from
+/// `CHATGPT_ORIGINATOR` and `CHATGPT_USER_AGENT`, so what reaches the live
+/// service is the recorder's exact identity and never one Rig makes up;
+/// replay sends a placeholder that never leaves the machine.
+pub(super) fn cassette_identity(cassette: &ProviderCassette) -> CallerIdentity {
+    CallerIdentity::new(
+        cassette.api_key("CHATGPT_ORIGINATOR"),
+        cassette.api_key("CHATGPT_USER_AGENT"),
+        None,
+    )
+    .expect("the cassette identity should be header-safe")
+}
 
 async fn chatgpt_cassette_with_default_instructions(
     spec: impl Into<CassetteSpec>,
@@ -20,6 +34,7 @@ async fn chatgpt_cassette_with_default_instructions(
     .await;
     let client =
         OpenAIConfig::with_key(&chatgpt::DIALECT, cassette.api_key("CHATGPT_ACCESS_TOKEN"))
+            .with_caller_identity(cassette_identity(&cassette))
             .with_account_id(cassette.api_key("CHATGPT_ACCOUNT_ID"))
             .with_base_url(cassette.base_url())
             .with_instructions(default_instructions);
@@ -37,6 +52,36 @@ where
     Fut: Future<Output = ()>,
 {
     let (cassette, client) = chatgpt_cassette(spec).await;
+    let result = AssertUnwindSafe(test_body(OpenAiModels::new(
+        client,
+        rig_test_support::cassettes::local_http(),
+    )))
+    .catch_unwind()
+    .await;
+    cassette.finish_after_test(result).await;
+}
+
+/// The `include` every Codex request in these cassettes was recorded with.
+///
+/// The Codex contract no longer forces `reasoning.encrypted_content` into
+/// `include`: it follows the rule every dialect shares, which requests it only
+/// alongside `reasoning`. These recordings were made while the Codex request
+/// always carried it, so a test that sets no `reasoning` states the include
+/// itself, and the request it sends is the one that was recorded.
+pub(super) fn recorded_include() -> serde_json::Value {
+    serde_json::json!({ "include": ["reasoning.encrypted_content"] })
+}
+
+pub(super) async fn with_chatgpt_cassette_default_instructions<F, Fut>(
+    spec: impl Into<CassetteSpec>,
+    default_instructions: impl Into<String>,
+    test_body: F,
+) where
+    F: FnOnce(OpenAiModels) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let (cassette, client) =
+        chatgpt_cassette_with_default_instructions(spec, default_instructions).await;
     let result = AssertUnwindSafe(test_body(OpenAiModels::new(
         client,
         rig_test_support::cassettes::local_http(),

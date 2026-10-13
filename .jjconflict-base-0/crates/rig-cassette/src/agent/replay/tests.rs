@@ -21,7 +21,7 @@ use crate::effect_log::{EffectLog, EffectLogRecorder};
 
 use rig_core::serve::{
     Reply, Serve,
-    adapters::{CompletionAdapter, ToolAdapter},
+    adapters::{ModelAdapter, ToolAdapter},
 };
 
 use rig_core::{
@@ -29,7 +29,7 @@ use rig_core::{
     effect::{EffectFamily, EffectKind, FamilyDescriptor, HandlerDescriptor, HandlerKey, Outcome},
     error::{ErrorKind, ErrorReport},
     message::AssistantContent,
-    streaming::StreamEvent,
+    streaming::{Item, Relayed, StreamEvent, Transcript},
     test_utils::{MockCompletionModel, MockStreamEvent},
     tool::{Tool, ToolContext, ToolExecutionError},
 };
@@ -38,7 +38,7 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::test]
 async fn kept_stream_replay_preserves_every_error_item_and_its_position() {
-    struct Items(Vec<Result<StreamEvent, ErrorReport>>);
+    struct Items(Vec<Result<Relayed, ErrorReport>>);
     impl Serve for Items {
         type Family = rig_core::effect::family::Completion;
         fn descriptor(&self) -> HandlerDescriptor {
@@ -57,10 +57,13 @@ async fn kept_stream_replay_preserves_every_error_item_and_its_position() {
     }
     for error_first in [false, true] {
         let error = Err(ErrorReport::new(ErrorKind::Response, "first error"));
-        let terminal = Ok(StreamEvent::Final(rig_core::streaming::StreamFinal::new(
-            "test",
-            rig_core::completion::Usage::default(),
-            serde_json::json!({}),
+        let terminal = Ok(Relayed::Done(Box::new(
+            rig_core::completion::CompletionResponse::new(
+                Vec::new(),
+                rig_core::completion::Usage::default(),
+                rig_core::message::Origin::new("test.api", "test", ""),
+                serde_json::json!({}),
+            ),
         )));
         let mut items = if error_first {
             vec![error, terminal]
@@ -92,10 +95,16 @@ async fn kept_stream_replay_preserves_every_error_item_and_its_position() {
                 .collect::<Vec<_>>(),
         )
         .await;
-        assert_eq!(
-            serde_json::to_value(replay).unwrap(),
-            serde_json::to_value(live).unwrap()
-        );
+        // What a consumer reads: the items up to the first that ends the
+        // stream, a response or an error.
+        let read = |items: Vec<Result<Relayed, ErrorReport>>| {
+            let end = items
+                .iter()
+                .position(|item| !matches!(item, Ok(Relayed::Item(_))))
+                .map_or(items.len(), |at| at + 1);
+            items.into_iter().take(end).collect::<Vec<_>>()
+        };
+        assert_eq!(read(replay), read(live));
     }
 }
 
@@ -120,7 +129,7 @@ async fn replayed_model_handle_retains_live_capabilities_and_model_identity() {
                 rig_core::completion::CompletionResponse::new(
                     vec![AssistantContent::text("ok")],
                     rig_core::completion::Usage::default(),
-                    "composing",
+                    rig_core::message::Origin::new("test.api", "composing", ""),
                     serde_json::json!({ "composing": "ok" }),
                 ),
             )))
@@ -143,7 +152,7 @@ async fn replayed_model_handle_retains_live_capabilities_and_model_identity() {
     let replay_model: rig_agent::bus::ModelHandle =
         dispatcher.handle(&HandlerKey::from("model")).unwrap();
     assert_eq!(replay_model.capabilities(), live_model.capabilities());
-    assert_eq!(replay_model.model_ref(), live_model.model_ref());
+    assert_eq!(replay_model.label(), live_model.label());
     assert!(
         replay_model
             .capabilities()
@@ -254,18 +263,7 @@ fn custom(payload: serde_json::Value) -> EffectKind {
 
 fn completion_kind(stream: bool) -> EffectKind {
     EffectKind::Completion {
-        request: CompletionRequest {
-            model: None,
-            chat_history: vec![Message::user("hi")],
-            documents: vec![],
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        },
+        request: CompletionRequest::from(vec![Message::user("hi")]),
         stream,
     }
 }
@@ -405,10 +403,13 @@ impl Serve for CutShort {
     }
 
     async fn serve(&self, _kind: EffectKind, _dispatch: Dispatch) -> Reply {
-        Reply::written(|mut out| async move {
-            let _ = out.text("partial").await;
-            // Dropped here, before any `Final`.
-        })
+        Reply::written(
+            rig_core::message::Origin::new("writer", "writer", "writer"),
+            |mut out| async move {
+                let _ = out.text("partial").await;
+                // Dropped here, before any `Final`.
+            },
+        )
     }
 }
 
@@ -447,7 +448,7 @@ async fn recorder_captures_every_dispatch_and_the_replayer_answers_from_it() {
         driver
             .register(
                 "model",
-                CompletionAdapter::new(
+                ModelAdapter::new(
                     "mock",
                     MockCompletionModel::from_stream_turns([vec![
                         MockStreamEvent::text("streamed"),
@@ -518,19 +519,20 @@ async fn recorder_captures_every_dispatch_and_the_replayer_answers_from_it() {
         panic!("expected a tool result");
     };
     assert_eq!(result.output().as_json(), Some(&json!(2)));
-    // A recorded completion answers a stream dispatch as events + Final.
-    let events: Vec<_> = within(
+    // A recorded completion answers a stream dispatch as events, then the
+    // response.
+    let items: Vec<_> = within(
         dispatcher
             .dispatch_stream(&HandlerKey::from("model"), completion_kind(true))
             .collect(),
     )
     .await;
-    let events: Vec<StreamEvent> = events.into_iter().map(|e| e.expect("ok")).collect();
-    assert!(matches!(events.last(), Some(StreamEvent::Final(_))));
+    let items: Vec<Relayed> = items.into_iter().map(|e| e.expect("ok")).collect();
+    assert!(matches!(items.last(), Some(Relayed::Done(_))));
     assert!(
-        events
+        items
             .iter()
-            .any(|e| matches!(e, StreamEvent::BlockDelta { .. }))
+            .any(|item| matches!(item, Relayed::Item(Item::Event(StreamEvent::Text { .. }))))
     );
     // Past the log: a divergence, never a hang.
     let report = within(dispatcher.dispatch(&HandlerKey::from("add"), custom(json!(1))))
@@ -639,7 +641,7 @@ async fn a_stream_that_ends_without_final_is_reported_and_recorded() {
     let last = items.last().expect("the truncation is an item");
     let report = last.as_ref().expect_err("the truncation is an error item");
     assert_eq!(report.kind, ErrorKind::Response, "{report:?}");
-    assert!(report.message.contains("before its terminal"), "{report:?}");
+    assert_eq!(report.message, rig_core::serve::stream_truncated().message);
     // Give the driver a moment to observe the dropped sink, then the log
     // holds the same failure the consumer saw.
     within(async {
@@ -757,7 +759,7 @@ async fn a_stream_recorded_verbatim_replays_its_own_events() {
         driver
             .register(
                 "model",
-                CompletionAdapter::new("mock", MockCompletionModel::from_stream_turns([events()])),
+                ModelAdapter::new("mock", MockCompletionModel::from_stream_turns([events()])),
             )
             .expect("register");
         driver.record_to(recorder.clone());
@@ -780,7 +782,15 @@ async fn a_stream_recorded_verbatim_replays_its_own_events() {
     // Keeping events: the record holds them verbatim.
     let (seen, kept) = record(EffectLogRecorder::keeping_stream_events()).await;
     let recorded = kept[0].events.as_ref().expect("events kept");
-    assert_eq!(recorded.len(), seen, "every event the consumer received");
+    assert_eq!(
+        recorded.len() + 2,
+        seen,
+        "the origin, every item the consumer received, then the response"
+    );
+    assert!(
+        kept[0].stream_origin.is_some(),
+        "the stream's origin is kept"
+    );
     assert!(
         matches!(kept[0].outcome, Ok(Outcome::Completion(_))),
         "and still the fold"
@@ -800,10 +810,19 @@ async fn a_stream_recorded_verbatim_replays_its_own_events() {
         }
         items
     };
-    let recorded = recorded.clone();
-    let from_kept = replay(kept).await;
+    let items = |relayed: Vec<Relayed>| -> Vec<Item<StreamEvent>> {
+        relayed
+            .into_iter()
+            .filter_map(|relayed| match relayed {
+                Relayed::Item(item) => Some(item),
+                Relayed::Origin(_) | Relayed::Done(_) => None,
+            })
+            .collect()
+    };
+    let recorded = recorded.items().to_vec();
+    let from_kept = items(replay(kept).await);
     assert_eq!(from_kept, recorded, "the recorded events, verbatim");
-    let from_fold = replay(folded).await;
+    let from_fold = items(replay(folded).await);
     assert_ne!(
         from_fold, recorded,
         "the fold re-emits its own boundaries, not the original deltas"
@@ -925,6 +944,7 @@ async fn a_tool_call_under_a_different_context_is_the_same_record() {
     let log: EffectLog = EffectLog {
         header: LogHeader::default(),
         records: vec![EffectRecord {
+            stream_origin: None,
             tool_output: None,
             parent: None,
             scope: None,
@@ -977,7 +997,7 @@ async fn a_streamed_error_record_replays_its_events_and_then_its_error() {
     driver
         .register(
             "model",
-            CompletionAdapter::new(
+            ModelAdapter::new(
                 "mock",
                 MockCompletionModel::from_stream_turns([vec![
                     MockStreamEvent::text("hel"),
@@ -996,16 +1016,18 @@ async fn a_streamed_error_record_replays_its_events_and_then_its_error() {
     drop(stream);
     let mut log = recorder.take();
     let events = log.records[0].events.as_mut().expect("events kept");
-    events.truncate(1);
-    let first = events[0].clone();
+    let first = events.items()[0].clone();
+    *events = Transcript::from_items(vec![first.clone()]).expect("a prefix");
     log.records[0].outcome = Err(ErrorReport::new(ErrorKind::Cancelled, "dropped mid-stream"));
 
     let (dispatcher, _registrar, mut driver) = Bus::channel();
     super::register_all(&log, &mut driver).expect("fresh keys");
     let _task = spawn(driver);
     let mut stream = dispatcher.dispatch_stream(&HandlerKey::from("model"), completion_kind(true));
+    let origin = within(stream.next()).await.expect("the stream's origin");
+    assert!(matches!(origin, Ok(Relayed::Origin(_))), "{origin:?}");
     let replayed = within(stream.next()).await.expect("the recorded event");
-    assert_eq!(replayed.expect("the event"), first);
+    assert_eq!(replayed.expect("the event"), Relayed::Item(first));
     let then = within(stream.next()).await.expect("then the error");
     let report = then.expect_err("the record's outcome");
     assert_eq!(report.kind, ErrorKind::Cancelled, "{report:?}");
@@ -1162,113 +1184,43 @@ async fn a_record_names_the_scope_of_the_program_that_made_it() {
     assert_eq!(restored[1].scope.as_deref(), Some("run-1"));
 }
 
-/// A stream whose *fold* fails — a tool call closed with malformed
-/// arguments under `UnparseableToolInput::Error` — reaches the consumer as
-/// the provider sent it (the malformed close is an `Ok` item; the
-/// consumer's own accumulator reports it) while the record's outcome is
-/// the fold's error. A replay with kept events re-emits the items as they
-/// were and nothing more: the consumer re-derives the same error and a
-/// re-record folds to the same outcome. It never appends the folded error
-/// as an item the live consumer did not receive.
-#[tokio::test]
-async fn kept_events_replay_a_fold_error_as_the_items_that_produced_it() {
-    use rig_core::streaming::{
-        BlockClose, BlockId, BlockKind, Delta, StreamFinal, ToolCallEnd, UnparseableToolInput,
+/// A log recorded before streams were typed carries its events in the old
+/// shape: block deltas and a final record. This record is the last turn of
+/// `anthropic_causal_completion_streamed` as it was recorded then (at
+/// `22368226f`), outcome and events verbatim. Its events are no longer a
+/// transcript, so the log does not decode: it is re-recorded, not replayed
+/// through a translation.
+#[test]
+fn a_log_recorded_before_typed_streams_does_not_decode() {
+    let EffectKind::Completion { request, .. } = completion_kind(true) else {
+        panic!("a completion kind");
     };
-
-    struct Items(Vec<Result<StreamEvent, ErrorReport>>);
-    impl Serve for Items {
-        type Family = rig_core::effect::family::Completion;
-        fn descriptor(&self) -> HandlerDescriptor {
-            HandlerDescriptor {
-                key: "model".into(),
-                family: FamilyDescriptor::Completion {
-                    model: rig_core::completion::ModelRef::new("malformed"),
-                    capabilities: rig_core::completion::ProviderCapabilities::default(),
-                },
-                layers: vec![],
-            }
-        }
-        async fn serve(&self, _: EffectKind, _dispatch: Dispatch) -> Reply {
-            Reply::Stream(Box::pin(futures::stream::iter(self.0.clone())))
-        }
-    }
-    let call = || BlockId::wire("call_1");
-    let items = vec![
-        Ok(StreamEvent::BlockStart {
-            id: call(),
-            kind: BlockKind::ToolCall,
-        }),
-        Ok(StreamEvent::BlockDelta {
-            id: call(),
-            delta: Delta::ToolName {
-                name: "lookup".to_owned(),
-            },
-        }),
-        Ok(StreamEvent::BlockDelta {
-            id: call(),
-            delta: Delta::ToolArguments {
-                arguments: "{not json".to_owned(),
-            },
-        }),
-        Ok(StreamEvent::BlockEnd {
-            id: call(),
-            end: BlockClose::ToolCall(ToolCallEnd::new(UnparseableToolInput::Error)),
-            block: None,
-        }),
-        Ok(StreamEvent::Final(StreamFinal::new(
-            "test",
-            rig_core::completion::Usage::default(),
-            serde_json::json!({}),
-        ))),
-    ];
-    let key = HandlerKey::from("model");
-    let (dispatcher, _, mut driver) = Bus::channel();
-    let recorder = EffectLogRecorder::keeping_stream_events();
-    driver.register(key.clone(), Items(items.clone())).unwrap();
-    driver.record_to(recorder.clone());
-    let _live = spawn(driver);
-    let live = within(
-        dispatcher
-            .dispatch_stream(&key, completion_kind(true))
-            .collect::<Vec<_>>(),
-    )
-    .await;
-    assert_eq!(
-        serde_json::to_value(&live).unwrap(),
-        serde_json::to_value(&items).unwrap(),
-        "the consumer receives the items as the provider sent them"
-    );
-    drop(dispatcher);
-    let log = recorder.take();
-    assert_eq!(log.len(), 1);
-    let report = log[0]
-        .outcome
-        .as_ref()
-        .expect_err("the fold's error is the record's outcome");
-    assert_eq!(report.kind, ErrorKind::Response, "{report:?}");
-
-    let (dispatcher, _, mut driver) = Bus::channel();
-    super::register_all(&log, &mut driver).expect("fresh keys");
-    let again = EffectLogRecorder::keeping_stream_events();
-    driver.record_to(again.clone());
-    let _replay = spawn(driver);
-    let replayed = within(
-        dispatcher
-            .dispatch_stream(&key, completion_kind(true))
-            .collect::<Vec<_>>(),
-    )
-    .await;
-    assert_eq!(
-        serde_json::to_value(&replayed).unwrap(),
-        serde_json::to_value(&live).unwrap(),
-        "a replay re-emits the live items and nothing more"
-    );
-    drop(dispatcher);
-    let rerecorded = again.take();
-    assert_eq!(
-        serde_json::to_value(&rerecorded[0].outcome).unwrap(),
-        serde_json::to_value(&log[0].outcome).unwrap(),
-        "a re-record of the replay folds to the same outcome"
-    );
+    let events: serde_json::Value = serde_json::from_str(LEGACY_EVENTS).expect("legacy events");
+    let outcome: serde_json::Value = serde_json::from_str(LEGACY_OUTCOME).expect("legacy outcome");
+    let log = serde_json::from_value::<EffectLog>(json!({
+        "header": {
+            "handlers": [{
+                "key": "golden/model:default",
+                "family": {"family": "completion", "model": "default", "capabilities": {"composes_native_output_with_tools": true}},
+            }],
+            "signature": {"golden/model:default": "completion"},
+            "hooks": [],
+            "required": {"golden/model:default": "completion"},
+        },
+        "records": [{
+            "id": 0,
+            "key": "golden/model:default",
+            "kind": {"effect": "completion", "request": request, "stream": true},
+            "outcome": outcome,
+            "events": events,
+            "tool_output": null,
+        }],
+    }));
+    assert!(log.is_err(), "the legacy events are not a transcript");
 }
+
+/// The legacy record's events, verbatim.
+const LEGACY_EVENTS: &str = r#"[{"event": "block_start", "id": "minted:block:0", "kind": {"kind": "text"}}, {"event": "block_delta", "id": "minted:block:0", "delta": {"delta": "text", "text": "Paris"}}, {"event": "final", "usage": {"input_tokens": 695, "output_tokens": 4, "total_tokens": 699, "cached_input_tokens": 0, "cache_creation_input_tokens": 0}, "finish_reason": "stop", "message_id": "msg_011CfLcWD6M3aaNfbpDzpN8F", "response_id": null, "provider_request_id": "req_011CfLcWCdKMMoTXzZp2m89E", "provider": "anthropic", "model": "claude-sonnet-4-6", "raw": {"usage": {"output_tokens": 4, "input_tokens": 695, "cache_creation_input_tokens": 0, "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}, "cache_read_input_tokens": 0}, "stop_reason": "end_turn", "message_id": "msg_011CfLcWD6M3aaNfbpDzpN8F", "model": "claude-sonnet-4-6"}}]"#;
+
+/// The legacy record's outcome, verbatim.
+const LEGACY_OUTCOME: &str = r#"{"Ok": {"outcome": "completion", "choice": [{"type": "text", "text": "Paris"}], "usage": {"input_tokens": 695, "output_tokens": 4, "total_tokens": 699, "cached_input_tokens": 0, "cache_creation_input_tokens": 0}, "message_id": "msg_011CfLcWD6M3aaNfbpDzpN8F", "response_id": null, "provider_request_id": "req_011CfLcWCdKMMoTXzZp2m89E", "finish_reason": "stop", "provider": "anthropic", "model": "claude-sonnet-4-6", "raw": {"usage": {"output_tokens": 4, "input_tokens": 695, "cache_creation_input_tokens": 0, "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}, "cache_read_input_tokens": 0}, "stop_reason": "end_turn", "message_id": "msg_011CfLcWD6M3aaNfbpDzpN8F", "model": "claude-sonnet-4-6"}}}"#;

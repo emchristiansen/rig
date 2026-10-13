@@ -60,7 +60,7 @@ fn openai_responses_request_auto_adds_reasoning_encrypted_include() {
 }
 
 /// The reasoning block a whole Responses body holding `item` decodes to.
-fn decoded_reasoning(item: serde_json::Value) -> rig::message::Reasoning {
+fn decoded_reasoning(item: serde_json::Value) -> rig::message::CarriedReasoning {
     let wire = rig::providers::openai::responses_api::wire::Responses::new(
         rig::providers::openai::OpenAIConfig::new("unused"),
         "gpt-5",
@@ -82,7 +82,7 @@ fn decoded_reasoning(item: serde_json::Value) -> rig::message::Reasoning {
         .choice
         .into_iter()
         .find_map(|block| match block {
-            AssistantContent::Reasoning(reasoning) => Some(reasoning),
+            AssistantContent::CarriedReasoning(reasoning) => Some(reasoning),
             _ => None,
         })
         .expect("the reasoning item decodes to a reasoning block")
@@ -100,15 +100,20 @@ fn openai_responses_reasoning_output_preserves_encrypted_content() {
         "status": "completed"
     });
     let reasoning = decoded_reasoning(item.clone());
-    assert_eq!(reasoning.text, "summary text");
-    let native = reasoning.native.expect("the item is the block's native");
+    assert_eq!(reasoning.display_text(), "summary text");
+    let native = reasoning.payload;
     assert_eq!(native.item, item);
     assert_eq!(native.item["encrypted_content"], "cipher_blob");
+    assert_eq!(native.item["id"], "rs_out_1");
+    assert_eq!(
+        native.item["summary"],
+        serde_json::json!([{"type":"summary_text", "text":"summary text"}])
+    );
 }
 
 #[test]
 fn openai_responses_reasoning_output_preserves_reasoning_text_content() {
-    let reasoning = decoded_reasoning(serde_json::json!({
+    let item = serde_json::json!({
         "type": "reasoning",
         "id": "rs_text_1",
         "summary": [],
@@ -116,11 +121,15 @@ fn openai_responses_reasoning_output_preserves_reasoning_text_content() {
             { "type": "reasoning_text", "text": "visible reasoning" }
         ],
         "status": "completed"
-    }));
-    assert_eq!(reasoning.text, "visible reasoning");
+    });
+    let reasoning = decoded_reasoning(item.clone());
+    assert_eq!(reasoning.display_text(), "visible reasoning");
+    assert_eq!(reasoning.payload.item, item);
+    assert_eq!(reasoning.payload.item["id"], "rs_text_1");
+    assert_eq!(reasoning.payload.item["summary"], serde_json::json!([]));
     assert_eq!(
-        reasoning.native.expect("the item is kept").item["id"],
-        "rs_text_1"
+        reasoning.payload.item["content"],
+        serde_json::json!([{"type":"reasoning_text", "text":"visible reasoning"}])
     );
 }
 
@@ -131,10 +140,8 @@ fn openai_responses_reasoning_output_without_summary_is_not_dropped() {
         "id": "rs_empty",
         "summary": []
     }));
-    assert!(reasoning.text.is_empty());
-    let native = reasoning
-        .native
-        .expect("a contentless reasoning item must still decode as one");
+    assert!(reasoning.display_text().is_empty());
+    let native = reasoning.payload;
     assert_eq!(native.item["id"], "rs_empty");
     assert!(native.item.get("encrypted_content").is_none());
 }

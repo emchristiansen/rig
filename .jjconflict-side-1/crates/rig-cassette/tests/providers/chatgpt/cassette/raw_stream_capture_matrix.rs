@@ -44,7 +44,9 @@ const MODEL: &str = chatgpt::GPT_5_4;
 const PROMPT: &str = "Reply with exactly the single word: pong";
 
 fn request() -> rig::completion::CompletionRequest {
-    CompletionRequest::new(PROMPT).max_tokens(64)
+    // No output-token cap: the Codex contract refuses a caller-set
+    // `max_output_tokens` by name.
+    CompletionRequest::new(PROMPT)
 }
 
 /// The premise every streaming cell rests on: the scenario recorded exactly

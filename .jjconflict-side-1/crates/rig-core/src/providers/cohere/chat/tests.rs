@@ -159,7 +159,6 @@ fn request_settings_land_where_cohere_reads_them() {
         json!([
             {"type": "function", "function": {"name": "lookup", "description": "looks things up",
                 "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}},
-            {"type": "function", "function": {"name": "raw", "parameters": {}}},
         ])
     );
     assert_eq!(body["tool_choice"], "REQUIRED");
@@ -184,12 +183,11 @@ fn request_settings_land_where_cohere_reads_them() {
     }
     let mut toolless = CompletionRequest::new("hi");
     toolless.tool_choice = Some(ToolChoice::Required);
-    assert!(
-        sent(&native(), toolless, Mode::Unary)
-            .1
-            .get("tool_choice")
-            .is_none()
-    );
+    let error = native()
+        .encode(toolless, Mode::Unary)
+        .expect_err("Required needs tools");
+    let error = crate::error::ProviderError::from(error);
+    assert_eq!(error.kind(), crate::error::ErrorKind::Request);
 }
 
 /// Malformed `additional_params` and a history with nothing to send are
@@ -726,4 +724,137 @@ fn compatibility_effort_follows_the_catalog() {
     assert_eq!(body["reasoning_effort"], "high");
     let error = effort("command-r7b-12-2024").expect_err("a model that does not think");
     assert!(error.contains("`reasoning`"), "{error}");
+}
+
+// G28 corrects U's broadening of Specific to unselected raw functions.
+#[test]
+fn specific_tool_choice_filters_typed_and_raw_functions() {
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let mut request = CompletionRequest::new("hi")
+            .tool(tool("lookup"))
+            .tool(tool("other"));
+        request.tool_choice = Some(ToolChoice::Specific {
+            function_names: vec![
+                ToolName::new("lookup").unwrap(),
+                ToolName::new("raw_selected").unwrap(),
+            ],
+        });
+        let raw_selected = json!({"type":"function", "function":{"name":"raw_selected", "parameters":{}, "future":7}});
+        request.additional_params = Some(json!({"tools":[
+            raw_selected.clone(),
+            {"type":"function", "function":{"name":"raw_other", "parameters":{}}}
+        ], "seed":11}));
+        let (_, body) = sent(&native(), request, mode);
+        assert_eq!(
+            body["tools"],
+            json!([
+                {"type":"function", "function":{"name":"lookup", "description":"looks things up", "parameters":{"type":"object", "properties":{"q":{"type":"string"}}}}},
+                raw_selected,
+            ])
+        );
+        assert_eq!(body["tool_choice"], "REQUIRED");
+        assert_eq!(body["seed"], 11);
+    }
+}
+
+#[test]
+fn specific_tool_choice_refuses_unidentifiable_raw_tools() {
+    for raw_tool in [
+        json!({"type":"function", "function":{"parameters":{}}}),
+        json!({"type":"function", "function":{"name":""}}),
+        json!({"type":"function", "function":{"name":7}}),
+        json!({"type":"custom", "name":"lookup"}),
+        Value::Null,
+    ] {
+        let mut request = CompletionRequest::new("hi").tool(tool("lookup"));
+        request.tool_choice = Some(ToolChoice::Specific {
+            function_names: vec![ToolName::new("lookup").unwrap()],
+        });
+        request.additional_params = Some(json!({"tools":[raw_tool]}));
+        let error = native()
+            .encode(request, Mode::Unary)
+            .expect_err("raw tool cannot carry Specific");
+        let error = crate::error::ProviderError::from(error);
+        assert_eq!(error.kind(), crate::error::ErrorKind::Request);
+    }
+}
+
+#[test]
+fn specific_tool_choice_refuses_an_empty_selected_set() {
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let mut request = CompletionRequest::new("hi").tool(tool("other"));
+        request.tool_choice = Some(ToolChoice::Specific {
+            function_names: vec![ToolName::new("lookup").unwrap()],
+        });
+        request.additional_params =
+            Some(json!({"tools":[{"type":"function", "function":{"name":"raw_other"}}]}));
+        let error = native()
+            .encode(request, mode)
+            .expect_err("Specific selected no effective tool");
+        let error = crate::error::ProviderError::from(error);
+        assert_eq!(error.kind(), crate::error::ErrorKind::Request);
+    }
+}
+
+// G29 keeps the requirement effective, including tools supplied as raw JSON.
+#[test]
+fn required_tool_choice_refuses_no_tools_and_accepts_raw_tools() {
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let mut request = CompletionRequest::new("hi");
+        request.tool_choice = Some(ToolChoice::Required);
+        let error = native()
+            .encode(request.clone(), mode)
+            .expect_err("Required has no tools");
+        let error = crate::error::ProviderError::from(error);
+        assert_eq!(error.kind(), crate::error::ErrorKind::Request);
+        let raw_tool = json!({"type":"function", "function":{"name":"lookup", "parameters":{}}});
+        request.additional_params = Some(json!({"tools":[raw_tool.clone()]}));
+        let (_, body) = sent(&native(), request, mode);
+        assert_eq!(body["tools"], json!([raw_tool]));
+        assert_eq!(body["tool_choice"], "REQUIRED");
+    }
+}
+
+// G32 fails conflicting mandatory instructions before the raw layer merges.
+#[test]
+fn mandatory_tool_choice_refuses_conflicting_raw_override() {
+    for choice in [
+        ToolChoice::Required,
+        ToolChoice::Specific {
+            function_names: vec![ToolName::new("lookup").unwrap()],
+        },
+    ] {
+        for raw_choice in [
+            json!("NONE"),
+            json!("AUTO"),
+            Value::Null,
+            json!(7),
+            json!({"type":"REQUIRED"}),
+        ] {
+            let mut request = CompletionRequest::new("hi").tool(tool("lookup"));
+            request.tool_choice = Some(choice.clone());
+            request.additional_params = Some(json!({"tool_choice":raw_choice}));
+            let error = native()
+                .encode(request, Mode::Unary)
+                .expect_err("mandatory instructions conflict");
+            let error = crate::error::ProviderError::from(error);
+            assert_eq!(error.kind(), crate::error::ErrorKind::Request);
+        }
+        let mut request = CompletionRequest::new("hi").tool(tool("lookup"));
+        request.tool_choice = Some(choice);
+        request.additional_params = Some(json!({"tool_choice":"REQUIRED"}));
+        assert_eq!(
+            sent(&native(), request, Mode::Unary).1["tool_choice"],
+            "REQUIRED"
+        );
+    }
+    for choice in [ToolChoice::Auto, ToolChoice::None] {
+        let mut request = CompletionRequest::new("hi").tool(tool("lookup"));
+        request.tool_choice = Some(choice);
+        request.additional_params = Some(json!({"tool_choice":"raw precedence"}));
+        assert_eq!(
+            sent(&native(), request, Mode::Unary).1["tool_choice"],
+            "raw precedence"
+        );
+    }
 }

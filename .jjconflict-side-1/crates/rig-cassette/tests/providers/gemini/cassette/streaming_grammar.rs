@@ -364,3 +364,61 @@ async fn interactions_signature_without_summaries_never_fabricates_an_empty_sibl
     )
     .await;
 }
+
+/// Cross-provider replay, recorded live (84a43e9e finding #5): a history
+/// sourced from an OpenAI-Chat-shaped provider carries the other wire's
+/// identifier `call_abc` only as rig's correlation handle — no Gemini
+/// provider id. Replayed to Gemini, the request's `functionResponse.name`
+/// must be the tool's *name*, read from the required `ToolResult::name` —
+/// never the identifier `call_abc`, which the pre-fix name-as-id heuristic
+/// kept verbatim — and the correlation-only handle must stay off the wire
+/// (no `functionCall.id`/`functionResponse.id`). The recording is the
+/// evidence: Gemini accepts the request and answers from the tool result.
+///
+/// Re-record with:
+/// `RIG_PROVIDER_TEST_MODE=record GEMINI_API_KEY=... cargo test --test gemini chat_sourced_history_replays -- --test-threads=1`
+#[tokio::test]
+async fn chat_sourced_history_replays_the_tool_name_not_the_identifier() {
+    super::super::support::with_gemini_cassette(
+        "streaming_grammar/chat_sourced_history_replay",
+        |client| async move {
+            let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
+            // G24: one genuine local identity, shared by this call and result.
+            let cross_provider_handle =
+                rig::message::CallId::from(rig::message::LocalCallId::new());
+            let call = rig::message::ToolCall::new(
+                cross_provider_handle.clone(),
+                rig::message::ToolFunction::new(
+                    rig::message::ToolName::new("add").expect("tool name"),
+                    serde_json::json!({"x": 2, "y": 3}),
+                ),
+            );
+            let history = vec![
+                rig::message::Message::user(
+                    "Use the add tool to compute 2 + 3, then state the result.",
+                ),
+                rig::message::Message::Assistant(rig::message::AssistantMessage::new(vec![
+                    AssistantContent::ToolCall(call),
+                ])),
+                rig::message::Message::tool_result(
+                    cross_provider_handle,
+                    rig::message::ToolName::new("add").expect("tool name"),
+                    "5",
+                ),
+            ];
+            let request = CompletionRequest::new("State the final result in one short sentence.")
+                .preamble(
+                    "You are a calculator assistant. Report tool results faithfully.".to_string(),
+                )
+                .tool(rig::tool::tool_definition(&crate::support::Adder))
+                .messages(history);
+            let run = drain_stream(model.stream(request).expect("stream should start")).await;
+            assert!(
+                run.text.contains('5'),
+                "the model should answer from the replayed tool result, got {:?}",
+                run.text
+            );
+        },
+    )
+    .await;
+}

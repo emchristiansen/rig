@@ -55,6 +55,13 @@ struct StoredResponseTurn {
     raw_response: Value,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredStreamingTurn {
+    user: Message,
+    assistant: Message,
+    final_response: CompletionResponse,
+}
+
 /// Issue one GPT-5.6 completion at `effort`, with the typed Responses
 /// options `responses`, and read the reasoning the provider reports through
 /// the typed extras.
@@ -304,6 +311,117 @@ async fn streaming_reasoning_metadata() {
                 reasoning_of(&extras),
                 [Some("low"), Some("pro"), Some("current_turn"), None]
             );
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn five_turn_streaming_reasoning_metadata_roundtrip() {
+    with_openai_cassette(
+        "gpt_5_6_reasoning/five_turn_streaming_metadata_roundtrip",
+        |client| async move {
+            let model = client.openai.completion(openai::GPT_5_6_SOL);
+            let expected_metadata = json!({
+                "context": "all_turns",
+                "effort": "low",
+                "mode": "pro",
+                "summary": null
+            });
+            let mut stored_turns = Vec::<StoredStreamingTurn>::new();
+            for (turn_index, (prompt, expected_text)) in FIVE_TURN_PROMPTS.into_iter().enumerate() {
+                let history = stored_turns
+                    .iter()
+                    .flat_map(|turn| [turn.user.clone(), turn.assistant.clone()]);
+                let user_message = Message::user(prompt);
+                let request = CompletionRequest::new(user_message.clone())
+                    .messages(history)
+                    .additional_params(json!({"reasoning": {
+                        "context":"all_turns", "effort":"low", "mode":"pro"
+                    }}));
+                let mut stream = model.stream(request).unwrap_or_else(|error| {
+                    panic!("turn {} stream should start: {error}", turn_index + 1)
+                });
+                let mut text = String::new();
+                while let Some(item) = stream.next().await {
+                    if let rig::streaming::Item::Event(rig::streaming::StreamEvent::Text {
+                        text: delta,
+                        ..
+                    }) = item.unwrap_or_else(|error| {
+                        panic!("turn {} stream should succeed: {error}", turn_index + 1)
+                    }) {
+                        text.push_str(&delta);
+                    }
+                }
+                assert_eq!(
+                    text.trim(),
+                    expected_text,
+                    "unexpected turn {} text",
+                    turn_index + 1
+                );
+                // G22 persists the response returned by the real current fold,
+                // including its provider raw, rather than a retired terminal DTO.
+                let final_response = stream.finish().await.unwrap_or_else(|error| {
+                    panic!(
+                        "turn {} should yield a final response: {error}",
+                        turn_index + 1
+                    )
+                });
+                assert_eq!(
+                    final_response.raw["reasoning"]["context"].as_str(),
+                    Some("all_turns")
+                );
+                assert_eq!(
+                    final_response.raw["reasoning"].as_object(),
+                    expected_metadata.as_object()
+                );
+                let final_json = serde_json::to_value(&final_response)
+                    .expect("final streaming response should serialize");
+                let roundtripped: CompletionResponse = serde_json::from_value(final_json.clone())
+                    .expect("final streaming response should deserialize after serialization");
+                assert_eq!(
+                    serde_json::to_value(&roundtripped)
+                        .expect("roundtripped streaming response should serialize"),
+                    final_json,
+                    "all final streaming data should survive turn {} serialization roundtrip",
+                    turn_index + 1
+                );
+                stored_turns.push(StoredStreamingTurn {
+                    user: user_message,
+                    assistant: Message::Assistant(
+                        final_response
+                            .head()
+                            .with_content(final_response.choice.clone()),
+                    ),
+                    final_response,
+                });
+                let stored_json = serde_json::to_value(&stored_turns)
+                    .expect("all stored streaming turns should serialize");
+                stored_turns = serde_json::from_value(stored_json.clone()).expect(
+                    "all stored streaming turns should deserialize before the next request",
+                );
+                assert_eq!(
+                    serde_json::to_value(&stored_turns)
+                        .expect("restored streaming turns should serialize"),
+                    stored_json,
+                    "all streaming session data should survive persistence after turn {}",
+                    turn_index + 1
+                );
+                assert_eq!(stored_turns.len(), turn_index + 1);
+                for (prior_turn, stored) in stored_turns.iter().enumerate() {
+                    assert_eq!(
+                        stored.final_response.raw["reasoning"].as_object(),
+                        expected_metadata.as_object(),
+                        "streaming reasoning metadata from turn {} changed by turn {}",
+                        prior_turn + 1,
+                        turn_index + 1
+                    );
+                    assert_eq!(
+                        stored.final_response.raw["reasoning"]["context"].as_str(),
+                        Some("all_turns")
+                    );
+                }
+            }
         },
     )
     .await;

@@ -430,14 +430,19 @@ async fn incomplete_mid_tool_call_normalizes_to_length() {
     with_openai_cassette(
         "streaming_grammar/incomplete_mid_tool_call",
         |client| async move {
-            let model = client.openai.completion(openai::GPT_5_6);
+            // A truncated stream is partial success only by opt-in.
+            let model = client
+                .openai
+                .completion(openai::GPT_5_6)
+                .map_wire(super::super::support::accepting_streamed_incomplete);
             let request = CompletionRequest::new(
-                "Add 48151.62342 and 27182.81828 using the add tool. You must call the tool.",
-            )
-            .tool(rig::tool::tool_definition(&Adder))
-            .tool_choice(rig::message::ToolChoice::Required)
-            .max_tokens(16)
-            .reasoning(Effort::Low);
+                    "Add 48151.62342 and 27182.81828 using the add tool. You must call the tool.",
+                )
+                .tool(rig::tool::tool_definition(&Adder))
+                .tool_choice(rig::message::ToolChoice::Required)
+                .max_tokens(16)
+                .additional_params(json!({ "reasoning": { "effort": "low" } }))
+                ;
             let run = drain_stream(model.stream(request).expect("stream should start")).await;
 
             assert_terminal(&run, FinishReason::Length);
@@ -604,11 +609,15 @@ async fn incomplete_max_output_tokens_normalizes_to_length() {
     with_openai_cassette(
         "streaming_grammar/incomplete_max_output_tokens",
         |client| async move {
-            let model = client.openai.completion(openai::GPT_5_6);
-            let request =
-                CompletionRequest::new("Write a 300-word essay about the history of lighthouses.")
-                    .max_tokens(32)
-                    .reasoning(Effort::Low);
+            // A truncated stream is partial success only by opt-in.
+            let model = client
+                .openai
+                .completion(openai::GPT_5_6)
+                .map_wire(super::super::support::accepting_streamed_incomplete);
+            let request = CompletionRequest::new("Write a 300-word essay about the history of lighthouses.")
+                .max_tokens(32)
+                .additional_params(json!({ "reasoning": { "effort": "low" } }))
+                ;
             let run = drain_stream(model.stream(request).expect("stream should start")).await;
 
             assert_terminal(&run, FinishReason::Length);

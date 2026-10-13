@@ -198,141 +198,30 @@ pub enum StreamedTurnEvent {
     /// `AgentRun::resolve_streamed_invalid_tool_call`, then apply the
     /// outcome with [`StreamedTurnAssembler::resolve_pending_invalid`].
     InvalidToolCall(StreamedInvalidToolCall),
-    /// The provider supplied its typed final payload. Record its usage (see
-    /// `AgentRun::record_streamed_completion_call`);
-    /// this does not establish that the provider stream reached EOF. When
-    /// `emit_final` is set, the turn streamed text and the driver should buffer
-    /// the final item until EOF finalizes the turn.
-    Completed {
-        /// Provider-reported usage for this call. Usage whose counters are
-        /// all `None` means the provider reported no usage metrics.
-        usage: Usage,
-        /// Whether the ingested final item should be forwarded to the
-        /// consumer (set when the turn streamed text).
-        emit_final: bool,
-        /// Why the provider stopped generating, when reported.
-        finish_reason: Option<FinishReason>,
-        /// The provider's own terminal record, as carried on
-        /// `StreamFinal::raw`: what the driver records with
-        /// [`AgentRun::record_streamed_completion_call`](super::AgentRun::record_streamed_completion_call)
-        /// so the call carries this attempt's payload.
-        raw: serde_json::Value,
-    },
 }
 
-/// A completed streamed call refused by
-/// [`rig_core::message::name_dispatchable_call`]: the refusal, and the call
-/// as the stream delivered it for diagnostic history.
+/// A completed call refused by name-keyed dispatch, retained for diagnostics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RefusedStreamedCall {
     /// Why the call cannot be dispatched.
     pub call: rig_core::message::UndispatchableToolCall,
-    /// The refused call, verbatim.
+    /// The refused call as the stream delivered it.
     pub content: AssistantContent,
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
-struct ToolCallDeltaState {
-    name_validated: bool,
-    buffered_arguments: Vec<String>,
-    /// The block's call was ignored (`StreamedResolution::Ignored` on its
-    /// name delta): its later deltas and its end are swallowed, and the
-    /// state is kept so they have something to land on.
-    ignored: bool,
-}
-
-/// One reasoning part of the turn, in first-arrival order. A part opens as
-/// delta text keyed by the stream's block id and is
-/// superseded in place when a completed block restating the same part
-/// arrives; a completed block matching no open part occupies its own slot.
+/// A tool call still streaming: the tool it named as it started, whether
+/// its items stream live, and its argument text so far.
 #[derive(Clone, Serialize, Deserialize)]
-struct ReasoningPart {
-    correlator: Option<BlockId>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    aliases: Vec<BlockId>,
-    provider_id: Option<String>,
-    state: ReasoningPartState,
+struct OpenCall {
+    name: Option<ToolName>,
+    live: bool,
+    arguments: String,
 }
 
-impl ReasoningPart {
-    fn matches_key(&self, key: &BlockId) -> bool {
-        self.correlator.as_ref() == Some(key) || self.aliases.contains(key)
-    }
-}
-
+/// A complete tool call with a disallowed name, awaiting resolution.
 #[derive(Clone, Serialize, Deserialize)]
-enum ReasoningPartState {
-    /// Delta text accumulated so far for a part with no completed block.
-    Pending(String),
-    /// The authoritative completed block (may carry signatures or encrypted
-    /// content the deltas lacked).
-    Completed(Reasoning),
-}
-
-/// Assemble one part's reasoning: a completed block as-is, a non-empty pending
-/// delta buffer as its own block carrying only the part's provider-issued id.
-fn reasoning_from_part(
-    state: ReasoningPartState,
-    provider_id: Option<String>,
-) -> Option<Reasoning> {
-    match state {
-        ReasoningPartState::Completed(reasoning) => Some(reasoning),
-        ReasoningPartState::Pending(text) if !text.is_empty() => {
-            let mut assembled = Reasoning::new(&text);
-            if let Some(id) = provider_id {
-                assembled = assembled.with_id(id);
-            }
-            Some(assembled)
-        }
-        ReasoningPartState::Pending(_) => None,
-    }
-}
-
-// Keep independently addressable blocks internally so a trailing signature
-// replaces only its own content. Group completed provider-item parts only when
-// exposing history, preserving the established grouping of distinct keys while
-// keeping repeated-key siblings separate.
-fn group_reasoning(parts: impl Iterator<Item = ReasoningPart>) -> Vec<Reasoning> {
-    let mut groups: Vec<(Reasoning, Vec<BlockId>, bool)> = Vec::new();
-    for part in parts {
-        let completed = matches!(part.state, ReasoningPartState::Completed(_));
-        let keys: Vec<_> = part.correlator.into_iter().chain(part.aliases).collect();
-        let Some(reasoning) = reasoning_from_part(part.state, part.provider_id) else {
-            continue;
-        };
-        if completed
-            && reasoning.id.is_some()
-            && let Some((existing, existing_keys, _)) = groups
-                .iter_mut()
-                .rev()
-                .find(|(existing, _, completed)| *completed && existing.id == reasoning.id)
-            && keys.iter().all(|key| !existing_keys.contains(key))
-        {
-            existing.content.extend(reasoning.content);
-            existing_keys.extend(keys);
-            continue;
-        }
-        groups.push((reasoning, keys, completed));
-    }
-    groups
-        .into_iter()
-        .map(|(reasoning, _, _)| reasoning)
-        .collect()
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-enum PendingInvalid {
-    /// A complete tool call with a disallowed name.
-    FullCall {
-        tool_call: ToolCall,
-        block_id: BlockId,
-    },
-    /// A streamed tool-name delta with a disallowed name.
-    NameDelta { block_id: BlockId },
-    /// A complete tool call whose arguments were not JSON. The provider's
-    /// accumulator already finalized the block; nothing is buffered here
-    /// to replay, so the only resolutions are abandon or fail.
-    MalformedArgs { tool_call: ToolCall },
+struct PendingInvalid {
+    tool_call: ToolCall,
 }
 
 /// Serializable accumulator for one streamed turn. Persisted state requires the
@@ -412,159 +301,23 @@ impl StreamedTurnAssembler {
         &self.text
     }
 
-    /// Return the newest matching reasoning part's provider ID, or `None` if
-    /// absent. Reused correlators refer to their latest pending or completed part.
-    pub fn reasoning_provider_id(&self, correlator: &BlockId) -> Option<&str> {
-        self.reasoning_parts
-            .iter()
-            .rev()
-            .find(|part| part.matches_key(correlator))
-            .and_then(|part| part.provider_id.as_deref())
+    /// The reasoning text accumulated so far for the part at `index`.
+    pub fn aggregated_reasoning(&self, index: usize) -> Option<&str> {
+        self.reasoning.get(&index).map(String::as_str)
     }
 
-    /// The reasoning text accumulated so far under `correlator`.
-    pub fn aggregated_reasoning(&self, correlator: &BlockId) -> Option<&str> {
-        self.reasoning_parts
-            .iter()
-            .find_map(|part| match (&part.state, part.correlator.as_ref()) {
-                (ReasoningPartState::Pending(text), Some(id)) if id == correlator => {
-                    Some(text.as_str())
-                }
-                _ => None,
-            })
+    /// The argument text the streaming call at part `index` sent so far.
+    pub fn aggregated_arguments(&self, index: usize) -> Option<&str> {
+        self.open_calls
+            .get(&index)
+            .map(|call| call.arguments.as_str())
     }
 
-    /// Combine accepted calls and reasoning with provider text, provider items
-    /// and images in canonical order. Without calls or reasoning, preserve the
-    /// provider choice.
-    fn canonical_choice_with(
-        pending_tool_calls: Vec<(ToolCall, BlockId)>,
-        reasoning: Vec<Reasoning>,
-        provider_choice: &[AssistantContent],
-    ) -> Vec<AssistantContent> {
-        if !pending_tool_calls.is_empty() || !reasoning.is_empty() {
-            let parts = reasoning
-                .into_iter()
-                .map(AssistantContent::Reasoning)
-                // Text and provider items, in the order the provider sent them.
-                .chain(provider_choice.iter().filter_map(|content| {
-                    match content {
-                        AssistantContent::ProviderItem(_) => Some(content.clone()),
-                        other => assistant_text_items_from_choice(std::slice::from_ref(other))
-                            .into_iter()
-                            .next(),
-                    }
-                }))
-                .chain(
-                    pending_tool_calls
-                        .into_iter()
-                        .map(|(tool_call, _)| AssistantContent::ToolCall(tool_call)),
-                )
-                .chain(
-                    provider_choice
-                        .iter()
-                        .filter(|content| matches!(content, AssistantContent::Image(_)))
-                        .cloned(),
-                )
-                .collect();
-            canonical_streamed_choice(parts)
-        } else {
-            provider_choice.to_vec()
-        }
-    }
-
-    /// A completed block replaces its pending deltas. After a key closes,
-    /// an explicit whole block or a second signature opens a sibling; only
-    /// trailing metadata for an unsigned close updates that completed part.
-    /// The normalized end retains this distinction in its original payload.
-    fn ingest_completed_reasoning(
-        &mut self,
-        reasoning: &Reasoning,
-        correlator: &BlockId,
-        restatement: bool,
-    ) {
-        let replace_at = self
-            .reasoning_parts
-            .iter()
-            .rposition(|part| {
-                part.matches_key(correlator) && matches!(part.state, ReasoningPartState::Pending(_))
-            })
-            .or_else(|| {
-                // A known block key is more specific than a shared provider
-                // item id. Its next whole block must not consume a different
-                // key's still-pending content.
-                if self
-                    .reasoning_parts
-                    .iter()
-                    .any(|part| part.matches_key(correlator))
-                {
-                    return None;
-                }
-                self.reasoning_parts.iter().rposition(|part| {
-                    matches!(part.state, ReasoningPartState::Pending(_))
-                        && matches!(
-                            (&part.provider_id, &reasoning.id),
-                            (Some(pending_id), Some(incoming_id)) if pending_id == incoming_id
-                        )
-                })
-            });
-        if let Some(part) = replace_at.and_then(|index| self.reasoning_parts.get_mut(index)) {
-            if reasoning.id.is_some() {
-                part.provider_id.clone_from(&reasoning.id);
-            }
-            if !part.matches_key(correlator) {
-                part.aliases.push(correlator.clone());
-            }
-            part.state = ReasoningPartState::Completed(reasoning.clone());
-            return;
-        }
-
-        if let Some(part) = self
-            .reasoning_parts
-            .iter_mut()
-            .rev()
-            .find(|part| part.matches_key(correlator))
-        {
-            let signed = matches!(&part.state, ReasoningPartState::Completed(existing)
-                if existing.content.iter().any(|content| matches!(content,
-                    rig_core::message::ReasoningContent::Text { signature: Some(_), .. })));
-            if !restatement && !signed {
-                if reasoning.id.is_some() {
-                    part.provider_id.clone_from(&reasoning.id);
-                }
-                part.state = ReasoningPartState::Completed(reasoning.clone());
-                return;
-            }
-            // Keep this completed sibling separately addressable. History
-            // grouping recognizes key reuse and preserves both parts.
-            self.reasoning_parts.push(ReasoningPart {
-                aliases: Vec::new(),
-                correlator: Some(correlator.clone()),
-                provider_id: reasoning.id.clone(),
-                state: ReasoningPartState::Completed(reasoning.clone()),
-            });
-            return;
-        }
-
-        self.reasoning_parts.push(ReasoningPart {
-            aliases: Vec::new(),
-            correlator: Some(correlator.clone()),
-            provider_id: reasoning.id.clone(),
-            state: ReasoningPartState::Completed(reasoning.clone()),
-        });
-    }
-
-    /// The turn's reasoning in first-arrival order. Completed parts from
-    /// distinct keys sharing a provider item are grouped; repeated-key siblings
-    /// and pending delta buffers retain their separate slots.
-    fn assembled_reasoning(&self) -> Vec<Reasoning> {
-        group_reasoning(self.reasoning_parts.iter().cloned())
-    }
-
-    /// Consume reasoning parts in canonical grouping, avoiding copies of large
-    /// encrypted payloads.
-    fn drain_reasoning(&mut self) -> Vec<Reasoning> {
-        group_reasoning(std::mem::take(&mut self.reasoning_parts).into_iter())
+    /// The tool the streaming call at part `index` named as it started.
+    pub fn streaming_tool_name(&self, index: usize) -> Option<&ToolName> {
+        self.open_calls
+            .get(&index)
+            .and_then(|call| call.name.as_ref())
     }
 
     /// Ingest one provider stream item and return what the driver must do.
@@ -581,262 +334,9 @@ impl StreamedTurnAssembler {
                 "streamed turn ingested while an invalid tool call awaits resolution".to_string(),
             ));
         }
-
-        match item {
-            StreamEvent::BlockDelta {
-                delta: Delta::Text { text },
-                ..
-            } => {
-                if !self.saw_text {
-                    self.text.clear();
-                    self.saw_text = true;
-                }
-                self.text.push_str(text);
-                Ok(vec![StreamedTurnEvent::EmitIngested])
-            }
-            // The driver and provider aggregate retain message identity and text metadata.
-            // A provider item's blocks too: the aggregate records the item.
-            StreamEvent::BlockStart {
-                kind:
-                    BlockKind::Message
-                    | BlockKind::Text { .. }
-                    | BlockKind::ToolCall
-                    | BlockKind::ProviderItem,
-                ..
-            }
-            | StreamEvent::BlockDelta {
-                delta: Delta::TextMeta { .. },
-                ..
-            }
-            | StreamEvent::BlockEnd {
-                end: BlockClose::Text | BlockClose::ProviderItem(_),
-                ..
-            } => Ok(vec![StreamedTurnEvent::EmitIngested]),
-            StreamEvent::BlockStart {
-                id,
-                kind: BlockKind::Reasoning { provider_id },
-                ..
-            } => {
-                let pending = self.reasoning_parts.iter_mut().find(|part| {
-                    part.matches_key(id) && matches!(part.state, ReasoningPartState::Pending(_))
-                });
-                match pending {
-                    Some(part) => {
-                        if part.provider_id.is_none() {
-                            part.provider_id.clone_from(provider_id);
-                        }
-                    }
-                    None => self.reasoning_parts.push(ReasoningPart {
-                        aliases: Vec::new(),
-                        correlator: Some(id.clone()),
-                        provider_id: provider_id.clone(),
-                        state: ReasoningPartState::Pending(String::new()),
-                    }),
-                }
-                Ok(vec![StreamedTurnEvent::EmitIngested])
-            }
-            StreamEvent::BlockEnd {
-                id,
-                end:
-                    BlockClose::Reasoning {
-                        reasoning: restatement,
-                        ..
-                    },
-                block,
-            } => {
-                if let Some(AssistantContent::Reasoning(reasoning)) = block {
-                    self.ingest_completed_reasoning(reasoning, id, restatement.is_some());
-                } else if let Some(part) = self.reasoning_parts.iter_mut().rev().find(|part| {
-                    part.matches_key(id) && matches!(part.state, ReasoningPartState::Pending(_))
-                }) && let ReasoningPartState::Pending(text) = &part.state
-                {
-                    // A synthesized silent close publishes no whole block,
-                    // but still ends this part. Later deltas reopen the key;
-                    // they must not extend or overwrite the completed text.
-                    let content = if text.is_empty() {
-                        Vec::new()
-                    } else {
-                        Reasoning::new(text).content
-                    };
-                    part.state = ReasoningPartState::Completed(Reasoning {
-                        provider: None,
-                        id: part.provider_id.clone(),
-                        content,
-                    });
-                }
-                Ok(vec![StreamedTurnEvent::EmitIngested])
-            }
-            StreamEvent::BlockDelta {
-                id,
-                delta: Delta::Reasoning { text: reasoning },
-            } => {
-                // Keep unsigned deltas separate until an authoritative completed block
-                // supplies metadata. Only provider IDs, not correlators, enter history.
-                let index = self
-                    .reasoning_parts
-                    .iter()
-                    .position(|part| {
-                        part.matches_key(id) && matches!(part.state, ReasoningPartState::Pending(_))
-                    })
-                    .unwrap_or_else(|| {
-                        self.reasoning_parts.push(ReasoningPart {
-                            aliases: Vec::new(),
-                            correlator: Some(id.clone()),
-                            provider_id: None,
-                            state: ReasoningPartState::Pending(String::new()),
-                        });
-                        self.reasoning_parts.len() - 1
-                    });
-                if let Some(part) = self.reasoning_parts.get_mut(index)
-                    && let ReasoningPartState::Pending(text) = &mut part.state
-                {
-                    text.push_str(reasoning);
-                }
-                Ok(vec![StreamedTurnEvent::EmitIngested])
-            }
-            // A custom call is never dispatchable: refused whole, even when
-            // its input parses as JSON. A repeated end finalizes nothing.
-            StreamEvent::BlockEnd {
-                id: block_id,
-                end: BlockClose::CustomToolCall(_),
-                block,
-            } => {
-                self.delta_states.remove(block_id);
-                Ok(block
-                    .as_ref()
-                    .and_then(Self::refuse_undispatchable)
-                    .into_iter()
-                    .collect())
-            }
-            // A namespaced function call is refused before the name-keyed
-            // allowed-set check and before invalid-call recovery could expose
-            // it by its bare name.
-            StreamEvent::BlockEnd {
-                id: block_id,
-                end: BlockClose::ToolCall(_),
-                block: Some(block),
-            } if Self::refuse_undispatchable(block).is_some() => {
-                self.delta_states.remove(block_id);
-                Ok(Self::refuse_undispatchable(block).into_iter().collect())
-            }
-            StreamEvent::BlockEnd {
-                id: block_id,
-                end: BlockClose::ToolCall(_),
-                block,
-            } => {
-                // The driver emits completed calls at turn commit, not at block end.
-                if self
-                    .delta_states
-                    .get(block_id)
-                    .is_some_and(|state| state.ignored)
-                {
-                    // The final durable ID may differ from the name delta's block key;
-                    // retain it so provider snapshots cannot restore an ignored call.
-                    if let Some(AssistantContent::ToolCall(call)) = block {
-                        self.ignored_calls.push(call.id.clone());
-                    }
-                    self.delta_states.remove(block_id);
-                    return Ok(Vec::new());
-                }
-                let Some(AssistantContent::ToolCall(tool_call)) = block else {
-                    self.delta_states.remove(block_id);
-                    return Ok(Vec::new());
-                };
-                if !self.allowed_tool_names.contains(&tool_call.function.name) {
-                    return Ok(self.surface_invalid_call(
-                        tool_call.clone(),
-                        block_id.clone(),
-                        Some(json_utils::serialize_json_value(
-                            &tool_call.function.arguments,
-                        )),
-                        PendingInvalid::FullCall {
-                            tool_call: tool_call.clone(),
-                            block_id: block_id.clone(),
-                        },
-                        InvalidToolCallReason::UnknownTool,
-                    ));
-                }
-
-                self.pending_tool_calls
-                    .push((tool_call.clone(), block_id.clone()));
-                Ok(Vec::new())
-            }
-            StreamEvent::BlockDelta {
-                id: block_id,
-                delta: delta @ (Delta::ToolName { .. } | Delta::ToolArguments { .. }),
-            } => {
-                let key = block_id.clone();
-                if self
-                    .delta_states
-                    .get(&key)
-                    .is_some_and(|state| state.ignored)
-                {
-                    return Ok(Vec::new());
-                }
-                match delta {
-                    Delta::ToolName { name } => {
-                        if !self.allowed_tool_names.contains(name) {
-                            let buffered_args = self
-                                .delta_states
-                                .get(&key)
-                                .map(|state| state.buffered_arguments.join(""))
-                                .unwrap_or_default();
-                            let tool_call =
-                                self.name_delta_diagnostic_tool_call(&key, name, &buffered_args);
-                            return Ok(self.surface_invalid_call(
-                                tool_call,
-                                block_id.clone(),
-                                Some(buffered_args),
-                                PendingInvalid::NameDelta {
-                                    block_id: block_id.clone(),
-                                },
-                                InvalidToolCallReason::UnknownTool,
-                            ));
-                        }
-
-                        Ok(self.validate_delta_name(key, name.clone()))
-                    }
-                    Delta::ToolArguments { arguments } => {
-                        let state = self.delta_states.entry(key).or_default();
-                        if state.name_validated {
-                            Ok(vec![StreamedTurnEvent::EmitToolCallDelta {
-                                block_id: block_id.clone(),
-                                delta: Delta::ToolArguments {
-                                    arguments: arguments.clone(),
-                                },
-                            }])
-                        } else {
-                            state.buffered_arguments.push(arguments.clone());
-                            Ok(Vec::new())
-                        }
-                    }
-                    Delta::Text { .. } | Delta::TextMeta { .. } | Delta::Reasoning { .. } => {
-                        Ok(vec![StreamedTurnEvent::EmitIngested])
-                    }
-                }
-            }
-            StreamEvent::Final(final_response) => {
-                if let Some(err) = self.pending_delta_error() {
-                    return Err(err);
-                }
-
-                let usage = final_response.usage;
-                let emit_final = self.saw_text;
-                self.saw_text = false;
-                // `StreamingCompletionResponse` has already reconciled this
-                // against the tool calls the accumulator actually saw (see
-                // `FinishReason::reconcile_with_output`), so it is consumed
-                // as-is and never re-reconciled here.
-                let finish_reason = final_response.finish_reason.clone();
-                self.finish_reason.clone_from(&finish_reason);
-                Ok(vec![StreamedTurnEvent::Completed {
-                    usage,
-                    emit_final,
-                    finish_reason,
-                    raw: final_response.raw.clone(),
-                }])
-            }
-            StreamEvent::Unknown(payload) => {
+        let event = match item {
+            Item::Event(event) => event,
+            Item::Unknown(payload) => {
                 // Unknown items have no assistant-content representation. Count lost
                 // assistant blocks for one warning without exposing payloads or flooding logs.
                 if unknown_payload_loses_assistant_content(payload.value()) {
@@ -850,6 +350,12 @@ impl StreamedTurnAssembler {
                 return Ok(vec![StreamedTurnEvent::EmitIngested]);
             }
         };
+        if let StreamEvent::End { part, content, .. } = event
+            && let Some(refused) = Self::refuse_undispatchable(content)
+        {
+            self.open_calls.remove(&part.index());
+            return Ok(vec![refused]);
+        }
         match event {
             StreamEvent::Text { text, .. } => {
                 self.text.push_str(text);
@@ -914,7 +420,11 @@ impl StreamedTurnAssembler {
                     call: tool_call.clone(),
                 }])
             }
-            StreamEvent::Start { .. } | StreamEvent::End { .. } => {
+            StreamEvent::Discard { part } => {
+                self.open_calls.remove(&part.index());
+                Ok(vec![StreamedTurnEvent::EmitIngested])
+            }
+            StreamEvent::Start { .. } | StreamEvent::End { .. } | StreamEvent::Input { .. } => {
                 Ok(vec![StreamedTurnEvent::EmitIngested])
             }
         }
@@ -972,13 +482,8 @@ impl StreamedTurnAssembler {
             .choice
             .iter()
             .filter(|content| match content {
-                AssistantContent::ToolCall(call) => !ignored.contains(&call.id),
-                // Refused at its block end; a finished turn never holds one.
-                AssistantContent::CustomToolCall(_)
-                | AssistantContent::Text(_)
-                | AssistantContent::Reasoning(_)
-                | AssistantContent::Image(_)
-                | AssistantContent::ProviderItem(_) => true,
+                AssistantContent::ToolCall(call) => !self.ignored_calls.contains(&call.id),
+                _ => true,
             })
             .cloned()
             .map(|content| match content {
@@ -1015,8 +520,8 @@ impl StreamedTurnAssembler {
             })
     }
 
-    /// Park resolution on `pending` and surface the rejected call to the
-    /// caller as an [`StreamedTurnEvent::InvalidToolCall`].
+    /// Park resolution on `tool_call` and surface it to the caller as an
+    /// [`StreamedTurnEvent::InvalidToolCall`].
     fn surface_invalid_call(
         &mut self,
         tool_call: ToolCall,
@@ -1029,80 +534,6 @@ impl StreamedTurnAssembler {
         };
         self.pending_invalid = Some(PendingInvalid { tool_call });
         vec![StreamedTurnEvent::InvalidToolCall(invalid)]
-    }
-
-    /// Surface malformed completed arguments for resolution. Retains raw argument
-    /// text and call identity, uses `Null` parsed arguments, and clears pending
-    /// delta bookkeeping because the provider accumulator already closed the block.
-    pub fn surface_malformed_input(
-        &mut self,
-        detail: &rig_core::error::MalformedToolInput,
-    ) -> Vec<StreamedTurnEvent> {
-        let tool_call = ToolCall {
-            id: detail.id.clone(),
-            provider: detail.provider.clone(),
-            function: rig_core::message::ToolFunction::new(
-                detail.name.clone(),
-                serde_json::Value::Null,
-            ),
-            signature: None,
-            additional_params: None,
-        };
-        let block_id = detail
-            .provider
-            .as_ref()
-            .map(|provider| BlockId::wire(provider.call_id.as_str()))
-            .or_else(|| detail.id.generated().cloned())
-            .unwrap_or_else(|| BlockId::wire(detail.id.wire_hint().as_ref()));
-        // The accumulator's block is closed; any delta bookkeeping this
-        // assembler kept for it must not trip the pending-delta check.
-        self.delta_states.remove(&block_id);
-        self.surface_invalid_call(
-            tool_call.clone(),
-            block_id,
-            Some(detail.raw.clone()),
-            PendingInvalid::MalformedArgs { tool_call },
-            InvalidToolCallReason::MalformedArguments {
-                error: detail.error.clone(),
-            },
-        )
-    }
-
-    fn name_delta_diagnostic_tool_call(
-        &self,
-        key: &BlockId,
-        name: &str,
-        buffered_args: &str,
-    ) -> ToolCall {
-        let diagnostic_args = if buffered_args.trim().is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::from_str(buffered_args).unwrap_or(serde_json::Value::Null)
-        };
-        // Provider identity is not known yet; use the block's deterministic ID
-        // to correlate diagnostics and rollback results without inventing a provider ID.
-        ToolCall::new(
-            rig_core::message::ToolCallId::from_block(key),
-            ToolFunction::new(name.to_string(), diagnostic_args),
-        )
-    }
-
-    fn validate_delta_name(&mut self, key: BlockId, name: String) -> Vec<StreamedTurnEvent> {
-        let state = self.delta_states.entry(key.clone()).or_default();
-        state.name_validated = true;
-        let buffered_arguments = std::mem::take(&mut state.buffered_arguments);
-
-        let mut events = vec![StreamedTurnEvent::EmitToolCallDelta {
-            block_id: key.clone(),
-            delta: Delta::ToolName { name },
-        }];
-        events.extend(buffered_arguments.into_iter().map(|arguments| {
-            StreamedTurnEvent::EmitToolCallDelta {
-                block_id: key.clone(),
-                delta: Delta::ToolArguments { arguments },
-            }
-        }));
-        events
     }
 }
 

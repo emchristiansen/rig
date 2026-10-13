@@ -8,18 +8,18 @@
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
+use rig::completion::CompletionRequest;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::StreamExt;
-use rig::agent::MultiTurnStreamItem;
-use rig::completion::{CompletionModel, Message};
+use rig::completion::Message;
 use rig::message::{AssistantContent, UserContent};
-use rig::prelude::*;
+use rig::agent::MultiTurnStreamItem;
 use rig::providers::chatgpt;
 use rig::tool::Tool;
 
-use super::super::support::with_chatgpt_cassette;
+use super::super::support::{recorded_include, with_chatgpt_cassette};
 use crate::reasoning::{self, WeatherTool};
 use crate::support::{
     ALPHA_SIGNAL_OUTPUT, Adder, AlphaSignal, BETA_SIGNAL_OUTPUT, BetaSignal,
@@ -47,12 +47,13 @@ struct ToolEvent {
 fn history_tool_calls(history: &[Message]) -> Vec<ToolEvent> {
     let mut calls = Vec::new();
     for (message_index, message) in history.iter().enumerate() {
-        if let Message::Assistant { content, .. } = message {
+        if let Message::Assistant(assistant) = message {
+            let content = &assistant.content;
             for item in content.iter() {
                 if let AssistantContent::ToolCall(tool_call) = item {
                     calls.push(ToolEvent {
                         message_index,
-                        name: tool_call.function.name.clone(),
+                        name: tool_call.function.name.to_string(),
                         call_id: tool_call.id.to_string(),
                     });
                 }
@@ -70,7 +71,7 @@ fn history_tool_results(history: &[Message]) -> Vec<ToolEvent> {
                 if let UserContent::ToolResult(tool_result) = item {
                     results.push(ToolEvent {
                         message_index,
-                        name: tool_result.name.clone(),
+                        name: tool_result.name.to_string(),
                         call_id: tool_result.call.to_string(),
                     });
                 }
@@ -98,12 +99,12 @@ async fn sequential_tool_calls_nonstreaming() {
     with_chatgpt_cassette(
         "codex_sessions/sequential_tool_calls_nonstreaming",
         |client| async move {
-            let agent = client
-                .agent(chatgpt::GPT_5_4)
+            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(SEQUENTIAL_TOOLS_PREAMBLE)
                 .tool(Adder)
                 .tool(Subtract)
                 .default_max_turns(6)
+                .additional_params(recorded_include())
                 .build();
             let mut history = Vec::<Message>::new();
 
@@ -112,7 +113,7 @@ async fn sequential_tool_calls_nonstreaming() {
                 .await
                 .expect("sequential tool chat should succeed");
 
-            assert_mentions_expected_number(&result.output, 2);
+            assert_mentions_expected_number(&result.output(), 2);
 
             let calls = history_tool_calls(&history);
             let results = history_tool_results(&history);
@@ -144,8 +145,8 @@ async fn sequential_tool_calls_nonstreaming() {
                 .iter()
                 .skip(subtract_result_index + 1)
                 .filter_map(|message| match message {
-                    Message::Assistant { content, .. } => Some(
-                        content
+                    Message::Assistant(assistant) => Some(
+                        assistant.content
                             .iter()
                             .filter_map(|item| match item {
                                 AssistantContent::Text(text) => Some(text.text.clone()),
@@ -170,11 +171,11 @@ async fn sequential_tool_calls_streaming() {
     with_chatgpt_cassette(
         "codex_sessions/sequential_tool_calls_streaming",
         |client| async move {
-            let agent = client
-                .agent(chatgpt::GPT_5_4)
+            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(SEQUENTIAL_TOOLS_PREAMBLE)
                 .tool(Adder)
                 .tool(Subtract)
+                .additional_params(recorded_include())
                 .build();
 
             let mut stream = agent
@@ -217,12 +218,12 @@ async fn parallel_tool_calls_single_turn_nonstreaming() {
     with_chatgpt_cassette(
         "codex_sessions/parallel_tool_calls_single_turn_nonstreaming",
         |client| async move {
-            let agent = client
-                .agent(chatgpt::GPT_5_4)
+            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(TWO_TOOL_STREAM_PREAMBLE)
                 .tool(AlphaSignal)
                 .tool(BetaSignal)
                 .default_max_turns(5)
+                .additional_params(recorded_include())
                 .build();
             let mut history = Vec::<Message>::new();
 
@@ -231,7 +232,7 @@ async fn parallel_tool_calls_single_turn_nonstreaming() {
                 .await
                 .expect("parallel tool chat should succeed");
 
-            let lowered = result.output.to_ascii_lowercase();
+            let lowered = result.output().to_ascii_lowercase();
             assert!(
                 lowered.contains(ALPHA_SIGNAL_OUTPUT) && lowered.contains(BETA_SIGNAL_OUTPUT),
                 "final response should include both tool outputs, got {result:?}"
@@ -278,11 +279,11 @@ async fn parallel_tool_calls_single_turn_streaming() {
     with_chatgpt_cassette(
         "codex_sessions/parallel_tool_calls_single_turn_streaming",
         |client| async move {
-            let agent = client
-                .agent(chatgpt::GPT_5_4)
+            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(TWO_TOOL_STREAM_PREAMBLE)
                 .tool(AlphaSignal)
                 .tool(BetaSignal)
+                .additional_params(recorded_include())
                 .build();
 
             let mut stream = agent.prompt(TWO_TOOL_STREAM_PROMPT).max_turns(5).stream();
@@ -308,13 +309,12 @@ async fn long_history_replay_nonstreaming() {
 
             // First turn: obtain a real tool call so the follow-up can echo
             // its call_id back, the way a caller-owned history would.
-            let first_request = model
-                .completion_request("Look up the harbor label with the tool.")
+            let first_request = CompletionRequest::new("Look up the harbor label with the tool.")
                 .preamble(preamble.to_string())
                 .tool(rig::tool::tool_definition(&AlphaSignal))
-                .build();
+                .additional_params(recorded_include());
             let first_response = model
-                .completion(first_request)
+                .call(first_request)
                 .await
                 .expect("first turn should succeed");
             let tool_call = first_response
@@ -325,47 +325,43 @@ async fn long_history_replay_nonstreaming() {
                     _ => None,
                 })
                 .expect("first turn should call lookup_harbor_label");
-            let call_id = tool_call.provider.as_ref().map_or_else(
+            let call_id = tool_call.id.provider().as_ref().map_or_else(
                 || tool_call.id.to_string(),
-                |provider| provider.call_id.clone(),
+                |provider| provider.as_str().to_owned(),
             );
 
             // Follow-up: replay a long client-owned history around that tool
-            // roundtrip. The tool call is re-tagged with a local item ID (not
-            // the provider's `fc_...` ID) — the request must still be accepted
-            // because non-native IDs are omitted and calls pair by call_id.
-            let request = model
-                .completion_request(
-                    "In one short sentence: what is my favorite color, and what was the \
+            // roundtrip. Current canonical calls have one identity; the
+            // independent local item ID cannot be represented. Calls still
+            // pair by the real call_id.
+            let request = CompletionRequest::new(
+                "In one short sentence: what is my favorite color, and what was the \
                      harbor label you looked up earlier?",
-                )
-                .preamble(preamble.to_string())
-                .message(Message::user(
-                    "My favorite color is teal. Please remember it.",
-                ))
-                .message(Message::assistant("Noted - your favorite color is teal."))
-                .message(Message::user("Now look up the harbor label with the tool."))
-                .message(Message::Assistant {
-                    id: None,
-                    content: vec![AssistantContent::tool_call_with_call_id(
-                        "history_tool_1",
-                        call_id.clone(),
-                        AlphaSignal::NAME,
-                        serde_json::json!({}),
-                    )],
-                })
-                .message(Message::from(UserContent::tool_result_with_call_id(
-                    "history_tool_1",
-                    call_id,
-                    AlphaSignal::NAME,
-                    vec![rig::message::ToolResultContent::text(ALPHA_SIGNAL_OUTPUT)],
-                )))
-                .message(Message::assistant("The harbor label is crimson-harbor."))
-                .tool(rig::tool::tool_definition(&AlphaSignal))
-                .build();
+            )
+            .preamble(preamble.to_string())
+            .message(Message::user(
+                "My favorite color is teal. Please remember it.",
+            ))
+            .message(Message::assistant("Noted - your favorite color is teal."))
+            .message(Message::user("Now look up the harbor label with the tool."))
+            .message(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
+                    call_id.clone(),
+                    rig_core::message::ToolName::new(AlphaSignal::NAME).expect("tool name"),
+                    serde_json::json!({}),
+                )]),
+            ))
+            .message(Message::from(UserContent::tool_result(
+                rig_core::message::CallId::from_wire(call_id),
+                rig_core::message::ToolName::new(AlphaSignal::NAME).expect("tool name"),
+                vec![rig::message::ToolResultContent::text(ALPHA_SIGNAL_OUTPUT)],
+            )))
+            .message(Message::assistant("The harbor label is crimson-harbor."))
+            .tool(rig::tool::tool_definition(&AlphaSignal))
+                .additional_params(recorded_include());
 
             let response = model
-                .completion(request)
+                .call(request)
                 .await
                 .expect("long history replay should be accepted by the Responses API");
 
@@ -403,14 +399,13 @@ async fn reasoning_session_two_tool_calls_streaming() {
         "codex_sessions/reasoning_session_two_tool_calls_streaming",
         |client| async move {
             let call_count = Arc::new(AtomicUsize::new(0));
-            let agent = client
-                .agent(chatgpt::GPT_5_4)
+            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(reasoning::TOOL_SYSTEM_PROMPT)
-                .max_tokens(6000)
+                // No output-token cap: the Codex contract refuses a
+                // caller-set `max_output_tokens` by name, and the recorded
+                // request carries none.
                 .tool(WeatherTool::new(call_count.clone()))
-                .additional_params(serde_json::json!({
-                    "reasoning": { "effort": "low" }
-                }))
+                .reasoning(rig::completion::Effort::Low)
                 .build();
 
             let stream = agent
@@ -469,15 +464,176 @@ async fn reasoning_session_two_tool_calls_streaming() {
     .await;
 }
 
+/// The output-token cap `reasoning_session_two_tool_calls_streaming` once set
+/// is refused by name on the Codex contract, on both the completion-model and
+/// the agent surface, rather than being cleared from the request.
+///
+/// No cassette: the refusal happens while the request is encoded, so nothing
+/// is sent. The base URL is a local discard address, so even a regression that
+/// did send would never leave the machine.
+#[tokio::test]
+async fn a_caller_set_output_token_cap_is_refused_by_name() {
+    use rig::error::ProviderError;
+    use rig::providers::openai::OpenAIConfig;
+    use rig::providers::openai::responses_api::wire::UnsupportedCodexControl;
+
+    let client = OpenAIConfig::with_key(&chatgpt::DIALECT, "unused-token")
+        .with_caller_identity(
+            rig::providers::openai::wire::CallerIdentity::new("rig_test", "rig-test/0", None)
+                .expect("a valid test identity"),
+        )
+        .with_base_url("http://127.0.0.1:9")
+        .client();
+
+    let model = client.completion(chatgpt::GPT_5_4);
+    let request = CompletionRequest::new("hello").max_tokens(6000);
+    let error = model
+        .call(request)
+        .await
+        .expect_err("a caller-set output-token cap is refused on the Codex contract");
+    let ProviderError::Request(source) = &error else {
+        panic!("an encode refusal is a request error, got {error:?}");
+    };
+    assert_eq!(
+        source.downcast_ref::<UnsupportedCodexControl>(),
+        Some(&UnsupportedCodexControl::MaxOutputTokens),
+        "expected the named Codex refusal, got {source}"
+    );
+
+    let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
+        .preamble(reasoning::TOOL_SYSTEM_PROMPT)
+        .max_tokens(6000)
+        .build();
+    let error = agent
+        .prompt("hello")
+        .await
+        .expect_err("the agent surfaces the same refusal");
+    let rendered = format!("{error} / {error:?}");
+    assert!(
+        rendered.contains(
+            "this adapter refuses a caller-set `max_output_tokens` on the Codex Responses contract"
+        ),
+        "the agent error names the refused control: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn streamed_phase_round_trips_on_follow_up() {
+    const PROMPT: &str = "Remember the codeword ALPHA-17. Reply exactly: ACK-1";
+    let mut first = None;
+    with_chatgpt_cassette(
+        "codex_sessions/streamed_phase_round_trips_on_follow_up",
+        |client| {
+            let first = &mut first;
+            async move {
+                // The backend serves this account only its current models.
+                let model = client.responses(rig::providers::openai::GPT_6_ASTRA);
+                let turn = |request: CompletionRequest| {
+                    let model = model.clone();
+                    async move {
+                        let mut stream = model.stream(request).expect("the stream starts");
+                        while let Some(item) = stream.next().await {
+                            item.expect("every stream item decodes");
+                        }
+                        stream.finish().await.expect("the stream ends")
+                    }
+                };
+                let reply = turn(CompletionRequest::new(PROMPT).preamble("Be concise.")).await;
+                let mut history = vec![Message::user(PROMPT)];
+                history.extend(reply.message());
+                turn(
+                    CompletionRequest::new("Reply with exactly the remembered codeword.")
+                        .preamble("Be concise.")
+                        .messages(history),
+                )
+                .await;
+                *first = Some(reply);
+            }
+        },
+    )
+    .await;
+    let first = first.expect("turn 1 ran");
+
+    let recorded = crate::cassettes::recorded_interaction_bodies(
+        "chatgpt",
+        "codex_sessions/streamed_phase_round_trips_on_follow_up",
+    );
+    assert_eq!(recorded.len(), 2, "two turns recorded");
+    let delivered: Vec<(String, String)> = crate::cassettes::recorded_sse_json_frames(
+        "chatgpt",
+        "codex_sessions/streamed_phase_round_trips_on_follow_up",
+    )
+    .into_iter()
+    .filter(|event| {
+        event["type"] == "response.output_item.done" && event["item"]["type"] == "message"
+    })
+    .map(|event| {
+        (
+            event["item"]["id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .expect("the recorded message has an id")
+                .to_owned(),
+            event["item"]["phase"]
+                .as_str()
+                .expect("the recorded message states a phase")
+                .to_owned(),
+        )
+    })
+    .collect();
+    assert_eq!(delivered.len(), 1, "one message item: {delivered:?}");
+    let (id, phase) = &delivered[0];
+
+    let texts: Vec<Option<&str>> = first
+        .choice
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some(
+                text.native
+                    .as_ref()
+                    .and_then(|native| native.item["phase"].as_str()),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !texts.is_empty() && texts.iter().all(|text| *text == Some(phase.as_str())),
+        "the streamed text carries the message's phase: {texts:?}"
+    );
+
+    let request: serde_json::Value = serde_json::from_str(&recorded[1].0).expect("request is JSON");
+    let phased: Vec<(&str, &str)> = request["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("phase").is_some())
+        .map(|item| {
+            (
+                item["id"].as_str().unwrap_or_default(),
+                item["phase"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        phased,
+        [(id.as_str(), phase.as_str())],
+        "the follow-up re-sends the phase on the same assistant item, and on no other"
+    );
+    assert!(
+        recorded[1].1.contains("\"type\":\"response.completed\""),
+        "the backend accepted the follow-up"
+    );
+}
+
 #[tokio::test]
 async fn usage_accumulates_across_streaming_multi_turn() {
     with_chatgpt_cassette(
         "codex_sessions/usage_accumulates_across_streaming_multi_turn",
         |client| async move {
-            let agent = client
-                .agent(chatgpt::GPT_5_4)
+            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(ORDERED_TOOL_STREAM_PREAMBLE)
                 .tool(AlphaSignal)
+                .additional_params(recorded_include())
                 .build();
 
             let mut stream = agent
@@ -490,7 +646,7 @@ async fn usage_accumulates_across_streaming_multi_turn() {
 
             while let Some(item) = stream.next().await {
                 match item.expect("stream item should be ok") {
-                    MultiTurnStreamItem::StreamUserItem(_) => saw_tool_result = true,
+                    MultiTurnStreamItem::ToolResult { .. } => saw_tool_result = true,
                     MultiTurnStreamItem::FinalResponse(response) => {
                         final_usage = Some(response.usage());
                     }

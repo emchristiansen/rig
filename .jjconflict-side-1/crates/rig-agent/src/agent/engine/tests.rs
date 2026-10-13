@@ -4989,6 +4989,118 @@ async fn outcome_stop_is_terminal_through_nested_hooks_on_both_surfaces() {
     }
 }
 
+fn codex_headers(used_percent: &str) -> rig_core::completion::ProviderResponseHeaders {
+    [(
+        "x-codex-primary-used-percent".to_owned(),
+        used_percent.to_owned(),
+    )]
+    .into_iter()
+    .collect()
+}
+
+/// Records the captured success-reply headers each completion outcome carries.
+#[derive(Clone, Default)]
+struct ResponseHeadersHook {
+    seen: Arc<Mutex<Vec<rig_core::completion::ProviderResponseHeaders>>>,
+}
+
+impl AgentHook for ResponseHeadersHook {
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        if let Some(response) = event.completion() {
+            self.seen
+                .lock()
+                .expect("header snapshots")
+                .push(response.provider_response_headers.clone());
+        }
+        OutcomeAction::proceed()
+    }
+}
+
+/// Blocking surface: each completion outcome carries its own attempt's
+/// captured success-reply headers, never an earlier attempt's.
+#[tokio::test]
+async fn completion_outcomes_carry_their_own_attempts_response_headers_blocking() {
+    let hook = ResponseHeadersHook::default();
+    AgentBuilder::new(MockCompletionModel::from_turns([
+        MockTurn::tool_call("tc1", "add", json!({"x": 2, "y": 3}))
+            .with_provider_response_headers(codex_headers("10")),
+        MockTurn::text("5").with_provider_response_headers(codex_headers("11")),
+    ]))
+    .tool(crate::test_utils::MockAddTool)
+    .add_hook(hook.clone())
+    .build()
+    .prompt(Message::user("add 2 and 3"))
+    .max_turns(3)
+    .run()
+    .await
+    .expect("blocking response");
+
+    assert_eq!(
+        *hook.seen.lock().expect("header snapshots"),
+        [codex_headers("10"), codex_headers("11")]
+    );
+}
+
+/// Streamed surface: each completion outcome carries the headers its own
+/// attempt's terminal record captured.
+#[tokio::test]
+async fn completion_outcomes_carry_their_own_attempts_response_headers_streamed() {
+    use rig_core::driver::Transport;
+    use rig_core::test_utils::{MockFrame, MockRuntime};
+    use std::collections::VecDeque;
+
+    #[derive(Clone)]
+    struct CapturedHeaders {
+        inner: MockRuntime,
+        headers: Arc<Mutex<VecDeque<rig_core::completion::ProviderResponseHeaders>>>,
+    }
+
+    impl Transport<MockScript> for CapturedHeaders {
+        fn send(
+            &self,
+            payload: rig_core::completion::CompletionRequest,
+            exchange: Exchange,
+        ) -> Opening<MockFrame> {
+            let opening = self.inner.send(payload, exchange);
+            let headers = self.headers.clone();
+            Opening::new(async move {
+                let opened = opening.await?;
+                let headers = headers.lock().expect("header snapshots")
+                    .pop_front().expect("one header snapshot per attempt");
+                Ok(opened.with_captured_response_headers(headers))
+            })
+        }
+    }
+
+    let hook = ResponseHeadersHook::default();
+    let scripted = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
+            MockStreamEvent::FinalResponse(Default::default()),
+        ],
+        vec![MockStreamEvent::text("5"), MockStreamEvent::FinalResponse(Default::default())],
+    ]);
+    let model = rig_core::Model::new(scripted.wire, CapturedHeaders {
+        inner: scripted.transport,
+        headers: Arc::new(Mutex::new([codex_headers("20"), codex_headers("21")].into())),
+    });
+    let mut stream = AgentBuilder::new(model)
+        .tool(crate::test_utils::MockAddTool)
+        .add_hook(hook.clone())
+        .build()
+        .prompt(Message::user("add 2 and 3"))
+        .max_turns(3)
+        .stream();
+    while let Some(item) = stream.next().await {
+        item.expect("stream item");
+    }
+
+    assert_eq!(
+        *hook.seen.lock().expect("header snapshots"),
+        [codex_headers("20"), codex_headers("21")]
+    );
+}
+
 /// The assistant message a scripted mock reply of `text` folds into.
 fn mock_reply(text: &str) -> Message {
     Message::Assistant(

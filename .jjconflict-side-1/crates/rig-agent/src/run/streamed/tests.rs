@@ -629,3 +629,215 @@ fn an_empty_partial_turn_is_no_assistant_message() {
     };
     assert_eq!(turn.assistant_message(None), None);
 }
+
+/// Current Part indices replace the retired correlator/provider-ID side tables.
+#[test]
+fn aggregated_reasoning_delta_is_scoped_to_each_interleaved_part() {
+    let mut asm = assembler();
+    let stream = items([vec![
+        event(json!({"event":"start", "part":0, "kind":"reasoning"})),
+        event(json!({"event":"reasoning", "part":0, "text":"first "})),
+        event(json!({"event":"start", "part":1, "kind":"reasoning"})),
+        event(json!({"event":"reasoning", "part":1, "text":"second"})),
+        event(json!({"event":"reasoning", "part":0, "text":"part"})),
+    ]]);
+    ingest_all(&mut asm, &stream);
+    assert_eq!(asm.aggregated_reasoning(0), Some("first part"));
+    assert_eq!(asm.aggregated_reasoning(1), Some("second"));
+    assert_eq!(asm.aggregated_reasoning(2), None);
+}
+
+#[test]
+fn interleaved_delta_parts_stay_distinct_in_opened_order() {
+    let mut asm = assembler();
+    let add = tool_call("tc_1", "add");
+    let stream = items([
+        vec![
+            event(json!({"event":"start", "part":0, "kind":"reasoning"})),
+            event(json!({"event":"reasoning", "part":0, "text":"first "})),
+            event(json!({"event":"reasoning", "part":0, "text":"part"})),
+        ],
+        call(1, &add),
+        vec![
+            event(json!({"event":"start", "part":2, "kind":"reasoning"})),
+            event(json!({"event":"reasoning", "part":2, "text":"second part"})),
+        ],
+    ]);
+    ingest_all(&mut asm, &stream);
+    assert_eq!(asm.aggregated_reasoning(0), Some("first part"));
+    assert_eq!(asm.aggregated_reasoning(2), Some("second part"));
+    let choice = rig_core::streaming::delivered(&stream);
+    let turn = asm.finish(&response(choice.clone()));
+    assert_eq!(turn.choice, choice);
+    let reasoning: Vec<_> = turn
+        .choice
+        .iter()
+        .filter_map(|part| match part {
+            AssistantContent::Reasoning(reasoning) => Some(reasoning.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, ["first part", "second part"]);
+}
+
+#[test]
+fn canonical_choice_and_partial_turn_agree_on_multi_part_reasoning() {
+    let stream = items([vec![
+        event(json!({"event":"start", "part":0, "kind":"reasoning"})),
+        event(json!({"event":"reasoning", "part":0, "text":"visible"})),
+        event(json!({"event":"start", "part":1, "kind":"reasoning"})),
+        event(json!({"event":"reasoning", "part":1, "text":"enc"})),
+    ]]);
+    let mut asm = assembler();
+    ingest_all(&mut asm, &stream);
+    let folded = response(rig_core::streaming::delivered(&stream));
+    let partial = asm.partial_turn(&folded);
+    let finished = asm.finish(&folded);
+    assert_eq!(
+        partial.content, finished.choice,
+        "partial and finished assembly agree"
+    );
+    assert_eq!(finished.choice.len(), 2);
+}
+
+#[test]
+fn finish_passes_raw_choice_through_for_plain_text_turns() {
+    let mut asm = assembler();
+    ingest_all(&mut asm, &items([text(0, "hi")]));
+    let final_choice = vec![AssistantContent::text("hi")];
+    let turn = asm.finish(&response(final_choice.clone()));
+    assert_eq!(
+        serde_json::to_value(&turn.choice).expect("serialize"),
+        serde_json::to_value(&final_choice).expect("serialize")
+    );
+}
+
+#[test]
+fn argument_deltas_are_held_until_the_current_call_can_be_validated() {
+    let mut asm = assembler();
+    let stream = items([vec![
+        event(json!({"event":"start", "part":0, "kind":"tool_call"})),
+        event(json!({"event":"arguments", "part":0, "json":"{\"x\""})),
+        event(json!({"event":"arguments", "part":0, "json":":1}"})),
+        event(
+            json!({"event":"end", "part":0, "content":AssistantContent::ToolCall(tool_call("tc_1", "add"))}),
+        ),
+    ]]);
+    for item in &stream[..3] {
+        assert!(matches!(
+            asm.ingest(item).unwrap().as_slice(),
+            [StreamedTurnEvent::HoldToolCall]
+        ));
+    }
+    assert_eq!(asm.aggregated_arguments(0), Some("{\"x\":1}"));
+    assert!(
+        matches!(asm.ingest(&stream[3]).unwrap().as_slice(), [StreamedTurnEvent::EmitToolCall { call }] if call.function.name == "add")
+    );
+}
+
+// G18/G31 keeps the fold's opened order rather than regrouping its response.
+#[test]
+fn finish_keeps_folded_reasoning_text_and_tool_order() {
+    let choice = vec![
+        AssistantContent::reasoning("think"),
+        AssistantContent::text("answer"),
+        AssistantContent::ToolCall(tool_call("tc_1", "add")),
+    ];
+    let turn = assembler().finish(&response(choice.clone()));
+    assert_eq!(turn.choice, choice);
+}
+
+#[test]
+fn finish_keeps_folded_images_in_their_original_order() {
+    let image = AssistantContent::image_base64(
+        "aGVsbG8=",
+        Some(rig_core::message::ImageMediaType::PNG),
+        None,
+    );
+    let choice = vec![
+        image,
+        AssistantContent::text("look"),
+        AssistantContent::ToolCall(tool_call("call_1", "add")),
+    ];
+    let mut asm = assembler();
+    ingest_all(&mut asm, &items([call(0, &tool_call("call_1", "add"))]));
+    let turn = asm.finish(&response(choice.clone()));
+    assert_eq!(turn.choice, choice);
+}
+
+#[test]
+fn completed_namespaced_and_custom_calls_are_refused_at_their_end() {
+    use rig_core::message::UndispatchableToolCall;
+    let call = tool_call("tc1", "add").with_namespace(Some("math".to_owned()));
+    let mut namespaced = assembler();
+    let stream = items([call_events_for_refusal(0, &call)]);
+    ingest_all(&mut namespaced, &stream[..2]);
+    let events = namespaced.ingest(&stream[2]).unwrap();
+    let [StreamedTurnEvent::UndispatchableToolCall(refused)] = events.as_slice() else {
+        panic!("expected refusal: {events:?}");
+    };
+    assert!(
+        matches!(&refused.call, UndispatchableToolCall::Namespaced { namespace, .. } if namespace == "math")
+    );
+    assert_eq!(refused.content, AssistantContent::ToolCall(call));
+    assert!(namespaced.pending_tool_calls.is_empty());
+    assert!(namespaced.pending_invalid.is_none());
+
+    // G11: only the unavailable independent ctc_1 item-ID input is omitted.
+    let content = AssistantContent::custom_tool_call(
+        "call_1",
+        ToolName::new("add").unwrap(),
+        None,
+        r#"{"x":1}"#,
+    );
+    let custom_stream = items([vec![
+        event(json!({"event":"start", "part":0, "kind":"custom_tool_call"})),
+        event(json!({"event":"end", "part":0, "content":content.clone()})),
+    ]]);
+    let mut custom = assembler();
+    let events = asm_ingest_to(&mut custom, &custom_stream);
+    let [StreamedTurnEvent::UndispatchableToolCall(refused)] = events.as_slice() else {
+        panic!("expected refusal: {events:?}");
+    };
+    assert!(matches!(&refused.call, UndispatchableToolCall::Custom { name, .. } if name == "add"));
+    assert_eq!(refused.content, content);
+    assert!(custom.pending_tool_calls.is_empty());
+    assert!(custom.pending_invalid.is_none());
+    let mut run = AgentRun::new("go");
+    assert!(matches!(
+        run.next_step().unwrap(),
+        AgentRunStep::CallModel { .. }
+    ));
+    // Folded evidence already contains the refused call before trailing text.
+    let folded = response(vec![content.clone(), AssistantContent::text("after")]);
+    let partial = custom.partial_turn(&folded);
+    let PromptError::UndispatchableToolCall { chat_history, .. } =
+        run.refuse_streamed_undispatchable(&partial, refused.clone())
+    else {
+        panic!("expected refusal");
+    };
+    let Some(Message::Assistant(last)) = chat_history.last() else {
+        panic!("refused turn ends history");
+    };
+    assert_eq!(last.content, folded.choice);
+    assert_eq!(
+        last.content.iter().filter(|part| **part == content).count(),
+        1
+    );
+}
+
+fn call_events_for_refusal(part: u32, tool_call: &ToolCall) -> Vec<serde_json::Value> {
+    call(part, tool_call)
+}
+
+#[test]
+fn a_rebuilt_turn_keeps_provider_items_in_their_order_with_the_text() {
+    let item = rig_core::message::ProviderItem::new(json!({"type":"web_search_call"}), "openai");
+    let choice = vec![
+        AssistantContent::text("before"),
+        AssistantContent::ProviderItem(item),
+        AssistantContent::text("after"),
+    ];
+    let turn = assembler().finish(&response(choice.clone()));
+    assert_eq!(turn.choice, choice);
+}

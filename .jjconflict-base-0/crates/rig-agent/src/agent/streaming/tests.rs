@@ -2410,24 +2410,15 @@ async fn stream_prompt_observes_interleaved_reasoning_deltas_before_unchanged_em
 
     while let Some(item) = stream.next().await {
         match item {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockStart {
-                id,
-                kind: BlockKind::Reasoning { provider_id },
-            })) => {
-                provider_ids.insert(id, provider_id);
-            }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockDelta {
-                id,
-                delta: Delta::Reasoning { text: reasoning },
-            })) => {
-                let provider_id = provider_ids.get(&id).cloned().flatten();
-                stream_deltas.push((id, provider_id, reasoning));
-            }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamEvent::BlockEnd {
-                end: BlockClose::Reasoning { .. },
-                block: Some(rig_core::message::AssistantContent::Reasoning(_)),
-                ..
-            })) => completed_reasoning += 1,
+            Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Reasoning {
+                part,
+                text,
+            }))) => stream_deltas.push((part.index(), text)),
+            Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::End {
+                part,
+                content: rig_core::message::AssistantContent::Reasoning(reasoning),
+                reasoning_authority: _,
+            }))) => completed.push((part.index(), reasoning)),
             Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
             Ok(_) => {}
             Err(err) => panic!("unexpected streaming error: {err:?}"),

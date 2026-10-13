@@ -8,9 +8,8 @@
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
-use rig::completion::{CompletionModel, Message, ToolDefinition};
+use rig::completion::{Message, ToolDefinition};
 use rig::message::AssistantContent;
-use rig::prelude::*;
 use rig::providers::chatgpt;
 use rig::tool::Tool;
 use serde::Deserialize;
@@ -18,9 +17,9 @@ use serde_json::json;
 
 use super::super::support::{recorded_include, with_chatgpt_cassette};
 use crate::support::{
-    REQUIRED_ZERO_ARG_TOOL_PROMPT, assert_stream_contains_zero_arg_tool_call_named,
-    collect_raw_stream_observation, zero_arg_tool_definition,
+    REQUIRED_ZERO_ARG_TOOL_PROMPT, collect_raw_stream_observation, zero_arg_tool_definition,
 };
+use rig::completion::CompletionRequest;
 
 const NESTED_ARGS_PREAMBLE: &str = "\
 You are a travel booking assistant. Use the plan_trip tool for every booking request \
@@ -159,16 +158,14 @@ async fn zero_argument_tool_call_streaming() {
         "codex_tool_args/zero_argument_tool_call_streaming",
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
-            let request = model
-                .completion_request(REQUIRED_ZERO_ARG_TOOL_PROMPT)
+            let request = CompletionRequest::new(REQUIRED_ZERO_ARG_TOOL_PROMPT)
                 .preamble("Follow the tool-calling instructions exactly.".to_string())
                 .tool(zero_arg_tool_definition("ping"))
                 .additional_params(recorded_include())
-                .build();
+                ;
 
             let stream = model
                 .stream(request)
-                .await
                 .expect("zero-arg streaming request should start");
 
             assert_stream_contains_zero_arg_tool_call_named(stream, "ping", true).await;
@@ -183,15 +180,14 @@ async fn zero_argument_tool_call_nonstreaming() {
         "codex_tool_args/zero_argument_tool_call_nonstreaming",
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
-            let request = model
-                .completion_request(REQUIRED_ZERO_ARG_TOOL_PROMPT)
+            let request = CompletionRequest::new(REQUIRED_ZERO_ARG_TOOL_PROMPT)
                 .preamble("Follow the tool-calling instructions exactly.".to_string())
                 .tool(zero_arg_tool_definition("ping"))
                 .additional_params(recorded_include())
-                .build();
+                ;
 
             let response = model
-                .completion(request)
+                .call(request)
                 .await
                 .expect("zero-arg completion should succeed");
 
@@ -205,7 +201,7 @@ async fn zero_argument_tool_call_nonstreaming() {
                 .expect("response should contain the ping tool call");
             assert_eq!(tool_call.function.name, "ping");
             assert_eq!(
-                tool_call.function.arguments,
+                tool_call.function.arguments_value(),
                 json!({}),
                 "zero-argument tool calls should surface empty-object arguments"
             );
@@ -219,8 +215,7 @@ async fn nested_arguments_roundtrip_nonstreaming() {
     with_chatgpt_cassette(
         "codex_tool_args/nested_arguments_roundtrip_nonstreaming",
         |client| async move {
-            let agent = client
-                .agent(chatgpt::GPT_5_4)
+            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble(NESTED_ARGS_PREAMBLE)
                 .tool(PlanTrip)
                 .default_max_turns(4)
@@ -234,19 +229,19 @@ async fn nested_arguments_roundtrip_nonstreaming() {
                 .expect("nested-args tool chat should succeed");
 
             assert!(
-                result.output.contains("SAKURA-77"),
+                result.output().contains("SAKURA-77"),
                 "final answer should repeat the tool's confirmation code, got {result:?}"
             );
 
             let arguments = history
                 .iter()
                 .find_map(|message| match message {
-                    Message::Assistant { content, .. } => {
+                    Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                         content.iter().find_map(|item| match item {
                             AssistantContent::ToolCall(tool_call)
                                 if tool_call.function.name == PlanTrip::NAME =>
                             {
-                                Some(tool_call.function.arguments.clone())
+                                Some(tool_call.function.arguments_value())
                             }
                             _ => None,
                         })
@@ -266,17 +261,15 @@ async fn nested_arguments_streaming() {
         "codex_tool_args/nested_arguments_streaming",
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
-            let request = model
-                .completion_request(NESTED_ARGS_PROMPT)
+            let request = CompletionRequest::new(NESTED_ARGS_PROMPT)
                 .preamble(NESTED_ARGS_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&PlanTrip))
                 .additional_params(recorded_include())
-                .build();
+                ;
 
             let observation = collect_raw_stream_observation(
                 model
                     .stream(request)
-                    .await
                     .expect("nested-args streaming request should start"),
             )
             .await;
@@ -303,18 +296,17 @@ async fn unicode_arguments_streaming() {
         "codex_tool_args/unicode_arguments_streaming",
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
-            let request = model
-                .completion_request(
-                    "Call the echo tool exactly once with the message argument set to \
+            let request = CompletionRequest::new(
+                "Call the echo tool exactly once with the message argument set to \
                      exactly this text: Grüße aus 東京, from the \"naïve café\"!",
-                )
-                .preamble(
-                    "You must call the echo tool with the exact text the user provides. \
+            )
+            .preamble(
+                "You must call the echo tool with the exact text the user provides. \
                      Do not translate, reword, or drop any characters."
                         .to_string(),
                 )
                 .tool(ToolDefinition {
-                    name: "echo".to_string(),
+                    name: rig_core::message::ToolName::new("echo").expect("tool name"),
                     description: "Echo a message back to the user.".to_string(),
                     parameters: json!({
                         "type": "object",
@@ -325,12 +317,11 @@ async fn unicode_arguments_streaming() {
                     }),
                 })
                 .additional_params(recorded_include())
-                .build();
+                ;
 
             let observation = collect_raw_stream_observation(
                 model
                     .stream(request)
-                    .await
                     .expect("unicode-args streaming request should start"),
             )
             .await;

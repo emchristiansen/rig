@@ -163,6 +163,7 @@ impl Source {
                     is_error: false,
                     call: call.id.clone(),
                     name: call.function.name.clone(),
+                    answers: call.answered_by(),
                     content: vec![ToolResultContent::text(weather_report(&city))],
                 })
             })

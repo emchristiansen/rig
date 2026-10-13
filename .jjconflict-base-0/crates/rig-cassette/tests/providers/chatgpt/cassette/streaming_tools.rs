@@ -1,15 +1,15 @@
 //! ChatGPT cassette coverage for terminal responses that omit `output`.
 
-use futures::StreamExt;
-use rig::completion::CompletionModel;
 use rig::message::{AssistantContent, ToolChoice};
 use rig::providers::chatgpt;
-use rig::streaming::StreamEvent;
+use futures::StreamExt;
+use rig::streaming::{Item, StreamEvent};
 use serde_json::json;
 
-use super::super::support::with_chatgpt_cassette;
+use super::super::support::{recorded_include, with_chatgpt_cassette};
 use crate::cassettes::cassette_path;
 use crate::support::zero_arg_tool_definition;
+use rig::completion::CompletionRequest;
 
 /// Assert that the recorded terminal `response.completed` event carries no
 /// output items, which is the precondition this whole scenario exercises.
@@ -38,13 +38,13 @@ async fn nonstreaming_tool_call_completed_response_without_output() {
         "streaming_tools/tool_call_completed_response_without_output",
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
-            let request = model
-                .completion_request(
+            let request = CompletionRequest::new(
                     "Call the ping tool with no arguments. Do not write any normal text before the tool call.",
                 )
                 .tool(zero_arg_tool_definition("ping"))
                 .tool_choice(ToolChoice::Required)
-                .build();
+                .additional_params(recorded_include())
+                ;
 
             // The premise of the scenario: the terminal `response.completed`
             // event carries no output items, so the non-streaming path has to
@@ -60,7 +60,7 @@ async fn nonstreaming_tool_call_completed_response_without_output() {
             );
 
             let response = model
-                .completion(request)
+                .call(request)
                 .await
                 .expect("non-streaming completion should reconstruct streamed tool call");
 
@@ -71,7 +71,7 @@ async fn nonstreaming_tool_call_completed_response_without_output() {
                 _ => None,
             });
             let tool_call = tool_call.expect("completion should include the ping tool call");
-            assert_eq!(tool_call.function.arguments, json!({}));
+            assert_eq!(tool_call.function.arguments_value(), json!({}));
             assert!(response.usage.input_tokens.is_some_and(|n| n > 0), "usage should have input tokens");
             assert!(
                 response.usage.output_tokens.is_some_and(|n| n > 0),
@@ -88,36 +88,32 @@ async fn stream_tool_call_completed_response_without_output() {
         "streaming_tools/tool_call_completed_response_without_output",
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
-            let request = model
-                .completion_request(
+            let request = CompletionRequest::new(
                     "Call the ping tool with no arguments. Do not write any normal text before the tool call.",
                 )
                 .tool(zero_arg_tool_definition("ping"))
                 .tool_choice(ToolChoice::Required)
-                .build();
+                .additional_params(recorded_include())
+                ;
 
-            let mut stream = model.stream(request).await.expect("stream should start");
+            let mut stream = model.stream(request).expect("stream should start");
             let mut saw_ping_tool_call = false;
-            let mut final_usage = None;
 
             while let Some(chunk) = stream.next().await {
                 match chunk.expect("stream item should be ok") {
-                    StreamEvent::BlockEnd {
-                        block: Some(AssistantContent::ToolCall(tool_call)),
+                    Item::Event(StreamEvent::End {
+                        content: AssistantContent::ToolCall(tool_call),
                         ..
-                    } if tool_call.function.name == "ping" => {
-                        assert_eq!(tool_call.function.arguments, json!({}));
+                    }) if tool_call.function.name == "ping" => {
+                        assert_eq!(tool_call.function.arguments_value(), json!({}));
                         saw_ping_tool_call = true;
-                    }
-                    StreamEvent::Final(response) => {
-                        final_usage = Some(response.usage);
                     }
                     _ => {}
                 }
             }
 
             assert!(saw_ping_tool_call, "stream should emit the ping tool call");
-            let usage = final_usage.expect("stream should emit terminal usage");
+            let usage = stream.finish().await.expect("stream should emit terminal usage").usage;
             assert!(usage.input_tokens.is_some_and(|n| n > 0), "usae should have input tokens");
             assert!(usage.output_tokens.is_some_and(|n| n > 0), "usae should have output tokens");
         },

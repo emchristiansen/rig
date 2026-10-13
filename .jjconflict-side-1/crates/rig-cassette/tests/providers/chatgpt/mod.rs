@@ -28,11 +28,23 @@ mod streaming_tools;
 use rig::http_client::DynHttpClient;
 use rig::providers::chatgpt;
 use rig::providers::openai::OpenAIConfig;
+use rig::providers::openai::wire::CallerIdentity;
 use serde::Deserialize;
 use std::path::PathBuf;
 
 const TOKEN_EXPIRY_SKEW_SECONDS: i64 = 60;
 pub(crate) const LIVE_MODEL: &str = chatgpt::GPT_5_3_CODEX;
+
+/// The caller identity a live ChatGPT test sends: exactly
+/// `CHATGPT_ORIGINATOR` and `CHATGPT_USER_AGENT`, which the tester sets. Rig
+/// supplies none of its own.
+pub(crate) fn live_identity() -> CallerIdentity {
+    let read = |name: &str| {
+        std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for a live ChatGPT test"))
+    };
+    CallerIdentity::new(read("CHATGPT_ORIGINATOR"), read("CHATGPT_USER_AGENT"), None)
+        .expect("the live identity should be header-safe")
+}
 
 #[derive(Debug, Deserialize)]
 struct CachedAuthRecord {
@@ -54,19 +66,23 @@ async fn live_provider(http: &DynHttpClient) -> OpenAIConfig {
             .expect("the ChatGPT environment should describe a provider");
     }
 
-    let authenticator = chatgpt::auth::Authenticator::new(
-        chatgpt::auth::AuthSource::OAuth,
+    let context = chatgpt::auth::Authenticator::new(
+        chatgpt::auth::AuthSource::OAuth {
+            identity: live_identity(),
+        },
         default_auth_file(),
         chatgpt::auth::DeviceCodeHandler::default(),
         true,
-    );
-    let mut provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "")
-        .connect(http.clone())
-        .authenticate(&authenticator)
-        .await
-        .expect("ChatGPT OAuth should resolve an access token")
-        .config()
-        .clone();
+    )
+    .auth_context(http)
+    .await
+    .expect("ChatGPT OAuth should resolve an access token");
+
+    let mut provider = OpenAIConfig::with_key(&chatgpt::DIALECT, context.access_token)
+        .with_caller_identity(live_identity());
+    if let Some(account_id) = context.account_id {
+        provider = provider.with_account_id(account_id);
+    }
     if let Ok(base_url) =
         std::env::var("CHATGPT_API_BASE").or_else(|_| std::env::var("OPENAI_CHATGPT_API_BASE"))
     {

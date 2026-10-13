@@ -6,21 +6,18 @@
 //! Run cassette tests in replay mode by default, or set
 //! `RIG_PROVIDER_TEST_MODE=record` to record against the real provider.
 
-use rig::completion::{CompletionModel, Message};
-use rig::message::AssistantContent;
-use rig::prelude::*;
+use rig::message::{AssistantContent, Message};
+const CHATGPT_PROVIDER: &str = "chatgpt";
 use rig::providers::chatgpt;
-use rig::providers::openai::responses_api;
 use rig::tool::Tool;
-use serde::Deserialize;
+use rig_test_support::cassette_models::MapWire;
 
 use super::super::support::{
     recorded_include, with_chatgpt_cassette, with_chatgpt_cassette_default_instructions,
 };
 use crate::cassettes::recorded_interaction_bodies;
 use crate::support::{Adder, TOOLS_PREAMBLE};
-
-const CHATGPT_PROVIDER: &str = "chatgpt";
+use rig::completion::CompletionRequest;
 
 #[tokio::test]
 async fn strict_tools_opt_in_roundtrip() {
@@ -33,15 +30,13 @@ async fn strict_tools_opt_in_roundtrip() {
             let model = client
                 .completion(chatgpt::GPT_5_4)
                 .map_wire(|wire| wire.with_strict_tools());
-            let request = model
-                .completion_request("Use the add tool to add 7 and 5.")
+            let request = CompletionRequest::new("Use the add tool to add 7 and 5.")
                 .preamble(TOOLS_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&Adder))
-                .additional_params(recorded_include())
-                .build();
+                .additional_params(recorded_include());
 
             let response = model
-                .completion(request)
+                .call(request)
                 .await
                 .expect("strict-tools completion should succeed");
 
@@ -86,47 +81,28 @@ async fn store_false_and_prompt_cache_fields_roundtrip() {
         "codex_behaviors/store_false_and_prompt_cache_fields_roundtrip",
         |client| async move {
             let model = client.completion(chatgpt::GPT_5_4);
-            // `store` and `prompt_cache_key` are Responses-API wire fields
-            // with no normalized home, so they are read off the backend's own
-            // response type — deserialized from the one reply's `raw`, which
-            // for a dialect that answers even a unary request with an event
-            // stream is the envelope the decoder reassembled from the terminal
-            // `response.completed` frame. That frame carries no output items,
-            // and the cassette records a single interaction, so the
-            // assistant-text check that used to ride along here lives only in
-            // `codex_sessions`. The marker prompt is kept verbatim so the
-            // request still matches the recorded cassette.
+            // The actual terminal raw keeps provider-only fields; usage is
+            // checked on the response normalized from that terminal.
             let response = model
-                .completion(
-                    model
-                        .completion_request("Reply with exactly this marker: CODEX-STORE-FALSE")
+                .call(
+                    CompletionRequest::new("Reply with exactly this marker: CODEX-STORE-FALSE")
                         .preamble("Return only the requested marker.".to_string())
-                        .additional_params(recorded_include())
-                        .build(),
+                        .additional_params(recorded_include()),
                 )
                 .await
                 .expect("basic ChatGPT/Codex completion should succeed");
-            let raw = responses_api::CompletionResponse::deserialize(&response.raw)
-                .expect("`raw` is the serialized responses_api::CompletionResponse");
-
             assert_eq!(
-                raw.additional_parameters.store,
-                Some(false),
+                response.raw["store"], false,
                 "ChatGPT provider must force store=false"
             );
             assert!(
-                raw.additional_parameters
-                    .prompt_cache_key
-                    .as_deref()
+                response.raw["prompt_cache_key"]
+                    .as_str()
                     .is_some_and(|value| !value.is_empty()),
                 "ChatGPT backend should return a prompt cache key that cassettes scrub"
             );
-            let usage = raw
-                .usage
-                .as_ref()
-                .expect("ChatGPT/Codex completion should report usage");
-            assert!(usage.input_tokens > 0);
-            assert!(usage.output_tokens > 0);
+            assert!(response.usage.input_tokens.is_some_and(|n| n > 0));
+            assert!(response.usage.output_tokens.is_some_and(|n| n > 0));
         },
     )
     .await;
@@ -157,11 +133,9 @@ async fn explicit_preamble_and_mid_conversation_system_messages_are_instructions
             // ChatGPT rejects `system` items in `input`; the recorded request
             // body locks that the provider lifts both the preamble and later
             // system messages into the top-level `instructions` field.
-            let agent = client
-                .agent(chatgpt::GPT_5_4)
+            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble("You are a concise assistant.")
-                .additional_params(recorded_include())
-                .build();
+                .additional_params(recorded_include());
             let mut history = vec![
                 Message::user("Hello!"),
                 Message::assistant("Hi! How can I help you today?"),
@@ -190,11 +164,9 @@ async fn default_instructions_merge_with_explicit_preamble() {
         "codex_behaviors/default_instructions_merge_with_explicit_preamble",
         "Default instruction marker: always include DEFAULT-CODEX-MARKER when asked for the default marker.",
         |client| async move {
-            let agent = client
-                .agent(chatgpt::GPT_5_4)
+            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble("Explicit instruction marker: also include EXPLICIT-CODEX-MARKER.")
-                .additional_params(recorded_include())
-                .build();
+                .additional_params(recorded_include());
             let mut history = Vec::<Message>::new();
 
             let result = agent
