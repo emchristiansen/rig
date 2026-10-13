@@ -482,11 +482,12 @@ fn billed_of(usage: Option<&Value>) -> Option<Usage> {
 }
 
 /// Rig's usage from Cohere's: the `tokens` the model read and wrote,
-/// else the `billed_units`, with `cached_tokens` among the input.
+/// with independently reported `cached_tokens`. Billing counts price cost
+/// separately; they never substitute for model token counts (G36).
 fn usage_of(usage: Option<&Value>) -> Usage {
     let count = |pointer: &str| usage?.at(pointer)?.as_u64_lenient();
-    let input = count("/tokens/input_tokens").or_else(|| count("/billed_units/input_tokens"));
-    let output = count("/tokens/output_tokens").or_else(|| count("/billed_units/output_tokens"));
+    let input = count("/tokens/input_tokens");
+    let output = count("/tokens/output_tokens");
     Usage {
         input_tokens: input,
         output_tokens: output,

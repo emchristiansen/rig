@@ -353,15 +353,15 @@ fn finish_reasons_map_to_rig_endings() {
     assert_eq!(stated.raw.at("/error"), Some(&json!("overloaded")));
 }
 
-/// Usage without `tokens` falls back to the billed units.
+/// G36: billing units price cost, but cannot supply missing model counters.
 #[test]
-fn usage_falls_back_to_billed_units() {
+fn billed_units_do_not_supply_model_token_counts() {
     let usage = usage_of(Some(
         &json!({"billed_units": {"input_tokens": 3, "output_tokens": 4}}),
     ));
-    assert_eq!(usage.input_tokens, Some(3));
-    assert_eq!(usage.output_tokens, Some(4));
-    assert_eq!(usage.total_tokens, Some(7));
+    assert_eq!(usage.input_tokens, None);
+    assert_eq!(usage.output_tokens, None);
+    assert_eq!(usage.total_tokens, None);
     assert_eq!(usage.cached_input_tokens, None);
 }
 
@@ -978,4 +978,48 @@ async fn the_observed_usage_does_not_invent_a_total() {
     let totals: Vec<Option<u64>> = observed.iter().map(|usage| usage.total_tokens).collect();
     assert_eq!(totals, [None], "Cohere reports no total_tokens");
     assert_eq!(observed, [crate::wire::AdapterUsage::from(&usage)]);
+}
+
+// G35 ports the exact original missing-token fixtures through the real wire.
+#[test]
+fn reported_cache_without_token_totals_is_retained() {
+    for mode in [crate::wire::Mode::Unary, crate::wire::Mode::Streaming] {
+        for usage in [json!({}), json!({"cached_tokens":512})] {
+            let reply = json!({"id":"abc123", "finish_reason":"COMPLETE",
+                "message":{"role":"assistant", "content":[{"type":"text", "text":"hi"}]},
+                "usage":usage.clone()});
+            let response = command_a(&[reply.clone()], mode);
+            assert_eq!(response.usage.input_tokens, None);
+            assert_eq!(response.usage.output_tokens, None);
+            assert_eq!(response.usage.total_tokens, None);
+            assert_eq!(
+                response.usage.cached_input_tokens,
+                usage.get("cached_tokens").and_then(Value::as_u64)
+            );
+            assert_eq!(response.raw, reply);
+            if usage == json!({}) {
+                assert_eq!(response.usage, Usage::default());
+            } else {
+                assert_eq!(response.usage.cached_input_tokens, Some(512));
+            }
+        }
+    }
+}
+
+// The actual decoder still reports billed-unit cost and full raw evidence.
+#[test]
+fn billed_only_reply_keeps_cost_and_raw_without_model_token_totals() {
+    let reply = json!({"id":"abc123", "finish_reason":"COMPLETE",
+        "message":{"role":"assistant", "content":[{"type":"text", "text":"hi"}]},
+        "usage":{"billed_units":{"input_tokens":3, "output_tokens":4}}});
+    let expected = crate::completion::Cost::from_parts(3.0 * 2.5 / 1e6, 4.0 * 10.0 / 1e6, 0.0, 0.0);
+    for mode in [crate::wire::Mode::Unary, crate::wire::Mode::Streaming] {
+        let response = command_a(&[reply.clone()], mode);
+        assert_eq!(response.usage.input_tokens, None);
+        assert_eq!(response.usage.output_tokens, None);
+        assert_eq!(response.usage.total_tokens, None);
+        assert_eq!(response.usage.cached_input_tokens, None);
+        assert_eq!(response.usage.cost, Some(expected));
+        assert_eq!(response.raw, reply);
+    }
 }
