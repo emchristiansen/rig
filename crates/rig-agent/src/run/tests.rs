@@ -1490,28 +1490,33 @@ fn a_format_2_run_is_refused_by_name() {
 /// G48b: a genuine length end must not authorize a call left open by its writer.
 #[tokio::test]
 async fn a_length_terminal_never_dispatches_a_call_the_writer_did_not_finish() {
-    use crate::test_utils::{MockCompletionModel, MockStreamEvent};
+    use rig_core::providers::anthropic::{Anthropic, completion::CLAUDE_SONNET_4_6};
+    use rig_core::wire::{Mode, WireFrame};
+    let wire = Anthropic::new("test-key").completion(CLAUDE_SONNET_4_6).wire;
     for finished in [false, true] {
         let mut frames = vec![
-            MockStreamEvent::tool_call_name_delta("call_1", "add"),
-            MockStreamEvent::tool_call_arguments_delta("call_1", "{\"x\":1,\"y\":2}"),
+            json!({"type":"message_start","message":{
+                "id":"msg_length","type":"message","role":"assistant",
+                "model":CLAUDE_SONNET_4_6,"content":[],"stop_reason":null,
+                "stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}
+            }}),
+            json!({"type":"content_block_start","index":0,
+                "content_block":{"type":"tool_use","id":"call_1","name":"add","input":{}}}),
+            json!({"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":"{\"x\":1,\"y\":2}"}}),
         ];
         if finished {
-            frames.push(MockStreamEvent::tool_call_end("call_1"));
+            frames.push(json!({"type":"content_block_stop","index":0}));
         }
-        let mut end = MockStreamEvent::final_response_with_default_usage();
-        let MockStreamEvent::FinalResponse(ref mut finish) = end else {
-            panic!("the real provider end");
-        };
-        finish.reason = Some(FinishReason::Length);
-        frames.push(end);
-        let model = MockCompletionModel::from_stream_turns([frames]);
-        let response = model
-            .stream(rig_core::completion::CompletionRequest::new("add things"))
-            .expect("the stream opens")
-            .finish()
-            .await
-            .expect("the genuine provider terminal arrives");
+        frames.push(json!({"type":"message_delta",
+            "delta":{"stop_reason":"max_tokens","stop_sequence":null},
+            "usage":{"output_tokens":0}}));
+        let response = rig_core::test_utils::history::decode(
+            &wire,
+            Mode::Streaming,
+            frames.into_iter().map(|frame| WireFrame::Text(frame.to_string())),
+        )
+        .expect("the genuine provider terminal arrives");
         assert_eq!(response.finish_reason(), Some(FinishReason::Length));
         let call = response
             .tool_calls()
