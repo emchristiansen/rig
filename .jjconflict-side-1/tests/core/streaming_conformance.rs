@@ -556,13 +556,21 @@ mod grammar_guards {
             .await
             .expect("stream should drive");
         let reasoning_texts: Vec<String> = drained
-            .choice_reasoning()
+            .choice
             .iter()
-            .map(|reasoning| reasoning.text.clone())
+            .filter_map(|part| match part {
+                rig_core::message::AssistantContent::CarriedReasoning(reasoning) => {
+                    Some(reasoning.display_text())
+                }
+                rig_core::message::AssistantContent::Reasoning(reasoning) => {
+                    Some(reasoning.text.clone())
+                }
+                _ => None,
+            })
             .collect();
         assert_eq!(
             reasoning_texts,
-            ["s1\n\ns2"],
+            ["s1\ns2"],
             "the first sibling supersedes the delta build; the rest append once each"
         );
     }
