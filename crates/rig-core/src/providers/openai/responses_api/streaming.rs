@@ -616,7 +616,7 @@ impl ResponsesDecoder {
             message.id = nonempty(id);
         }
         message.delta = true;
-        message.phase = None;
+        // deltas do not revoke the phase an actual message snapshot supplied.
         let part = message.parts.entry(part_index).or_default();
         part.refusal |= refusal;
         let at = text_at(part, index, part_index, out)?;
@@ -742,12 +742,8 @@ impl ResponsesDecoder {
             self.check_message_kind(index, part as u64, opaque, item.str("id"))?;
         }
         self.bind(index, Parent::Message, item.str("id"), out)?;
-        // F ignores snapshot phase once this message received a delta.
-        let phase = item.str("phase").filter(|_| {
-            self.messages
-                .get(&index)
-                .is_none_or(|message| !message.delta)
-        });
+        // the actual snapshot retains phase custody after streamed deltas.
+        let phase = item.str("phase");
         for (part, raw) in content.iter().enumerate() {
             self.message_part_with_phase(
                 index,
@@ -762,9 +758,7 @@ impl ResponsesDecoder {
         if message.id.is_none() {
             message.id = nonempty(item.str("id"));
         }
-        if !message.delta {
-            message.phase = item.str("phase").map(str::to_owned);
-        }
+        message.phase = item.str("phase").map(str::to_owned);
         if completed {
             message.complete = true;
             message.item = Some(item.clone());
@@ -1466,7 +1460,36 @@ impl ResponsesDecoder {
             }
             let item = state.raw();
             if state.carried() {
-                let reasoning = super::carried_reasoning(&item, None)?;
+                // blank signature metadata has no canonical text contribution.
+                // Retain the untouched item as evidence, including its original signature.
+                let mut projection = item.clone();
+                if projection.str("signature").is_some_and(|value| value.trim().is_empty())
+                    && let Some(fields) = projection.as_object_mut()
+                {
+                    fields.remove("signature");
+                }
+                let mut reasoning = super::carried_reasoning(&projection, None)?;
+                reasoning.payload.item = item.clone();
+                let known_root = item.as_object().is_some_and(|fields| {
+                    fields.keys().all(|key| matches!(key.as_str(),
+                        "type" | "id" | "summary" | "content" | "encrypted_content"
+                        | "signature" | "status"))
+                });
+                let empty_known = reasoning.id.as_deref().is_some_and(|id| !id.is_empty())
+                    && known_root && reasoning.content.iter().all(|part| match part {
+                        crate::message::CarriedReasoningPart::Summary(text) => text.is_empty(),
+                        crate::message::CarriedReasoningPart::Text { text, signature } => {
+                            text.is_empty() && signature.as_deref()
+                                .is_none_or(|signature| signature.trim().is_empty())
+                        }
+                        _ => false,
+                    });
+                if empty_known {
+                    if let Some(at) = state.at {
+                        out.close(at)?;
+                    }
+                    continue;
+                }
                 let at = match state.at {
                     Some(at) => at,
                     None => {
@@ -1533,6 +1556,23 @@ impl ResponsesDecoder {
         Ok(())
     }
 
+    /// retain observed buffered custody before the original local refusal.
+    /// Flush errors never replace the first error or prove a provider terminal.
+    fn refuse_buffered(
+        &mut self,
+        error: ProviderError,
+        out: &mut Out<'_, Completion>,
+    ) -> ProviderError {
+        if !self.terminal_issuer {
+            out.stamp_carried_issuer(&self.provider);
+        }
+        if let Err(flush_error) = self.flush(FlushBoundary::Partial, out) {
+            self.pending_flush_error.get_or_insert(flush_error);
+        }
+        self.finished = true;
+        error
+    }
+
     fn terminal(
         &mut self,
         response: Value,
@@ -1561,12 +1601,23 @@ impl ResponsesDecoder {
             )?;
         }
         // Whole-response indices are source positions, not writer Part indices.
+        let mut first_error = None;
         for (index, item) in response.arr("output").iter().enumerate() {
+            // after a conflict, only independently validated later reasoning
+            // may join the buffered prefix. No successful terminal is sealed.
+            if first_error.is_some() && item.str("type") != Some("reasoning") {
+                continue;
+            }
             // A streamed terminal drains never-done calls from their actual
             // fragments. Whole-body decoding alone supplies whole calls.
             if whole || !matches!(item.str("type"), Some("function_call" | "custom_tool_call")) {
-                self.output(index as u64, item, true, &mut out)?;
+                if let Err(error) = self.output(index as u64, item, true, &mut out) {
+                    first_error.get_or_insert(error);
+                }
             }
+        }
+        if let Some(error) = first_error {
+            return Err(self.refuse_buffered(error, &mut out));
         }
         // Some gateways report only a top-level reasoning string.
         if !whole
@@ -1775,8 +1826,10 @@ impl<'id> Decoder<'id, Completion> for ResponsesDecoder {
                 }
                 kind if is_lifecycle_event(kind) => Ok(Flow::More),
                 kind => {
-                    self.item_event(kind, frame, &mut out)?;
-                    Ok(Flow::More)
+                    match self.item_event(kind, frame, &mut out) {
+                        Ok(()) => Ok(Flow::More),
+                        Err(error) => Err(self.refuse_buffered(error, &mut out)),
+                    }
                 }
             },
             ResponsesEvent::Whole(body) => self.terminal(body, true, out),

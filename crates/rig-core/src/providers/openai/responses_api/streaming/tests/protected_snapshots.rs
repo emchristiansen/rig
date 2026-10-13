@@ -169,9 +169,9 @@ fn reasoning_completion_keeps_authoritative_ciphertext_and_signature() {
 
 // F streaming/tests.rs:4793
 #[test]
-fn a_streamed_message_takes_no_phase_from_its_snapshots_while_unary_keeps_it() {
-    // Known issue: the stream keeps ca81's replay bytes, so a streamed
-    // message replays without the phase a unary reply of it carries.
+fn a_streamed_message_keeps_terminal_phase_as_its_unary_reply_does() {
+    // G173 deliberately changes F's rule that ignored phase after deltas.
+    // The exact terminal snapshot keeps its phase in both modes.
     let mut item = opaque_message_fixture(json!([{"type":"output_text","text":"A"}]));
     item["phase"] = json!("final_answer");
     let streamed = folded_body_with(ResponsesStreamOptions::strict(), &[
@@ -185,7 +185,7 @@ fn a_streamed_message_takes_no_phase_from_its_snapshots_while_unary_keeps_it() {
         replay[0]["content"],
         json!([{"type":"output_text","text":"A"}])
     );
-    assert!(replay[0].get("phase").is_none(), "{replay}");
+    assert_eq!(replay[0]["phase"], "final_answer", "{replay}");
 
     // A message only the terminal states keeps its phase, as at ca81.
     let terminal_only = folded_body_with(
@@ -261,3 +261,18 @@ fn an_empty_ciphertext_at_done_does_not_block_the_terminal_ciphertext() {
 }
 
 
+
+/// G173: no terminal phase means no phase is invented after streamed deltas.
+#[test]
+fn a_streamed_message_without_phase_keeps_exact_terminal_raw() {
+    let item = opaque_message_fixture(json!([{"type":"output_text","text":"A","annotations":[]}]));
+    let response = folded_body_with(ResponsesStreamOptions::strict(), &[
+        json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"delta":"A"}),
+        json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":item}),
+        completed_with_output(json!([item])),
+    ]).unwrap();
+    assert_eq!(response.raw["output"][0], item);
+    let replay = replay_opaque_choice(response.choice);
+    assert_eq!(replay[0]["content"], item["content"]);
+    assert!(replay[0].get("phase").is_none(), "{replay}");
+}

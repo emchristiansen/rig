@@ -159,3 +159,45 @@ fn multi_block_reasoning_done_item_yields_one_part() {
     ]);
     assert_eq!(reasoning_items(&driven.response.choice).len(), 1, "canonical history carries one reasoning item for rs_1");
 }
+
+
+/// G165: canonical absence does not discard the provider's exact raw item.
+#[test]
+fn blank_signature_and_empty_known_reasoning_keep_raw_without_a_canonical_end() {
+    for signature in ["", " "] {
+        let item = json!({"type":"reasoning","id":"rs_1","summary":[],"content":[],
+            "signature":signature,"encrypted_content":""});
+        let driven = drive(&[done(item.clone())]);
+        assert!(driven.errors.is_empty());
+        assert!(reasoning_ends(&driven.items).is_empty());
+        assert!(driven.response.choice.is_empty());
+        assert_eq!(driven.response.raw["output"][0], item);
+    }
+}
+
+/// G165 keeps meaningful signature bytes and unknown payload custody distinct.
+#[test]
+fn meaningful_signature_and_unknown_reasoning_are_not_empty_known_items() {
+    for item in [
+        json!({"type":"reasoning","id":"rs_1","summary":[],"signature":"signature"}),
+        json!({"type":"reasoning","id":"rs_1","summary":[],
+            "content":[{"type":"future_content","payload":[1]}]}),
+        json!({"type":"reasoning","id":"rs_1","summary":[],"future_field":[1]}),
+    ] {
+        let driven = drive(&[done(item.clone())]);
+        assert!(driven.errors.is_empty());
+        let ends = reasoning_ends(&driven.items);
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].0.payload.item, item);
+        if item.get("signature").is_some() {
+            assert_eq!(ends[0].0.content, [CarriedReasoningPart::Text {
+                text: String::new(), signature: Some("signature".to_owned()),
+            }]);
+        }
+        if item.get("content").is_some() {
+            assert!(matches!(&ends[0].0.content[0], CarriedReasoningPart::OpaqueContent(raw)
+                if raw.item == item["content"][0]));
+        }
+        assert_eq!(driven.response.raw["output"][0], item);
+    }
+}

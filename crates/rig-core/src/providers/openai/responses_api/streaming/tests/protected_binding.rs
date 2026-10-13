@@ -69,7 +69,9 @@ async fn unresolved_unknown_parts_leave_raw_before_the_flush_without_a_fabricate
         while let Some(item)=stream.next().await {
             match item {
                 Ok(Item::Unknown(raw))=>{
-                    assert!(stream.partial().response_id().is_none(),"raw precedes delivered terminal proof");
+                    // G163: the public partial snapshot reports an arrived genuine end.
+                    assert_eq!(stream.partial().response_id(),
+                        (ending == "completed").then_some("resp_123"));
                     unknowns.push(raw.value().clone());
                 },
                 Ok(Item::Event(StreamEvent::Start {..}))=>panic!("{ending}: no fabricated parent"),

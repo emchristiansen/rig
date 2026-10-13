@@ -304,7 +304,8 @@ fn a_lost_done_frame_does_not_discard_a_provider_completed_call() {
     assert_eq!(calls[0].function.name.as_str(), "get_weather");
     assert_eq!(calls[0].function.arguments_value(), json!({"city":"Paris"}));
     assert_eq!(calls[0].id.provider().map(|id|id.as_str()), Some("call_abc"));
-    assert_eq!(calls[0].native.as_ref().map(|native| &native.item["id"]), Some(&json!("fc_1")));
+    // G171: the never-done call has no completed native item; fc_1 stays in the fixture.
+    assert!(calls[0].native.is_none());
 }
 
 // F streaming/tests.rs:2104

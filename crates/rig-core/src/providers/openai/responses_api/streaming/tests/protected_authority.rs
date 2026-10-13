@@ -28,7 +28,8 @@ fn reasoning_done_waits_for_late_terminal_parts_without_losing_its_position() {
             }
             {
                 let out=reply.out(); let shared=out.lock();
-                assert!(shared.items.iter().any(|item|matches!(item,Ok(Item::Event(StreamEvent::Start {kind:PartKind::Reasoning,..})))));
+                // G164: a done-only Start is deferred until the flush.
+                assert_eq!(shared.items.iter().any(|item|matches!(item,Ok(Item::Event(StreamEvent::Start {kind:PartKind::Reasoning,..})))), with_delta);
                 assert!(!shared.items.iter().any(|item|matches!(item,Ok(Item::Event(StreamEvent::End {content:AssistantContent::CarriedReasoning(_),..})))));
                 if with_delta {assert!(shared.items.iter().any(|item|matches!(item,Ok(Item::Event(StreamEvent::Reasoning {text,..})) if text=="known")));}
             }

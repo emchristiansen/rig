@@ -57,7 +57,10 @@ fn unchanged_message_snapshots_do_not_reopen_text_blocks(){
     assert_eq!(driven.items.iter().filter(|item|matches!(item,Item::Event(StreamEvent::Text {text,..}) if text=="A")).count(),1,"no duplicate fragment");
     assert_eq!(driven.items.iter().filter(|item|matches!(item,Item::Event(StreamEvent::End {content:AssistantContent::Text(_)|AssistantContent::CarriedText(_),..}))).count(),1,"one canonical text close replaces implicit old accumulator closure");
     assert_eq!(folded_texts(&driven.response.choice),["A"]);
-    assert_eq!(replay_opaque_choice(driven.response.choice)[0]["content"],item["content"]);
+    // G166: canonical reconstruction adds exactly this empty annotations member.
+    let mut expected = item["content"].clone();
+    expected[0]["annotations"] = json!([]);
+    assert_eq!(replay_opaque_choice(driven.response.choice)[0]["content"],expected);
 }
 
 // F streaming/tests.rs:4687
