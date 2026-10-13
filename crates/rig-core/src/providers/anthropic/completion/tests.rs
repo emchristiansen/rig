@@ -4618,6 +4618,7 @@ fn foreign_inspection_text_edits_do_not_replay_payload_siblings() {
 
 #[test]
 fn foreign_opaque_carried_content_still_refuses_before_lowering() {
+    use crate::completion::ReplayTarget;
     let part = message::CarriedText::new(message::CarriedTextContent::Opaque(String::new()),
         message::CarriedPayload::new(json!({"unknown":"opaque"}), Some(crate::providers::gemini::completion::PROVIDER_NAME.to_owned())));
     let target = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
