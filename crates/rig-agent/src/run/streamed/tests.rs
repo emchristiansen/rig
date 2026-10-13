@@ -841,3 +841,23 @@ fn a_rebuilt_turn_keeps_provider_items_in_their_order_with_the_text() {
     let turn = assembler().finish(&response(choice.clone()));
     assert_eq!(turn.choice, choice);
 }
+
+#[test]
+fn resumed_text_passes_through_once_without_reopening_or_duplicating_text() {
+    let mut frames = vec![
+        event(json!({"event": "start", "part": 0, "kind": "text"})),
+        event(json!({"event": "text", "part": 0, "text": "first"})),
+    ];
+    frames.extend(text(1, "other"));
+    frames.push(event(json!({"event": "resume", "part": 0})));
+    frames.push(event(json!({"event": "text", "part": 0, "text": "last"})));
+    let stream = items([frames]);
+    let mut asm = assembler();
+    ingest_all(&mut asm, &stream[..5]);
+    assert_eq!(asm.aggregated_text(), "firstother");
+    let emitted = asm.ingest(&stream[5]).expect("the existing text Part resumes");
+    assert!(matches!(emitted.as_slice(), [StreamedTurnEvent::EmitIngested]));
+    assert_eq!(asm.aggregated_text(), "firstother");
+    asm.ingest(&stream[6]).expect("the resumed text continues");
+    assert_eq!(asm.aggregated_text(), "firstotherlast");
+}

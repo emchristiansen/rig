@@ -425,7 +425,10 @@ impl StreamedTurnAssembler {
                 self.open_calls.remove(&part.index());
                 Ok(vec![StreamedTurnEvent::EmitIngested])
             }
-            StreamEvent::Start { .. } | StreamEvent::End { .. } | StreamEvent::Input { .. } => {
+            StreamEvent::Start { .. }
+            | StreamEvent::Resume { .. }
+            | StreamEvent::End { .. }
+            | StreamEvent::Input { .. } => {
                 Ok(vec![StreamedTurnEvent::EmitIngested])
             }
         }
