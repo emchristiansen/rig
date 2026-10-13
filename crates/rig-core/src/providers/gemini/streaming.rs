@@ -269,6 +269,17 @@ impl GenerateContentDecoder {
                 self.placed.clear();
                 let mut previous_text = false;
                 for (part_index, part) in parts.iter().enumerate() {
+                    // Empty unsigned text cannot settle an image awaiting its signature.
+                    if self.pending_vertex_image.is_some()
+                        && part.as_object().and_then(reader::select) == Some(reader::SelectedKind::Text)
+                        && part.str("text") == Some("")
+                        && part.str("thoughtSignature").is_none()
+                    {
+                        self.part_index = part_index as u64;
+                        self.part(part.clone(), out)?;
+                        self.placed.push(self.placement.take());
+                        continue;
+                    }
                     let text = part.as_object().and_then(reader::select) == Some(reader::SelectedKind::Text)
                         && part.bool("thought") != Some(true);
                     if text && previous_text {

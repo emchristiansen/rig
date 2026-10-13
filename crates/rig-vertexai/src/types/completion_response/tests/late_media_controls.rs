@@ -363,3 +363,161 @@ fn g237_metadata_only_frames_do_not_publish_pending_media_before_content() -> Te
     assert!(matches!(futures::executor::block_on(stream.finish()),Err(ProviderError::Truncated)));
     Ok(())
 }
+
+
+#[test]
+fn gm1b_sdk_empty_texts_preserve_pending_signed_media_in_both_modes() -> TestResult {
+    let parts = vec![
+        media("image/png"),
+        json!({"text":""}),
+        json!({"text":""}),
+        signature("c2ln"),
+        json!({"text":"answer"}),
+    ];
+    let script = whole(frame(parts.clone(), Some("STOP"))?)?;
+    let raw = script.document.clone().ok_or("captured SDK document")?;
+    assert_eq!(raw, body(parts.clone(), Some("STOP")));
+    assert_eq!(raw["candidates"][0]["content"]["parts"], json!(parts));
+    let unary = futures::executor::block_on(model(script.clone()).call(CompletionRequest::new("inspect")))?;
+    let observed = read(script)?;
+    assert!(observed.items.iter().all(Result::is_ok));
+    assert_order(&observed, &[PartKind::Text, PartKind::Text]);
+    assert_eq!(ends(&observed).len(), 2);
+    assert_inspection(ends(&observed)[0], "image/png", "c2ln", 0);
+    assert_unsigned_answer(ends(&observed)[1], "answer");
+    let response = observed.outcome?;
+    assert_eq!(response.choice, unary.choice);
+    for response in [&unary, &response] {
+        assert_eq!(response.choice.len(), 2);
+        assert_inspection(&response.choice[0], "image/png", "c2ln", 0);
+        assert_unsigned_answer(&response.choice[1], "answer");
+        assert_eq!(response.raw, raw);
+        assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+        assert_eq!(response.text(), "answer");
+        assert!(!response.choice.iter().any(|content| matches!(content, AssistantContent::Image(_))));
+    }
+    Ok(())
+}
+
+/// Synthetic SDK frames exercise adapter boundaries, not network streaming.
+#[test]
+fn gm1b_synthetic_sdk_frames_keep_empty_texts_before_late_signature() -> TestResult {
+    for grouped in [true, false] {
+        let empty_parts = vec![json!({"text":""}), json!({"text":""})];
+        let mut frames = vec![Ok(frame(vec![media("image/png")], None)?)];
+        if grouped {
+            let received = frame(empty_parts.clone(), None)?;
+            assert_eq!(Value::Object(rest_chunk(&received)?), body(empty_parts, None));
+            frames.push(Ok(received));
+        } else {
+            for part in empty_parts {
+                let received = frame(vec![part.clone()], None)?;
+                assert_eq!(Value::Object(rest_chunk(&received)?), body(vec![part], None));
+                frames.push(Ok(received));
+            }
+        }
+        frames.push(Ok(frame(vec![signature("c2ln")], None)?));
+        frames.push(Ok(frame(vec![json!({"text":"answer"})], Some("STOP"))?));
+        let script = Scripted { frames, document: None };
+        let unary = futures::executor::block_on(model(script.clone()).call(CompletionRequest::new("inspect")))?;
+        let observed = read(script)?;
+        assert!(observed.items.iter().all(Result::is_ok));
+        assert_order(&observed, &[PartKind::Text, PartKind::Text]);
+        let response = observed.outcome?;
+        assert_eq!(response.choice, unary.choice);
+        let mut signed = media("image/png");
+        signed["thoughtSignature"] = json!("c2ln");
+        let expected = body(vec![signed, json!({"text":"answer"})], Some("STOP"));
+        for response in [&unary, &response] {
+            assert_eq!(response.choice.len(), 2);
+            assert_inspection(&response.choice[0], "image/png", "c2ln", 0);
+            assert_unsigned_answer(&response.choice[1], "answer");
+            assert_eq!(response.raw, expected, "the existing split-frame reassembler drops empty text and joins bare signature metadata");
+            assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn gm1b_unsigned_media_stays_typed_across_empty_texts_until_content_or_eof() -> TestResult {
+    for with_answer in [true, false] {
+        let mut parts = vec![media("image/png"), json!({"text":""}), json!({"text":""})];
+        if with_answer {
+            parts.push(json!({"text":"answer"}));
+        }
+        let script = whole(frame(parts.clone(), Some("STOP"))?)?;
+        let raw = script.document.clone().ok_or("captured SDK document")?;
+        assert_eq!(raw, body(parts, Some("STOP")));
+        let unary = futures::executor::block_on(model(script.clone()).call(CompletionRequest::new("inspect")))?;
+        let observed = read(script)?;
+        assert!(observed.items.iter().all(Result::is_ok));
+        let kinds = if with_answer { vec![PartKind::Image, PartKind::Text] } else { vec![PartKind::Image] };
+        assert_order(&observed, &kinds);
+        let response = observed.outcome?;
+        assert_eq!(response.choice, unary.choice);
+        for response in [&unary, &response] {
+            assert_eq!(response.choice.len(), if with_answer { 2 } else { 1 });
+            assert_image(&response.choice[0], "image/png", ImageMediaType::PNG);
+            if with_answer {
+                assert_unsigned_answer(&response.choice[1], "answer");
+            }
+            assert_eq!(response.raw, raw);
+            assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+        }
+    }
+    // Synthetic pending SDK input proves empty parts do not publish the image.
+    let received = MetadataOnly(vec![frame(vec![
+        media("image/png"), json!({"text":""}), json!({"text":""}),
+    ], None)?]);
+    let mut stream = Model::new(crate::completion::GenerateContent::new(
+        crate::completion::GEMINI_2_5_FLASH), received).stream(CompletionRequest::new("inspect"))?;
+    assert!(stream.next().now_or_never().is_none(), "empty unsigned parts are not a content boundary");
+    assert!(stream.partial().choice.is_empty());
+    stream.cancel();
+    assert!(stream.partial().choice.is_empty());
+    assert!(matches!(futures::executor::block_on(stream.finish()), Err(ProviderError::Truncated)));
+    Ok(())
+}
+
+#[test]
+fn gm1b_signed_empty_text_remains_a_material_boundary_with_original_position() -> TestResult {
+    let signed_empty = json!({"text":"", "thoughtSignature":"c2ln"});
+    let parts = vec![
+        media("image/png"),
+        json!({"text":""}),
+        json!({"text":""}),
+        signed_empty.clone(),
+        json!({"text":"answer"}),
+    ];
+    let script = whole(frame(parts.clone(), Some("STOP"))?)?;
+    let raw = script.document.clone().ok_or("captured SDK document")?;
+    assert_eq!(raw, body(parts, Some("STOP")));
+    let unary = futures::executor::block_on(model(script.clone()).call(CompletionRequest::new("inspect")))?;
+    let observed = read(script)?;
+    assert!(observed.items.iter().all(Result::is_ok));
+    assert_order(&observed, &[PartKind::Image, PartKind::Text, PartKind::Text]);
+    let response = observed.outcome?;
+    assert_eq!(response.choice, unary.choice);
+    for response in [&unary, &response] {
+        assert_eq!(response.choice.len(), 3);
+        assert_image(&response.choice[0], "image/png", ImageMediaType::PNG);
+        let AssistantContent::CarriedText(empty) = &response.choice[1] else {
+            panic!("signed empty text is a real separate answer part");
+        };
+        let CarriedTextContent::GeminiSignedAnswer(answer) = &empty.content else {
+            panic!("the signed empty part keeps its known signed answer category");
+        };
+        assert_eq!(answer.text, "");
+        assert_eq!(answer.signature.as_str(), "c2ln");
+        assert_eq!(empty.payload.item, signed_empty);
+        assert_eq!(empty.payload.provider.as_deref(), Some(PROVIDER_NAME));
+        assert_eq!(empty.payload.position, CarriedPosition::MessageContent { item_index: 0, part_index: 3 });
+        assert!(response.choice[1].native_item().is_none());
+        assert_unsigned_answer(&response.choice[2], "answer");
+        assert_eq!(response.raw, raw);
+        assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+        assert_eq!(response.text(), "answer");
+    }
+    Ok(())
+}
