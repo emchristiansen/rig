@@ -2450,3 +2450,6 @@ mod bedrock_terminal_tests;
 
 #[cfg(test)]
 mod effective_model_tests;
+
+#[cfg(test)]
+mod g26_writer_exact_tests;

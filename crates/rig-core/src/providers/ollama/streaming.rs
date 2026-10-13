@@ -346,3 +346,6 @@ pub(crate) mod document;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod g26_exact_tests;
