@@ -195,3 +195,5 @@ fn ordinary_gemini_decoder_keeps_its_existing_carried_issuer() -> TestResult {
     }
     Ok(())
 }
+
+mod signed_answer_issuer_controls;

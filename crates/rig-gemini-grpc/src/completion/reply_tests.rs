@@ -279,3 +279,5 @@ fn generate_content_response_round_trips_through_serde_json_value() {
     assert_eq!(restored.usage.total_tokens, Some(30));
     assert_eq!(restored.usage.cached_input_tokens, Some(4));
 }
+
+mod signed_answer_issuer_controls;

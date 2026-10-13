@@ -616,10 +616,7 @@ fn base_in(
     let declared = (!declared.is_empty())
         .then(|| json!({ "functionDeclarations": declared, "codeExecution": null }));
     let tools: Vec<Value> = declared.into_iter().chain(extra_tools).collect();
-    let contents = Value::Array(match tool_results {
-        ToolResultStyle::GenerateContent => contents(history, target, model)?,
-        ToolResultStyle::Vertex => contents_in(history, target, model, tool_results)?,
-    });
+    let contents = Value::Array(contents_in(history, target, model, tool_results, issuer)?);
     let system = (!system.is_empty()).then(|| json!({ "parts": system, "role": "model" }));
     let tool_config = request
         .tool_choice
@@ -709,12 +706,13 @@ fn calling_config(choice: ToolChoice) -> Value {
 /// them: Gemini answers text that shares a content with function responses
 /// poorly. Provider handles stay exact; local call identities have no
 /// optional ID field.
+#[cfg(test)]
 fn contents(
     history: Vec<Message>,
     target: &dyn ReplayTarget,
     model: &str,
 ) -> Result<Vec<Value>, EncodeError> {
-    contents_in(history, target, model, ToolResultStyle::GenerateContent)
+    contents_in(history, target, model, ToolResultStyle::GenerateContent, PROVIDER_NAME)
 }
 
 fn contents_in(
@@ -722,6 +720,7 @@ fn contents_in(
     target: &dyn ReplayTarget,
     model: &str,
     tool_results: ToolResultStyle,
+    issuer: &str,
 ) -> Result<Vec<Value>, EncodeError> {
     let mut contents = Vec::with_capacity(history.len());
     let mut push = |role: &str, parts: Vec<Value>| {
@@ -762,7 +761,7 @@ fn contents_in(
                 let parts = turn
                     .content
                     .iter()
-                    .map(|block| assistant_part(block, target, model));
+                    .map(|block| assistant_part_in(block, target, model, issuer));
                 push(
                     "model",
                     parts
@@ -1053,10 +1052,20 @@ fn user_part(part: UserContent, id: Option<&str>) -> Result<Value, EncodeError> 
 /// rebuilt call on Gemini 3 carries Google's placeholder signature, since
 /// Gemini 3 rejects a call it did not sign without one ("Function call is
 /// missing a thought_signature in functionCall parts").
+#[cfg(test)]
 fn assistant_part(
     block: &AssistantContent,
     target: &dyn ReplayTarget,
     model: &str,
+) -> Result<Option<Value>, EncodeError> {
+    assistant_part_in(block, target, model, PROVIDER_NAME)
+}
+
+fn assistant_part_in(
+    block: &AssistantContent,
+    target: &dyn ReplayTarget,
+    model: &str,
+    issuer: &str,
 ) -> Result<Option<Value>, EncodeError> {
     crate::message::json_only_wire_tool_call("Gemini generateContent", block)?;
     let replay = match block {
@@ -1115,7 +1124,7 @@ fn assistant_part(
         }
         AssistantContent::Opaque(opaque) => opaque.item.clone(),
         AssistantContent::CarriedText(part) => {
-            if let Some(answer) = part.signed_answer() {
+            if let Some(answer) = part.signed_answer().filter(|_| part.payload.replayable_to(issuer)) {
                 json!({"text": answer.text, "thought": false, "thoughtSignature": answer.signature.as_str()})
             } else if let Some(text) = part.known_text_projection() {
                 text_part(text.to_owned())
@@ -1274,3 +1283,6 @@ mod reasoning_scope_tests;
 
 #[cfg(test)]
 mod checked_usage_tests;
+
+#[cfg(test)]
+mod signed_answer_issuer_tests;
