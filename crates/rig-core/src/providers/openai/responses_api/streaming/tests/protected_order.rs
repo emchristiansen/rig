@@ -265,8 +265,8 @@ fn opaque_output_items_join_the_answer_alike_unary_and_streamed(){
     assert!(driven.items.iter().any(|item|matches!(item,Item::Event(StreamEvent::Start {kind:PartKind::ProviderItem,source_order:Some(order),..}) if *order==SourceOrder::new(1,0))));
     assert_eq!(unary,driven.response.choice);
     let providers=driven.response.choice.iter().filter_map(|part|match part{AssistantContent::ProviderItem(item)=>Some(item),_=>None}).collect::<Vec<_>>();
-    assert_eq!(providers.len(),2);assert_eq!(providers[0].item,compaction);assert_eq!(providers[1].item,hosted);
-    for item in providers{assert_eq!(item.provider.as_deref(),Some("openai"));}
+    assert_eq!(providers.len(),2);assert_eq!(providers[0].payload.item,compaction);assert_eq!(providers[1].payload.item,hosted);
+    for item in providers{assert_eq!(item.payload.provider.as_deref(),Some("openai"));}
 }
 
 // F streaming/tests.rs:3652

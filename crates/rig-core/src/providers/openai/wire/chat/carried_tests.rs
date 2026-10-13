@@ -830,7 +830,7 @@ async fn a_single_chunk_probe_closes_only_the_call_in_that_fragment() {
             other => panic!("a whole call closes before EOF: {other:?}"),
         }
     };
-    assert_eq!(first_closed.id.explicit(), Some("whole"));
+    assert_eq!(first_closed.id.provider().map(|id| id.as_str()), Some("whole"));
     assert!(
         stream.finish().await.is_err(),
         "EOF is not a provider terminal"
@@ -921,7 +921,7 @@ async fn length_discards_only_unusable_function_calls_on_their_original_parts() 
             .expect("explicit Length is a successful wire terminal");
         let calls: Vec<_> = response.tool_calls().collect();
         assert_eq!(calls.len(), 1, "{raw:?}");
-        assert_eq!(calls[0].id.explicit(), Some("whole"));
+        assert_eq!(calls[0].id.provider().map(|id| id.as_str()), Some("whole"));
         assert_eq!(
             calls[0].function.arguments,
             json!({"note":"kept"}).as_object().expect("object").clone()
@@ -1074,7 +1074,7 @@ async fn delivered_function_calls_flush_before_a_terminal_error_without_native_p
         let [call] = ended.as_slice() else {
             panic!("one complete call precedes the first error: {ended:?}");
         };
-        assert_eq!(call.id.explicit(), Some("delivered"));
+        assert_eq!(call.id.provider().map(|id| id.as_str()), Some("delivered"));
         assert!(
             call.native.is_none(),
             "syntax-complete input did not invent a provider assertion"
@@ -1293,7 +1293,7 @@ async fn a_tool_call_cut_mid_arguments_drops_only_itself() {
             folded.choice
         );
     };
-    assert_eq!(call.id.explicit(), Some("call_whole"));
+    assert_eq!(call.id.provider().map(|id| id.as_str()), Some("call_whole"));
     assert_eq!(call.function.name, "record");
     assert_eq!(
         call.function.arguments_value(),
@@ -1357,7 +1357,7 @@ async fn valid_arguments_survive_a_length_truncated_turn() {
             folded.choice
         );
     };
-    assert_eq!(call.id.explicit(), Some("call_odd"));
+    assert_eq!(call.id.provider().map(|id| id.as_str()), Some("call_odd"));
     assert_eq!(
         call.function.arguments_value(),
         serde_json::json!({"unexpected": 1})
@@ -1448,7 +1448,7 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
             data: crate::message::DocumentSourceKind::Url("https://x.invalid/a.png".to_owned()),
             media_type: None,
             detail: None,
-            ..Default::default(),
+            ..Default::default()
         }),
     ])
     .expect("encodes");
@@ -1465,7 +1465,7 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
         UserContent::Video(crate::message::Video {
             data: crate::message::DocumentSourceKind::Url("https://x.invalid/a.mp4".to_owned()),
             media_type: None,
-            ..Default::default(),
+            ..Default::default()
         }),
     ]);
     let error = refused.expect_err("Mistral carries no video chunk");
@@ -1479,7 +1479,7 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
     let body = encode(vec![UserContent::Document(Document {
         data: DocumentData::File(crate::message::DocumentSourceKind::Base64("ZGF0YQ==".to_owned())),
         media_type: Some(DocumentMediaType::PDF),
-        ..Default::default(),
+        ..Default::default()
     })])
     .expect("encodes");
     let parts = body["messages"][0]["content"]
@@ -1498,7 +1498,7 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
             data: crate::message::DocumentSourceKind::Url("https://x.invalid/a.png".to_owned()),
             media_type: None,
             detail: None,
-            ..Default::default(),
+            ..Default::default()
         })],
     }];
     let openai = wire().encode(request, Mode::Unary).expect("encodes");

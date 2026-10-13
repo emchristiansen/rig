@@ -285,6 +285,23 @@ fn kinds(response: &CompletionResponse) -> Vec<&'static str> {
             AssistantContent::ToolCall(_) => "call",
             AssistantContent::Image(_) => "image",
             AssistantContent::Opaque(_) => "opaque",
+            AssistantContent::CustomToolCall(_) => "custom call",
+            AssistantContent::ProviderItem(_) => "provider item",
+            AssistantContent::CarriedText(text) => match &text.content {
+                crate::message::CarriedTextContent::Text(_)
+                | crate::message::CarriedTextContent::Refusal(_)
+                | crate::message::CarriedTextContent::GeminiSignedAnswer(_)
+                | crate::message::CarriedTextContent::InspectionOnlyText(_)
+                | crate::message::CarriedTextContent::InspectionOnlyMedia(_) => "text",
+                crate::message::CarriedTextContent::Opaque(_) => "opaque carried text",
+            },
+            AssistantContent::CarriedReasoning(reasoning) => {
+                if reasoning.has_opaque_parts() {
+                    "opaque carried reasoning"
+                } else {
+                    "reasoning"
+                }
+            }
         })
         .collect()
 }
@@ -400,8 +417,16 @@ fn a_terminal_only_hosted_item_keeps_its_place() {
                "model": "gpt-5.4", "output": output.clone()}}),
     ];
     let whole = whole(output);
-    assert_eq!(kinds(&streamed(&events)), kinds(&whole));
-    assert_eq!(kinds(&whole), ["reasoning", "opaque", "text"]);
+    let streamed = streamed(&events);
+    assert_eq!(kinds(&streamed), kinds(&whole));
+    assert_eq!(kinds(&whole), ["reasoning", "provider item", "text"]);
+    for response in [&whole, &streamed] {
+        let Some(AssistantContent::ProviderItem(item)) = response.choice.get(1) else {
+            panic!("the hosted item has its distinct provider-item category");
+        };
+        assert_eq!(item.payload.item, search);
+        assert_eq!(item.payload.provider.as_deref(), Some("openai"));
+    }
 }
 
 /// Reasoning streamed as raw text whose done item also states a summary

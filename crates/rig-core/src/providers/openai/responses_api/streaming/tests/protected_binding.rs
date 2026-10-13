@@ -129,7 +129,7 @@ fn responses_replay_refuses_text_beside_an_opaque_marker() {
         let wire=crate::providers::openai::wire::OpenAIConfig::new("test-key").responses("different-model");
         let request=crate::completion::CompletionRequest::new("continue").message(crate::message::Message::from(choice));
         let result=crate::operation::Completion::prepare(request,&crate::wire::Wire::describe(&wire))
-            .and_then(|request|crate::wire::Wire::encode(&wire,request,crate::wire::Mode::Unary));
+            .and_then(|request|crate::wire::Wire::encode(&wire,request,crate::wire::Mode::Unary).map_err(crate::error::ProviderError::from));
         let error=result.expect_err("text beside an opaque marker cannot replay");
         assert!(error.to_string().contains("an opaque Responses message part carries non-empty text"),"id={id:?}: {error}");
     }

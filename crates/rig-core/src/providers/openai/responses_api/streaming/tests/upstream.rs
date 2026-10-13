@@ -938,7 +938,7 @@ fn natives(response: &crate::completion::CompletionResponse) -> Vec<serde_json::
                 previous_message = None;
                 items.push(match other {
                     AssistantContent::CarriedReasoning(reasoning) => reasoning.payload.item.clone(),
-                    AssistantContent::ProviderItem(item) => item.item.clone(),
+                    AssistantContent::ProviderItem(item) => item.payload.item.clone(),
                     AssistantContent::CustomToolCall(call) => call.native.as_ref().expect("exact custom item").item.clone(),
                     AssistantContent::Opaque(opaque) => opaque.item.clone(),
                     block => block.native_item().cloned().unwrap_or_default(),

@@ -44,7 +44,7 @@ fn image_message(text: &str) -> Message {
                 data: message::DocumentSourceKind::Url("https://example.test/image.png".to_owned()),
                 media_type: None,
                 detail: Some(message::ImageDetail::High),
-                additional_params: None,
+                ..Default::default()
             }),
         ],
     }

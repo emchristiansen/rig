@@ -100,7 +100,7 @@ fn unknown_output_item_surfaces_as_a_verbatim_provider_item_block() {
         Item::Event(StreamEvent::End { part: actual, content: AssistantContent::ProviderItem(value), .. }) if *actual == part => Some(value),
         _ => None,
     }).expect("same actual part closes");
-    assert_eq!(closed.item, item, "verbatim whole item reaches the consumer");
+    assert_eq!(closed.payload.item, item, "verbatim whole item reaches the consumer");
 }
 
 // F streaming/tests.rs:683

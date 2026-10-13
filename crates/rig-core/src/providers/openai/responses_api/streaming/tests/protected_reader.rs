@@ -50,7 +50,7 @@ fn classify_known_event_decodes() {
     .to_string();
     assert!(matches!(
         classify_responses_frame(&frame),
-        WireEvent::Known(ResponsesEvent::Frame { kind, frame, .. } if kind == "response.output_text.delta" && frame["delta"] == "hi")
+        WireEvent::Known(ResponsesEvent::Frame { kind, frame, .. }) if kind == "response.output_text.delta" && frame["delta"] == "hi"
     ));
 }
 

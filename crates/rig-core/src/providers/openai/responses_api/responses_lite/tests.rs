@@ -564,6 +564,8 @@ fn full_and_delta_image_details_are_omitted_in_every_supported_location() {
             calls: Default::default(),
         },
         true,
+        &mut Vec::new(),
+        None,
     )
     .expect("actual typed delta input converts");
     assert!(delta[0]["content"][0].get("detail").is_none());
@@ -584,6 +586,8 @@ fn full_and_delta_image_details_are_omitted_in_every_supported_location() {
             calls: Default::default(),
         },
         true,
+        &mut Vec::new(),
+        None,
     )
     .expect("standard image input converts");
     assert_eq!(input[0]["content"][0]["detail"], "high");

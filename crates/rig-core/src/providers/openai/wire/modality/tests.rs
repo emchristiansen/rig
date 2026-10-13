@@ -743,12 +743,12 @@ fn an_unhonourable_width_is_refused_before_the_request_is_built() {
 #[tokio::test]
 async fn an_embedding_reply_that_is_not_utf8_keeps_its_exact_bytes() {
     let body: &[u8] = b"{\"object\":\xff}";
-    let bound = Bound::new(
-        OpenAI::new("sk-test").embeddings("text-embedding-3-small", None),
+    let bound = crate::driver::Model::new(
+        OpenAIConfig::new("sk-test").embedding("text-embedding-3-small", None),
         RecordingHttpClient::new(bytes::Bytes::from_static(body)),
     );
     let error = bound
-        .embed_texts_response(documents())
+        .call(documents())
         .await
         .expect_err("the reply cannot decode");
     let ProviderError::CorruptFrame(corrupt) = &error else {
@@ -765,16 +765,11 @@ async fn an_embedding_reply_that_is_not_utf8_keeps_its_exact_bytes() {
 #[test]
 fn a_transcription_reply_that_is_not_utf8_is_a_corrupt_frame_with_its_bytes() {
     let received = b"{\"text\":\"\xff\"}".to_vec();
-    let wire = OpenAI::new("sk-test").transcriptions("whisper-1");
-    let mut driver = crate::driver::WireDriver::<crate::operation::Transcription, _>::new(
-        wire.decoder(Mode::Unary),
-    );
-    driver.push(crate::wire::WireFrame::Bytes(received.clone()));
-    driver.finish();
-    let error = driver
-        .drain()
-        .find_map(Result::err)
-        .expect("the reply cannot decode");
+    use crate::wire::Decoder;
+    let wire = OpenAIConfig::new("sk-test").transcription("whisper-1");
+    let error = crate::driver::triage(wire.decoder()
+        .classify(crate::wire::WireFrame::Bytes(received.clone())))
+        .expect_err("the reply cannot decode");
     let ProviderError::CorruptFrame(corrupt) = &error else {
         panic!("expected a corrupt frame, got {error:?}");
     };

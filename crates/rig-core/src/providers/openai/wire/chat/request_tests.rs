@@ -44,6 +44,7 @@ fn result(call: &str, content: Vec<ToolResultContent>) -> UserContent {
     UserContent::ToolResult(ToolResult {
         call: CallId::from_wire(call),
         name: name("tool"),
+        answers: crate::message::AnsweredToolCall::Function,
         content,
         is_error: false,
     })

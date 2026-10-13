@@ -886,7 +886,7 @@ fn declared_function() -> serde_json::Value {
 
 fn lookup_tool() -> completion::ToolDefinition {
     completion::ToolDefinition {
-        name: "lookup".to_string(),
+        name: message::ToolName::new("lookup").unwrap_or_else(|error| panic!("fixture name: {error}")),
         description: "Look something up".to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -1165,15 +1165,13 @@ fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
     }
 }
 
-fn lite_refusal(error: EncodeError) -> super::super::responses_lite::ResponsesLiteError {
-    let crate::error::ProviderError::Request(reason) = crate::error::ProviderError::from(error)
-    else {
+fn lite_refusal(error: &crate::error::ProviderError) -> &super::super::responses_lite::ResponsesLiteError {
+    let crate::error::ProviderError::Request(reason) = error else {
         panic!("a Lite encode refusal is a request error");
     };
     reason
-        .downcast::<super::super::responses_lite::ResponsesLiteError>()
-        .map(|error| *error)
-        .unwrap_or_else(|reason| panic!("expected a named Lite refusal, got {reason}"))
+        .downcast_ref::<super::super::responses_lite::ResponsesLiteError>()
+        .unwrap_or_else(|| panic!("expected a named Lite refusal, got {reason}"))
 }
 
 /// Builder validation rejects non-Codex selection, while encode-time
@@ -1193,35 +1191,35 @@ fn responses_lite_selection_is_revalidated_at_encode_time() {
     serialized["codex_request_shape"] = serde_json::json!("responses_lite");
     let by_serde: Responses = serde_json::from_value(serialized).expect("the wire deserializes");
     for wire in [by_field, by_serde] {
-        let error = wire
+        let error = crate::error::ProviderError::from(wire
             .encode(prompt(), Mode::Unary)
-            .expect_err("a non-Codex Lite wire is refused");
+            .expect_err("a non-Codex Lite wire is refused"));
         assert!(matches!(
-            lite_refusal(error),
+            lite_refusal(&error),
             ResponsesLiteError::ResponsesLiteRequiresCodex { dialect: "openai" }
         ));
     }
 
-    let missing_identity = chatgpt()
+    let missing_identity = crate::error::ProviderError::from(chatgpt()
         .with_responses_lite()
         .expect("the ChatGPT dialect supports Lite")
         .encode(prompt(), Mode::Unary)
-        .expect_err("HTTP Lite needs a stable identity");
+        .expect_err("HTTP Lite needs a stable identity"));
     assert!(matches!(
-        lite_refusal(missing_identity),
+        lite_refusal(&missing_identity),
         ResponsesLiteError::ResponsesLiteRequiresIdentity
     ));
 
-    let input_system = chatgpt()
+    let input_system = crate::error::ProviderError::from(chatgpt()
         .with_system_instructions_as_messages()
         .with_responses_lite()
         .expect("the ChatGPT dialect supports Lite")
         .with_codex_identity(derived_identity())
         .expect("the ChatGPT dialect speaks the Codex contract")
         .encode(prompt(), Mode::Unary)
-        .expect_err("Lite refuses InputSystemMessages");
+        .expect_err("Lite refuses InputSystemMessages"));
     assert!(matches!(
-        lite_refusal(input_system),
+        lite_refusal(&input_system),
         ResponsesLiteError::InputSystemMessages
     ));
 }

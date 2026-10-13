@@ -1942,7 +1942,7 @@ fn a_signature_only_reasoning_item_round_trips_without_text() {
             .expect("identified reasoning encodes")
             .expect("reasoning item");
         assert_eq!(item["signature"], "signed");
-        assert_eq!(item["summary"], summary);
+        assert_eq!(item["summary"], Value::Array(summary));
         assert!(item.get("content").is_none(), "{item}");
     }
 }

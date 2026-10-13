@@ -2,7 +2,7 @@ use crate::completion::{CompletionRequest, CompletionResponse};
 use crate::message::{AssistantContent, CarriedPosition, Message, Source, SourceLocation};
 use crate::operation::Completion;
 use crate::providers::openai::wire::OpenAIConfig;
-use crate::wire::{Mode, Wire, WireFrame};
+use crate::wire::{Mode, Operation, Wire, WireFrame};
 use serde_json::{Value, json};
 
 fn message() -> Value {

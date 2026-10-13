@@ -661,7 +661,7 @@ fn chatgpt_modality_requests_carry_the_caller_s_identity_or_refuse() {
     for (provider, expected) in refused_chatgpt_configurations() {
         let refused = provider
             .models()
-            .encode((), Mode::Unary)
+            .encode(None, Mode::Unary)
             .expect_err("no exact identity, no request");
         assert_eq!(missing_identity(refused.into()), expected);
     }
@@ -669,7 +669,7 @@ fn chatgpt_modality_requests_carry_the_caller_s_identity_or_refuse() {
     let encoded = chatgpt("tok")
         .with_caller_identity(client_exec_identity(Some("1.2.3")))
         .models()
-        .encode((), Mode::Unary)
+        .encode(None, Mode::Unary)
         .expect("encodes");
     let headers = encoded.request.headers();
     assert_eq!(headers["originator"], "client_exec");
@@ -695,7 +695,10 @@ fn a_dialect_without_an_identity_requirement_keeps_its_behavior() {
 
     let plain = identity_headers(&OpenAIConfig::new("sk-test").with_originator("ccc"));
     assert_eq!(plain["originator"], "ccc");
-    assert_eq!(plain["user-agent"], default_user_agent("ccc").as_str());
+    assert_eq!(plain["user-agent"], format!(
+        "rig/{} ({} {}; ccc)",
+        env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH,
+    ).as_str());
     assert!(plain.get(VERSION_HEADER).is_none());
 }
 
