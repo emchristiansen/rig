@@ -229,6 +229,7 @@ fn a_reply_that_skips_or_stops_before_a_frame_is_refused() {
         provider: "candle".into(),
         raw: serde_json::Value::Null,
         provider_request_id: None,
+        response_headers: rig_core::completion::ProviderResponseHeaders::new(),
     };
 
     let mut skipped = fold();
