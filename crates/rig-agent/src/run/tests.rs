@@ -1486,3 +1486,96 @@ fn a_format_2_run_is_refused_by_name() {
         "{error}"
     );
 }
+
+/// G48b: a genuine length end must not authorize a call left open by its writer.
+#[tokio::test]
+async fn a_length_terminal_never_dispatches_a_call_the_writer_did_not_finish() {
+    use crate::test_utils::{MockCompletionModel, MockStreamEvent};
+    for finished in [false, true] {
+        let mut frames = vec![
+            MockStreamEvent::tool_call_name_delta("call_1", "add"),
+            MockStreamEvent::tool_call_arguments_delta("call_1", "{\"x\":1,\"y\":2}"),
+        ];
+        if finished {
+            frames.push(MockStreamEvent::tool_call_end("call_1"));
+        }
+        let mut end = MockStreamEvent::final_response_with_default_usage();
+        let MockStreamEvent::FinalResponse(ref mut finish) = end else {
+            panic!("the real provider end");
+        };
+        finish.reason = Some(FinishReason::Length);
+        frames.push(end);
+        let model = MockCompletionModel::from_stream_turns([frames]);
+        let response = model
+            .stream(rig_core::completion::CompletionRequest::new("add things"))
+            .expect("the stream opens")
+            .finish()
+            .await
+            .expect("the genuine provider terminal arrives");
+        assert_eq!(response.finish_reason(), Some(FinishReason::Length));
+        let call = response
+            .tool_calls()
+            .next()
+            .expect("the received call remains diagnosable");
+        assert_eq!(call.function.arguments_value(), json!({"x":1,"y":2}));
+        assert_eq!(
+            call.function.invalid_arguments, None,
+            "parseability alone does not prove completion"
+        );
+        let reason = "the provider ended the reply with a tool call it never finished";
+        if finished {
+            assert_eq!(response.error, None);
+            assert_eq!(response.head().stop, Some(StopReason::Length));
+        } else {
+            assert_eq!(response.error.as_deref(), Some(reason));
+            assert_eq!(
+                response.head().stop,
+                Some(StopReason::Error(reason.to_owned()))
+            );
+            assert!(call.native.is_none(), "the incomplete call has no Native");
+        }
+        let turn = ModelTurn::new(
+            response.head(),
+            response.choice.clone(),
+            response.usage.clone(),
+            policy(&["add"]),
+            response.raw.clone(),
+        )
+        .with_finish_reason(response.finish_reason());
+        let mut run = AgentRun::new("add things").max_turns(2);
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(turn)
+                .expect("the received model turn is retained"),
+        );
+        if finished {
+            let calls = expect_call_tools(&mut run);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].tool_call.function.name, "add");
+        } else {
+            let error = run
+                .next_step()
+                .expect_err("the failed turn cannot dispatch tools");
+            assert!(
+                matches!(error, PromptError::Provider(ProviderError::Response(ref message))
+                if message.contains("none of its tool calls ran") && message.contains(reason))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_open_call_at_eof_has_no_genuine_terminal_and_is_truncated() {
+    use crate::test_utils::{MockCompletionModel, MockStreamEvent};
+    let model = MockCompletionModel::from_stream_turns([vec![
+        MockStreamEvent::tool_call_name_delta("call_1", "add"),
+        MockStreamEvent::tool_call_arguments_delta("call_1", "{\"x\":1,\"y\":2}"),
+    ]]);
+    let error = model
+        .stream(rig_core::completion::CompletionRequest::new("add things"))
+        .expect("the stream opens")
+        .finish()
+        .await
+        .expect_err("EOF has no provider terminal");
+    assert!(matches!(error, ProviderError::Truncated), "{error}");
+}

@@ -139,7 +139,8 @@ pub fn turn_delivered_no_answer(choice: &[AssistantContent]) -> bool {
 /// never takes as a success a turn the next request leaves out. A turn that
 /// delivered no answer ([`turn_delivered_no_answer`]) also fails when the
 /// output budget or a filter cut it (`finish` is truncating). A turn that
-/// ended at the token limit with a call is finished, so its call runs.
+/// ended at the token limit with an explicitly finished call may run it;
+/// a call the writer never finished makes the turn fail.
 /// Every runtime reads this one rule.
 pub fn turn_failure(
     choice: &[AssistantContent],

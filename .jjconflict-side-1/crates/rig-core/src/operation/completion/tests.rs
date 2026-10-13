@@ -1152,3 +1152,90 @@ fn subscription_and_local_providers_have_no_catalog_cost() {
         );
     }
 }
+
+#[test]
+fn default_malformed_call_keeps_the_exact_invalid_input() {
+    let raw = "{\"location\": not-json";
+    let decoded = write(|out| {
+        out.fragment(
+            Some(7),
+            CallFragment {
+                id: Some("call_1"),
+                name: Some("get_weather"),
+                arguments: Some(raw),
+            },
+        )?;
+        out.finish(7)
+    });
+    let response = response(decoded);
+    let calls: Vec<_> = response.tool_calls().collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id.wire(), "call_1");
+    assert_eq!(calls[0].function.name, "get_weather");
+    assert_eq!(calls[0].function.invalid_arguments.as_deref(), Some(raw));
+}
+
+#[test]
+fn first_oversized_fragment_trips_the_bound_and_marks_the_call_invalid() {
+    let oversized = "x".repeat(super::MAX_TOOL_INPUT_BYTES + 1);
+    let decoded = write(|out| {
+        out.fragment(
+            Some(7),
+            CallFragment {
+                id: Some("call_1"),
+                name: Some("big"),
+                arguments: Some(&oversized),
+            },
+        )?;
+        {
+            let shared = out.lock();
+            let super::Body::Call { arguments, .. } = &shared.fold.open[&7].body else {
+                panic!("the real open call");
+            };
+            assert!(arguments.overflowed);
+            assert!(
+                arguments.text.is_empty(),
+                "the oversized first fragment is not retained"
+            );
+        }
+        out.finish(7)
+    });
+    let response = response(decoded);
+    let call = response
+        .tool_calls()
+        .next()
+        .expect("a named invalid call remains diagnosable");
+    assert_eq!(call.id.wire(), "call_1");
+    assert_eq!(call.function.name, "big");
+    assert_eq!(call.function.invalid_arguments.as_deref(), Some(""));
+}
+
+#[test]
+fn a_call_that_never_names_a_tool_has_no_canonical_call() {
+    let decoded = write(|out| {
+        out.fragment(
+            Some(7),
+            CallFragment {
+                id: Some("call_1"),
+                name: None,
+                arguments: Some("{\"y\":1}"),
+            },
+        )?;
+        out.finish(7)
+    });
+    assert_eq!(response(decoded).tool_calls().count(), 0);
+}
+
+#[test]
+fn finishing_a_closed_item_refuses_without_duplicating_its_part() {
+    let decoded = write(|out| {
+        out.whole(7, Block::Text, Value::Null, "A")?;
+        let error = out
+            .finish(7)
+            .expect_err("closed item refuses another finish");
+        assert!(matches!(error, ProviderError::Response(ref message)
+            if message == "the reply wrote to item 7, which is not open"));
+        Ok(())
+    });
+    assert_eq!(response(decoded).choice, vec![AssistantContent::text("A")]);
+}

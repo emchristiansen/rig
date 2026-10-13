@@ -1412,10 +1412,10 @@ impl Turn {
             }
             match &reason {
                 None => Some("the provider ended the reply without a finish reason".to_owned()),
-                Some(FinishReason::Length) => None,
                 Some(_) if self.unfinished_call => Some(
                     "the provider ended the reply with a tool call it never finished".to_owned(),
                 ),
+                Some(FinishReason::Length) => None,
                 Some(_) => None,
             }
         });
