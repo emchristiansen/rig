@@ -246,16 +246,19 @@ impl ReplayTarget for GenerateContent {
         document_part(document).map(|_| ())
     }
 
-    fn check_tool_result(&self, result: &crate::message::ToolResult) -> Result<(), ProviderError> {
-        for content in &result.content {
-            match content {
-                ToolResultContent::Text(_) | ToolResultContent::Json { .. } => {}
-                ToolResultContent::Image(image) => {
-                    tool_result_image_part(image).map_err(ProviderError::from)?;
+    // There is no dedicated tool-result preflight hook; adding one would
+    // change the public interface, so this existing preflight checks both.
+    fn check_documents(&self, request: &CompletionRequest) -> Result<(), EncodeError> {
+        for message in &request.chat_history {
+            if let Message::User { content } = message {
+                for part in content {
+                    if let UserContent::Document(document) = part {
+                        self.check_document(document)?;
+                    }
                 }
             }
         }
-        Ok(())
+        check_original_tool_result_images(&request.chat_history)
     }
 
     fn normalize_tool_call_id(
@@ -772,6 +775,26 @@ pub(super) fn document_part(document: &crate::message::Document) -> Result<Value
         )),
         Source::Unknown => Err(EncodeError::request("Document has no body")),
     }
+}
+
+fn check_original_tool_result_images(history: &[Message]) -> Result<(), EncodeError> {
+    for message in history {
+        if let Message::User { content } = message {
+            for part in content {
+                if let UserContent::ToolResult(result) = part {
+                    for part in &result.content {
+                        match part {
+                            ToolResultContent::Text(_) | ToolResultContent::Json { .. } => {}
+                            ToolResultContent::Image(image) => {
+                                tool_result_image_part(image)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Encode inline function-response images with their declared supported type.
