@@ -244,6 +244,9 @@ impl Chat {
             rewrites.push(Rewrite::Stream(true));
         }
         rewrites.push(Rewrite::ChatDialect(quirks.rewrite));
+        if quirks.rewrite == BodyRewrite::OpenRouter && self.prompt_caching {
+            rewrites.push(Rewrite::OpenRouterPromptCaching);
+        }
         let raw_at = match quirks.rewrite {
             BodyRewrite::Mira => RawAt::Ignored(
                 "Additional parameters are not supported by Mira and will be ignored",
@@ -263,27 +266,13 @@ impl Chat {
             body,
             crate::providers::openai::options::Endpoint::ChatCompletions,
         )?;
-        let mut body = body.deserialize::<Value>()?;
-        if let Some(map) = body.as_object_mut() {
-            if quirks.rewrite == BodyRewrite::GroqCompoundTools {
-                fold_groq_native_tools(
-                    map,
-                    request
-                        .additional_params
-                        .as_ref()
-                        .and_then(|raw| raw.get("tools")),
-                )?;
-            }
-            if quirks.rewrite == BodyRewrite::OpenRouter && self.prompt_caching {
-                apply_openrouter_prompt_caching(map);
-            }
-        }
+        let traced_body = body.deserialize::<Value>()?;
         crate::providers::internal::trace_json(
             crate::providers::internal::LogTarget::Completions,
             "OpenAI Chat Completions request",
-            &body,
+            &traced_body,
         );
-        let request = builder.body(crate::wire::Body::Bytes(serde_json::to_vec(&body)?))?;
+        let request = builder.body(body.into_body())?;
         let framing = match mode {
             Mode::Streaming => Framing::Sse,
             Mode::Unary => Framing::Whole,
@@ -1224,7 +1213,7 @@ fn finalize_openrouter(map: &mut serde_json::Map<String, serde_json::Value>, pro
     }
 }
 
-fn apply_openrouter_prompt_caching(map: &mut serde_json::Map<String, serde_json::Value>) {
+pub(crate) fn apply_openrouter_prompt_caching(map: &mut serde_json::Map<String, serde_json::Value>) {
     let Some(messages) = map.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
@@ -2815,9 +2804,9 @@ struct ObservedChatError {
 }
 
 use carried::{
-    carried_details, carried_finish_reason, flatten_text_content_parts, fold_groq_native_tools,
-    sanitize_plain_text_history,
+    carried_details, carried_finish_reason, flatten_text_content_parts, sanitize_plain_text_history,
 };
+pub(crate) use carried::fold_groq_native_tools;
 mod carried;
 mod document;
 mod reported;

@@ -133,7 +133,7 @@ pub(super) fn merge_groq_tools(compound: &mut Value, native: Vec<Value>) {
 }
 
 /// The merged compound options retain their caller-supplied fields.
-pub(super) fn fold_groq_native_tools(
+pub(crate) fn fold_groq_native_tools(
     map: &mut Map<String, Value>,
     raw: Option<&Value>,
 ) -> Result<(), EncodeError> {

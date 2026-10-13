@@ -191,6 +191,11 @@ pub enum Rewrite {
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
     ChatDialect(BodyRewrite),
+    /// Mark the selected OpenRouter chat wire's system-prompt cache boundary.
+    ///
+    /// For rig's own crates; not covered by semver.
+    #[doc(hidden)]
+    OpenRouterPromptCaching,
     /// Gemini `cachedContent`: each raw `cachedContent`/`cached_content`
     /// handle, then the wire's own, checked against the body. The
     /// GenerateContent wires that name it also read a raw
@@ -1024,6 +1029,15 @@ fn apply(
         }
         Rewrite::ChatDialect(kind) => {
             crate::providers::openai::wire::chat::rewrite_body(*kind, body)?;
+            if *kind == BodyRewrite::GroqCompoundTools {
+                crate::providers::openai::wire::chat::fold_groq_native_tools(
+                    body,
+                    request.additional_params.as_ref().and_then(|raw| raw.get("tools")),
+                )?;
+            }
+        }
+        Rewrite::OpenRouterPromptCaching => {
+            crate::providers::openai::wire::chat::apply_openrouter_prompt_caching(body);
         }
         Rewrite::GeminiCachedContent(handle) => {
             for name in handles.iter().chain(handle) {
