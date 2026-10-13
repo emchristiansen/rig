@@ -821,3 +821,38 @@ fn connect_takes_every_selector_spelling() {
         Err(ConnectError::Malformed { .. })
     ));
 }
+
+
+/// The Anthropic version and beta options a configuration carries reach the
+/// request headers.
+#[test]
+fn the_configured_version_and_betas_reach_the_request_headers() {
+    use crate::completion::CompletionRequest;
+    use crate::wire::{Mode, Wire};
+
+    let json = r#"{"config":{"anthropic":{"api_key":"[redacted]","base_url":"https://api.anthropic.com","version":"2023-01-01","betas":["beta-one","beta-two"],"dialect":"anthropic"}},"model":"claude-haiku-4-5"}"#;
+    let reference: ProviderRef = serde_json::from_str(json).expect("the options read from data");
+    let ProviderConfig::Anthropic(config) = reference.config("sk-test") else {
+        panic!("a Messages configuration");
+    };
+    let encoded = config
+        .completion(reference.model())
+        .encode(
+            CompletionRequest::new("hello"),
+            Mode::Unary,
+        )
+        .expect("the request encodes");
+    let request = encoded.request;
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().expect("an ASCII header").to_owned())
+    };
+    assert_eq!(header("anthropic-version").as_deref(), Some("2023-01-01"));
+    assert_eq!(
+        header("anthropic-beta").as_deref(),
+        Some("beta-one,beta-two")
+    );
+    assert_eq!(header("x-api-key").as_deref(), Some("sk-test"));
+}

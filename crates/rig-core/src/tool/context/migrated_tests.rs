@@ -116,3 +116,63 @@ fn unencodable_value_is_an_error_not_a_panic() {
     ));
     assert!(!c.contains::<TupleKeyed>());
 }
+
+
+use crate::tool::{DynamicTool, ToolOutput};
+use crate::wasm_compat::WasmBoxedFuture;
+use std::sync::Arc;
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct CallData(u32);
+
+impl crate::tool::ContextValue for CallData {
+    const KEY: &'static str = "test.dynamic.call_data";
+}
+
+fn mutate_context(
+    context: &mut ToolContext,
+    arguments: serde_json::Value,
+) -> WasmBoxedFuture<'_, Result<ToolOutput, ToolExecutionError>> {
+    Box::pin(async move {
+        assert_eq!(context.require::<CallData>()?, CallData(1));
+        context.insert(CallData(99))?;
+        context.insert_result(CallData(7))?;
+        if arguments["pending"] == true {
+            return std::future::pending().await;
+        }
+        if arguments["fail"] == true {
+            return Err(ToolExecutionError::other("tool failed"));
+        }
+        Ok(ToolOutput::text("done"))
+    })
+}
+
+#[test]
+fn cancelling_inline_execution_preserves_the_callers_context() {
+    use futures::{FutureExt, task::noop_waker_ref};
+
+    let tool = DynamicTool::new_with_context(
+        crate::message::ToolName::new("mutate").expect("nonempty tool name"),
+        "test context isolation",
+        serde_json::json!({}),
+        mutate_context,
+    );
+    let scope = Arc::new(42_u32);
+    let mut context = ToolContext::new().with_scope(scope.clone());
+    context.insert(CallData(1)).expect("inbound");
+    context.insert_result(CallData(3)).expect("prior result");
+    let before = context.clone();
+    let mut run = Box::pin(tool.execute_with(&mut context, serde_json::json!({"pending": true})));
+    let mut cx = std::task::Context::from_waker(noop_waker_ref());
+    assert!(run.poll_unpin(&mut cx).is_pending());
+    drop(run);
+    assert_eq!(
+        context, before,
+        "cancellation must not consume caller data or publish a partial result"
+    );
+    assert!(Arc::ptr_eq(
+        &context.scope::<u32>().expect("scope retained"),
+        &scope
+    ));
+}
+
