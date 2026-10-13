@@ -47,6 +47,9 @@ pub use observation::{
 /// the default completion and durable message types.
 #[cfg(feature = "completion-observations")]
 pub mod observed_types;
+/// Metadata values used only by the observed Responses representations.
+#[cfg(feature = "completion-observations")]
+pub mod observed_values;
 /// Private wire types for observed Responses decoding and assembly.
 #[cfg(feature = "completion-observations")]
 pub(crate) mod observed_wire;

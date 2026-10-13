@@ -39,6 +39,8 @@ use crate::wire::{
 mod dyn_model;
 pub(crate) mod http_transport;
 mod local;
+#[cfg(feature = "completion-observations")]
+pub(crate) mod observed;
 mod realtime;
 
 pub use dyn_model::DynModel;

@@ -387,7 +387,7 @@ fn content_type(request: &mut http::Request<Body>) {
 
 /// Add `Accept: text/event-stream` to an SSE request, without overriding an
 /// `Accept` the wire set itself.
-fn accept_header(request: &mut http::Request<Body>, framing: Framing) {
+pub(super) fn accept_header(request: &mut http::Request<Body>, framing: Framing) {
     content_type(request);
     if framing == Framing::Sse {
         request
@@ -404,7 +404,7 @@ fn accept_header(request: &mut http::Request<Body>, framing: Framing) {
 ///
 /// The one predicate both paths ask, so a unary reply and a streamed one
 /// cannot disagree about what the provider sent.
-fn wrong_content_type(
+pub(super) fn wrong_content_type(
     headers: &http::HeaderMap,
     framing: Framing,
     relaxed: bool,
@@ -430,7 +430,9 @@ fn wrong_content_type(
 }
 
 /// A request whose body is bytes. Multipart replies are never streamed.
-fn byte_request(request: http::Request<Body>) -> Result<http::Request<Vec<u8>>, ProviderError> {
+pub(super) fn byte_request(
+    request: http::Request<Body>,
+) -> Result<http::Request<Vec<u8>>, ProviderError> {
     let (parts, body) = request.into_parts();
     match body {
         Body::Bytes(bytes) => Ok(http::Request::from_parts(parts, bytes)),
@@ -549,7 +551,7 @@ const REJECTED_CHUNK_LIMIT: usize = 4096;
 /// included: a status is a status) into the non-success error, reading the
 /// body to its end (bounded in bytes and chunks) so the provider's payload
 /// and the transport's headers ride on the error.
-async fn reject_response(
+pub(super) async fn reject_response(
     response: http::Response<crate::http_client::BoxedStream>,
 ) -> http_client::Error {
     let status = response.status();

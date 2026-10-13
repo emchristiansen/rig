@@ -1,6 +1,6 @@
 use super::observed_types::{self as message, Text};
-use super::{
-    OpenAIServiceTier, OutputRole, Reasoning, ResponseObject, ResponseStatus, ToolStatus,
+use super::observed_values::{
+    AdditionalParams, OpenAIServiceTier, OutputRole, Reasoning, ResponseObject, ResponseStatus, ToolStatus,
     TruncationStrategy,
 };
 use crate::json_utils;
@@ -1084,7 +1084,7 @@ const REFUSAL_PART_KIND: &str = "refusal";
 
 /// The retained JSON value of an opaque Responses message part, when `params` marks one.
 pub(crate) fn opaque_message_part(
-    params: Option<&crate::message::AdditionalParams>,
+    params: Option<&AdditionalParams>,
 ) -> Option<&Value> {
     let marker = params?.wire_extras(OPENAI_RESPONSES_PART_KEY)?;
     (marker.get("kind").and_then(Value::as_str) == Some("opaque"))
@@ -1093,8 +1093,8 @@ pub(crate) fn opaque_message_part(
 }
 
 /// The metadata that marks a text block as a refusal.
-pub(crate) fn refusal_marker() -> Option<crate::message::AdditionalParams> {
-    crate::message::AdditionalParams::from_entries(Some((
+pub(crate) fn refusal_marker() -> Option<AdditionalParams> {
+    AdditionalParams::from_entries(Some((
         OPENAI_RESPONSES_PART_KEY,
         serde_json::json!({ "kind": REFUSAL_PART_KIND }),
     )))
@@ -1110,7 +1110,7 @@ pub(crate) fn stamp_phase(text: &mut Text, phase: Option<&str>) {
     let mut entries = match text
         .additional_params
         .take()
-        .map(crate::message::AdditionalParams::into_value)
+        .map(AdditionalParams::into_value)
     {
         Some(Value::Object(entries)) => entries,
         _ => Map::new(),
@@ -1127,7 +1127,7 @@ pub(crate) fn stamp_phase(text: &mut Text, phase: Option<&str>) {
         OPENAI_RESPONSES_EXTRAS_KEY.to_string(),
         Value::Object(extras),
     );
-    text.additional_params = crate::message::AdditionalParams::new(entries);
+    text.additional_params = AdditionalParams::new(entries);
 }
 
 /// Converts output text, a refusal or an opaque part to a Rig text block, retaining nonempty
@@ -1137,7 +1137,7 @@ pub(crate) fn text_block(value: AssistantContent) -> Text {
     match value {
         AssistantContent::Unknown(value) => Text {
             text: String::new(),
-            additional_params: crate::message::AdditionalParams::from_entries(Some((
+            additional_params: AdditionalParams::from_entries(Some((
                 OPENAI_RESPONSES_PART_KEY,
                 serde_json::json!({"kind": "opaque", "value": value}),
             ))),
@@ -1160,7 +1160,7 @@ pub(crate) fn text_block(value: AssistantContent) -> Text {
                 .collect();
             Text {
                 text,
-                additional_params: crate::message::AdditionalParams::from_entries(
+                additional_params: AdditionalParams::from_entries(
                     (!extras.is_empty())
                         .then_some((OPENAI_RESPONSES_EXTRAS_KEY, Value::Object(extras))),
                 ),
