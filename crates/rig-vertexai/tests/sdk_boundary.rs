@@ -126,8 +126,8 @@ async fn unary_completion_converts_the_request_and_maps_the_response() {
     );
     assert_eq!(
         body["systemInstruction"],
-        serde_json::json!({"role": "model", "parts": [{"text": "you are terse"}]}),
-        "the system instruction is the REST wire's, transcoded"
+        serde_json::json!({"role": "user", "parts": [{"text": "you are terse"}]}),
+        "the Vertex wrapper uses user for the system instruction"
     );
 
     assert_eq!(
