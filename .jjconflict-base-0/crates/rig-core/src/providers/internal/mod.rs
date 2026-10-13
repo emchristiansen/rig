@@ -144,3 +144,6 @@ pub(crate) fn with_query_pairs(path: &str, pairs: &[(&str, &str)]) -> String {
     }
     format!("{path}?{}", serializer.finish())
 }
+
+#[cfg(test)]
+mod call_identity_tests;
