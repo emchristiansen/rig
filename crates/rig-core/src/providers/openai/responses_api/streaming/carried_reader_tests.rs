@@ -717,7 +717,7 @@ async fn valid_never_done_json_values_fail_unfinished_without_native_or_discard(
     ] {
         let added = json!({"type":"response.output_item.added","sequence_number":0,
             "output_index":1,"item":function("in_progress", "", Some(""))});
-        let mut stream = streamed(&[added, argument_delta(raw), terminal(json!([]))],
+        let mut stream = streamed(&[added.clone(), argument_delta(raw), terminal(json!([]))],
             IncompleteTerminal::Refuse);
         while let Some(item) = stream.next().await {
             let item = item.expect("valid fragments survive the genuine terminal");
@@ -764,7 +764,19 @@ async fn valid_never_done_json_values_fail_unfinished_without_native_or_discard(
         ).as_deref(), Some(
             "the turn failed, so none of its tool calls ran: the provider ended the reply with a tool call it never finished"
         ));
-        assert_eq!(response.raw, terminal(json!([]))["response"]);
+        let received_terminal = terminal(json!([]));
+        let received_raw = received_terminal.to_string();
+        let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict());
+        let WireEvent::Known(super::ResponsesEvent::Frame { frame, raw: captured, .. }) =
+            decoder.classify(WireFrame::Text(received_raw.clone())) else {
+                panic!("the actual reader retains the received terminal");
+            };
+        assert_eq!(captured, received_raw);
+        assert_eq!(frame, received_terminal);
+        assert_eq!(frame["response"]["output"], json!([]));
+        let mut expected_document = received_terminal["response"].clone();
+        expected_document["output"] = json!([added["item"].clone()]);
+        assert_eq!(response.raw, expected_document);
     }
 }
 
@@ -802,7 +814,19 @@ async fn explicitly_done_json_values_replay_exactly_without_discard() {
         assert_eq!(call.function.name.as_str(), "add");
         assert_eq!(call.function.namespace.as_deref(), Some(""));
         assert_eq!(call.native.as_ref().expect("received done evidence").item, authoritative);
-        assert_eq!(response.raw, terminal(json!([]))["response"]);
+        let received_terminal = terminal(json!([]));
+        let received_raw = received_terminal.to_string();
+        let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict());
+        let WireEvent::Known(super::ResponsesEvent::Frame { frame, raw: captured, .. }) =
+            decoder.classify(WireFrame::Text(received_raw.clone())) else {
+                panic!("the actual reader retains the received terminal");
+            };
+        assert_eq!(captured, received_raw);
+        assert_eq!(frame, received_terminal);
+        assert_eq!(frame["response"]["output"], json!([]));
+        let mut expected_document = received_terminal["response"].clone();
+        expected_document["output"] = json!([authoritative.clone()]);
+        assert_eq!(response.raw, expected_document);
         let wire = OpenAIConfig::new("fixture-key").responses("different-model");
         let original_request = CompletionRequest::new("continue")
             .message(response.message().expect("canonical call history"));

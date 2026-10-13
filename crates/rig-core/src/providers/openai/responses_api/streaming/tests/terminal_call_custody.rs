@@ -51,7 +51,7 @@ fn a_terminal_completed_call_finishes_only_its_announced_id_at_any_output_positi
         let driven = drive(&frames);
         assert!(driven.errors.is_empty(), "{:?}", driven.errors);
         assert_eq!(driven.response.error, None);
-        assert_eq!(driven.response.finish_reason(), Some(FinishReason::Stop));
+        assert_eq!(driven.response.finish_reason(), Some(FinishReason::ToolCalls));
         assert_eq!(driven.response.head().stop, Some(StopReason::ToolUse));
         let [AssistantContent::ToolCall(call)] = driven.response.choice.as_slice() else {
             panic!("one actual completed call: {:?}", driven.response.choice);

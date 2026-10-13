@@ -1591,9 +1591,9 @@ async fn an_open_call_at_eof_has_no_genuine_terminal_and_is_truncated() {
 #[tokio::test]
 async fn a_responses_length_terminal_never_dispatches_a_parseable_call_without_done() {
     use rig_core::providers::openai::responses_api::streaming::IncompleteTerminal;
-    use rig_core::providers::openai::wire::OpenAIConfig;
+    use rig_core::providers::openai::OpenAI;
     use rig_core::wire::{Mode, WireFrame};
-    let wire = OpenAIConfig::new("test-key").responses("gpt-5.4")
+    let wire = OpenAI::new("test-key").responses("gpt-5.4").wire
         .with_streamed_incomplete(IncompleteTerminal::Accept);
     let frames = [
         json!({"type":"response.output_item.added","sequence_number":0,"output_index":0,
