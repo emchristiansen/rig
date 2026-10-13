@@ -2067,3 +2067,148 @@ async fn a_generic_session_warmup_may_carry_no_input() {
     assert!(frame["instructions"].is_string(), "got {frame}");
     assert!(frame.get("stream").is_none(), "got {frame}");
 }
+
+#[cfg(all(feature = "tungstenite", not(target_family = "wasm")))]
+#[test]
+fn bundled_connect_has_current_session_signature() {
+    fn assert_future(
+        _: impl std::future::Future<Output = Result<CodexWebSocketSession, ProviderError>> + Send,
+    ) {
+    }
+
+    let builder = CodexWebSocketSessionBuilder::new(codex_wire())
+        .expect("the current ChatGPT wire supports Codex sessions");
+    assert_future(builder.connect());
+}
+
+#[cfg(all(feature = "tungstenite", not(target_family = "wasm")))]
+#[tokio::test]
+async fn bundled_connect_matches_explicit_tungstenite_backend()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use futures::{SinkExt, StreamExt};
+    use rig_tungstenite::tokio_tungstenite::{
+        accept_hdr_async,
+        tungstenite::{Message as SocketMessage, handshake::server::Request},
+    };
+    use std::time::Duration;
+
+    type TestError = Box<dyn std::error::Error + Send + Sync>;
+
+    let listener = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::net::TcpListener::bind("127.0.0.1:0"),
+    )
+    .await??;
+    let base_url = format!("http://{}/v1", listener.local_addr()?);
+    let identity = CodexIdentity::from_ids("session-bundled", "thread-bundled")?;
+    let wire = OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
+        .with_base_url(base_url)
+        .with_caller_identity(crate::test_utils::test_caller_identity())
+        .with_account_id(ACCOUNT_ID)
+        .responses(chatgpt::GPT_5_3_CODEX);
+    let expected_handshake = identity.handshake_request(&wire)?;
+    let builder = || {
+        CodexWebSocketSessionBuilder::new(wire.clone())
+            .expect("the current ChatGPT wire supports Codex sessions")
+            .with_identity(identity.clone())
+            .connect_timeout(Duration::from_secs(2))
+            .event_timeout(Duration::from_secs(2))
+    };
+    let completed_frame = completed("resp_bundled");
+    let delta_frame = text_delta("bundled backend");
+
+    let server = async {
+        let mut received = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await?;
+            let mut received_headers = None;
+            let mut socket = accept_hdr_async(stream, |request: &Request, response| {
+                assert_eq!(request.uri().path(), "/v1/responses");
+                received_headers = Some(request.headers().clone());
+                Ok(response)
+            })
+            .await?;
+            let headers = received_headers.ok_or_else(|| {
+                std::io::Error::other("the local upgrade callback did not capture headers")
+            })?;
+            let request = socket.next().await.ok_or_else(|| {
+                std::io::Error::other("the local client ended before response.create")
+            })??;
+            let frame: serde_json::Value = serde_json::from_str(request.to_text()?)?;
+            assert_eq!(frame["type"], "response.create");
+            for event in [&delta_frame, &completed_frame] {
+                socket.send(SocketMessage::text(event.clone())).await?;
+            }
+            let mut closed = false;
+            while let Some(message) = socket.next().await {
+                if message?.is_close() {
+                    closed = true;
+                    break;
+                }
+            }
+            assert!(closed, "each real backend must send its close frame");
+            received.push((headers, frame));
+        }
+        Ok::<_, TestError>(received)
+    };
+
+    let clients = async {
+        let mut bundled = builder().connect().await?;
+        assert_eq!(bundled.identity(), &identity);
+        let bundled_response = bundled.completion(user_request("hello")).await?;
+        bundled.close().await?;
+
+        let mut explicit = builder()
+            .connect_with(&rig_tungstenite::TungsteniteClient::new())
+            .await?;
+        assert_eq!(explicit.identity(), &identity);
+        let explicit_response = explicit.completion(user_request("hello")).await?;
+        explicit.close().await?;
+        Ok::<_, TestError>((bundled_response, explicit_response))
+    };
+
+    // Join both bounded paths even if either fails. No detached server survives.
+    let (server_result, client_result) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(10), server),
+        tokio::time::timeout(Duration::from_secs(10), clients),
+    );
+    let received = server_result??;
+    let (bundled_response, explicit_response) = client_result??;
+    assert_eq!(received.len(), 2);
+    for (headers, _) in &received {
+        for (name, value) in expected_handshake.headers() {
+            assert_eq!(
+                headers.get(name),
+                Some(value),
+                "exact configured header {name}"
+            );
+        }
+    }
+    assert_eq!(
+        received[0].1, received[1].1,
+        "the actual response.create frames agree"
+    );
+    assert_eq!(received[0].1["stream"], true);
+    assert_eq!(received[0].1["prompt_cache_key"], "thread-bundled");
+    assert_eq!(
+        received[0].1["client_metadata"]["session_id"],
+        "session-bundled"
+    );
+    assert_eq!(
+        received[0].1["client_metadata"]["thread_id"],
+        "thread-bundled"
+    );
+    for response in [&bundled_response, &explicit_response] {
+        assert!(
+            matches!(response.choice.as_slice(), [AssistantContent::Text(text)]
+            if text.text == "bundled backend")
+        );
+        assert_eq!(
+            response.raw,
+            serde_json::from_str::<serde_json::Value>(&completed_frame)?["response"]
+        );
+    }
+    assert_eq!(bundled_response.usage, explicit_response.usage);
+    assert_eq!(bundled_response.model(), explicit_response.model());
+    Ok(())
+}

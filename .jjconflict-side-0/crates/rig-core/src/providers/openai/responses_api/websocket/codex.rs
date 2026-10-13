@@ -324,6 +324,15 @@ impl CodexWebSocketSessionBuilder {
         self
     }
 
+    /// Open the session over the bundled tungstenite backend with the configured
+    /// timeouts. Return handshake construction, transport, or provider errors.
+    #[cfg(all(feature = "tungstenite", not(target_family = "wasm")))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tungstenite")))]
+    pub async fn connect(self) -> Result<CodexWebSocketSession, ProviderError> {
+        self.connect_with(&rig_tungstenite::TungsteniteClient::new())
+            .await
+    }
+
     /// Open the session over `backend`.
     /// Return handshake construction, transport, or provider errors; a
     /// rejected upgrade keeps its status, headers, body and request ID.
