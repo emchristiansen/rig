@@ -100,7 +100,27 @@ fn whole_and_terminal_reasoning_restatements_keep_provider_authority_without_can
         let response = result.outcome.expect("genuine provider terminal");
         let [AssistantContent::CarriedReasoning(folded)] = response.choice.as_slice() else { panic!("same canonical content"); };
         assert_eq!(folded.payload.item, ended.payload.item);
-        assert_eq!(folded.content, ended.content);
+        // Delivered parts retain unknown issuer; the fold stamps its actual issuer.
+        use crate::message::CarriedReasoningPart as Part;
+        let (
+            [Part::Summary(ended_summary), Part::OpaqueContent(ended_opaque), Part::Encrypted(ended_cipher)],
+            [Part::Summary(folded_summary), Part::OpaqueContent(folded_opaque), Part::Encrypted(folded_cipher)],
+        ) = (ended.content.as_slice(), folded.content.as_slice()) else {
+            panic!("exact received summary, opaque content, encrypted ordering");
+        };
+        assert_eq!(ended_summary, "thought");
+        assert_eq!(folded_summary, ended_summary);
+        assert_eq!(ended_cipher, "cipher");
+        assert_eq!(folded_cipher, ended_cipher);
+        assert_eq!(ended_opaque.item, reasoning()["content"][0]);
+        assert_eq!(folded_opaque.item, ended_opaque.item);
+        assert_eq!(ended_opaque.position, crate::message::CarriedPosition::ReasoningContent { part_index: 0 });
+        assert_eq!(folded_opaque.position, ended_opaque.position);
+        assert_eq!(ended_opaque.provider, None);
+        assert_eq!(folded_opaque.provider.as_deref(), Some("openai"));
+        assert_eq!(ended.payload.provider, None);
+        assert_eq!(ended.id.as_deref(), Some("rs_1"));
+        assert_eq!(folded.id, ended.id);
         assert_eq!(folded.payload.provider.as_deref(), Some("openai"));
         assert!(matches!(response.message(), Some(crate::message::Message::Assistant(turn)) if turn.content == response.choice));
     }

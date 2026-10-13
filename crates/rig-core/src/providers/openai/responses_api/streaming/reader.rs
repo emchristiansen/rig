@@ -552,13 +552,33 @@ pub(super) fn classify_websocket(data: &str) -> WireEvent<ResponsesEvent> {
 pub(super) fn repair(data: &str) -> Option<String> {
     let mut value: Value = serde_json::from_str(data).ok()?;
     let object = value.as_object_mut()?;
-    for field in [
-        "sequence_number",
-        "output_index",
-        "content_index",
-        "summary_index",
-    ] {
-        object.entry(field).or_insert_with(|| Value::from(0));
+    let kind = object.get("type")?.as_str()?;
+    let required: &[&str] = match kind {
+        kind if super::is_lifecycle_event(kind) => &["sequence_number"],
+        "response.output_item.added"
+        | "response.output_item.done"
+        | "response.function_call_arguments.delta"
+        | "response.function_call_arguments.done"
+        | "response.reasoning_text.delta" => &["sequence_number", "output_index"],
+        "response.content_part.added"
+        | "response.content_part.done"
+        | "response.output_text.delta"
+        | "response.output_text.done"
+        | "response.refusal.delta"
+        | "response.refusal.done"
+        | "response.reasoning_text.done" => {
+            &["sequence_number", "output_index", "content_index"]
+        }
+        "response.reasoning_summary_part.added"
+        | "response.reasoning_summary_part.done"
+        | "response.reasoning_summary_text.delta"
+        | "response.reasoning_summary_text.done" => {
+            &["sequence_number", "output_index", "summary_index"]
+        }
+        _ => return None,
+    };
+    for field in required {
+        object.entry(*field).or_insert_with(|| Value::from(0));
     }
     serde_json::to_string(&value).ok()
 }

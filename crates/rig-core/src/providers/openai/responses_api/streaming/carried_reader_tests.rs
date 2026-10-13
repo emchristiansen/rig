@@ -731,8 +731,30 @@ async fn valid_never_done_json_values_replay_exactly_without_discard() {
         assert_eq!(call.function.name.as_str(), "add");
         assert_eq!(call.function.namespace.as_deref(), Some(""));
         let wire = OpenAIConfig::new("fixture-key").responses("different-model");
-        let request = CompletionRequest::new("continue")
+        let original_request = CompletionRequest::new("continue")
             .message(response.message().expect("canonical call history"));
+        let original = Completion::prepare(original_request.clone(), &wire.describe())
+            .expect("original no-tools history adaptation");
+        let original = wire.encode(original, Mode::Unary)
+            .expect("original no-tools request");
+        let original_body = crate::test_utils::json_body(&original.request);
+        let original_input = original_body["input"].as_array().expect("original input");
+        assert!(original_input.iter().all(|item| item["type"] != "function_call"));
+        let original_assistant = original_input.iter()
+            .find(|item| item["role"] == "assistant").expect("original textual call");
+        let expected_no_tools = if raw == "{\"city\":\"Paris\"}" {
+            r#"[called tool add with {"city":"Paris"}]"#
+        } else {
+            "[called tool add with {}]"
+        };
+        assert_eq!(original_assistant["content"][0]["text"], expected_no_tools);
+
+        // The replay control explicitly declares its tool; no-tools stays textual above.
+        let request = original_request.tool(crate::completion::ToolDefinition::new(
+            crate::message::ToolName::new("add").expect("declared call name"),
+            "add",
+            json!({}),
+        ));
         let request = Completion::prepare(request, &wire.describe()).expect("history adaptation");
         let encoded = wire.encode(request, Mode::Unary).expect("actual Responses encoder");
         let body = crate::test_utils::json_body(&encoded.request);
@@ -887,4 +909,49 @@ async fn partial_eof_stamps_only_folded_carried_issuer_and_keeps_delivered_ends_
     assert!(partial.finish_reason().is_none());
     assert!(partial.error.is_none());
     assert!(matches!(stream.finish().await, Err(ProviderError::Truncated)));
+}
+
+#[test]
+fn repaired_lifecycle_preserves_every_genuine_sibling_in_the_raw_document() {
+    use crate::wire::document::Reassemble;
+    let frame = json!({"type":"response.completed","response":response(json!([])),
+        "output_index":17,"content_index":23,"summary_index":29,
+        "future":{"keep":[null,7]}});
+    let mut repaired = super::document::Response::with_strict_reader(true);
+    repaired.absorb(&WireFrame::Text(frame.to_string()));
+    let mut expected = frame["response"].clone();
+    for field in ["output_index", "content_index", "summary_index", "future"] {
+        expected[field] = frame[field].clone();
+    }
+    assert_eq!(repaired.finish(), expected);
+}
+
+#[test]
+fn repaired_known_events_synthesize_only_their_required_coordinates_and_keep_raw() {
+    let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict())
+        .with_envelope_repair();
+    for (received, fields) in [
+        (json!({"type":"response.completed","response":response(json!([]))}),
+            vec!["sequence_number"]),
+        (json!({"type":"response.output_item.done","item":message(json!([]))}),
+            vec!["sequence_number", "output_index"]),
+        (json!({"type":"response.output_text.delta","delta":"kept"}),
+            vec!["sequence_number", "output_index", "content_index"]),
+        (json!({"type":"response.reasoning_summary_text.delta","delta":"thought"}),
+            vec!["sequence_number", "output_index", "summary_index"]),
+        (json!({"type":"response.reasoning_text.delta","delta":"thought"}),
+            vec!["sequence_number", "output_index"]),
+    ] {
+        let raw = received.to_string();
+        let mut expected = received;
+        for field in fields {
+            expected[field] = json!(0);
+        }
+        let WireEvent::Known(super::ResponsesEvent::Frame { frame, raw: captured, .. }) =
+            decoder.classify(WireFrame::Text(raw.clone())) else {
+                panic!("only missing required bookkeeping is repaired");
+            };
+        assert_eq!(frame, expected);
+        assert_eq!(captured, raw);
+    }
 }

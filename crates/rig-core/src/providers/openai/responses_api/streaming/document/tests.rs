@@ -260,7 +260,9 @@ async fn chatgpt_unary_and_streamed_replies_rebuild_one_output() {
         item("response.output_item.done", 0, call("fc_1", "{\"q\":1}")),
         lifecycle("response.completed", envelope("completed", json!([]))),
     ]);
-    let wire = OpenAIConfig::with_key(&CHATGPT, "test-token").responses("gpt-5.4");
+    let wire = OpenAIConfig::with_key(&CHATGPT, "test-token")
+        .with_caller_identity(crate::test_utils::test_caller_identity())
+        .responses("gpt-5.4");
     let (unary, streamed) = raw_pair(wire, stream.clone(), stream)
         .await
         .unwrap_or_else(|error| panic!("the ChatGPT stream decodes: {error}"));

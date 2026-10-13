@@ -139,7 +139,7 @@ fn ordinary_developer_items_keep_their_standard_mode_wire_shape() {
     let mut target = lite_wire();
     target.codex_request_shape = CodexRequestShape::Standard;
     let body = encoded_body(&target, request_with_raw_item(expected.clone()));
-    assert_eq!(body["input"][1], expected);
+    assert_eq!(body["input"][0], expected);
 
     // The old DTO's string alias is retired. A raw item was always an
     // independent reader path, and its string stays exact on that path.
@@ -147,7 +147,7 @@ fn ordinary_developer_items_keep_their_standard_mode_wire_shape() {
         "role": "developer", "content": "ordinary developer instruction"
     });
     let body = encoded_body(&target, request_with_raw_item(raw.clone()));
-    assert_eq!(body["input"][1], raw);
+    assert_eq!(body["input"][0], raw);
 }
 
 #[test]
@@ -160,8 +160,8 @@ fn named_developer_items_keep_their_name_at_the_real_request_boundary() {
     let mut target = lite_wire();
     target.codex_request_shape = CodexRequestShape::Standard;
     let body = encoded_body(&target, request_with_raw_item(expected.clone()));
-    assert_eq!(body["input"][1], expected);
-    assert_eq!(body["input"][1]["name"], "policy");
+    assert_eq!(body["input"][0], expected);
+    assert_eq!(body["input"][0]["name"], "policy");
 }
 
 #[test]
@@ -176,19 +176,19 @@ fn canonical_function_calls_omit_role_and_raw_null_role_items_remain_exact() {
         AssistantMessage::new(vec![AssistantContent::ToolCall(call)]),
     ));
     let body = encoded_body(&target, request);
-    assert_eq!(body["input"][1]["type"], "function_call");
-    assert_eq!(body["input"][1].get("role"), None);
-    assert_eq!(body["input"][1]["call_id"], "call_1");
-    assert_eq!(body["input"][1]["name"], "lookup");
-    assert_eq!(body["input"][1]["arguments"], "{}");
+    assert_eq!(body["input"][0]["type"], "function_call");
+    assert_eq!(body["input"][0].get("role"), None);
+    assert_eq!(body["input"][0]["call_id"], "call_1");
+    assert_eq!(body["input"][0]["name"], "lookup");
+    assert_eq!(body["input"][0]["arguments"], "{}");
 
     let raw = serde_json::json!({
         "type": "function_call", "role": null, "id": "fc_1",
         "arguments": "{}", "call_id": "call_1", "name": "lookup", "status": "completed"
     });
     let body = encoded_body(&target, request_with_raw_item(raw.clone()));
-    assert_eq!(body["input"][1], raw);
-    assert_eq!(body["input"][1].get("role"), Some(&Value::Null));
+    assert_eq!(body["input"][0], raw);
+    assert_eq!(body["input"][0].get("role"), Some(&Value::Null));
 }
 
 #[test]

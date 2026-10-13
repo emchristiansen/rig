@@ -46,7 +46,8 @@ fn each_payload_reports_wrapped_usage_and_reported_total_before_its_verdict_and_
         json!({"type":"response.created","response":{"id":"resp_1","status":"in_progress","usage":{"input_tokens":7}}}),
         json!({"type":"response.failed","usage":{"input_tokens":11,"total_tokens":99},"response":{"id":"resp_1","status":"failed","usage":{"input_tokens":100,"output_tokens":3,"total_tokens":103,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":2}},"error":{"code":"server_error","message":"boom"}}}),
     ]);
-    assert_eq!(events.len(), 5);
+    // The created payload has no semantic verdict; its usage is still observed.
+    assert_eq!(events.len(), 4);
     assert_eq!(
         events[0],
         AdapterEvent::Usage {
@@ -60,9 +61,8 @@ fn each_payload_reports_wrapped_usage_and_reported_total_before_its_verdict_and_
             }
         }
     );
-    assert!(matches!(events[1], AdapterEvent::Provider { .. }));
     assert_eq!(
-        events[2],
+        events[1],
         AdapterEvent::Usage {
             usage: AdapterUsage {
                 input_tokens: Some(100),
@@ -74,8 +74,8 @@ fn each_payload_reports_wrapped_usage_and_reported_total_before_its_verdict_and_
             }
         }
     );
-    assert!(matches!(events[3], AdapterEvent::Provider { .. }));
-    assert!(matches!(events[4], AdapterEvent::ErrorEnvelope { .. }));
+    assert!(matches!(events[2], AdapterEvent::Provider { .. }));
+    assert!(matches!(events[3], AdapterEvent::ErrorEnvelope { .. }));
 }
 
 #[test]
@@ -437,5 +437,20 @@ fn raw_projection_refuses_malformed_roots_nested_known_fields_and_tools() {
             )
             .expect_err("malformed recognized raw input refused");
         assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn recognized_raw_prompt_cache_options_keep_exact_values_without_unknown_passthrough() {
+    let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
+    for value in [
+        json!({"ttl":"30m","comparison_response_id":"resp_0","future":[null,7]}),
+        Value::Null,
+    ] {
+        let request = codex_request(json!({"prompt_cache_options":value,"unknown_outer":[null,9]}));
+        let body = wire.responses_request(&request,
+            super::super::Delivery::Http(crate::wire::Mode::Unary)).expect("existing request merge");
+        assert_eq!(body.get("prompt_cache_options"), Some(&value));
+        assert!(body.get("unknown_outer").is_none());
     }
 }

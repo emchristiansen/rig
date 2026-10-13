@@ -2029,9 +2029,14 @@ pub mod fixtures {
                     "sequence_number": 4,
                     "item_id": "ws_1",
                 }))),
-                // The decoder reads only the fields it builds blocks from, and
-                // reads those leniently, so no known event fails a reply (#2668).
-                defective_known_frame: None,
+                // A known text event with a non-string delta fails both readers.
+                defective_known_frame: Some(sse(&json!({
+                    "type": "response.output_text.delta",
+                    "sequence_number": 0,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": 7,
+                }))),
                 delta_less_prelude_frame: None,
                 refusal: Some(RefusalFixture {
                     frames: vec![sse(&json!({

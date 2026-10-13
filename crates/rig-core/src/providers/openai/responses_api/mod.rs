@@ -692,6 +692,21 @@ pub(crate) fn project_raw_parameters(raw: &Value) -> Result<Map<String, Value>, 
     if raw.is_null() || raw.is_boolean() {
         return Ok(Map::new());
     }
+    let invalid_root = match raw {
+        Value::Array(_) => Some(serde::de::Unexpected::Seq),
+        Value::String(value) => Some(serde::de::Unexpected::Str(value)),
+        _ => None,
+    };
+    if let Some(unexpected) = invalid_root {
+        let error = <serde_json::Error as serde::de::Error>::invalid_type(
+            unexpected,
+            &"struct AdditionalParameters",
+        );
+        return Err(EncodeError::request(format!(
+            "Invalid OpenAI Responses additional_params payload: {error}"
+        )));
+    }
+    let prompt_cache_options = raw.get("prompt_cache_options").cloned();
     let mut raw = raw.clone();
     let tools = if let Some(fields) = raw.as_object_mut() {
         if fields.contains_key("__rig_tolerate_incomplete") {
@@ -723,6 +738,9 @@ pub(crate) fn project_raw_parameters(raw: &Value) -> Result<Map<String, Value>, 
     };
     if let Some(tools) = tools {
         fields.insert("tools".to_owned(), tools);
+    }
+    if let Some(prompt_cache_options) = prompt_cache_options {
+        fields.insert("prompt_cache_options".to_owned(), prompt_cache_options);
     }
     Ok(fields)
 }
