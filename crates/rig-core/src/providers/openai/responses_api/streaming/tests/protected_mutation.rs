@@ -77,7 +77,18 @@ fn an_added_message_never_takes_over_an_id_less_slot() {
             message_item("msg_b", annotated)
         ])),
     ]);
-    assert!(driven.errors.is_empty()); assert_eq!(folded_texts(&driven.response.choice),["A","B"]); let AssistantContent::CarriedText(a)=&driven.response.choice[0] else {panic!("text first")}; assert!(a.payload.item.get("annotations").is_none(),"B's annotations never land on A");
+    assert!(driven.errors.is_empty());
+    assert_eq!(folded_texts(&driven.response.choice), ["A", "B"]);
+    let AssistantContent::Text(_) = &driven.response.choice[0] else {
+        panic!("text first")
+    };
+    let a = driven.response.choice[0]
+        .native_item()
+        .expect("A retains the actual received message");
+    assert!(
+        a["content"][0].get("annotations").is_none(),
+        "B's annotations never land on A"
+    );
 }
 
 // F streaming/tests.rs:5126

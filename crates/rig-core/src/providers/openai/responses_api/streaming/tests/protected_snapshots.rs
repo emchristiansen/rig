@@ -238,7 +238,7 @@ fn reasoning_first_published_at_the_flush_keeps_its_output_slot() {
         "{streamed:?}"
     );
     assert!(
-        matches!(&streamed[1], AssistantContent::CarriedText(t) if t.text() == "answer"),
+        matches!(&streamed[1], AssistantContent::Text(t) if t.text == "answer"),
         "{streamed:?}"
     );
     assert_eq!(streamed.len(), 2);
