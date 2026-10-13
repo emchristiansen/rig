@@ -104,8 +104,10 @@ async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservatio
 
     let raw = match cell.transport {
         Transport::Blocking => {
-            // The provider's chat-completions reply is `CompletionResponse::raw`.
-            model.call(request).await?.raw
+            let response = model.call(request).await?;
+            let response: rig::providers::openai::completion::CompletionResponse =
+                serde_json::from_value(response.raw)?;
+            serde_json::to_value(response)?
         }
         Transport::Streaming => {
             let mut stream = model.stream(request)?;

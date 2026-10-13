@@ -106,14 +106,15 @@ async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservatio
 
     let observation = match cell.transport {
         Transport::Blocking => {
-            // The provider's chat-completions reply is `CompletionResponse::raw`.
             let response = model.call(request).await?;
-            let choice = response.raw["choices"]
-                .get(0)
+            let raw: rig::providers::openai::completion::CompletionResponse =
+                serde_json::from_value(response.raw)?;
+            let choice = raw.choices
+                .first()
                 .context("blocking response should carry a choice")?;
             Observation {
-                logprobs: choice["logprobs"].clone(),
-                finish_reason: choice["finish_reason"].clone(),
+                logprobs: choice.logprobs.clone().unwrap_or(Value::Null),
+                finish_reason: json!(choice.finish_reason),
             }
         }
         Transport::Streaming => {
@@ -125,12 +126,14 @@ async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservatio
                 .finish()
                 .await
                 .context("stream should carry a terminal record")?;
-            // The chat-completions terminal record is `CompletionResponse::raw`.
-            // The rebuilt document states them where a unary body does.
-            let choice = &terminal.raw["choices"][0];
+            // The current stream owns a whole native document at finish.
+            let raw: rig::providers::openai::completion::CompletionResponse =
+                serde_json::from_value(terminal.raw)?;
+            let choice = raw.choices.first()
+                .context("streamed whole response should carry a choice")?;
             Observation {
-                logprobs: choice["logprobs"].clone(),
-                finish_reason: choice["finish_reason"].clone(),
+                logprobs: choice.logprobs.clone().unwrap_or(Value::Null),
+                finish_reason: json!(choice.finish_reason),
             }
         }
     };
