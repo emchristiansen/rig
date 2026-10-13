@@ -30,7 +30,10 @@ fn provider_response_ext_text_response() {
     assert_eq!(
         out.choice
             .first()
-            .and_then(AssistantContent::as_text)
+            .and_then(|content| match content {
+                AssistantContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
             .map(str::to_owned),
         Some("hello world".to_string())
     );
@@ -60,15 +63,11 @@ fn token_usage_delegates_to_provider_response_ext() {
         "x",
         Some(json!({"inputTokens": 10, "outputTokens": 20, "totalTokens": 30})),
     );
-    assert_eq!(
-        out.usage,
-        Usage {
-            input_tokens: Some(10),
-            output_tokens: Some(20),
-            total_tokens: Some(30),
-            ..Default::default()
-        }
-    );
+    let mut expected = Usage::default();
+    expected.input_tokens = Some(10);
+    expected.output_tokens = Some(20);
+    expected.total_tokens = Some(30);
+    assert_eq!(out.usage, expected);
 }
 
 #[test]
