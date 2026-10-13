@@ -1,8 +1,8 @@
 //! Protected waiting-item binding, source order, and refusal before mutation.
 
 use super::helpers::*;
-use crate::message::{AssistantContent, CarriedTextContent, CarriedReasoningPart};
-use crate::streaming::{Item, PartKind, StreamEvent};
+use crate::message::{AssistantContent, CarriedReasoningPart};
+use crate::streaming::{Item, StreamEvent};
 use crate::wire::Operation;
 use serde_json::json;
 

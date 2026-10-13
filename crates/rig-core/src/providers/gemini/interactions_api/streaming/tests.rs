@@ -921,7 +921,7 @@ fn cf_full_delta_partial_start_keeps_one_part_until_stop() {
 
 #[test]
 fn a_full_kind_call_without_an_id_keeps_the_completed_hook_refusal() {
-    use crate::wire::{Decoder, Wire, WireEvent};
+    use crate::wire::{Decoder, WireEvent};
 
     let wire = wire();
     let request = crate::completion::CompletionRequest::new("hello");

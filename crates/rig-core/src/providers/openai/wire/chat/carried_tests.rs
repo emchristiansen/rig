@@ -1,6 +1,5 @@
 //! Fork Chat contracts migrated onto the actual upstream wire and driver.
 
-use super::super::tests::recorded;
 use super::*;
 use crate::message::{AssistantMessage, DocumentData};
 use crate::message::{

@@ -6,7 +6,7 @@ use crate::operation::Completion;
 use crate::providers::anthropic::wire::AnthropicConfig;
 use crate::test_utils::json_body;
 use crate::wire::WireFrame;
-use crate::wire::{Fold, Operation, Wire};
+use crate::wire::{Operation, Wire};
 use serde_json::json;
 
 /// The wire settings a request body is built with.
