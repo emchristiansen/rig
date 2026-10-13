@@ -135,7 +135,8 @@ async fn explicit_preamble_and_mid_conversation_system_messages_are_instructions
             // system messages into the top-level `instructions` field.
             let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble("You are a concise assistant.")
-                .additional_params(recorded_include());
+                .additional_params(recorded_include())
+                .build();
             let mut history = vec![
                 Message::user("Hello!"),
                 Message::assistant("Hi! How can I help you today?"),
@@ -150,7 +151,7 @@ async fn explicit_preamble_and_mid_conversation_system_messages_are_instructions
                 .expect("chat with a mid-conversation system message should succeed");
 
             assert!(
-                result.output.contains("FALCON-9"),
+                result.output().contains("FALCON-9"),
                 "the mid-conversation system message must reach the model, got {result:?}"
             );
         },
@@ -166,7 +167,8 @@ async fn default_instructions_merge_with_explicit_preamble() {
         |client| async move {
             let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
                 .preamble("Explicit instruction marker: also include EXPLICIT-CODEX-MARKER.")
-                .additional_params(recorded_include());
+                .additional_params(recorded_include())
+                .build();
             let mut history = Vec::<Message>::new();
 
             let result = agent
@@ -178,8 +180,8 @@ async fn default_instructions_merge_with_explicit_preamble() {
                 .expect("default and explicit instructions should both reach the backend");
 
             assert!(
-                result.output.contains("DEFAULT-CODEX-MARKER")
-                    && result.output.contains("EXPLICIT-CODEX-MARKER"),
+                result.output().contains("DEFAULT-CODEX-MARKER")
+                    && result.output().contains("EXPLICIT-CODEX-MARKER"),
                 "merged instructions should influence the answer, got {result:?}"
             );
         },

@@ -45,7 +45,7 @@ use super::super::cassette_support::*;
 use rig::completion::CompletionRequest;
 use rig::message::{Message, AssistantMessage, AssistantContent, UserContent, ToolResult, ToolResultContent, CallId, ToolName};
 use serde_json::json;
-use crate::cassettes::recorded_json_request;
+use crate::cassettes::{recorded_json_request, recorded_statuses_and_bodies};
 
 const NO_THINK: &str = "/no_think ";
 

@@ -17,7 +17,8 @@ use serde_json::json;
 
 use super::super::support::{recorded_include, with_chatgpt_cassette};
 use crate::support::{
-    REQUIRED_ZERO_ARG_TOOL_PROMPT, collect_raw_stream_observation, zero_arg_tool_definition,
+    REQUIRED_ZERO_ARG_TOOL_PROMPT, assert_stream_contains_zero_arg_tool_call_named,
+    collect_raw_stream_observation, zero_arg_tool_definition,
 };
 use rig::completion::CompletionRequest;
 
@@ -284,7 +285,7 @@ async fn nested_arguments_streaming() {
                 .iter()
                 .find(|tool_call| tool_call.function.name == PlanTrip::NAME)
                 .expect("stream should emit the plan_trip tool call");
-            assert_expected_plan_trip_arguments(&tool_call.function.arguments);
+            assert_expected_plan_trip_arguments(&tool_call.function.arguments_value());
         },
     )
     .await;
