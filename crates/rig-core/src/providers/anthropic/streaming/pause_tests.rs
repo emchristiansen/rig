@@ -31,7 +31,8 @@ fn frames(reason: &str, stopped_text: bool, cited: bool) -> Vec<Value> {
     ];
     if cited { frames.push(json!({"type":"content_block_delta","index":0,"delta":{
         "type":"citations_delta","citation":{"type":"web_search_result_location",
-            "url":"https://example.com/search","title":"Search","cited_text":"Searching."}}})); }
+            "url":"https://example.com/search","title":"Search","cited_text":"Searching.",
+            "encrypted_index":"encrypted-index"}}})); }
     if stopped_text { frames.push(json!({"type":"content_block_stop","index":0})); }
     frames.extend([
         json!({"type":"content_block_start","index":1,"content_block":hosted()}),
@@ -138,7 +139,8 @@ fn paused_open_text_uses_existing_finish_custody_with_exact_received_citations()
     assert_eq!(open.citations(), stopped.citations());
     assert_eq!(open.citations().len(), 1);
     assert_eq!(open.payload.item["citations"], json!([{"type":"web_search_result_location",
-        "url":"https://example.com/search","title":"Search","cited_text":"Searching."}]));
+        "url":"https://example.com/search","title":"Search","cited_text":"Searching.",
+        "encrypted_index":"encrypted-index"}]));
 }
 
 #[test]
