@@ -661,3 +661,5 @@ fn two_signed_thought_parts_keep_both_signatures() {
     }
     assert_eq!(signatures, ["b25l", "dHdv"], "{:?}", response.choice);
 }
+
+mod signature_media_controls;

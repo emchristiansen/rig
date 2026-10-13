@@ -795,3 +795,5 @@ fn default_grpc_keeps_all_five_inline_image_mimes_as_exact_inspection()
     }
     Ok(())
 }
+
+mod signature_media_controls;

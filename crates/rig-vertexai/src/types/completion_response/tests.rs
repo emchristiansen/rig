@@ -399,3 +399,5 @@ fn grounding_and_citations_cite_the_answer() {
         [vertexai::model::Part::new().set_text(ANSWER.to_owned())]
     );
 }
+
+mod signature_media_controls;
