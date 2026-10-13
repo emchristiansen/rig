@@ -232,3 +232,24 @@ fn an_untyped_corrupt_line_keeps_its_text_or_its_exact_bytes() {
         (None, crate::error::FrameEvidence::Bytes(b"{\xff".to_vec()))
     );
 }
+
+#[test]
+fn chat_duplicate_object_discriminator_is_corrupt() {
+    let event = classify_chat_completions_frame::<TestChunk>(
+        r#"{"object":"chat.completion.chunk","object":"future.thing","data":1}"#,
+    );
+    assert!(matches!(event, WireEvent::Corrupt(_)));
+}
+
+#[test]
+fn tagged_duplicate_non_discriminator_key_still_classifies() {
+    // Only discriminator duplication is rejected by the scanner; other
+    // duplicate keys stay with the typed decode's own policy (an ignored
+    // key duplicated is harmless).
+    let event = classify_tagged_frame::<TestEvent>(
+        r#"{"type":"text.delta","ignored":1,"ignored":2,"delta":"hi"}"#,
+        "type",
+        known,
+    );
+    assert!(matches!(event, WireEvent::Known(TestEvent::TextDelta { delta }) if delta == "hi"));
+}
