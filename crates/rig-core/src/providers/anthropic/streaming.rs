@@ -575,8 +575,8 @@ impl MessagesDecoder {
     }
 
     /// End the reply with Anthropic's terminal record. Every block still
-    /// open is complete, but a call whose input is not JSON yet: the end of
-    /// the reply closes it unfinished. The container the reply ran in is a
+    /// open is complete, except calls at the token limit or whose input is
+    /// not JSON yet: the reply closes those unfinished. The container is a
     /// last opaque block.
     fn end(
         &mut self,
@@ -585,13 +585,16 @@ impl MessagesDecoder {
         details: Option<&Value>,
         mut out: Out<'_, Completion>,
     ) -> Result<Flow, ProviderError> {
+        let (reason, error) = stop_reason.map_or((None, None), |reason| finish_of(reason, details));
         let open: Vec<usize> = self
             .open
             .iter()
             .filter(|(_, (kind, json))| {
                 *kind != Kind::Call
-                    || json.is_empty()
-                    || crate::json_utils::parse_tool_arguments(json).is_ok_and(|v| v.is_object())
+                    || (reason != Some(FinishReason::Length)
+                        && (json.is_empty()
+                            || crate::json_utils::parse_tool_arguments(json)
+                                .is_ok_and(|v| v.is_object())))
             })
             .map(|(index, _)| *index)
             .collect();
@@ -603,7 +606,6 @@ impl MessagesDecoder {
             let item = json!({ "type": "container", "container": container });
             out.whole(index, Block::Opaque { replay: true }, item, "")?;
         }
-        let (reason, error) = stop_reason.map_or((None, None), |reason| finish_of(reason, details));
         Ok(out.end(Finish {
             usage: usage.usage(),
             reason,

@@ -2071,3 +2071,43 @@ fn a_citation_without_its_passage_or_title_still_cites_its_source() {
         ));
     }
 }
+
+#[test]
+fn a_length_terminal_keeps_a_valid_open_call_unfinished() {
+    let mut frames = reply(Vec::new(), "max_tokens");
+    let end = frames.pop().expect("the genuine terminal");
+    frames.extend([
+        json!({"type":"content_block_start","index":0,
+            "content_block":{"type":"tool_use","id":"call_1","name":"add","input":{}}}),
+        json!({"type":"content_block_delta","index":0,
+            "delta":{"type":"input_json_delta","partial_json":"{\"x\":1,\"y\":2}"}}),
+        end,
+    ]);
+    let response = streamed(&frames).expect("the received turn folds");
+    assert_eq!(response.finish_reason(), Some(FinishReason::Length));
+    let error = "the provider ended the reply with a tool call it never finished";
+    assert_eq!(response.error.as_deref(), Some(error));
+    assert_eq!(response.stop(), StopReason::Error(error.to_owned()));
+    let call = response.tool_calls().next().expect("the incomplete call is kept");
+    assert_eq!(call.function.arguments_value(), json!({"x":1,"y":2}));
+    assert!(call.native.is_none());
+}
+
+#[test]
+fn a_length_terminal_retains_an_explicitly_finished_valid_call() {
+    let response = streamed(&reply(
+        vec![block(
+            0,
+            json!({"type":"tool_use","id":"call_1","name":"add","input":{}}),
+            &[json!({"type":"input_json_delta","partial_json":"{\"x\":1,\"y\":2}"})],
+        )],
+        "max_tokens",
+    ))
+    .expect("the complete call folds");
+    assert_eq!(response.finish_reason(), Some(FinishReason::Length));
+    assert_eq!(response.error, None);
+    assert_eq!(response.stop(), StopReason::Length);
+    let call = response.tool_calls().next().expect("the completed call is kept");
+    assert_eq!(call.function.arguments_value(), json!({"x":1,"y":2}));
+    assert!(call.native.is_some());
+}

@@ -308,6 +308,7 @@ fn results(
     if rng.chance(10) {
         parts.push(UserContent::ToolResult(rig_core::message::ToolResult {
             call: CallId::from_wire("call_gone"),
+            answers: rig_core::message::AnsweredToolCall::Function,
             name: tool("lookup"),
             content: vec![ToolResultContent::text("stale")],
             is_error: false,

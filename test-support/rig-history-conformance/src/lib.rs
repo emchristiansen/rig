@@ -1302,6 +1302,7 @@ pub fn h08_pairing<F: HistoryFixture>(fixture: &F) {
     });
     let orphan = ToolResult {
         call: CallId::from_wire("call_gone"),
+        answers: rig_core::message::AnsweredToolCall::Function,
         name: name("lookup"),
         content: vec![ToolResultContent::text("stale")],
         is_error: false,
@@ -2203,6 +2204,7 @@ pub fn h16_call_identity<F: HistoryFixture>(fixture: &F) {
     let answer = |id: &str, text: &str| Message::User {
         content: vec![UserContent::ToolResult(ToolResult {
             call: CallId::from_wire(id),
+            answers: rig_core::message::AnsweredToolCall::Function,
             name: name("lookup"),
             content: vec![ToolResultContent::text(text)],
             is_error: false,
