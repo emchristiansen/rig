@@ -17,14 +17,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .await
         .context("Failed to get completion")?;
 
-    let mut response_text = String::new();
-    for content in response.choice.iter() {
-        if let rig_core::message::AssistantContent::Text(rig_core::message::Text { text, .. }) =
-            content
-        {
-            response_text.push_str(text);
-        }
-    }
+    let response_text = response.text();
 
     println!("Response: {response_text}");
 
