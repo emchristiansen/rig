@@ -118,19 +118,17 @@ fn image_tool_result_maps_to_native_function_response_part() {
 #[test]
 fn test_tool_choice_auto_conversion() {
     // Test that rig's ToolChoice::Auto converts to Vertex AI Auto mode
-    let request = CompletionRequest {
-        model: None,
-        tool_choice: Some(ToolChoice::Auto),
-        tools: vec![ToolDefinition {
-            name: name("test_tool"),
-            description: "A test tool".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        }],
-        ..minimal_request()
-    };
+    let mut request = minimal_request();
+    request.model = None;
+    request.tool_choice = Some(ToolChoice::Auto);
+    request.tools = vec![ToolDefinition {
+        name: name("test_tool"),
+        description: "A test tool".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+    }];
 
     let encoded = sdk_request(request).expect("the fixture encodes");
     let tool_config = encoded.tool_config;
@@ -149,19 +147,17 @@ fn test_tool_choice_auto_conversion() {
 #[test]
 fn test_tool_choice_required_conversion() {
     // Test that rig's ToolChoice::Required converts to Vertex AI Any mode
-    let request = CompletionRequest {
-        model: None,
-        tool_choice: Some(ToolChoice::Required),
-        tools: vec![ToolDefinition {
-            name: name("test_tool"),
-            description: "A test tool".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        }],
-        ..minimal_request()
-    };
+    let mut request = minimal_request();
+    request.model = None;
+    request.tool_choice = Some(ToolChoice::Required);
+    request.tools = vec![ToolDefinition {
+        name: name("test_tool"),
+        description: "A test tool".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+    }];
 
     let encoded = sdk_request(request).expect("the fixture encodes");
     let tool_config = encoded.tool_config;
@@ -180,19 +176,17 @@ fn test_tool_choice_required_conversion() {
 #[test]
 fn test_tool_choice_none_conversion() {
     // Test that rig's ToolChoice::None converts to Vertex AI None mode
-    let request = CompletionRequest {
-        model: None,
-        tool_choice: Some(ToolChoice::None),
-        tools: vec![ToolDefinition {
-            name: name("test_tool"),
-            description: "A test tool".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        }],
-        ..minimal_request()
-    };
+    let mut request = minimal_request();
+    request.model = None;
+    request.tool_choice = Some(ToolChoice::None);
+    request.tools = vec![ToolDefinition {
+        name: name("test_tool"),
+        description: "A test tool".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+    }];
 
     let encoded = sdk_request(request).expect("the fixture encodes");
     let tool_config = encoded.tool_config;
@@ -211,21 +205,19 @@ fn test_tool_choice_none_conversion() {
 #[test]
 fn test_tool_choice_specific_conversion() {
     // Test that rig's ToolChoice::Specific converts to Vertex AI Any mode with allowed function names
-    let request = CompletionRequest {
-        model: None,
-        tool_choice: Some(ToolChoice::Specific {
-            function_names: vec![name("test_tool")],
+    let mut request = minimal_request();
+    request.model = None;
+    request.tool_choice = Some(ToolChoice::Specific {
+        function_names: vec![name("test_tool")],
+    });
+    request.tools = vec![ToolDefinition {
+        name: name("test_tool"),
+        description: "A test tool".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {}
         }),
-        tools: vec![ToolDefinition {
-            name: name("test_tool"),
-            description: "A test tool".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        }],
-        ..minimal_request()
-    };
+    }];
 
     let encoded = sdk_request(request).expect("the fixture encodes");
     let tool_config = encoded.tool_config;
@@ -248,16 +240,14 @@ fn test_tool_choice_specific_conversion() {
 
 #[test]
 fn test_system_instruction_from_system_history_and_contents_skip_system() {
-    let request = CompletionRequest {
-        model: None,
-        chat_history: vec![
-            Message::system("System from history"),
-            Message::User {
-                content: vec![UserContent::Text(Text::new("hello".to_string()))],
-            },
-        ],
-        ..minimal_request()
-    };
+    let mut request = minimal_request();
+    request.model = None;
+    request.chat_history = vec![
+        Message::system("System from history"),
+        Message::User {
+            content: vec![UserContent::Text(Text::new("hello".to_string()))],
+        },
+    ];
 
     let vertex_request = sdk_request(request).expect("the fixture encodes");
     let system_instruction = vertex_request.system_instruction.clone();
@@ -277,22 +267,20 @@ fn test_system_instruction_from_system_history_and_contents_skip_system() {
 #[test]
 fn test_tools_conversion() {
     // Test that ToolDefinition converts to FunctionDeclaration
-    let request = CompletionRequest {
-        model: None,
-        tools: vec![ToolDefinition {
-            name: name("add"),
-            description: "Add two numbers".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "x": {"type": "number"},
-                    "y": {"type": "number"}
-                },
-                "required": ["x", "y"]
-            }),
-        }],
-        ..minimal_request()
-    };
+    let mut request = minimal_request();
+    request.model = None;
+    request.tools = vec![ToolDefinition {
+        name: name("add"),
+        description: "Add two numbers".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "x": {"type": "number"},
+                "y": {"type": "number"}
+            },
+            "required": ["x", "y"]
+        }),
+    }];
 
     let encoded = sdk_request(request).expect("the fixture encodes");
     let tools = encoded.tools.into_iter().next();
@@ -312,18 +300,16 @@ fn test_tools_conversion() {
 #[test]
 fn test_tool_with_empty_parameters() {
     // Test that tools with empty parameters work correctly
-    let request = CompletionRequest {
-        model: None,
-        tools: vec![ToolDefinition {
-            name: name("document_list"),
-            description: "Lists all documents".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        }],
-        ..minimal_request()
-    };
+    let mut request = minimal_request();
+    request.model = None;
+    request.tools = vec![ToolDefinition {
+        name: name("document_list"),
+        description: "Lists all documents".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+    }];
 
     let encoded = sdk_request(request).expect("the fixture encodes");
     let tools = encoded.tools.into_iter().next();
@@ -342,28 +328,26 @@ fn test_tool_with_empty_parameters() {
 #[test]
 fn test_tool_with_parameters() {
     // Test that tools with complex parameters work correctly
-    let request = CompletionRequest {
-        model: None,
-        tools: vec![ToolDefinition {
-            name: name("get_weather"),
-            description: "Get weather for a location".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "City name"
-                    },
-                    "units": {
-                        "type": "string",
-                        "enum": ["celsius", "fahrenheit"]
-                    }
+    let mut request = minimal_request();
+    request.model = None;
+    request.tools = vec![ToolDefinition {
+        name: name("get_weather"),
+        description: "Get weather for a location".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "City name"
                 },
-                "required": ["location"]
-            }),
-        }],
-        ..minimal_request()
-    };
+                "units": {
+                    "type": "string",
+                    "enum": ["celsius", "fahrenheit"]
+                }
+            },
+            "required": ["location"]
+        }),
+    }];
 
     let encoded = sdk_request(request).expect("the fixture encodes");
     let tools = encoded.tools.into_iter().next();
@@ -382,12 +366,10 @@ fn test_tool_with_parameters() {
 #[test]
 fn test_generation_config_with_temperature_and_max_tokens() {
     // Test that temperature and max_tokens convert to GenerationConfig
-    let request = CompletionRequest {
-        model: None,
-        temperature: Some(0.7),
-        max_tokens: Some(100),
-        ..minimal_request()
-    };
+    let mut request = minimal_request();
+    request.model = None;
+    request.temperature = Some(0.7);
+    request.max_tokens = Some(100);
 
     let generation_config = sdk_request(request)
         .expect("generation config should parse")
@@ -402,17 +384,15 @@ fn test_generation_config_with_temperature_and_max_tokens() {
 
 #[test]
 fn generation_config_maps_thinking_budget_and_include_thoughts() {
-    let request = CompletionRequest {
-        additional_params: Some(serde_json::json!({
-            "generationConfig": {
-                "thinkingConfig": {
-                    "thinkingBudget": 1024,
-                    "includeThoughts": true
-                }
+    let mut request = minimal_request();
+    request.additional_params = Some(serde_json::json!({
+        "generationConfig": {
+            "thinkingConfig": {
+                "thinkingBudget": 1024,
+                "includeThoughts": true
             }
-        })),
-        ..minimal_request()
-    };
+        }
+    }));
 
     let config = sdk_request(request)
         .expect("generation config should parse")
@@ -429,32 +409,30 @@ fn generation_config_maps_thinking_budget_and_include_thoughts() {
 
 #[test]
 fn generation_config_maps_supported_fields_and_typed_fields_take_precedence() {
-    let request = CompletionRequest {
-        temperature: Some(0.7),
-        max_tokens: Some(100),
-        additional_params: Some(serde_json::json!({
-            "generationConfig": {
-                "temperature": 0.2,
-                "maxOutputTokens": 20,
-                "candidateCount": 2,
-                "stopSequences": ["END"],
-                "responseMimeType": "application/json",
-                "responseJsonSchema": { "type": "object" },
-                "topP": 0.8,
-                "topK": 40,
-                "presencePenalty": 0.1,
-                "frequencyPenalty": 0.2,
-                "responseLogprobs": true,
-                "logprobs": 3,
-                "responseModalities": ["TEXT", "IMAGE"],
-                "imageConfig": {
-                    "aspectRatio": "16:9",
-                    "imageSize": "1K"
-                }
+    let mut request = minimal_request();
+    request.temperature = Some(0.7);
+    request.max_tokens = Some(100);
+    request.additional_params = Some(serde_json::json!({
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 20,
+            "candidateCount": 2,
+            "stopSequences": ["END"],
+            "responseMimeType": "application/json",
+            "responseJsonSchema": { "type": "object" },
+            "topP": 0.8,
+            "topK": 40,
+            "presencePenalty": 0.1,
+            "frequencyPenalty": 0.2,
+            "responseLogprobs": true,
+            "logprobs": 3,
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {
+                "aspectRatio": "16:9",
+                "imageSize": "1K"
             }
-        })),
-        ..minimal_request()
-    };
+        }
+    }));
 
     let config = sdk_request(request)
         .expect("generation config should parse")
@@ -495,19 +473,17 @@ fn generation_config_maps_supported_fields_and_typed_fields_take_precedence() {
 
 #[test]
 fn generation_config_maps_response_schema() {
-    let request = CompletionRequest {
-        additional_params: Some(serde_json::json!({
-            "generationConfig": {
-                "responseSchema": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "name": { "type": "STRING" }
-                    }
+    let mut request = minimal_request();
+    request.additional_params = Some(serde_json::json!({
+        "generationConfig": {
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "name": { "type": "STRING" }
                 }
             }
-        })),
-        ..minimal_request()
-    };
+        }
+    }));
 
     let config = sdk_request(request)
         .expect("generation config should parse")
@@ -529,13 +505,11 @@ fn generation_config_maps_response_schema() {
 
 #[test]
 fn generation_config_typed_max_overrides_out_of_range_provider_max() {
-    let request = CompletionRequest {
-        max_tokens: Some(100),
-        additional_params: Some(serde_json::json!({
-            "generationConfig": { "maxOutputTokens": 2_147_483_648_u64 }
-        })),
-        ..minimal_request()
-    };
+    let mut request = minimal_request();
+    request.max_tokens = Some(100);
+    request.additional_params = Some(serde_json::json!({
+        "generationConfig": { "maxOutputTokens": 2_147_483_648_u64 }
+    }));
 
     let config = sdk_request(request)
         .expect("typed max should override an unrepresentable provider max")
@@ -546,13 +520,11 @@ fn generation_config_typed_max_overrides_out_of_range_provider_max() {
 
 #[test]
 fn generation_config_typed_temperature_overrides_out_of_range_provider_temperature() {
-    let request = CompletionRequest {
-        temperature: Some(0.7),
-        additional_params: Some(serde_json::json!({
-            "generationConfig": { "temperature": f64::MAX }
-        })),
-        ..minimal_request()
-    };
+    let mut request = minimal_request();
+    request.temperature = Some(0.7);
+    request.additional_params = Some(serde_json::json!({
+        "generationConfig": { "temperature": f64::MAX }
+    }));
 
     let config = sdk_request(request)
         .expect("typed temperature should override an unrepresentable provider temperature")
