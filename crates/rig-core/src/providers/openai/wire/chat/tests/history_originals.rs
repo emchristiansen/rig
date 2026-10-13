@@ -244,7 +244,7 @@ fn recorded_stream_chunks(scenario: &str) -> Vec<Value> {
     // Existing transport framing and existing JSON parser; no fixture parser.
     Framing::Sse.split(body.as_bytes()).into_iter()
         .filter(|frame| frame.as_str().trim() != "[DONE]")
-        .map(|frame| serde_json::from_str(frame.as_str())
+        .map(|frame| serde_json::from_str(&frame.as_str())
             .expect("recorded SSE frame should be JSON"))
         .collect()
 }
