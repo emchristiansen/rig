@@ -118,7 +118,8 @@ fn out_of_binary_history_suites_name_a_live_check() {
 }
 
 /// Provider modules with no completion wire, so no suite.
-const NO_COMPLETION_WIRE: &[&str] = &["internal", "registry", "voyageai"];
+// live_support re-exports Live support and owns no completion wire.
+const NO_COMPLETION_WIRE: &[&str] = &["internal", "registry", "voyageai", "live_support"];
 
 /// Every provider module has a suite: some wire in `HISTORY_WIRES` names it
 /// as one of its `_`-separated words, so a new provider cannot skip the
