@@ -1748,3 +1748,96 @@ async fn labelled_memory_and_retrieve_adapters_serve_side_by_side() {
     assert_eq!(tenant_a.load_count(), 1);
     assert_eq!(tenant_b.load_count(), 1);
 }
+
+#[test]
+fn full_consumer_queue_stops_pulls_and_ancestor_cancellation_keeps_its_terminal() {
+    struct ReadyStream(Arc<AtomicUsize>, Arc<AtomicUsize>);
+    impl Serve for ReadyStream {
+        type Family = rig_core::effect::family::Dynamic;
+        fn descriptor(&self) -> HandlerDescriptor {
+            HandlerDescriptor {
+                key: "ready".into(),
+                family: FamilyDescriptor::Custom {
+                    kind: "ready".into(),
+                },
+                layers: vec![],
+            }
+        }
+        async fn serve(&self, _: EffectKind, _: Dispatch) -> CoreReply {
+            struct Guard(Arc<AtomicUsize>);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let guard = Guard(self.1.clone());
+            let polls = self.0.clone();
+            CoreReply::Stream(Box::pin(futures::stream::poll_fn(move |_| {
+                let _guard = &guard;
+                polls.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(Some(Ok(rig_core::streaming::Relayed::Item(
+                    rig_core::streaming::Item::Unknown(
+                        rig_core::streaming::UnknownPayload::new(json!(null)),
+                    ),
+                ))))
+            })))
+        }
+    }
+    let (root, mut driver, outer, retained) = completed_middle_chain(ServingPolicy {
+        stream_capacity: 1,
+        ..ServingPolicy::default()
+    });
+    let polls = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    driver
+        .register("ready", ReadyStream(polls.clone(), drops.clone()))
+        .unwrap();
+    let mut stream = retained.dispatch_stream(&HandlerKey::from("ready"), completion_kind(true));
+    let mut cx = Context::from_waker(noop_waker_ref());
+    assert!(stream.poll_next_unpin(&mut cx).is_pending());
+    for _ in 0..4 {
+        let _ = driver.poll_unpin(&mut cx);
+    }
+    let stalled = polls.load(Ordering::SeqCst);
+    assert!(
+        (1..=3).contains(&stalled),
+        "one queue slot, one sender reservation, at most one undelivered item: {stalled}"
+    );
+    for _ in 0..4 {
+        let _ = driver.poll_unpin(&mut cx);
+    }
+    assert_eq!(polls.load(Ordering::SeqCst), stalled);
+    let mut other = root.dispatch(&HandlerKey::from("missing"), custom(json!(null)));
+    assert_eq!(
+        drive_to_outcome(&mut driver, &mut other)
+            .unwrap()
+            .unwrap_err()
+            .kind,
+        ErrorKind::HandlerUnavailable
+    );
+    drop(outer);
+    for _ in 0..4 {
+        let _ = driver.poll_unpin(&mut cx);
+    }
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        stalled,
+        "cancellation must not pull another item"
+    );
+    let mut delivered = 0;
+    loop {
+        match stream.poll_next_unpin(&mut cx) {
+            Poll::Ready(Some(Ok(_))) => delivered += 1,
+            Poll::Ready(Some(Err(error))) => {
+                assert_eq!(error.kind, ErrorKind::Cancelled);
+                break;
+            }
+            other => panic!("the full queue lost its cancellation terminal: {other:?}"),
+        }
+    }
+    assert!(delivered <= stalled);
+    assert!(matches!(stream.poll_next_unpin(&mut cx), Poll::Ready(None)));
+    assert_eq!(driver.in_flight(), 0);
+}
+
