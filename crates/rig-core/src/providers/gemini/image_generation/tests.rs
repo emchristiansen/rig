@@ -149,3 +149,63 @@ fn the_wire_decodes_a_recorded_image_reply() {
     assert_eq!(response.usage.output_tokens, Some(1290));
     assert_eq!(response.usage.total_tokens, Some(1305));
 }
+
+#[test]
+fn actual_decoder_normalizes_usage_and_refuses_checked_overflow() {
+    let wire = Images::new(
+        crate::providers::gemini::GeminiConfig::new("test-key"),
+        "gemini-2.5-flash",
+    );
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let mut raw = json!({
+            "candidates": [{"content": {"role": "model", "parts": [{"inlineData": {"mimeType": "image/png", "data": "AAEC/w=="}}]},
+                "finishReason": "STOP", "index": 0}],
+            "modelVersion": "gemini-2.5-flash", "responseId": "usage-190-image_generation",
+            "usageMetadata": {"promptTokenCount": 100, "toolUsePromptTokenCount": 75,
+                "cachedContentTokenCount": 40, "candidatesTokenCount": 30,
+                "thoughtsTokenCount": 34, "totalTokenCount": 239}
+        });
+        let response = crate::test_utils::decode_reply(
+            &wire, &image_generation_request("a banana"), mode,
+            [WireFrame::Text(raw.to_string())], raw.clone(),
+        ).expect("the real decoder completes");
+        assert_eq!(response.image, [0, 1, 2, 255]);
+        assert_eq!(response.usage.input_tokens, Some(175));
+        assert_eq!(response.usage.tool_use_prompt_tokens, Some(75));
+        assert_eq!(response.usage.cached_input_tokens, Some(40));
+        assert_eq!(response.usage.output_tokens, Some(64));
+        assert_eq!(response.usage.reasoning_tokens, Some(34));
+        assert_eq!(response.usage.total_tokens, Some(239));
+        assert_eq!(response.usage.cache_creation_input_tokens, None);
+        assert_eq!(response.usage.cost, None);
+        assert_eq!(response.model.as_deref(), Some("gemini-2.5-flash"));
+        assert_eq!(response.response_id.as_deref(), Some("usage-190-image_generation"));
+        assert_eq!(response.raw, raw);
+        raw["usageMetadata"] = json!({"toolUsePromptTokenCount": 75,
+            "cachedContentTokenCount": 40, "thoughtsTokenCount": 34});
+        let response = crate::test_utils::decode_reply(
+            &wire, &image_generation_request("a banana"), mode,
+            [WireFrame::Text(raw.to_string())], raw.clone(),
+        ).expect("missing base counts keep their existing defaults");
+        assert_eq!(response.usage.input_tokens, Some(75));
+        assert_eq!(response.usage.output_tokens, None);
+        assert_eq!(response.usage.total_tokens, Some(0));
+        assert_eq!(response.usage.cached_input_tokens, Some(40));
+        assert_eq!(response.usage.tool_use_prompt_tokens, Some(75));
+        assert_eq!(response.usage.reasoning_tokens, Some(34));
+        assert_eq!(response.raw, raw);
+        for (usage, message) in [
+            (json!({"promptTokenCount": -1, "toolUsePromptTokenCount": 1}),
+                "Gemini input token count overflow"),
+            (json!({"candidatesTokenCount": -1, "thoughtsTokenCount": 1}),
+                "Gemini output token count overflow"),
+        ] {
+            raw["usageMetadata"] = usage;
+            let error = crate::test_utils::decode_reply(
+                &wire, &image_generation_request("a banana"), mode,
+                [WireFrame::Text(raw.to_string())], raw.clone(),
+            ).expect_err("overflow is a typed response refusal");
+            assert!(matches!(error, ProviderError::Response(ref actual) if actual == message));
+        }
+    }
+}

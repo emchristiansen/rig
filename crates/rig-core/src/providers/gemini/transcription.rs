@@ -3,7 +3,7 @@ use std::path::Path;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use serde_json::{Map, Value, json};
 
-use super::completion::usage_of;
+use super::completion::checked_usage_of;
 use crate::error::{EncodeError, ProviderError};
 use crate::json_utils::Lenient;
 use crate::operation::Transcription;
@@ -165,7 +165,7 @@ pub fn transcript_of(reply: &Value) -> Result<transcription::TranscriptionRespon
     Ok(transcription::TranscriptionResponse {
         model: reply.str("modelVersion").map(str::to_owned),
         response_id: Some(reply.str("responseId").unwrap_or_default().to_owned()),
-        usage: reply.get("usageMetadata").map(usage_of).unwrap_or_default(),
+        usage: reply.get("usageMetadata").map(checked_usage_of).transpose()?.unwrap_or_default(),
         ..transcription::TranscriptionResponse::new(parts.concat())
     })
 }

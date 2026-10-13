@@ -9,7 +9,7 @@
 //! # }
 //! ```
 
-use super::completion::usage_of;
+use super::completion::checked_usage_of;
 use crate::error::{EncodeError, ProviderError};
 use crate::image_generation;
 use crate::image_generation::ImageGenerationRequest;
@@ -59,7 +59,7 @@ pub fn image_of(reply: &Value) -> Result<image_generation::ImageGenerationRespon
     Ok(image_generation::ImageGenerationResponse {
         model: reply.str("modelVersion").map(str::to_owned),
         response_id: Some(reply.str("responseId").unwrap_or_default().to_owned()),
-        usage: reply.get("usageMetadata").map(usage_of).unwrap_or_default(),
+        usage: reply.get("usageMetadata").map(checked_usage_of).transpose()?.unwrap_or_default(),
         ..image_generation::ImageGenerationResponse::new(image)
     })
 }

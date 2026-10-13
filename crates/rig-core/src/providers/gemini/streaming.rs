@@ -15,7 +15,7 @@
 use serde_json::{Map, Value};
 
 use super::completion::blocked_prompt_error;
-use super::completion::{map_google_finish_reason, usage_of};
+use super::completion::{checked_usage_of, map_google_finish_reason};
 use crate::error::ProviderError;
 use crate::json_utils::Lenient;
 use crate::message::{CallId, DocumentSourceKind, Image, ImageMediaType, MimeType, ToolName};
@@ -317,7 +317,7 @@ impl GenerateContentDecoder {
         for (index, citation) in citations {
             out.cite(index, citation);
         }
-        let usage = self.usage.as_ref().map(usage_of).unwrap_or_default();
+        let usage = self.usage.as_ref().map(checked_usage_of).transpose()?.unwrap_or_default();
         let model = self.model_version.take();
         let response_id = self.response_id.take();
         Ok(out.end(Finish {

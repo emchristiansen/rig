@@ -415,3 +415,75 @@ fn a_raw_null_generation_config_keeps_the_typed_fields() {
     assert_eq!(config.temperature, Some(0.2));
     assert_eq!(config.max_output_tokens, Some(64));
 }
+
+#[test]
+fn grpc_unary_and_streamed_finish_include_tool_input_and_reasoning_output() {
+    let raw = serde_json::json!({
+        "candidates": [{"content": {"role": "model", "parts": [{"text": "hi"}]},
+            "finishReason": "STOP", "index": 0}],
+        "modelVersion": "gemini-2.5-flash", "responseId": "usage-190-grpc",
+        "usageMetadata": {"promptTokenCount": 100, "toolUsePromptTokenCount": 75,
+            "cachedContentTokenCount": 40, "candidatesTokenCount": 30,
+            "thoughtsTokenCount": 34, "totalTokenCount": 239}
+    });
+    let frame: GenerateContentResponse = crate::rest::from_rest(raw.clone())
+        .expect("the real protobuf fixture transcodes");
+    let unary = complete(frame.clone()).expect("the real unary decoder completes");
+    let streamed = futures::executor::block_on(stream_from_events(vec![Ok(frame)]).finish())
+        .expect("the real streamed decoder completes");
+    for response in [unary, streamed] {
+        assert_eq!(response.usage.input_tokens, Some(175));
+        assert_eq!(response.usage.tool_use_prompt_tokens, Some(75));
+        assert_eq!(response.usage.cached_input_tokens, Some(40));
+        assert_eq!(response.usage.output_tokens, Some(64));
+        assert_eq!(response.usage.reasoning_tokens, Some(34));
+        assert_eq!(response.usage.total_tokens, Some(239));
+        assert_eq!(response.usage.cache_creation_input_tokens, None);
+        assert_eq!(response.choice.len(), 1);
+        assert_eq!(response.text(), "hi");
+        assert_eq!(response.finish_reason(), Some(rig_core::completion::FinishReason::Stop));
+        assert_eq!(response.response_id(), Some("usage-190-grpc"));
+        assert_eq!(response.model(), Some("gemini-2.5-flash"));
+        assert_eq!(response.raw, raw);
+    }
+}
+
+#[test]
+fn grpc_missing_candidate_and_base_counts_and_negative_cast_overflow_use_the_real_decoder() {
+    let mut raw = serde_json::json!({
+        "candidates": [{"content": {"role": "model", "parts": [{"text": "hi"}]},
+            "finishReason": "STOP", "index": 0}],
+        "usageMetadata": {"toolUsePromptTokenCount": 75,
+            "cachedContentTokenCount": 40, "thoughtsTokenCount": 34}
+    });
+    let frame: GenerateContentResponse = crate::rest::from_rest(raw.clone())
+        .expect("the missing-count protobuf fixture transcodes");
+    let unary = complete(frame.clone()).expect("missing counts stay optional");
+    let streamed = futures::executor::block_on(stream_from_events(vec![Ok(frame)]).finish())
+        .expect("missing counts stay optional when streamed");
+    for response in [unary, streamed] {
+        assert_eq!(response.usage.input_tokens, Some(75));
+        assert_eq!(response.usage.output_tokens, None);
+        assert_eq!(response.usage.total_tokens, Some(0));
+        assert_eq!(response.usage.tool_use_prompt_tokens, Some(75));
+        assert_eq!(response.usage.cached_input_tokens, Some(40));
+        assert_eq!(response.usage.reasoning_tokens, Some(34));
+        assert_eq!(response.raw, raw);
+    }
+    for (usage, message) in [
+        (serde_json::json!({"promptTokenCount": -1, "toolUsePromptTokenCount": 1}),
+            "Gemini input token count overflow"),
+        (serde_json::json!({"candidatesTokenCount": -1, "thoughtsTokenCount": 1}),
+            "Gemini output token count overflow"),
+    ] {
+        raw["usageMetadata"] = usage;
+        let frame: GenerateContentResponse = crate::rest::from_rest(raw.clone())
+            .expect("signed counts still transcode unchanged");
+        let unary = complete(frame.clone()).expect_err("the existing signed cast overflows");
+        let streamed = futures::executor::block_on(stream_from_events(vec![Ok(frame)]).finish())
+            .expect_err("the existing signed cast overflows when streamed");
+        for error in [unary, streamed] {
+            assert!(matches!(error, ProviderError::Response(ref actual) if actual == message));
+        }
+    }
+}

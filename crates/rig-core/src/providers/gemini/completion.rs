@@ -1239,6 +1239,22 @@ pub fn usage_of(usage: &Value) -> crate::completion::Usage {
     }
 }
 
+/// Include hosted-tool input and reasoning output in canonical usage.
+/// Missing candidate counts stay absent; overflowing sums fail the reply.
+pub(super) fn checked_usage_of(usage: &Value) -> Result<crate::completion::Usage, ProviderError> {
+    let mut normalized = usage_of(usage);
+    normalized.input_tokens = Some(
+        normalized.input_tokens.unwrap_or(0)
+            .checked_add(normalized.tool_use_prompt_tokens.unwrap_or(0))
+            .ok_or_else(|| ProviderError::Response("Gemini input token count overflow".to_owned()))?,
+    );
+    normalized.output_tokens = normalized.output_tokens.map(|candidates| {
+        candidates.checked_add(normalized.reasoning_tokens.unwrap_or(0))
+            .ok_or_else(|| ProviderError::Response("Gemini output token count overflow".to_owned()))
+    }).transpose()?;
+    Ok(normalized)
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -1255,3 +1271,6 @@ mod vertex_controls_tests;
 
 #[cfg(test)]
 mod reasoning_scope_tests;
+
+#[cfg(test)]
+mod checked_usage_tests;
