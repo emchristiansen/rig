@@ -440,7 +440,7 @@ pub fn request_body(
     request_params(
         target,
         request,
-        |input| adjusted_base(request, target, model, input, declaration, adjust),
+        |input| adjusted_base(request, target, model, input, declaration, ReasoningScope::GenerateContent, adjust),
         RawAt::Top,
         &[
             Rewrite::GeminiCachedContent(cached_content.map(str::to_owned)),
@@ -471,7 +471,7 @@ pub fn request_body_for_vertex(
     request_params(
         target,
         request,
-        |input| adjusted_base(request, target, model, input, vertex_declaration, adjust),
+        |input| adjusted_base(request, target, model, input, vertex_declaration, ReasoningScope::Unchanged, adjust),
         RawAt::Top,
         &[
             Rewrite::GeminiCachedContent(cached_content.map(str::to_owned)),
@@ -480,6 +480,28 @@ pub fn request_body_for_vertex(
     )
 }
 
+enum ReasoningScope {
+    GenerateContent,
+    Unchanged,
+}
+
+// Known reasoning and signatures issued elsewhere are not Gemini inputs.
+// Opaque parts stay present so the existing encoder refuses them explicitly.
+fn scope_generate_content_reasoning(history: &mut Vec<Message>) {
+    history.retain_mut(|message| {
+        let Message::Assistant(turn) = message else {
+            return true;
+        };
+        let before = turn.content.len();
+        turn.content.retain(|part| match part {
+            AssistantContent::CarriedReasoning(reasoning) => {
+                reasoning.has_opaque_parts() || reasoning.replayable_to(PROVIDER_NAME)
+            }
+            _ => true,
+        });
+        before == 0 || !turn.content.is_empty()
+    });
+}
 /// Apply the transport's spellings to the shared base before any merge.
 fn adjusted_base(
     request: &CompletionRequest,
@@ -487,9 +509,10 @@ fn adjusted_base(
     model: &str,
     input: &mut BaseInput<'_>,
     declaration: fn(crate::completion::ToolDefinition) -> Result<Value, EncodeError>,
+    reasoning_scope: ReasoningScope,
     adjust: impl FnOnce(&mut Map<String, Value>),
 ) -> Result<Map<String, Value>, EncodeError> {
-    let mut body = base(request, target, model, input, declaration)?;
+    let mut body = base(request, target, model, input, declaration, reasoning_scope)?;
     adjust(&mut body);
     Ok(body)
 }
@@ -502,6 +525,7 @@ fn base(
     model: &str,
     input: &mut BaseInput<'_>,
     declaration: fn(crate::completion::ToolDefinition) -> Result<Value, EncodeError>,
+    reasoning_scope: ReasoningScope,
 ) -> Result<Map<String, Value>, EncodeError> {
     let extra_tools = input.raw_tools()?;
     let schema = request
@@ -530,6 +554,9 @@ fn base(
             Message::System { content } => system.push(text_part(content.clone())),
             message => history.push(message.clone()),
         }
+    }
+    if let ReasoningScope::GenerateContent = reasoning_scope {
+        scope_generate_content_reasoning(&mut history);
     }
     // Gemini rejects a field set twice, and merges a tool choice set twice,
     // which unions the allowed functions.
@@ -1082,3 +1109,6 @@ mod document_tests;
 
 #[cfg(test)]
 mod vertex_controls_tests;
+
+#[cfg(test)]
+mod reasoning_scope_tests;

@@ -92,7 +92,7 @@ fn regular_generate_content_keeps_pre_refactor_request_bytes() {
         // Exact private base/adjust/merge sequence from the approved clean
         // provider preimage, before extracting adjusted_base.
         let previous = request_params(&target, &request, |input| {
-            let mut body = base(&request, &target, MODEL, input, super::declaration)?;
+            let mut body = base(&request, &target, MODEL, input, super::declaration, super::ReasoningScope::Unchanged)?;
             adjust(&mut body);
             Ok(body)
         }, RawAt::Top, &[Rewrite::GeminiCachedContent(None), Rewrite::GeminiTypedControls])

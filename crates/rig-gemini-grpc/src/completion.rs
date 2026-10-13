@@ -907,3 +907,6 @@ mod transport_tests;
 
 #[cfg(test)]
 mod request_tests;
+
+#[cfg(test)]
+mod reasoning_scope_tests;
