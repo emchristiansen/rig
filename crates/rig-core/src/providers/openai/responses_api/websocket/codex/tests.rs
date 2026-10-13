@@ -404,8 +404,8 @@ async fn warmup_is_a_root_send_with_generate_false() {
 
 /// The `response.create` frame the adapter actually writes carries the Codex
 /// request shaping: `store: false` stated, the encrypted-reasoning `include`
-/// following the rule every dialect shares (absent without `reasoning`,
-/// requested alongside it), no sampling or output-cap key when the caller set
+/// following the stateless rule even without a reasoning option, no sampling
+/// or output-cap key when the caller set
 /// none, and the cache identity stamped from the session's one identity.
 #[tokio::test]
 async fn the_response_create_frame_carries_the_codex_shaping() {
@@ -448,10 +448,10 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
             })
         );
     }
-    assert!(
-        frames[0].get("include").is_none(),
-        "no include is forced onto a turn without reasoning: {}",
-        frames[0]
+    assert_eq!(
+        frames[0]["include"],
+        json!(["reasoning.encrypted_content"]),
+        "the stateless turn requests ciphertext without a reasoning option"
     );
     assert_eq!(
         frames[1]["include"],

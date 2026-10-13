@@ -305,10 +305,10 @@ fn the_chatgpt_dialect_always_streams_and_relaxes_the_content_type() {
 
 /// The Codex contract states `store: false` and otherwise sends the request
 /// the caller built: no sampling, metadata or structured-output control is
-/// cleared, and the encrypted-reasoning include is not forced onto a request
-/// that carries no reasoning.
+/// cleared. Its stateless request asks for encrypted reasoning even when
+/// the caller supplied no reasoning option.
 #[test]
-fn the_chatgpt_dialect_states_store_false_and_clears_nothing() {
+fn the_chatgpt_dialect_requests_stateless_ciphertext_and_keeps_controls_unset() {
     let wire = chatgpt();
     let body = encoded_body(&wire, Mode::Unary);
 
@@ -316,7 +316,7 @@ fn the_chatgpt_dialect_states_store_false_and_clears_nothing() {
     assert_eq!(body.get("max_output_tokens"), None);
     assert_eq!(body.get("top_p"), None);
     assert_eq!(body.get("store"), Some(&serde_json::Value::Bool(false)));
-    assert_eq!(body.get("include"), None);
+    assert_eq!(body.get("include"), Some(&serde_json::json!(["reasoning.encrypted_content"])));
     assert_eq!(
         body.get("instructions").and_then(serde_json::Value::as_str),
         Some("You are ChatGPT, a helpful AI assistant.")
