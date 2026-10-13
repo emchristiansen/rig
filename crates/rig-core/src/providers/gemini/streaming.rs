@@ -467,12 +467,18 @@ impl GenerateContentDecoder {
         }
         if selected == Some(reader::SelectedKind::InlineData) {
             self.close(out)?;
+            let mut fields = fields.clone();
+            if let Some(signature) = self.signature.take() {
+                fields.entry("thoughtSignature".to_owned())
+                    .or_insert(Value::String(signature));
+            }
             self.delivered = true;
             let index = out.fresh_index();
+            self.last = Some(index);
             if self.vertex_inline_images
                 && matches!(fields.get("thought"), None | Some(Value::Bool(false)))
                 && fields.keys().all(|key| matches!(key.as_str(), "inlineData" | "thought"))
-                && let Some(inline) = part.obj("inlineData")
+                && let Some(inline) = fields.get("inlineData").and_then(Value::as_object)
                 && inline.keys().all(|key| matches!(key.as_str(), "mimeType" | "data"))
                 && let Some(media_type) = inline.get("mimeType").and_then(Value::as_str)
                     .and_then(ImageMediaType::from_mime_type)
@@ -485,10 +491,10 @@ impl GenerateContentDecoder {
                     media_type: Some(media_type),
                     ..Image::default()
                 };
-                out.open(index, Block::Image(image), part.clone())?;
+                out.open(index, Block::Image(image), Value::Object(fields))?;
                 return out.finish(index);
             }
-            let payload = CarriedPayload::new(part.clone(), Some(self.carried_issuer.to_owned()))
+            let payload = CarriedPayload::new(Value::Object(fields), Some(self.carried_issuer.to_owned()))
                 .with_position(CarriedPosition::MessageContent { item_index: 0, part_index: self.part_index });
             out.open(index, Block::Text, Value::Null)?;
             return out.finish_carried_text(index, CarriedText::new(
