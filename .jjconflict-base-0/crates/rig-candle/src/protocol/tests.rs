@@ -361,22 +361,34 @@ fn every_prompt_format_refuses_namespaced_and_custom_calls() {
 
 #[test]
 fn opaque_responses_parts_are_refused_before_request_content_is_discarded() {
-    use rig_core::message::{AssistantContent, Message, Reasoning, ReasoningContent};
+    use rig_core::message::{
+        AssistantContent, CarriedPayload, CarriedReasoning, CarriedReasoningPart, CarriedText,
+        CarriedTextContent, Message,
+    };
     let raw = serde_json::json!({"type":"future_part","payload":{"list":[1,2]}});
-    let opaque: AssistantContent =
-        rig_core::providers::openai::responses_api::AssistantContent::Unknown(raw.clone()).into();
+    let opaque = AssistantContent::CarriedText(CarriedText::new(
+        CarriedTextContent::Opaque(String::new()),
+        CarriedPayload::new(raw.clone(), None),
+    ));
     for part in [
         opaque,
-        AssistantContent::Reasoning(Reasoning {
-            id: None,
-            provider: Some("openai".into()),
-            content: vec![ReasoningContent::OpaqueSummary(raw.clone())],
-        }),
-        AssistantContent::Reasoning(Reasoning {
-            id: Some("rs_1".into()),
-            provider: Some("openai".into()),
-            content: vec![ReasoningContent::OpaqueContent(raw)],
-        }),
+        AssistantContent::CarriedReasoning(CarriedReasoning::new(
+            vec![CarriedReasoningPart::OpaqueSummary(CarriedPayload::new(
+                raw.clone(),
+                Some("openai".to_owned()),
+            ))],
+            CarriedPayload::new(serde_json::Value::Null, Some("openai".to_owned())),
+        )),
+        AssistantContent::CarriedReasoning(
+            CarriedReasoning::new(
+                vec![CarriedReasoningPart::OpaqueContent(CarriedPayload::new(
+                    raw,
+                    Some("openai".to_owned()),
+                ))],
+                CarriedPayload::new(serde_json::Value::Null, Some("openai".to_owned())),
+            )
+            .with_id(Some("rs_1".to_owned())),
+        ),
     ] {
         let history = vec![Message::Assistant(rig_core::message::AssistantMessage::new(
             vec![AssistantContent::text("known"), part],

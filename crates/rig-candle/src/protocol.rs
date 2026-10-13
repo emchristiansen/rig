@@ -225,6 +225,19 @@ fn validate_common_request(request: &CompletionRequest) -> Result<(), CandleErro
     for message in request.chat_history.iter() {
         if let Message::Assistant(turn) = message {
             for item in &turn.content {
+                let opaque = match item {
+                    AssistantContent::CarriedText(text) => matches!(
+                        &text.content,
+                        rig_core::message::CarriedTextContent::Opaque(_)
+                    ),
+                    AssistantContent::CarriedReasoning(reasoning) => reasoning.has_opaque_parts(),
+                    _ => false,
+                };
+                if opaque {
+                    return Err(
+                        rig_core::message::UnrepresentableOpaqueContent::new(CANDLE_WIRE).into(),
+                    );
+                }
                 rig_core::message::json_only_wire_tool_call(CANDLE_WIRE, item)?;
             }
         }
