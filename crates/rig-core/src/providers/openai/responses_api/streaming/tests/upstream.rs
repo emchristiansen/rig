@@ -196,7 +196,13 @@ fn decoded_body(body: &str) -> Decoded<Completion> {
         .filter(|data| !data.is_empty() && *data != "[DONE]")
         .map(|data| WireFrame::Text(data.to_owned()))
         .collect();
-    feed_frames!(ResponsesDecoder::new("openai", super::super::ResponsesStreamOptions::strict()), "openai", frames)
+    // G168: the real document receives each frame before decoding and owns raw.
+    feed_frames!(
+        ResponsesDecoder::new("openai", super::super::ResponsesStreamOptions::strict()),
+        super::super::document::Response::with_strict_reader(false),
+        "openai",
+        frames
+    )
 }
 
 /// An SSE body of `events`, one `data:` line each.
@@ -1032,7 +1038,7 @@ fn an_incomplete_turn_reports_why_unless_the_token_limit_cut_it() {
         ),
         (
             "max_tool_calls",
-            crate::message::StopReason::Error("Response incomplete: max_tool_calls".into()),
+            crate::message::StopReason::Error("Provider finish_reason: max_tool_calls".into()),
         ),
     ] {
         let mut body = sample_response("incomplete");
@@ -1273,12 +1279,12 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
         (
             json!({"status": "queued"}),
             None,
-            false,
+            true, // G170: shape acceptance is not terminal finish proof.
         ),
         (
             json!({"status": "in_progress"}),
             None,
-            false,
+            true, // G170: shape acceptance is not terminal finish proof.
         ),
         (
             json!({"status": "paused"}),
@@ -1335,7 +1341,14 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
             );
             assert_eq!(response.raw["error"], status["error"]);
         }
-        assert!(response.error.is_none(), "a well-shaped Whole does not synthesize response.error: {status}");
+        // G187: queued/in_progress lack genuine finish proof; their old
+        // error-none observations are replaced by the exact terminal guard.
+        if matches!(status["status"].as_str(), Some("queued" | "in_progress")) {
+            assert_eq!(response.error.as_deref(),
+                Some("the provider ended the reply without a finish reason"), "{status}");
+        } else {
+            assert!(response.error.is_none(), "a well-shaped Whole does not synthesize response.error: {status}");
+        }
         assert_eq!(response.text(), "Done.");
     }
     for (status, reason) in [
@@ -1348,7 +1361,14 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
         body.as_object_mut().unwrap().extend(status.as_object().unwrap().clone());
         let response = decode(Mode::Unary, vec![WireFrame::Text(body.to_string())]);
         assert_eq!(response.finish_reason(), reason);
-        assert!(response.error.is_none());
+        // G187: the empty status also has no finish reason. Only that row's
+        // old error-none observation is replaced; every other row stays exact.
+        if status["status"].as_str() == Some("") {
+            assert_eq!(response.error.as_deref(),
+                Some("the provider ended the reply without a finish reason"));
+        } else {
+            assert!(response.error.is_none());
+        }
         assert_eq!(response.raw["status"], status["status"]);
     }
     for required in ["id","object","created_at","status","model"] {
@@ -1662,12 +1682,15 @@ fn an_item_without_a_type_never_replays() {
         decode(Mode::Unary, whole(&output)),
         decode(Mode::Streaming, frames(&restated(&output))),
     ] {
-        assert!(
-            matches!(response.choice.first(), Some(AssistantContent::Opaque(opaque)) if !opaque.replay),
-            "{:?}",
-            response.choice
-        );
-        assert_eq!(replayed_ids(&response), [json!("msg_1")]);
+        // G172: the genuine untyped item is a ProviderItem with its real issuer.
+        let Some(AssistantContent::ProviderItem(item)) = response.choice.first() else {
+            panic!("the untyped received item is carried whole: {:?}", response.choice);
+        };
+        assert_eq!(item.payload.item, output[0]);
+        assert_eq!(item.payload.provider.as_deref(), Some("openai"));
+        assert_eq!(response.raw["output"][0], output[0]);
+        assert_eq!(replayed_input(&response)[0], output[0]);
+        assert_eq!(replayed_ids(&response), [json!("x_1"), json!("msg_1")]);
     }
 }
 

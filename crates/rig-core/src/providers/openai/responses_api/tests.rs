@@ -2065,7 +2065,7 @@ async fn delta_only_stream_minted_output_ids_are_not_serialized_upstream() {
     use futures::StreamExt;
     let sse = |frame: &serde_json::Value| Bytes::from(format!("data: {frame}\n\n"));
     let frames = vec![
-        // No `item_id`: the streaming adapter mints `output-0`.
+        // G141: no received `item_id`; do not give an internal slot replay authority.
         sse(&json!({
             "type": "response.reasoning_text.delta",
             "output_index": 0,
@@ -2105,7 +2105,17 @@ async fn delta_only_stream_minted_output_ids_are_not_serialized_upstream() {
         item.expect("valid received event");
     }
     let drained = stream.finish().await.expect("stream should complete");
-    assert!(drained.choice.iter().any(|content|matches!(content,CoreContent::Reasoning(reasoning) if reasoning.text=="unattributed thought")));
+    // G141: only the old plain-Reasoning/minted-id view is lost. The actual
+    // carried text and absent provider item ID still cannot go upstream.
+    let thought = drained.choice.iter().find_map(|content| match content {
+        CoreContent::CarriedReasoning(reasoning) => Some(reasoning),
+        _ => None,
+    }).expect("the actual carried thought");
+    assert_eq!(thought.display_text(), "unattributed thought");
+    assert_eq!(thought.content, vec![Part::Text {
+        text: "unattributed thought".to_owned(), signature: None,
+    }]);
+    assert!(thought.id.is_none(), "no provider reasoning item ID was received");
     let items = input_items(assistant(drained.choice)).expect("history converts");
     assert!(reasoning_inputs(&items).is_empty());
 }

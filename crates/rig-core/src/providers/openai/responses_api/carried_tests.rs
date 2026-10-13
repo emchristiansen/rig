@@ -523,7 +523,8 @@ fn decoded_native_call_replay_uses_the_planned_occurrence_and_keeps_other_bytes(
     for (provider_id, expected_id) in [("call_1", "call_1"), ("", "tool-0")] {
         let raw = json!({"type":"function_call","id":"fc_1","call_id":provider_id,"name":"function","arguments":"{}","status":"completed","future":{"x":null}});
         let response = crate::test_utils::history::decode(&wire(), Mode::Unary, [WireFrame::Text(json!({
-            "id":"resp_1","object":"response","model":"gpt-5.4","status":"completed","output":[raw.clone()]
+            // G139 outer fixture-clock scaffolding; the full call stays exact.
+            "id":"resp_1","object":"response","created_at":0,"model":"gpt-5.4","status":"completed","output":[raw.clone()]
         }).to_string())]).expect("real Responses decoder creates native custody");
         let call = response.tool_calls().next().expect("decoded call");
         assert_eq!(response.choice[0].native_item(), Some(&raw));

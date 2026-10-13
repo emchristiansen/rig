@@ -1712,10 +1712,11 @@ async fn a_unary_reply_and_a_streamed_reply_fold_to_the_same_answer() {
     let buffered = unary("gemini-2.5-flash", CEDAR_UNARY).await;
     let streamed = streamed("gemini-2.5-flash", CEDAR_STREAM).await;
     assert_eq!(folded(&buffered), folded(&streamed));
-    assert_eq!(
-        buffered.choice.first(),
-        Some(&message::AssistantContent::text("cedar"))
-    );
+    // G141: the decoded Text retains its genuine part; the constructor has none.
+    assert_eq!(buffered.choice.first().map(message::AssistantContent::canonical),
+        Some(message::AssistantContent::text("cedar")));
+    assert_eq!(buffered.choice.first().and_then(message::AssistantContent::native_item),
+        Some(&json!({"text": "cedar"})));
     assert_eq!(
         buffered.finish_reason(),
         Some(crate::completion::FinishReason::Stop)

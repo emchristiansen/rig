@@ -28,15 +28,30 @@ fn tool(tool: &str) -> ToolDefinition {
     }
 }
 
+// G139 outer scaffolding exception: absent envelope metadata is supplied
+// on a clone. Original item fields, statuses and output positions stay exact.
 fn frames(events: &[Value]) -> Vec<WireFrame> {
     events
         .iter()
-        .map(|event| WireFrame::Text(event.to_string()))
+        .enumerate()
+        .map(|(sequence, event)| {
+            let mut event = event.clone();
+            if let Some(fields) = event.as_object_mut() {
+                fields.entry("sequence_number").or_insert_with(|| json!(sequence));
+                if let Some(response) = fields.get_mut("response").and_then(Value::as_object_mut) {
+                    response.entry("created_at").or_insert_with(|| json!(0));
+                    response.entry("object").or_insert_with(|| json!("response"));
+                    response.entry("model").or_insert_with(|| json!("gpt-5.4"));
+                }
+            }
+            WireFrame::Text(event.to_string())
+        })
         .collect()
 }
 
 fn body(output: Value) -> Value {
-    json!({"id": "resp_1", "object": "response", "status": "completed", "model": "gpt-5.4", "output": output})
+    // G139: the outer fixture clock is explicit scaffolding, not received data.
+    json!({"id": "resp_1", "object": "response", "created_at": 0, "status": "completed", "model": "gpt-5.4", "output": output})
 }
 
 fn whole(output: Value) -> CompletionResponse {
