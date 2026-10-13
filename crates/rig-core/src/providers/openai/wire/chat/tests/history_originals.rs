@@ -465,3 +465,25 @@ async fn streaming_gpt_4_1_mini_normalized_single_tool() -> Result<()> {
 async fn streaming_gpt_4_1_mini_normalized_parallel_tool() -> Result<()> {
     run_cell("streaming_gpt_4_1_mini_normalized_parallel_tool", cell(Transport::Streaming, ModelVariant::Gpt41Mini, Surface::Normalized, Shape::ParallelTool)).await
 }
+
+// Four original normalized Text subjects under coord-a-rig-g235-shape-1.
+
+#[tokio::test]
+async fn blocking_gpt_4o_mini_normalized_text() -> Result<()> {
+    run_cell("blocking_gpt_4o_mini_normalized_text", cell(Transport::Blocking, ModelVariant::Gpt4oMini, Surface::Normalized, Shape::Text)).await
+}
+
+#[tokio::test]
+async fn blocking_gpt_4_1_mini_normalized_text() -> Result<()> {
+    run_cell("blocking_gpt_4_1_mini_normalized_text", cell(Transport::Blocking, ModelVariant::Gpt41Mini, Surface::Normalized, Shape::Text)).await
+}
+
+#[tokio::test]
+async fn streaming_gpt_4o_mini_normalized_text() -> Result<()> {
+    run_cell("streaming_gpt_4o_mini_normalized_text", cell(Transport::Streaming, ModelVariant::Gpt4oMini, Surface::Normalized, Shape::Text)).await
+}
+
+#[tokio::test]
+async fn streaming_gpt_4_1_mini_normalized_text() -> Result<()> {
+    run_cell("streaming_gpt_4_1_mini_normalized_text", cell(Transport::Streaming, ModelVariant::Gpt41Mini, Surface::Normalized, Shape::Text)).await
+}
