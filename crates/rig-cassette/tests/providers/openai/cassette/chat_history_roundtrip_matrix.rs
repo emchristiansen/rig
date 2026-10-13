@@ -1,32 +1,10 @@
-//! OpenAI Chat Completions history serialization and response matrix.
+//! OpenAI Chat Completions history on retained fixtures.
 //!
-//! This matrix exercises the request serializer and response normalizer around
-//! caller-owned history, including tool-call ids, arguments, ordered tool
-//! results, Unicode-bearing text, and both public completion surfaces.
-//!
-//! The complete input space exercised here is a 2 × 2 × 2 × 3 cross-product:
-//!
-//! | dimension | values |
-//! |---|---|
-//! | transport | blocking, streaming |
-//! | model | `gpt-4o-mini`, `gpt-4.1-mini` |
-//! | surface | provider-native raw, normalized Rig response |
-//! | history shape | text, one tool result, two ordered tool results |
-//!
-//! That is 24 cells, of which the one below is a test. Each test proves the
-//! exact serialized history from its fixture and compares the observed response
-//! text to those exact blocking or SSE bytes.
-//!
-//! Each test maps to
-//! `crates/rig-cassette/fixtures/cassettes/openai/chat_history_roundtrip_matrix/<test-name>.yaml`.
-//! The two inexpensive mini models are stable history/tool-call controls from
-//! separate families. Assertions cover provider-native and normalized blocking
-//! responses, raw and normalized streams, Unicode text, exact tool ids and
-//! arguments, ordered tool results, the current prompt, and terminal arrival.
-//!
-//! | recorded cells | exact fixture set |
-//! |---|---|
-//! | 1 of 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml` |
+//! Four normalized-text declarations preserve the original no-tools history,
+//! Unicode marker, prompts and exact response-text predicates. The existing
+//! parallel-tool control declares tools and remains a separate changed-input
+//! observation. The original tool-bearing histories and Raw subjects are
+//! separately ported in core Chat tests at their approved current boundaries.
 
 use rig::streaming::Item;
 use std::sync::{Arc, Mutex};
@@ -43,12 +21,14 @@ use rig::completion::CompletionRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
+    Blocking,
     Streaming,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModelVariant {
     Gpt4oMini,
+    Gpt41Mini,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,12 +149,30 @@ fn request(cell: Cell) -> rig::completion::CompletionRequest {
 fn model_name(model: ModelVariant) -> &'static str {
     match model {
         ModelVariant::Gpt4oMini => "gpt-4o-mini",
+        ModelVariant::Gpt41Mini => "gpt-4.1-mini",
     }
+}
+
+fn normalized_text(choice: &[AssistantContent]) -> String {
+    choice
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservation) -> Result<()> {
     let model = client.openai.chat(model_name(cell.model));
     let observation = match (cell.transport, cell.surface) {
+        (Transport::Blocking, Surface::Normalized) => {
+            let response = model.call(request(cell)).await?;
+            Observation {
+                text: normalized_text(&response.choice),
+                saw_terminal: true,
+            }
+        }
         (Transport::Streaming, Surface::Normalized) => {
             let mut stream = model.stream(request(cell))?;
             let mut text = String::new();
@@ -209,6 +207,9 @@ fn content_text(content: &Value) -> String {
 
 fn recorded_text(scenario: &str, transport: Transport) -> String {
     match transport {
+        Transport::Blocking => {
+            content_text(&recorded_response(scenario)["choices"][0]["message"]["content"])
+        }
         Transport::Streaming => recorded_stream_chunks(scenario)
             .iter()
             .flat_map(|chunk| chunk["choices"].as_array().into_iter().flatten())
@@ -220,6 +221,10 @@ fn recorded_text(scenario: &str, transport: Transport) -> String {
 
 fn recorded_request(scenario: &str) -> Value {
     crate::cassettes::recorded_json_request("openai", scenario)
+}
+
+fn recorded_response(scenario: &str) -> Value {
+    crate::cassettes::recorded_json_response("openai", scenario)
 }
 
 fn recorded_stream_chunks(scenario: &str) -> Vec<Value> {
@@ -250,6 +255,7 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
         .expect("recorded request messages");
     match cell.shape {
         Shape::Text => {
+            assert!(request.get("tools").is_none(), "{scenario}: history only");
             assert_eq!(messages.len(), 3, "{scenario}: text history length");
             assert_eq!(messages[0]["role"], "user", "{scenario}");
             assert!(
@@ -338,5 +344,13 @@ fn cell(transport: Transport, model: ModelVariant, surface: Surface, shape: Shap
 crate::matrix::case_matrix! {
     wrapper: with_openai_history_roundtrip_cassette_result, family: history_roundtrip_matrix_case;
     # [tokio :: test]
+    blocking_gpt_4o_mini_normalized_text: ("chat_history_roundtrip_matrix/blocking_gpt_4o_mini_normalized_text", configured, cell (Transport :: Blocking , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: Text ,));
+    # [tokio :: test]
+    blocking_gpt_4_1_mini_normalized_text: ("chat_history_roundtrip_matrix/blocking_gpt_4_1_mini_normalized_text", configured, cell (Transport :: Blocking , ModelVariant :: Gpt41Mini , Surface :: Normalized , Shape :: Text ,));
+    # [tokio :: test]
+    streaming_gpt_4o_mini_normalized_text: ("chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_text", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: Text ,));
+    # [tokio :: test]
     streaming_gpt_4o_mini_normalized_parallel_tool: ("chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool", configured, cell (Transport :: Streaming , ModelVariant :: Gpt4oMini , Surface :: Normalized , Shape :: ParallelTool ,));
+    # [tokio :: test]
+    streaming_gpt_4_1_mini_normalized_text: ("chat_history_roundtrip_matrix/streaming_gpt_4_1_mini_normalized_text", configured, cell (Transport :: Streaming , ModelVariant :: Gpt41Mini , Surface :: Normalized , Shape :: Text ,));
 }

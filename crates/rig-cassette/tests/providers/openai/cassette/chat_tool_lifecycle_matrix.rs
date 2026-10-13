@@ -1,36 +1,8 @@
-//! Live Chat Completions tool-call lifecycle and argument-integrity matrix.
+//! OpenAI Chat Completions tool lifecycle across 24 retained fixtures.
 //!
-//! The space is 2 transports × 2 models × 3 call shapes × 2
-//! public surfaces = 24 cells, of which the two below are tests. The shapes
-//! cover a deliberate zero-argument call, a nested object containing an array
-//! and Unicode, and two parallel calls. Model cells read the normalized reply
-//! the driver decodes from the provider-native response; agent cells prove
-//! exact-once invocation. Streaming cells additionally reassemble every id,
-//! name, and argument fragment from their fixtures.
-//!
-//! Auto/none/specific tool-choice controls are assigned to the separate
-//! request-shape matrix; this matrix fixes choice to `required` so call shape
-//! rather than model discretion is the independent variable. Sequential
-//! call/result/follow-up history is assigned to the content/history matrix.
-//!
-//! | dimension | values |
-//! |---|---|
-//! | transport | blocking, streaming |
-//! | model | `gpt-4o-mini`, `gpt-4.1-mini` |
-//! | call shape | zero arguments, nested Unicode/array object, parallel pair |
-//! | surface | raw/normalized model, one-turn agent |
-//!
-//! Each test maps to
-//! `crates/rig-cassette/fixtures/cassettes/openai/chat_tool_lifecycle_matrix/<test-name>.yaml`.
-//! The two low-cost mini models are stable, tool-capable controls from distinct
-//! model families. Assertions span request schemas, provider-native blocking
-//! and streaming assembly, normalized ids/names/arguments/order, and agent
-//! exact-once dispatch. Malformed synthetic call objects remain unit tests
-//! because model output cannot deterministically request those wire defects.
-//!
-//! | recorded cells | exact fixture set |
-//! |---|---|
-//! | 2 of 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_tool_lifecycle_matrix/{blocking_gpt4o_zero_agent,streaming_gpt4o_nested_model}.yaml` |
+//! Blocking and streaming model and agent declarations preserve zero, nested
+//! Unicode and parallel-call premises on both mini models. Each compares
+//! recorded call names, IDs, arguments and order, or exact-once invocation.
 
 use rig::streaming::Item;
 use std::sync::{Arc, Mutex};
@@ -58,6 +30,7 @@ pub(super) enum Transport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Model {
     Gpt4oMini,
+    Gpt41Mini,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +78,7 @@ pub(super) fn cell(transport: Transport, model: Model, shape: Shape, surface: Su
 pub(super) fn model_name(model: Model) -> &'static str {
     match model {
         Model::Gpt4oMini => "gpt-4o-mini",
+        Model::Gpt41Mini => "gpt-4.1-mini",
     }
 }
 
@@ -620,7 +594,51 @@ pub(super) async fn execute(scenario: &'static str, cell: Cell, observed: Shared
 crate::matrix::case_matrix! {
     wrapper: with_openai_tool_lifecycle_cassette_result, family: tool_lifecycle_matrix_case;
     # [tokio :: test]
+    blocking_gpt4o_zero_model: ("chat_tool_lifecycle_matrix/blocking_gpt4o_zero_model", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Zero , Surface :: Model ,));
+    # [tokio :: test]
     blocking_gpt4o_zero_agent: ("chat_tool_lifecycle_matrix/blocking_gpt4o_zero_agent", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Zero , Surface :: Agent ,));
     # [tokio :: test]
+    blocking_gpt4o_nested_model: ("chat_tool_lifecycle_matrix/blocking_gpt4o_nested_model", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Nested , Surface :: Model ,));
+    # [tokio :: test]
+    blocking_gpt4o_nested_agent: ("chat_tool_lifecycle_matrix/blocking_gpt4o_nested_agent", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Nested , Surface :: Agent ,));
+    # [tokio :: test]
+    blocking_gpt4o_parallel_model: ("chat_tool_lifecycle_matrix/blocking_gpt4o_parallel_model", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Parallel , Surface :: Model ,));
+    # [tokio :: test]
+    blocking_gpt4o_parallel_agent: ("chat_tool_lifecycle_matrix/blocking_gpt4o_parallel_agent", configured, cell (Transport :: Blocking , Model :: Gpt4oMini , Shape :: Parallel , Surface :: Agent ,));
+    # [tokio :: test]
+    blocking_gpt41_zero_model: ("chat_tool_lifecycle_matrix/blocking_gpt41_zero_model", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Zero , Surface :: Model ,));
+    # [tokio :: test]
+    blocking_gpt41_zero_agent: ("chat_tool_lifecycle_matrix/blocking_gpt41_zero_agent", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Zero , Surface :: Agent ,));
+    # [tokio :: test]
+    blocking_gpt41_nested_model: ("chat_tool_lifecycle_matrix/blocking_gpt41_nested_model", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Nested , Surface :: Model ,));
+    # [tokio :: test]
+    blocking_gpt41_nested_agent: ("chat_tool_lifecycle_matrix/blocking_gpt41_nested_agent", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Nested , Surface :: Agent ,));
+    # [tokio :: test]
+    blocking_gpt41_parallel_model: ("chat_tool_lifecycle_matrix/blocking_gpt41_parallel_model", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Parallel , Surface :: Model ,));
+    # [tokio :: test]
+    blocking_gpt41_parallel_agent: ("chat_tool_lifecycle_matrix/blocking_gpt41_parallel_agent", configured, cell (Transport :: Blocking , Model :: Gpt41Mini , Shape :: Parallel , Surface :: Agent ,));
+    # [tokio :: test]
+    streaming_gpt4o_zero_model: ("chat_tool_lifecycle_matrix/streaming_gpt4o_zero_model", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Zero , Surface :: Model ,));
+    # [tokio :: test]
+    streaming_gpt4o_zero_agent: ("chat_tool_lifecycle_matrix/streaming_gpt4o_zero_agent", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Zero , Surface :: Agent ,));
+    # [tokio :: test]
     streaming_gpt4o_nested_model: ("chat_tool_lifecycle_matrix/streaming_gpt4o_nested_model", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Nested , Surface :: Model ,));
+    # [tokio :: test]
+    streaming_gpt4o_nested_agent: ("chat_tool_lifecycle_matrix/streaming_gpt4o_nested_agent", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Nested , Surface :: Agent ,));
+    # [tokio :: test]
+    streaming_gpt4o_parallel_model: ("chat_tool_lifecycle_matrix/streaming_gpt4o_parallel_model", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Parallel , Surface :: Model ,));
+    # [tokio :: test]
+    streaming_gpt4o_parallel_agent: ("chat_tool_lifecycle_matrix/streaming_gpt4o_parallel_agent", configured, cell (Transport :: Streaming , Model :: Gpt4oMini , Shape :: Parallel , Surface :: Agent ,));
+    # [tokio :: test]
+    streaming_gpt41_zero_model: ("chat_tool_lifecycle_matrix/streaming_gpt41_zero_model", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Zero , Surface :: Model ,));
+    # [tokio :: test]
+    streaming_gpt41_zero_agent: ("chat_tool_lifecycle_matrix/streaming_gpt41_zero_agent", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Zero , Surface :: Agent ,));
+    # [tokio :: test]
+    streaming_gpt41_nested_model: ("chat_tool_lifecycle_matrix/streaming_gpt41_nested_model", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Nested , Surface :: Model ,));
+    # [tokio :: test]
+    streaming_gpt41_nested_agent: ("chat_tool_lifecycle_matrix/streaming_gpt41_nested_agent", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Nested , Surface :: Agent ,));
+    # [tokio :: test]
+    streaming_gpt41_parallel_model: ("chat_tool_lifecycle_matrix/streaming_gpt41_parallel_model", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Parallel , Surface :: Model ,));
+    # [tokio :: test]
+    streaming_gpt41_parallel_agent: ("chat_tool_lifecycle_matrix/streaming_gpt41_parallel_agent", configured, cell (Transport :: Streaming , Model :: Gpt41Mini , Shape :: Parallel , Surface :: Agent ,));
 }
