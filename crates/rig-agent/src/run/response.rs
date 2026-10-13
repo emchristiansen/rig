@@ -69,6 +69,7 @@ impl CompletionCall {
     /// This call's identity metadata as one [`ResponseIdentity`] carrier.
     pub fn identity(&self) -> ResponseIdentity {
         ResponseIdentity {
+            message_id: None,
             response_id: self.response_id.clone(),
             provider_request_id: self.provider_request_id.clone(),
         }

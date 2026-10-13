@@ -372,6 +372,7 @@ impl StreamedTurnAssembler {
                 part,
                 kind: PartKind::ToolCall,
                 name,
+                ..
             } => {
                 let live = name
                     .as_ref()
@@ -420,7 +421,7 @@ impl StreamedTurnAssembler {
                     call: tool_call.clone(),
                 }])
             }
-            StreamEvent::Discard { part } => {
+            StreamEvent::Discard { part, .. } => {
                 self.open_calls.remove(&part.index());
                 Ok(vec![StreamedTurnEvent::EmitIngested])
             }

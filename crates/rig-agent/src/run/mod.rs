@@ -1020,6 +1020,7 @@ impl AgentRun {
         self.record_completion_call(
             turn.usage,
             ResponseIdentity {
+                message_id: None,
                 response_id: turn.response_id,
                 provider_request_id: turn.provider_request_id,
             },
