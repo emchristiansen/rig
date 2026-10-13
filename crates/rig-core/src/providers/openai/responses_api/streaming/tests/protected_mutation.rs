@@ -102,7 +102,14 @@ fn an_opaque_terminal_part_elsewhere_never_marks_repaired_streamed_text() {
             message_item("msg_2", json!([unknown]))
         ])),
     ]);
-    assert!(driven.errors.is_empty()); let hello=driven.response.choice.iter().find_map(|part|match part{AssistantContent::CarriedText(text) if text.text()=="Hello"=>Some(text),_=>None}).expect("streamed text"); assert!(matches!(&hello.content,CarriedTextContent::Text(_))); assert!(driven.response.choice.iter().any(|part|matches!(part,AssistantContent::CarriedText(text) if matches!(&text.content,CarriedTextContent::Opaque(_)) && text.payload.item==unknown)));
+    assert!(matches!(driven.errors.as_slice(), [ProviderError::Response(message)]
+        if message == "conflicting Responses parent kind at output 0: reasoning in a message"));
+    assert!(!driven.errors[0].is_retryable());
+    assert!(driven.response.response_id().is_none());
+    assert_eq!(folded_texts(&driven.response.choice), ["Hello"]);
+    assert!(matches!(driven.response.choice.as_slice(),
+        [AssistantContent::Text(text)] if text.text == "Hello"));
+    assert!(opaque_texts(&driven.response.choice).is_empty());
 }
 
 // F streaming/tests.rs:5203

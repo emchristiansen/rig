@@ -552,6 +552,120 @@ impl ResponsesDecoder {
         slot
     }
 
+    fn relocate_terminal_messages(&mut self, output: &[Value]) -> Result<(), ProviderError> {
+        let mut claims = HashMap::new();
+        let mut moves = BTreeMap::new();
+        for (destination, item) in output.iter().enumerate() {
+            if item.str("type") != Some("message") {
+                continue;
+            }
+            let Some(id) = item.str("id").filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            let Some(source) = self.message_ids.get(id).copied() else {
+                continue;
+            };
+            let destination = destination as u64;
+            if let Some(previous) = claims.insert(id, destination) {
+                return Err(ProviderError::Response(format!(
+                    "conflicting Responses terminal message ID {id}: claimed outputs {previous} and {destination}"
+                )));
+            }
+            if source == destination {
+                continue;
+            }
+            let occupied = |index| {
+                self.reasoning.contains_key(&index)
+                    || self.calls.contains_key(&index)
+                    || self.provider_items.contains(&index)
+                    || self.finished_calls.contains(&index)
+                    || self.call_items.values().any(|slot| *slot == index)
+            };
+            let Some(message) = self.messages.get(&source) else {
+                return Err(ProviderError::Response(format!(
+                    "conflicting Responses terminal message ownership at output {source}: item {id} has no message state"
+                )));
+            };
+            if message.id.as_deref() != Some(id)
+                || self.parents.get(&source) != Some(&Parent::Message)
+                || occupied(source)
+                || self.message_ids.iter().any(|(other, slot)| {
+                    *slot == source && other.as_str() != id
+                })
+            {
+                return Err(ProviderError::Response(format!(
+                    "conflicting Responses terminal message ownership at output {source}: item {id} does not exclusively own its message state"
+                )));
+            }
+            if self.messages.contains_key(&destination)
+                || self.parents.contains_key(&destination)
+                || occupied(destination)
+                || self.message_ids.values().any(|slot| *slot == destination)
+            {
+                return Err(ProviderError::Response(format!(
+                    "conflicting Responses terminal message destination at output {destination}: occupied while relocating item {id} from output {source}"
+                )));
+            }
+            let content = item.arr("content");
+            for (part, raw) in content.iter().enumerate() {
+                let opaque = !matches!(raw.str("type"), Some("output_text" | "refusal"));
+                self.check_message_kind(source, part as u64, opaque, Some(id))?;
+            }
+            for ((slot, part), pending) in &self.undecided {
+                for pending in pending {
+                    if pending.id.as_deref() != Some(id) {
+                        if *slot == source || *slot == destination {
+                            return Err(ProviderError::Response(format!(
+                                "conflicting Responses terminal message pending ownership at output {slot}, content {part}: item {id} cannot claim an anonymous or foreign part"
+                            )));
+                        }
+                        continue;
+                    }
+                    let opaque = !matches!(pending.raw.str("type"),
+                        Some("output_text" | "refusal"));
+                    if let Some(stored) = message.parts.get(part)
+                        && stored.opaque != opaque
+                    {
+                        return Err(conflicting_kind(source, "content", *part,
+                            stored.opaque, opaque));
+                    }
+                    if let Some(raw) = usize::try_from(*part).ok()
+                        .and_then(|part| content.get(part))
+                    {
+                        let incoming = !matches!(raw.str("type"),
+                            Some("output_text" | "refusal"));
+                        if opaque != incoming {
+                            return Err(conflicting_kind(source, "content", *part,
+                                opaque, incoming));
+                        }
+                    }
+                }
+            }
+            moves.insert(source, destination);
+        }
+        if moves.is_empty() {
+            return Ok(());
+        }
+        // Every claim is proved before moving the same states and their maps.
+        // Writer Part indices, activation and already delivered SourceOrder stay unchanged.
+        self.messages = std::mem::take(&mut self.messages).into_iter()
+            .map(|(source, message)| {
+                (moves.get(&source).copied().unwrap_or(source), message)
+            })
+            .collect();
+        self.parents = std::mem::take(&mut self.parents).into_iter()
+            .map(|(source, parent)| {
+                (moves.get(&source).copied().unwrap_or(source), parent)
+            })
+            .collect();
+        for slot in self.message_ids.values_mut() {
+            if let Some(destination) = moves.get(slot) {
+                *slot = *destination;
+            }
+        }
+        Ok(())
+    }
+
     fn bind(
         &mut self,
         index: u64,
@@ -1601,7 +1715,7 @@ impl ResponsesDecoder {
             )?;
         }
         // Whole-response indices are source positions, not writer Part indices.
-        let mut first_error = None;
+        let mut first_error = self.relocate_terminal_messages(response.arr("output")).err();
         for (index, item) in response.arr("output").iter().enumerate() {
             // after a conflict, only independently validated later reasoning
             // may join the buffered prefix. No successful terminal is sealed.

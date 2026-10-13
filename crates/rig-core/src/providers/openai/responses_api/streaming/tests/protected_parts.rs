@@ -67,8 +67,8 @@ fn a_done_only_refusal_never_reopens_an_id_less_refusal() {
 
 // F streaming/tests.rs:5407
 #[test]
-fn a_content_part_done_restating_an_id_less_slot_does_not_repeat_its_text() {
-    let (choice, _) = fold_driven(&[
+fn a_done_part_cannot_move_an_anonymous_message_away_from_a_terminal_conflict() {
+    let driven = drive(&[
         json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"sequence_number":0,"delta":"Hello"}),
         json!({"type":"response.content_part.done","item_id":"msg_1","output_index":1,"content_index":0,"sequence_number":1,"part":{"type":"output_text","text":"Hello","annotations":[]}}),
         completed_with_output(json!([
@@ -76,7 +76,11 @@ fn a_content_part_done_restating_an_id_less_slot_does_not_repeat_its_text() {
             message_item("msg_1", json!([{"type":"output_text","text":"Hello"}]))
         ])),
     ]);
-    assert_eq!(folded_texts(&choice), ["Hello"]);
+    assert!(matches!(driven.errors.as_slice(), [crate::error::ProviderError::Response(message)]
+        if message == "conflicting Responses parent kind at output 0: reasoning in a message"));
+    assert!(!driven.errors[0].is_retryable());
+    assert!(driven.response.response_id().is_none());
+    assert_eq!(folded_texts(&driven.response.choice), ["Hello", "Hello"]);
 }
 
 // F streaming/tests.rs:5420
@@ -379,12 +383,9 @@ fn a_reasoning_snapshot_never_overwrites_its_own_waiting_part() {
 
 // F streaming/tests.rs:5725
 #[test]
-fn known_issue_an_added_position_duplicates_repaired_id_less_text() {
-    // Known issue: an empty `added` binds msg_1 to position 1, so the
-    // terminal's exact restatement never takes over the slot that repaired
-    // id-less deltas filled, and the text appears twice. A fix must change
-    // this pin deliberately.
-    let (choice, _) = fold_driven(&[
+fn an_added_position_with_anonymous_text_refuses_a_conflicting_terminal() {
+    // An anonymous delta does not prove ownership of the separately announced ID.
+    let driven = drive(&[
         json!({"type":"response.output_item.added","output_index":1,"sequence_number":0,"item":message_item("msg_1", json!([]))}),
         json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"sequence_number":1,"delta":"Hello"}),
         completed_with_output(json!([
@@ -392,7 +393,11 @@ fn known_issue_an_added_position_duplicates_repaired_id_less_text() {
             message_item("msg_1", json!([{"type":"output_text","text":"Hello"}]))
         ])),
     ]);
-    assert_eq!(folded_texts(&choice), ["Hello", "Hello"]);
+    assert!(matches!(driven.errors.as_slice(), [crate::error::ProviderError::Response(message)]
+        if message == "conflicting Responses parent kind at output 0: reasoning in a message"));
+    assert!(!driven.errors[0].is_retryable());
+    assert!(driven.response.response_id().is_none());
+    assert_eq!(folded_texts(&driven.response.choice), ["Hello"]);
 }
 
 // F streaming/tests.rs:5742
