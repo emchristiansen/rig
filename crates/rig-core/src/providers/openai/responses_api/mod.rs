@@ -345,7 +345,16 @@ fn input(
                                     ),
                                 ));
                             }
-                            if let Some(item) = carried_reasoning_item(reasoning)? {
+                            let item = carried_reasoning_item(reasoning)?;
+                            let ciphertext = item.as_ref()
+                                .and_then(|item| item.get("encrypted_content"))
+                                .and_then(Value::as_str)
+                                .is_some_and(|cipher| !cipher.is_empty());
+                            if stateless && !reasoning.has_opaque_parts() && !ciphertext {
+                                unpaired = true;
+                                continue;
+                            }
+                            if let Some(item) = item {
                                 items.push(item);
                             }
                             continue;
@@ -1805,6 +1814,9 @@ fn carried_reasoning_item(
 
 #[cfg(test)]
 mod carried_tests;
+
+#[cfg(test)]
+mod stateless_carried_tests;
 
 #[cfg(test)]
 mod parent_fields_tests;
