@@ -767,3 +767,31 @@ async fn grounding_and_recitations_cite_the_answer_unary_or_streamed() {
     let streamed = stream.finish().await.expect("the stream completes");
     assert_eq!(citations(&streamed), expected);
 }
+
+#[test]
+fn default_grpc_keeps_all_five_inline_image_mimes_as_exact_inspection()
+    -> Result<(), Box<dyn std::error::Error>>
+{
+    for mime in ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"] {
+        let received = response(vec![proto::Part {
+            data: Some(proto::part::Data::InlineData(proto::Blob {
+                mime_type: mime.to_owned(), data: vec![0, 1, 2, 255],
+            })),
+            ..Default::default()
+        }], proto::candidate::FinishReason::Stop as i32);
+        let raw = crate::rest::to_rest(&received)?;
+        let expected = raw.pointer("/candidates/0/content/parts/0").ok_or("received protobuf image missing")?;
+        let decoded = complete(received)?;
+        let [AssistantContent::CarriedText(media)] = decoded.choice.as_slice() else {
+            return Err("default gRPC inline media must remain inspection data".into());
+        };
+        assert_eq!(media.content, rig_core::message::CarriedTextContent::InspectionOnlyMedia(String::new()));
+        assert_eq!(&media.payload.item, expected);
+        assert_eq!(decoded.raw.pointer("/candidates/0/content/parts/0"), Some(expected));
+        assert_eq!(media.payload.provider.as_deref(), Some(rig_core::providers::gemini::completion::PROVIDER_NAME));
+        let data = media.payload.item.pointer("/inlineData/data")
+            .and_then(serde_json::Value::as_str).ok_or("received protobuf image bytes missing")?;
+        assert_eq!(base64::prelude::BASE64_STANDARD.decode(data)?, [0, 1, 2, 255]);
+    }
+    Ok(())
+}

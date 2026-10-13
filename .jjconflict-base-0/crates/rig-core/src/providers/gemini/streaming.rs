@@ -1,7 +1,8 @@
 //! The decoder of GenerateContent replies, a whole `generateContent` body or
 //! a stream of `streamGenerateContent` chunks, read as REST JSON. Signed
 //! answers and reasoning retain
-//! their signatures in carried parts. Inline media remains inspection data.
+//! their signatures in carried parts. Inline media remains inspection data
+//! by default; the Vertex companion selects closed ordinary inline images.
 //! Hosted code stays in the raw diagnostic document.
 //!
 //! ```
@@ -17,7 +18,7 @@ use super::completion::blocked_prompt_error;
 use super::completion::{map_google_finish_reason, usage_of};
 use crate::error::ProviderError;
 use crate::json_utils::Lenient;
-use crate::message::{CallId, ToolName};
+use crate::message::{CallId, DocumentSourceKind, Image, ImageMediaType, MimeType, ToolName};
 use crate::message::{CarriedPayload, CarriedPosition, CarriedText, CarriedTextContent, CarriedReasoning, CarriedReasoningPart,
     GeminiSignedAnswer, GeminiThoughtSignature};
 use crate::operation::{Block, Completion, Finish};
@@ -60,6 +61,7 @@ impl<'de> serde::Deserialize<'de> for GenerateContentChunk {
 #[derive(Debug)]
 pub struct GenerateContentDecoder {
     carried_issuer: &'static str,
+    vertex_inline_images: bool,
     streaming: bool,
     /// At least one content part was emitted.
     delivered: bool,
@@ -100,6 +102,7 @@ impl Default for GenerateContentDecoder {
     fn default() -> Self {
         Self {
             carried_issuer: super::completion::PROVIDER_NAME,
+            vertex_inline_images: false,
             streaming: false,
             delivered: false,
             finish: None,
@@ -274,6 +277,18 @@ impl GenerateContentDecoder {
     #[doc(hidden)]
     pub fn with_carried_issuer(mut self, issuer: &'static str) -> Self {
         self.carried_issuer = issuer;
+        self
+    }
+
+    /// Select typed ordinary inline images for the Vertex AI companion.
+    /// Sole sanctioned caller: rig-vertexai's VertexDecoder. This changes only
+    /// image production for closed, unsigned, non-thought JPEG/PNG/WEBP/HEIC/HEIF
+    /// parts. The writer retains their original native evidence; provenance,
+    /// other media, Origin and endings are unchanged.
+    /// For that companion's internal use; not covered by semver.
+    #[doc(hidden)]
+    pub fn with_vertex_inline_images(mut self) -> Self {
+        self.vertex_inline_images = true;
         self
     }
 
@@ -454,6 +469,25 @@ impl GenerateContentDecoder {
             self.close(out)?;
             self.delivered = true;
             let index = out.fresh_index();
+            if self.vertex_inline_images
+                && matches!(fields.get("thought"), None | Some(Value::Bool(false)))
+                && fields.keys().all(|key| matches!(key.as_str(), "inlineData" | "thought"))
+                && let Some(inline) = part.obj("inlineData")
+                && inline.keys().all(|key| matches!(key.as_str(), "mimeType" | "data"))
+                && let Some(media_type) = inline.get("mimeType").and_then(Value::as_str)
+                    .and_then(ImageMediaType::from_mime_type)
+                && matches!(&media_type, ImageMediaType::JPEG | ImageMediaType::PNG
+                    | ImageMediaType::WEBP | ImageMediaType::HEIC | ImageMediaType::HEIF)
+                && let Some(data) = inline.get("data").and_then(Value::as_str)
+            {
+                let image = Image {
+                    data: DocumentSourceKind::Base64(data.to_owned()),
+                    media_type: Some(media_type),
+                    ..Image::default()
+                };
+                out.open(index, Block::Image(image), part.clone())?;
+                return out.finish(index);
+            }
             let payload = CarriedPayload::new(part.clone(), Some(self.carried_issuer.to_owned()))
                 .with_position(CarriedPosition::MessageContent { item_index: 0, part_index: self.part_index });
             out.open(index, Block::Text, Value::Null)?;
@@ -590,3 +624,6 @@ mod decoder_tests;
 
 #[cfg(test)]
 mod upstream_tests;
+
+#[cfg(test)]
+mod vertex_image_tests;

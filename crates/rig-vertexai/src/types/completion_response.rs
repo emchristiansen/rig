@@ -43,7 +43,9 @@ pub struct VertexDecoder(GenerateContentDecoder);
 
 impl Default for VertexDecoder {
     fn default() -> Self {
-        Self(GenerateContentDecoder::default().with_carried_issuer(PROVIDER_NAME))
+        Self(GenerateContentDecoder::default()
+            .with_carried_issuer(PROVIDER_NAME)
+            .with_vertex_inline_images())
     }
 }
 
