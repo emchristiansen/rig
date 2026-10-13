@@ -333,8 +333,7 @@ impl ChatDecoder {
         out.finish(index)
     }
 
-    /// End the reply: every block still open is complete, but a call whose
-    /// arguments are not JSON yet, which the end closes unfinished. Its
+    /// End the reply, leaving calls without an explicit end unfinished. Its
     /// cost is the `billed_units` priced at the catalog, since the `tokens`
     /// it reports as usage include tokens Cohere does not bill.
     fn end(
@@ -347,11 +346,7 @@ impl ChatDecoder {
         let open: Vec<usize> = self
             .open
             .iter()
-            .filter(|(_, (kind, json))| {
-                *kind != Kind::Call
-                    || json.trim().is_empty()
-                    || crate::json_utils::parse_tool_arguments(json).is_ok_and(|v| v.is_object())
-            })
+            .filter(|(_, (kind, _))| *kind != Kind::Call)
             .map(|(index, _)| *index)
             .collect();
         for index in open {
