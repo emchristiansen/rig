@@ -99,8 +99,8 @@ fn delta_uses_the_captured_model_custom_tools_and_stateless_context_before_lite(
         "tools": [{"type": "custom", "name": "execute", "format": {"type": "text"}}]
     }));
     let (body, context) = full(&target, &request);
-    assert_eq!(body.get("model"), Some(&json!("resolved-model")));
-    assert_eq!(context.model, "resolved-model");
+    assert_eq!(body.get("model"), Some(&json!("request-model")));
+    assert_eq!(context.model, "request-model");
     assert!(context.custom.contains("execute"));
     assert!(context.stateless);
     assert!(
@@ -126,6 +126,16 @@ fn delta_uses_the_captured_model_custom_tools_and_stateless_context_before_lite(
             "type": "custom_tool_call", "call_id": "tool-0", "name": "execute", "input": "run"
         })]
     );
+}
+
+#[test]
+fn typed_selected_model_is_captured_instead_of_the_wire_default() {
+    let target = lite();
+    let mut request = CompletionRequest::new("full turn");
+    request.model = Some("typed-selected-model".to_owned());
+    let (body, context) = full(&target, &request);
+    assert_eq!(body.get("model"), Some(&json!("typed-selected-model")));
+    assert_eq!(context.model, "typed-selected-model");
 }
 
 #[test]
