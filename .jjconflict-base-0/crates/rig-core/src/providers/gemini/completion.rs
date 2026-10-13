@@ -440,7 +440,7 @@ pub fn request_body(
     request_params(
         target,
         request,
-        |input| adjusted_base(request, target, model, input, declaration, ReasoningScope::GenerateContent, adjust),
+        |input| adjusted_base(request, target, model, input, RequestEncoding { declaration, reasoning_scope: ReasoningScope::GenerateContent, tool_results: ToolResultStyle::GenerateContent }, adjust),
         RawAt::Top,
         &[
             Rewrite::GeminiCachedContent(cached_content.map(str::to_owned)),
@@ -471,7 +471,7 @@ pub fn request_body_for_vertex(
     request_params(
         target,
         request,
-        |input| adjusted_base(request, target, model, input, vertex_declaration, ReasoningScope::TargetIssuer, adjust),
+        |input| adjusted_base(request, target, model, input, RequestEncoding { declaration: vertex_declaration, reasoning_scope: ReasoningScope::TargetIssuer, tool_results: ToolResultStyle::Vertex }, adjust),
         RawAt::Top,
         &[
             Rewrite::GeminiCachedContent(cached_content.map(str::to_owned)),
@@ -483,6 +483,19 @@ pub fn request_body_for_vertex(
 enum ReasoningScope {
     GenerateContent,
     TargetIssuer,
+}
+
+/// One closed internal selection; only request_body_for_vertex chooses Vertex.
+#[derive(Clone, Copy)]
+enum ToolResultStyle {
+    GenerateContent,
+    Vertex,
+}
+
+struct RequestEncoding {
+    declaration: fn(crate::completion::ToolDefinition) -> Result<Value, EncodeError>,
+    reasoning_scope: ReasoningScope,
+    tool_results: ToolResultStyle,
 }
 
 // Known reasoning and signatures issued elsewhere are not inputs for this issuer.
@@ -508,11 +521,14 @@ fn adjusted_base(
     target: &dyn ReplayTarget,
     model: &str,
     input: &mut BaseInput<'_>,
-    declaration: fn(crate::completion::ToolDefinition) -> Result<Value, EncodeError>,
-    reasoning_scope: ReasoningScope,
+    encoding: RequestEncoding,
     adjust: impl FnOnce(&mut Map<String, Value>),
 ) -> Result<Map<String, Value>, EncodeError> {
-    let mut body = base(request, target, model, input, declaration, reasoning_scope)?;
+    let RequestEncoding { declaration, reasoning_scope, tool_results } = encoding;
+    let mut body = match tool_results {
+        ToolResultStyle::GenerateContent => base(request, target, model, input, declaration, reasoning_scope)?,
+        ToolResultStyle::Vertex => base_in(request, target, model, input, declaration, reasoning_scope, tool_results)?,
+    };
     adjust(&mut body);
     Ok(body)
 }
@@ -526,6 +542,18 @@ fn base(
     input: &mut BaseInput<'_>,
     declaration: fn(crate::completion::ToolDefinition) -> Result<Value, EncodeError>,
     reasoning_scope: ReasoningScope,
+) -> Result<Map<String, Value>, EncodeError> {
+    base_in(request, target, model, input, declaration, reasoning_scope, ToolResultStyle::GenerateContent)
+}
+
+fn base_in(
+    request: &CompletionRequest,
+    target: &dyn ReplayTarget,
+    model: &str,
+    input: &mut BaseInput<'_>,
+    declaration: fn(crate::completion::ToolDefinition) -> Result<Value, EncodeError>,
+    reasoning_scope: ReasoningScope,
+    tool_results: ToolResultStyle,
 ) -> Result<Map<String, Value>, EncodeError> {
     let extra_tools = input.raw_tools()?;
     let schema = request
@@ -588,7 +616,10 @@ fn base(
     let declared = (!declared.is_empty())
         .then(|| json!({ "functionDeclarations": declared, "codeExecution": null }));
     let tools: Vec<Value> = declared.into_iter().chain(extra_tools).collect();
-    let contents = Value::Array(contents(history, target, model)?);
+    let contents = Value::Array(match tool_results {
+        ToolResultStyle::GenerateContent => contents(history, target, model)?,
+        ToolResultStyle::Vertex => contents_in(history, target, model, tool_results)?,
+    });
     let system = (!system.is_empty()).then(|| json!({ "parts": system, "role": "model" }));
     let tool_config = request
         .tool_choice
@@ -683,6 +714,15 @@ fn contents(
     target: &dyn ReplayTarget,
     model: &str,
 ) -> Result<Vec<Value>, EncodeError> {
+    contents_in(history, target, model, ToolResultStyle::GenerateContent)
+}
+
+fn contents_in(
+    history: Vec<Message>,
+    target: &dyn ReplayTarget,
+    model: &str,
+    tool_results: ToolResultStyle,
+) -> Result<Vec<Value>, EncodeError> {
     let mut contents = Vec::with_capacity(history.len());
     let mut push = |role: &str, parts: Vec<Value>| {
         // Gemini rejects a content with no parts, as pi skips one.
@@ -709,7 +749,12 @@ fn contents(
                         push("user", std::mem::take(&mut run));
                     }
                     responses = is_result;
-                    run.push(user_part(part, id.as_deref())?);
+                    run.push(match (tool_results, part) {
+                        (ToolResultStyle::Vertex, UserContent::ToolResult(result)) => {
+                            vertex_tool_result(result, id.as_deref())?
+                        }
+                        (_, part) => user_part(part, id.as_deref())?,
+                    });
                 }
                 push("user", run);
             }
@@ -851,6 +896,102 @@ fn tool_result_image_part(image: &crate::message::Image) -> Result<Value, Encode
         )).into());
     }
     Ok(json!({"inlineData":{"mimeType":media_type.to_mime_type(),"data":data}}))
+}
+
+/// Vertex's private success response keeps canonical value/media interleave.
+/// G120 keeps failed results on the existing shared lowering and callback.
+fn vertex_tool_result(
+    result: crate::message::ToolResult,
+    id: Option<&str>,
+) -> Result<Value, EncodeError> {
+    if result.is_error {
+        return user_part(UserContent::ToolResult(result), id);
+    }
+    if result.answers == crate::message::AnsweredToolCall::Custom {
+        return Err(crate::message::UnrepresentableToolCall::CustomCall {
+            wire: "Gemini GenerateContent", name: result.name.clone(),
+        }.into());
+    }
+    let mut reserved = std::collections::HashSet::new();
+    for item in &result.content {
+        if let ToolResultContent::Json { value } = item {
+            collect_vertex_ref_names(value, &mut reserved);
+        }
+    }
+    let has_values = result.content.iter().any(|item| !matches!(item, ToolResultContent::Image(_)));
+    let mut image_index = 0;
+    let (mut values, mut parts) = (Vec::new(), Vec::new());
+    for item in result.content {
+        match item {
+            ToolResultContent::Text(text) => values.push(Value::String(text.text)),
+            ToolResultContent::Json { value } => values.push(value),
+            ToolResultContent::Image(image) => {
+                let name = loop {
+                    let name = format!("rig_tool_result_image_{image_index}");
+                    image_index += 1;
+                    if reserved.insert(name.clone()) { break name; }
+                };
+                parts.push(vertex_tool_result_image(&image, &name)?);
+                values.push(json!({"$ref": name}));
+            }
+        }
+    }
+    let output = match values.as_slice() {
+        [single] => single.clone(),
+        _ => Value::Array(values),
+    };
+    let response = object([
+        ("name", Some(json!(result.name))),
+        ("id", id.map(Value::from)),
+        // Image-only successes keep the existing callback's request-wide names.
+        ("response", (has_values || parts.is_empty()).then(|| json!({"output": output}))),
+        ("parts", (!parts.is_empty()).then_some(Value::Array(parts))),
+    ]);
+    Ok(json!({"functionResponse": response, "thought": false}))
+}
+
+fn collect_vertex_ref_names(value: &Value, names: &mut std::collections::HashSet<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(Value::String(name)) = object.get("$ref") { names.insert(name.clone()); }
+            for value in object.values() { collect_vertex_ref_names(value, names); }
+        }
+        Value::Array(values) => {
+            for value in values { collect_vertex_ref_names(value, names); }
+        }
+        _ => {}
+    }
+}
+
+/// MIME-first validation and native Vertex response-media forms.
+fn vertex_tool_result_image(image: &crate::message::Image, name: &str) -> Result<Value, EncodeError> {
+    use base64::Engine as _;
+    use crate::message::ImageMediaType;
+    let media_type = image.media_type.as_ref().ok_or_else(|| {
+        EncodeError::request("Media type for tool-result image is required for Vertex AI")
+    })?;
+    if !matches!(media_type, ImageMediaType::JPEG | ImageMediaType::PNG | ImageMediaType::WEBP) {
+        return Err(EncodeError::request(format!(
+            "Unsupported Vertex AI tool-result image media type {media_type:?}; expected JPEG, PNG, or WEBP"
+        )));
+    }
+    let mime = media_type.to_mime_type();
+    let bytes = match &image.data {
+        Source::Base64(data) => base64::engine::general_purpose::STANDARD.decode(data).map_err(|error| {
+            EncodeError::request(format!("Invalid base64 tool-result image data: {error}"))
+        })?,
+        Source::Raw(bytes) => bytes.clone(),
+        Source::Url(uri) => return Ok(json!({"fileData": {
+            "mimeType": mime, "fileUri": uri, "displayName": name,
+        }})),
+        data => return Err(EncodeError::request(format!(
+            "Unsupported Vertex AI tool-result image source: {data}"
+        ))),
+    };
+    Ok(json!({"inlineData": {
+        "mimeType": mime, "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+        "displayName": name,
+    }}))
 }
 
 /// A user part as Gemini takes it. A function response carries `id`, its

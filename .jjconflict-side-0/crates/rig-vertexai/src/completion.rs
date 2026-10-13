@@ -71,8 +71,21 @@ impl Wire for GenerateContent {
         {
             return Err(EncodeError::request("Vertex AI temperature must be finite"));
         }
+        check_original_assistant_images(&request)?;
         let model = request.model.clone().unwrap_or_else(|| self.model.clone());
         let body = rest::request_body_for_vertex(&request, self, &model, None, |body| {
+            if let Some(system) = body
+                .get_mut("systemInstruction")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                system.insert("role".to_owned(), "user".into());
+            }
+            if !request.tools.is_empty() && request.tool_choice.is_none() {
+                body.insert(
+                    "toolConfig".to_owned(),
+                    serde_json::json!({"functionCallingConfig": {"mode": "AUTO"}}),
+                );
+            }
             let contents = body
                 .get_mut("contents")
                 .and_then(serde_json::Value::as_array_mut);
@@ -83,12 +96,68 @@ impl Wire for GenerateContent {
             }
             body.insert("model".to_owned(), model.clone().into());
         })?;
-        Ok(body.deserialize()?)
+        let encoded: vertexai::model::GenerateContentRequest = body.deserialize()?;
+        if let Some(config) = &encoded.generation_config {
+            if config.response_modalities.contains(
+                &vertexai::model::generation_config::Modality::Audio,
+            ) {
+                return Err(EncodeError::request(
+                    "responseModalities AUDIO is unsupported because Rig cannot represent assistant audio responses",
+                ));
+            }
+            if let Some(thinking) = &config.thinking_config
+                && thinking.thinking_budget.is_some()
+                && thinking.thinking_level.is_some()
+            {
+                return Err(EncodeError::request(
+                    "thinking_budget and thinking_level cannot both be set",
+                ));
+            }
+        }
+        Ok(encoded)
     }
 
     fn decoder<'id>(&self) -> Self::Decoder<'id> {
         VertexDecoder::default()
     }
+}
+
+/// Check only caller/rebuilt assistant images. A current Native item's exact
+/// received bytes remain under the existing replay custody.
+fn check_original_assistant_images(request: &CompletionRequest) -> Result<(), EncodeError> {
+    for message in &request.chat_history {
+        if let rig_core::message::Message::Assistant(turn) = message {
+            for block in &turn.content {
+                if let rig_core::message::AssistantContent::Image(image) = block
+                    && block.native_item().is_none()
+                {
+                    check_assistant_image(image)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Vertex's private canonical assistant-image form is typed inline base64.
+fn check_assistant_image(image: &rig_core::message::Image) -> Result<(), EncodeError> {
+    use rig_core::message::{DocumentSourceKind, ImageMediaType};
+    let media_type = image.media_type.as_ref().ok_or_else(|| {
+        EncodeError::request("Media type for assistant image is required for Vertex AI")
+    })?;
+    if !matches!(media_type, ImageMediaType::JPEG | ImageMediaType::PNG
+        | ImageMediaType::WEBP | ImageMediaType::HEIC | ImageMediaType::HEIF)
+    {
+        return Err(EncodeError::request(format!(
+            "Unsupported Vertex AI assistant image media type {media_type:?}"
+        )));
+    }
+    let DocumentSourceKind::Base64(data) = &image.data else {
+        return Err(EncodeError::request("Vertex AI assistant images must use base64 data"));
+    };
+    BASE64.decode(data).map(|_| ()).map_err(|error| {
+        EncodeError::request(format!("Invalid base64 assistant image data: {error}"))
+    })
 }
 
 /// Respell every thought signature in `content` in standard base64, the
@@ -100,7 +169,14 @@ fn standard_signatures(content: &mut serde_json::Value) {
         .get_mut("parts")
         .and_then(serde_json::Value::as_array_mut);
     for part in parts.into_iter().flatten() {
-        if let Some(signature) = part.get_mut("thoughtSignature")
+        let invalid = part.get("thoughtSignature")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|text| BASE64.decode(text).is_err() && URL_SAFE.decode(text).is_err());
+        if invalid {
+            if let Some(fields) = part.as_object_mut() {
+                fields.remove("thoughtSignature");
+            }
+        } else if let Some(signature) = part.get_mut("thoughtSignature")
             && let Some(text) = signature.as_str()
             && BASE64.decode(text).is_err()
             && let Ok(bytes) = URL_SAFE.decode(text)
@@ -167,6 +243,21 @@ impl rig_core::completion::ReplayTarget for GenerateContent {
     ) -> rig_core::completion::options::OptionMap {
         let model = request.model.as_deref().unwrap_or(&self.model);
         rest::generate_content_options(model, rest::Route::Vertex, fields)
+    }
+
+    // There is no dedicated assistant-image preflight hook. Use this existing
+    // hook after unchanged original-document validation, before adaptation.
+    fn check_documents(&self, request: &CompletionRequest) -> Result<(), EncodeError> {
+        for message in &request.chat_history {
+            if let rig_core::message::Message::User { content } = message {
+                for part in content {
+                    if let rig_core::message::UserContent::Document(document) = part {
+                        self.check_document(document)?;
+                    }
+                }
+            }
+        }
+        check_original_assistant_images(request)
     }
 
     fn api(&self) -> rig_core::message::Api {
@@ -287,3 +378,9 @@ mod reasoning_guard_tests;
 
 #[cfg(test)]
 mod port_mechanical_tests;
+
+#[cfg(test)]
+mod port_controls_tests;
+
+#[cfg(test)]
+mod port_media_tests;

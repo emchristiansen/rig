@@ -1057,6 +1057,46 @@ fn apply(
                     Value::Array(_) => return Err(not_object(GenerationConfigKind::Array)),
                 }
             }
+            if matches!(rewrite, Rewrite::VertexTypedControls)
+                && let Some(config) = body
+                    .get_mut("generationConfig")
+                    .and_then(Value::as_object_mut)
+            {
+                let set = |key: &str| config.get(key).is_some_and(|value| !value.is_null());
+                if set("responseSchema")
+                    && (set("responseJsonSchema") || set("_responseJsonSchema"))
+                {
+                    return Err(EncodeError::request(
+                        "responseSchema cannot be combined with responseJsonSchema or _responseJsonSchema",
+                    ));
+                }
+                if set("responseJsonSchema") && set("_responseJsonSchema") {
+                    return Err(EncodeError::request(
+                        "responseJsonSchema cannot be combined with _responseJsonSchema",
+                    ));
+                }
+                if set("_responseJsonSchema")
+                    && let Some(schema) = config.shift_remove("_responseJsonSchema")
+                {
+                    config.insert("responseJsonSchema".to_owned(), schema);
+                }
+                if let Some(level) = config
+                    .get_mut("thinkingConfig")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|thinking| thinking.get_mut("thinkingLevel"))
+                {
+                    let spelling = match level.as_str() {
+                        Some("minimal") => Some("MINIMAL"),
+                        Some("low") => Some("LOW"),
+                        Some("medium") => Some("MEDIUM"),
+                        Some("high") => Some("HIGH"),
+                        _ => None,
+                    };
+                    if let Some(spelling) = spelling {
+                        *level = Value::from(spelling);
+                    }
+                }
+            }
         }
         Rewrite::GeminiInteractionsTypedControls => {
             let mut typed = Map::new();
