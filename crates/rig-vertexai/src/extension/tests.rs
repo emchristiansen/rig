@@ -155,16 +155,36 @@ fn candidate_count_reaches_generation_config() {
 
 #[test]
 fn response_modalities_reach_generation_config() {
-    let config = config(
+    let options = VertexOptions::new().generation_config(
         GenerationConfig::new()
             .response_modalities([ResponseModality::Text, ResponseModality::Audio]),
+    );
+    let request = CompletionRequest::new("hi").provider_option(options);
+    let wire = GenerateContent::new("gemini-2.5-flash");
+    let request = rig_core::operation::Completion::prepare(request, &wire.describe())
+        .expect("the original request prepares");
+    let error = wire.encode(request, Mode::Unary)
+        .expect_err("the original Audio request is refused before transport");
+    let rig_core::error::EncodeError::Request(source) = &error else {
+        panic!("Audio must have the typed Request refusal");
+    };
+    assert_eq!(source.to_string(),
+        "responseModalities AUDIO is unsupported because Rig cannot represent assistant audio responses");
+    let error = rig_core::error::ProviderError::from(error);
+    assert!(matches!(error, rig_core::error::ProviderError::Request(_)));
+}
+
+#[test]
+fn text_only_response_modality_reaches_generation_config() {
+    let config = config(
+        GenerationConfig::new().response_modalities([ResponseModality::Text]),
     );
     let names: Vec<_> = config
         .response_modalities
         .iter()
         .map(|modality| modality.name())
         .collect();
-    assert_eq!(names, [Some("TEXT"), Some("AUDIO")]);
+    assert_eq!(names, [Some("TEXT")]);
 }
 
 #[test]

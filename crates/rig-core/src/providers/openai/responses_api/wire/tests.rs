@@ -199,6 +199,11 @@ async fn a_chatgpt_replayed_body_folds_the_same_unary_and_streamed() {
 fn text_of(response: &completion::CompletionResponse) -> Option<String> {
     response.choice.iter().find_map(|content| match content {
         message::AssistantContent::Text(text) => Some(text.text.clone()),
+        message::AssistantContent::CarriedText(text)
+            if matches!(&text.content, message::CarriedTextContent::Text(_)) =>
+        {
+            Some(text.text().to_owned())
+        }
         _ => None,
     })
 }

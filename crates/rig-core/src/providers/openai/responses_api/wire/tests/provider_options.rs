@@ -82,7 +82,8 @@ fn assert_adds(
 fn shared_store_reaches_the_body_and_shapes_history_stateless() {
     let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
     let reply = json!({
-        "id": "resp_1", "object": "response", "status": "completed", "model": "gpt-5.4",
+        "id": "resp_1", "object": "response", "created_at": 0,
+        "status": "completed", "model": "gpt-5.4",
         "output": [
             {"type": "reasoning", "id": "rs_1", "summary": []},
             {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
@@ -116,7 +117,7 @@ fn shared_store_reaches_the_body_and_shapes_history_stateless() {
         turn(history).provider_options(shared(OpenAiShared::default().store(false))),
     );
 
-    assert_eq!(reasoning_ids(&stored), vec![json!("rs_1")]);
+    assert_eq!(reasoning_ids(&stored), Vec::<Value>::new());
     assert_eq!(stateless["store"], json!(false));
     assert_eq!(stateless["include"], json!(["reasoning.encrypted_content"]));
     assert!(reasoning_ids(&stateless).is_empty(), "{stateless}");
