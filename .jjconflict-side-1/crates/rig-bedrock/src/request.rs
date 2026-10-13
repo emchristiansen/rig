@@ -462,3 +462,6 @@ mod tests;
 
 #[cfg(test)]
 mod port_refusal_reasoning_tests;
+
+#[cfg(test)]
+mod port_mechanical_tests;

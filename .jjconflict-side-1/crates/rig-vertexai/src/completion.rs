@@ -284,3 +284,6 @@ mod tests;
 
 #[cfg(test)]
 mod reasoning_guard_tests;
+
+#[cfg(test)]
+mod port_mechanical_tests;
