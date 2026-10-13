@@ -1239,3 +1239,87 @@ fn finishing_a_closed_item_refuses_without_duplicating_its_part() {
     });
     assert_eq!(response(decoded).choice, vec![AssistantContent::text("A")]);
 }
+
+// G26 row 65124f8ed234: keep F's exact call_1/bulk 33 one-MiB fragments.
+// G47 retains the invalid named call for diagnosis rather than F's Drop policy.
+#[test]
+fn accumulated_oversized_tool_input_keeps_the_bound_and_sticky_invalid_marker() {
+    let chunk = "x".repeat(1024 * 1024);
+    let opening = "{\"data\":\"";
+    let closing = "\"}";
+    assert_eq!(opening.len(), 9);
+    assert_eq!(super::MAX_TOOL_INPUT_BYTES, 32 * 1024 * 1024);
+
+    let decoded = write(|out| {
+        out.fragment(
+            Some(7),
+            CallFragment {
+                id: Some("call_1"),
+                name: Some("bulk"),
+                arguments: None,
+            },
+        )?;
+        out.fragment(
+            Some(7),
+            CallFragment {
+                arguments: Some(opening),
+                ..CallFragment::default()
+            },
+        )?;
+        for fragment_index in 0..33 {
+            out.fragment(
+                Some(7),
+                CallFragment {
+                    arguments: Some(&chunk),
+                    ..CallFragment::default()
+                },
+            )?;
+            if fragment_index >= 30 {
+                let shared = out.lock();
+                let super::Body::Call { arguments, .. } = &shared.fold.open[&7].body else {
+                    panic!("the real call_1 argument assembly");
+                };
+                assert_eq!(arguments.text.len(), opening.len() + 31 * chunk.len());
+                assert_eq!(arguments.overflowed, fragment_index >= 31);
+                assert!(arguments.text.len() <= super::MAX_TOOL_INPUT_BYTES);
+            }
+        }
+        out.fragment(
+            Some(7),
+            CallFragment {
+                arguments: Some(closing),
+                ..CallFragment::default()
+            },
+        )?;
+        {
+            let shared = out.lock();
+            let super::Body::Call { arguments, .. } = &shared.fold.open[&7].body else {
+                panic!("the real call_1 argument assembly");
+            };
+            assert_eq!(arguments.text.len(), 32_505_867);
+            assert!(arguments.text.len() <= super::MAX_TOOL_INPUT_BYTES);
+            assert!(arguments.overflowed, "a fitting suffix does not clear overflow");
+            assert!(
+                crate::json_utils::parse_tool_arguments(&arguments.text).is_ok(),
+                "the retained JSON parses, so its invalid marker must come from overflow"
+            );
+            assert!(!arguments.complete(), "overflowed input is never a complete call");
+        }
+        out.finish(7)
+    });
+    let response = response(decoded);
+    let calls: Vec<_> = response.tool_calls().collect();
+    assert_eq!(calls.len(), 1, "G47 keeps one named invalid call for diagnosis");
+    let call = calls[0];
+    assert_eq!(call.id.wire(), "call_1");
+    assert_eq!(call.function.name, "bulk");
+    let expected_data = chunk.repeat(31);
+    let expected_raw = format!("{{\"data\":\"{expected_data}\"}}");
+    assert_eq!(expected_raw.len(), 32_505_867);
+    assert_eq!(call.function.arguments.get("data"), Some(&json!(expected_data)));
+    assert_eq!(call.function.invalid_arguments.as_deref(), Some(expected_raw.as_str()));
+    assert!(
+        calls.iter().all(|call| call.function.invalid_arguments.is_some()),
+        "the truncated input must not fabricate an unflagged call"
+    );
+}
