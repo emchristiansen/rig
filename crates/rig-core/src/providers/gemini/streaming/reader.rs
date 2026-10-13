@@ -319,10 +319,14 @@ pub(super) fn read(fields: &Map<String, Value>) -> Result<(), serde_json::Error>
     for candidate in reply.candidates {
         if let Some(content) = candidate.content {
             for raw in content.parts {
-                let Some(kind) = raw.as_object().and_then(select) else {
+                let Some(fields) = raw.as_object() else {
                     continue;
                 };
+                let kind = select(fields);
                 let part = serde_json::from_value::<Part>(raw)?;
+                let Some(kind) = kind else {
+                    continue;
+                };
                 // PartKind claims the first recognized key. Other keys stay
                 // inspection data, including unselected modeled siblings.
                 match kind {
