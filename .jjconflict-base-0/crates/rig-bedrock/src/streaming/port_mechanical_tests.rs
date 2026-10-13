@@ -106,3 +106,13 @@ fn aws_converse_output_preserves_parallel_tool_calls_in_completion_response() {
         json!({"x": 4, "y": 3})
     );
 }
+
+#[test]
+fn aws_content_block_to_assistant_content() {
+    let content = decoded(vec![json!({"text": "text"})], None);
+    assert!(content.is_ok());
+    assert_eq!(
+        content.unwrap().choice[0],
+        AssistantContent::Text("text".into())
+    );
+}
