@@ -10,7 +10,7 @@ use base64::alphabet::STANDARD;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use base64::prelude::BASE64_STANDARD;
 use rig_core::completion::options::{BaseInput, FinalBody, RawAt, request_params};
-use rig_core::completion::{CacheRetention, CompletionRequest, Message, Replay};
+use rig_core::completion::{CacheRetention, CompletionRequest, Message, Replay, ReplayTarget};
 use rig_core::error::EncodeError;
 use rig_core::message::{
     AssistantContent, Document, DocumentData, DocumentMediaType, DocumentSourceKind, Image,
@@ -47,6 +47,18 @@ pub(crate) fn body(
         RawAt::Under("/additionalModelRequestFields"),
         &[],
     )
+}
+
+/// Refuse calls before adaptation can discard their original turn.
+pub(crate) fn check_assistant_calls(request: &CompletionRequest) -> Result<(), EncodeError> {
+    for message in &request.chat_history {
+        if let Message::Assistant(turn) = message {
+            for block in &turn.content {
+                rig_core::message::json_only_wire_tool_call("Bedrock Converse", block)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A cache checkpoint with the TTL `cache` asks for.
@@ -91,9 +103,9 @@ fn base(
     {
         system.push(checkpoint(cache));
     }
-    let ids = WireIds::for_target(history, wire, model);
+    let ids = WireIds::for_target(history, wire, model).map_err(EncodeError::request)?;
     let mut messages: Vec<Value> = Vec::new();
-    for message in history {
+    for (message_index, message) in history.iter().enumerate() {
         let mut content = Vec::new();
         let role = match message {
             // `adapt` sends a later system message as user text.
@@ -102,8 +114,8 @@ fn base(
                 "user"
             }
             Message::User { content: parts } => {
-                for part in parts {
-                    content.extend(user(part, family, &ids)?);
+                for (content_index, part) in parts.iter().enumerate() {
+                    content.extend(user(part, family, &ids, message_index, content_index)?);
                 }
                 if content.is_empty() {
                     content.push(json!({ "text": EMPTY_TEXT }));
@@ -111,8 +123,17 @@ fn base(
                 "user"
             }
             Message::Assistant(turn) => {
-                for block in &turn.content {
-                    content.extend(assistant(block, wire, family, &ids)?);
+                for (content_index, block) in turn.content.iter().enumerate() {
+                    let wire_id = match block {
+                        AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => {
+                            Some(
+                                ids.spell(message_index, content_index)
+                                    .map_err(EncodeError::request)?,
+                            )
+                        }
+                        _ => None,
+                    };
+                    content.extend(assistant(block, wire, family, wire_id.as_deref())?);
                 }
                 "assistant"
             }
@@ -221,33 +242,41 @@ fn assistant(
     block: &AssistantContent,
     wire: &Converse,
     family: Family,
-    ids: &WireIds,
+    wire_id: Option<&str>,
 ) -> Result<Option<Value>, EncodeError> {
+    rig_core::message::json_only_wire_tool_call("Bedrock Converse", block)?;
     if let AssistantContent::Opaque(opaque) = block {
         return Ok(opaque.replay.then(|| whole_numbers(opaque.item.clone())));
     }
-    if let Replay::Item(item) = block.replay(wire, ids) {
+    if let Replay::Item(item) = block.replay(wire, wire_id) {
         return Ok(Some(whole_numbers(item.into_owned())));
     }
     Ok(match block {
         AssistantContent::Text(text) => Some(json!({ "text": text.text })),
         AssistantContent::ToolCall(call) => Some(json!({ "toolUse": {
-            "toolUseId": ids.spell(&call.id),
+            "toolUseId": wire_id.ok_or_else(|| EncodeError::request("Bedrock tool call has no planned wire ID"))?,
             "name": call.function.name.as_str(),
             "input": call.function.arguments,
         } })),
-        // Redacted reasoning is nothing without its bytes.
-        AssistantContent::Reasoning(reasoning)
-            if reasoning.redacted || reasoning.text.trim().is_empty() =>
-        {
-            None
-        }
-        // Claude rejects unsigned reasoning: it goes back as text.
-        AssistantContent::Reasoning(reasoning) if family == Family::Claude => {
-            Some(json!({ "text": reasoning.text }))
-        }
         AssistantContent::Reasoning(reasoning) => {
-            Some(json!({ "reasoningContent": { "reasoningText": { "text": reasoning.text } } }))
+            reasoning_content(&reasoning.text, reasoning.redacted, family)
+        }
+        AssistantContent::CarriedReasoning(reasoning) => {
+            wire.check_carried_reasoning(reasoning)?;
+            let text = reasoning
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    rig_core::message::CarriedReasoningPart::Text { text, .. }
+                    | rig_core::message::CarriedReasoningPart::Summary(text) => Some(text.as_str()),
+                    rig_core::message::CarriedReasoningPart::Encrypted(_)
+                    | rig_core::message::CarriedReasoningPart::Redacted { .. }
+                    | rig_core::message::CarriedReasoningPart::OpaqueSummary(_)
+                    | rig_core::message::CarriedReasoningPart::OpaqueContent(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            reasoning_content(&text, false, family)
         }
         AssistantContent::Image(image) => Some(json!({ "image": self::image(image)? })),
         AssistantContent::Opaque(_) => None,
@@ -259,11 +288,25 @@ fn assistant(
     })
 }
 
+/// Lower unsigned visible reasoning using the target model family's form.
+fn reasoning_content(text: &str, redacted: bool, family: Family) -> Option<Value> {
+    if redacted || text.trim().is_empty() {
+        None
+    } else if family == Family::Claude {
+        Some(json!({ "text": text }))
+    } else {
+        Some(json!({ "reasoningContent": { "reasoningText": { "text": text } } }))
+    }
+}
+
 /// Whether [`assistant`] sends `block` on `wire`, read from the encoder
 /// itself so the two never disagree.
 pub(crate) fn sends(block: &AssistantContent, wire: &Converse) -> bool {
     let family = wire.family(&wire.model);
-    assistant(block, wire, family, &WireIds::default()).is_ok_and(|block| block.is_some())
+    if matches!(block, AssistantContent::ToolCall(_)) {
+        return rig_core::message::json_only_wire_tool_call("Bedrock Converse", block).is_ok();
+    }
+    assistant(block, wire, family, None).is_ok_and(|block| block.is_some())
 }
 
 /// `value` with each whole number written as an integer: a store may write
@@ -289,7 +332,13 @@ fn whole_numbers(value: Value) -> Value {
 
 /// The Converse blocks for one piece of user content. Converse rejects
 /// blank text, so it has none.
-fn user(content: &UserContent, family: Family, ids: &WireIds) -> Result<Vec<Value>, EncodeError> {
+fn user(
+    content: &UserContent,
+    family: Family,
+    ids: &WireIds,
+    message_index: usize,
+    content_index: usize,
+) -> Result<Vec<Value>, EncodeError> {
     let text = |text: &str| (!text.trim().is_empty()).then(|| json!({ "text": text }));
     Ok(match content {
         UserContent::Text(part) => text(&part.text).into_iter().collect(),
@@ -312,7 +361,7 @@ fn user(content: &UserContent, family: Family, ids: &WireIds) -> Result<Vec<Valu
             // documents the field for Nova and Claude only.
             let failed = result.is_error && family != Family::Other;
             let block = present(json!({
-                "toolUseId": ids.spell(&result.call),
+                "toolUseId": ids.spell(message_index, content_index).map_err(EncodeError::request)?,
                 "content": parts,
                 "status": failed.then_some("error"),
             }));
@@ -410,3 +459,6 @@ pub(crate) fn document(document: &Document) -> Result<Value, EncodeError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod port_refusal_reasoning_tests;

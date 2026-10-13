@@ -268,6 +268,21 @@ impl ReplayTarget for Converse {
         crate::options::converse(self.family(model), model, request, fields)
     }
 
+    // There is no dedicated assistant-call preflight hook; adding one would
+    // change the public interface, so this existing preflight keeps refusals.
+    fn check_documents(&self, request: &CompletionRequest) -> Result<(), EncodeError> {
+        for message in &request.chat_history {
+            if let rig_core::message::Message::User { content } = message {
+                for part in content {
+                    if let rig_core::message::UserContent::Document(document) = part {
+                        self.check_document(document)?;
+                    }
+                }
+            }
+        }
+        request::check_assistant_calls(request)
+    }
+
     fn api(&self) -> Api {
         Api::from_static("bedrock.converse")
     }
