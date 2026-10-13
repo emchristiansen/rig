@@ -65,6 +65,12 @@ impl Wire for GenerateContent {
         request: CompletionRequest,
         _mode: Mode,
     ) -> Result<vertexai::model::GenerateContentRequest, EncodeError> {
+        if request
+            .temperature
+            .is_some_and(|temperature| !temperature.is_finite())
+        {
+            return Err(EncodeError::request("Vertex AI temperature must be finite"));
+        }
         let model = request.model.clone().unwrap_or_else(|| self.model.clone());
         let body = rest::request_body_for_vertex(&request, self, &model, None, |body| {
             let contents = body
@@ -275,3 +281,6 @@ fn rpc_error(error: &google_cloud_aiplatform_v1::Error) -> ProviderError {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests;
+
+#[cfg(test)]
+mod reasoning_guard_tests;
