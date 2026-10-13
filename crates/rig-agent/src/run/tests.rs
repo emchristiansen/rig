@@ -1799,3 +1799,51 @@ fn native_cohere_call_end_controls_real_folded_turn_dispatch() {
         }
     }
 }
+
+
+#[tokio::test]
+async fn a_decoded_carried_json_answer_satisfies_the_existing_output_schema() {
+    use rig_core::providers::openai::{OpenAIConfig, responses_api::wire::Responses};
+    use rig_core::test_utils::RecordingHttpClient;
+    let answer = r#"{"x":1}"#;
+    let body = json!({
+        "id":"resp_carried_json", "object":"response", "created_at":0,
+        "status":"completed", "model":"gpt-4o-mini", "tools":[],
+        "output":[{"type":"message", "id":"msg_carried_json", "role":"assistant",
+            "status":"completed", "phase":"final_answer",
+            "content":[{"type":"output_text", "text":answer, "annotations":[]}]}],
+    });
+    let http = RecordingHttpClient::new(body.to_string().into_bytes());
+    let model = rig_core::Model::new(
+        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"), http.clone(),
+    );
+    let schema = json!({"type":"object", "properties":{"x":{"type":"integer"}},
+        "required":["x"]});
+    let request = rig_core::completion::CompletionRequest::new("answer")
+        .tool(rig_core::completion::ToolDefinition {
+            name: rig_core::message::ToolName::new("final_result").expect("output-tool name"),
+            description: "Return the structured answer.".to_owned(),
+            parameters: schema.clone(),
+        });
+    let response = model.call(request)
+        .await.expect("the real Responses decoder returns the carried JSON answer");
+    assert!(matches!(response.choice.as_slice(), [AssistantContent::CarriedText(text)]
+        if text.text() == answer && text.phase.as_deref() == Some("final_answer")));
+    assert_eq!(response.raw, body);
+    let turn = ModelTurn::new(
+        response.head(), response.choice.clone(), response.usage.clone(),
+        TurnPolicy::new(tool_names(&[]), None, Some("final_result".to_owned())).expect("policy"),
+        response.raw.clone(),
+    ).with_finish_reason(response.finish_reason());
+    let mut run = AgentRun::new("answer").max_turns(2)
+        .with_output_tool_name("final_result")
+        .with_output_validation(Some(schema), 1);
+    expect_call_model(&mut run);
+    expect_continue(run.model_response(turn).expect("the actual decoded turn is ingested"));
+    let AgentRunStep::Done(output) = run.next_step().expect("schema-compatible carried JSON completes") else {
+        panic!("the schema accepts actual canonical JSON without a retry");
+    };
+    assert_eq!(output.output(), answer);
+    assert_eq!(output.requests(), 1);
+    assert_eq!(http.requests().len(), 1);
+}

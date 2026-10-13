@@ -5862,3 +5862,69 @@ fn no_dispatch_events_are_built_outside_the_scope() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+
+fn phased_carried_answer_body(answer: &str) -> serde_json::Value {
+    json!({
+        "id":"resp_carried_answer", "object":"response", "created_at":0,
+        "status":"completed", "model":"gpt-4o-mini", "tools":[],
+        "output":[{"type":"message", "id":"msg_carried_answer", "role":"assistant",
+            "status":"completed", "phase":"final_answer",
+            "content":[{"type":"output_text", "text":answer, "annotations":[]}]}],
+    })
+}
+
+#[tokio::test]
+async fn a_decoded_phased_responses_answer_survives_agent_chat_output() {
+    use rig_core::providers::openai::{OpenAIConfig, responses_api::wire::Responses};
+    use rig_core::test_utils::RecordingHttpClient;
+    let answer = "known phased answer";
+    let body = phased_carried_answer_body(answer);
+    let http = RecordingHttpClient::new(body.to_string().into_bytes());
+    let model = rig_core::Model::new(
+        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"), http.clone(),
+    );
+    let agent = AgentBuilder::new(model).build();
+    let mut history = Vec::new();
+    let response = agent.chat("answer", &mut history).await.expect("the decoded answer succeeds");
+    assert_eq!(response.output(), answer);
+    assert!(matches!(response.content.as_slice(), [AssistantContent::CarriedText(text)]
+        if text.text() == answer && text.phase.as_deref() == Some("final_answer")));
+    assert_eq!(response.completion_calls.len(), 1);
+    assert_eq!(response.completion_calls[0].raw, body);
+    assert_eq!(http.requests().len(), 1);
+    let Some(Message::Assistant(turn)) = history.last() else {
+        panic!("chat keeps the actual assistant answer in caller history");
+    };
+    assert_eq!(rig_core::transcript::assistant_text_from_choice(&turn.content), answer);
+}
+
+#[tokio::test]
+async fn carried_answer_telemetry_obeys_the_existing_content_consent_flag() {
+    use rig_core::providers::openai::{OpenAIConfig, responses_api::wire::Responses};
+    use rig_core::test_utils::RecordingHttpClient;
+    let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
+    let capture = crate::test_utils::TraceCapture::default();
+    let _default = tracing::subscriber::set_default(capture.subscriber());
+    tracing::callsite::rebuild_interest_cache();
+    for consent in [false, true] {
+        capture.clear();
+        let answer = "known carried telemetry answer";
+        let body = phased_carried_answer_body(answer);
+        let http = RecordingHttpClient::new(body.to_string().into_bytes());
+        let model = rig_core::Model::new(
+            Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"), http.clone(),
+        );
+        let response = AgentBuilder::new(model)
+            .record_content_telemetry(consent).build()
+            .prompt("answer").run().await.expect("the decoded answer succeeds");
+        assert_eq!(response.output(), answer);
+        assert_eq!(http.requests().len(), 1);
+        let recorded = capture.values_of("gen_ai.completion");
+        if consent {
+            assert!(recorded.iter().any(|value| value.as_str() == Some(answer)), "{recorded:?}");
+        } else {
+            assert!(recorded.is_empty(), "{recorded:?}");
+        }
+    }
+}

@@ -83,14 +83,7 @@ async fn none_suppresses_tool_calls() {
                 names.is_empty(),
                 "tool_choice=none must suppress tool calls, saw {names:?}"
             );
-            let text: String = response
-                .choice
-                .iter()
-                .filter_map(|content| match content {
-                    AssistantContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect();
+            let text = response.text();
             assert!(
                 text.contains('5'),
                 "model should answer directly without tools, got {text:?}"

@@ -146,13 +146,7 @@ async fn sequential_tool_calls_nonstreaming() {
                 .skip(subtract_result_index + 1)
                 .filter_map(|message| match message {
                     Message::Assistant(assistant) => Some(
-                        assistant.content
-                            .iter()
-                            .filter_map(|item| match item {
-                                AssistantContent::Text(text) => Some(text.text.clone()),
-                                _ => None,
-                            })
-                            .collect::<String>(),
+                        rig_core::transcript::assistant_text_from_choice(&assistant.content),
                     ),
                     _ => None,
                 })

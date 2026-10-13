@@ -240,6 +240,7 @@ pub fn assistant_text_from_choice(content: &[AssistantContent]) -> String {
         .iter()
         .filter_map(|part| match part {
             AssistantContent::Text(text) => Some(text.text.as_str()),
+            AssistantContent::CarriedText(text) => Some(text.text()),
             _ => None,
         })
         .collect()
