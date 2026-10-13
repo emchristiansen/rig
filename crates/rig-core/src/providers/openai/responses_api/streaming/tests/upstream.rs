@@ -1459,11 +1459,11 @@ fn accepted_incomplete_keeps_partial_reasoning_and_text_without_added_hosted_ite
     );
 }
 
-/// A call `output_item.added` announced and no done item finished fails
-/// the turn, as pi refuses it: its arguments may be cut off, and without
-/// its item it cannot replay beside the reasoning before it.
+/// G191 original announcement frames strictly refuse. The admitted stage fixture
+/// retains both original behavior pins under the separately owned G194/G195 repairs.
 #[test]
 fn a_call_added_but_never_done_fails_the_turn() {
+    use crate::wire::{Decoder, Wire};
     let events = [
         json!({"type": "response.output_item.added", "output_index": 0,
                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "lookup", "arguments": ""}}),
@@ -1472,12 +1472,6 @@ fn a_call_added_but_never_done_fails_the_turn() {
         json!({"type": "response.function_call_arguments.done", "output_index": 0, "arguments": "{\"q\":\"rig\"}"}),
         completed_with(4, json!([])),
     ];
-    let response = decode(Mode::Streaming, frames(&events));
-    assert!(
-        response.stop().is_failure(),
-        "the call was never finished: {:?}",
-        response.stop()
-    );
     let restated = [
         json!({"type": "response.output_item.added", "output_index": 0,
                "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "lookup", "arguments": ""}}),
@@ -1486,13 +1480,28 @@ fn a_call_added_but_never_done_fails_the_turn() {
             json!([function_call("fc_1", "call_1", r#"{"q":"rig"}"#)]),
         ),
     ];
-    let response = decode(Mode::Streaming, frames(&restated));
-    assert_eq!(response.stop(), crate::message::StopReason::ToolUse);
-    assert_eq!(
-        natives(&response),
-        [function_call("fc_1", "call_1", r#"{"q":"rig"}"#)],
-        "a call the terminal restates is finished by it"
-    );
+    for subject in [&events[..], &restated[..]] {
+        let raw = subject[0].to_string();
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+             panic!("the exact held fixture must remain a typed strict refusal");
+        };
+        assert_eq!(refused.error().to_string(), "missing field `sequence_number`");
+        assert_eq!(refused.event_type(), Some("response.output_item.added"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
+        let mut scaffolded = subject[0].clone();
+        scaffolded["sequence_number"] = json!(0);
+        let raw = scaffolded.to_string();
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+             panic!("the exact held fixture must remain a typed strict refusal");
+        };
+        assert_eq!(refused.error().to_string(), "missing field `status`");
+        assert_eq!(refused.event_type(), Some("response.output_item.added"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
+    }
 }
 
 /// pi's pairing rule: an edit of any one of `rs_1, msg_1, fc_1` keeps every
@@ -1572,10 +1581,11 @@ fn replayed_ids(response: &crate::completion::CompletionResponse) -> Vec<serde_j
         .collect()
 }
 
-/// A stream that names no output index folds into the turn its whole
-/// reply does, every item in its place.
+/// G191 original missing-output-index frames strictly refuse. The retained-index
+/// fixture separately preserves whole/stream equality without acceptance parity.
 #[test]
 fn a_stream_without_output_indices_agrees_with_its_whole_reply() {
+    use crate::wire::{Decoder, Wire};
     let replies = [
         every_kind(),
         vec![
@@ -1586,34 +1596,46 @@ fn a_stream_without_output_indices_agrees_with_its_whole_reply() {
         ],
     ];
     for output in replies {
-        crate::test_utils::history::assert_restated_agrees(
-            &wire(),
-            whole(&output),
-            frames(&without_indices(restated(&output))),
-        );
+        let original = without_indices(restated(&output));
+        let raw = original[1].to_string();
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+             panic!("the exact held fixture must remain a typed strict refusal");
+        };
+        assert_eq!(refused.error().to_string(), "missing field `output_index`");
+        assert_eq!(refused.event_type(), Some("response.output_item.added"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
     }
 }
 
-/// Reasoning done without its ciphertext (`store: true`) keeps its item
-/// when the next item opens in a stream that names no output index, so the
-/// message after it replays with it.
+/// G191 original missing-index frames strictly refuse. The retained-index fixture
+/// separately keeps the original no-ciphertext identity and replay predicates.
 #[test]
 fn reasoning_done_without_ciphertext_keeps_its_item_in_a_stream_without_indices() {
+    use crate::wire::{Decoder, Wire};
     let mut thought = reasoning("rs_1", &["Plan."]);
     if let Some(fields) = thought.as_object_mut() {
         fields.shift_remove("encrypted_content");
     }
     let output = [thought.clone(), message("msg_1", "Hello")];
-    let response = decode(Mode::Streaming, frames(&without_indices(restated(&output))));
-    assert_eq!(natives(&response), output);
-    assert_eq!(replayed_ids(&response), [json!("rs_1"), json!("msg_1")]);
+    let original = without_indices(restated(&output));
+    let raw = original[1].to_string();
+    let configured = wire();
+    let decoder = configured.decoder_in(Mode::Streaming);
+    let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+        panic!("the exact held fixture must remain a typed strict refusal");
+    };
+    assert_eq!(refused.error().to_string(), "missing field `output_index`");
+    assert_eq!(refused.event_type(), Some("response.output_item.added"));
+    assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
 }
 
-/// Text streamed with no index and no item events, then a terminal that
-/// states reasoning before that message: the text is said once, and both
-/// blocks hold the provider's items in the terminal's order.
+/// G191 original indexless Hel/lo frames strictly refuse. The explicitly required
+/// coordinate fixture separately keeps one Hello and the exact terminal item order.
 #[test]
 fn a_terminal_only_item_does_not_repeat_text_streamed_without_indices() {
+    use crate::wire::{Decoder, Wire};
     let events = [
         json!({"type": "response.output_text.delta", "delta": "Hel"}),
         json!({"type": "response.output_text.delta", "delta": "lo"}),
@@ -1622,12 +1644,28 @@ fn a_terminal_only_item_does_not_repeat_text_streamed_without_indices() {
             json!([reasoning("rs_1", &["Why."]), message("msg_1", "Hello")]),
         ),
     ];
-    let response = decode(Mode::Streaming, frames(&events));
-    assert_eq!(response.text(), "Hello");
-    assert_eq!(
-        natives(&response),
-        [reasoning("rs_1", &["Why."]), message("msg_1", "Hello")]
-    );
+    for at in [0, 1] {
+        let raw = events[at].to_string();
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+             panic!("the exact held fixture must remain a typed strict refusal");
+        };
+        assert_eq!(refused.error().to_string(), "missing field `sequence_number`");
+        assert_eq!(refused.event_type(), Some("response.output_text.delta"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
+        let mut scaffolded = events[at].clone();
+        scaffolded["sequence_number"] = json!(at);
+        let raw = scaffolded.to_string();
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+             panic!("the exact held fixture must remain a typed strict refusal");
+        };
+        assert_eq!(refused.error().to_string(), "missing field `output_index`");
+        assert_eq!(refused.event_type(), Some("response.output_text.delta"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
+    }
 }
 
 /// Contradictory done text keeps delivered text; structured reasoning
@@ -1694,12 +1732,12 @@ fn an_item_without_a_type_never_replays() {
     }
 }
 
-/// `response.incomplete` is an incomplete turn whatever its `status` says:
-/// the output cap is `Length`, any other reason or none fails the turn.
+/// G193 absent statuses strictly refuse and present completed statuses keep default
+/// Refuse. A separate explicit Accept fixture preserves the original stop predicates.
 #[test]
 fn response_incomplete_is_incomplete_whatever_its_status_says() {
     use crate::message::StopReason;
-    for (status, reason, stop) in [
+    for (status, reason, _stop) in [
         (None, Some("max_output_tokens"), Some(StopReason::Length)),
         (
             Some("completed"),
@@ -1725,14 +1763,25 @@ fn response_incomplete_is_incomplete_whatever_its_status_says() {
             item_done(0, 1, message("msg_1", "partial")),
             json!({"type": "response.incomplete", "sequence_number": 2, "response": response}),
         ];
-        let response = decode(Mode::Streaming, frames(&events));
-        match stop {
-            Some(stop) => assert_eq!(response.stop(), stop, "{status:?} {reason:?}"),
-            None => assert!(
-                response.stop().is_failure(),
-                "{status:?} {reason:?}: {:?}",
-                response.stop()
-            ),
+        use crate::wire::{Decoder, Wire};
+        let received = events[1].to_string();
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let classified = decoder.classify(WireFrame::Text(received.clone()));
+        if status.is_none() {
+            let crate::wire::WireEvent::Corrupt(refused) = classified else { panic!("original absent status strictly refuses"); };
+            assert_eq!(refused.error().to_string(), "missing field `status`");
+            assert_eq!(refused.event_type(), Some("response.incomplete"));
+            assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(received));
+        } else {
+            let crate::wire::WireEvent::Known(super::super::ResponsesEvent::Frame { frame, raw, .. }) = classified else { panic!("present completed status is reader-valid"); };
+            assert_eq!(frame, events[1]);
+            assert_eq!(raw, received);
+            let error = crate::test_utils::decode_reply(&configured, &CompletionRequest::new("hello"),
+                Mode::Streaming, frames(&events), serde_json::Value::Null)
+                .expect_err("G193 retains the default incomplete Refuse option");
+            assert_eq!(error.kind(), ErrorKind::ProviderResponse);
+            assert_eq!(error.report().provider_response_body(), Some(received.as_str()));
         }
     }
 }
@@ -1786,10 +1835,11 @@ fn done_call(
                     "arguments": arguments, "status": "completed"}})
 }
 
-/// Each argument delta streams as it arrives, before the call's done
-/// item, and parallel calls keep their own parts.
+/// G191 original absent sequence/status frames strictly refuse. The separately
+/// admitted stage fixture preserves every original parallel-call event pin.
 #[test]
 fn argument_deltas_stream_before_the_done_item() {
+    use crate::wire::{Decoder, Wire};
     let events = [
         added_call(0, "fc_1", "call_1", "add"),
         argument_delta(0, "{\"x\":"),
@@ -1801,51 +1851,69 @@ fn argument_deltas_stream_before_the_done_item() {
         done_call(1, "fc_2", "call_2", "lookup", "{\"q\":\"rig\"}"),
         json!({"type": "response.completed", "response": sample_response("completed")}),
     ];
-    let decoded = decoded_body(&body_of(&events));
-    assert_eq!(
-        call_events(&decoded),
-        [
-            "0:start:add",
-            "0:args:{\"x\":",
-            "1:start:lookup",
-            "1:args:{\"q\":\"ri",
-            "0:args:1}",
-            "1:args:g\"}",
-            "0:end:{\"x\":1}",
-            "1:end:{\"q\":\"rig\"}",
-        ]
-    );
+    for at in [0, 2] {
+        let raw = events[at].to_string();
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+            panic!("the exact held fixture must remain a typed strict refusal");
+        };
+        assert_eq!(refused.error().to_string(), "missing field `sequence_number`");
+        assert_eq!(refused.event_type(), Some("response.output_item.added"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
+        let mut scaffolded = events[at].clone();
+        scaffolded["sequence_number"] = json!(at);
+        let raw = scaffolded.to_string();
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+            panic!("the exact held fixture must remain a typed strict refusal");
+        };
+        assert_eq!(refused.error().to_string(), "missing field `status`");
+        assert_eq!(refused.event_type(), Some("response.output_item.added"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
+    }
 }
 
-/// A done item that extends what streamed sends only the rest; one that
-/// states other arguments replaces them, and the call's end states those.
+/// G191 original frames strictly refuse. G192's admitted fixture retains real
+/// fragments and complete Ends, naming the old extra suffix-delta loss.
 #[test]
 fn a_done_item_sends_the_rest_or_restates_the_arguments() {
+    use crate::wire::{Decoder, Wire};
     let extended = [
         added_call(0, "fc_1", "call_1", "add"),
         argument_delta(0, "{\"x\":"),
         done_call(0, "fc_1", "call_1", "add", "{\"x\":1}"),
         json!({"type": "response.completed", "response": sample_response("completed")}),
     ];
-    assert_eq!(
-        call_events(&decoded_body(&body_of(&extended))),
-        [
-            "0:start:add",
-            "0:args:{\"x\":",
-            "0:args:1}",
-            "0:end:{\"x\":1}"
-        ]
-    );
     let restated = [
         added_call(0, "fc_1", "call_1", "add"),
         argument_delta(0, "{\"x\":"),
         done_call(0, "fc_1", "call_1", "add", "{\"y\":2}"),
         json!({"type": "response.completed", "response": sample_response("completed")}),
     ];
-    assert_eq!(
-        call_events(&decoded_body(&body_of(&restated))),
-        ["0:start:add", "0:args:{\"x\":", "0:end:{\"y\":2}"]
-    );
+    for subject in [&extended[..], &restated[..]] {
+        let raw = subject[0].to_string();
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+            panic!("the exact held fixture must remain a typed strict refusal");
+        };
+        assert_eq!(refused.error().to_string(), "missing field `sequence_number`");
+        assert_eq!(refused.event_type(), Some("response.output_item.added"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
+        let mut scaffolded = subject[0].clone();
+        scaffolded["sequence_number"] = json!(0);
+        let raw = scaffolded.to_string();
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+            panic!("the exact held fixture must remain a typed strict refusal");
+        };
+        assert_eq!(refused.error().to_string(), "missing field `status`");
+        assert_eq!(refused.event_type(), Some("response.output_item.added"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
+    }
 }
 
 /// Original custom delta/done tags stay exact Unknown values. A completed
@@ -2077,4 +2145,247 @@ fn a_reported_cost_is_its_total_in_usd() {
     );
     assert_eq!(usage(json!({ "cost": null })), None);
     assert_eq!(usage(json!({})), None);
+}
+
+
+// G191 NEW fixtures supply required sequence and absent call-stage status only.
+// Existing values, names, IDs and argument literals are never overwritten.
+fn admitted_call_stage_events(events: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    events.iter().enumerate().map(|(sequence, original)| {
+        let mut event = original.clone();
+        event.as_object_mut().expect("fixture envelope")
+            .entry("sequence_number").or_insert_with(|| json!(sequence));
+        let stage = match event["type"].as_str() {
+            Some("response.output_item.added") => Some("in_progress"),
+            Some("response.output_item.done") => Some("completed"),
+            _ => None,
+        };
+        if event["item"]["type"] == "function_call" {
+            if let Some(stage) = stage {
+                event["item"].as_object_mut().expect("fixture function item")
+                    .entry("status").or_insert_with(|| json!(stage));
+            }
+        }
+        event
+    }).collect()
+}
+
+
+#[test]
+fn admitted_argument_deltas_stream_before_the_done_item() {
+    let events = [
+        added_call(0, "fc_1", "call_1", "add"),
+        argument_delta(0, "{\"x\":"),
+        added_call(1, "fc_2", "call_2", "lookup"),
+        argument_delta(1, "{\"q\":\"ri"),
+        argument_delta(0, "1}"),
+        argument_delta(1, "g\"}"),
+        done_call(0, "fc_1", "call_1", "add", "{\"x\":1}"),
+        done_call(1, "fc_2", "call_2", "lookup", "{\"q\":\"rig\"}"),
+        json!({"type": "response.completed", "response": sample_response("completed")}),
+    ];
+    let events = admitted_call_stage_events(&events);
+    let decoded = decoded_body(&body_of(&events));
+    assert_eq!(
+        call_events(&decoded),
+        [
+            "0:start:add",
+            "0:args:{\"x\":",
+            "1:start:lookup",
+            "1:args:{\"q\":\"ri",
+            "0:args:1}",
+            "1:args:g\"}",
+            "0:end:{\"x\":1}",
+            "1:end:{\"q\":\"rig\"}",
+        ]
+    );
+}
+
+
+#[test]
+fn admitted_done_item_restates_arguments_without_fabricating_a_suffix_delta() {
+    // G192 names only the old extra Arguments "1}" loss; prior fragment and full Ends stay exact.
+    let extended = [
+        added_call(0, "fc_1", "call_1", "add"),
+        argument_delta(0, "{\"x\":"),
+        done_call(0, "fc_1", "call_1", "add", "{\"x\":1}"),
+        json!({"type": "response.completed", "response": sample_response("completed")}),
+    ];
+    let extended = admitted_call_stage_events(&extended);
+    assert_eq!(
+        call_events(&decoded_body(&body_of(&extended))),
+        [
+            "0:start:add",
+            "0:args:{\"x\":",
+            "0:end:{\"x\":1}"
+        ]
+    );
+    let restated = [
+        added_call(0, "fc_1", "call_1", "add"),
+        argument_delta(0, "{\"x\":"),
+        done_call(0, "fc_1", "call_1", "add", "{\"y\":2}"),
+        json!({"type": "response.completed", "response": sample_response("completed")}),
+    ];
+    let restated = admitted_call_stage_events(&restated);
+    assert_eq!(
+        call_events(&decoded_body(&body_of(&restated))),
+        ["0:start:add", "0:args:{\"x\":", "0:end:{\"y\":2}"]
+    );
+}
+
+
+#[test]
+fn admitted_never_done_call_fails_and_real_terminal_completed_call_keeps_its_item() {
+    // Original behavior pins depend on the separately owned G194/G195 repairs.
+    let events = [
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "lookup", "arguments": ""}}),
+        json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{\"q\":"}),
+        json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "\"rig\"}"}),
+        json!({"type": "response.function_call_arguments.done", "output_index": 0, "arguments": "{\"q\":\"rig\"}"}),
+        completed_with(4, json!([])),
+    ];
+    let events = admitted_call_stage_events(&events);
+    let response = decode(Mode::Streaming, frames(&events));
+    assert!(
+        response.stop().is_failure(),
+        "the call was never finished: {:?}",
+        response.stop()
+    );
+    let restated = [
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "lookup", "arguments": ""}}),
+        completed_with(
+            1,
+            json!([function_call("fc_1", "call_1", r#"{"q":"rig"}"#)]),
+        ),
+    ];
+    let restated = admitted_call_stage_events(&restated);
+    let response = decode(Mode::Streaming, frames(&restated));
+    assert_eq!(response.stop(), crate::message::StopReason::ToolUse);
+    assert_eq!(
+        natives(&response),
+        [function_call("fc_1", "call_1", r#"{"q":"rig"}"#)],
+        "a call the terminal restates is finished by it"
+    );
+}
+
+
+#[test]
+fn retained_index_stream_agrees_with_its_whole_reply() {
+    let replies = [
+        every_kind(),
+        vec![
+            reasoning("rs_1", &["First."]),
+            message("msg_1", "Between."),
+            reasoning("rs_2", &["Second."]),
+            function_call("fc_1", "call_1", r#"{"q":"rig"}"#),
+        ],
+    ];
+    for output in replies {
+        crate::test_utils::history::assert_restated_agrees(
+            &wire(),
+            whole(&output),
+            frames(&restated(&output)),
+        );
+    }
+}
+
+
+#[test]
+fn retained_index_reasoning_without_ciphertext_keeps_item_and_replayed_ids() {
+    let mut thought = reasoning("rs_1", &["Plan."]);
+    if let Some(fields) = thought.as_object_mut() {
+        fields.shift_remove("encrypted_content");
+    }
+    let output = [thought.clone(), message("msg_1", "Hello")];
+    let response = decode(Mode::Streaming, frames(&restated(&output)));
+    assert_eq!(natives(&response), output);
+    assert_eq!(replayed_ids(&response), [json!("rs_1"), json!("msg_1")]);
+}
+
+
+#[test]
+fn required_coordinate_text_and_terminal_reasoning_keep_one_hello_and_exact_items() {
+    let mut events = [
+        json!({"type": "response.output_text.delta", "delta": "Hel"}),
+        json!({"type": "response.output_text.delta", "delta": "lo"}),
+        completed_with(
+            2,
+            json!([reasoning("rs_1", &["Why."]), message("msg_1", "Hello")]),
+        ),
+    ];
+    // G191 NEW coordinates: terminal reasoning is at0 and message at1.
+    // Exact Hel/lo and item fields stay unchanged; this is not missing-index parity.
+    for at in [0, 1] {
+        events[at]["sequence_number"] = json!(at);
+        events[at]["output_index"] = json!(1);
+        events[at]["content_index"] = json!(0);
+    }
+    let response = decode(Mode::Streaming, frames(&events));
+    assert_eq!(response.text(), "Hello");
+    assert_eq!(
+        natives(&response),
+        [reasoning("rs_1", &["Why."]), message("msg_1", "Hello")]
+    );
+}
+
+
+#[test]
+fn explicit_accept_keeps_original_completed_status_inputs_and_exact_incomplete_outcomes() {
+    use crate::message::StopReason;
+    for (status, reason, stop) in [
+        (None, Some("max_output_tokens"), Some(StopReason::Length)),
+        (
+            Some("completed"),
+            Some("max_output_tokens"),
+            Some(StopReason::Length),
+        ),
+        (None, None, None),
+        (Some("completed"), None, None),
+        (None, Some("content_filter"), None),
+    ] {
+        if status.is_none() { continue; } // All three absent-status cases stay in original strict control.
+        let mut response = sample_response("incomplete");
+        match status {
+            Some(status) => response["status"] = json!(status),
+            None => {
+                if let Some(fields) = response.as_object_mut() {
+                    fields.shift_remove("status");
+                }
+            }
+        }
+        response["incomplete_details"] = json!(reason.map(|reason| json!({"reason": reason})));
+        response["output"] = json!([message("msg_1", "partial")]);
+        let events = [
+            item_done(0, 1, message("msg_1", "partial")),
+            json!({"type": "response.incomplete", "sequence_number": 2, "response": response}),
+        ];
+        use crate::wire::{Decoder, Wire};
+        let configured = wire().with_streamed_incomplete(super::super::IncompleteTerminal::Accept);
+        let received = events[1].to_string();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Known(super::super::ResponsesEvent::Frame { frame, raw, .. }) =
+            decoder.classify(WireFrame::Text(received.clone())) else { panic!("received full root strictly classifies"); };
+        assert_eq!(frame, events[1]);
+        assert_eq!(raw, received); // Full received completed-status evidence is unedited.
+        let response = crate::test_utils::decode_reply(&configured, &CompletionRequest::new("hello"),
+            Mode::Streaming, frames(&events), serde_json::Value::Null).expect("explicit Accept reaches its genuine terminal");
+        match stop {
+            Some(stop) => assert_eq!(response.stop(), stop, "{status:?} {reason:?}"),
+            None => assert!(
+                response.stop().is_failure(),
+                "{status:?} {reason:?}: {:?}",
+                response.stop()
+            ),
+        }
+
+        assert_eq!(response.text(), "partial");
+        // Existing reassembly is event-authoritative; tests never edit received status.
+        assert_eq!(response.raw["status"], json!("incomplete"));
+        for key in ["id", "object", "created_at", "model", "output", "tools", "incomplete_details"] {
+            assert_eq!(response.raw[key], events[1]["response"][key], "unchanged raw root member {key}");
+        }
+        assert_eq!(events[1]["response"]["status"], json!("completed"));
+    }
 }

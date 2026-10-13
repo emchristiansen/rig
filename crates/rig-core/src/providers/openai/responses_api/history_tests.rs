@@ -124,92 +124,56 @@ fn streamed_call() -> Vec<Value> {
     ]
 }
 
-/// NEW-A and responses_new NEW-1: a done call item that leaves out its
-/// arguments, name or call id keeps what its announcement and deltas
-/// stated, as pi keeps the added block's id and name and parses
-/// `item.arguments || partialJson`.
+/// G191: original absent added status and removed done fields remain strict
+/// refusals. The separately named intact fixture retains the old reachable pins.
 #[test]
 fn a_done_call_keeps_what_was_announced_and_streamed() {
+    use crate::wire::{Decoder, Wire};
     for missing in ["arguments", "name", "call_id"] {
         let mut events = streamed_call();
         if let Some(item) = events[6]["item"].as_object_mut() {
             item.shift_remove(missing);
         }
-        let response = streamed(&events);
-        let calls: Vec<&ToolCall> = response.tool_calls().collect();
-        assert_eq!(calls.len(), 1, "without `{missing}`: {:?}", response.choice);
-        assert_eq!(calls[0].id.wire(), "call_1", "without `{missing}`");
-        assert_eq!(calls[0].function.name.as_str(), "f", "without `{missing}`");
-        assert_eq!(
-            calls[0].function.arguments_value(),
-            json!({"a": 1}),
-            "without `{missing}`"
-        );
-        let input = replayed(&response, &["f"]);
-        let call = input
-            .iter()
-            .find(|item| item["type"] == "function_call")
-            .expect("the call goes back");
-        let output = input
-            .iter()
-            .find(|item| item["type"] == "function_call_output")
-            .expect("its result");
-        assert_eq!(
-            call["id"], "fc_1",
-            "without `{missing}`: the item goes back"
-        );
-        assert_eq!(call["call_id"], output["call_id"], "without `{missing}`");
+        let WireFrame::Text(announced) = frames(&events[3..4]).remove(0) else { panic!("text fixture"); };
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(announced.clone())) else { panic!("the original added status is absent"); };
+        assert_eq!(refused.error().to_string(), "missing field `status`");
+        assert_eq!(refused.event_type(), Some("response.output_item.added"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(announced));
+        let WireFrame::Text(scaffolded) = frames(&events[6..7]).remove(0) else { panic!("text fixture"); };
+        let raw = scaffolded;
+        let configured = wire();
+        let decoder = configured.decoder_in(Mode::Streaming);
+        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+            panic!("the exact held fixture must remain a typed strict refusal");
+        };
+        assert_eq!(refused.error().to_string(), format!("missing field `{missing}`"));
+        assert_eq!(refused.event_type(), Some("response.output_item.done"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
     }
 }
 
-/// #2647 by rollback: a reply cut before its terminal keeps no provider
-/// item, whether or not the call after the reasoning is done; the terminal
-/// keeps both and backfills the ciphertext Azure states only there.
+/// G191: original later cuts reach a call without required added status.
+/// Cut3 and admitted cutoff/ciphertext behavior have separate named controls.
 #[test]
 fn a_reply_cut_before_its_terminal_keeps_no_item_and_the_terminal_takes_the_ciphertext() {
     let mut events = streamed_call();
     if let Some(item) = events[2]["item"].as_object_mut() {
         item.shift_remove("encrypted_content");
     }
-    let partial = |cut: usize| {
-        crate::test_utils::history_conformance::partial(
-            &wire(),
-            Mode::Streaming,
-            frames(&events[..cut]),
-        )
-        .0
-    };
-    assert!(!partial(7).choice.is_empty(), "both items ended");
-    for cut in [3, 5, 7] {
-        let cut_off = partial(cut);
-        assert!(
-            cut_off
-                .choice
-                .iter()
-                .all(|block| block.native_item().is_none()),
-            "cut {cut}: {:?}",
-            cut_off.choice
-        );
+    // G191 cuts5/7 reach the bad announcement; cut3 is its own behavior.
+    for cut in [5, 7] {
+        let encoded = frames(&events[..cut]);
+        let WireFrame::Text(expected) = &encoded[3] else { panic!("text fixture"); };
+        let expected = expected.clone();
+        let error = crate::test_utils::history::decode(&wire(), Mode::Streaming, encoded)
+            .expect_err("the original added call has no required status");
+        let crate::error::ProviderError::CorruptFrame(refused) = error else { panic!("strict shape refusal"); };
+        assert_eq!(refused.error().to_string(), "missing field `status`");
+        assert_eq!(refused.event_type(), Some("response.output_item.added"));
+        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(expected));
     }
-    let last = events.len() - 1;
-    events[last]["response"]["output"] = json!([
-        {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "plan"}], "encrypted_content": "enc"},
-    ]);
-    let response = streamed(&events);
-    assert!(
-        response
-            .choice
-            .iter()
-            .all(|block| block.native_item().is_some()),
-        "{:?}",
-        response.choice
-    );
-    assert_eq!(
-        response.choice[0]
-            .native_item()
-            .map(|item| item["encrypted_content"].clone()),
-        Some(json!("enc"))
-    );
 }
 
 /// Round 5 generated-history finding 3: a stream that never sends output 0
@@ -444,10 +408,11 @@ fn a_terminal_only_hosted_item_keeps_its_place() {
     }
 }
 
-/// Reasoning streamed as raw text whose done item also states a summary
-/// folds as the whole reply does.
+/// G191: the original message announcement lacks required status. Its strict
+/// refusal and the admitted raw/summary whole-turn parity are distinct subjects.
 #[test]
 fn raw_reasoning_deltas_under_a_summary_fold_as_the_whole_reply() {
+    use crate::wire::{Decoder, Wire};
     let rs = json!({"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "sum"}],
                     "content": [{"type": "reasoning_text", "text": "raw"}], "encrypted_content": "enc"});
     let output = json!([rs, message("msg_1", "hi")]);
@@ -461,28 +426,161 @@ fn raw_reasoning_deltas_under_a_summary_fold_as_the_whole_reply() {
         json!({"type": "response.output_item.done", "output_index": 1, "item": message("msg_1", "hi")}),
         json!({"type": "response.completed", "response": body(output.clone())}),
     ];
-    let streamed = streamed(&events);
-    let whole = whole(output);
-    assert_eq!(streamed.choice, whole.choice);
+    let WireFrame::Text(scaffolded) = frames(&events[4..5]).remove(0) else { panic!("text fixture"); };
+    let raw = scaffolded;
+    let configured = wire();
+    let decoder = configured.decoder_in(Mode::Streaming);
+    let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+        panic!("the exact held fixture must remain a typed strict refusal");
+    };
+    assert_eq!(refused.error().to_string(), "missing field `status`");
+    assert_eq!(refused.event_type(), Some("response.output_item.added"));
+    assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
 }
 
-/// A call with no name is dropped at decode, so the reasoning before it,
-/// which goes only with that call, never goes back with the next item.
+/// G191: the exact nameless call is a strict refusal, replacing the old dropped
+/// call/no-replay/later-text success. G47 separately pins genuine unnamed writers.
 #[test]
 fn reasoning_before_a_dropped_call_does_not_go_back() {
+    use crate::wire::{Decoder, Wire};
     let nameless = json!({"type": "function_call", "id": "fc_1", "call_id": "call_1",
                           "arguments": "{}", "status": "completed"});
-    let response = whole(json!([
-        reasoning("rs_1", Some("enc")),
-        nameless,
-        message("msg_1", "hi")
-    ]));
-    let input = replayed(&response, &["f"]);
-    assert!(!input.iter().any(|item| item["id"] == "rs_1"), "{input:?}");
-    assert!(
-        input
-            .iter()
-            .any(|item| item["type"] == "message" && item["role"] == "assistant"),
-        "{input:?}"
+    let raw = body(json!([
+        reasoning("rs_1", Some("enc")), nameless, message("msg_1", "hi")
+    ])).to_string();
+    let configured = wire();
+    let decoder = configured.decoder_in(Mode::Unary);
+    let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+        panic!("a deliberately nameless call must remain a typed strict refusal");
+    };
+    assert_eq!(refused.error().to_string(), "missing field `name`");
+    assert_eq!(refused.event_type(), None);
+    assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
+}
+
+
+#[test]
+fn admitted_raw_reasoning_deltas_under_a_summary_fold_as_the_whole_reply() {
+    let rs = json!({"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "sum"}],
+                    "content": [{"type": "reasoning_text", "text": "raw"}], "encrypted_content": "enc"});
+    let output = json!([rs, message("msg_1", "hi")]);
+    let mut events = [
+        json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "reasoning", "id": "rs_1", "summary": []}}),
+        json!({"type": "response.reasoning_text.delta", "output_index": 0, "item_id": "rs_1", "content_index": 0, "delta": "raw"}),
+        json!({"type": "response.reasoning_summary_text.delta", "output_index": 0, "item_id": "rs_1", "summary_index": 0, "delta": "sum"}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": rs}),
+        json!({"type": "response.output_item.added", "output_index": 1, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}),
+        json!({"type": "response.output_text.delta", "output_index": 1, "item_id": "msg_1", "content_index": 0, "delta": "hi"}),
+        json!({"type": "response.output_item.done", "output_index": 1, "item": message("msg_1", "hi")}),
+        json!({"type": "response.completed", "response": body(output.clone())}),
+    ];
+    // G191 NEW added-message status; original raw/summary/text parity stays exact.
+    events[4]["item"]["status"] = json!("in_progress");
+    let streamed = streamed(&events);
+    let whole = whole(output.clone());
+    assert_eq!(streamed.choice, whole.choice);
+    assert_eq!(streamed.raw["output"], whole.raw["output"]);
+    assert_eq!(streamed.raw["output"], output);
+}
+
+
+// G191 NEW variant supplies only the absent added-call status. Original helper
+// and deliberately missing done fields remain unchanged in negative subjects.
+fn admitted_streamed_call() -> Vec<Value> {
+    let mut events = streamed_call();
+    events[3]["item"]["status"] = json!("in_progress");
+    events
+}
+
+
+#[test]
+fn the_original_three_frame_reasoning_prefix_keeps_no_native_item() {
+    let mut events = streamed_call();
+    if let Some(item) = events[2]["item"].as_object_mut() {
+        item.shift_remove("encrypted_content");
+    }
+    let (cut_off, ended) = crate::test_utils::history_conformance::partial(
+        &wire(), Mode::Streaming, frames(&events[..3]));
+    assert!(!ended, "no original terminal arrived");
+    assert!(cut_off.choice.iter().all(|block| block.native_item().is_none()),
+        "cut3: {:?}", cut_off.choice);
+}
+
+
+#[test]
+fn admitted_reply_cuts_keep_no_native_item_and_terminal_keeps_ciphertext() {
+    let mut events = admitted_streamed_call();
+    if let Some(item) = events[2]["item"].as_object_mut() {
+        item.shift_remove("encrypted_content");
+    }
+    let partial = |cut: usize| {
+        crate::test_utils::history_conformance::partial(
+            &wire(),
+            Mode::Streaming,
+            frames(&events[..cut]),
+        )
+        .0
+    };
+    assert!(!partial(7).choice.is_empty(), "both items ended");
+    for cut in [3, 5, 7] {
+        let cut_off = partial(cut);
+        assert!(
+            cut_off
+                .choice
+                .iter()
+                .all(|block| block.native_item().is_none()),
+            "cut {cut}: {:?}",
+            cut_off.choice
+        );
+    }
+    let last = events.len() - 1;
+    events[last]["response"]["output"] = json!([
+        {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "plan"}], "encrypted_content": "enc"},
+    ]);
+    let response = streamed(&events);
+    // G196: terminal reasoning is actual carried data; completed call stays Native.
+    let [AssistantContent::CarriedReasoning(reasoning), AssistantContent::ToolCall(call)] =
+        response.choice.as_slice() else { panic!("ordered reasoning and call: {:?}", response.choice); };
+    assert_eq!(reasoning.id.as_deref(), Some("rs_1"));
+    assert_eq!(reasoning.display_text(), "plan");
+    assert_eq!(reasoning.content, vec![crate::message::CarriedReasoningPart::Summary("plan".to_owned()),
+        crate::message::CarriedReasoningPart::Encrypted("enc".to_owned())]);
+    assert_eq!(reasoning.payload.item, events[last]["response"]["output"][0]);
+    assert_eq!(reasoning.payload.item["encrypted_content"], json!("enc"));
+    assert_eq!(response.choice[1].native_item(), Some(&events[6]["item"]));
+    assert_eq!(call.function.arguments_value(), json!({"a":1}));
+    assert_eq!(call.id.wire(), "call_1");
+    assert_eq!(response.raw["output"], events[last]["response"]["output"]);
+}
+
+
+#[test]
+fn an_admitted_intact_done_call_preserves_announced_arguments_identity_and_pairing() {
+    // G191 intact control supplies no omitted name/call-id/arguments fallback.
+    let events = admitted_streamed_call();
+    let missing = "intact fixture";
+    let response = streamed(&events);
+    let calls: Vec<&ToolCall> = response.tool_calls().collect();
+    assert_eq!(calls.len(), 1, "without `{missing}`: {:?}", response.choice);
+    assert_eq!(calls[0].id.wire(), "call_1", "without `{missing}`");
+    assert_eq!(calls[0].function.name.as_str(), "f", "without `{missing}`");
+    assert_eq!(
+        calls[0].function.arguments_value(),
+        json!({"a": 1}),
+        "without `{missing}`"
     );
+    let input = replayed(&response, &["f"]);
+    let call = input
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .expect("the call goes back");
+    let output = input
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .expect("its result");
+    assert_eq!(
+        call["id"], "fc_1",
+        "without `{missing}`: the item goes back"
+    );
+    assert_eq!(call["call_id"], output["call_id"], "without `{missing}`");
 }
