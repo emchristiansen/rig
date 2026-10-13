@@ -703,3 +703,223 @@ fn g225_missing_reported_fields_keep_zero_defaults_and_cache_optional_values() {
     assert_eq!(counted.cached_input_tokens, Some(100));
     assert_eq!(counted.cache_creation_input_tokens, Some(7));
 }
+
+
+/// SDK transport delivers the completed text prefix before the capture fault.
+#[tokio::test]
+async fn capture_fault_keeps_completed_prefix_and_is_one_fatal_response() {
+    use aws_sdk_bedrockruntime::config::{BehaviorVersion, Credentials, Region};
+    use aws_smithy_types::event_stream::{Header, HeaderValue, Message};
+    use futures::StreamExt;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    let bad_payload = br#"{"contentBlockIndex":0,"delta":"#;
+    let frames: [(&str, &[u8]); 4] = [
+        ("contentBlockDelta", br#"{"contentBlockIndex":0,"delta":{"text":"valid prefix"}}"#),
+        ("contentBlockStop", br#"{"contentBlockIndex":0}"#),
+        ("contentBlockDelta", bad_payload),
+        ("metadata", br#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#),
+    ];
+    let mut body = Vec::new();
+    let mut suffix = Vec::new();
+    for (index, (event, payload)) in frames.into_iter().enumerate() {
+        let message = Message::new(payload.to_vec())
+            .add_header(Header::new(":message-type", HeaderValue::String("event".into())))
+            .add_header(Header::new(":event-type", HeaderValue::String(event.into())));
+        let mut frame = Vec::new();
+        aws_smithy_eventstream::frame::write_message_to(&message, &mut frame).expect("real SDK frame");
+        if index >= 2 {
+            suffix.extend(&frame);
+        }
+        body.extend(frame);
+    }
+    let config = aws_sdk_bedrockruntime::Config::builder()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(Credentials::new("test", "test", None, None, "parity"))
+        .http_client(Recorded {
+            body: body.into(),
+            content_type: "application/vnd.amazon.eventstream",
+        })
+        .build();
+    let runtime: crate::client::BedrockRuntime = aws_sdk_bedrockruntime::Client::from_conf(config).into();
+    let model = rig_core::Model::new(Converse::new(NOVA), runtime);
+    let mut stream = model.stream(rig_core::completion::CompletionRequest::new("probe")).expect("valid request");
+    let mut prefix = Vec::new();
+    let error = loop {
+        match stream.next().await.expect("the capture fault arrives") {
+            Ok(item) => prefix.push(item),
+            Err(error) => break error,
+        }
+    };
+    assert_eq!(prefix.len(), 3);
+    assert!(matches!(&prefix[0], Item::Event(StreamEvent::Start { part, kind: rig_core::streaming::PartKind::Text, .. }) if part.index() == 0));
+    assert!(matches!(&prefix[1], Item::Event(StreamEvent::Text { text, .. }) if text == "valid prefix"));
+    assert!(matches!(&prefix[2], Item::Event(StreamEvent::End { content: AssistantContent::Text(text), .. }) if text.text == "valid prefix"));
+    let cause = serde_json::from_slice::<Value>(bad_payload).expect_err("malformed fixture");
+    let expected = format!("Bedrock Converse event-stream JSON payload failed: {cause}; payload_bytes={bad_payload:?}; unvalidated_wire_bytes={suffix:?}");
+    assert!(matches!(&error, ProviderError::Response(detail) if detail == &expected));
+    assert_eq!(error.kind(), rig_core::error::ErrorKind::Response);
+    assert!(!error.is_retryable());
+    assert!(error.corrupt_frame().is_none());
+    assert!(std::error::Error::source(&error).is_none());
+    assert!(stream.next().await.is_none());
+    assert!(stream.next().await.is_none());
+    let partial = stream.partial();
+    assert_eq!(partial.choice, vec![AssistantContent::Text("valid prefix".into())]);
+    assert_eq!(partial.raw, json!({"output":{"message":{"content":[{"text":"valid prefix"}]}}}));
+    assert!(matches!(stream.finish().await, Err(ProviderError::Response(detail)) if detail == expected));
+}
+
+/// A capture failure before blockStop never manufactures a completed call.
+#[tokio::test]
+async fn capture_fault_before_tool_stop_refuses_with_a_genuine_completed_control() {
+    use aws_sdk_bedrockruntime::config::{BehaviorVersion, Credentials, Region};
+    use aws_smithy_types::event_stream::{Header, HeaderValue, Message};
+    use futures::StreamExt;
+    use rig_core::completion::{CompletionRequest, ToolDefinition};
+    use rig_core::message::ToolName;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    for malformed in [true, false] {
+        let bad_payload = br#"{"contentBlockIndex":0,"delta":"#;
+        let frames: [(&str, &[u8]); 6] = [
+            ("contentBlockStart", br#"{"contentBlockIndex":0,"start":{"toolUse":{"toolUseId":"call_1","name":"add"}}}"#),
+            ("contentBlockDelta", br#"{"contentBlockIndex":0,"delta":{"toolUse":{"input":"{\"x\":1}"}}}"#),
+            ("contentBlockDelta", bad_payload),
+            ("contentBlockStop", br#"{"contentBlockIndex":0}"#),
+            ("messageStop", br#"{"stopReason":"tool_use"}"#),
+            ("metadata", br#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#),
+        ];
+        let mut body = Vec::new();
+        let mut suffix = Vec::new();
+        for (index, (event, payload)) in frames.into_iter().enumerate() {
+            if !malformed && index == 2 {
+                continue;
+            }
+            let message = Message::new(payload.to_vec())
+                .add_header(Header::new(":message-type", HeaderValue::String("event".into())))
+                .add_header(Header::new(":event-type", HeaderValue::String(event.into())));
+            let mut frame = Vec::new();
+            aws_smithy_eventstream::frame::write_message_to(&message, &mut frame).expect("real SDK frame");
+            if index >= 2 {
+                suffix.extend(&frame);
+            }
+            body.extend(frame);
+        }
+        let config = aws_sdk_bedrockruntime::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(Credentials::new("test", "test", None, None, "parity"))
+            .http_client(Recorded {
+                body: body.into(),
+                content_type: "application/vnd.amazon.eventstream",
+            })
+            .build();
+        let runtime: crate::client::BedrockRuntime = aws_sdk_bedrockruntime::Client::from_conf(config).into();
+        let model = rig_core::Model::new(Converse::new(NOVA), runtime);
+        let mut request = CompletionRequest::new("probe");
+        request.tools = vec![ToolDefinition::new(
+            ToolName::new("add").expect("nonempty tool name"),
+            "add",
+            json!({"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]}),
+        )];
+        let mut stream = model.stream(request).expect("valid declared-tool request");
+        let mut items = Vec::new();
+        let mut failure = None;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => items.push(item),
+                Err(error) => {
+                    assert!(failure.is_none());
+                    failure = Some(error);
+                }
+            }
+        }
+        assert!(items.iter().any(|item| matches!(item, Item::Event(StreamEvent::Arguments { json, .. }) if json == "{\"x\":1}")));
+        let completed: Vec<_> = items.iter().filter_map(|item| match item {
+            Item::Event(StreamEvent::End { content: AssistantContent::ToolCall(call), .. }) => Some(call),
+            _ => None,
+        }).collect();
+        if malformed {
+            assert!(completed.is_empty());
+            let error = failure.expect("capture refuses malformed JSON before stop");
+            let cause = serde_json::from_slice::<Value>(bad_payload).expect_err("malformed fixture");
+            let expected = format!("Bedrock Converse event-stream JSON payload failed: {cause}; payload_bytes={bad_payload:?}; unvalidated_wire_bytes={suffix:?}");
+            assert!(matches!(&error, ProviderError::Response(detail) if detail == &expected));
+            assert_eq!(error.kind(), rig_core::error::ErrorKind::Response);
+            assert!(!error.is_retryable());
+            assert!(std::error::Error::source(&error).is_none());
+            assert!(stream.next().await.is_none());
+            assert!(matches!(stream.finish().await, Err(ProviderError::Response(detail)) if detail == expected));
+        } else {
+            assert!(failure.is_none());
+            assert_eq!(completed.len(), 1);
+            let call = completed[0];
+            assert_eq!(call.id.provider().map(|id| id.as_str()), Some("call_1"));
+            assert_eq!(call.function.name.as_str(), "add");
+            assert_eq!(call.function.arguments_value(), json!({"x":1}));
+            let response = stream.finish().await.expect("genuine complete control");
+            assert_eq!(response.stop(), StopReason::ToolUse);
+            assert_eq!(response.raw.pointer("/output/message/content/0/toolUse"), Some(&json!({"toolUseId":"call_1","name":"add","input":{"x":1}})));
+        }
+    }
+}
+
+/// Incomplete binary framing at EOF keeps the existing truncation contract.
+#[tokio::test]
+async fn incomplete_binary_frame_at_eof_keeps_prefix_and_truncates() {
+    use aws_sdk_bedrockruntime::config::{BehaviorVersion, Credentials, Region};
+    use aws_smithy_types::event_stream::{Header, HeaderValue, Message};
+    use futures::StreamExt;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    for pending_bytes in [8, 12] {
+        let frames: [(&str, &[u8]); 3] = [
+            ("contentBlockDelta", br#"{"contentBlockIndex":0,"delta":{"text":"valid prefix"}}"#),
+            ("contentBlockStop", br#"{"contentBlockIndex":0}"#),
+            ("metadata", br#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#),
+        ];
+        let mut body = Vec::new();
+        for (index, (event, payload)) in frames.into_iter().enumerate() {
+            let message = Message::new(payload.to_vec())
+                .add_header(Header::new(":message-type", HeaderValue::String("event".into())))
+                .add_header(Header::new(":event-type", HeaderValue::String(event.into())));
+            let mut frame = Vec::new();
+            aws_smithy_eventstream::frame::write_message_to(&message, &mut frame).expect("real SDK frame");
+            if index == 2 {
+                body.extend(&frame[..pending_bytes]);
+            } else {
+                body.extend(frame);
+            }
+        }
+        let config = aws_sdk_bedrockruntime::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(Credentials::new("test", "test", None, None, "parity"))
+            .http_client(Recorded {
+                body: body.into(),
+                content_type: "application/vnd.amazon.eventstream",
+            })
+            .build();
+        let runtime: crate::client::BedrockRuntime = aws_sdk_bedrockruntime::Client::from_conf(config).into();
+        let model = rig_core::Model::new(Converse::new(NOVA), runtime);
+        let mut stream = model.stream(rig_core::completion::CompletionRequest::new("probe")).expect("valid request");
+        let mut items = Vec::new();
+        let mut failures = 0;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => items.push(item),
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated));
+                    failures += 1;
+                }
+            }
+        }
+        assert_eq!(failures, 1);
+        assert!(items.iter().any(|item| matches!(item, Item::Event(StreamEvent::End { content: AssistantContent::Text(text), .. }) if text.text == "valid prefix")));
+        assert_eq!(stream.partial().choice, vec![AssistantContent::Text("valid prefix".into())]);
+        assert_eq!(stream.partial().raw, json!({"output":{"message":{"content":[{"text":"valid prefix"}]}}}));
+        assert!(matches!(stream.finish().await, Err(ProviderError::Truncated)));
+    }
+}

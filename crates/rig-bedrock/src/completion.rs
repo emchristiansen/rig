@@ -459,11 +459,17 @@ impl Transport<Converse> for BedrockRuntime {
             }
             let frames = async_stream::stream! {
                 let mut events = Events::default();
-                while let Some(chunk) = capture::chunk(&mut body).await {
+                'chunks: while let Some(chunk) = capture::chunk(&mut body).await {
                     match chunk {
                         Ok(chunk) => {
                             for event in events.read(&chunk) {
-                                yield Ok(ConverseFrame::Event(event));
+                                match event {
+                                    Ok(event) => yield Ok(ConverseFrame::Event(event)),
+                                    Err(error) => {
+                                        yield Err(error);
+                                        break 'chunks;
+                                    }
+                                }
                             }
                         }
                         Err(error) => {

@@ -100,22 +100,50 @@ impl Intercept for Capture {
 #[derive(Default)]
 pub(crate) struct Events {
     buffer: BytesMut,
-    decoder: MessageFrameDecoder,
+    failed: bool,
 }
 
 impl Events {
-    /// The JSON of each event or exception `bytes` completes, as
-    /// `{"<type>": <payload>}`.
-    pub(crate) fn read(&mut self, bytes: &[u8]) -> Vec<Value> {
+    /// The JSON of each event or exception `bytes` completes, followed by
+    /// one fatal error if its JSON or event-stream framing is malformed.
+    pub(crate) fn read(&mut self, bytes: &[u8]) -> Vec<Result<Value, ProviderError>> {
+        if self.failed {
+            return Vec::new();
+        }
         self.buffer.extend_from_slice(bytes);
         let mut events = Vec::new();
         loop {
-            match self.decoder.decode_frame(&mut self.buffer) {
-                Ok(DecodedFrame::Complete(message)) => events.extend(event(&message)),
+            // Probe borrowed bytes so an incomplete or malformed frame keeps
+            // its original prelude and payload until validation succeeds.
+            let mut view = self.buffer.as_ref();
+            match MessageFrameDecoder::default().decode_frame(&mut view) {
+                Ok(DecodedFrame::Complete(message)) => {
+                    let consumed = self.buffer.len() - view.len();
+                    match event(&message) {
+                        Ok(value) => {
+                            if let Some(value) = value {
+                                events.push(Ok(value));
+                            }
+                            let _ = self.buffer.split_to(consumed);
+                        }
+                        Err(error) => {
+                            events.push(Err(ProviderError::Response(format!(
+                                "Bedrock Converse event-stream JSON payload failed: {error}; payload_bytes={:?}; unvalidated_wire_bytes={:?}",
+                                message.payload().as_ref(),
+                                self.buffer.as_ref(),
+                            ))));
+                            self.failed = true;
+                            break;
+                        }
+                    }
+                }
                 Ok(DecodedFrame::Incomplete) => break,
                 Err(error) => {
-                    tracing::warn!(%error, "Converse sent bytes that are not an event stream");
-                    self.buffer.clear();
+                    events.push(Err(ProviderError::Response(format!(
+                        "Bedrock Converse event-stream framing failed: {error}; unvalidated_wire_bytes={:?}",
+                        self.buffer.as_ref(),
+                    ))));
+                    self.failed = true;
                     break;
                 }
             }
@@ -124,7 +152,7 @@ impl Events {
     }
 }
 
-fn event(message: &Message) -> Option<Value> {
+fn event(message: &Message) -> Result<Option<Value>, serde_json::Error> {
     let header = |name: &str| {
         message
             .headers()
@@ -133,13 +161,19 @@ fn event(message: &Message) -> Option<Value> {
             .and_then(|header| header.value().as_string().ok())
             .map(|value| value.as_str().to_owned())
     };
-    let kind = match header(":message-type")?.as_str() {
-        "event" => header(":event-type")?,
-        "exception" => header(":exception-type")?,
-        _ => return None,
+    let Some(message_type) = header(":message-type") else {
+        return Ok(None);
     };
-    let payload = serde_json::from_slice(message.payload()).unwrap_or(Value::Null);
-    Some(Value::Object(serde_json::Map::from_iter([(kind, payload)])))
+    let kind = match message_type.as_str() {
+        "event" => header(":event-type"),
+        "exception" => header(":exception-type"),
+        _ => return Ok(None),
+    };
+    let Some(kind) = kind else {
+        return Ok(None);
+    };
+    let payload = serde_json::from_slice(message.payload())?;
+    Ok(Some(Value::Object(serde_json::Map::from_iter([(kind, payload)]))))
 }
 
 #[cfg(test)]
