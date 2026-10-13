@@ -770,3 +770,5 @@ fn interactions_refuses_namespaced_and_custom_calls() {
         }
     }
 }
+
+mod g89_pair_request_tests;

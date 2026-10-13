@@ -945,3 +945,5 @@ fn default_document_requests_keep_native_structured_documents() {
         }
     }
 }
+
+mod g89_pair_request_tests;
