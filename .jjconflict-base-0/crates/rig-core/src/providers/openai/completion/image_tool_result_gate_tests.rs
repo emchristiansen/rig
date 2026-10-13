@@ -15,40 +15,34 @@
 
 use super::*;
 use crate::message;
+use crate::providers::openai::wire::{Chat, OpenAIConfig, Quirks, OPENAI};
+use crate::wire::{Mode, Wire};
 
 fn params(
     supports_image_tool_results: bool,
     content: Vec<message::ToolResultContent>,
-) -> OpenAIRequestParams {
-    OpenAIRequestParams {
-        reasoning_details: false,
-        model: "test-model".to_string(),
-        request: crate::completion::CompletionRequest {
-            model: None,
-            chat_history: vec![message::Message::User {
-                content: vec![message::UserContent::ToolResult(message::ToolResult {
-                    call: message::ToolCallId::new_or_minted("call_1", 0),
-                    provider: message::ProviderCallId::new("call_1"),
-                    name: "view_file".to_string(),
-                    content,
-                })],
-            }],
-            documents: vec![],
-            tools: vec![],
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        },
-        strict_tools: false,
-        tool_result_array_content: false,
+) -> (Chat, crate::completion::CompletionRequest) {
+    let dialect = OPENAI.with_quirks(Quirks {
         supports_image_tool_results,
-        supports_tools: true,
-        supports_response_format: true,
-        response_format_with_tools: false,
-    }
+        ..Quirks::openai()
+    });
+    let wire = OpenAIConfig::new("test-key")
+        .with_dialect(&dialect)
+        .chat("test-model");
+    let request = crate::completion::CompletionRequest::new(message::Message::User {
+        content: vec![message::UserContent::tool_result(
+            message::CallId::from_wire("call_1"),
+            message::ToolName::new("view_file").expect("the fixture tool name is nonempty"),
+            content,
+        )],
+    });
+    (wire, request)
+}
+
+fn encode(
+    (wire, request): (Chat, crate::completion::CompletionRequest),
+) -> Result<crate::wire::Encoded, crate::error::EncodeError> {
+    wire.encode(request, Mode::Unary)
 }
 
 fn image() -> message::ToolResultContent {
@@ -63,7 +57,7 @@ fn image() -> message::ToolResultContent {
 /// flattening it away or letting the provider answer.
 #[test]
 fn an_image_tool_result_is_refused_when_the_provider_cannot_carry_it() {
-    let error = CompletionRequest::try_from(params(false, vec![image()]))
+    let error = encode(params(false, vec![image()]))
         .expect_err("a provider without the capability must refuse");
     let message = error.to_string();
     assert!(
@@ -79,9 +73,9 @@ fn an_image_tool_result_is_refused_when_the_provider_cannot_carry_it() {
 /// The same request is built when the provider does carry it.
 #[test]
 fn an_image_tool_result_is_sent_when_the_provider_supports_it() {
-    let request = CompletionRequest::try_from(params(true, vec![image()]))
+    let request = encode(params(true, vec![image()]))
         .expect("a capable provider should accept the image");
-    let wire = serde_json::to_value(&request.messages).expect("serialize");
+    let wire = crate::test_utils::json_body(&request.request)["messages"].clone();
     let content = &wire[0]["content"];
     assert_eq!(content[0]["type"], "image_url", "{wire}");
     assert!(
@@ -96,8 +90,8 @@ fn an_image_tool_result_is_sent_when_the_provider_supports_it() {
 /// because a string has nowhere to put it.
 #[test]
 fn an_image_forces_array_content_even_when_flattening_is_configured() {
-    let request = CompletionRequest::try_from(params(true, vec![image()])).expect("build");
-    let wire = serde_json::to_value(&request.messages).expect("serialize");
+    let request = encode(params(true, vec![image()])).expect("build");
+    let wire = crate::test_utils::json_body(&request.request)["messages"].clone();
     assert!(
         wire[0]["content"].is_array(),
         "image results must stay an array: {wire}"
@@ -108,12 +102,12 @@ fn an_image_forces_array_content_even_when_flattening_is_configured() {
 #[test]
 fn a_text_tool_result_is_unaffected_by_the_gate() {
     for supports in [false, true] {
-        let request = CompletionRequest::try_from(params(
+        let request = encode(params(
             supports,
             vec![message::ToolResultContent::text("ok")],
         ))
         .unwrap_or_else(|e| panic!("text results must always build (supports={supports}): {e}"));
-        let wire = serde_json::to_value(&request.messages).expect("serialize");
+        let wire = crate::test_utils::json_body(&request.request)["messages"].clone();
         assert_eq!(wire[0]["content"], "ok", "supports={supports}: {wire}");
     }
 }
@@ -122,7 +116,7 @@ fn a_text_tool_result_is_unaffected_by_the_gate() {
 /// image half.
 #[test]
 fn a_mixed_text_and_image_result_is_refused_rather_than_partly_sent() {
-    let error = CompletionRequest::try_from(params(
+    let error = encode(params(
         false,
         vec![
             message::ToolResultContent::text("here is the file"),
@@ -149,4 +143,22 @@ fn an_image_part_round_trips_through_serde() {
     assert!(content.has_image());
     let wire = serde_json::to_value(&content).expect("serialize");
     assert_eq!(wire[0]["type"], "image_url");
+}
+
+/// The adopted direct image gate also covers the shared header encoder.
+#[test]
+fn the_adopted_direct_image_gate_also_refuses_encode_with_headers() {
+    let (wire, request) = params(false, vec![image()]);
+    let error = wire
+        .encode_with_headers(request, Mode::Unary, OpenAIConfig::completion_headers)
+        .expect_err("a provider without the capability must refuse");
+    let message = error.to_string();
+    assert!(
+        message.contains("does not accept an image in a tool result"),
+        "{message}"
+    );
+    assert!(
+        message.contains("Responses API"),
+        "the refusal should name the surface that works: {message}"
+    );
 }

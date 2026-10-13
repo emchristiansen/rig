@@ -149,7 +149,24 @@ fn user_part(part: &UserContent) -> Result<Value, EncodeError> {
 /// A result as the `tool` message that answers its call: its text joined
 /// into one string, or its parts as an array when the wire asks for one or
 /// it holds an image, which has no string form.
-fn tool_message(result: &ToolResult, wire_id: &str, array: bool) -> Result<Value, EncodeError> {
+fn tool_message(
+    result: &ToolResult,
+    wire_id: &str,
+    array: bool,
+    supports_image_tool_results: bool,
+) -> Result<Value, EncodeError> {
+    if !supports_image_tool_results
+        && result.content.iter().any(|part| matches!(part, ToolResultContent::Image(_)))
+    {
+        return Err(EncodeError::request(concat!(
+            "this provider does not accept an image in a tool result. ",
+            "Official OpenAI refuses it on Chat Completions (and the GPT-5 ",
+            "family accepts the request while ignoring the image); use the ",
+            "Responses API, which carries images in `function_call_output`, ",
+            "or a server that sets `SUPPORTS_IMAGE_TOOL_RESULTS` ",
+            "(llama.cpp does)",
+        )));
+    }
     let parts = result
         .content
         .iter()
@@ -474,7 +491,12 @@ impl Chat {
                             let wire_id = ids
                                 .spell(message_index, content_index)
                                 .map_err(EncodeError::request)?;
-                            messages.push(tool_message(result, &wire_id, array)?);
+                            messages.push(tool_message(
+                                result,
+                                &wire_id,
+                                array,
+                                self.provider.dialect.quirks.supports_image_tool_results,
+                            )?);
                         } else {
                             parts.push(user_part(part)?);
                         }

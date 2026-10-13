@@ -331,20 +331,33 @@ fn test_deserialize_message_model() {
     }
 }
 
-// G2: future string labels retain their exact private reader values.
+// G16: unknown classification is private; exact labels stay in real wire evidence.
 #[test]
 fn future_metadata_labels_keep_their_exact_string_values() {
-    let usage: Usage = serde_json::from_value(json!({
-        "trafficType": "ON_DEMAND_PRIORITY",
-        "promptTokensDetails": [{"modality": "HOLOGRAM", "tokenCount": 3}],
-        "promptTokenCount": 3, "candidatesTokenCount": 2, "totalTokenCount": 5
-    }))
-    .expect("future metadata labels do not reject valid usage");
-    assert!(matches!(usage.traffic_type,
-        Some(Traffic::Unknown(ref label)) if label == "ON_DEMAND_PRIORITY"));
+    use crate::wire::{Mode, WireFrame};
+    let body = json!({
+        "candidates": [{"content": {"parts": [{"text": "answer"}]}, "finishReason": "STOP"}],
+        "usageMetadata": {
+            "trafficType": "ON_DEMAND_PRIORITY",
+            "promptTokensDetails": [{"modality": "HOLOGRAM", "tokenCount": 3}],
+            "promptTokenCount": 3, "candidatesTokenCount": 2, "totalTokenCount": 5
+        }
+    });
+    let wire = crate::providers::gemini::GeminiConfig::new("test-key")
+        .completion("gemini-2.5-flash");
+    let response = crate::test_utils::history::decode(
+        &wire,
+        Mode::Unary,
+        [WireFrame::Text(body.to_string())],
+    ).expect("future metadata labels do not reject the real reply");
+    let raw_usage = &response.raw["usageMetadata"];
+    assert_eq!(raw_usage["trafficType"], "ON_DEMAND_PRIORITY");
+    assert_eq!(raw_usage["promptTokensDetails"][0]["modality"], "HOLOGRAM");
+    let usage: Usage = serde_json::from_value(raw_usage.clone())
+        .expect("future metadata labels do not reject valid usage");
+    assert!(matches!(usage.traffic_type, Some(Traffic::Unknown(()))));
     let detail = &usage.prompt_tokens_details.as_ref().expect("details")[0];
-    assert!(matches!(detail.modality,
-        Modality::Unknown(ref label) if label == "HOLOGRAM"));
+    assert!(matches!(detail.modality, Modality::Unknown(())));
     assert_eq!(detail.token_count, 3);
     assert_eq!(
         (

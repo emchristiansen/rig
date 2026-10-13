@@ -220,12 +220,20 @@ struct ModalityCount {
     token_count: i32,
 }
 
+// Unknown metadata labels are validated as strings; the decoder keeps their
+// exact spelling in the original JSON rather than storing an unread copy.
+fn unknown_metadata_label<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(), D::Error> {
+    String::deserialize(deserializer).map(|_| ())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum Modality {
     ModalityUnspecified, Text, Image, Video, Audio, Document,
     #[serde(untagged)]
-    Unknown(String),
+    Unknown(#[serde(deserialize_with = "unknown_metadata_label")] ()),
 }
 
 #[derive(Deserialize)]
@@ -233,7 +241,7 @@ enum Modality {
 enum Traffic {
     TrafficTypeUnspecified, OnDemand, ProvisionedThroughput,
     #[serde(untagged)]
-    Unknown(String),
+    Unknown(#[serde(deserialize_with = "unknown_metadata_label")] ()),
 }
 
 #[derive(Deserialize)]

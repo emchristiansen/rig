@@ -452,6 +452,7 @@ pub struct ToolResult {
 }
 
 /// A nameless result had no unique preceding outstanding call.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub(crate) enum ToolResultNameError {
     /// No preceding outstanding call matches the typed identity and kind.
@@ -474,6 +475,7 @@ impl ToolResult {
     /// Missing and ambiguous matches refuse before a canonical result exists.
     /// The incoming result's error flag is retained without a success default.
     /// This creates no provider identity, Native item or unresolved ToolName.
+    #[cfg(test)]
     pub(crate) fn from_history(
         prefix: &[Message],
         call: CallId,
