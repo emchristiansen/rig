@@ -603,12 +603,12 @@ fn a_result_copies_its_decoded_local_call_id() {
     assert_eq!(result.content, vec![ToolResultContent::text("2")]);
 }
 
-/// G41 emits the current local identity on both legs, without provider provenance.
+/// G41 emits one planned local alias on both legs, without provider provenance.
 #[test]
 fn local_call_ids_are_emitted_on_both_wire_legs() {
     let response = native_calls(json!([{"function": {"name": "add", "arguments": {"x": 1}}}]));
     let call = response.tool_calls().next().expect("the call");
-    let id = call.id.wire().into_owned();
+    let local_id = call.id.wire().into_owned();
     let result = call.result(vec![ToolResultContent::text("2")]);
     assert!(call.id.is_local());
     assert_eq!(call.id.provider(), None);
@@ -622,6 +622,11 @@ fn local_call_ids_are_emitted_on_both_wire_legs() {
         Message::user("next"),
     ];
     let messages = body(request)["messages"].clone();
+    let id = "tool-0";
+    assert_ne!(
+        id, local_id,
+        "the planned wire alias is distinct from local custody"
+    );
     assert_eq!(messages[1]["tool_calls"][0]["id"], id);
     assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "add");
     assert_eq!(
