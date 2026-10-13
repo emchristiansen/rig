@@ -36,10 +36,15 @@ fn an_unparseable_restatement_is_not_reemitted_over_streamed_fragments(){
 
 // F streaming/tests.rs:1563
 #[test]
-fn a_fragmentless_unparseable_restatement_still_reaches_the_buffer(){
-    let driven=drive(&[malformed_function_call_done("incomplete",1)]);
+fn a_fragmentless_unparseable_restatement_keeps_raw_and_is_discarded_as_incomplete(){
+    // G186: this exact incomplete fixture is discarded, not a live Arguments event.
+    let frame=malformed_function_call_done("incomplete",1);
+    let driven=drive(&[frame.clone()]);
     assert!(driven.errors.is_empty());
-    assert_eq!(driven.items.iter().filter(|item|matches!(item,Item::Event(StreamEvent::Arguments {..}))).count(),1,"the raw bytes reach the real argument buffer once");
+    assert_eq!(driven.items.iter().filter(|item|matches!(item,Item::Event(StreamEvent::Arguments {..}))).count(),0,"restatement does not fabricate a streamed fragment");
+    assert_eq!(driven.items.iter().filter(|item|matches!(item,Item::Event(StreamEvent::Discard {reason:crate::streaming::DiscardReason::Incomplete,..}))).count(),1);
+    assert!(!driven.items.iter().any(|item|matches!(item,Item::Event(StreamEvent::End {content:AssistantContent::ToolCall(_),..}))));
+    assert_eq!(driven.response.raw["output"][0],frame["item"]);
 }
 
 // F streaming/tests.rs:4456; A29 replaces implicit closure with one real close.
