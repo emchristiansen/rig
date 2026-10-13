@@ -579,6 +579,7 @@ fn whole(out: &mut Out<'_, Completion>, content: AssistantContent) -> Result<(),
                 Block::Call {
                     id: call.id,
                     name: call.function.name,
+                    namespace: call.function.namespace,
                 },
                 arguments,
             )
