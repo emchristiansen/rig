@@ -76,17 +76,18 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() {
 
     let call = |call_id: &str, name: &str| {
         let function = ToolFunction::new(
-            crate::message::ToolName::new(name.to_owned()).expect("tool name"),
+            message::ToolName::new(name).expect("tool name"),
             json!({}),
         );
+        let tool_call = ToolCall::new(message::CallId::from_wire(call_id), function);
         Message::Assistant(message::AssistantMessage::new(vec![
-            AssistantContent::ToolCall(ToolCall::from_wire(call_id, function)),
+            AssistantContent::ToolCall(tool_call),
         ]))
     };
     let result = |call_id: &str, name: &str| Message::User {
         content: vec![message::UserContent::tool_result(
-            crate::message::CallId::from_wire(call_id),
-            crate::message::ToolName::new(name).expect("tool name"),
+            message::CallId::from_wire(call_id),
+            message::ToolName::new(name).expect("tool name"),
             vec![ToolResultContent::text("out")],
         )],
     };
@@ -96,61 +97,89 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() {
         // hook renamed the call: `sum` ran, not `add`).
         call("call_1", "sum"),
         result("call_1", "sum"),
-        // An OpenAI-shaped correlator travels as the call id while the
-        // required `name` field carries the executed name: `call_abc` must
-        // never reach the wire as a name.
+        // An OpenAI-shaped correlator travels as the call id while
+        // the required `name` field carries the executed name —
+        // `call_abc` must never reach the wire as a name.
         call("call_abc", "get_weather"),
         result("call_abc", "get_weather"),
+        // G9 omits only the independent `fc_1` item ID; this
+        // canonical call retains its correlator and executed name.
         call("call_9", "get_time"),
         result("call_9", "get_time"),
     ]);
 
-    let body = body_of(request);
-    let results: Vec<&Value> = body["input"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|step| step["type"] == "function_result")
-        .collect();
-    let names: Vec<&str> = results
-        .iter()
-        .filter_map(|step| step["name"].as_str())
-        .collect();
-    let call_ids: Vec<&str> = results
-        .iter()
-        .filter_map(|step| step["call_id"].as_str())
-        .collect();
+    let input = body_of(request)["input"].clone();
+    let mut names = Vec::new();
+    let mut call_ids = Vec::new();
+    fn collect(value: &serde_json::Value, names: &mut Vec<String>, call_ids: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("type").and_then(|t| t.as_str()) == Some("function_result") {
+                    if let Some(name) = map.get("name").and_then(|n| n.as_str()) {
+                        names.push(name.to_owned());
+                    }
+                    if let Some(call_id) = map.get("call_id").and_then(|c| c.as_str()) {
+                        call_ids.push(call_id.to_owned());
+                    }
+                }
+                for nested in map.values() {
+                    collect(nested, names, call_ids);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for nested in items {
+                    collect(nested, names, call_ids);
+                }
+            }
+            _ => {}
+        }
+    }
+    collect(&input, &mut names, &mut call_ids);
 
-    assert_eq!(names, ["sum", "get_weather", "get_time"]);
-    assert_eq!(call_ids, ["call_1", "call_abc", "call_9"]);
+    assert_eq!(
+        names,
+        vec![
+            "sum".to_owned(),
+            "get_weather".to_owned(),
+            "get_time".to_owned()
+        ]
+    );
+    assert_eq!(
+        call_ids,
+        vec![
+            "call_1".to_owned(),
+            "call_abc".to_owned(),
+            "call_9".to_owned()
+        ]
+    );
 }
 
 #[test]
 fn test_tool_result_without_provider_id_sends_minted_call_id() {
-    // A call id is always available: the wire gets the provider-issued id
-    // when one exists, else the spelling of the id rig issued.
+    // A standalone local result uses Interactions' existing occurrence plan.
     let call = message::CallId::from_wire("");
     let history = vec![Message::from(message::UserContent::ToolResult(
         message::ToolResult {
             is_error: false,
             call: call.clone(),
             name: crate::message::ToolName::new("get_weather".to_string()).expect("tool name"),
+            answers: crate::message::AnsweredToolCall::Function,
             content: vec![message::ToolResultContent::text("ok")],
         },
     ))];
     let wire =
         crate::providers::gemini::GeminiConfig::new("test-key").interactions("gemini-2.5-flash");
-    let spelled = crate::providers::internal::wire_ids::WireIds::for_target(
+    let spelled = crate::providers::internal::wire_ids::WireIds::for_interactions(
         &history,
         &wire,
         "gemini-2.5-flash",
-    );
+    ).expect("the standalone result has a planned spelling");
     let body = body_of(CompletionRequest::from(history));
 
     let result = function_result(&body);
     let sent = result["call_id"].as_str().expect("a call id is sent");
     assert!(!sent.is_empty());
-    assert_eq!(Some(sent), spelled.of(&call));
+    assert_eq!(Some(sent), spelled.of(0, 0));
     assert_eq!(result["name"], "get_weather");
 }
 
@@ -183,11 +212,70 @@ fn test_tool_result_preserves_text_and_json_types() {
 }
 
 #[test]
+fn test_tool_result_text_and_json_singletons_remain_scalar() {
+    let cases = [
+        (
+            message::ToolResultContent::text(r#"{"status":"literal"}"#),
+            json!("{\"status\":\"literal\"}"),
+        ),
+        (
+            message::ToolResultContent::json(json!({ "status": "structured" })),
+            json!({ "status": "structured" }),
+        ),
+        (
+            message::ToolResultContent::json(json!("structured string")),
+            json!("structured string"),
+        ),
+        // A scalar is wrapped as the generate wire wraps it: as a text
+        // block it would be a multimodal response, which the models refuse.
+        (
+            message::ToolResultContent::json(json!(42)),
+            json!({ "result": 42 }),
+        ),
+        (
+            message::ToolResultContent::json(json!([1, 2])),
+            json!({ "result": [1, 2] }),
+        ),
+    ];
+
+    for (tool_content, expected) in cases {
+        let body = body_of(tool_result_request(vec![tool_content]));
+        let result = function_result(&body);
+        assert_eq!(result["type"].as_str(), Some("function_result"));
+        assert_eq!(result.get("result"), Some(&expected));
+    }
+}
+
+#[test]
+fn test_tool_result_rich_singletons_use_tagged_content() {
+    let cases = [(
+        message::ToolResultContent::image_base64(
+            "image-data",
+            Some(message::ImageMediaType::PNG),
+            None,
+        ),
+        json!([{
+            "type": "image",
+            "data": "image-data",
+            "mime_type": "image/png"
+        }]),
+    )];
+
+    for (tool_content, expected) in cases {
+        let body = body_of(tool_result_request(vec![tool_content]));
+        let result = function_result(&body);
+        assert_eq!(result["type"].as_str(), Some("function_result"));
+        assert_eq!(result.get("result"), Some(&expected));
+    }
+}
+
+#[test]
 fn test_tool_result_images_and_text_serialize_as_ordered_tagged_content() {
     let tool_result = message::UserContent::ToolResult(message::ToolResult {
         is_error: false,
         call: crate::message::CallId::from_wire("call-image"),
         name: crate::message::ToolName::new("render".to_string()).expect("tool name"),
+        answers: crate::message::AnsweredToolCall::Function,
         content: vec![
             message::ToolResultContent::image_base64(
                 "first-image",
@@ -243,11 +331,10 @@ fn test_tool_result_images_and_text_serialize_as_ordered_tagged_content() {
 #[test]
 fn a_rebuilt_thought_tags_its_summary() {
     let wire = interactions_wire();
-    let ids = WireIds::for_target(&[], &wire, &wire.model);
     let step = assistant_step(
         &message::AssistantContent::reasoning("add them"),
         &wire,
-        &ids,
+        None,
     )
     .expect("reasoning converts");
     assert_eq!(
@@ -414,8 +501,20 @@ fn shape(response: &crate::completion::CompletionResponse) -> (Vec<&'static str>
             message::AssistantContent::Text(_) => "text",
             message::AssistantContent::Reasoning(_) => "reasoning",
             message::AssistantContent::ToolCall(_) => "tool_call",
+            message::AssistantContent::CustomToolCall(_) => "custom_tool_call",
             message::AssistantContent::Image(_) => "image",
+            message::AssistantContent::ProviderItem(_) => "provider_item",
             message::AssistantContent::Opaque(_) => "opaque",
+            message::AssistantContent::CarriedText(text) => {
+                if text.known_text_projection().is_some() { "text" } else { "carried_text" }
+            }
+            message::AssistantContent::CarriedReasoning(reasoning) => {
+                if !reasoning.content.is_empty() && !reasoning.has_opaque_parts() {
+                    "reasoning"
+                } else {
+                    "carried_reasoning"
+                }
+            }
         })
         .collect();
     let signature = response.choice.iter().find_map(|item| match item {
@@ -424,6 +523,12 @@ fn shape(response: &crate::completion::CompletionResponse) -> (Vec<&'static str>
             .as_ref()
             .and_then(|native| native.item["signature"].as_str())
             .map(str::to_owned),
+        message::AssistantContent::CarriedReasoning(reasoning) => {
+            reasoning.content.iter().find_map(|part| match part {
+                message::CarriedReasoningPart::Text { signature, .. } => signature.clone(),
+                _ => None,
+            })
+        }
         _ => None,
     });
     (kinds, signature)
@@ -605,4 +710,63 @@ fn a_string_source_is_the_same_inline_data_on_both_gemini_wires() -> anyhow::Res
         "Interactions sends {interactions:?} where GenerateContent sends {generate:?}"
     );
     Ok(())
+}
+
+#[test]
+fn interactions_refuses_namespaced_and_custom_calls() {
+    use message::{AssistantContent, ToolCall, ToolFunction, ToolName, UnrepresentableToolCall};
+    use std::error::Error;
+
+    // G11 omits only the independent provider item IDs `fc_1` and `ctc_1`.
+    let turns = [
+        (
+            Message::from(AssistantContent::ToolCall(
+                ToolCall::from_wire(
+                    "call_1",
+                    ToolFunction::new(ToolName::new("add").expect("tool name"), json!({"x": 1})),
+                ).with_namespace(Some("math".to_owned())),
+            )),
+            "namespace",
+        ),
+        (
+            Message::from(AssistantContent::custom_tool_call(
+                "call_2",
+                ToolName::new("apply_patch").expect("tool name"),
+                None,
+                r#"{"x": 1}"#,
+            )),
+            "custom",
+        ),
+    ];
+    let wire = interactions_wire();
+    for (turn, kind) in turns {
+        let message::Message::Assistant(turn) = turn else {
+            unreachable!()
+        };
+        for item in turn.content {
+            let error: ProviderError = assistant_step(&item, &wire, None)
+                .expect_err("refused, not dropped")
+                .into();
+            assert!(matches!(&error, ProviderError::Request(_)));
+            let refusal = error
+                .source()
+                .and_then(|source| source.downcast_ref::<UnrepresentableToolCall>())
+                .expect("the request failure retains the typed refusal");
+            match (kind, refusal) {
+                (
+                    "namespace",
+                    UnrepresentableToolCall::Namespace { wire, name, namespace },
+                ) => {
+                    assert_eq!(
+                        (*wire, name.as_str(), namespace.as_str()),
+                        ("Gemini Interactions", "add", "math"),
+                    );
+                }
+                ("custom", UnrepresentableToolCall::CustomCall { wire, name }) => {
+                    assert_eq!((*wire, name.as_str()), ("Gemini Interactions", "apply_patch"));
+                }
+                _ => panic!("expected the {kind} refusal on Gemini Interactions, got {refusal:?}"),
+            }
+        }
+    }
 }
