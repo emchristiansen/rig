@@ -2,7 +2,7 @@
 
 use super::helpers::*;
 use crate::error::ProviderError;
-use crate::message::{AssistantContent, CarriedTextContent};
+use crate::message::AssistantContent;
 use crate::streaming::{Item, PartKind, StreamEvent};
 use serde_json::json;
 

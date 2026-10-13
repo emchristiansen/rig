@@ -277,7 +277,7 @@ fn every_message_relocation_is_validated_before_any_state_or_id_moves() {
                     let WireEvent::Known(event) = decoder.classify(WireFrame::Text(frame.to_string())) else {
                         panic!("actual valid prefix frames");
                     };
-                    decoder.decode(event, reply.out())?;
+                    let _ = decoder.decode(event, reply.out())?;
                 }
                 let messages = |decoder: &ResponsesDecoder| decoder.messages.iter()
                     .map(|(slot, state)| (*slot, state.id.clone(), state.phase.clone(),
