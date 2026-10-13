@@ -69,6 +69,7 @@ impl Wire for GenerateContent {
     ) -> Result<GenerateContentRequest, EncodeError> {
         let model = request.model.clone().unwrap_or_else(|| self.model.clone());
         let body = rest::request_body(&request, self, &model, None, |body| {
+            strip_source_user_image_data_uris(&request, body);
             body.insert("model".to_owned(), format!("models/{model}").into());
         })?;
         Ok(crate::rest::from_rest(serde_json::to_value(&body)?)?)
@@ -79,6 +80,58 @@ impl Wire for GenerateContent {
     }
 }
 
+// The shared base emits one part per user content, in order, even when it
+// separates function results into their own contents. Follow that source order
+// before the raw merge so only canonical user images receive this legacy strip.
+fn strip_source_user_image_data_uris(
+    request: &CompletionRequest,
+    body: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    use message::{DocumentSourceKind, Message, UserContent};
+    let mut source = request
+        .chat_history
+        .iter()
+        .filter_map(|message| match message {
+            Message::User { content } => Some(content.iter()),
+            Message::System { .. } | Message::Assistant(_) => None,
+        })
+        .flatten();
+    let Some(contents) = body
+        .get_mut("contents")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for content in contents {
+        if content.get("role").and_then(serde_json::Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(parts) = content
+            .get_mut("parts")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for part in parts {
+            let Some(UserContent::Image(image)) = source.next() else {
+                continue;
+            };
+            let DocumentSourceKind::Base64(data) = &image.data else {
+                continue;
+            };
+            let Some((_, data)) = data
+                .trim()
+                .strip_prefix("data:")
+                .and_then(|rest| rest.split_once(','))
+            else {
+                continue;
+            };
+            if let Some(encoded) = part.pointer_mut("/inlineData/data") {
+                *encoded = serde_json::Value::String(data.to_owned());
+            }
+        }
+    }
+}
 impl rig_core::completion::ReplayTarget for GenerateContent {
     /// The GenerateContent mapping, for what the gRPC request declares.
     fn map_options(
@@ -220,3 +273,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod schema_tests;
+
+#[cfg(test)]
+mod transport_tests;
