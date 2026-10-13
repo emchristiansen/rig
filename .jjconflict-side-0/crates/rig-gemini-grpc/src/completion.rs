@@ -913,3 +913,6 @@ mod reasoning_scope_tests;
 
 #[cfg(test)]
 mod reply_tests;
+
+#[cfg(test)]
+mod refusal_tests;
