@@ -543,13 +543,12 @@ fn decoded_native_call_replay_uses_the_planned_occurrence_and_keeps_other_bytes(
     }
 }
 
-fn never_done_function_response(arguments: &str) -> crate::completion::CompletionResponse {
-    use crate::wire::WireFrame;
+fn never_done_function_frames(arguments: &str) -> [Value; 4] {
     let response = |status| json!({
         "id":"resp_arguments", "object":"response", "created_at":1,
         "status":status, "model":"gpt-5.4", "output":[]
     });
-    let frames = [
+    [
         json!({"type":"response.created","sequence_number":0,"response":response("in_progress")}),
         json!({"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{
             "type":"function_call","id":"fc_arguments","call_id":"call_arguments",
@@ -558,12 +557,54 @@ fn never_done_function_response(arguments: &str) -> crate::completion::Completio
         json!({"type":"response.function_call_arguments.delta","sequence_number":2,
             "output_index":0,"item_id":"fc_arguments","delta":arguments}),
         json!({"type":"response.completed","sequence_number":3,"response":response("completed")}),
-    ];
+    ]
+}
+
+fn never_done_function_stream(arguments: &str) -> crate::streaming::CompletionStream {
+    let sse: String = never_done_function_frames(arguments).iter()
+        .map(|frame| format!("data: {frame}\n\n")).collect();
+    crate::driver::Model::new(wire(), crate::test_utils::MockStreamingClient {
+        sse_bytes: sse.into(),
+    }).stream(CompletionRequest::new("restate")).expect("the actual original-mode stream opens")
+}
+
+fn completed_function_response(arguments: &str) -> crate::completion::CompletionResponse {
+    use crate::wire::WireFrame;
+    let mut frames = never_done_function_frames(arguments).to_vec();
+    let mut item = frames[1]["item"].clone();
+    item["arguments"] = json!(arguments);
+    item["status"] = json!("completed");
+    frames.insert(3, json!({"type":"response.output_item.done","sequence_number":3,
+        "output_index":0,"item":item}));
     crate::test_utils::history::decode(
-        &wire(),
-        Mode::Streaming,
+        &wire(), Mode::Streaming,
         frames.into_iter().map(|frame| WireFrame::Text(frame.to_string())),
-    ).expect("well-formed never-done argument bytes decode at the genuine terminal")
+    ).expect("the separately completed fixture decodes through the original route")
+}
+
+fn assert_failed_unfinished_function(response: &crate::completion::CompletionResponse) {
+    let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else {
+        panic!("one canonical unfinished function call");
+    };
+    assert_eq!(call.id.provider().expect("original provider ID").as_str(), "call_arguments");
+    assert_eq!(call.function.name.as_str(), "function");
+    assert_eq!(call.function.namespace, None);
+    assert_eq!(response.raw["output"][0]["id"], "fc_arguments");
+    assert_eq!(response.raw["output"][0]["call_id"], "call_arguments");
+    assert_eq!(response.raw["output"][0]["name"], "function");
+    assert!(response.raw["output"][0].get("namespace").is_none());
+    assert!(call.native.is_none());
+    let error = "the provider ended the reply with a tool call it never finished";
+    assert_eq!(response.error.as_deref(), Some(error));
+    assert_eq!(response.stop(), crate::message::StopReason::Error(error.to_owned()));
+    let Message::Assistant(turn) = response.message().expect("failed assistant history") else {
+        panic!("assistant failure history");
+    };
+    assert_eq!(turn.stop, Some(crate::message::StopReason::Error(error.to_owned())));
+    assert_eq!(crate::message::turn_failure(&response.choice, turn.stop.as_ref(),
+        response.finish_reason().as_ref()).as_deref(), Some(
+            "the turn failed, so none of its tool calls ran: the provider ended the reply with a tool call it never finished"
+        ));
 }
 
 fn prepared_function_rebuild(
@@ -586,15 +627,39 @@ fn prepared_function_rebuild(
     Completion::prepare(request, &wire().describe()).expect("prepare actual different-model history")
 }
 
-#[test]
-fn never_done_non_object_function_arguments_use_fork_spelling_after_model_change() {
+#[tokio::test]
+async fn never_done_non_object_arguments_keep_fork_spelling_in_failed_unfinished_inspection() {
+    use futures::StreamExt;
     for (arguments, expected) in [
         ("17", "17"),
         (" [ 1, {\"x\": 2}, null ] ", r#"[1,{"x":2},null]"#),
         (r#""\u0061""#, r#""a""#),
         (r#""{\"x\":1}""#, r#""{\"x\":1}""#),
     ] {
-        let response = never_done_function_response(arguments);
+        let mut stream = never_done_function_stream(arguments);
+        while let Some(item) = stream.next().await {
+            let item = item.expect("valid never-done arguments remain inspection data");
+            assert!(!matches!(item, crate::streaming::Item::Event(
+                crate::streaming::StreamEvent::Discard { .. }
+            )));
+        }
+        let response = stream.finish().await.expect("the actual failed folded response");
+        let call = response.tool_calls().next().expect("decoded scalar/array/string call");
+        assert!(call.function.arguments.is_empty());
+        assert_eq!(call.function.invalid_arguments.as_deref(), Some(expected));
+        assert_failed_unfinished_function(&response);
+    }
+}
+
+#[test]
+fn completed_non_object_function_arguments_use_fork_spelling_after_model_change() {
+    for (arguments, expected) in [
+        ("17", "17"),
+        (" [ 1, {\"x\": 2}, null ] ", r#"[1,{"x":2},null]"#),
+        (r#""\u0061""#, r#""a""#),
+        (r#""{\"x\":1}""#, r#""{\"x\":1}""#),
+    ] {
+        let response = completed_function_response(arguments);
         let call = response.tool_calls().next().expect("decoded scalar/array/string call");
         assert!(call.function.arguments.is_empty());
         assert_eq!(call.function.invalid_arguments.as_deref(), Some(expected));
@@ -614,10 +679,29 @@ fn never_done_non_object_function_arguments_use_fork_spelling_after_model_change
     }
 }
 
-#[test]
-fn never_done_object_arguments_use_current_canonical_object_on_rebuild() {
+#[tokio::test]
+async fn never_done_object_arguments_remain_canonical_in_failed_unfinished_inspection() {
+    use futures::StreamExt;
     for (edit, stale_raw_object) in [(false, false), (true, false), (true, true)] {
-        let response = never_done_function_response(" { \"old\": 1 } ");
+        let mut stream = never_done_function_stream(" { \"old\": 1 } ");
+        while let Some(item) = stream.next().await {
+            let item = item.expect("valid never-done arguments remain inspection data");
+            assert!(!matches!(item, crate::streaming::Item::Event(
+                crate::streaming::StreamEvent::Discard { .. }
+            )));
+        }
+        let response = stream.finish().await.expect("the actual failed folded response");
+        let call = response.tool_calls().next().expect("decoded object call");
+        assert!(call.function.invalid_arguments.is_none());
+        assert_eq!(call.function.arguments_value(), json!({"old":1}), "case {edit}/{stale_raw_object}");
+        assert_failed_unfinished_function(&response);
+    }
+}
+
+#[test]
+fn completed_object_arguments_use_current_canonical_object_on_rebuild() {
+    for (edit, stale_raw_object) in [(false, false), (true, false), (true, true)] {
+        let response = completed_function_response(" { \"old\": 1 } ");
         let call = response.tool_calls().next().expect("decoded object call");
         assert!(call.function.invalid_arguments.is_none());
         assert_eq!(call.function.arguments_value(), json!({"old":1}));

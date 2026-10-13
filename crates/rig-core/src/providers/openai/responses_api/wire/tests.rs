@@ -649,11 +649,25 @@ async fn a_chatgpt_reply_captures_the_terminal_response_object_as_raw() {
         assert_eq!(response.raw["service_tier"], "default", "{case}");
         assert_eq!(response.raw["id"], "resp_chatgpt_raw", "{case}");
 
+        if case == "assembled output" {
+            let [message::AssistantContent::CarriedText(text)] = response.choice.as_slice() else {
+                panic!("assembled output keeps one genuine carried text part");
+            };
+            assert_eq!(text.content, message::CarriedTextContent::Text("hi".to_owned()));
+            assert_eq!(text.payload.item, received["output"][0]["content"][0]);
+            assert_eq!(text.item_id.as_deref(), Some("msg_chatgpt_raw"));
+            assert_eq!(text.payload.provider.as_deref(), Some("chatgpt"));
+            assert_eq!(text.payload.position, message::CarriedPosition::MessageContent {
+                item_index: 0, part_index: 0,
+            });
+            assert_eq!(response.choice.len(), 1);
+        } else {
         assert_eq!(
             response.choice,
             vec![message::AssistantContent::text("hi")],
             "{case}: the deltas are the content"
         );
+        }
         assert_eq!(response.usage.total_tokens, Some(2), "{case}");
         assert_eq!(
             response.identity().response_id.as_deref(),

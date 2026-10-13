@@ -244,11 +244,9 @@ fn fields_beside_a_lifecycle_response_are_fields_of_the_document() {
     assert_eq!(document.get("type"), None);
 }
 
-/// ChatGPT answers even a unary request with an event stream whose terminal
-/// states no output, so both paths rebuild the output from the items the
-/// stream finished.
+/// The unchanged original ChatGPT parity fixture fails strict root admission.
 #[tokio::test]
-async fn chatgpt_unary_and_streamed_replies_rebuild_one_output() {
+async fn original_chatgpt_parity_fixture_is_refused_by_strict_root_reader() {
     let stream = sse(&[
         lifecycle("response.created", envelope("in_progress", json!([]))),
         item(
@@ -263,12 +261,46 @@ async fn chatgpt_unary_and_streamed_replies_rebuild_one_output() {
     let wire = OpenAIConfig::with_key(&CHATGPT, "test-token")
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .responses("gpt-5.4");
+    let error = raw_pair(wire, stream.clone(), stream).await
+        .expect_err("the original root has no required created_at");
+    let Some(crate::error::ErrorDetail::CorruptFrame(detail)) = error.report().detail else {
+        panic!("strict refusal retains typed frame evidence");
+    };
+    assert_eq!(detail.event_type.as_deref(), Some("response.created"));
+    assert_eq!(detail.evidence, crate::error::FrameEvidence::Text(
+        lifecycle("response.created", envelope("in_progress", json!([]))).to_string()
+    ));
+}
+
+/// Explicit admission fields let the real unary and streamed Model routes
+/// exercise the original whole-document parity predicates.
+#[tokio::test]
+async fn admitted_chatgpt_unary_and_streamed_replies_rebuild_one_output() {
+    let original_done = call("fc_1", "{\"q\":1}");
+    let mut created = envelope("in_progress", json!([]));
+    created["created_at"] = json!(0);
+    let mut completed = envelope("completed", json!([]));
+    completed["created_at"] = json!(0);
+    let mut announcement = json!({"type":"function_call","id":"fc_1","arguments":""});
+    announcement["call_id"] = original_done["call_id"].clone();
+    announcement["name"] = original_done["name"].clone();
+    announcement["status"] = json!("in_progress");
+    let stream = sse(&[
+        lifecycle("response.created", created),
+        item("response.output_item.added", 0, announcement),
+        json!({"type":"response.function_call_arguments.delta","sequence_number":2,
+            "output_index":0,"item_id":"fc_1","delta":"{\"q\":1}"}),
+        item("response.output_item.done", 0, original_done.clone()),
+        lifecycle("response.completed", completed),
+    ]);
+    let wire = OpenAIConfig::with_key(&CHATGPT, "test-token")
+        .with_caller_identity(crate::test_utils::test_caller_identity())
+        .responses("gpt-5.4");
     let (unary, streamed) = raw_pair(wire, stream.clone(), stream)
         .await
-        .unwrap_or_else(|error| panic!("the ChatGPT stream decodes: {error}"));
+        .unwrap_or_else(|error| panic!("the separately admitted ChatGPT stream decodes: {error}"));
     assert_eq!(unary, streamed);
-    assert_eq!(
-        streamed,
-        envelope("completed", json!([call("fc_1", "{\"q\":1}")]))
-    );
+    let mut expected = envelope("completed", json!([original_done]));
+    expected["created_at"] = json!(0);
+    assert_eq!(streamed, expected);
 }
