@@ -89,7 +89,10 @@ fn the_same_turn_folds_identically_whether_it_was_buffered_or_streamed() {
     assert_eq!(buffered.message_id, streamed.message_id);
     assert_eq!(buffered.provider_request_id, streamed.provider_request_id);
     assert_eq!(
-        buffered.choice.first().and_then(AssistantContent::as_text),
+        buffered.choice.first().and_then(|content| match content {
+            AssistantContent::Text(text) => Some(text.text()),
+            _ => None,
+        }),
         Some("parity probe")
     );
     assert_eq!(buffered.usage.output_tokens, Some(6));

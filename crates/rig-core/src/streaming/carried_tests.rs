@@ -38,7 +38,7 @@ const ABORTED_ERROR: &str =
 const QUEUED_TEXT: &str = r#"{"type":"batch","first":"kept","second":"queued","terminal":false}"#;
 const QUEUED_END: &str = r#"{"type":"batch","first":"kept","second":"queued","terminal":true}"#;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct StreamWire;
 
 impl ReplayTarget for StreamWire {

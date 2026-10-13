@@ -10,7 +10,6 @@ use crate::message::{
 use crate::providers::anthropic::wire::AnthropicConfig;
 use crate::streaming::StreamEvent;
 use crate::wire::Mode;
-use futures::StreamExt;
 
 /// A fresh decoder labelled the way the [`Messages`](super::super::wire::Messages)
 /// wire labels Anthropic proper.
@@ -715,7 +714,7 @@ fn test_tool_call_accumulation_with_multiple_deltas() {
     };
     assert_eq!(call.id, crate::message::CallId::from_wire("tool_123"));
     assert_eq!(
-        call.function.arguments,
+        call.function.arguments_value(),
         json!({"location":"Paris","temp":"20C"})
     );
     assert!(decoded.outcome.is_ok());
@@ -1053,20 +1052,20 @@ fn classify_dispatches_on_the_known_event_list() {
     let frame = WireFrame::Text(r#"{"type":"something_new_from_anthropic","field":"x"}"#.into());
     assert!(matches!(
         adapter.classify(frame),
-        crate::providers::internal::wire::WireEvent::Unknown { event_type, .. }
+        crate::wire::WireEvent::Unknown { event_type, .. }
             if event_type == "something_new_from_anthropic"
     ));
 
     let frame = WireFrame::Text(r#"{"type":"ping"}"#.into());
     assert!(matches!(
         adapter.classify(frame),
-        crate::providers::internal::wire::WireEvent::Known(event) if event.fields["type"] == "ping"
+        crate::wire::WireEvent::Known(event) if event.fields["type"] == "ping"
     ));
 
     let frame = WireFrame::Text("{not json".into());
     assert!(matches!(
         adapter.classify(frame),
-        crate::providers::internal::wire::WireEvent::Corrupt(_)
+        crate::wire::WireEvent::Corrupt(_)
     ));
 }
 
@@ -1080,7 +1079,7 @@ fn novel_nested_delta_type_is_a_known_noop() {
     let frame = WireFrame::Text(
         r#"{"type":"content_block_delta","index":0,"delta":{"type":"banana_delta","x":1}}"#.into(),
     );
-    let crate::providers::internal::wire::WireEvent::Known(event) = classifier.classify(frame)
+    let crate::wire::WireEvent::Known(event) = classifier.classify(frame)
     else {
         panic!("a novel nested delta type must stay a Known event");
     };
@@ -1132,7 +1131,7 @@ fn delta_missing_its_type_is_corrupt_not_skipped() {
     );
     assert!(matches!(
         adapter.classify(frame),
-        crate::providers::internal::wire::WireEvent::Corrupt(_)
+        crate::wire::WireEvent::Corrupt(_)
     ));
 }
 
@@ -1148,7 +1147,7 @@ fn known_nested_delta_tag_with_defective_payload_is_corrupt() {
     );
     assert!(matches!(
         adapter.classify(frame),
-        crate::providers::internal::wire::WireEvent::Corrupt(_)
+        crate::wire::WireEvent::Corrupt(_)
     ));
 }
 
@@ -1166,7 +1165,7 @@ fn known_nested_delta_tag_with_defective_payload_is_corrupt() {
 fn top_level_error_event_surfaces_as_a_provider_error() {
     const ENVELOPE: &str = r#"{"error":{"message":"Overloaded","type":"overloaded_error"},"request_id":"req_011CXYZ","type":"error"}"#;
     let classifier = adapter();
-    let crate::providers::internal::wire::WireEvent::Known(event) =
+    let crate::wire::WireEvent::Known(event) =
         classifier.classify(WireFrame::Text(ENVELOPE.into()))
     else {
         panic!("the error envelope must classify as a Known event");
@@ -1194,7 +1193,7 @@ fn top_level_error_event_surfaces_as_a_provider_error() {
 fn message_start_with_null_message_is_a_known_noop() {
     let classifier = adapter();
     let frame = WireFrame::Text(r#"{"type":"message_start","message":null}"#.into());
-    let crate::providers::internal::wire::WireEvent::Known(event) = classifier.classify(frame)
+    let crate::wire::WireEvent::Known(event) = classifier.classify(frame)
     else {
         panic!("null-message message_start must stay a known event");
     };
@@ -1304,7 +1303,7 @@ fn an_empty_tool_use_id_is_minted_not_keyed_on_the_empty_string() {
             "{:?}",
             call.id
         );
-        assert_eq!(call.function.arguments, json!({"x":1}));
+        assert_eq!(call.function.arguments_value(), json!({"x":1}));
     }
     assert_ne!(
         calls[0].id, calls[1].id,

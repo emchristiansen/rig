@@ -272,6 +272,7 @@ fn reply() -> crate::wire::Reply {
         provider: "prov".to_owned(),
         raw: Value::Null,
         provider_request_id: None,
+        response_headers: crate::completion::ProviderResponseHeaders::new(),
     }
 }
 

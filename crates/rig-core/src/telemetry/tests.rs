@@ -339,15 +339,22 @@ fn user_parts_keep_a_document_text_apart_from_media_sources() {
 /// it is; a namespace is recorded beside the name, never dropped.
 #[test]
 fn custom_and_namespaced_calls_render_truthfully() {
+    // G3/G9/G11 standing same-pattern exception: independent fc_1 and ctc_2
+    // item-ID assignments are omitted; all remaining exact inputs survive.
+    // G123 separately replaces only the retired rendered explicit: ID prefix.
     let output = vec![
-        AssistantContent::tool_call_with_namespace(
-            "fc_1",
-            "call_1".to_owned(),
-            "add",
-            Some("math".to_owned()),
-            json!({"x": 1}),
-        ),
-        AssistantContent::custom_tool_call("ctc_2", "call_2", "apply_patch", None, r#"{"x": 1}"#),
+        AssistantContent::ToolCall(crate::message::ToolCall::new(
+            crate::message::CallId::from_wire("call_1"),
+            crate::message::ToolFunction::new(
+                crate::message::ToolName::new("add").expect("the original function name is nonempty"),
+                json!({"x": 1}),
+            ),
+        ).with_namespace(Some("math".to_owned()))),
+        AssistantContent::CustomToolCall(crate::message::CustomToolCall::new(
+            crate::message::CallId::from_wire("call_2"),
+            crate::message::ToolName::new("apply_patch").expect("the original custom name is nonempty"),
+            r#"{"x": 1}"#,
+        )),
     ];
     assert_eq!(
         serde_json::to_value(output_messages(&output)).expect("serialize"),
@@ -356,14 +363,14 @@ fn custom_and_namespaced_calls_render_truthfully() {
             "parts": [
                 {
                     "type": "tool_call",
-                    "id": "explicit:call_1",
+                    "id": "call_1",
                     "name": "add",
                     "namespace": "math",
                     "arguments": {"x": 1}
                 },
                 {
                     "type": "custom_tool_call",
-                    "id": "explicit:call_2",
+                    "id": "call_2",
                     "name": "apply_patch",
                     "input": "{\"x\": 1}"
                 }

@@ -825,26 +825,42 @@ fn older_anthropic_models_hoist_mid_conversation_system_message() {
 
 #[test]
 fn test_tool_definition_cache_control_serialization() {
-    let tool = ToolDefinition {
-        name: "cached_tool".to_string(),
-        description: Some("Cached tool".to_string()),
-        input_schema: json!({"type": "object"}),
-        strict: false,
-        cache_control: Some(CacheControl::ephemeral()),
+    // G124: original DTO serde is now tested at the actual native RAW-tool
+    // request stage; original tool values and both cache predicates remain.
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+    let encode_tool = |tool: Value| {
+        let original = tool.clone();
+        let request = CompletionRequest {
+            additional_params: Some(json!({"tools": [tool]})),
+            ..CompletionRequest::new("test")
+        };
+        let encoded = wire.encode(request, Mode::Unary)
+            .expect("the exact original raw tool encodes on native Anthropic");
+        let body = json_body(&encoded.request);
+        let tools = body["tools"].as_array().expect("the actual encoded tools array");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0], original);
+        tools[0].clone()
     };
+    let tool = json!({
+        "name": "cached_tool",
+        "description": "Cached tool",
+        "input_schema": {"type": "object"},
+        "strict": false,
+        "cache_control": {"type": "ephemeral"}
+    });
 
-    let value = serde_json::to_value(tool).unwrap();
+    let value = encode_tool(tool);
     assert_eq!(value["cache_control"]["type"], "ephemeral");
 
-    let tool_without_cache = ToolDefinition {
-        name: "uncached_tool".to_string(),
-        description: Some("Uncached tool".to_string()),
-        input_schema: json!({"type": "object"}),
-        strict: false,
-        cache_control: None,
-    };
+    let tool_without_cache = json!({
+        "name": "uncached_tool",
+        "description": "Uncached tool",
+        "input_schema": {"type": "object"},
+        "strict": false
+    });
 
-    let value = serde_json::to_value(tool_without_cache).unwrap();
+    let value = encode_tool(tool_without_cache);
     assert!(value.get("cache_control").is_none());
 }
 
@@ -863,17 +879,15 @@ fn test_apply_tool_cache_control_marks_only_final_tool() {
         }),
     ];
 
-    let mut remaining_cache_markers = 4;
-    apply_tool_cache_control(
-        &mut tools,
-        &mut remaining_cache_markers,
-        &CacheControl::ephemeral(),
-    )
-    .unwrap();
+    // G125: existing private placement helper; the old signature and only
+    // its caller-visible remaining==3 view are retired, not reconstructed.
+    let wire = AnthropicConfig::new("test-key")
+        .completion(CLAUDE_SONNET_4_6)
+        .with_prompt_caching();
+    apply_cache_control(&wire, false, None, &mut [], &mut [], &mut tools).unwrap();
 
     assert!(tools[0].get("cache_control").is_none());
     assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
-    assert_eq!(remaining_cache_markers, 3);
 }
 
 #[test]

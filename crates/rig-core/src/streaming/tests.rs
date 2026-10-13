@@ -921,7 +921,7 @@ async fn response_raw_round_trips_through_serde_mirror() {
     let payload = json!({"usage":{"total_tokens":8},"provider_only":"kept"});
     let mut stream = captured(
         vec![MockStreamEvent::FinalResponse(Finish {
-            message_id: crate::message::ProviderMessageId::new("msg_123"),
+            message_id: crate::completion::ProviderMessageId::new("msg_123"),
             ..Finish::default()
         })],
         Some(payload.clone()),
@@ -964,7 +964,7 @@ async fn response_serde_round_trip_is_identity() {
                 cost: None,
             },
             reason: Some(FinishReason::Stop),
-            message_id: crate::message::ProviderMessageId::new("msg_123"),
+            message_id: crate::completion::ProviderMessageId::new("msg_123"),
             response_id: Some("resp_456".to_owned()),
             model: Some("provider-model-v2".to_owned()),
             ..Finish::default()
@@ -1046,7 +1046,7 @@ async fn stream_identity_falls_back_to_the_real_finish_and_opened_metadata() {
             MockStreamEvent::text("done"),
             MockStreamEvent::FinalResponse(Finish {
                 usage: Usage::new().total_tokens(1),
-                message_id: crate::message::ProviderMessageId::new("msg_terminal"),
+                message_id: crate::completion::ProviderMessageId::new("msg_terminal"),
                 response_id: Some("resp_1".to_owned()),
                 ..Finish::default()
             }),
@@ -1057,7 +1057,7 @@ async fn stream_identity_falls_back_to_the_real_finish_and_opened_metadata() {
     assert_eq!(
         stream.partial().identity(),
         crate::completion::ResponseIdentity {
-            message_id: crate::message::ProviderMessageId::new("msg_terminal"),
+            message_id: crate::completion::ProviderMessageId::new("msg_terminal"),
             response_id: Some("resp_1".to_owned()),
             provider_request_id: Some("req_1".to_owned()),
         }
@@ -1072,7 +1072,7 @@ async fn stream_identity_prefers_an_explicit_message_id_event() {
             MockStreamEvent::text("done"),
             MockStreamEvent::FinalResponse(Finish {
                 usage: Usage::new().total_tokens(1),
-                message_id: crate::message::ProviderMessageId::new("msg_terminal"),
+                message_id: crate::completion::ProviderMessageId::new("msg_terminal"),
                 response_id: Some("resp_1".to_owned()),
                 ..Finish::default()
             }),
@@ -1083,7 +1083,7 @@ async fn stream_identity_prefers_an_explicit_message_id_event() {
     assert_eq!(
         stream.partial().identity(),
         crate::completion::ResponseIdentity {
-            message_id: crate::message::ProviderMessageId::new("msg_event"),
+            message_id: crate::completion::ProviderMessageId::new("msg_event"),
             response_id: Some("resp_1".to_owned()),
             provider_request_id: None,
         }
@@ -1130,7 +1130,7 @@ async fn decoded_response_round_trips_and_unknown_item_fidelity_is_preserved() {
                 cost: None,
             },
             reason: Some(FinishReason::Other("future_reason".to_owned())),
-            message_id: crate::message::ProviderMessageId::new("msg_123"),
+            message_id: crate::completion::ProviderMessageId::new("msg_123"),
             model: Some("provider-model-v2".to_owned()),
             ..Finish::default()
         })],
