@@ -222,11 +222,19 @@ struct ModalityCount {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum Modality { ModalityUnspecified, Text, Image, Video, Audio, Document }
+enum Modality {
+    ModalityUnspecified, Text, Image, Video, Audio, Document,
+    #[serde(untagged)]
+    Unknown(String),
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum Traffic { TrafficTypeUnspecified, OnDemand, ProvisionedThroughput }
+enum Traffic {
+    TrafficTypeUnspecified, OnDemand, ProvisionedThroughput,
+    #[serde(untagged)]
+    Unknown(String),
+}
 
 #[derive(Deserialize)]
 #[allow(dead_code)]

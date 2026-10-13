@@ -451,6 +451,121 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+/// A nameless result had no unique preceding outstanding call.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub(crate) enum ToolResultNameError {
+    /// No preceding outstanding call matches the typed identity and kind.
+    #[error("no outstanding call supplies the tool name for {0}")]
+    Missing(CallId),
+    /// More than one preceding outstanding call matches the identity and kind.
+    #[error("multiple outstanding calls supply the tool name for {0}")]
+    Ambiguous(CallId),
+}
+
+impl ToolResult {
+    /// Ingest a nameless result using only the canonical history preceding it.
+    ///
+    /// Exactly one outstanding call of the supplied identity and kind must
+    /// provide its name. Prior results consume calls chronologically; an
+    /// established result name disambiguates duplicate identities, and is
+    /// never rewritten. Assistant text does not clear outstanding calls.
+    ///
+    /// The caller passes the prefix before this result, excluding later calls.
+    /// Missing and ambiguous matches refuse before a canonical result exists.
+    /// The incoming result's error flag is retained without a success default.
+    /// This creates no provider identity, Native item or unresolved ToolName.
+    pub(crate) fn from_history(
+        prefix: &[Message],
+        call: CallId,
+        answers: AnsweredToolCall,
+        content: Vec<ToolResultContent>,
+        is_error: bool,
+    ) -> Result<Self, ToolResultNameError> {
+        struct PendingCall<'a> {
+            id: &'a CallId,
+            name: &'a ToolName,
+            answers: AnsweredToolCall,
+        }
+
+        let mut pending: Vec<PendingCall<'_>> = Vec::new();
+        for message in prefix {
+            match message {
+                Message::Assistant(turn) => {
+                    for part in &turn.content {
+                        match part {
+                            AssistantContent::ToolCall(call) => pending.push(PendingCall {
+                                id: &call.id,
+                                name: &call.function.name,
+                                answers: AnsweredToolCall::Function,
+                            }),
+                            AssistantContent::CustomToolCall(call) => pending.push(PendingCall {
+                                id: &call.id,
+                                name: &call.name,
+                                answers: AnsweredToolCall::Custom,
+                            }),
+                            AssistantContent::Text(_)
+                            | AssistantContent::Reasoning(_)
+                            | AssistantContent::Image(_)
+                            | AssistantContent::Opaque(_)
+                            | AssistantContent::ProviderItem(_)
+                            | AssistantContent::CarriedText(_)
+                            | AssistantContent::CarriedReasoning(_) => {}
+                        }
+                    }
+                }
+                Message::User { content } => {
+                    for part in content {
+                        match part {
+                            UserContent::ToolResult(result) => {
+                                let mut candidates: Vec<_> = pending
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, pending)| {
+                                        pending.id == &result.call
+                                            && pending.answers == result.answers
+                                    })
+                                    .map(|(index, _)| index)
+                                    .collect();
+                                if candidates.len() > 1 {
+                                    candidates.retain(|index| {
+                                        pending[*index].name == &result.name
+                                    });
+                                }
+                                if let [index] = candidates.as_slice() {
+                                    pending.remove(*index);
+                                }
+                            }
+                            UserContent::Text(_)
+                            | UserContent::Image(_)
+                            | UserContent::Audio(_)
+                            | UserContent::Video(_)
+                            | UserContent::Document(_) => {}
+                        }
+                    }
+                }
+                Message::System { .. } => {}
+            }
+        }
+
+        let mut matches = pending
+            .iter()
+            .filter(|pending| pending.id == &call && pending.answers == answers);
+        let Some(first) = matches.next() else {
+            return Err(ToolResultNameError::Missing(call));
+        };
+        if matches.next().is_some() {
+            return Err(ToolResultNameError::Ambiguous(call));
+        }
+        Ok(Self {
+            call,
+            name: first.name.clone(),
+            answers,
+            content,
+            is_error,
+        })
+    }
+}
+
 /// Describes one typed item in a tool result.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -1484,3 +1599,6 @@ impl From<MessageError> for ProviderError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod result_name_tests;

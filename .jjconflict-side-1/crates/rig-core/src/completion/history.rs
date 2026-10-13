@@ -204,7 +204,8 @@ pub trait ReplayTarget: std::fmt::Debug + WasmCompatSync {
     /// authority. Responses parts require a destination's explicit replay policy.
     fn check_carried_text(&self, part: &CarriedText) -> Result<(), UnrepresentableOpaqueContent> {
         match &part.content {
-            CarriedTextContent::GeminiSignedAnswer(_) | CarriedTextContent::InspectionOnlyMedia(_) => {
+            CarriedTextContent::GeminiSignedAnswer(_) | CarriedTextContent::InspectionOnlyText(_)
+            | CarriedTextContent::InspectionOnlyMedia(_) => {
                 Ok(())
             }
             CarriedTextContent::Text(_) | CarriedTextContent::Refusal(_)

@@ -41,6 +41,8 @@ pub const GEMINI_2_0_FLASH: &str = "gemini-2.0-flash";
 
 use serde_json::{Map, Value, json};
 
+mod schema;
+
 pub use super::cached_content::with_cached_content;
 #[doc(hidden)]
 pub use super::options::{Route, generate_content_options};
@@ -164,14 +166,10 @@ impl Wire for GenerateContent {
     type Decoder<'id> = super::streaming::GenerateContentDecoder;
     type Reassembler = super::streaming::document::GenerateContentResponse;
 
-    #[allow(deprecated)]
     fn describe(&self) -> Descriptor<'_> {
         Descriptor::new(PROVIDER_NAME)
             .model(self.model.as_str())
-            .telemetry(|mode| match mode {
-                Mode::Unary => GenAiOperation::GenerateContent,
-                Mode::Streaming => GenAiOperation::ChatStreaming,
-            })
+            .telemetry(|_| GenAiOperation::GenerateContent)
             .replay(self)
     }
 
@@ -246,6 +244,18 @@ impl ReplayTarget for GenerateContent {
 
     fn check_document(&self, document: &crate::message::Document) -> Result<(), EncodeError> {
         document_part(document).map(|_| ())
+    }
+
+    fn check_tool_result(&self, result: &crate::message::ToolResult) -> Result<(), ProviderError> {
+        for content in &result.content {
+            match content {
+                ToolResultContent::Text(_) | ToolResultContent::Json { .. } => {}
+                ToolResultContent::Image(image) => {
+                    tool_result_image_part(image).map_err(ProviderError::from)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn normalize_tool_call_id(
@@ -427,7 +437,7 @@ pub fn request_body(
     request_params(
         target,
         request,
-        |input| adjusted_base(request, target, model, input, adjust),
+        |input| adjusted_base(request, target, model, input, declaration, adjust),
         RawAt::Top,
         &[
             Rewrite::GeminiCachedContent(cached_content.map(str::to_owned)),
@@ -458,7 +468,7 @@ pub fn request_body_for_vertex(
     request_params(
         target,
         request,
-        |input| adjusted_base(request, target, model, input, adjust),
+        |input| adjusted_base(request, target, model, input, vertex_declaration, adjust),
         RawAt::Top,
         &[
             Rewrite::GeminiCachedContent(cached_content.map(str::to_owned)),
@@ -473,9 +483,10 @@ fn adjusted_base(
     target: &dyn ReplayTarget,
     model: &str,
     input: &mut BaseInput<'_>,
+    declaration: fn(crate::completion::ToolDefinition) -> Result<Value, EncodeError>,
     adjust: impl FnOnce(&mut Map<String, Value>),
 ) -> Result<Map<String, Value>, EncodeError> {
-    let mut body = base(request, target, model, input)?;
+    let mut body = base(request, target, model, input, declaration)?;
     adjust(&mut body);
     Ok(body)
 }
@@ -487,6 +498,7 @@ fn base(
     target: &dyn ReplayTarget,
     model: &str,
     input: &mut BaseInput<'_>,
+    declaration: fn(crate::completion::ToolDefinition) -> Result<Value, EncodeError>,
 ) -> Result<Map<String, Value>, EncodeError> {
     let extra_tools = input.raw_tools()?;
     let schema = request
@@ -540,7 +552,7 @@ fn base(
         .iter()
         .cloned()
         .map(declaration)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, EncodeError>>()?;
     let declared = (!declared.is_empty())
         .then(|| json!({ "functionDeclarations": declared, "codeExecution": null }));
     let tools: Vec<Value> = declared.into_iter().chain(extra_tools).collect();
@@ -567,16 +579,31 @@ fn base(
     ]))
 }
 
-/// A tool as its function declaration: its JSON Schema goes as
-/// `parametersJsonSchema`, which reads full JSON Schema, as pi sends it. A
-/// tool with no schema declares none.
-fn declaration(tool: crate::completion::ToolDefinition) -> Value {
+/// A typed tool as a function declaration with projected `parameters`.
+/// Reference definitions must be acyclic. Conversion errors name the tool.
+fn declaration(tool: crate::completion::ToolDefinition) -> Result<Value, EncodeError> {
+    let parameters = schema::parameters(tool.parameters).map_err(|error| {
+        let reason = std::error::Error::source(&error)
+            .map_or_else(|| error.to_string(), ToString::to_string);
+        EncodeError::request(format!(
+            "Tool '{}' could not be converted to a schema: {reason}", tool.name
+        ))
+    })?;
+    Ok(Value::Object(object([
+        ("name", Some(json!(tool.name))),
+        ("description", Some(json!(tool.description))),
+        ("parameters", parameters),
+    ])))
+}
+
+/// A Vertex declaration carries the original JSON Schema unchanged.
+fn vertex_declaration(tool: crate::completion::ToolDefinition) -> Result<Value, EncodeError> {
     let parameters = (!tool.parameters.is_null()).then_some(tool.parameters);
-    Value::Object(object([
+    Ok(Value::Object(object([
         ("name", Some(json!(tool.name))),
         ("description", Some(json!(tool.description))),
         ("parametersJsonSchema", parameters),
-    ]))
+    ])))
 }
 
 /// An object of the entries that are set.
@@ -747,6 +774,33 @@ pub(super) fn document_part(document: &crate::message::Document) -> Result<Value
     }
 }
 
+/// Encode inline function-response images with their declared supported type.
+/// Missing types, URLs and other source kinds return message conversion errors.
+fn tool_result_image_part(image: &crate::message::Image) -> Result<Value, EncodeError> {
+    let Source::Base64(data) = &image.data else {
+        let reason = match &image.data {
+            Source::Url(_) => "Gemini tool result images must use base64 inline data; URL-backed images are not supported",
+            _ => "Unsupported image source kind for tool results",
+        };
+        return Err(crate::message::MessageError::ConversionError(reason.to_owned()).into());
+    };
+    let media_type = image.media_type.as_ref().ok_or_else(|| {
+        crate::message::MessageError::ConversionError(
+            "Image media type is required for Gemini tool results".to_owned(),
+        )
+    })?;
+    if !matches!(media_type,
+        crate::message::ImageMediaType::JPEG
+        | crate::message::ImageMediaType::PNG
+        | crate::message::ImageMediaType::WEBP
+    ) {
+        return Err(crate::message::MessageError::ConversionError(format!(
+            "Unsupported image media type {media_type:?} for Gemini tool results; supported types are JPEG, PNG, and WEBP"
+        )).into());
+    }
+    Ok(json!({"inlineData":{"mimeType":media_type.to_mime_type(),"data":data}}))
+}
+
 /// A user part as Gemini takes it. A function response carries `id`, its
 /// call's exact provider handle, and the error key when
 /// the tool failed, as the Gemini SDKs spell a function's failure. Images
@@ -767,7 +821,7 @@ fn user_part(part: UserContent, id: Option<&str>) -> Result<Value, EncodeError> 
                     ToolResultContent::Text(text) => values.push(Value::String(text.text)),
                     ToolResultContent::Json { value } => values.push(value),
                     ToolResultContent::Image(image) => {
-                        parts.push(media(mime(image.media_type), image.data, false)?);
+                        parts.push(tool_result_image_part(&image)?);
                     }
                 }
             }
@@ -811,13 +865,13 @@ fn assistant_part(
     target: &dyn ReplayTarget,
     model: &str,
 ) -> Result<Option<Value>, EncodeError> {
-    crate::message::json_only_wire_tool_call("Gemini GenerateContent", block)?;
+    crate::message::json_only_wire_tool_call("Gemini generateContent", block)?;
     let replay = match block {
         AssistantContent::ToolCall(call) => match &call.id {
             crate::message::CallId::Provider(id) => block.replay_optional_call_id(target, OptionalCallId::ProviderHandle(id)),
             crate::message::CallId::Local(_) => block.replay_optional_call_id(target, OptionalCallId::OmitLocal),
         },
-        AssistantContent::CustomToolCall(call) => return Err(call.refused_by_json_only_wire("Gemini GenerateContent").into()),
+        AssistantContent::CustomToolCall(call) => return Err(call.refused_by_json_only_wire("Gemini generateContent").into()),
         AssistantContent::ProviderItem(item) => return Err(crate::message::UnreplayableProviderItem::new("Gemini GenerateContent", item).into()),
         AssistantContent::Text(_) | AssistantContent::Reasoning(_)
         | AssistantContent::Image(_) | AssistantContent::Opaque(_)
@@ -894,7 +948,7 @@ fn assistant_part(
                 ("thoughtSignature", signature.map(|signature| json!(signature))),
             ]))
         }
-        AssistantContent::CustomToolCall(call) => return Err(call.refused_by_json_only_wire("Gemini GenerateContent").into()),
+        AssistantContent::CustomToolCall(call) => return Err(call.refused_by_json_only_wire("Gemini generateContent").into()),
         AssistantContent::ProviderItem(item) => return Err(crate::message::UnreplayableProviderItem::new("Gemini GenerateContent", item).into()),
     }))
 }

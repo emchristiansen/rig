@@ -161,6 +161,9 @@ pub enum CarriedTextContent {
     Opaque(String),
     /// Known Gemini answer text with its independent provider signature.
     GeminiSignedAnswer(GeminiSignedAnswer),
+    /// Editable known output text beside unselected inspection-only siblings.
+    /// Every encoder projects the current text without replaying raw fields.
+    InspectionOnlyText(String),
     /// Editable known text beside media retained only for history and inspection.
     /// The preserved media never has outbound replay authority.
     InspectionOnlyMedia(String),
@@ -171,7 +174,7 @@ impl CarriedTextContent {
     pub fn text(&self) -> &str {
         match self {
             Self::Text(text) | Self::Refusal(text) | Self::Opaque(text)
-            | Self::InspectionOnlyMedia(text) => text,
+            | Self::InspectionOnlyText(text) | Self::InspectionOnlyMedia(text) => text,
             Self::GeminiSignedAnswer(answer) => &answer.text,
         }
     }
@@ -180,7 +183,7 @@ impl CarriedTextContent {
     pub fn text_mut(&mut self) -> &mut String {
         match self {
             Self::Text(text) | Self::Refusal(text) | Self::Opaque(text)
-            | Self::InspectionOnlyMedia(text) => text,
+            | Self::InspectionOnlyText(text) | Self::InspectionOnlyMedia(text) => text,
             Self::GeminiSignedAnswer(answer) => &mut answer.text,
         }
     }
@@ -281,7 +284,8 @@ impl CarriedText {
     pub fn known_text_projection(&self) -> Option<&str> {
         match &self.content {
             CarriedTextContent::GeminiSignedAnswer(answer) => Some(&answer.text),
-            CarriedTextContent::InspectionOnlyMedia(text) => Some(text),
+            CarriedTextContent::InspectionOnlyText(text)
+            | CarriedTextContent::InspectionOnlyMedia(text) => Some(text),
             CarriedTextContent::Text(_) | CarriedTextContent::Refusal(_)
             | CarriedTextContent::Opaque(_) => None,
         }
@@ -292,7 +296,8 @@ impl CarriedText {
         match &self.content {
             CarriedTextContent::GeminiSignedAnswer(answer) => Some(answer),
             CarriedTextContent::Text(_) | CarriedTextContent::Refusal(_)
-            | CarriedTextContent::Opaque(_) | CarriedTextContent::InspectionOnlyMedia(_) => None,
+            | CarriedTextContent::Opaque(_) | CarriedTextContent::InspectionOnlyText(_)
+            | CarriedTextContent::InspectionOnlyMedia(_) => None,
         }
     }
 
@@ -310,7 +315,8 @@ impl CarriedText {
             CarriedTextContent::GeminiSignedAnswer(answer) => {
                 return Ok(CarriedTextReplay::KnownText(&answer.text));
             }
-            CarriedTextContent::InspectionOnlyMedia(text) => {
+            CarriedTextContent::InspectionOnlyText(text)
+            | CarriedTextContent::InspectionOnlyMedia(text) => {
                 return Ok(CarriedTextReplay::KnownText(text));
             }
         };
