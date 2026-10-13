@@ -3,9 +3,10 @@
 //! tool result so the model can call again. A model that keeps sending
 //! malformed arguments is answered until `max_turns`, or stopped after
 //! `max_consecutive_malformed_tool_calls` consecutive turns when that is set.
-//! Every case runs on the blocking and the streamed
-//! surface, which share the tool step, and asserts what the model sees on
-//! its next request.
+//! Most original fixtures sample both surfaces. G234 keeps two subjects'
+//! Blocking feedback/hook predicates, labels their original fragmented
+//! Streamed inputs as refusals, and samples completed-response Streaming
+//! separately without changing the shared fixture producer.
 
 use std::sync::{Arc, Mutex};
 
@@ -226,7 +227,7 @@ fn answer_text(requests: &[CompletionRequest], turn: usize) -> String {
 
 #[tokio::test]
 async fn by_default_a_malformed_call_is_answered_with_feedback_and_the_run_continues() {
-    for surface in SURFACES {
+    for surface in [Surface::Blocking] {
         let (outcome, requests) = run(surface, &[Turn::Malformed, Turn::Answer], |r| r).await;
         assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
         assert_eq!(
@@ -245,7 +246,7 @@ async fn by_default_a_malformed_call_is_answered_with_feedback_and_the_run_conti
 
 #[tokio::test]
 async fn the_hook_sees_the_reason_and_the_raw_arguments() {
-    for surface in SURFACES {
+    for surface in [Surface::Blocking] {
         let hook = Decide::new(None);
         let (outcome, requests) = run(surface, &[Turn::Malformed, Turn::Answer], |r| {
             r.add_hook(hook.clone())
@@ -748,5 +749,190 @@ async fn anthropic_first_fragment_overflow_never_executes_a_tool_at_the_default_
         assert_eq!(feedback,
             "The arguments for tool `add` are not a JSON object: . \
              Call the tool again with a JSON object as its arguments.");
+    }
+}
+
+// G234 confines its stage exception to the two subjects below. The shared
+// model()/run() helpers and all other users keep the original script path.
+#[derive(Clone)]
+struct CompletedFrameTransport {
+    turns: Arc<Mutex<std::collections::VecDeque<rig_core::completion::CompletionResponse>>>,
+    requests: Arc<Mutex<Vec<(rig_core::wire::Mode, CompletionRequest)>>>,
+}
+
+impl rig_core::driver::Transport<rig_core::test_utils::MockScript> for CompletedFrameTransport {
+    fn send(
+        &self,
+        request: CompletionRequest,
+        exchange: rig_core::driver::Exchange,
+    ) -> rig_core::driver::Opening<rig_core::test_utils::MockFrame> {
+        use rig_core::driver::{Opened, Opening};
+        use rig_core::error::ProviderError;
+        use rig_core::test_utils::MockFrame;
+        if exchange.mode != rig_core::wire::Mode::Streaming {
+            return Opening::failed(ProviderError::Provider(
+                "G234 completed-response transport is a labelled streaming fixture".to_owned(),
+            ));
+        }
+        self.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((exchange.mode, request));
+        let response = self.turns.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front();
+        let Some(response) = response else {
+            return Opening::failed(ProviderError::Provider("G234 fixture has no completed response left".to_owned()));
+        };
+        let document = response.raw.clone();
+        let request_id = response.provider_request_id.clone();
+        let headers = response.provider_response_headers.clone();
+        Opening::ready(
+            Opened::new(futures::stream::iter([Ok(MockFrame::Response(Box::new(response)))]))
+                .with_document(document)
+                .with_request_id(request_id)
+                .with_captured_response_headers(headers),
+        )
+    }
+}
+
+/// Produce actual typed completions through the existing unary mock Model,
+/// then deliver those completions as MockFrame::Response in Streaming mode.
+/// No Origin/Native or success terminal is constructed by this fixture.
+async fn run_completed_frame_stage(
+    configure: impl FnOnce(AgentRunner) -> AgentRunner,
+) -> (Result<String, String>, Vec<CompletionRequest>) {
+    let unary = model(Surface::Blocking, &[Turn::Malformed, Turn::Answer]);
+    let mut turns = std::collections::VecDeque::new();
+    for _ in 0..2 {
+        let response = unary.call(CompletionRequest::new("add 2 and something")).await
+            .expect("the actual unary mock produces the completed typed fixture");
+        assert_eq!(response.origin.provider, rig_core::test_utils::MOCK_PROVIDER);
+        if turns.is_empty() {
+            let calls = response.tool_calls().collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id.provider().expect("actual received call ID").as_str(), "tool_call_1");
+            assert_eq!(calls[0].function.name.as_str(), "add");
+            assert_eq!(calls[0].function.invalid_arguments.as_deref(), Some(RAW));
+            assert!(calls[0].native.is_none());
+        }
+        turns.push_back(response);
+    }
+    let transport = CompletedFrameTransport {
+        turns: Arc::new(Mutex::new(turns)),
+        requests: Arc::default(),
+    };
+    let recorded = transport.clone();
+    let completed = rig_core::driver::Model::new(unary.wire.clone(), transport);
+    let agent = AgentBuilder::new(completed).tool(MockAddTool).build();
+    let outcome = drive(Surface::Streamed,
+        configure(agent.prompt("add 2 and something").max_turns(10)),
+    ).await;
+    let captured = recorded.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    assert!(captured.iter().all(|(mode, _)| *mode == rig_core::wire::Mode::Streaming));
+    (outcome, captured.into_iter().map(|(_, request)| request).collect())
+}
+
+/// G234 retains the exact original fragmented Streamed script as refusal,
+/// separate from completed-turn malformed feedback/hook consumption.
+async fn assert_original_fragmented_stage_refusal(with_hook: bool) {
+    use rig_core::error::{ErrorDetail, ErrorKind};
+    use rig_core::streaming::{Item, StreamEvent};
+    let fragmented = model(Surface::Streamed, &[Turn::Malformed, Turn::Answer]);
+    let recorded = fragmented.clone();
+    let hook = Decide::new(None);
+    let agent = AgentBuilder::new(fragmented).tool(MockAddTool).build();
+    let mut runner = agent.prompt("add 2 and something").max_turns(10);
+    if with_hook {
+        runner = runner.add_hook(hook.clone());
+    }
+    let mut stream = runner.stream();
+    let mut call_ends = 0;
+    let mut completed_calls = 0;
+    let mut final_answers = 0;
+    let mut refusal = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(_), ..
+            }))) => call_ends += 1,
+            Ok(MultiTurnStreamItem::CompletionCall(_)) => completed_calls += 1,
+            Ok(MultiTurnStreamItem::FinalResponse(_)) => final_answers += 1,
+            Ok(_) => {},
+            Err(error) => { refusal = Some(error); break; },
+        }
+    }
+    assert!(stream.next().await.is_none());
+    assert_eq!(call_ends, 0);
+    assert_eq!(completed_calls, 0, "the original producer never reaches its scripted terminal");
+    assert_eq!(final_answers, 0);
+    let crate::run::PromptError::Report(report) = refusal.expect("exact fragmented RAW is refused") else {
+        panic!("the existing relayed malformed detail remains typed at the agent boundary");
+    };
+    assert_eq!(report.kind, ErrorKind::Response);
+    assert_eq!(report.message, "tool call `add` arrived with malformed JSON input: expected value at line 1 column 15");
+    let Some(ErrorDetail::MalformedToolInput(input)) = report.detail else { panic!("actual malformed detail"); };
+    assert_eq!(input.name.as_str(), "add");
+    assert_eq!(input.raw, RAW);
+    assert_eq!(input.error, "expected value at line 1 column 15");
+    assert_eq!(input.id.provider().expect("actual call ID").as_str(), "tool_call_1");
+    let provider = input.provider.expect("the exact received correlation is retained");
+    assert_eq!(provider.call_id.as_str(), "tool_call_1");
+    assert_eq!(provider.item_id, None);
+    assert_eq!(recorded.requests().len(), 1, "no recovery request was made on this original stage");
+    assert!(hook.seen().is_empty(), "no completed malformed call reached the invalid-call hook");
+}
+
+#[tokio::test]
+async fn the_original_default_fragmented_malformed_stream_is_a_strict_refusal() {
+    assert_original_fragmented_stage_refusal(false).await;
+}
+
+#[tokio::test]
+async fn the_original_hook_fragmented_malformed_stream_is_a_strict_refusal() {
+    assert_original_fragmented_stage_refusal(true).await;
+}
+
+/// G234 input-stage exception: a real completed typed malformed turn is
+/// streamed through MockFrame::Response; no fragmented-input parity claim.
+#[tokio::test]
+async fn completed_response_streaming_preserves_default_malformed_feedback_and_recovery() {
+    let surface = Surface::Streamed;
+    let (outcome, requests) = run_completed_frame_stage(|r| r).await;
+    assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
+    assert_eq!(requests.len(), 2, "{surface:?}: the model gets another turn");
+    let text = answer_text(&requests, 1);
+    assert!(
+        text.starts_with("The arguments for tool `add` are not a JSON object: ") && text.contains(RAW),
+        "{surface:?}: the answer names the problem and the arguments: {text}",
+    );
+}
+
+/// G234 completed-response stage retains every original hook predicate and
+/// independently pins the existing Required request patch in this new control.
+#[tokio::test]
+async fn completed_response_streaming_preserves_malformed_hook_context_and_patched_choice() {
+    let surface = Surface::Streamed;
+    for patched_choice in [None, Some(ToolChoice::Required)] {
+        let mut hook = Decide::new(None);
+        if let Some(choice) = patched_choice.clone() {
+            hook = hook.patching(choice);
+        }
+        let (outcome, requests) = run_completed_frame_stage(|r| r.add_hook(hook.clone())).await;
+        assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
+        assert_eq!(requests.len(), 2, "the actual completed stage reaches the recovery request");
+        let seen = hook.seen();
+        let [context] = seen.as_slice() else { panic!("{surface:?}: the hook is consulted once, saw {seen:?}"); };
+        assert_eq!(context.tool_name, "add");
+        assert_eq!(context.args.as_deref(), Some(RAW));
+        assert!(matches!(&context.reason, InvalidToolCallReason::MalformedArguments { error } if !error.is_empty()),
+            "{surface:?}: {:?}", context.reason);
+        assert_eq!(context.tool_call_id.as_ref().and_then(|id| id.provider()).map(|id| id.as_str()), Some("tool_call_1"));
+        assert_eq!(context.available_tools, ["add"]);
+        assert_eq!(context.allowed_tools, ["add"]);
+        assert_eq!(context.is_streaming, matches!(surface, Surface::Streamed), "{surface:?}");
+        assert!(context.chat_history.iter().any(|message| matches!(message,
+            Message::Assistant(AssistantMessage { content, .. }) if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_)))
+        )), "{surface:?}: the diagnostic history holds the committed turn");
+        assert!(answer_text(&requests, 1).contains("not a JSON object"));
+        assert_eq!(context.tool_choice, patched_choice);
+        assert!(requests.iter().all(|request| request.tool_choice == patched_choice));
     }
 }
