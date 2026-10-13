@@ -1766,9 +1766,9 @@ fn an_unknown_reasoning_summary_supplies_no_text() {
     assert_eq!(raw.item, json!({"type":"future_summary","list":[1]}));
 }
 
-// D08; approved G82-G89 current boundary and named exceptions.
+// D08 / G202: known nonempty categories survive; known empty reasoning keeps raw.
 #[test]
-fn each_known_tag_decodes_to_its_modeled_variant() {
+fn known_tags_keep_nonempty_categories_and_empty_reasoning_keeps_raw() {
     for (item, kind) in [
         (
             json!({"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi","annotations":[]}]}),
@@ -1781,15 +1781,33 @@ fn each_known_tag_decodes_to_its_modeled_variant() {
         (json!({"type":"reasoning","id":"r1","summary":[]}), 2),
     ] {
         let response = fold_items(vec![item.clone()]);
-        assert_eq!(response.choice.len(), 1);
-        assert!(matches!(
-            (&response.choice[0], kind),
-            (CoreContent::CarriedText(_), 0)
-                | (CoreContent::ToolCall(_), 1)
-                | (CoreContent::CarriedReasoning(_), 2)
-        ));
+        if kind == 2 {
+            // G202: the original known empty item retains raw, not a canonical part.
+            assert!(response.choice.is_empty());
+        } else {
+            assert_eq!(response.choice.len(), 1);
+            assert!(matches!(
+                (&response.choice[0], kind),
+                (CoreContent::CarriedText(_), 0) | (CoreContent::ToolCall(_), 1)
+            ));
+        }
         assert_eq!(response.raw["output"][0], item);
     }
+}
+
+/// G202 separately labelled synthetic nonempty known-category control.
+#[test]
+fn a_nonempty_known_reasoning_tag_keeps_its_category_and_exact_raw() {
+    let item = json!({"type":"reasoning","id":"r1",
+        "summary":[{"type":"summary_text","text":"synthetic category control"}]});
+    let response = fold_items(vec![item.clone()]);
+    assert_eq!(response.choice.len(), 1);
+    let CoreContent::CarriedReasoning(reasoning) = &response.choice[0] else {
+        panic!("the nonempty known tag remains reasoning");
+    };
+    assert_eq!(reasoning.id.as_deref(), Some("r1"));
+    assert_eq!(reasoning.content, [Part::Summary("synthetic category control".to_owned())]);
+    assert_eq!(response.raw["output"][0], item);
 }
 
 // D09; approved G82-G89 current boundary and named exceptions.

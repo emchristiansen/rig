@@ -286,10 +286,10 @@ fn opaque_message_parts_replay_in_place_with_and_without_ids() {
     assert_eq!(items[0]["content"], json!([raw()]));
 }
 
-/// OC04 / G128: tagged forms retain their current typed categories;
-/// untagged original fixtures are genuine unknown whole items, without inference.
+/// OC04 / G128 / G201: tagged calls and untagged whole items keep their content;
+/// the original empty known reasoning keeps exact raw without a canonical part.
 #[test]
-fn tagged_items_keep_typed_categories_and_untagged_items_keep_provider_payloads() {
+fn tagged_calls_and_untagged_items_keep_content_while_empty_reasoning_keeps_raw() {
     for tagged in [true, false] {
         let mut call = json!({"id":"fc_1","call_id":"call_1","name":"tool",
             "arguments":"{}","status":"completed"});
@@ -311,13 +311,11 @@ fn tagged_items_keep_typed_categories_and_untagged_items_keep_provider_payloads(
         assert_eq!(response.raw["output"][0], call);
         let response =
             decode(vec![reasoning.clone()]).expect("the original reasoning fixture reads");
-        assert_eq!(response.choice.len(), 1);
         if tagged {
-            assert!(matches!(
-                &response.choice[0],
-                CoreContent::CarriedReasoning(_)
-            ));
+            // G201: G165 suppresses the original wholly empty known reasoning.
+            assert!(response.choice.is_empty());
         } else {
+            assert_eq!(response.choice.len(), 1);
             let CoreContent::ProviderItem(item) = &response.choice[0] else {
                 panic!("the untagged original reasoning is a whole unknown item");
             };
@@ -326,6 +324,23 @@ fn tagged_items_keep_typed_categories_and_untagged_items_keep_provider_payloads(
         assert_eq!(response.raw["output"][0], reasoning);
     }
     assert!(decode(vec![json!({"type":"function_call","id":"bad"})]).is_err());
+}
+
+/// G201 separately labelled synthetic nonempty known-category control.
+#[test]
+fn nonempty_tagged_reasoning_keeps_its_known_category_and_exact_raw() {
+    let item = json!({"type":"reasoning","id":"rs_1",
+        "summary":[{"type":"summary_text","text":"synthetic category control"}]});
+    let response = decode(vec![item.clone()]).expect("the nonempty control reads");
+    assert_eq!(response.choice.len(), 1);
+    let CoreContent::CarriedReasoning(reasoning) = &response.choice[0] else {
+        panic!("the nonempty known control remains reasoning");
+    };
+    assert_eq!(reasoning.id.as_deref(), Some("rs_1"));
+    assert_eq!(reasoning.content, [CarriedReasoningPart::Summary(
+        "synthetic category control".to_owned(),
+    )]);
+    assert_eq!(response.raw["output"][0], item);
 }
 
 /// OC07 / G130: preparation retains both current carried foreign parts.

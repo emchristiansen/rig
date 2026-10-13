@@ -109,8 +109,8 @@ fn test_deserialize_stream_response_with_usage_only_chunk() {
     assert_eq!(response.usage.total_tokens, Some(15));
 }
 
-#[test]
-fn test_deserialize_stream_response_with_multiple_text_parts() {
+#[tokio::test]
+async fn test_unary_model_preserves_multiple_received_text_parts_and_raw() {
     let json_data = json!({
         "candidates": [{
             "content": {
@@ -132,7 +132,17 @@ fn test_deserialize_stream_response_with_multiple_text_parts() {
     });
 
     let parts = json_data["candidates"][0]["content"]["parts"].clone();
-    let response = decoded(json_data).expect("the reply decodes");
+    // G200: actual unary transport captures the whole received body.
+    let wire = crate::providers::gemini::GeminiConfig::new("test-key")
+        .completion("gemini-2.5-flash");
+    let body = serde_json::to_vec(&json_data).expect("the original fixture is JSON");
+    let response = crate::driver::Model::new(
+        wire,
+        crate::test_utils::RecordingHttpClient::new(body),
+    )
+    .call(crate::completion::CompletionRequest::new("restate"))
+    .await
+    .expect("the actual unary reply decodes");
     let [AssistantContent::Text(first), AssistantContent::Text(second), AssistantContent::Text(third)]
         = response.choice.as_slice() else {
         panic!("Expected three received text blocks: {:?}", response.choice);

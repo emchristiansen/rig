@@ -251,19 +251,19 @@ async fn test_tool_protocol_finish_reason_returns_response_error() {
 }
 
 #[tokio::test]
-async fn test_completion_response_usage_preserves_cached_and_reasoning_tokens() {
-    let converted = unary(
-        "gemini-2.5-flash",
-        r#"{"responseId":"resp_1","candidates":[{"content":{"parts":[{"text":"answer"}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":40,"cachedContentTokenCount":20,"candidatesTokenCount":30,"totalTokenCount":100,"thoughtsTokenCount":10,"toolUsePromptTokenCount":12},"modelVersion":"gemini-2.0-flash-001"}"#,
-    )
-    .await;
+async fn test_completion_usage_includes_tool_input_and_reasoning_output() {
+    // G199: G190 canonical totals include tool input and thought output.
+    let fixture = r#"{"responseId":"resp_1","candidates":[{"content":{"parts":[{"text":"answer"}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":40,"cachedContentTokenCount":20,"candidatesTokenCount":30,"totalTokenCount":100,"thoughtsTokenCount":10,"toolUsePromptTokenCount":12},"modelVersion":"gemini-2.0-flash-001"}"#;
+    let converted = unary("gemini-2.5-flash", fixture).await;
 
-    assert_eq!(converted.usage.input_tokens, Some(40));
+    assert_eq!(converted.usage.input_tokens, Some(52));
     assert_eq!(converted.usage.cached_input_tokens, Some(20));
-    assert_eq!(converted.usage.output_tokens, Some(30));
+    assert_eq!(converted.usage.output_tokens, Some(40));
     assert_eq!(converted.usage.reasoning_tokens, Some(10));
     assert_eq!(converted.usage.tool_use_prompt_tokens, Some(12));
     assert_eq!(converted.usage.total_tokens, Some(100));
+    assert_eq!(converted.raw, serde_json::from_str::<serde_json::Value>(fixture)
+        .expect("the original received body is JSON"));
 }
 
 #[tokio::test]
