@@ -49,7 +49,7 @@ fn rest_response() -> CompletionResponse {
     ]},"finishReason":"STOP","citationMetadata":{"citationSources":[{
         "startIndex":0,"endIndex":1,"uri":"https://example.com/arith","title":"Arithmetic"
     }]}}]});
-    let response=futures::executor::block_on(Model::new(GeminiConfig::new("test-key").completion(GEMINI_2_5_FLASH),
+    let response=futures::executor::block_on(Model::new(rig_core::providers::gemini::completion::GenerateContent::new(GeminiConfig::new("test-key"), GEMINI_2_5_FLASH),
         rig_core::test_utils::RecordingHttpClient::new(serde_json::to_vec(&raw).expect("fixture JSON")))
         .call(CompletionRequest::new("What is 2 + 2?"))).expect("actual REST decoder/fold");
     assert_eq!(response.raw,raw); assert_received(&response,REST_ISSUER);
@@ -99,11 +99,13 @@ fn g227_actual_vertex_answer_keeps_its_genuine_signature_on_vertex() {
 #[test]
 fn g227_actual_vertex_answer_to_rest_projects_known_text_without_foreign_signature() {
     let response=vertex_response(); let choice=response.choice.clone(); let raw=response.raw.clone();
-    let wire=GeminiConfig::new("test-key").completion(GEMINI_2_5_FLASH);
+    let wire=rig_core::providers::gemini::completion::GenerateContent::new(GeminiConfig::new("test-key"), GEMINI_2_5_FLASH);
     let prepared=Completion::prepare(history(response.message().unwrap()),&wire.describe()).expect("actual REST prepare");
     let Message::Assistant(turn)=&prepared.chat_history[1] else {panic!("known foreign answer is not dropped")};
     assert_eq!(turn.content,choice);
-    let body=rig_core::test_utils::json_body(&wire.encode(prepared,Mode::Unary).expect("actual REST encode").request);
+    let encoded=wire.encode(prepared,Mode::Unary).expect("actual REST encode");
+    let rig_core::wire::Body::Bytes(bytes)=encoded.request.body() else {panic!("actual REST byte body")};
+    let body:Value=serde_json::from_slice(bytes).expect("actual encoded JSON");
     assert_eq!(body["contents"].as_array().unwrap().len(),3);
     assert_eq!(body["contents"][1]["parts"],json!([{"text":"4","thought":false}]));
     assert_eq!(response.raw,raw); assert_eq!(response.choice,choice);
