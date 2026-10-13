@@ -6,7 +6,7 @@
 //! guide names.
 
 use super::*;
-use crate::providers::openai::OpenAI;
+use crate::providers::openai::{OpenAI, OpenAIConfig};
 use crate::wasm_compat::{WasmBoxedFuture, WasmCompatSend};
 use crate::wire::{Credential, CredentialSource, CredentialSourceError};
 use std::sync::{Arc, Mutex};
@@ -165,7 +165,7 @@ async fn a_credential_source_failure_sends_nothing() {
             Box::pin(async { Err("the vault is locked".into()) })
         }
     }
-    let sessions = PublicLiveSessions::new(OpenAI::new("sk-test").with_credential_source(Locked))
+    let sessions = PublicLiveSessions::new(OpenAIConfig::new("sk-test").with_credential_source(Locked).client())
         .expect("the OpenAI dialect");
     let backend = Backend::new(http::StatusCode::CREATED, CREATED, Delivery::Reply);
     let error = sessions
@@ -185,7 +185,7 @@ async fn a_credential_source_is_read_at_send_time() {
             Box::pin(async { Ok(Credential::new("sk-rotated")) })
         }
     }
-    let sessions = PublicLiveSessions::new(OpenAI::new("sk-test").with_credential_source(Rotated))
+    let sessions = PublicLiveSessions::new(OpenAIConfig::new("sk-test").with_credential_source(Rotated).client())
         .expect("the OpenAI dialect");
     let backend = Backend::new(http::StatusCode::CREATED, CREATED, Delivery::Reply);
     sessions
