@@ -16,7 +16,7 @@ use crate::completion::{FinishReason, Usage};
 use crate::error::ProviderError;
 use crate::json_utils::Lenient;
 use crate::message::{
-    CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart, CarriedText, CarriedTextContent, DocumentRange, Source, SourceLocation,
+    CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart, CarriedText, CarriedTextContent, DocumentRange, DocumentSourceKind, Image, ImageMediaType, Source, SourceLocation,
 };
 use crate::operation::completion::merge;
 use crate::operation::{Block, CallFragment, Completion, Finish};
@@ -145,6 +145,18 @@ pub fn usage_of(usage: &Value) -> Usage {
     }
 }
 
+/// Base64 bytes of a closed unsigned PNG item with no unselected fields.
+fn closed_png_data(content: &Value) -> Option<&str> {
+    let fields = content.as_object()?;
+    if content.str("type") != Some("image")
+        || content.str("mime_type") != Some("image/png")
+        || !fields.keys().all(|key| matches!(key.as_str(), "type" | "data" | "mime_type"))
+    {
+        return None;
+    }
+    content.str("data")
+}
+
 /// Open the block for `content`, a model output's newest content item.
 fn open_content(
     content: Value,
@@ -164,6 +176,16 @@ fn open_content(
         return Ok((index, content));
     }
     if content.str("type") == Some("image") {
+        if let Some(data) = closed_png_data(&content) {
+            let image = Image {
+                data: DocumentSourceKind::Base64(data.to_owned()),
+                media_type: Some(ImageMediaType::PNG),
+                ..Image::default()
+            };
+            // The completed output step supplies the image's native item.
+            out.open(index, Block::Image(image), Value::Null)?;
+            return Ok((index, content));
+        }
         out.open(index, Block::Text, Value::Null)?;
         let payload = CarriedPayload::new(content.clone(), Some(PROVIDER_NAME.to_owned()))
             .with_position(CarriedPosition::MessageContent { item_index: step_index as u64, part_index: content_index as u64 });
@@ -469,7 +491,8 @@ impl InteractionsDecoder {
             Some(Open::Output(step, items)) => {
                 for (block, item) in items {
                     if (item.str("type") == Some("function_call") && item.str("name").is_some())
-                        || matches!(item.str("type"), Some("thought" | "image")) {
+                        || item.str("type") == Some("thought")
+                        || (item.str("type") == Some("image") && closed_png_data(&item).is_none()) {
                         continue;
                     }
                     for annotation in item.arr("annotations") {

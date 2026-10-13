@@ -214,8 +214,8 @@ fn a_versioned_gemini_id_takes_its_models_thinking() {
     );
 }
 
-/// A raw `generationConfig` merges over the typed fields and the mapped
-/// options, key by key: a key set both ways is the raw one.
+/// Explicit temperature wins the raw value; other raw and mapped fields
+/// stay in the merged generation config.
 #[test]
 fn a_raw_generation_config_beats_the_typed_fields_and_keeps_the_rest() {
     let body = sent(
@@ -228,7 +228,7 @@ fn a_raw_generation_config_beats_the_typed_fields_and_keeps_the_rest() {
     .expect("encodes");
     assert_eq!(
         body["generationConfig"],
-        json!({"temperature": 0.9, "maxOutputTokens": 64, "topP": 0.5, "seed": 7, "topK": 3})
+        json!({"temperature": 0.2, "maxOutputTokens": 64, "topP": 0.5, "seed": 7, "topK": 3})
     );
 }
 

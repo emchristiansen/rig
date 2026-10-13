@@ -144,6 +144,13 @@ fn mixed_step() -> Value {
 #[test]
 fn a_mixed_output_reaches_another_model_as_its_canonical_blocks() {
     let response = whole(vec![mixed_step()], "completed");
+    assert_eq!(response.raw["steps"][0], mixed_step());
+    let AssistantContent::Image(image) = &response.choice[1] else {
+        panic!("a canonical PNG: {:?}", response.choice);
+    };
+    assert_eq!(image.data, crate::message::DocumentSourceKind::Base64("aW1n".to_owned()));
+    assert_eq!(image.media_type, Some(ImageMediaType::PNG));
+    assert_eq!(image.native.as_ref().map(|native| &native.item["content"][0]), Some(&image_item()));
     assert_eq!(
         replayed_to(&wire("gemini-2.5-flash"), &response),
         [
@@ -386,4 +393,36 @@ fn a_stored_continuation_keeps_its_results_without_declared_tools() {
         steps,
         [json!({"type": "function_result", "name": "add", "call_id": "c_1", "result": "18"})]
     );
+}
+
+#[test]
+fn only_closed_unsigned_png_output_is_a_canonical_image() {
+    let item = image_item();
+    let step = json!({"type": "model_output", "content": [item.clone()]});
+    let response = whole(vec![step.clone()], "completed");
+    let [AssistantContent::Image(image)] = response.choice.as_slice() else {
+        panic!("one canonical closed PNG: {:?}", response.choice);
+    };
+    assert_eq!(image.data, crate::message::DocumentSourceKind::Base64("aW1n".to_owned()));
+    assert_eq!(image.media_type, Some(ImageMediaType::PNG));
+    assert_eq!(image.native.as_ref().map(|native| &native.item), Some(&step));
+    assert_eq!(response.raw["steps"][0], step);
+    assert_eq!(replayed_to(&wire(MODEL), &response), [step]);
+    for item in [
+        json!({"type": "image", "data": "aW1n", "mime_type": "image/png", "extra": {"exact": true}}),
+        json!({"type": "image", "data": "aW1n", "mime_type": "image/png", "signature": "sig"}),
+        json!({"type": "image", "data": "aW1n", "mime_type": "image/jpeg"}),
+        json!({"type": "image", "data": null, "mime_type": "image/png"}),
+        json!({"type": "image", "uri": "https://example.com/a.png", "mime_type": "image/png"}),
+        json!({"type": "image", "mime_type": "image/png"}),
+    ] {
+        let step = json!({"type": "model_output", "content": [item.clone()]});
+        let response = whole(vec![step.clone()], "completed");
+        let [AssistantContent::CarriedText(text)] = response.choice.as_slice() else {
+            panic!("an unselected image stays inspection-only: {:?}", response.choice);
+        };
+        assert_eq!(text.known_text_projection(), Some(""));
+        assert_eq!(text.payload.item, item);
+        assert_eq!(response.raw["steps"][0], step);
+    }
 }

@@ -302,12 +302,25 @@ fn modeled_metadata_is_read_before_any_candidate_emission() {
     for metadata in [
         json!({"promptTokenCount":"1"}),
         json!({"cachedContentTokenCount":1.5}),
+    ] {
+        let body = json!({"candidates":[valid_candidate.clone()],"usageMetadata":metadata});
+        assert!(matches!(GenerateContentDecoder::default().in_mode(Mode::Streaming)
+            .classify(WireFrame::Text(body.to_string())), WireEvent::Corrupt(_)));
+    }
+    for metadata in [
         json!({"promptTokensDetails":[{"modality":"UNKNOWN_KIND","tokenCount":1}]}),
         json!({"trafficType":"NEW_TRAFFIC"}),
     ] {
         let body = json!({"candidates":[valid_candidate.clone()],"usageMetadata":metadata});
         assert!(matches!(GenerateContentDecoder::default().in_mode(Mode::Streaming)
-            .classify(WireFrame::Text(body.to_string())), WireEvent::Corrupt(_)));
+            .classify(WireFrame::Text(body.to_string())), WireEvent::Known(_)));
+        for mode in [Mode::Unary, Mode::Streaming] {
+            let response = crate::test_utils::history::decode(&wire(), mode,
+                [WireFrame::Text(body.to_string())]).expect("future string metadata is admitted");
+            assert_eq!(response.text(), "must not emit");
+            assert_eq!(response.raw["usageMetadata"], metadata);
+            assert_eq!(response.raw["candidates"][0]["content"], valid_candidate["content"]);
+        }
     }
 }
 
@@ -444,7 +457,7 @@ fn selected_unsigned_text_keeps_siblings_only_for_inspection_and_projects_real_r
                     &target.describe()).expect("original carried history prepares");
                 let encoded = target.encode(prepared, Mode::Unary).expect("known text encodes");
                 let body = crate::test_utils::json_body(&encoded.request);
-                assert_eq!(body["contents"][1]["parts"], json!([{"text":text}]));
+                assert_eq!(body["contents"][1]["parts"], json!([{"text":text,"thought":false}]));
                 assert!(!body.to_string().contains("executableCode"));
                 assert!(!body.to_string().contains("arbitrary"));
             }

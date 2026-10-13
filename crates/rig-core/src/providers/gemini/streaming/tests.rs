@@ -131,17 +131,20 @@ fn test_deserialize_stream_response_with_multiple_text_parts() {
         }
     });
 
+    let parts = json_data["candidates"][0]["content"]["parts"].clone();
     let response = decoded(json_data).expect("the reply decodes");
-    // Consecutive text parts continue one text block, and its provider item
-    // holds the merged text.
-    let [AssistantContent::Text(text)] = response.choice.as_slice() else {
-        panic!("Expected one text block: {:?}", response.choice);
+    let [AssistantContent::Text(first), AssistantContent::Text(second), AssistantContent::Text(third)]
+        = response.choice.as_slice() else {
+        panic!("Expected three received text blocks: {:?}", response.choice);
     };
-    assert_eq!(text.text, "Hello, world! How are you?");
-    assert_eq!(
-        text.native.as_ref().map(|native| &native.item),
-        Some(&json!({ "text": "Hello, world! How are you?" }))
-    );
+    assert_eq!(first.text, "Hello, ");
+    assert_eq!(second.text, "world!");
+    assert_eq!(third.text, " How are you?");
+    assert_eq!(response.text(), "Hello, world! How are you?");
+    for (index, text) in [first, second, third].into_iter().enumerate() {
+        assert_eq!(text.native.as_ref().map(|native| &native.item), Some(&parts[index]));
+    }
+    assert_eq!(response.raw["candidates"][0]["content"]["parts"], parts);
 }
 
 #[test]
@@ -280,10 +283,9 @@ fn test_deserialize_stream_response_with_empty_parts() {
         }
     });
 
-    // An empty successful reply is a success with no blocks.
-    let response = decoded(json_data).expect("an empty reply decodes");
-    assert!(response.choice.is_empty(), "{:?}", response.choice);
-    assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+    let error = decoded(json_data).expect_err("an empty unary reply refuses");
+    assert!(matches!(error, crate::error::ProviderError::Response(message)
+        if message == crate::message::EMPTY_RESPONSE_ERROR));
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -501,7 +503,7 @@ fn a_signature_only_part_joins_the_text_before_it() {
     let body = crate::test_utils::json_body(&encoded.request);
     assert_eq!(
         body["contents"][1]["parts"],
-        json!([{"text": "Answer", "thoughtSignature": "c2ln"}]),
+        json!([{"text": "Answer", "thought": false, "thoughtSignature": "c2ln"}]),
         "{body}"
     );
 }
@@ -589,7 +591,7 @@ fn a_signature_only_part_signs_the_block_beside_it() {
     let body = replayed("gemini-3-flash-preview", &leading);
     assert_eq!(
         body["contents"][1]["parts"],
-        json!([{"text": "Answer", "thoughtSignature": "c2lnLWxlYWQ="}]),
+        json!([{"text": "Answer", "thought": false, "thoughtSignature": "c2lnLWxlYWQ="}]),
         "{body}"
     );
 }

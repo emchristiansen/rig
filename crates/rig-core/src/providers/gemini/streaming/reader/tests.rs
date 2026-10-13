@@ -239,8 +239,6 @@ fn test_deserialize_message_user() {
         assert_eq!(
             function_call
                 .args
-                .as_object()
-                .expect("arguments object")
                 .get("arg1")
                 .expect("arg1"),
             "value1"
@@ -379,5 +377,23 @@ fn future_metadata_label_acceptance_does_not_admit_non_strings() {
             "promptTokensDetails": [{"modality": value, "tokenCount": 3}]
         }});
         assert!(read(modality.as_object().expect("reply object")).is_err());
+    }
+}
+
+#[test]
+fn absent_function_args_default_but_explicit_nonobjects_refuse() {
+    let call: FunctionCall = serde_json::from_value(json!({"name": "add"}))
+        .expect("absent proto3 args are an empty object");
+    assert_eq!(call.name, "add");
+    assert_eq!(call.args, Map::new());
+    assert_eq!(call.id, None);
+    let call: FunctionCall = serde_json::from_value(json!({"name": "add", "args": {"x": 1}}))
+        .expect("present object arguments survive");
+    assert_eq!(call.args, Map::from_iter([("x".to_owned(), json!(1))]));
+    for args in [json!(null), json!([]), json!("{}"), json!(1), json!(true)] {
+        let call = json!({"name": "add", "args": args});
+        assert!(serde_json::from_value::<FunctionCall>(call.clone()).is_err(), "{call}");
+        let reply = json!({"candidates": [{"content": {"parts": [{"functionCall": call}]}}]});
+        assert!(read(reply.as_object().expect("a reply object")).is_err(), "{reply}");
     }
 }

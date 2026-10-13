@@ -133,8 +133,8 @@ fn a_unary_reply_cites_its_grounding_segments_in_bytes() {
     assert_eq!(span.range(), bytes_of("Nico")..bytes_of("Nico") + 27);
 }
 
-/// A segment of the second part counts from that part's start, which is
-/// past the first part's bytes in the block the parts share.
+/// A segment of the second part counts from that part's start, and the
+/// received parts retain their separate text blocks.
 #[test]
 fn a_segment_of_a_later_part_counts_from_that_part() {
     let split = bytes_of("Nico");
@@ -143,12 +143,20 @@ fn a_segment_of_a_later_part_counts_from_that_part() {
         support(1, split, "Nico Williams scored first.", &[0], &[0.75]),
         support(1, split, "Oyarzabal won it.", &[0, 1], &[0.5, 0.25]),
     ];
-    let reply = finished(chunk(parts, grounding(supports)));
+    let reply = finished(chunk(parts.clone(), grounding(supports)));
     let response = decode(&wire(), Mode::Unary, [frame(reply)]).expect("the reply decodes");
-    let [text] = texts(&response)[..] else {
-        panic!("one text block: {:?}", response.choice);
+    let [first, second] = texts(&response)[..] else {
+        panic!("two received text blocks: {:?}", response.choice);
     };
-    assert_eq!(cited(text), expected_grounding());
+    assert_eq!(first.text, &ANSWER[..split]);
+    assert_eq!(second.text, &ANSWER[split..]);
+    assert_eq!(response.text(), ANSWER);
+    assert_eq!(first.native.as_ref().map(|native| &native.item), Some(&parts[0]));
+    assert_eq!(second.native.as_ref().map(|native| &native.item), Some(&parts[1]));
+    assert!(first.citations().is_empty());
+    assert_eq!(cited(second), expected_grounding());
+    assert_eq!(second.citations()[0].span.as_ref().expect("first span").range(), 0..27);
+    assert_eq!(second.citations()[1].span.as_ref().expect("second span").range(), 28..45);
 }
 
 /// A stream sends the grounding with its last chunk, its segments counted
@@ -302,9 +310,18 @@ fn a_cited_turn_replays_its_parts_unchanged() {
     let plain = finished(chunk(parts.clone(), json!({})));
     let cited = decode(&wire(), Mode::Unary, [frame(cited)]).expect("the reply decodes");
     let plain = decode(&wire(), Mode::Unary, [frame(plain)]).expect("the reply decodes");
-    assert_eq!(texts(&cited)[0].citations().len(), 2);
+    let [AssistantContent::CarriedText(text)] = cited.choice.as_slice() else {
+        panic!("one genuine carried signed answer: {:?}", cited.choice);
+    };
+    assert_eq!(text.known_text_projection(), Some(ANSWER));
+    assert_eq!(text.signed_answer().map(|answer| answer.signature.as_str()), Some("c2ln"));
+    assert_eq!(text.payload.item, parts[0]);
+    assert_eq!(text.citations().len(), 2);
     assert_eq!(replayed(&cited), replayed(&plain));
-    assert_eq!(replayed(&cited)["contents"][1]["parts"], parts);
+    assert_eq!(
+        replayed(&cited)["contents"][1]["parts"],
+        json!([{"text": ANSWER, "thought": false, "thoughtSignature": "c2ln"}])
+    );
 }
 
 /// A segment and a recitation source the answer cannot hold: a reversed
@@ -327,8 +344,8 @@ fn malformed_ranges(text: &str) -> Vec<(Value, Value)> {
     ]
 }
 
-/// A reversed range or one whose offsets overflow drops its citation; the
-/// reply decodes and the rest of the answer stays uncited by it.
+/// An admitted reversed range drops its citation. Huge recitation offsets
+/// outside the reader's i32 domain refuse as corrupt frames.
 #[test]
 fn a_reversed_or_huge_range_is_dropped_without_panicking() {
     for (segment, recitation) in malformed_ranges("Nico") {
@@ -349,10 +366,19 @@ fn a_reversed_or_huge_range_is_dropped_without_panicking() {
             });
             for mode in [Mode::Unary, Mode::Streaming] {
                 let reply = finished(chunk(json!([{"text": ANSWER}]), metadata.clone()));
-                let response = decode(&wire(), mode, [frame(reply)]).expect("the reply decodes");
-                for citation in texts(&response)[0].citations() {
-                    let span = citation.span.as_ref().expect("a span");
-                    assert!(span.range().end <= ANSWER.len(), "{segment} {span:?}");
+                let result = decode(&wire(), mode, [frame(reply)]);
+                if recitation["endIndex"].as_u64().expect("an original integer offset") > i32::MAX as u64 {
+                    let error = result.expect_err("huge recitation offsets refuse before range handling");
+                    assert!(matches!(error.report().detail,
+                        Some(crate::error::ErrorDetail::CorruptFrame(_))), "{error}");
+                } else {
+                    let response = result.expect("the reversed in-range reply decodes");
+                    assert_eq!(response.text(), ANSWER);
+                    assert!(texts(&response)[0].citations().is_empty());
+                    for citation in texts(&response)[0].citations() {
+                        let span = citation.span.as_ref().expect("a span");
+                        assert!(span.range().end <= ANSWER.len(), "{segment} {span:?}");
+                    }
                 }
             }
         }

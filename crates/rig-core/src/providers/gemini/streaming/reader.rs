@@ -66,7 +66,12 @@ struct FileData { mime_type: Option<String>, file_uri: String }
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
-struct FunctionCall { name: String, args: Value, id: Option<String> }
+struct FunctionCall {
+    name: String,
+    #[serde(default)]
+    args: Map<String, Value>,
+    id: Option<String>,
+}
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
