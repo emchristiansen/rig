@@ -429,22 +429,14 @@ fn finish_reason(reason: &str) -> FinishReason {
     }
 }
 
-/// Rig's input is Bedrock's `inputTokens` plus its cache reads and writes,
-/// and its total input plus output, which is `totalTokens`.
+/// The provider's reported input, output and total, with cache counts separate.
 fn usage(usage: &Value) -> Usage {
-    let cache_read = usage.u64("cacheReadInputTokens");
-    let cache_write = usage.u64("cacheWriteInputTokens");
-    let input = [usage.u64("inputTokens"), cache_read, cache_write]
-        .into_iter()
-        .flatten()
-        .fold(0, u64::saturating_add);
-    let output = usage.u64("outputTokens").unwrap_or(0);
     Usage::new()
-        .input_tokens(input)
-        .output_tokens(output)
-        .total_tokens(input.saturating_add(output))
-        .cached_input_tokens(cache_read)
-        .cache_creation_input_tokens(cache_write)
+        .input_tokens(usage.u64("inputTokens").unwrap_or(0))
+        .output_tokens(usage.u64("outputTokens").unwrap_or(0))
+        .total_tokens(usage.u64("totalTokens").unwrap_or(0))
+        .cached_input_tokens(usage.u64("cacheReadInputTokens"))
+        .cache_creation_input_tokens(usage.u64("cacheWriteInputTokens"))
 }
 
 impl<'id> rig_core::wire::Decoder<'id, Completion, ConverseFrame> for StreamState {

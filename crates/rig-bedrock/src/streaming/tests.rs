@@ -417,17 +417,16 @@ fn images_results_and_cut_streams_rebuild_what_arrived() {
     assert_eq!(rebuilt(&[]), Value::Null);
 }
 
-/// Rig's input counts Bedrock's cache reads and writes, and its total is
-/// input plus output.
+/// Cache reads and writes do not change the provider's reported counts.
 #[test]
-fn usage_counts_cache_reads_and_writes_in_input() {
+fn usage_keeps_reported_counts_with_separate_cache_reads_and_writes() {
     let counted = super::usage(&json!({
         "inputTokens": 10, "outputTokens": 5, "totalTokens": 15,
         "cacheReadInputTokens": 100, "cacheWriteInputTokens": 7,
     }));
-    assert_eq!(counted.input_tokens, Some(117));
+    assert_eq!(counted.input_tokens, Some(10));
     assert_eq!(counted.output_tokens, Some(5));
-    assert_eq!(counted.total_tokens, Some(122));
+    assert_eq!(counted.total_tokens, Some(15));
     assert_eq!(counted.cached_input_tokens, Some(100));
     assert_eq!(counted.cache_creation_input_tokens, Some(7));
 }
@@ -649,4 +648,58 @@ fn every_citation_kind_resolves_the_same_unary_and_streamed() {
             .collect();
         assert_eq!(items, content.iter().cloned().map(Some).collect::<Vec<_>>());
     }
+}
+
+
+/// Reported totals need not equal the sum of the two other counters.
+#[test]
+fn g225_whole_and_stream_keep_exact_reported_usage_and_cache_components() {
+    let reported = json!({
+        "inputTokens": 10, "outputTokens": 5, "totalTokens": 99,
+        "cacheReadInputTokens": 100, "cacheWriteInputTokens": 7,
+    });
+    let mut whole = document(vec![json!({"text":"answer"})], "end_turn");
+    whole["usage"] = reported.clone();
+    let unary = decode(
+        &Converse::new(CLAUDE),
+        Mode::Unary,
+        [ConverseFrame::Whole(whole)],
+    ).expect("the real whole decoder folds reported usage");
+    let stream = streamed(CLAUDE, vec![
+        delta(0, json!({"text":"answer"})),
+        stop(0),
+        json!({"messageStop":{"stopReason":"end_turn"}}),
+        json!({"metadata":{"usage":reported,"metrics":{"latencyMs":5}}}),
+    ]).expect("the real stream decoder folds reported usage");
+    for response in [unary, stream] {
+        assert_eq!(response.usage.input_tokens, Some(10));
+        assert_eq!(response.usage.output_tokens, Some(5));
+        assert_eq!(response.usage.total_tokens, Some(99));
+        assert_eq!(response.usage.cached_input_tokens, Some(100));
+        assert_eq!(response.usage.cache_creation_input_tokens, Some(7));
+        assert_eq!(response.raw["usage"], reported);
+        assert!(matches!(response.choice.as_slice(), [AssistantContent::Text(text)]
+            if text.text == "answer"));
+    }
+}
+
+#[test]
+fn g225_missing_reported_fields_keep_zero_defaults_and_cache_optional_values() {
+    for reported in [json!({}), json!({
+        "inputTokens":null,"outputTokens":null,"totalTokens":null,
+        "cacheReadInputTokens":null,"cacheWriteInputTokens":null,
+    })] {
+        let counted = super::usage(&reported);
+        assert_eq!(counted.input_tokens, Some(0));
+        assert_eq!(counted.output_tokens, Some(0));
+        assert_eq!(counted.total_tokens, Some(0));
+        assert_eq!(counted.cached_input_tokens, None);
+        assert_eq!(counted.cache_creation_input_tokens, None);
+    }
+    let counted = super::usage(&json!({"cacheReadInputTokens":100,"cacheWriteInputTokens":7}));
+    assert_eq!(counted.input_tokens, Some(0));
+    assert_eq!(counted.output_tokens, Some(0));
+    assert_eq!(counted.total_tokens, Some(0));
+    assert_eq!(counted.cached_input_tokens, Some(100));
+    assert_eq!(counted.cache_creation_input_tokens, Some(7));
 }
