@@ -423,7 +423,7 @@ impl Arguments {
     /// The call to `name` these arguments make: the announced ones when no
     /// fragment arrived, else the text, read by [`ToolFunction::parse`].
     fn function(&self, name: ToolName) -> ToolFunction {
-        if self.text.is_empty()
+        if !self.overflowed && self.text.is_empty()
             && let Some(announced) = &self.announced
         {
             return ToolFunction::new(name, announced.clone());
