@@ -421,3 +421,24 @@ fn signature_deltas_replace_the_opening_fallback_in_the_rebuilt_document() {
     ]);
     assert_eq!(only_delta["content"][0]["signature"], "the_whole_signature");
 }
+
+// G155: no received literal gains a type; only its unary-equivalent document does.
+#[test]
+fn a_stream_without_nested_type_infers_only_the_unary_document_tag() {
+    const OPEN: &str = r#"{"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":0}}}"#;
+    let opened: Value = serde_json::from_str(OPEN).expect("original start");
+    let mut expected = opened["message"].clone();
+    assert!(expected.get("type").is_none());
+    expected["type"] = json!("message");
+    assert_eq!(rebuilt(&[opened.clone()]), expected);
+    assert!(opened["message"].get("type").is_none());
+    assert_eq!(serde_json::from_str::<Value>(OPEN).expect("unchanged received start"), opened);
+}
+
+#[test]
+fn an_explicit_nested_tag_is_preserved_by_document_reconstruction() {
+    let mut opened = message_start("claude-sonnet-4-6", json!({"input_tokens":5,"output_tokens":0}));
+    opened["message"]["type"] = json!("future_message");
+    opened["message"]["future"] = json!({"exact":"kept"});
+    assert_eq!(rebuilt(&[opened.clone()]), opened["message"]);
+}

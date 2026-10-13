@@ -291,6 +291,10 @@ async fn terminal_raw_round_trips_into_the_terminal_type() {
         collect(sse(&[MESSAGE_START, TEXT_START, TEXT_DELTA, STOP_SEQUENCE])).await;
     let response = finished.expect("the turn completes");
     let raw = &response.raw;
+    // G155: type is inferred unary reconstruction metadata; MESSAGE_START stays exact.
+    assert!(serde_json::from_str::<serde_json::Value>(MESSAGE_START)
+        .expect("original message_start")["message"].get("type").is_none());
+    assert_eq!(raw["type"], "message");
     assert_eq!(raw["stop_reason"], "stop_sequence");
     assert_eq!(raw["stop_sequence"], "alpha");
     assert_eq!(raw["id"], "msg_1");

@@ -464,6 +464,11 @@ pub(super) fn assistant_parts(
             .into_iter()
             .collect());
     }
+    if let AssistantContent::CarriedText(part) = block
+        && let Some(known) = part.known_text_projection()
+    {
+        return Ok((!known.is_empty()).then(|| text(known)).into_iter().collect());
+    }
     let identity = match block.replay(target, wire_id) {
         Replay::Item(item) => {
             if item.get("type").and_then(Value::as_str) == Some("text") {

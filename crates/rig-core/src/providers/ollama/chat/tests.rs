@@ -310,7 +310,7 @@ fn messages_carry_images_thinking_calls_and_results() {
         ])
     );
 
-    // Canonical reasoning is emitted ungated, as settled in G42.
+    // G159: shared prepare retains its reasoning-to-text projection.
     let mut request = CompletionRequest::new("next");
     request.chat_history = vec![
         Message::user("first"),
@@ -320,8 +320,8 @@ fn messages_carry_images_thinking_calls_and_results() {
         ])),
     ];
     let messages = body(request)["messages"].clone();
-    assert_eq!(messages[1]["thinking"], "theirs");
-    assert_eq!(messages[1]["content"], "Answer.");
+    assert!(messages[1].get("thinking").is_none());
+    assert_eq!(messages[1]["content"], "theirsAnswer.");
 }
 
 /// A turn the same model produced replays its call items as the daemon sent
@@ -641,4 +641,21 @@ fn local_call_ids_are_emitted_on_both_wire_legs() {
         messages[2],
         json!({"role": "tool", "content": "2", "tool_name": "add", "tool_call_id": id})
     );
+}
+
+// G159/G42: the direct native encoder remains ungated for the same original reasoning.
+#[test]
+fn direct_native_encoding_keeps_originless_canonical_reasoning_ungated() {
+    let mut request = CompletionRequest::new("next");
+    request.chat_history = vec![
+        Message::user("first"),
+        Message::Assistant(AssistantMessage::new(vec![
+            AssistantContent::Reasoning(Reasoning::new("theirs")),
+            AssistantContent::text("Answer."),
+        ])),
+    ];
+    let encoded = wire().encode(request, Mode::Unary).expect("direct native encode");
+    assert_eq!(json_body(&encoded.request)["messages"][1], json!({
+        "role":"assistant", "content":"Answer.", "thinking":"theirs"
+    }));
 }

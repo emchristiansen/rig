@@ -631,14 +631,8 @@ fn test_handle_text_block_start_event() {
         r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"","citations":[]}}"#,
     )]);
     let events = decoded.events();
-    assert!(matches!(
-        events.as_slice(),
-        [StreamEvent::Start {
-            kind: crate::streaming::PartKind::Text,
-            source_order: None,
-            ..
-        }]
-    ));
+    // G154: an empty text block has no eager Start or unindexed event.
+    assert!(events.is_empty());
 }
 
 #[test]
@@ -1666,7 +1660,10 @@ fn a_stop_reason_states_every_open_block_complete() {
     );
 
     let cut = streamed(&without_stops("max_tokens", "{\"x\":")).expect("the reply folds");
-    assert_eq!(cut.stop(), StopReason::Length);
+    // G157: unfinished Length calls remain a failure under G48b/G137.
+    assert_eq!(cut.stop(), StopReason::Error(
+        "the provider ended the reply with a tool call it never finished".to_owned()
+    ));
     assert!(item(&cut.choice[0]).is_some(), "{:?}", cut.choice);
     assert!(item(&cut.choice[1]).is_none(), "{:?}", cut.choice);
     let unfinished = streamed(&without_stops("tool_use", "{\"x\":")).expect("the reply folds");
@@ -2110,4 +2107,22 @@ fn a_length_terminal_retains_an_explicitly_finished_valid_call() {
     let call = response.tool_calls().next().expect("the completed call is kept");
     assert_eq!(call.function.arguments_value(), json!({"x":1,"y":2}));
     assert!(call.native.is_some());
+}
+
+// G154: independently exercise the indexed Start with real nonempty text.
+#[test]
+fn a_nonempty_text_block_starts_at_its_received_source_coordinate() {
+    let decoded = decode([classified(
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"Hello, world!","citations":[]}}"#,
+    )]);
+    let events = decoded.events();
+    assert!(matches!(events.as_slice(), [
+        StreamEvent::Start { kind: crate::streaming::PartKind::Text,
+            source_order: Some(order), part: start, .. },
+        StreamEvent::Text { part: text_part, text },
+        StreamEvent::End { part: end, content, .. },
+    ] if *order == crate::streaming::SourceOrder::new(0, 0)
+        && start == text_part && text_part == end
+        && *text == "Hello, world!"
+        && *content == AssistantContent::text("Hello, world!")));
 }

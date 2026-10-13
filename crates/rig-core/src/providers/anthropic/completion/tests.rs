@@ -3152,25 +3152,19 @@ fn request_reserves_raw_server_tool_handles_without_rewriting_them() {
         ];
         let mut request = completion_request_with_history(history, None);
         request.tools = vec![generic_tool("local")];
-        let value = request_body(Params {
+        let error = request_body(Params {
             model: CLAUDE_SONNET_4_6,
             request,
             prompt_caching: false,
             cache: None,
             static_prefix_cache_ttl: None,
         })
-        .expect("reserved raw handles");
-        let content = &value["messages"][0]["content"];
-        assert_ne!(content[0]["id"], hosted_id);
-        assert_eq!(
-            content[0]["id"],
-            value["messages"][1]["content"][0]["tool_use_id"]
-        );
-        assert_eq!(content[1], raw_call);
-        assert_eq!(content[2], raw_result);
-        if hosted_id == "tool-0" {
-            assert_eq!(content[0]["id"], "tool-1");
-        }
+        .expect_err("G152: the original empty Local result is refused");
+        let error = ProviderError::from(error);
+        assert!(matches!(&error, ProviderError::Request(_)));
+        assert!(error.to_string().contains(
+            "tool result for `local` at index 0 of the user message at index 1 has no content"
+        ), "{error}");
     }
 }
 
@@ -4456,14 +4450,18 @@ fn sonnet_5_5_defers_a_system_message_past_tool_results() {
             tool_result,
         ],
     );
-    assert_eq!(value["system"][0]["text"], "Answer in Spanish.");
+    // G153: the held system now occupies the valid slot after the tool results.
+    assert!(value.get("system").is_none());
+    assert_eq!(value["messages"][3], json!({
+        "role":"system", "content":[{"type":"text","text":"Answer in Spanish."}]
+    }));
     let roles: Vec<_> = value["messages"]
         .as_array()
         .unwrap()
         .iter()
         .map(|message| message["role"].clone())
         .collect();
-    assert_eq!(roles, ["user", "assistant", "user"]);
+    assert_eq!(roles, ["user", "assistant", "user", "system"]);
 
     let value = encode_mid_conversation_history(
         CLAUDE_SONNET_5_5,
@@ -4506,4 +4504,123 @@ fn carried_hosted_results_replay_without_an_origin_or_a_matching_use() {
         message::Message::user("next"),
     ]);
     assert_eq!(body["messages"][1]["content"], json!([raw]));
+}
+
+// G152: a separate nonempty result control retains every original alias/raw predicate.
+#[test]
+fn nonempty_results_preserve_raw_server_tool_handle_reservations() {
+    for hosted_id in ["srvtoolu_real", "tool-0"] {
+        let raw_call = json!({"type":"server_tool_use","id":hosted_id,"name":"web_search","input":{"query":"test"}});
+        let raw_result =
+            json!({"type":"web_search_tool_result","tool_use_id":hosted_id,"content":[]});
+        let local = message::ToolCall::new(
+            message::CallId::Local(message::LocalCallId::new()),
+            message::ToolFunction::new(
+                message::ToolName::new("local").expect("tool name"),
+                json!({}),
+            ),
+        );
+        assert!(local.id.is_local());
+        let message::Message::Assistant(mut turn) = decoded_assistant(
+            CLAUDE_SONNET_4_6,
+            vec![raw_call.clone(), raw_result.clone()],
+        ) else {
+            panic!("assistant");
+        };
+        turn.content
+            .insert(0, message::AssistantContent::ToolCall(local.clone()));
+        let history = vec![
+            message::Message::Assistant(turn),
+            message::Message::User {
+                content: vec![message::UserContent::ToolResult(local.result(vec![message::ToolResultContent::text("ok")]))],
+            },
+        ];
+        let mut request = completion_request_with_history(history, None);
+        request.tools = vec![generic_tool("local")];
+        let value = request_body(Params {
+            model: CLAUDE_SONNET_4_6,
+            request,
+            prompt_caching: false,
+            cache: None,
+            static_prefix_cache_ttl: None,
+        })
+        .expect("reserved raw handles");
+        let content = &value["messages"][0]["content"];
+        assert_ne!(content[0]["id"], hosted_id);
+        assert_eq!(
+            content[0]["id"],
+            value["messages"][1]["content"][0]["tool_use_id"]
+        );
+        assert_eq!(content[1], raw_call);
+        assert_eq!(content[2], raw_result);
+        if hosted_id == "tool-0" {
+            assert_eq!(content[0]["id"], "tool-1");
+        }
+    }
+}
+
+// G140: foreign received signature data is never outbound Anthropic authority.
+#[test]
+fn foreign_signed_answer_projects_only_its_known_text() {
+    let source = crate::providers::gemini::GeminiConfig::new("test-key")
+        .completion("gemini-3-flash-preview");
+    let response = crate::test_utils::decode_reply(&source, &CompletionRequest::new("restate"),
+        Mode::Unary, [WireFrame::Text(json!({"candidates":[{
+            "content":{"parts":[{"text":"the answer","thoughtSignature":"c2lnbmVkLWFuc3dlcg=="}],"role":"model"},
+            "finishReason":"STOP"
+        }]}).to_string())], Value::Null).expect("genuine signed answer");
+    let request = CompletionRequest::from(vec![message::Message::user("q"),
+        message::Message::Assistant(message::AssistantMessage::new(response.choice)),
+        message::Message::user("again")]).max_tokens(16);
+    let target = AnthropicConfig::new("sk-test").completion("claude-haiku-4-5");
+    let encoded = target.encode(request.clone(), Mode::Unary).expect("direct known text");
+    let direct = json_body(&encoded.request);
+    let prepared = Completion::prepare(request, &target.describe()).expect("original carried preflight");
+    let encoded = target.encode(prepared, Mode::Unary).expect("prepared known text");
+    for body in [direct, json_body(&encoded.request)] {
+        assert_eq!(body["messages"][1]["content"], json!([{"type":"text","text":"the answer"}]));
+        assert!(!body.to_string().contains("thoughtSignature"));
+        assert!(!body.to_string().contains("c2lnbmVkLWFuc3dlcg"));
+    }
+}
+
+#[test]
+fn foreign_inspection_text_edits_do_not_replay_payload_siblings() {
+    const BODY: &str = r#"{"candidates":[{"content":{"parts":[{"text":"answer","executableCode":{"language":"RUST","code":"x"},"arbitrary":{"retained":true}}]},"finishReason":"STOP"}]}"#;
+    let source = crate::providers::gemini::GeminiConfig::new("test-key")
+        .completion("gemini-3-flash-preview");
+    let raw: Value = serde_json::from_str(BODY).expect("exact original fixture");
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let response = crate::test_utils::history::decode(&source, mode,
+            [WireFrame::Text(BODY.to_owned())]).expect("known inspection text");
+        assert_eq!(response.raw, raw);
+        let received = response.message().expect("genuine turn");
+        for edited in [false, true] {
+            let mut received = received.clone();
+            let message::Message::Assistant(turn) = &mut received else { panic!("assistant"); };
+            let message::AssistantContent::CarriedText(part) = &mut turn.content[0] else { panic!("carried"); };
+            if edited { *part.text_mut() = "edited".to_owned(); }
+            assert_eq!(part.payload.item, raw["candidates"][0]["content"]["parts"][0]);
+            let target = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+            let request = CompletionRequest::from(vec![message::Message::user("before"),
+                received, message::Message::user("continue")]).max_tokens(64);
+            let prepared = Completion::prepare(request, &target.describe()).expect("original known text prepares");
+            let encoded = target.encode(prepared, Mode::Unary).expect("known text encodes");
+            let body = json_body(&encoded.request);
+            assert_eq!(body["messages"][1]["content"], json!([{
+                "type":"text","text":if edited { "edited" } else { "answer" }
+            }]));
+            assert!(!body.to_string().contains("executableCode"));
+            assert!(!body.to_string().contains("arbitrary"));
+        }
+    }
+}
+
+#[test]
+fn foreign_opaque_carried_content_still_refuses_before_lowering() {
+    let part = message::CarriedText::new(message::CarriedTextContent::Opaque(String::new()),
+        message::CarriedPayload::new(json!({"unknown":"opaque"}), Some(crate::providers::gemini::completion::PROVIDER_NAME.to_owned())));
+    let target = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+    assert!(target.check_carried_text(&part).is_err());
+    assert!(assistant_parts(&message::AssistantContent::CarriedText(part), &target, None).is_err());
 }

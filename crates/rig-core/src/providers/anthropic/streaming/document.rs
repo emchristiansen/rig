@@ -190,6 +190,8 @@ impl Reassemble<WireFrame> for Message {
                     for (key, value) in start {
                         fold(message, key, value);
                     }
+                    // This is inferred unary reconstruction metadata, not a received field.
+                    message.entry("type").or_insert_with(|| json!("message"));
                 }
             }
             "content_block_start" => {

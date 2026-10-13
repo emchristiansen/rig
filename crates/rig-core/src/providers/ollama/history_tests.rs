@@ -43,8 +43,8 @@ fn name(name: &str) -> ToolName {
 
 /// One `/v1/chat/completions` reply whose only call states `arguments`, in
 /// the shape `ollama/tools/optional_argument.yaml` records.
-fn reply(arguments: Value) -> ToolCall {
-    let frame = WireFrame::Text(
+fn reply_frame(arguments: Value) -> WireFrame {
+    WireFrame::Text(
         json!({"id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": MODEL,
             "system_fingerprint": "fp_ollama",
             "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
@@ -52,27 +52,41 @@ fn reply(arguments: Value) -> ToolCall {
                 "tool_calls": [{"id": "call_1", "index": 0, "type": "function",
                     "function": {"name": "add", "arguments": arguments}}]}}]})
         .to_string(),
-    );
-    let response = decode(&wire(), Mode::Unary, vec![frame]).expect("a call never fails");
+    )
+}
+
+fn reply_result(arguments: Value) -> Result<ToolCall, crate::error::ProviderError> {
+    let response = decode(&wire(), Mode::Unary, vec![reply_frame(arguments)])?;
     let calls: Vec<ToolCall> = response.tool_calls().cloned().collect();
     let [call] = calls.as_slice() else {
         panic!("the call is kept: {:?}", response.choice);
     };
-    call.clone()
+    Ok(call.clone())
+}
+
+fn reply(arguments: Value) -> ToolCall {
+    reply_result(arguments).expect("a valid call decodes")
 }
 
 /// #1085, #2447, #2554 on Ollama: double-stringified arguments are an
-/// object, malformed ones never fail the reply, and `null` ones go back as
-/// an object.
+/// object and `null` ones go back as an object. Malformed input remains
+/// an exact typed refusal on the compatible wire.
 #[test]
 fn arguments_are_always_an_object() {
     assert_eq!(
         reply(json!("\"{\\\"x\\\":1}\"")).function.arguments_value(),
         json!({"x": 1})
     );
-    let malformed = reply(json!("{\"x\": 1"));
-    assert_eq!(malformed.function.arguments_value(), json!({"x": 1}));
-    assert!(malformed.function.invalid_arguments.is_some());
+    // G158: retain the exact malformed literal as a typed whole-call refusal.
+    let malformed = json!("{\"x\": 1");
+    let frame = reply_frame(malformed.clone()).as_str().to_string();
+    let error = reply_result(malformed).expect_err("malformed compatible input is refused");
+    let crate::error::ProviderError::CorruptFrame(corrupt) = error else {
+        panic!("typed malformed-frame refusal");
+    };
+    assert_eq!(corrupt.event_type(), Some("chat.completion"));
+    assert_eq!(corrupt.frame(), Some(frame.as_str()));
+    assert_eq!(reply(json!({"x": 1})).function.arguments_value(), json!({"x": 1}));
     assert_eq!(reply(json!("null")).function.arguments_value(), json!({}));
     let turn = AssistantMessage {
         content: vec![AssistantContent::ToolCall(ToolCall::new(
