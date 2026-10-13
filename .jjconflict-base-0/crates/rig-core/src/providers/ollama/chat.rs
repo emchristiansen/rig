@@ -134,7 +134,8 @@ impl Chat {
         }
 
         // Defer the schema until a tool result exists: a constrained reply
-        // cannot call a tool.
+        // cannot call a tool. A direct text answer on this deferred turn is
+        // unconstrained; Model does not validate it against the schema.
         let answered = messages
             .iter()
             .any(|message| message.get("role").and_then(Value::as_str) == Some("tool"));

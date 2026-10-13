@@ -308,7 +308,7 @@ fn messages_carry_images_thinking_calls_and_results() {
         ])
     );
 
-    // Another model's reasoning is sent as text.
+    // Canonical reasoning is emitted ungated, as settled in G42.
     let mut request = CompletionRequest::new("next");
     request.chat_history = vec![
         Message::user("first"),
@@ -318,7 +318,8 @@ fn messages_carry_images_thinking_calls_and_results() {
         ])),
     ];
     let messages = body(request)["messages"].clone();
-    assert!(messages[1].get("thinking").is_none(), "{messages}");
+    assert_eq!(messages[1]["thinking"], "theirs");
+    assert_eq!(messages[1]["content"], "Answer.");
 }
 
 /// A turn the same model produced replays its call items as the daemon sent
@@ -444,4 +445,191 @@ fn unprepared_content_is_refused() {
     let mut empty = CompletionRequest::new("hi");
     empty.chat_history.clear();
     assert!(wire().encode(empty, Mode::Unary).is_err());
+}
+
+/// G38 preserves the four original complete bodies on the current encoder.
+#[test]
+fn original_think_controls_keep_their_complete_native_bodies() {
+    for think in [json!(true), json!("low"), json!("medium"), json!("high")] {
+        let mut request =
+            with_params(json!({"think": think, "keep_alive": "-1m", "num_ctx": 4096}));
+        request
+            .chat_history
+            .insert(0, Message::system("You are a helpful assistant."));
+        request.temperature = Some(0.7);
+        request.max_tokens = Some(1024);
+        assert_eq!(
+            body(request),
+            json!({
+                "model": "qwen3:8b",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "What is 2 + 2?"}
+                ],
+                "stream": false,
+                "think": think,
+                "keep_alive": "-1m",
+                "options": {"temperature": 0.7, "num_predict": 1024, "num_ctx": 4096}
+            })
+        );
+    }
+}
+
+/// G38 replaces the old local refusal with the raw escape hatch's exact value.
+#[test]
+fn an_unknown_raw_think_level_is_forwarded_exactly() {
+    let mut request =
+        with_params(json!({"think": "invalid", "keep_alive": "-1m", "num_ctx": 4096}));
+    request
+        .chat_history
+        .insert(0, Message::system("You are a helpful assistant."));
+    request.temperature = Some(0.7);
+    request.max_tokens = Some(1024);
+    assert_eq!(
+        body(request),
+        json!({
+            "model": "qwen3:8b",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is 2 + 2?"}
+            ],
+            "stream": false,
+            "think": "invalid",
+            "keep_alive": "-1m",
+            "options": {"temperature": 0.7, "num_predict": 1024, "num_ctx": 4096}
+        })
+    );
+}
+
+/// G39 pins the current omission on the original untuned request.
+#[test]
+fn original_untuned_request_omits_empty_options() {
+    let mut request = CompletionRequest::new("Hello!");
+    request.model = Some("llama3.2".to_owned());
+    assert_eq!(
+        body(request),
+        json!({
+            "model": "llama3.2", "messages": [{"role": "user", "content": "Hello!"}], "stream": false
+        })
+    );
+}
+
+/// The original tool-free schema reaches the real native format field.
+#[test]
+fn original_tool_free_output_schema_is_preserved() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"age": {"type": "integer"}, "available": {"type": "boolean"}},
+        "required": ["age", "available"]
+    });
+    let mut request = CompletionRequest::new("How old is Ollama?");
+    request.model = Some("llama3.1".to_owned());
+    request.output_schema =
+        Some(serde_json::from_value(schema.clone()).expect("the original schema"));
+    assert_eq!(body(request)["format"], schema);
+}
+
+#[test]
+fn original_tool_free_request_without_schema_omits_format() {
+    let mut request = CompletionRequest::new("Hello!");
+    request.model = Some("llama3.1".to_owned());
+    assert!(
+        body(request).get("format").is_none(),
+        "format is absent without output_schema"
+    );
+}
+
+fn native_calls(calls: Value) -> crate::completion::CompletionResponse {
+    let reply = json!({
+        "model": MODEL, "created_at": "2024-01-01T00:00:00Z", "done": true, "done_reason": "stop",
+        "message": {"role": "assistant", "content": "", "tool_calls": calls}
+    });
+    crate::test_utils::history::decode(
+        &wire(),
+        Mode::Unary,
+        [crate::wire::WireFrame::Text(reply.to_string())],
+    )
+    .expect("the native reply decodes")
+}
+
+#[test]
+fn absent_call_ids_have_distinct_local_custody() {
+    let response = native_calls(json!([
+        {"function": {"name": "same", "arguments": {"value": 1}}},
+        {"function": {"name": "same", "arguments": {"value": 3}}}
+    ]));
+    let calls: Vec<_> = response.tool_calls().collect();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.id.is_local() && call.id.provider().is_none())
+    );
+    assert_ne!(calls[0].id, calls[1].id);
+    assert_eq!(calls[0].function.arguments_value(), json!({"value": 1}));
+    assert_eq!(calls[1].function.arguments_value(), json!({"value": 3}));
+}
+
+#[test]
+fn provider_ids_keep_separate_custody_from_local_calls() {
+    let response = native_calls(json!([
+        {"function": {"name": "same", "arguments": {"value": 1}}},
+        {"id": "tool-0", "function": {"name": "same", "arguments": {"value": 2}}},
+        {"function": {"name": "same", "arguments": {"value": 3}}}
+    ]));
+    let calls: Vec<_> = response.tool_calls().collect();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| &call.id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    assert!(calls[0].id.is_local());
+    assert_eq!(calls[1].id.provider().map(|id| id.as_str()), Some("tool-0"));
+    assert!(calls[2].id.is_local());
+}
+
+#[test]
+fn a_result_copies_its_decoded_local_call_id() {
+    let response = native_calls(json!([{"function": {"name": "add", "arguments": {"x": 1}}}]));
+    let call = response.tool_calls().next().expect("the call");
+    let result = call.result(vec![ToolResultContent::text("2")]);
+    assert!(call.id.is_local());
+    assert_eq!(result.call, call.id);
+    assert_eq!(result.name, name("add"));
+    assert_eq!(result.content, vec![ToolResultContent::text("2")]);
+}
+
+/// G41 emits the current local identity on both legs, without provider provenance.
+#[test]
+fn local_call_ids_are_emitted_on_both_wire_legs() {
+    let response = native_calls(json!([{"function": {"name": "add", "arguments": {"x": 1}}}]));
+    let call = response.tool_calls().next().expect("the call");
+    let id = call.id.wire().into_owned();
+    let result = call.result(vec![ToolResultContent::text("2")]);
+    assert!(call.id.is_local());
+    assert_eq!(call.id.provider(), None);
+    let mut request = CompletionRequest::new("next").tool(tool("add"));
+    request.chat_history = vec![
+        Message::user("first"),
+        response.message().expect("the real decoded turn"),
+        Message::User {
+            content: vec![UserContent::ToolResult(result)],
+        },
+        Message::user("next"),
+    ];
+    let messages = body(request)["messages"].clone();
+    assert_eq!(messages[1]["tool_calls"][0]["id"], id);
+    assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "add");
+    assert_eq!(
+        messages[1]["tool_calls"][0]["function"]["arguments"],
+        json!({"x": 1})
+    );
+    assert_eq!(
+        messages[2],
+        json!({"role": "tool", "content": "2", "tool_name": "add", "tool_call_id": id})
+    );
 }
