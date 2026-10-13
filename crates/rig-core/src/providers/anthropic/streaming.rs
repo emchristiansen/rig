@@ -235,6 +235,8 @@ pub struct MessagesDecoder {
     open: BTreeMap<usize, (Kind, String)>,
     /// Every index a block opened at, closed or not.
     started: BTreeSet<usize>,
+    /// Actual text indices eligible for paused custody, including already closed text.
+    text_indices: BTreeSet<usize>,
     /// Indices whose signature is assembled from deltas rather than its opening fallback.
     signature_deltas: BTreeSet<usize>,
     /// Whether a block other than a leading `fallback` marker opened.
@@ -312,7 +314,10 @@ impl MessagesDecoder {
             return Ok(());
         }
         let (opened, kind, text) = match kind {
-            "text" => (Block::Text, Kind::Text, block.str("text")),
+            "text" => {
+                self.text_indices.insert(index);
+                (Block::Text, Kind::Text, block.str("text"))
+            },
             "thinking" => (
                 Block::Reasoning { redacted: false },
                 Kind::Thinking,
@@ -586,6 +591,16 @@ impl MessagesDecoder {
         mut out: Out<'_, Completion>,
     ) -> Result<Flow, ProviderError> {
         let (reason, error) = stop_reason.map_or((None, None), |reason| finish_of(reason, details));
+        if self.carried_hosted
+            && let Some(reason) = reason.as_ref()
+            && matches!(reason, FinishReason::Other(reason) if reason == "pause_turn")
+        {
+            for index in &self.text_indices {
+                if out.carry_text_for_anthropic_pause(*index, reason)? {
+                    self.open.remove(index);
+                }
+            }
+        }
         let open: Vec<usize> = self
             .open
             .iter()
@@ -893,3 +908,6 @@ pub(super) fn validate_content(content: &Value) -> Result<(), serde_json::Error>
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pause_tests;

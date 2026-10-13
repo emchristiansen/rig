@@ -1515,6 +1515,33 @@ fn item_of(content: &mut AssistantContent) -> Option<&mut serde_json::Value> {
     native.map(|native| &mut native.item)
 }
 
+/// Carry one actual Anthropic text block without claiming an absent coordinate.
+fn anthropic_paused_text(
+    text: &str,
+    item: &serde_json::Value,
+    issuer: &str,
+    order: Option<SourceOrder>,
+) -> Result<CarriedText, ProviderError> {
+    if item.get("type").and_then(serde_json::Value::as_str) != Some("text")
+        || item.get("text").and_then(serde_json::Value::as_str) != Some(text)
+    {
+        return Err(ProviderError::Response(
+            "paused text has no matching whole native text block".to_owned(),
+        ));
+    }
+    let mut payload = CarriedPayload::new(item.clone(), Some(issuer.to_owned()));
+    if let Some(order) = order {
+        payload.position = crate::message::CarriedPosition::MessageContent {
+            item_index: order.primary,
+            part_index: order.secondary,
+        };
+    }
+    Ok(CarriedText::new(
+        crate::message::CarriedTextContent::InspectionOnlyText(text.to_owned()),
+        payload,
+    ))
+}
+
 /// `block` holding `item` as its native, unless there is no item.
 fn with_item(block: AssistantContent, item: serde_json::Value) -> AssistantContent {
     if item.is_null() {
@@ -1979,6 +2006,78 @@ impl<'id> Out<'id, Completion> {
             );
         }
         Ok(())
+    }
+
+    /// Preserve native Anthropic paused text on its existing Part.
+    /// Closed parts change custody in place; already delivered events stay unchanged.
+    pub(crate) fn carry_text_for_anthropic_pause(
+        &mut self,
+        index: usize,
+        reason: &FinishReason,
+    ) -> Result<bool, ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        if fold.origin.provider != crate::providers::anthropic::PROVIDER_NAME
+            || !matches!(reason, FinishReason::Other(reason) if reason == "pause_turn")
+        {
+            return Err(ProviderError::Response(
+                "paused text custody requires native Anthropic pause_turn".to_owned(),
+            ));
+        }
+        let issuer = fold.origin.provider.clone();
+        if let Some(draft) = fold.open.get(&index) {
+            let Body::Text(text) = &draft.body else {
+                return Err(ProviderError::Response(format!(
+                    "paused item {index} is not native text"
+                )));
+            };
+            if text.trim().is_empty() {
+                return Ok(false);
+            }
+            let text = anthropic_paused_text(text, &draft.item, &issuer, draft.source_order)?;
+            drop(shared);
+            self.finish_carried_text(index, text)?;
+            return Ok(true);
+        }
+        let position = *fold.ended.get(&index).ok_or_else(|| not_open(index))?;
+        let order = fold.source_orders.get(&position).copied();
+        let queued = items.iter_mut().find_map(|item| match item {
+            Ok(Item::Event(StreamEvent::End { part, content, .. }))
+                if part.index() == position => Some(content),
+            _ => None,
+        });
+        let content = queued.or_else(|| fold.choice.get_mut(position).and_then(Option::as_mut));
+        let Some(content) = content else {
+            // A genuinely ended blank text may already have been omitted.
+            return Ok(false);
+        };
+        if let AssistantContent::CarriedText(text) = content {
+            if matches!(&text.content, crate::message::CarriedTextContent::InspectionOnlyText(_)) {
+                let expected = anthropic_paused_text(text.text(), &text.payload.item, &issuer, order)?;
+                if text.payload == expected.payload {
+                    return Ok(true);
+                }
+            }
+            return Err(ProviderError::Response(format!(
+                "paused item {index} has incompatible carried custody"
+            )));
+        }
+        let AssistantContent::Text(text) = content else {
+            return Err(ProviderError::Response(format!(
+                "paused item {index} is not native text"
+            )));
+        };
+        if text.text.trim().is_empty() {
+            return Ok(false);
+        }
+        let native = AssistantContent::Text(text.clone());
+        let item = native.native_item().ok_or_else(|| ProviderError::Response(format!(
+            "paused item {index} has no current native text evidence"
+        )))?;
+        let carried = anthropic_paused_text(&text.text, item, &issuer, order)?
+            .with_citations(text.citations().iter().cloned());
+        *content = AssistantContent::CarriedText(carried);
+        Ok(true)
     }
 
     /// Finish an open text part with its carried metadata, retaining the
@@ -2479,3 +2578,6 @@ mod g26_writer_exact_tests;
 
 #[cfg(test)]
 mod runtime_boundary_tests;
+
+#[cfg(test)]
+mod anthropic_pause_tests;
