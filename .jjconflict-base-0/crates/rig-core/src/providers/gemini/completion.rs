@@ -471,7 +471,7 @@ pub fn request_body_for_vertex(
     request_params(
         target,
         request,
-        |input| adjusted_base(request, target, model, input, vertex_declaration, ReasoningScope::Unchanged, adjust),
+        |input| adjusted_base(request, target, model, input, vertex_declaration, ReasoningScope::TargetIssuer, adjust),
         RawAt::Top,
         &[
             Rewrite::GeminiCachedContent(cached_content.map(str::to_owned)),
@@ -482,12 +482,12 @@ pub fn request_body_for_vertex(
 
 enum ReasoningScope {
     GenerateContent,
-    Unchanged,
+    TargetIssuer,
 }
 
-// Known reasoning and signatures issued elsewhere are not Gemini inputs.
+// Known reasoning and signatures issued elsewhere are not inputs for this issuer.
 // Opaque parts stay present so the existing encoder refuses them explicitly.
-fn scope_generate_content_reasoning(history: &mut Vec<Message>) {
+fn scope_reasoning_to_issuer(history: &mut Vec<Message>, issuer: &str) {
     history.retain_mut(|message| {
         let Message::Assistant(turn) = message else {
             return true;
@@ -495,7 +495,7 @@ fn scope_generate_content_reasoning(history: &mut Vec<Message>) {
         let before = turn.content.len();
         turn.content.retain(|part| match part {
             AssistantContent::CarriedReasoning(reasoning) => {
-                reasoning.has_opaque_parts() || reasoning.replayable_to(PROVIDER_NAME)
+                reasoning.has_opaque_parts() || reasoning.replayable_to(issuer)
             }
             _ => true,
         });
@@ -555,9 +555,11 @@ fn base(
             message => history.push(message.clone()),
         }
     }
-    if let ReasoningScope::GenerateContent = reasoning_scope {
-        scope_generate_content_reasoning(&mut history);
-    }
+    let issuer = match reasoning_scope {
+        ReasoningScope::GenerateContent => PROVIDER_NAME,
+        ReasoningScope::TargetIssuer => target.provider(),
+    };
+    scope_reasoning_to_issuer(&mut history, issuer);
     // Gemini rejects a field set twice, and merges a tool choice set twice,
     // which unions the allowed functions.
     let preamble = "system instruction twice: as a preamble or system message";
