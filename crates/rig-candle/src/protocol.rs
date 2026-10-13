@@ -158,6 +158,11 @@ fn validate_protocol_inputs(
                         | AssistantContent::CarriedReasoning(_)
                         | AssistantContent::Opaque(_)
                         | AssistantContent::Image(_) => {}
+                        other => {
+                            return Err(CandleError::UnsupportedFeature(format!(
+                                "assistant content {other:?}"
+                            )));
+                        }
                     }
                 }
             }
