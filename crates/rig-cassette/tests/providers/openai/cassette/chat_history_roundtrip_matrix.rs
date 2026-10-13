@@ -20,14 +20,12 @@ use rig::completion::CompletionRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
-    Blocking,
     Streaming,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModelVariant {
     Gpt4oMini,
-    Gpt41Mini,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,30 +146,12 @@ fn request(cell: Cell) -> rig::completion::CompletionRequest {
 fn model_name(model: ModelVariant) -> &'static str {
     match model {
         ModelVariant::Gpt4oMini => "gpt-4o-mini",
-        ModelVariant::Gpt41Mini => "gpt-4.1-mini",
     }
-}
-
-fn normalized_text(choice: &[AssistantContent]) -> String {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
 }
 
 async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservation) -> Result<()> {
     let model = client.openai.chat(model_name(cell.model));
     let observation = match (cell.transport, cell.surface) {
-        (Transport::Blocking, Surface::Normalized) => {
-            let response = model.call(request(cell)).await?;
-            Observation {
-                text: normalized_text(&response.choice),
-                saw_terminal: true,
-            }
-        }
         (Transport::Streaming, Surface::Normalized) => {
             let mut stream = model.stream(request(cell))?;
             let mut text = String::new();
@@ -206,9 +186,6 @@ fn content_text(content: &Value) -> String {
 
 fn recorded_text(scenario: &str, transport: Transport) -> String {
     match transport {
-        Transport::Blocking => {
-            content_text(&recorded_response(scenario)["choices"][0]["message"]["content"])
-        }
         Transport::Streaming => recorded_stream_chunks(scenario)
             .iter()
             .flat_map(|chunk| chunk["choices"].as_array().into_iter().flatten())
@@ -220,10 +197,6 @@ fn recorded_text(scenario: &str, transport: Transport) -> String {
 
 fn recorded_request(scenario: &str) -> Value {
     crate::cassettes::recorded_json_request("openai", scenario)
-}
-
-fn recorded_response(scenario: &str) -> Value {
-    crate::cassettes::recorded_json_response("openai", scenario)
 }
 
 fn recorded_stream_chunks(scenario: &str) -> Vec<Value> {
