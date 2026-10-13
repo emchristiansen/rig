@@ -1931,3 +1931,5 @@ fn original_sparse_failed_response_is_strictly_refused() {
     assert_eq!(&detail.evidence, corrupt.evidence());
     assert_eq!(detail.error, corrupt.error().to_string());
 }
+
+mod terminal_call_custody;
