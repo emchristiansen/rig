@@ -123,6 +123,75 @@ fn shared_store_reaches_the_body_and_shapes_history_stateless() {
     assert!(reasoning_ids(&stateless).is_empty(), "{stateless}");
 }
 
+/// G208: effective typed and raw store:false both request ciphertext even
+/// when no reasoning option is present. Both use the real prepared encoder.
+#[test]
+fn stateless_store_false_requests_ciphertext_from_typed_and_raw_options() {
+    let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
+    let baseline = prepared_body_of(&wire, prompt());
+    let typed = prompt().provider_options(shared(OpenAiShared::default().store(false)));
+    let mut raw = prompt();
+    raw.additional_params = Some(json!({"store": false}));
+    for request in [typed, raw] {
+        assert_eq!(
+            prepared_body_of(&wire, request),
+            merged(
+                baseline.clone(),
+                json!({"store": false, "include": ["reasoning.encrypted_content"]}),
+            )
+        );
+    }
+}
+
+/// G208: preserve existing include order and do not add another ciphertext
+/// member when it is already supplied by the caller, through either layer.
+#[test]
+fn stateless_ciphertext_include_preserves_members_and_adds_no_duplicate() {
+    let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
+    let baseline = prepared_body_of(&wire, prompt());
+    let expected = merged(
+        baseline,
+        json!({"store": false, "include": ["file_search_call.results", "reasoning.encrypted_content"]}),
+    );
+    for already_included in [false, true] {
+        let mut include = vec![Include::FileSearchCallResults];
+        if already_included {
+            include.push(Include::ReasoningEncryptedContent);
+        }
+        let typed = prompt().provider_options(entry::<OpenAiExt>(
+            &OpenAiOptions::default()
+                .shared(OpenAiShared::default().store(false))
+                .responses(OpenAiResponsesOptions::default().include(include)),
+        ));
+        assert_eq!(prepared_body_of(&wire, typed), expected);
+
+        let mut include = vec![json!("file_search_call.results")];
+        if already_included {
+            include.push(json!("reasoning.encrypted_content"));
+        }
+        let mut raw = prompt();
+        raw.additional_params = Some(json!({"store": false, "include": include}));
+        assert_eq!(prepared_body_of(&wire, raw), expected);
+    }
+}
+
+/// G208: stored/no-reasoning requests do not acquire an unsolicited include.
+#[test]
+fn stored_requests_without_reasoning_do_not_request_ciphertext() {
+    let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
+    let baseline = prepared_body_of(&wire, prompt());
+    assert!(baseline.get("reasoning").is_none());
+    assert!(baseline.get("include").is_none());
+    let typed = prompt().provider_options(shared(OpenAiShared::default().store(true)));
+    let mut raw = prompt();
+    raw.additional_params = Some(json!({"store": true}));
+    for request in [typed, raw] {
+        let body = prepared_body_of(&wire, request);
+        assert_eq!(body, merged(baseline.clone(), json!({"store": true})));
+        assert!(body.get("include").is_none());
+    }
+}
+
 #[test]
 fn shared_metadata_reaches_the_body() {
     assert_adds(

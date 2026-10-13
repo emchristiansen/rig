@@ -176,10 +176,10 @@ fn a_reply_cut_before_its_terminal_keeps_no_item_and_the_terminal_takes_the_ciph
     }
 }
 
-/// Round 5 generated-history finding 3: a stream that never sends output 0
-/// and is cut before its terminal keeps no item of the call it streamed at
-/// output 1, so the turn a runtime rolls back sends the call without an
-/// item that would need the reasoning that never arrived.
+/// G207: the original missing-output-zero frames reach normal OpenAI's
+/// deferred-publication cut boundary. The default cut has no published call
+/// and retains its exact request refusal; a separately labelled immediate
+/// delivery-option control below retains the original replay predicates.
 #[test]
 fn a_call_cut_off_after_a_missing_output_index_goes_back_without_its_item() {
     let call = json!({"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "f",
@@ -204,6 +204,123 @@ fn a_call_cut_off_after_a_missing_output_index_goes_back_without_its_item() {
         "{:?}",
         response.choice
     );
+    assert!(response.choice.is_empty(), "the default cut has no published call");
+    let turn = response.continued(response.choice.clone());
+    let results = turn
+        .tool_calls()
+        .map(|call| {
+            crate::message::UserContent::ToolResult(
+                call.result(vec![ToolResultContent::text("ok")]),
+            )
+        })
+        .collect();
+    let history = vec![
+        Message::user("q"),
+        Message::Assistant(turn),
+        Message::User { content: results },
+    ];
+    // G207: normal OpenAI defers completed calls until its terminal. This
+    // cut loses the former default-path call replay and no-item-ID successes.
+    let error = Completion::prepare(
+        CompletionRequest::from(history).tools(vec![tool("f")]),
+        &wire().describe(),
+    )
+    .expect_err("the original default cut has an empty assistant turn");
+    let crate::error::ProviderError::Request(error) = error else {
+        panic!("the cut must retain the typed request refusal");
+    };
+    assert_eq!(
+        error.to_string(),
+        "assistant message at index 1 has no content; providers reject empty content blocks"
+    );
+}
+
+// G207 delivery-option control only: the real normal OpenAI wire still
+// owns the descriptor, request encoding, credentials and reassembler.
+#[derive(Clone)]
+struct ImmediateCompletedCalls(Responses);
+
+impl Wire for ImmediateCompletedCalls {
+    type Op = Completion;
+    type Payload = <Responses as Wire>::Payload;
+    type Frame = <Responses as Wire>::Frame;
+    type Decoder<'id> = super::streaming::ResponsesDecoder;
+    type Reassembler = <Responses as Wire>::Reassembler;
+
+    fn describe(&self) -> crate::wire::Descriptor<'_> {
+        self.0.describe()
+    }
+
+    fn encode(
+        &self,
+        request: CompletionRequest,
+        mode: Mode,
+    ) -> Result<Self::Payload, crate::error::EncodeError> {
+        self.0.encode(request, mode)
+    }
+
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
+        super::streaming::ResponsesDecoder::new(
+            self.0.describe().name,
+            super::streaming::ResponsesStreamOptions::strict_with_immediate_tool_calls()
+                .with_incomplete(self.0.streamed_incomplete),
+        )
+    }
+
+    fn decoder_in<'id>(&self, mode: Mode) -> Self::Decoder<'id> {
+        let incomplete = match mode {
+            Mode::Unary => super::streaming::IncompleteTerminal::Accept,
+            Mode::Streaming => self.0.streamed_incomplete,
+        };
+        super::streaming::ResponsesDecoder::new(
+            self.0.describe().name,
+            super::streaming::ResponsesStreamOptions::strict_with_immediate_tool_calls()
+                .with_incomplete(incomplete),
+        )
+    }
+
+    fn credential_stamp(&self) -> Option<crate::wire::CredentialStamp> {
+        self.0.credential_stamp()
+    }
+
+    fn reassembler(&self) -> Self::Reassembler {
+        self.0.reassembler()
+    }
+}
+
+/// G207: changed delivery option, not default-cut acceptance parity.
+/// Exact original frames retain the call_1/no-fc_1 replay predicates.
+#[test]
+fn the_same_missing_output_zero_cut_replays_with_explicit_immediate_call_publication() {
+    let call = json!({"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "f",
+        "arguments": "{}", "status": "completed"});
+    let mut added = call.clone();
+    added["arguments"] = json!("");
+    added["status"] = json!("in_progress");
+    let events = [
+        json!({"type": "response.created", "response": {"id": "resp_1", "status": "in_progress", "output": []}}),
+        json!({"type": "response.output_item.added", "output_index": 1, "item": added}),
+        json!({"type": "response.function_call_arguments.done", "output_index": 1, "item_id": "fc_1", "arguments": "{}"}),
+        json!({"type": "response.output_item.done", "output_index": 1, "item": call}),
+    ];
+    let configured = wire();
+    assert_eq!(configured.describe().name, "openai");
+    let (response, ended) =
+        crate::test_utils::history_conformance::partial(
+            &ImmediateCompletedCalls(configured),
+            Mode::Streaming,
+            frames(&events),
+        );
+    assert!(!ended, "no terminal arrived");
+    assert!(
+        response
+            .choice
+            .iter()
+            .all(|block| block.native_item().is_none()),
+        "{:?}",
+        response.choice
+    );
+    assert_eq!(response.choice.len(), 1, "the item-done call is already published");
     let turn = response.continued(response.choice.clone());
     let results = turn
         .tool_calls()
@@ -372,10 +489,28 @@ fn a_terminal_shifted_against_the_stream_restates_its_items() {
     ];
     let response = streamed(&events);
     assert_eq!(response.text(), "hi", "{:?}", response.choice);
+    // G205: the former whole-message Native view is unavailable. Carried
+    // custody owns the exact content part at the original stream position;
+    // the terminal document independently owns the whole received message.
+    let [AssistantContent::CarriedText(carried)] = response.choice.as_slice() else {
+        panic!("the received annotation field retains one carried text part");
+    };
     assert_eq!(
-        response.choice[0].native_item(),
-        Some(&message("msg_1", "hi"))
+        carried.content,
+        crate::message::CarriedTextContent::Text("hi".to_owned())
     );
+    assert_eq!(carried.payload.item, message("msg_1", "hi")["content"][0]);
+    assert_eq!(carried.item_id.as_deref(), Some("msg_1"));
+    assert_eq!(carried.payload.provider.as_deref(), Some("openai"));
+    assert_eq!(
+        carried.payload.position,
+        crate::message::CarriedPosition::MessageContent {
+            item_index: 1,
+            part_index: 0,
+        }
+    );
+    assert!(response.choice[0].native_item().is_none());
+    assert_eq!(response.raw["output"][0], message("msg_1", "hi"));
 }
 
 /// A hosted item only the terminal states takes its place between the
