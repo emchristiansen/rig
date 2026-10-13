@@ -62,8 +62,10 @@ impl<'de> serde::Deserialize<'de> for GenerateContentChunk {
 pub struct GenerateContentDecoder {
     carried_issuer: &'static str,
     vertex_inline_images: bool,
+    defer_vertex_inline_images: bool,
+    pending_vertex_image: Option<PendingVertexImage>,
     streaming: bool,
-    /// At least one content part was emitted.
+    /// At least one assistant content part was received.
     delivered: bool,
     /// The latest `finishReason`.
     finish: Option<String>,
@@ -103,6 +105,8 @@ impl Default for GenerateContentDecoder {
         Self {
             carried_issuer: super::completion::PROVIDER_NAME,
             vertex_inline_images: false,
+            defer_vertex_inline_images: false,
+            pending_vertex_image: None,
             streaming: false,
             delivered: false,
             finish: None,
@@ -140,6 +144,60 @@ impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
         &mut self,
         GenerateContentChunk(data): GenerateContentChunk,
         mut out: Out<'id, Completion>,
+    ) -> Result<Flow, ProviderError> {
+        let decoded = self.decode_chunk(data, &mut out);
+        if decoded.is_err() {
+            self.flush_pending_vertex_image(&mut out)?;
+        }
+        decoded
+    }
+
+    /// Gemini ends a reply at EOF, not at its first finish reason: a
+    /// hosted-tool round can report one before more content arrives.
+    fn eof(&mut self, mut out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
+        let cut_short = self.normalized_finish().is_some_and(|reason| {
+            matches!(reason, crate::completion::FinishReason::Length | crate::completion::FinishReason::ContentFilter)
+        });
+        if !self.streaming && !self.delivered && !cut_short {
+            self.close(&mut out)?;
+            return Err(ProviderError::Response(crate::message::EMPTY_RESPONSE_ERROR.to_owned()));
+        }
+        if self.finish.is_some() {
+            return self.end(out);
+        }
+        self.close(&mut out)?;
+        if self.streaming {
+            Ok(Flow::More)
+        } else {
+            Err(ProviderError::Truncated)
+        }
+    }
+
+    fn incomplete_eof(&self) -> IncompleteEof {
+        if self.streaming { IncompleteEof::KeepPartial } else { IncompleteEof::Refuse }
+    }
+
+    fn flush_before_terminal_error(
+        &mut self,
+        mut out: Out<'id, Completion>,
+    ) -> Result<(), ProviderError> {
+        self.close(&mut out)
+    }
+}
+
+#[derive(Debug)]
+struct PendingVertexImage {
+    index: usize,
+    image: Image,
+    fields: Map<String, Value>,
+    position: CarriedPosition,
+}
+
+impl GenerateContentDecoder {
+    fn decode_chunk(
+        &mut self,
+        data: Map<String, Value>,
+        out: &mut Out<'_, Completion>,
     ) -> Result<Flow, ProviderError> {
         let data = Value::Object(data);
         // Gemini repeats both on every chunk. Record a value when it changes:
@@ -214,11 +272,11 @@ impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
                     let text = part.as_object().and_then(reader::select) == Some(reader::SelectedKind::Text)
                         && part.bool("thought") != Some(true);
                     if text && previous_text {
-                        self.close(&mut out)?;
+                        self.close(out)?;
                     }
                     previous_text = text;
                     self.part_index = part_index as u64;
-                    self.part(part.clone(), &mut out)?;
+                    self.part(part.clone(), out)?;
                     self.placed.push(self.placement.take());
                 }
             }
@@ -236,40 +294,6 @@ impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
         Ok(Flow::More)
     }
 
-    /// Gemini ends a reply at EOF, not at its first finish reason: a
-    /// hosted-tool round can report one before more content arrives.
-    fn eof(&mut self, mut out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
-        let cut_short = self.normalized_finish().is_some_and(|reason| {
-            matches!(reason, crate::completion::FinishReason::Length | crate::completion::FinishReason::ContentFilter)
-        });
-        if !self.streaming && !self.delivered && !cut_short {
-            self.close(&mut out)?;
-            return Err(ProviderError::Response(crate::message::EMPTY_RESPONSE_ERROR.to_owned()));
-        }
-        if self.finish.is_some() {
-            return self.end(out);
-        }
-        self.close(&mut out)?;
-        if self.streaming {
-            Ok(Flow::More)
-        } else {
-            Err(ProviderError::Truncated)
-        }
-    }
-
-    fn incomplete_eof(&self) -> IncompleteEof {
-        if self.streaming { IncompleteEof::KeepPartial } else { IncompleteEof::Refuse }
-    }
-
-    fn flush_before_terminal_error(
-        &mut self,
-        mut out: Out<'id, Completion>,
-    ) -> Result<(), ProviderError> {
-        self.close(&mut out)
-    }
-}
-
-impl GenerateContentDecoder {
     /// Configure independent carried provenance for the Vertex AI companion.
     /// Sole sanctioned caller: rig-vertexai's VertexDecoder. This changes only
     /// the issuer of carried payloads, never content, Origin, Native or endings.
@@ -283,12 +307,15 @@ impl GenerateContentDecoder {
     /// Select typed ordinary inline images for the Vertex AI companion.
     /// Sole sanctioned caller: rig-vertexai's VertexDecoder. This changes only
     /// image production for closed, unsigned, non-thought JPEG/PNG/WEBP/HEIC/HEIF
-    /// parts. The writer retains their original native evidence; provenance,
+    /// parts. Selection waits until the next content part, EOF or error so a
+    /// following bare signature can keep media inspection-only. The writer
+    /// retains their original native evidence; provenance,
     /// other media, Origin and endings are unchanged.
     /// For that companion's internal use; not covered by semver.
     #[doc(hidden)]
     pub fn with_vertex_inline_images(mut self) -> Self {
         self.vertex_inline_images = true;
+        self.defer_vertex_inline_images = true;
         self
     }
 
@@ -331,6 +358,7 @@ impl GenerateContentDecoder {
 
     /// Finish the open text or thought run: Gemini states each part whole.
     fn close(&mut self, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
+        self.flush_pending_vertex_image(out)?;
         let Some((index, thought)) = self.open.take() else {
             return Ok(());
         };
@@ -368,6 +396,28 @@ impl GenerateContentDecoder {
             }
         }
         out.finish(index)
+    }
+
+    fn flush_pending_vertex_image(
+        &mut self,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        let Some(pending) = self.pending_vertex_image.take() else {
+            return Ok(());
+        };
+        // Only this decoder owns the reserved fresh index. Nothing opened it,
+        // and opening and finishing it here have no intervening writer call.
+        if pending.fields.contains_key("thoughtSignature") {
+            let payload = CarriedPayload::new(Value::Object(pending.fields),
+                Some(self.carried_issuer.to_owned())).with_position(pending.position);
+            out.open(pending.index, Block::Text, Value::Null)?;
+            out.finish_carried_text(pending.index, CarriedText::new(
+                CarriedTextContent::InspectionOnlyMedia(String::new()), payload,
+            ))
+        } else {
+            out.open(pending.index, Block::Image(pending.image), Value::Object(pending.fields))?;
+            out.finish(pending.index)
+        }
     }
 
     /// Write a block at a fresh index, closing the run before it. A text or
@@ -417,16 +467,28 @@ impl GenerateContentDecoder {
     /// or the next block when it comes first.
     fn part(&mut self, part: Value, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
         let Value::Object(fields) = &part else {
+            self.flush_pending_vertex_image(out)?;
             return self.open(Block::Opaque { replay: false }, part, "", out);
         };
         let selected = reader::select(fields);
         let thought = part.bool("thought") == Some(true);
         let signature = part.str("thoughtSignature");
+        // An empty unsigned text part carries no content boundary.
+        if selected == Some(reader::SelectedKind::Text)
+            && part.str("text") == Some("") && signature.is_none()
+        {
+            return Ok(());
+        }
+        let bare = ["thought", "thoughtSignature", "partMetadata"];
+        if !fields.keys().any(|key| !bare.contains(&key.as_str()))
+            && let Some(signature) = signature
+            && let Some(pending) = self.pending_vertex_image.as_mut()
+        {
+            pending.fields.insert("thoughtSignature".to_owned(), Value::from(signature));
+            return Ok(());
+        }
+        self.flush_pending_vertex_image(out)?;
         if let Some(text) = part.str("text").filter(|_| selected == Some(reader::SelectedKind::Text)) {
-            // An empty part without a signature carries nothing.
-            if text.is_empty() && signature.is_none() {
-                return Ok(());
-            }
             if !thought && signature.is_some() {
                 self.open(Block::Text, part.clone(), text, out)?;
                 return self.close(out);
@@ -491,6 +553,15 @@ impl GenerateContentDecoder {
                     media_type: Some(media_type),
                     ..Image::default()
                 };
+                if self.defer_vertex_inline_images {
+                    self.pending_vertex_image = Some(PendingVertexImage {
+                        index, image, fields,
+                        position: CarriedPosition::MessageContent {
+                            item_index: 0, part_index: self.part_index,
+                        },
+                    });
+                    return Ok(());
+                }
                 out.open(index, Block::Image(image), Value::Object(fields))?;
                 return out.finish(index);
             }
@@ -633,3 +704,6 @@ mod upstream_tests;
 
 #[cfg(test)]
 mod vertex_image_tests;
+
+#[cfg(test)]
+mod vertex_defer_boundary_tests;

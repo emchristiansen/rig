@@ -64,8 +64,21 @@ impl<'id> Decoder<'id, Completion, vertexai::model::GenerateContentResponse> for
         response: vertexai::model::GenerateContentResponse,
         out: Out<'id, Completion>,
     ) -> Result<Flow, ProviderError> {
-        let chunk = rest_chunk(&response)?;
+        let chunk = match rest_chunk(&response) {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                Decoder::<'id, Completion>::flush_before_terminal_error(&mut self.0, out)?;
+                return Err(error);
+            }
+        };
         Decoder::<'id, Completion>::decode(&mut self.0, GenerateContentChunk(chunk), out)
+    }
+
+    fn flush_before_terminal_error(
+        &mut self,
+        out: Out<'id, Completion>,
+    ) -> Result<(), ProviderError> {
+        Decoder::<'id, Completion>::flush_before_terminal_error(&mut self.0, out)
     }
 
     fn eof(&mut self, out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
