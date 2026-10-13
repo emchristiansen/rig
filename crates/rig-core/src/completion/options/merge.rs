@@ -949,9 +949,12 @@ fn apply(
             crate::providers::openai::responses_api::wire::shape_codex_body(body)?;
         }
         Rewrite::ResponsesReasoningCiphertext => {
-            if body.get("reasoning").is_some_and(|value| !value.is_null())
-                || body.get("store") == Some(&Value::Bool(false))
-            {
+            let wanted = body.get("reasoning").is_some_and(|value| !value.is_null())
+                || body.get("store") == Some(&Value::Bool(false));
+            let reasoning = body.get("model")
+                .and_then(Value::as_str)
+                .and_then(crate::providers::openai::options::reasons);
+            if wanted && reasoning != Some(false) {
                 crate::providers::openai::responses_api::include_ciphertext(body);
             }
         }

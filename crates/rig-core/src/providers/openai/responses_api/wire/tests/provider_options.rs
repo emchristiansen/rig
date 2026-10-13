@@ -193,6 +193,33 @@ fn stored_requests_without_reasoning_do_not_request_ciphertext() {
 }
 
 #[test]
+fn non_reasoning_models_do_not_automatically_request_ciphertext() {
+    let wire = OpenAIConfig::new("test-key").responses("gpt-4o-mini");
+    let baseline = prepared_body_of(&wire, prompt());
+    assert_eq!(baseline["model"], "gpt-4o-mini");
+    let typed = prompt().provider_options(shared(OpenAiShared::default().store(false)));
+    let mut raw = prompt();
+    raw.additional_params = Some(json!({"store": false}));
+    for request in [typed, raw] {
+        let body = prepared_body_of(&wire, request);
+        assert_eq!(body, merged(baseline.clone(), json!({"store": false})));
+        assert!(body.get("include").is_none());
+    }
+}
+
+#[test]
+fn selected_non_reasoning_model_overrides_reasoning_wire_default_for_ciphertext() {
+    let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
+    let baseline = prepared_body_of(&wire, prompt());
+    assert_eq!(baseline["model"], "gpt-5.4");
+    let mut request = prompt().provider_options(shared(OpenAiShared::default().store(false)));
+    request.model = Some("gpt-4o-mini".to_owned());
+    let body = prepared_body_of(&wire, request);
+    assert_eq!(body, merged(baseline, json!({"model":"gpt-4o-mini", "store":false})));
+    assert!(body.get("include").is_none());
+}
+
+#[test]
 fn shared_metadata_reaches_the_body() {
     assert_adds(
         &gpt_6(),
