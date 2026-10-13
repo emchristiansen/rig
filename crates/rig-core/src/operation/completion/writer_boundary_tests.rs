@@ -271,6 +271,8 @@ fn terminal_issuer_stamps_only_unknown_folded_carried_provenance_after_ends_were
     payload.provider = Some("terminal/issuer".to_owned());
     assert_eq!(response.choice[4], AssistantContent::CarriedReasoning(stamped_reasoning));
     assert_eq!(response.choice[5], AssistantContent::CarriedReasoning(foreign));
+    // G179 changes folded text provenance only; the delivered End above stays unknown.
+    carried_text.payload.provider = Some("terminal/issuer".to_owned());
     assert_eq!(response.choice[6], AssistantContent::CarriedText(carried_text));
     assert!(response.choice[1..].iter().all(|content| content.native_item().is_none()));
 }

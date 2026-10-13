@@ -1048,6 +1048,17 @@ impl Turn {
                 };
                 citation::attach(text, kept, citations, provider, index);
             }
+            Some(AssistantContent::CarriedText(text))
+                if matches!(&text.content,
+                    crate::message::CarriedTextContent::Text(_)
+                    | crate::message::CarriedTextContent::Refusal(_)
+                    | crate::message::CarriedTextContent::GeminiSignedAnswer(_)
+                    | crate::message::CarriedTextContent::InspectionOnlyText(_)
+                    | crate::message::CarriedTextContent::InspectionOnlyMedia(_)) =>
+            {
+                let kept = if replace { Vec::new() } else { text.citations().to_vec() };
+                citation::attach_carried(text, kept, citations, provider, index);
+            }
             _ => tracing::warn!(
                 provider,
                 index,
@@ -1265,7 +1276,7 @@ impl Turn {
         reply: &Reply,
         failure: Option<&ProviderError>,
     ) -> CompletionResponse {
-        let mut response = self.response(end.cloned().unwrap_or_default(), reply.clone());
+        let mut response = self.response_with_end(end.cloned(), reply.clone());
         if end.is_none() {
             match failure {
                 Some(error) => {
@@ -1301,7 +1312,7 @@ impl Turn {
             })
             .collect();
         response.choice = self.ordered(parts, canonical_from);
-        self.stamp_carried_choice(&mut response.choice);
+        self.stamp_carried_choice(&mut response.choice, end.is_some());
         response
     }
 
@@ -1358,12 +1369,17 @@ impl Turn {
         parts.into_iter().map(|(_, part)| part).collect()
     }
 
-    fn stamp_carried_choice(&self, choice: &mut [AssistantContent]) {
+    fn stamp_carried_choice(&self, choice: &mut [AssistantContent], terminal_received: bool) {
         let Some(issuer) = &self.carried_issuer else {
             return;
         };
         for content in choice {
             match content {
+                AssistantContent::CarriedText(text)
+                    if terminal_received && text.payload.provider.is_none() =>
+                {
+                    text.payload.provider = Some(issuer.clone());
+                }
                 AssistantContent::ProviderItem(item) if item.payload.provider.is_none() => {
                     item.payload.provider = Some(issuer.clone());
                 }
@@ -1386,6 +1402,12 @@ impl Turn {
     }
 
     fn response(&self, end: Finish, reply: Reply) -> CompletionResponse {
+        self.response_with_end(Some(end), reply)
+    }
+
+    /// A missing end is a partial snapshot, not a default genuine terminal.
+    fn response_with_end(&self, end: Option<Finish>, reply: Reply) -> CompletionResponse {
+        let terminal_received = end.is_some();
         let Finish {
             message_id,
             usage,
@@ -1393,7 +1415,7 @@ impl Turn {
             response_id,
             model,
             error,
-        } = end;
+        } = end.unwrap_or_default();
         use crate::provider_response::reported;
         let mut origin = self.origin.clone();
         origin.response_model = reported(model);
@@ -1407,7 +1429,7 @@ impl Turn {
         origin.response_id = reported(response_id);
         let usage = priced(usage, &origin);
         let error = error.or_else(|| {
-            if !self.wire {
+            if !self.wire || !terminal_received {
                 return None;
             }
             match &reason {
@@ -1420,7 +1442,7 @@ impl Turn {
             }
         });
         let mut choice = self.snapshot();
-        self.stamp_carried_choice(&mut choice);
+        self.stamp_carried_choice(&mut choice, terminal_received);
         let mut response = CompletionResponse::new(choice, usage, origin, reply.raw)
             .with_optional_finish_reason(reason)
             .accept_unknown_finish_reasons(self.accept_unknown_finish);
@@ -1645,8 +1667,9 @@ impl<'id> Out<'id, Completion> {
         self.lock().fold.origin.model.clone()
     }
 
-    /// Record the actual terminal issuer for the folded response's carried
-    /// reasoning and whole provider items whose issuer is still unknown.
+    /// Record the actual terminal issuer for folded response fields:
+    /// carried text, reasoning and whole provider items whose issuer is unknown.
+    /// Carried text receives this issuer only when an actual end is present.
     /// This fills only missing provenance when the response is built; it
     /// changes neither already yielded events nor Origin, Native, or text.
     pub fn stamp_carried_issuer(&mut self, issuer: &str) {
@@ -2453,3 +2476,6 @@ mod effective_model_tests;
 
 #[cfg(test)]
 mod g26_writer_exact_tests;
+
+#[cfg(test)]
+mod runtime_boundary_tests;
