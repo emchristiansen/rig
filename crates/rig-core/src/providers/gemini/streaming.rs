@@ -57,8 +57,9 @@ impl<'de> serde::Deserialize<'de> for GenerateContentChunk {
 /// hosted-tool rounds can report intermediate finish reasons. The
 /// candidate's grounding and recitation metadata cite the text blocks when
 /// the reply ends.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GenerateContentDecoder {
+    carried_issuer: &'static str,
     streaming: bool,
     /// At least one content part was emitted.
     delivered: bool,
@@ -93,6 +94,32 @@ pub struct GenerateContentDecoder {
     recitations: Vec<(usize, WireCitation)>,
     part_index: u64,
     open_position: Option<CarriedPosition>,
+}
+
+impl Default for GenerateContentDecoder {
+    fn default() -> Self {
+        Self {
+            carried_issuer: super::completion::PROVIDER_NAME,
+            streaming: false,
+            delivered: false,
+            finish: None,
+            usage: None,
+            model_version: None,
+            response_id: None,
+            open: None,
+            signed: false,
+            last: None,
+            signature: None,
+            answer: grounding::AnswerText::default(),
+            placed: Vec::new(),
+            placement: None,
+            grounding: Vec::new(),
+            chunks: 0,
+            recitations: Vec::new(),
+            part_index: 0,
+            open_position: None,
+        }
+    }
 }
 
 impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
@@ -240,6 +267,16 @@ impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
 }
 
 impl GenerateContentDecoder {
+    /// Configure independent carried provenance for the Vertex AI companion.
+    /// Sole sanctioned caller: rig-vertexai's VertexDecoder. This changes only
+    /// the issuer of carried payloads, never content, Origin, Native or endings.
+    /// For that companion's internal use; not covered by semver.
+    #[doc(hidden)]
+    pub fn with_carried_issuer(mut self, issuer: &'static str) -> Self {
+        self.carried_issuer = issuer;
+        self
+    }
+
     pub(super) fn in_mode(mut self, mode: Mode) -> Self {
         self.streaming = mode == Mode::Streaming;
         self
@@ -288,7 +325,7 @@ impl GenerateContentDecoder {
             out.edit(index, |held| item = held.clone())?;
             let text = item.str("text").unwrap_or_default().to_owned();
             let signature = item.str("thoughtSignature").map(str::to_owned);
-            let payload = CarriedPayload::new(item, Some(super::completion::PROVIDER_NAME.to_owned()))
+            let payload = CarriedPayload::new(item, Some(self.carried_issuer.to_owned()))
                 .with_position(position);
             return out.finish_carried_reasoning(index,
                 CarriedReasoning::new(vec![CarriedReasoningPart::Text { text, signature }], payload));
@@ -298,7 +335,7 @@ impl GenerateContentDecoder {
             if let Some(signature) = item.str("thoughtSignature") {
                 let answer = GeminiSignedAnswer::new(item.str("text").unwrap_or_default(),
                     GeminiThoughtSignature::new(signature));
-                let payload = CarriedPayload::new(item, Some(super::completion::PROVIDER_NAME.to_owned()))
+                let payload = CarriedPayload::new(item, Some(self.carried_issuer.to_owned()))
                     .with_position(position);
                 return out.finish_carried_text(index, CarriedText::new(
                     CarriedTextContent::GeminiSignedAnswer(answer), payload,
@@ -308,7 +345,7 @@ impl GenerateContentDecoder {
                 !matches!(key.as_str(), "text" | "thought" | "thoughtSignature")
             )) {
                 let text = item.str("text").unwrap_or_default().to_owned();
-                let payload = CarriedPayload::new(item, Some(super::completion::PROVIDER_NAME.to_owned()))
+                let payload = CarriedPayload::new(item, Some(self.carried_issuer.to_owned()))
                     .with_position(position);
                 return out.finish_carried_text(index, CarriedText::new(
                     CarriedTextContent::InspectionOnlyText(text), payload,
@@ -417,7 +454,7 @@ impl GenerateContentDecoder {
             self.close(out)?;
             self.delivered = true;
             let index = out.fresh_index();
-            let payload = CarriedPayload::new(part.clone(), Some(super::completion::PROVIDER_NAME.to_owned()))
+            let payload = CarriedPayload::new(part.clone(), Some(self.carried_issuer.to_owned()))
                 .with_position(CarriedPosition::MessageContent { item_index: 0, part_index: self.part_index });
             out.open(index, Block::Text, Value::Null)?;
             return out.finish_carried_text(index, CarriedText::new(

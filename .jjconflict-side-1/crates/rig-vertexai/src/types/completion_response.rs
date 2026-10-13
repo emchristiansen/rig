@@ -38,8 +38,14 @@ impl rig_core::wire::document::Reassemble<vertexai::model::GenerateContentRespon
 /// as the REST chunk its JSON is and read by the Gemini API's decoder, so a
 /// block's provider item is the SDK part's JSON. A streamed call re-emits
 /// the same reply.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct VertexDecoder(GenerateContentDecoder);
+
+impl Default for VertexDecoder {
+    fn default() -> Self {
+        Self(GenerateContentDecoder::default().with_carried_issuer(PROVIDER_NAME))
+    }
+}
 
 impl<'id> Decoder<'id, Completion, vertexai::model::GenerateContentResponse> for VertexDecoder {
     type Event = vertexai::model::GenerateContentResponse;
@@ -160,3 +166,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod vertex_usage_mapping_tests;
+
+#[cfg(test)]
+mod carried_issuer_tests;
