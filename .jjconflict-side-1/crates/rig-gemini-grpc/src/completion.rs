@@ -217,3 +217,6 @@ pub(crate) fn grpc_code_name(code: tonic::Code) -> String {
     clippy::indexing_slicing
 )]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod schema_tests;

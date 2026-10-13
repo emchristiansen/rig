@@ -1,10 +1,12 @@
-//! Gemini completion models over gRPC.
+//! The Gemini `GenerateContent` completion wire over gRPC.
 //!
 //! ```no_run
-//! use rig_gemini_grpc::{Client, completion::{CompletionModel, GEMINI_2_5_FLASH}};
+//! use rig_core::Model;
+//! use rig_gemini_grpc::{GeminiGrpc, completion::{GEMINI_2_5_FLASH, GenerateContent}};
 //!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-//! let model = CompletionModel::new(Client::new("API_KEY").await?, GEMINI_2_5_FLASH);
+//! # async fn example() -> Result<(), rig_gemini_grpc::GeminiGrpcError> {
+//! let model = GeminiGrpc::new("API_KEY").await?.completion(GEMINI_2_5_FLASH);
+//! # let _ = model;
 //! # Ok(())
 //! # }
 //! ```
@@ -16,146 +18,180 @@ pub const GEMINI_2_0_FLASH_LITE: &str = "gemini-2.0-flash-lite";
 /// `gemini-2.0-flash` completion model
 pub const GEMINI_2_0_FLASH: &str = "gemini-2.0-flash";
 
-use base64::Engine as _;
-use rig_core::completion::{self, CompletionRequest};
+use futures::StreamExt;
+use rig_core::completion::CompletionRequest;
+use rig_core::driver::{Exchange, Opened, Opening, Transport};
+use rig_core::error::EncodeError;
 use rig_core::error::ProviderError;
-use rig_core::message::{self, MimeType, Reasoning};
-use rig_core::providers::gemini::completion::gemini_api_types::{
-    Schema as GeminiSchema, map_google_finish_reason, tool_parameters_to_schema,
-};
-use rig_core::providers::gemini::{
-    GEMINI_TEXT_EXTRAS_KEY, text_signature_extras, text_thought_signature,
-};
-use rig_core::telemetry::ProviderResponseExt;
-use std::convert::TryFrom;
+use rig_core::message;
+use rig_core::operation::Completion;
+use rig_core::providers::gemini::completion as rest;
+use rig_core::wire::{Descriptor, Mode, Wire};
 
-use super::Client;
-use super::proto::{self, GenerateContentRequest, GenerateContentResponse};
+use super::GeminiGrpc;
+use super::proto::{GenerateContentRequest, GenerateContentResponse};
 
-#[derive(Clone, Debug)]
-pub struct CompletionModel {
-    pub(crate) client: Client,
+/// The `GenerateContent` endpoint for one model: `GenerateContent` for a
+/// unary call, `StreamGenerateContent` for a streamed one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenerateContent {
     pub model: String,
 }
 
-impl CompletionModel {
-    pub fn new(client: Client, model: impl Into<String>) -> Self {
+impl GenerateContent {
+    pub fn new(model: impl Into<String>) -> Self {
         Self {
-            client,
             model: model.into(),
         }
     }
 }
 
-/// Stable descriptor name reported on normalized responses from this provider.
-pub const PROVIDER_NAME: &str = "gemini-grpc";
+impl Wire for GenerateContent {
+    type Op = Completion;
+    type Payload = GenerateContentRequest;
+    type Frame = GenerateContentResponse;
+    type Decoder<'id> = crate::streaming::GrpcAdapter;
+    type Reassembler = rig_core::providers::gemini::streaming::document::GenerateContentResponse;
 
-/// The issuer this transport's reasoning records: the Gemini API service,
-/// which also serves the REST transport, so thought signatures move between
-/// the two.
-pub const REASONING_ISSUER: &str = rig_core::providers::gemini::completion::PROVIDER_NAME;
-
-/// Map Gemini's protobuf `finishReason` onto rig's normalized vocabulary.
-///
-/// The wire value is a prost enum discriminant; `as_str_name` recovers the
-/// SCREAMING_SNAKE proto spelling the shared Google table keys on, and a
-/// discriminant this proto does not model keeps its numeric identity so a
-/// reason Google adds later surfaces rather than reading as a natural stop.
-pub fn map_finish_reason(reason: i32) -> Option<completion::FinishReason> {
-    use proto::candidate::FinishReason as Wire;
-
-    let Ok(reason) = Wire::try_from(reason) else {
-        return Some(completion::FinishReason::Other(format!(
-            "FINISH_REASON_{reason}"
-        )));
-    };
-
-    map_google_finish_reason(reason.as_str_name())
-}
-
-/// Returns a response error for malformed calls, unexpected calls, or exceeded
-/// tool-call limits, including the supplied finish message. Other discriminants
-/// return `None`.
-pub fn tool_protocol_finish_reason_error(
-    reason: i32,
-    finish_message: Option<&str>,
-) -> Option<ProviderError> {
-    use proto::candidate::FinishReason as Wire;
-
-    let reason = Wire::try_from(reason).ok()?;
-    match reason {
-        Wire::MalformedFunctionCall | Wire::UnexpectedToolCall | Wire::TooManyToolCalls => {
-            let message = finish_message.unwrap_or("no finish message provided");
-            Some(ProviderError::Response(format!(
-                "Gemini stopped with finish_reason={}: {message}",
-                reason.as_str_name()
-            )))
-        }
-        _ => None,
-    }
-}
-
-impl CompletionModel {
-    /// Executes one RPC and returns the native protobuf response.
-    /// Returns request-conversion, client, or RPC errors.
-    pub async fn raw_completion(
-        &self,
-        completion_request: CompletionRequest,
-    ) -> Result<GenerateContentResponse, ProviderError> {
-        let request = create_grpc_request(&self.model, completion_request)?;
-
-        let mut grpc_client = self
-            .client
-            .grpc_client()
-            .map_err(|e| ProviderError::Provider(e.to_string()))?;
-
-        let response = grpc_client
-            .generate_content(request)
-            .await
-            .map_err(|status| rpc_error(&status))?
-            .into_inner();
-
-        Ok(response)
-    }
-}
-
-impl completion::CompletionModel for CompletionModel {
-    async fn completion(
-        &self,
-        completion_request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse, ProviderError> {
-        self.raw_completion(completion_request).await?.try_into()
+    fn describe(&self) -> Descriptor<'_> {
+        Descriptor::new(PROVIDER_NAME)
+            .model(self.model.as_str())
+            .replay(self)
     }
 
-    async fn stream(
+    /// The REST wire's request, transcoded: every field the shared encoder
+    /// builds reaches the protobuf request, and one the proto does not
+    /// declare is an error rather than dropped.
+    fn encode(
         &self,
         request: CompletionRequest,
-    ) -> Result<rig_core::streaming::StreamingCompletionResponse, ProviderError> {
-        super::streaming::stream(self.client.clone(), self.model.clone(), request).await
+        _mode: Mode,
+    ) -> Result<GenerateContentRequest, EncodeError> {
+        let model = request.model.clone().unwrap_or_else(|| self.model.clone());
+        let body = rest::request_body(&request, self, &model, None, |body| {
+            body.insert("model".to_owned(), format!("models/{model}").into());
+        })?;
+        Ok(crate::rest::from_rest(serde_json::to_value(&body)?)?)
+    }
+
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
+        crate::streaming::GrpcAdapter::default()
     }
 }
 
-/// Build a non-thought `proto::Part` around the given data payload.
-pub(crate) fn data_part(data: proto::part::Data) -> proto::Part {
-    proto::Part {
-        data: Some(data),
-        thought: false,
-        thought_signature: Vec::new(),
-        part_metadata: None,
+impl rig_core::completion::ReplayTarget for GenerateContent {
+    /// The GenerateContent mapping, for what the gRPC request declares.
+    fn map_options(
+        &self,
+        request: &rig_core::completion::CompletionRequest,
+        fields: rig_core::completion::options::OptionFields<'_>,
+    ) -> rig_core::completion::options::OptionMap {
+        let model = request.model.as_deref().unwrap_or(&self.model);
+        rest::generate_content_options(model, rest::Route::Grpc, fields)
+    }
+
+    fn api(&self) -> rig_core::message::Api {
+        rig_core::message::Api::from_static("gemini.generate_content")
+    }
+
+    fn provider(&self) -> &str {
+        PROVIDER_NAME
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// What the model reads, as on every GenerateContent wire.
+    fn accepts(&self, model: &str) -> rig_core::completion::Accepts {
+        rest::accepts(model)
+    }
+
+    /// The media the Gemini API takes, as on the REST wire.
+    fn encodes(&self, _model: &str, media: rig_core::completion::Media<'_>) -> bool {
+        rest::encodes(media, false)
+    }
+
+    fn normalize_tool_call_id(
+        &self,
+        id: &str,
+        model: &str,
+        _source: Option<&message::Origin>,
+    ) -> String {
+        rest::normalize_tool_call_id(model, id)
+    }
+
+    /// Gemini takes system text only in `systemInstruction`: later system
+    /// messages fold into the leading one, as pi's `collapseSystemMessages`.
+    fn later_system(&self, _model: &str) -> rig_core::completion::LaterSystem {
+        rig_core::completion::LaterSystem::Leading
+    }
+
+    fn call_id_slot(&self) -> Option<&'static str> {
+        rest::CALL_ID_SLOT
+    }
+
+    /// Tools in `additional_params` or a cached content count, as on the
+    /// REST wire.
+    fn declares_tools(&self, request: &rig_core::completion::CompletionRequest) -> bool {
+        rest::declares_tools(self, request)
     }
 }
 
-/// Build a plain (non-thought) text `proto::Part`.
-pub(crate) fn text_part(text: String) -> proto::Part {
-    data_part(proto::part::Data::Text(text))
+impl Transport<GenerateContent> for GeminiGrpc {
+    fn send(
+        &self,
+        request: GenerateContentRequest,
+        exchange: Exchange,
+    ) -> Opening<GenerateContentResponse> {
+        let mode = exchange.mode;
+        let mut client = self.grpc_client();
+        Opening::new(async move {
+            Ok(match mode {
+                Mode::Unary => match client.generate_content(request).await {
+                    Ok(response) => unary(response.into_inner())?,
+                    Err(status) => Opened::failed(rpc_error(&status)),
+                },
+                Mode::Streaming => match client.stream_generate_content(request).await {
+                    Ok(response) => {
+                        let mut chunks = response.into_inner();
+                        // Stop receiving after a tonic failure.
+                        Opened::new(async_stream::stream! {
+                            while let Some(item) = chunks.next().await {
+                                match item {
+                                    Ok(chunk) => yield Ok(chunk),
+                                    Err(status) => {
+                                        yield Err(rpc_error(&status));
+                                        break;
+                                    }
+                                }
+                            }
+                        })
+                    }
+                    Err(status) => Opened::failed(rpc_error(&status)),
+                },
+            })
+        })
+    }
 }
+
+/// A unary reply: its one message, whose REST JSON is the response's `raw`.
+/// A message that does not transcode fails as its decoding would.
+pub(crate) fn unary(
+    response: GenerateContentResponse,
+) -> Result<Opened<GenerateContentResponse>, ProviderError> {
+    let document = crate::streaming::document::rest_document(&response)?;
+    Ok(Opened::new(futures::stream::iter([Ok(response)])).with_document(document))
+}
+
+/// Stable descriptor name reported on normalized responses from this provider.
+pub const PROVIDER_NAME: &str = "gemini-grpc";
 
 /// Preserves tonic status display text with RPC code and retry classification.
 /// Transport failures use the same provider-body representation.
 pub(crate) fn rpc_error(status: &tonic::Status) -> ProviderError {
     ProviderError::from_provider_body(status.to_string())
         .with_provider_code(Some(grpc_code_name(status.code())))
-        .with_transient(Some(transient_grpc_code(status.code())))
 }
 
 /// The gRPC status code's canonical name (`UNAVAILABLE`): the code the
@@ -802,5 +838,13 @@ fn json_type_to_proto_type(t: &str) -> proto::Type {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests;
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    clippy::indexing_slicing
+)]
+pub(crate) mod tests;
+
+#[cfg(test)]
+mod schema_tests;
