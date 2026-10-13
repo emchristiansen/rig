@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::providers::chatgpt;
+use crate::providers::openai::OpenAIConfig;
 use serde_json::json;
 
 const API_KEY: &str = "sk-test";
@@ -63,7 +64,7 @@ fn the_request_matches_the_reference_example() {
 #[test]
 fn the_offer_is_sent_verbatim_under_a_custom_base_url() {
     let sessions =
-        PublicLiveSessions::new(OpenAI::new(API_KEY).with_base_url("http://localhost:8080/v1/"))
+        PublicLiveSessions::new(OpenAIConfig::new(API_KEY).with_base_url("http://localhost:8080/v1/").client())
             .expect("the OpenAI dialect");
     let request = sessions
         .create_request(OFFER, &SessionConfig::new())
@@ -89,7 +90,7 @@ fn an_empty_offer_is_refused() {
 
 #[test]
 fn the_codex_backend_is_refused() {
-    let provider = OpenAI::with_key(&chatgpt::DIALECT, "access-token");
+    let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "access-token").client();
     let error = PublicLiveSessions::new(provider).expect_err("the Codex dialect");
     assert_eq!(
         error,
@@ -105,7 +106,7 @@ fn the_codex_backend_is_refused() {
 
 #[test]
 fn another_openai_shaped_gateway_is_refused() {
-    let provider = OpenAI::with_key(&crate::providers::openai::wire::GROQ, "gsk-test");
+    let provider = OpenAIConfig::with_key(&crate::providers::openai::wire::GROQ, "gsk-test").client();
     let error = PublicLiveSessions::new(provider).expect_err("the Groq dialect");
     assert_eq!(error, NotOfficialOpenAi { dialect: "groq" });
 }

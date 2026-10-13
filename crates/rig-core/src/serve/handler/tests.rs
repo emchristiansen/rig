@@ -258,6 +258,30 @@ fn the_tap_yields_only_its_first_outcome() {
     assert!(matches!(outcomes.first(), Some(Err(report)) if report.message == "reset"));
 }
 
+/// Obtain synthetic serving responses through the actual current fold, with
+/// its caller-supplied relay label and exact original raw value.
+fn response_from_parts(
+    provider: &str,
+    choice: Vec<crate::message::AssistantContent>,
+    raw: serde_json::Value,
+) -> CompletionResponse {
+    let decoded: crate::driver::Decoded<crate::operation::Completion> = crate::driver::decode_with(
+        crate::operation::completion::Turn::relayed(provider),
+        provider,
+        |reply| {
+            let mut out = reply.out();
+            for content in choice {
+                out.content(content)?;
+            }
+            let _ = out.end(Finish::default());
+            Ok(())
+        },
+    );
+    let mut response = decoded.outcome.expect("the actual relay fold completes");
+    response.raw = raw;
+    response
+}
+
 /// Re-emitting a unary reply as stream events and folding them back keeps a
 /// namespaced call's namespace and a custom call whole.
 #[test]
@@ -265,29 +289,31 @@ fn re_emitted_namespaced_and_custom_calls_fold_back_unchanged() {
     use crate::message::AssistantContent;
 
     let choice = vec![
-        AssistantContent::tool_call_with_namespace(
-            "fc_1",
-            "call_1".to_owned(),
-            "add",
-            Some("math".to_owned()),
-            serde_json::json!({"x": 1}),
-        ),
+        // G11: independent fc_1/ctc_2 item IDs are absent from canonical calls.
+        AssistantContent::ToolCall(crate::message::ToolCall::new(
+            crate::message::CallId::from_wire("call_1"),
+            crate::message::ToolFunction::new(
+                crate::message::ToolName::new("add").expect("a nonempty tool name"),
+                serde_json::json!({"x": 1}),
+            ).with_namespace(Some("math".to_owned())),
+        )),
         AssistantContent::custom_tool_call(
-            "ctc_2",
             "call_2",
-            "apply_patch",
+            crate::message::ToolName::new("apply_patch").expect("a nonempty tool name"),
             Some("repo".to_owned()),
             r#"{"x": 1}"#,
         ),
     ];
     let mut tap = StreamTap::new();
     let mut outcome = None;
-    for item in events_from_response(&CompletionResponse::new(
-        choice.clone(),
-        Default::default(),
-        "openai",
-        serde_json::Value::Null,
-    )) {
+    // G73–G75: current serving emits Origin/Item/Done instead of old Final events.
+    let response = response_from_parts("openai", choice.clone(), serde_json::Value::Null);
+    let items = block_on(
+        Reply::Outcome(Ok(Outcome::Completion(response)))
+            .into_stream()
+            .collect::<Vec<_>>(),
+    );
+    for item in items {
         if let Some(folded) = tap.observe(&item) {
             outcome = Some(folded);
         }
@@ -309,10 +335,9 @@ fn captured_response_headers_survive_both_serving_conversions() {
     .into_iter()
     .map(|(name, value)| (name.to_owned(), value.to_owned()))
     .collect();
-    let response = CompletionResponse::new(
-        vec![crate::message::AssistantContent::text("hi")],
-        Default::default(),
+    let response = response_from_parts(
         "test",
+        vec![crate::message::AssistantContent::text("hi")],
         serde_json::json!({}),
     )
     .with_provider_response_headers(headers.clone());
@@ -325,7 +350,7 @@ fn captured_response_headers_survive_both_serving_conversions() {
     let terminal = events
         .iter()
         .find_map(|item| match item {
-            Ok(StreamEvent::Final(terminal)) => Some(terminal.clone()),
+            Ok(Relayed::Done(terminal)) => Some(terminal.clone()),
             _ => None,
         })
         .expect("the stream ends with a terminal record");

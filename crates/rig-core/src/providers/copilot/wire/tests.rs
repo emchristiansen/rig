@@ -131,7 +131,7 @@ fn a_manual_copilot_wrapper_keeps_its_envelope_after_deserialization() {
 fn a_copilot_wrapper_around_the_chatgpt_dialect_is_refused() {
     use crate::providers::chatgpt;
 
-    let provider = OpenAI::with_key(&chatgpt::DIALECT, "token")
+    let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "token")
         .with_caller_identity(crate::test_utils::test_caller_identity());
     for shared in [
         provider.chat("model").into(),
@@ -660,7 +660,7 @@ fn the_responses_route_sends_declared_tools_as_written_under_its_strict_default(
     });
     let request = CompletionRequest {
         tools: vec![crate::completion::ToolDefinition {
-            name: "lookup".to_string(),
+            name: crate::message::ToolName::new("lookup").expect("a nonempty tool name"),
             description: "Look something up".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -674,10 +674,10 @@ fn the_responses_route_sends_declared_tools_as_written_under_its_strict_default(
     };
 
     let wire = copilot().completion(super::super::GPT_5_3_CODEX);
-    let mut encoded = wire
+    let encoded = wire
         .encode(request, Mode::Unary)
         .expect("the request encodes");
-    let request = encoded.requests.remove(0);
+    let request = encoded.request;
     assert_eq!(request.uri().path(), "/responses");
     let Body::Bytes(bytes) = request.into_body() else {
         panic!("a Responses body is bytes");
@@ -749,7 +749,7 @@ impl crate::wire::CredentialSource for SourceForCopilot {
 
 fn copilot_over_a_source(source: SourceForCopilot) -> CopilotWire {
     CopilotWire {
-        wire: crate::providers::openai::OpenAI::new("static-key")
+        wire: crate::providers::openai::OpenAIConfig::new("static-key")
             .with_credential_source(source)
             .completion("gpt-4o"),
         intent: CopilotIntent::default(),
@@ -764,8 +764,8 @@ async fn the_copilot_wrapper_forwards_its_wires_credential_source() {
     let http = crate::test_utils::RecordingHttpClient::new("{}");
     // Whether the canned reply decodes is beside the point: the request has
     // already reached the transport.
-    let _ = crate::driver::Bound::new(copilot_over_a_source(source.clone()), http.clone())
-        .completion(crate::completion::CompletionRequest {
+    let _ = crate::driver::Model::new(copilot_over_a_source(source.clone()), http.clone())
+        .call(crate::completion::CompletionRequest {
             model: None,
             chat_history: vec![crate::message::Message::user("hi")],
             documents: Vec::new(),
@@ -776,6 +776,7 @@ async fn the_copilot_wrapper_forwards_its_wires_credential_source() {
             additional_params: None,
             output_schema: None,
             record_telemetry_content: false,
+            ..crate::completion::CompletionRequest::new("hi")
         })
         .await;
 
@@ -789,14 +790,14 @@ async fn the_copilot_wrapper_forwards_its_wires_credential_source() {
 #[tokio::test]
 async fn a_failing_credential_source_refuses_through_the_copilot_wrapper() {
     let http = crate::test_utils::RecordingHttpClient::new("{}");
-    let error = crate::driver::Bound::new(
+    let error = crate::driver::Model::new(
         copilot_over_a_source(SourceForCopilot {
             fails: true,
             ..SourceForCopilot::default()
         }),
         http.clone(),
     )
-    .completion(crate::completion::CompletionRequest {
+    .call(crate::completion::CompletionRequest {
         model: None,
         chat_history: vec![crate::message::Message::user("hi")],
         documents: Vec::new(),
@@ -807,6 +808,7 @@ async fn a_failing_credential_source_refuses_through_the_copilot_wrapper() {
         additional_params: None,
         output_schema: None,
         record_telemetry_content: false,
+        ..crate::completion::CompletionRequest::new("hi")
     })
     .await
     .expect_err("the source has no credential");
