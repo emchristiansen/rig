@@ -27,6 +27,7 @@ use rig_core::message::{AssistantContent, Message, Text, ToolChoice, UserContent
 use rig_vertexai::VertexAi;
 use rig_vertexai::client::VertexAiClientError;
 use rig_vertexai::completion::GenerateContent;
+use std::time::Duration;
 use support::{LocalEndpoint, Reply, SentinelCredentials, text_response, tool_call_response};
 
 const PROJECT: &str = "rig-test-project";
@@ -332,3 +333,40 @@ async fn deferred_client_initialization_failure_surfaces_on_first_use() {
         "no token was ever minted for a client that never existed"
     );
 }
+
+/// Dropping the completion future releases the in-flight RPC: the endpoint,
+/// still holding the request open, sees the connection go away. The client and
+/// its credentials are not operation-scoped, so the next completion works.
+#[tokio::test]
+async fn a_cancelled_completion_releases_its_rpc_and_leaves_the_client_usable() {
+    let endpoint = LocalEndpoint::spawn([Reply::Hang, Reply::ok(text_response("after"))]).await;
+    let credentials = SentinelCredentials::rotating("cancel-token");
+    let model = hosted_model(&endpoint, &credentials).await;
+
+    // Arrival, not elapsed time, establishes that there is real work to cancel.
+    {
+        let completion = model.call(request("abandoned"));
+        tokio::pin!(completion);
+        tokio::select! {
+            result = &mut completion => panic!("held RPC completed before cancellation: {result:?}"),
+            () = endpoint.wait_for_requests(1) => {}
+        }
+    }
+
+    endpoint.wait_for_disconnects(1).await;
+    assert_eq!(
+        endpoint.disconnects(),
+        1,
+        "the abandoned RPC's connection was actually closed, not left dangling"
+    );
+
+    let response = tokio::time::timeout(Duration::from_secs(10), model.call(request("next")))
+        .await
+        .expect("subsequent completion deadline")
+        .expect("the shared client and its credentials survived the cancellation");
+    assert!(
+        matches!(response.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "after")
+    );
+    assert_eq!(credentials.issued(), 2);
+}
+
