@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use rig_core::completion::{AssistantContent, CompletionRequest, ToolDefinition};
 use rig_core::message::{
-    Message, Reasoning, ToolCall, ToolCallId, ToolChoice, ToolFunction, ToolResultContent,
+    CallId, Message, Reasoning, ToolCall, ToolChoice, ToolFunction, ToolName, ToolResultContent,
     UserContent,
 };
 use serde::Deserialize;
@@ -97,15 +97,12 @@ fn validate_protocol_inputs(
     request: &CompletionRequest,
     protocol: ConversationProtocol,
 ) -> Result<(), CandleError> {
-    for document in &request.documents {
-        validate_protocol_text(&document.to_string(), "document", protocol)?;
-    }
     for tool in &request.tools {
         validate_protocol_text(&tool.description, "tool description", protocol)?;
         validate_protocol_text(
             &serde_json::to_string(&tool.parameters).map_err(|error| {
                 CandleError::InvalidToolDefinition {
-                    tool: tool.name.clone(),
+                    tool: tool.name.to_string(),
                     reason: format!("parameters cannot be serialized: {error}"),
                 }
             })?,
@@ -118,14 +115,14 @@ fn validate_protocol_inputs(
             Message::System { content } => {
                 validate_protocol_text(content, "system message", protocol)?;
             }
-            Message::Assistant { content, .. } => {
-                for item in content.iter() {
+            Message::Assistant(turn) => {
+                for item in turn.content.iter() {
                     match item {
                         AssistantContent::Text(text) => {
                             validate_protocol_text(&text.text, "assistant text", protocol)?;
                         }
                         AssistantContent::Reasoning(reasoning) => validate_protocol_text(
-                            &reasoning.display_text(),
+                            &reasoning.text,
                             "assistant reasoning",
                             protocol,
                         )?,
@@ -147,7 +144,20 @@ fn validate_protocol_inputs(
                                 protocol,
                             )?;
                         }
-                        AssistantContent::Image(_) => {}
+                        AssistantContent::CustomToolCall(call) => {
+                            return Err(call.refused_by_json_only_wire(CANDLE_WIRE).into());
+                        }
+                        AssistantContent::ProviderItem(item) => {
+                            return Err(rig_core::message::UnreplayableProviderItem::new(
+                                CANDLE_WIRE,
+                                item,
+                            )
+                            .into());
+                        }
+                        AssistantContent::CarriedText(_)
+                        | AssistantContent::CarriedReasoning(_)
+                        | AssistantContent::Opaque(_)
+                        | AssistantContent::Image(_) => {}
                     }
                 }
             }
@@ -206,26 +216,23 @@ pub(crate) fn parse_assistant(
     }
 }
 
+/// Wire name for the shared JSON-only tool-call refusal.
+const CANDLE_WIRE: &str = "Candle local prompt";
+
 fn validate_common_request(request: &CompletionRequest) -> Result<(), CandleError> {
-    if let Some(model) = &request.model {
-        return Err(CandleError::UnsupportedFeature(format!(
-            "model override `{model}`; byte-loaded models do not support request-time model selection"
-        )));
+    // Every prompt format renders tool calls as a name and JSON arguments,
+    // with no namespace and no raw-input form.
+    for message in request.chat_history.iter() {
+        if let Message::Assistant(turn) = message {
+            for item in &turn.content {
+                rig_core::message::json_only_wire_tool_call(CANDLE_WIRE, item)?;
+            }
+        }
     }
     if request.output_schema.is_some() {
         return Err(CandleError::UnsupportedFeature(
             "direct output_schema requires constrained decoding; use Rig's tool output mode"
                 .to_string(),
-        ));
-    }
-    if request
-        .additional_params
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|parameters| parameters.contains_key("tools"))
-    {
-        return Err(CandleError::UnsupportedFeature(
-            "provider-native hosted tools".to_string(),
         ));
     }
     Ok(())
@@ -282,19 +289,14 @@ fn selected_tools(
 }
 
 fn validate_tool_definition(tool: &ToolDefinition) -> Result<(), CandleError> {
-    let valid_name = !tool.name.is_empty()
-        && tool.name.len() <= 64
+    let valid_name = tool.name.len() <= 64
         && tool
             .name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
     if !valid_name {
         return Err(CandleError::InvalidToolDefinition {
-            tool: if tool.name.is_empty() {
-                "<empty>".to_string()
-            } else {
-                tool.name.clone()
-            },
+            tool: tool.name.to_string(),
             reason: "name must contain 1-64 ASCII letters, digits, underscores, or hyphens"
                 .to_string(),
         });
@@ -303,7 +305,7 @@ fn validate_tool_definition(tool: &ToolDefinition) -> Result<(), CandleError> {
         tool.parameters
             .as_object()
             .ok_or_else(|| CandleError::InvalidToolDefinition {
-                tool: tool.name.clone(),
+                tool: tool.name.to_string(),
                 reason: "parameters must be a JSON Schema object".to_string(),
             })?;
     if parameters
@@ -312,35 +314,17 @@ fn validate_tool_definition(tool: &ToolDefinition) -> Result<(), CandleError> {
         .is_some_and(|kind| kind != "object")
     {
         return Err(CandleError::InvalidToolDefinition {
-            tool: tool.name.clone(),
+            tool: tool.name.to_string(),
             reason: "the root parameter schema type must be `object` when present".to_string(),
         });
     }
     serde_json::to_string(&tool.parameters).map_err(|error| {
         CandleError::InvalidToolDefinition {
-            tool: tool.name.clone(),
+            tool: tool.name.to_string(),
             reason: format!("parameters cannot be serialized: {error}"),
         }
     })?;
     Ok(())
-}
-
-fn messages_with_documents(request: &CompletionRequest) -> Vec<Message> {
-    let mut messages = request.chat_history.clone();
-    if !request.documents.is_empty() {
-        let context = request
-            .documents
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let insertion = messages
-            .iter()
-            .position(|message| !matches!(message, Message::System { .. }))
-            .unwrap_or(messages.len());
-        messages.insert(insertion, Message::user(context));
-    }
-    messages
 }
 
 fn render_plain_chat(
@@ -357,7 +341,7 @@ fn render_plain_chat(
             "tool_choice requires the Qwen3 conversation protocol".to_string(),
         ));
     }
-    let messages = messages_with_documents(request);
+    let messages = &request.chat_history;
     type Pieces = &'static [&'static str];
     let (turn_start, role_suffix, turn_end, mut rendered): (&str, Pieces, Pieces, String) =
         match family {
@@ -384,7 +368,7 @@ fn render_plain_chat(
             }
         };
     for message in messages {
-        let (role, content) = render_plain_message(&message)?;
+        let (role, content) = render_plain_message(message)?;
         for piece in [&[turn_start, role][..], role_suffix, &[&content], turn_end].concat() {
             rendered.push_str(piece);
         }
@@ -417,13 +401,20 @@ fn render_plain_message(message: &Message) -> Result<(&'static str, String), Can
             }
             Ok(("user", parts.join("\n")))
         }
-        Message::Assistant { content, .. } => {
+        Message::Assistant(turn) => {
             let mut parts = Vec::new();
-            for item in content.iter() {
+            for item in turn.content.iter() {
                 match item {
                     AssistantContent::Text(text) => parts.push(text.text.clone()),
-                    AssistantContent::ToolCall(_) => {
+                    AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => {
                         return Err(CandleError::UnsupportedPromptContent("tool calls"));
+                    }
+                    AssistantContent::ProviderItem(item) => {
+                        return Err(rig_core::message::UnreplayableProviderItem::new(
+                            CANDLE_WIRE,
+                            item,
+                        )
+                        .into());
                     }
                     AssistantContent::Reasoning(_) => {
                         return Err(CandleError::UnsupportedPromptContent(
@@ -432,6 +423,12 @@ fn render_plain_message(message: &Message) -> Result<(&'static str, String), Can
                     }
                     AssistantContent::Image(_) => {
                         return Err(CandleError::UnsupportedPromptContent("image content"));
+                    }
+                    AssistantContent::Opaque(_) => {
+                        return Err(CandleError::UnsupportedPromptContent("provider items"));
+                    }
+                    _ => {
+                        return Err(CandleError::UnsupportedPromptContent("assistant content"));
                     }
                 }
             }
@@ -442,7 +439,7 @@ fn render_plain_message(message: &Message) -> Result<(&'static str, String), Can
 
 fn render_qwen3(request: &CompletionRequest) -> Result<String, CandleError> {
     let (tools, require_call) = selected_tools(request)?;
-    let messages = messages_with_documents(request);
+    let messages = &request.chat_history;
     let mut rendered = String::new();
     let mut first_message = 0;
 
@@ -467,7 +464,7 @@ fn render_qwen3(request: &CompletionRequest) -> Result<String, CandleError> {
             });
             rendered.push_str(&serde_json::to_string(&definition).map_err(|error| {
                 CandleError::InvalidToolDefinition {
-                    tool: tool.name.clone(),
+                    tool: tool.name.to_string(),
                     reason: format!("definition cannot be serialized: {error}"),
                 }
             })?);
@@ -487,12 +484,12 @@ fn render_qwen3(request: &CompletionRequest) -> Result<String, CandleError> {
         first_message = 1;
     }
 
-    let mut aliases = HashMap::<String, ToolCallId>::new();
-    let mut unresolved = HashSet::<ToolCallId>::new();
-    let mut answered = HashSet::<ToolCallId>::new();
+    let mut aliases = HashMap::<String, CallId>::new();
+    let mut unresolved = HashSet::<CallId>::new();
+    let mut answered = HashSet::<CallId>::new();
     let mut rendered_messages = Vec::new();
     for message in messages.iter().skip(first_message) {
-        rendered_messages.push(render_qwen_message(
+        rendered_messages.extend(render_qwen_message(
             message,
             &mut aliases,
             &mut unresolved,
@@ -550,19 +547,19 @@ fn render_qwen3(request: &CompletionRequest) -> Result<String, CandleError> {
 
 fn render_qwen_message(
     message: &Message,
-    aliases: &mut HashMap<String, ToolCallId>,
-    unresolved: &mut HashSet<ToolCallId>,
-    answered: &mut HashSet<ToolCallId>,
-) -> Result<RenderedMessage, CandleError> {
+    aliases: &mut HashMap<String, CallId>,
+    unresolved: &mut HashSet<CallId>,
+    answered: &mut HashSet<CallId>,
+) -> Result<Vec<RenderedMessage>, CandleError> {
     match message {
-        Message::System { content } => Ok(RenderedMessage::Normal {
+        Message::System { content } => Ok(vec![RenderedMessage::Normal {
             role: "system",
             content: content.clone(),
-        }),
-        Message::Assistant { content, .. } => {
+        }]),
+        Message::Assistant(turn) => {
             let mut rendered = String::new();
             let mut call_count = 0usize;
-            for item in content.iter() {
+            for item in turn.content.iter() {
                 match item {
                     AssistantContent::Text(text) => rendered.push_str(&text.text),
                     AssistantContent::Reasoning(_) => {
@@ -577,8 +574,8 @@ fn render_qwen_message(
                                 call.id
                             )));
                         }
-                        if let Some(provider) = &call.provider {
-                            let call_id = &provider.call_id;
+                        if let Some(provider) = call.id.provider() {
+                            let call_id = provider.as_str();
                             if aliases
                                 .get(call_id)
                                 .is_some_and(|existing| existing != &call_key)
@@ -587,7 +584,7 @@ fn render_qwen_message(
                                     "duplicate historical tool call correlation ID `{call_id}`"
                                 )));
                             }
-                            aliases.insert(call_id.clone(), call_key.clone());
+                            aliases.insert(call_id.to_owned(), call_key.clone());
                         }
                         if call_count > 0 || !rendered.is_empty() {
                             rendered.push('\n');
@@ -607,24 +604,51 @@ fn render_qwen_message(
                         rendered.push_str(TOOL_CALL_END);
                         call_count += 1;
                     }
+                    AssistantContent::CustomToolCall(call) => {
+                        return Err(call.refused_by_json_only_wire(CANDLE_WIRE).into());
+                    }
+                    AssistantContent::ProviderItem(item) => {
+                        return Err(rig_core::message::UnreplayableProviderItem::new(
+                            CANDLE_WIRE,
+                            item,
+                        )
+                        .into());
+                    }
                     AssistantContent::Image(_) => {
                         return Err(CandleError::UnsupportedPromptContent(
                             "assistant image content",
                         ));
                     }
+                    AssistantContent::Opaque(_) => {
+                        return Err(CandleError::UnsupportedPromptContent("provider items"));
+                    }
+                    _ => {
+                        return Err(CandleError::UnsupportedPromptContent("assistant content"));
+                    }
                 }
             }
-            Ok(RenderedMessage::Normal {
+            Ok(vec![RenderedMessage::Normal {
                 role: "assistant",
                 content: rendered,
-            })
+            }])
         }
         Message::User { content } => {
-            let mut text = Vec::new();
-            let mut results = Vec::new();
+            // A user message the adapter merged holds results and then text:
+            // the results render as one tool-response turn and the text as
+            // the user turn after it, in their order.
+            let mut segments: Vec<RenderedMessage> = Vec::new();
             for item in content.iter() {
                 match item {
-                    UserContent::Text(value) => text.push(value.text.clone()),
+                    UserContent::Text(value) => match segments.last_mut() {
+                        Some(RenderedMessage::Normal { content, .. }) => {
+                            content.push('\n');
+                            content.push_str(&value.text);
+                        }
+                        _ => segments.push(RenderedMessage::Normal {
+                            role: "user",
+                            content: value.text.clone(),
+                        }),
+                    },
                     UserContent::ToolResult(result) => {
                         let canonical_by_id = unresolved.get(&result.call);
                         // A recycled provider handle must not redirect a stale
@@ -636,9 +660,9 @@ fn render_qwen_message(
                             });
                         }
                         let canonical_by_call_id = result
-                            .provider
-                            .as_ref()
-                            .and_then(|provider| aliases.get(&provider.call_id));
+                            .call
+                            .provider()
+                            .and_then(|provider| aliases.get(provider.as_str()));
                         if let (Some(by_id), Some(by_call_id)) =
                             (canonical_by_id, canonical_by_call_id)
                             && by_id != by_call_id
@@ -683,24 +707,22 @@ fn render_qwen_message(
                                 }
                             }
                         }
-                        results.push(items.join("\n"));
+                        let result = items.join("\n");
+                        match segments.last_mut() {
+                            Some(RenderedMessage::ToolResults(results)) => results.push(result),
+                            _ => segments.push(RenderedMessage::ToolResults(vec![result])),
+                        }
                     }
                     unsupported => return Err(unsupported_user_content(unsupported)),
                 }
             }
-            if !text.is_empty() && !results.is_empty() {
-                return Err(CandleError::UnsupportedPromptContent(
-                    "mixed text and tool-result user message",
-                ));
-            }
-            if results.is_empty() {
-                Ok(RenderedMessage::Normal {
+            if segments.is_empty() {
+                segments.push(RenderedMessage::Normal {
                     role: "user",
-                    content: text.join("\n"),
-                })
-            } else {
-                Ok(RenderedMessage::ToolResults(results))
+                    content: String::new(),
+                });
             }
+            Ok(segments)
         }
     }
 }
@@ -779,12 +801,12 @@ fn parse_qwen3_assistant(
                 "duplicate or empty tool-call ID `{id}`"
             )));
         }
-        // The `tool_calls`-th call of the turn: an id-less envelope mints
-        // its handle at that index, so two calls never share one.
-        items.push(AssistantContent::ToolCall(ToolCall::from_wire_indexed(
+        let name = ToolName::new(envelope.name)
+            .map_err(|error| CandleError::MalformedToolCall(error.to_string()))?;
+        // Rig issues an id for an id-less envelope.
+        items.push(AssistantContent::ToolCall(ToolCall::from_wire(
             envelope.id.unwrap_or_default(),
-            tool_calls as u64,
-            ToolFunction::new(envelope.name, envelope.arguments),
+            ToolFunction::new(name, envelope.arguments),
         )));
         tool_calls += 1;
         remaining = after_start[end + TOOL_CALL_END.len()..].trim_start();
@@ -803,7 +825,6 @@ fn parse_qwen3_assistant(
         ));
     }
     // Preserve empty turns without inventing model output.
-    rig_core::message::normalize_missing_tool_call_ids(&mut items);
     let visible_text = canonicalize_visible_text(&mut items);
     Ok(ParsedAssistant {
         items,

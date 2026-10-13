@@ -144,7 +144,20 @@ fn validate_protocol_inputs(
                                 protocol,
                             )?;
                         }
-                        _ => {}
+                        AssistantContent::CustomToolCall(call) => {
+                            return Err(call.refused_by_json_only_wire(CANDLE_WIRE).into());
+                        }
+                        AssistantContent::ProviderItem(item) => {
+                            return Err(rig_core::message::UnreplayableProviderItem::new(
+                                CANDLE_WIRE,
+                                item,
+                            )
+                            .into());
+                        }
+                        AssistantContent::CarriedText(_)
+                        | AssistantContent::CarriedReasoning(_)
+                        | AssistantContent::Opaque(_)
+                        | AssistantContent::Image(_) => {}
                     }
                 }
             }
@@ -203,7 +216,19 @@ pub(crate) fn parse_assistant(
     }
 }
 
+/// Wire name for the shared JSON-only tool-call refusal.
+const CANDLE_WIRE: &str = "Candle local prompt";
+
 fn validate_common_request(request: &CompletionRequest) -> Result<(), CandleError> {
+    // Every prompt format renders tool calls as a name and JSON arguments,
+    // with no namespace and no raw-input form.
+    for message in request.chat_history.iter() {
+        if let Message::Assistant(turn) = message {
+            for item in &turn.content {
+                rig_core::message::json_only_wire_tool_call(CANDLE_WIRE, item)?;
+            }
+        }
+    }
     if request.output_schema.is_some() {
         return Err(CandleError::UnsupportedFeature(
             "direct output_schema requires constrained decoding; use Rig's tool output mode"
@@ -381,8 +406,15 @@ fn render_plain_message(message: &Message) -> Result<(&'static str, String), Can
             for item in turn.content.iter() {
                 match item {
                     AssistantContent::Text(text) => parts.push(text.text.clone()),
-                    AssistantContent::ToolCall(_) => {
+                    AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => {
                         return Err(CandleError::UnsupportedPromptContent("tool calls"));
+                    }
+                    AssistantContent::ProviderItem(item) => {
+                        return Err(rig_core::message::UnreplayableProviderItem::new(
+                            CANDLE_WIRE,
+                            item,
+                        )
+                        .into());
                     }
                     AssistantContent::Reasoning(_) => {
                         return Err(CandleError::UnsupportedPromptContent(
@@ -571,6 +603,16 @@ fn render_qwen_message(
                         rendered.push('\n');
                         rendered.push_str(TOOL_CALL_END);
                         call_count += 1;
+                    }
+                    AssistantContent::CustomToolCall(call) => {
+                        return Err(call.refused_by_json_only_wire(CANDLE_WIRE).into());
+                    }
+                    AssistantContent::ProviderItem(item) => {
+                        return Err(rig_core::message::UnreplayableProviderItem::new(
+                            CANDLE_WIRE,
+                            item,
+                        )
+                        .into());
                     }
                     AssistantContent::Image(_) => {
                         return Err(CandleError::UnsupportedPromptContent(

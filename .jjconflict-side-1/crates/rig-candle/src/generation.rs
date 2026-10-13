@@ -659,6 +659,18 @@ fn emit_parsed_items(
         match item {
             AssistantContent::Text(text) => emit(GenerationEvent::Text(text.text))?,
             AssistantContent::ToolCall(call) => emit(GenerationEvent::ToolCall(call))?,
+            // The local parsers never produce a provider item or custom call.
+            AssistantContent::ProviderItem(_) => {
+                return Err(CandleError::Inference(
+                    "the local output parser produced a provider item, which it never emits".into(),
+                ));
+            }
+            AssistantContent::CustomToolCall(_) => {
+                return Err(CandleError::Inference(
+                    "the local output parser produced a custom tool call, which it never emits"
+                        .into(),
+                ));
+            }
             AssistantContent::Reasoning(reasoning) => {
                 emit(GenerationEvent::Reasoning(reasoning))?;
             }

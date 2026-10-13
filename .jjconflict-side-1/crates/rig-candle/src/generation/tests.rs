@@ -36,7 +36,7 @@ fn parsed_missing_ids_keep_their_identity_and_provenance_through_stream_emission
     assert!(
         [ids.first(), ids.get(2)]
             .iter()
-            .all(|id| id.is_some_and(|id| id.provider().is_none()))
+            .all(|id| id.is_some_and(|id| id.is_local() && id.provider().is_none()))
     );
     assert_eq!(
         serde_json::to_value(emitted).expect("valid parsed tool event"),
