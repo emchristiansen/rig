@@ -94,7 +94,7 @@ fn test_assistant_tool_call_echoes_thought_signature() {
         panic!("one real received function call is required");
     };
     assert_eq!(call.function.name.as_str(), "add");
-    assert_eq!(call.function.arguments, json!({"x": 5}));
+    assert_eq!(call.function.arguments_value(), json!({"x": 5}));
     assert_eq!(
         block.native_item(),
         Some(&serde_json::to_value(&part).expect("part serializes"))
