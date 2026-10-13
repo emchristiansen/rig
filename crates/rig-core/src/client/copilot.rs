@@ -66,7 +66,8 @@ impl Copilot {
     /// ```
     pub async fn authenticate(self, authenticator: &Authenticator) -> Result<Self, AuthError> {
         let context = authenticator.auth_context(&self.http).await?;
-        let explicit = self.config.base_url != CopilotConfig::new(self.config.api_key).base_url;
+        let explicit = self.config.base_url_explicit
+            || self.config.base_url != CopilotConfig::new(self.config.api_key).base_url;
         let signed_in = CopilotConfig::from_auth(&context);
         let config = if explicit {
             signed_in.with_base_url(self.config.base_url)

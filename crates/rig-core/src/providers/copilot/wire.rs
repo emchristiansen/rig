@@ -135,6 +135,10 @@ pub struct CopilotConfig {
     pub api_key: Secret,
     /// The API root every path resolves against.
     pub base_url: String,
+    /// Whether the caller pinned this root against token-exchange routing.
+    /// Set by [`Self::with_base_url`] and environment overrides.
+    #[serde(default, skip_serializing_if = "crate::json_utils::is_false")]
+    pub base_url_explicit: bool,
 }
 
 impl CopilotConfig {
@@ -146,6 +150,7 @@ impl CopilotConfig {
         Self {
             api_key: provider.api_key,
             base_url: provider.base_url,
+            base_url_explicit: false,
         }
     }
 
@@ -172,7 +177,7 @@ impl CopilotConfig {
         };
         let mut provider = Self::new(api_key);
         if let Some(base_url) = first_env(BASE_URL_ENV)? {
-            provider.base_url = base_url;
+            provider = provider.with_base_url(base_url);
         }
         Ok(provider)
     }
@@ -180,6 +185,7 @@ impl CopilotConfig {
     /// Override the base URL.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self.base_url_explicit = true;
         self
     }
 
