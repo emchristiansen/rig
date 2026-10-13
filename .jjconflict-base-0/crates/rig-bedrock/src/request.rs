@@ -245,6 +245,11 @@ fn assistant(
     wire_id: Option<&str>,
 ) -> Result<Option<Value>, EncodeError> {
     rig_core::message::json_only_wire_tool_call("Bedrock Converse", block)?;
+    if let AssistantContent::CarriedText(part) = block
+        && matches!(&part.content, rig_core::message::CarriedTextContent::Opaque(text) if text.is_empty())
+    {
+        wire.check_carried_text(part)?;
+    }
     if let AssistantContent::Opaque(opaque) = block {
         return Ok(opaque.replay.then(|| whole_numbers(opaque.item.clone())));
     }
@@ -426,8 +431,8 @@ pub(crate) fn video(video: &Video) -> Result<Value, EncodeError> {
     media(mime, &["mp4", "mpeg", "mov", "webm"], &video.data)
 }
 
-/// The Converse document block for `document`. A text format Converse does
-/// not list is plain text. The name is the content's digest, so a request
+/// The Converse document block for `document`, carrying text as UTF-8 bytes.
+/// The name is the content's digest, so a request
 /// is byte-stable across turns and runs, which prompt-cache prefixes and
 /// recorded replays rely on.
 pub(crate) fn document(document: &Document) -> Result<Value, EncodeError> {
@@ -441,11 +446,14 @@ pub(crate) fn document(document: &Document) -> Result<Value, EncodeError> {
             DocumentMediaType::MARKDOWN => "text/md",
             _ => "text/txt",
         });
-    let DocumentData::File(data) = &document.data else {
-        return Err(EncodeError::request("a text document goes as text"));
+    let data = match &document.data {
+        DocumentData::Text(text) => std::borrow::Cow::Owned(
+            DocumentSourceKind::Raw(text.as_bytes().to_vec()),
+        ),
+        DocumentData::File(data) => std::borrow::Cow::Borrowed(data),
     };
-    let mut block = media(mime, &["pdf", "html", "csv", "md", "txt"], data)?;
-    let (_, bytes) = source(data)?;
+    let mut block = media(mime, &["pdf", "html", "csv", "md", "txt"], &data)?;
+    let (_, bytes) = source(&data)?;
     let digest: String = Sha256::digest(&bytes)
         .iter()
         .take(8)
@@ -465,3 +473,6 @@ mod port_refusal_reasoning_tests;
 
 #[cfg(test)]
 mod port_mechanical_tests;
+
+#[cfg(test)]
+mod final_accepted_tests;

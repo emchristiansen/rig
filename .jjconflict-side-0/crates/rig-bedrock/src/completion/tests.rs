@@ -39,7 +39,7 @@ fn the_family_is_the_provider_the_id_names() {
 
 /// Converse carries inline images, documents in the formats it lists, and
 /// S3 objects and video to Nova, which reads them; never URLs, file ids,
-/// string documents (its text source is rejected) or audio.
+/// documents whose text has no supported MIME format, or audio.
 #[test]
 fn converse_encodes_only_what_it_carries() {
     let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
@@ -93,7 +93,7 @@ fn converse_encodes_only_what_it_carries() {
         rig_core::message::DocumentData::Text("notes".into()),
         DocumentMediaType::TXT,
     );
-    assert!(!encodes(AMAZON_NOVA_LITE, Media::Document(&text)));
+    assert!(encodes(AMAZON_NOVA_LITE, Media::Document(&text)));
     let mp4 = video(Source::base64("AAAAIGZ0eXBpc29tAAACAA"));
     assert!(encodes(AMAZON_NOVA_LITE, Media::Video(&mp4)));
     let stored = video(s3());

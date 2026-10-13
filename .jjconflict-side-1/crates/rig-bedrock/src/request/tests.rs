@@ -211,7 +211,7 @@ fn cache_points_follow_what_the_request_sends() {
 }
 
 /// #43, #652: request documents reach the first user message through the
-/// adapter, which sends a string document as its text. A document's name
+/// adapter, which sends text documents as their UTF-8 bytes. A document's name
 /// is its content's digest, unique within the request (#404, #405).
 #[test]
 fn documents_are_named_by_content_and_land_in_the_first_user_message() {
@@ -251,15 +251,17 @@ fn documents_are_named_by_content_and_land_in_the_first_user_message() {
         .iter()
         .filter_map(|block| block.pointer("/document/name")?.as_str())
         .collect();
-    assert_eq!(names.len(), 2, "{body}");
-    assert!(names[0].starts_with("document-"));
-    assert_eq!(names[1], format!("{}-2", names[0]));
-    assert!(content.contains(&json!({ "text": "plain" })), "{body}");
-    assert!(
-        content[0]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("the sky is green"))
-    );
+    assert_eq!(names.len(), 4, "{body}");
+    assert!(names[2].starts_with("document-"));
+    assert_eq!(names[3], format!("{}-2", names[2]));
+    let documents: Vec<&Value> = content.iter().filter_map(|block| block.get("document")).collect();
+    assert_eq!(documents[1]["format"], "txt");
+    assert_eq!(documents[1]["source"], json!({ "bytes": "cGxhaW4=" }));
+    assert!(documents[1]["name"].as_str().is_some_and(|name| name.starts_with("document-")));
+    let static_text = BASE64_STANDARD.decode(documents[0]["source"]["bytes"].as_str().expect("UTF-8 document bytes"))
+        .expect("base64 source");
+    assert!(String::from_utf8(static_text).expect("UTF-8 static document").contains("the sky is green"));
+    assert!(documents[0]["name"].as_str().is_some_and(|name| name.starts_with("document-")));
     assert_eq!(body["messages"].as_array().map(Vec::len), Some(1));
 }
 
@@ -274,9 +276,8 @@ fn unprepared(history: Vec<Message>) -> Result<Value, EncodeError> {
 
 /// A document given as raw bytes sends the same base64 source as one given
 /// as base64, a later system message goes as user text, and audio, which
-/// Converse has no block for, and a document's own text, which preparation
-/// sends as text, are refused, when the request reaches the encoder
-/// unprepared.
+/// Converse has no block for, is refused. UTF-8 text documents also encode
+/// directly without preparation.
 #[test]
 fn unprepared_content_is_encoded_or_refused() {
     use rig_core::message::{Audio, Document};
@@ -329,11 +330,10 @@ fn unprepared_content_is_encoded_or_refused() {
             additional_params: None,
         })],
     }])
-    .expect_err("a text document is not a file");
-    assert!(
-        text.to_string().contains("a text document goes as text"),
-        "{text}"
-    );
+    .expect("a text document carries its UTF-8 bytes");
+    assert_eq!(text.pointer("/messages/0/content/1/document/source"), Some(&json!({ "bytes": "cGxhaW4=" })));
+    assert!(text.pointer("/messages/0/content/1/document/name").and_then(Value::as_str)
+        .is_some_and(|name| name.starts_with("document-")), "{text}");
 }
 
 /// A failed result states it with `status: error` to Nova and Claude, which

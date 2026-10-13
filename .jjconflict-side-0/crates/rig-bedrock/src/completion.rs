@@ -362,8 +362,8 @@ impl ReplayTarget for Converse {
 
     /// Converse carries images in its four formats, documents in a format it
     /// lists, and inline data, which must be valid base64. Only Nova reads S3
-    /// objects and video. Converse rejects a document's text source and
-    /// takes no audio, so a text document goes as its text.
+    /// objects and video. Text documents carry their UTF-8 bytes; Converse
+    /// takes no audio.
     fn encodes(&self, model: &str, media: Media<'_>) -> bool {
         let nova = self.family(model) == Family::Nova;
         let stored = |data: &DocumentSourceKind| {
@@ -372,8 +372,10 @@ impl ReplayTarget for Converse {
         match media {
             Media::Image(image, _) => stored(&image.data) && request::image(image).is_ok(),
             Media::Document(document) => {
-                matches!(&document.data, DocumentData::File(data) if stored(data))
-                    && request::document(document).is_ok()
+                (match &document.data {
+                    DocumentData::Text(_) => true,
+                    DocumentData::File(data) => stored(data),
+                }) && request::document(document).is_ok()
             }
             Media::Video(video) => {
                 nova && self.accepts(model).user_images && request::video(video).is_ok()
