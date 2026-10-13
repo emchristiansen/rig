@@ -1491,7 +1491,7 @@ async fn caller_rejection_diagnostic_bases_match_selected_terminal_metadata_debu
             expected_usage_debug,
             expected_message_id,
             expected_finish_reason,
-            expected_raw,
+            &actual.raw,
         );
         assert_eq!(
             format!("{actual:?}"),
@@ -1592,7 +1592,7 @@ async fn first_terminal_ignores_later_terminals() {
                 "provider_response_headers: {{}}, finish_reason: Some(Length), ",
                 "provider: \"chatgpt\", model: Some(\"reported-model\"), raw: {:?} }}"
             ),
-            expected_raw
+            &result.body.response.raw
         );
         assert_eq!(format!("{:?}", result.body.response), expected_debug);
         drop(result);
