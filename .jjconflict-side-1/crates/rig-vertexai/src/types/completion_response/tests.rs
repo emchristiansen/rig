@@ -110,11 +110,78 @@ fn test_text_response_conversion() {
     );
 }
 
-/// A thought image, inline media that is not an image, and a signed image
-/// all keep their part, so each replays to Vertex as it arrived: the
-/// thought image and the audio as opaque blocks, the image as an image.
+/// G94: thought images, audio and signed images retain exact inspection
+/// payloads between the surrounding text. Their carried category gives those
+/// payloads no outbound replay authority.
 #[test]
-fn every_inline_part_keeps_its_part_and_replays_it() {
+fn unselected_inline_parts_keep_exact_inspection_evidence() {
+    use base64::Engine as _;
+    use rig_core::completion::FinishReason;
+    use rig_core::message::{CarriedPosition, CarriedTextContent, StopReason};
+
+    let parts = [
+        vertexai::model::Part::new().set_text("before"),
+        inline_data_part("image/png", vec![1, 2, 3]).set_thought(true),
+        inline_data_part("audio/wav", vec![0]),
+        inline_data_part("image/gif", vec![0]).set_thought_signature(vec![1, 2, 3]),
+        vertexai::model::Part::new().set_text("after"),
+    ];
+    let received = create_parts_response(parts.clone());
+    let wire_raw = serde_json::Value::Object(
+        rest_chunk(&received).expect("the received SDK reply has a REST wire frame"),
+    );
+    let response = complete(received).expect("the reply decodes");
+    assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+    assert_eq!(response.stop(), StopReason::Stop);
+    assert_eq!(response.raw, wire_raw);
+    assert_eq!(
+        response.raw.pointer("/candidates/0/content/parts"),
+        Some(&serde_json::to_value(&parts).expect("the received parts serialize")),
+    );
+
+    let [AssistantContent::Text(before), AssistantContent::CarriedText(thought_image),
+        AssistantContent::CarriedText(audio), AssistantContent::CarriedText(signed_image),
+        AssistantContent::Text(after)] = response.choice.as_slice()
+    else {
+        panic!("the received five parts must stay text/inspection/inspection/inspection/text");
+    };
+    assert_eq!(before.text, "before");
+    assert_eq!(after.text, "after");
+    for (index, carried, mime, bytes) in [
+        (1, thought_image, "image/png", vec![1, 2, 3]),
+        (2, audio, "audio/wav", vec![0]),
+        (3, signed_image, "image/gif", vec![0]),
+    ] {
+        assert!(matches!(&carried.content,
+            CarriedTextContent::InspectionOnlyMedia(text) if text.is_empty()));
+        assert_eq!(carried.payload.provider.as_deref(), Some(PROVIDER_NAME));
+        assert_eq!(carried.payload.position,
+            CarriedPosition::MessageContent { item_index: 0, part_index: index as u64 });
+        assert_eq!(carried.payload.item,
+            serde_json::to_value(&parts[index]).expect("the received part serializes"));
+        assert_eq!(response.choice[index].native_item(), None);
+        assert_eq!(carried.payload.item["inlineData"]["mimeType"], json!(mime));
+        let data = carried.payload.item["inlineData"]["data"]
+            .as_str().expect("the received inline bytes remain base64");
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(data)
+            .expect("the SDK bytes retain valid base64"), bytes);
+    }
+    assert_eq!(thought_image.payload.item["thought"], json!(true));
+    let signature = signed_image.payload.item["thoughtSignature"]
+        .as_str().expect("the received signature is retained");
+    assert_eq!(signature, "AQID");
+    assert_eq!(base64::engine::general_purpose::STANDARD.decode(signature)
+        .expect("the SDK signature retains valid base64"), vec![1, 2, 3]);
+}
+
+/// G94: completed history projects these three inspection carriers to empty
+/// text; the retained media and signature never reach the Vertex request.
+#[test]
+fn prepared_history_omits_inspection_media_and_keeps_surrounding_text() {
+    use rig_core::completion::FinishReason;
+    use rig_core::message::{Message, StopReason};
+    use rig_core::wire::{Mode, Operation as _, Wire as _};
+
     let parts = [
         vertexai::model::Part::new().set_text("before"),
         inline_data_part("image/png", vec![1, 2, 3]).set_thought(true),
@@ -123,20 +190,36 @@ fn every_inline_part_keeps_its_part_and_replays_it() {
         vertexai::model::Part::new().set_text("after"),
     ];
     let response = complete(create_parts_response(parts.clone())).expect("the reply decodes");
-    let kinds: Vec<&str> = response
-        .choice
-        .iter()
-        .map(|block| match block {
-            AssistantContent::Text(_) => "text",
-            AssistantContent::Opaque(_) => "opaque",
-            AssistantContent::Image(_) => "image",
-            _ => "other",
-        })
-        .collect();
-    assert_eq!(kinds, ["text", "opaque", "opaque", "image", "text"]);
-
-    let replayed = replay(response.choice.clone()).expect("the turn replays");
-    assert_eq!(replayed.parts, parts);
+    assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+    assert_eq!(response.stop(), StopReason::Stop);
+    let retained_raw = response.raw.clone();
+    let wire = crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH);
+    let request = rig_core::operation::Completion::prepare(
+        CompletionRequest::from(vec![
+            Message::user("hello"),
+            response.message().expect("the completed reply supplies its own history message"),
+            Message::user("next"),
+        ]),
+        &wire.describe(),
+    ).expect("the completed history prepares");
+    let encoded = wire.encode(request, Mode::Unary).expect("the prepared history encodes");
+    assert_eq!(encoded.contents.len(), 3);
+    assert_eq!(encoded.contents[0].role, "user");
+    assert_eq!(encoded.contents[2].role, "user");
+    let model = &encoded.contents[1];
+    assert_eq!(model.role, "model");
+    // These are empty known-text projections, not replayed media payloads.
+    let empty = || vertexai::model::Part::new().set_text("").set_thought(false);
+    assert_eq!(model.parts, [parts[0].clone(), empty(), empty(), empty(), parts[4].clone()]);
+    assert_eq!(model.parts[0].text(), Some(&"before".to_owned()));
+    assert_eq!(model.parts[4].text(), Some(&"after".to_owned()));
+    for part in &model.parts[1..4] {
+        assert_eq!(part.text(), Some(&String::new()));
+        assert!(part.inline_data().is_none());
+        assert!(part.file_data().is_none());
+        assert!(part.thought_signature.is_empty());
+    }
+    assert_eq!(response.raw, retained_raw);
 }
 
 /// The load-bearing property behind `CompletionResponse::raw` for Vertex
