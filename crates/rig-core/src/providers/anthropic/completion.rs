@@ -339,6 +339,12 @@ fn message_json(
             turn.content
                 .iter()
                 .enumerate()
+                // Keep original coordinates for the tool-ID plan while omitting
+                // known reasoning whose issuer is foreign to this dialect.
+                .filter(|(_, block)| !matches!(block,
+                    AssistantContent::CarriedReasoning(reasoning)
+                        if !reasoning.has_opaque_parts()
+                            && !reasoning.replayable_to(target.provider.dialect.name)))
                 .map(|(content_index, block)| {
                     assistant_parts(block, target, ids.of(message_index, content_index))
                 })
