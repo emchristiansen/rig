@@ -165,13 +165,12 @@ fn response_modalities_reach_generation_config() {
         .expect("the original request prepares");
     let error = wire.encode(request, Mode::Unary)
         .expect_err("the original Audio request is refused before transport");
-    let rig_core::error::EncodeError::Request(source) = &error else {
+    let error = rig_core::error::ProviderError::from(error);
+    let rig_core::error::ProviderError::Request(source) = &error else {
         panic!("Audio must have the typed Request refusal");
     };
     assert_eq!(source.to_string(),
         "responseModalities AUDIO is unsupported because Rig cannot represent assistant audio responses");
-    let error = rig_core::error::ProviderError::from(error);
-    assert!(matches!(error, rig_core::error::ProviderError::Request(_)));
 }
 
 #[test]
