@@ -721,7 +721,7 @@ async fn capture_fault_keeps_completed_prefix_and_is_one_fatal_response() {
         ("metadata", br#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#),
     ];
     let mut body = Vec::new();
-    let mut suffix = Vec::new();
+    let mut suffix: Vec<u8> = Vec::new();
     for (index, (event, payload)) in frames.into_iter().enumerate() {
         let message = Message::new(payload.to_vec())
             .add_header(Header::new(":message-type", HeaderValue::String("event".into())))
@@ -792,7 +792,7 @@ async fn capture_fault_before_tool_stop_refuses_with_a_genuine_completed_control
             ("metadata", br#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#),
         ];
         let mut body = Vec::new();
-        let mut suffix = Vec::new();
+        let mut suffix: Vec<u8> = Vec::new();
         for (index, (event, payload)) in frames.into_iter().enumerate() {
             if !malformed && index == 2 {
                 continue;
