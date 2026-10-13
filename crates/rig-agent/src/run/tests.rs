@@ -1584,3 +1584,49 @@ async fn an_open_call_at_eof_has_no_genuine_terminal_and_is_truncated() {
         .expect_err("EOF has no provider terminal");
     assert!(matches!(error, ProviderError::Truncated), "{error}");
 }
+
+
+/// G194/G48b synthetic Responses admission: required root/envelope fields and
+/// actual in_progress status are explicit; no output_item.done is invented.
+#[tokio::test]
+async fn a_responses_length_terminal_never_dispatches_a_parseable_call_without_done() {
+    use rig_core::providers::openai::responses_api::streaming::IncompleteTerminal;
+    use rig_core::providers::openai::wire::OpenAIConfig;
+    use rig_core::wire::{Mode, WireFrame};
+    let wire = OpenAIConfig::new("test-key").responses("gpt-5.4")
+        .with_streamed_incomplete(IncompleteTerminal::Accept);
+    let frames = [
+        json!({"type":"response.output_item.added","sequence_number":0,"output_index":0,
+            "item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"add",
+                "arguments":"","status":"in_progress"}}),
+        json!({"type":"response.function_call_arguments.delta","sequence_number":1,
+            "output_index":0,"delta":"{\"x\":1,\"y\":2}"}),
+        json!({"type":"response.incomplete","sequence_number":2,"response":{
+            "id":"resp_length","object":"response","created_at":0,"status":"incomplete",
+            "model":"gpt-5.4","output":[],"tools":[],
+            "incomplete_details":{"reason":"max_output_tokens"}}}),
+    ];
+    let response = rig_core::test_utils::history::decode(&wire, Mode::Streaming,
+        frames.into_iter().map(|frame| WireFrame::Text(frame.to_string())))
+        .expect("the actual accepted incomplete provider terminal arrives");
+    assert_eq!(response.finish_reason(), Some(FinishReason::Length));
+    let reason = "the provider ended the reply with a tool call it never finished";
+    assert_eq!(response.error.as_deref(), Some(reason));
+    assert_eq!(response.head().stop, Some(StopReason::Error(reason.to_owned())));
+    let calls = response.tool_calls().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id.provider().unwrap().as_str(), "call_1");
+    assert_eq!(calls[0].function.name.as_str(), "add");
+    assert_eq!(calls[0].function.arguments_value(), json!({"x":1,"y":2}));
+    assert_eq!(calls[0].function.invalid_arguments, None);
+    assert!(calls[0].native.is_none(), "the unfinished call has no Native");
+    let turn = ModelTurn::new(response.head(), response.choice.clone(),
+        response.usage.clone(), policy(&["add"]), response.raw.clone())
+        .with_finish_reason(response.finish_reason());
+    let mut run = AgentRun::new("add things").max_turns(2);
+    expect_call_model(&mut run);
+    expect_continue(run.model_response(turn).expect("the received turn is retained"));
+    let error = run.next_step().expect_err("no tool dispatch step may be issued");
+    assert!(matches!(error, PromptError::Provider(ProviderError::Response(ref message))
+        if message.contains("none of its tool calls ran") && message.contains(reason)));
+}

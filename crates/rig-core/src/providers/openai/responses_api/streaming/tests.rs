@@ -20,3 +20,5 @@ mod protected_authority;
 mod protected_protocol;
 mod pending_contract;
 mod upstream;
+
+mod terminal_call_custody;

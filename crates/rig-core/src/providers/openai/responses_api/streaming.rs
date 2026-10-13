@@ -1338,6 +1338,11 @@ impl ResponsesDecoder {
         }
         if complete {
             out.finish(call.at)
+        } else if boundary == FlushBoundary::GenuineTerminal {
+            // Parseable input is not evidence that the provider finished
+            // the call. Leave its projected draft open so end/close_open marks
+            // it unfinished and the existing dispatch boundary refuses it.
+            Ok(())
         } else {
             out.close(call.at)
         }
@@ -1687,6 +1692,55 @@ impl ResponsesDecoder {
         error
     }
 
+    /// Only an announced pending function's genuine terminal item may
+    /// finish that same call. A terminal output position is not its identity.
+    fn terminal_announced_function_call(
+        &mut self,
+        item: &Value,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<bool, ProviderError> {
+        let Some(item_id) = item.str("id").filter(|id| !id.is_empty()) else {
+            return Ok(false);
+        };
+        let Some(index) = self.call_items.get(item_id).copied() else {
+            return Ok(false);
+        };
+        let Some(call) = self.calls.get(&index) else {
+            return Ok(false);
+        };
+        if self.finished_calls.contains(&index)
+            || !matches!(call.ending, CallEnding::Pending)
+            || call.item_id.as_deref() != Some(item_id)
+            || call.name.is_empty()
+        {
+            return Ok(false);
+        }
+        let Some(call_id) = call.id.provider() else {
+            return Ok(false);
+        };
+        // Check every identity claim before call_done may restate arguments or
+        // edit Native. This applies to any item kind using this live function ID,
+        // and to contradictory same-type identities even before completed status.
+        for (field, matches) in [
+            ("kind", item.str("type") == Some("function_call")),
+            ("name", item.str("name") == Some(call.name.as_str())),
+            ("call ID", item.str("call_id") == Some(call_id.as_str())),
+            ("namespace", item.str("namespace") == call.namespace.as_deref()),
+        ] {
+            if !matches {
+                return Err(ProviderError::Response(format!(
+                    "conflicting Responses terminal function call {item_id}: {field} contradicts its announcement"
+                )));
+            }
+        }
+        if item.str("status") != Some("completed") {
+            // Matching noncompleted items keep the existing streamed route.
+            return Ok(false);
+        }
+        self.call_done(index, item, out)?;
+        Ok(true)
+    }
+
     fn terminal(
         &mut self,
         response: Value,
@@ -1722,8 +1776,18 @@ impl ResponsesDecoder {
             if first_error.is_some() && item.str("type") != Some("reasoning") {
                 continue;
             }
-            // A streamed terminal drains never-done calls from their actual
-            // fragments. Whole-body decoding alone supplies whole calls.
+            if !whole {
+                match self.terminal_announced_function_call(item, &mut out) {
+                    Ok(true) => continue,
+                    Ok(false) => {},
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                }
+            }
+            // Other streamed terminal calls retain their existing route; only
+            // whole-body decoding supplies new or unannounced whole calls.
             if whole || !matches!(item.str("type"), Some("function_call" | "custom_tool_call")) {
                 if let Err(error) = self.output(index as u64, item, true, &mut out) {
                     first_error.get_or_insert(error);
