@@ -701,10 +701,10 @@ fn malformed_never_done_arguments_drop_only_at_a_genuine_terminal() {
     }
 }
 
-/// F accepts every successfully parsed JSON value at a never-done terminal.
-/// Replay must retain scalar/array/string/null rather than replace it with {}.
+/// A genuine terminal does not complete a never-done tool call.
+/// Its canonical arguments survive for inspection; its failed turn cannot run tools.
 #[tokio::test]
-async fn valid_never_done_json_values_replay_exactly_without_discard() {
+async fn valid_never_done_json_values_fail_unfinished_without_native_or_discard() {
     for (raw, expected) in [
         ("{\"city\":\"Paris\"}", "{\"city\":\"Paris\"}"),
         ("481", "481"),
@@ -720,16 +720,89 @@ async fn valid_never_done_json_values_replay_exactly_without_discard() {
         let mut stream = streamed(&[added, argument_delta(raw), terminal(json!([]))],
             IncompleteTerminal::Refuse);
         while let Some(item) = stream.next().await {
-            let item = item.expect("valid fragments complete at terminal");
+            let item = item.expect("valid fragments survive the genuine terminal");
             assert!(!matches!(item, Item::Event(StreamEvent::Discard { .. })));
+            if let Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(call), ..
+            }) = &item {
+                assert!(call.native.is_none(), "unfinished delivered call has no native");
+            }
         }
-        let response = stream.finish().await.expect("actual Model's genuine terminal");
+        let response = stream.finish().await.expect("the stream returns its failed folded response");
         let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else {
-            panic!("one valid function call for {raw}");
+            panic!("one unfinished canonical function call for {raw}");
         };
         assert_eq!(call.id.provider().unwrap().as_str(), "call_1");
         assert_eq!(call.function.name.as_str(), "add");
         assert_eq!(call.function.namespace.as_deref(), Some(""));
+        assert!(call.native.is_none(), "no completion evidence was received");
+        let canonical = if raw == "{\"city\":\"Paris\"}" {
+            json!({"city":"Paris"})
+        } else {
+            json!({})
+        };
+        assert_eq!(call.function.arguments_value(), canonical, "current canonical arguments for {raw}");
+        let invalid = match raw {
+            "{\"city\":\"Paris\"}" | "   " => None,
+            _ => Some(expected),
+        };
+        assert_eq!(call.function.invalid_arguments.as_deref(), invalid,
+            "preserved non-object value for {raw}");
+        let error = "the provider ended the reply with a tool call it never finished";
+        assert_eq!(response.error.as_deref(), Some(error));
+        assert_eq!(response.stop(), crate::message::StopReason::Error(error.to_owned()));
+        let history = response.message().expect("failed canonical call history");
+        let Message::Assistant(turn) = &history else {
+            panic!("assistant failure history");
+        };
+        assert_eq!(turn.content, response.choice);
+        assert_eq!(turn.stop, Some(crate::message::StopReason::Error(error.to_owned())));
+        // AgentRun reads this shared failure rule before dispatch; its actual
+        // no-dispatch control lives in the separately owned runtime lane.
+        assert_eq!(crate::message::turn_failure(
+            &response.choice, turn.stop.as_ref(), response.finish_reason().as_ref(),
+        ).as_deref(), Some(
+            "the turn failed, so none of its tool calls ran: the provider ended the reply with a tool call it never finished"
+        ));
+        assert_eq!(response.raw, terminal(json!([]))["response"]);
+    }
+}
+
+/// An explicit done item supplies the completion evidence needed for replay.
+/// The original argument values and both no-tools and declared-tool encodings remain exact.
+#[tokio::test]
+async fn explicitly_done_json_values_replay_exactly_without_discard() {
+    for (raw, expected) in [
+        ("{\"city\":\"Paris\"}", "{\"city\":\"Paris\"}"),
+        ("481", "481"),
+        ("[481,null]", "[481,null]"),
+        ("\"quoted\"", "\"quoted\""),
+        ("\"{\\\"city\\\":\\\"Paris\\\"}\"", "\"{\\\"city\\\":\\\"Paris\\\"}\""),
+        ("null", "null"),
+        (" \t null \n", "null"),
+        ("   ", "{}"),
+    ] {
+        let added = json!({"type":"response.output_item.added","sequence_number":0,
+            "output_index":1,"item":function("in_progress", "", Some(""))});
+        let authoritative = function("completed", raw, Some(""));
+        let mut stream = streamed(&[
+            added, argument_delta(raw), done(1, authoritative.clone()), terminal(json!([])),
+        ], IncompleteTerminal::Refuse);
+        while let Some(item) = stream.next().await {
+            let item = item.expect("explicitly done fragments complete at terminal");
+            assert!(!matches!(item, Item::Event(StreamEvent::Discard { .. })));
+        }
+        let response = stream.finish().await.expect("actual Model's genuine terminal");
+        assert!(response.error.is_none());
+        assert_eq!(response.stop(), crate::message::StopReason::ToolUse);
+        let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else {
+            panic!("one explicitly completed function call for {raw}");
+        };
+        assert_eq!(call.id.provider().unwrap().as_str(), "call_1");
+        assert_eq!(call.function.name.as_str(), "add");
+        assert_eq!(call.function.namespace.as_deref(), Some(""));
+        assert_eq!(call.native.as_ref().expect("received done evidence").item, authoritative);
+        assert_eq!(response.raw, terminal(json!([]))["response"]);
         let wire = OpenAIConfig::new("fixture-key").responses("different-model");
         let original_request = CompletionRequest::new("continue")
             .message(response.message().expect("canonical call history"));
