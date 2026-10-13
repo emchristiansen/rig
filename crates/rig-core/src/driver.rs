@@ -39,6 +39,7 @@ use crate::wire::{
 mod dyn_model;
 pub(crate) mod http_transport;
 mod local;
+mod realtime;
 
 pub use dyn_model::DynModel;
 pub use local::{Local, Step};
