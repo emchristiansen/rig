@@ -1713,3 +1713,89 @@ fn anthropic_first_fragment_overflow_is_refused_with_zero_malformed_retries() {
     assert!(matches!(error,
         PromptError::Provider(ProviderError::Response(ref message)) if message == &expected));
 }
+
+/// G221: native Cohere requires its actual tool-call-end, even for parseable
+/// add/{x:1}. The folded turn's failure gate precedes every AgentRun dispatch.
+#[test]
+fn native_cohere_call_end_controls_real_folded_turn_dispatch() {
+    use rig_core::providers::cohere::{CohereConfig, NativeChat};
+    use rig_core::wire::{Mode, WireFrame};
+    let wire = NativeChat::new(CohereConfig::new("test-key"), "command-a");
+    let reason = "the provider ended the reply with a tool call it never finished";
+    for (finish, expected_finish) in [
+        ("MAX_TOKENS", FinishReason::Length),
+        ("COMPLETE", FinishReason::ToolCalls),
+        ("TOOL_CALL", FinishReason::ToolCalls),
+    ] {
+        for finished in [false, true] {
+            let mut frames = vec![
+                json!({"id":"resp_1","type":"message-start","delta":{"message":{
+                    "role":"assistant","content":[],"tool_plan":"","tool_calls":[],"citations":[]
+                }}}),
+                json!({"type":"tool-call-start","index":0,"delta":{"message":{"tool_calls":{
+                    "id":"call_1","type":"function","function":{"name":"add","arguments":""}
+                }}}}),
+                json!({"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":{
+                    "function":{"arguments":"{\"x\":1}"}
+                }}}}),
+            ];
+            if finished {
+                frames.push(json!({"type":"tool-call-end","index":0}));
+            }
+            frames.push(json!({"type":"message-end","delta":{"finish_reason":finish}}));
+            let response = rig_core::test_utils::history::decode(
+                &wire, Mode::Streaming,
+                frames.into_iter().map(|frame| WireFrame::Text(frame.to_string())),
+            ).expect("the actual native Cohere terminal folds");
+            assert_eq!(response.finish_reason(), Some(expected_finish.clone()));
+            let calls = response.tool_calls().collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id.provider().expect("received provider ID").as_str(), "call_1");
+            assert_eq!(calls[0].function.name.as_str(), "add");
+            assert_eq!(calls[0].function.arguments_value(), json!({"x":1}));
+            assert_eq!(calls[0].function.invalid_arguments, None);
+            let failure = rig_core::completion::message::turn_failure(
+                &response.choice, response.head().stop.as_ref(), response.finish_reason().as_ref(),
+            );
+            if finished {
+                assert_eq!(response.error, None);
+                assert_eq!(failure, None);
+                assert!(calls[0].native.is_some(), "explicit native tool-call-end seals its real item");
+            } else {
+                assert_eq!(response.error.as_deref(), Some(reason));
+                assert_eq!(response.head().stop, Some(StopReason::Error(reason.to_owned())));
+                assert!(calls[0].native.is_none());
+                assert_eq!(failure, Some(format!("the turn failed, so none of its tool calls ran: {reason}")));
+            }
+            let turn = ModelTurn::from_policy(&response, policy(&["add"]));
+            let mut run = AgentRun::new("add things").max_turns(2);
+            expect_call_model(&mut run);
+            expect_continue(run.model_response(turn).expect("retain the actual folded turn"));
+            if finished {
+                let calls = expect_call_tools(&mut run);
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].tool_call.function.name.as_str(), "add");
+                assert_eq!(calls[0].tool_call.function.arguments_value(), json!({"x":1}));
+                assert!(calls[0].preresolved_result.is_none());
+                let result = calls[0].tool_call.result(vec![ToolResultContent::text("1")]);
+                run.tool_results(vec![UserContent::ToolResult(result)])
+                    .expect("the host's result answers the genuinely dispatched call");
+                let (prompt, _, next_turn) = expect_call_model(&mut run);
+                assert_eq!(next_turn, 2);
+                let Message::User { content } = prompt else { panic!("the actual result becomes the next prompt"); };
+                let [UserContent::ToolResult(result)] = content.as_slice() else { panic!("one matching actual tool result"); };
+                assert_eq!(result.call.provider().expect("received call ID").as_str(), "call_1");
+                assert_eq!(result.name.as_str(), "add");
+                assert_eq!(result.content, vec![ToolResultContent::text("1")]);
+            } else {
+                let error = run.next_step().expect_err("no tool dispatch step can be issued");
+                assert!(matches!(error, PromptError::Provider(ProviderError::Response(ref message))
+                    if message == &format!("the turn failed, so none of its tool calls ran: {reason}")));
+                let kept = run.messages().last().expect("the failed actual turn remains inspectable");
+                assert!(matches!(kept, Message::Assistant(turn)
+                    if turn.stop == Some(StopReason::Error(reason.to_owned()))
+                        && turn.tool_calls().count() == 1));
+            }
+        }
+    }
+}

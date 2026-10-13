@@ -1023,3 +1023,106 @@ fn billed_only_reply_keeps_cost_and_raw_without_model_token_totals() {
         assert_eq!(response.raw, reply);
     }
 }
+
+/// G221: message-end completes ordinary content, never a still-open call.
+#[test]
+fn native_cohere_terminals_finish_text_without_inventing_tool_call_end() {
+    let reason = "the provider ended the reply with a tool call it never finished";
+    for finish in ["MAX_TOKENS", "COMPLETE", "TOOL_CALL"] {
+        let response = on_wire(&stream(
+            vec![
+                content_start(0, "text"),
+                content_delta(0, "text", "prefix"),
+                call_start(0, "call_1", "add"),
+                call_delta(0, "{\"x\":1}"),
+            ],
+            finish,
+        ))
+        .expect("the genuine native terminal retains the received turn");
+        assert_eq!(response.text(), "prefix", "{finish}");
+        let text = response.choice.iter().find_map(|part| match part {
+            AssistantContent::Text(text) => Some(text),
+            _ => None,
+        }).expect("the ordinary open text is completed at message-end");
+        assert_eq!(item(&text.native), Some(json!({"type":"text","text":"prefix"})));
+        let calls = response.tool_calls().collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1, "{finish}");
+        assert_eq!(calls[0].id.provider().expect("received call ID").as_str(), "call_1");
+        assert_eq!(calls[0].function.name.as_str(), "add");
+        assert_eq!(calls[0].function.arguments_value(), json!({"x":1}));
+        assert_eq!(calls[0].function.invalid_arguments, None);
+        assert!(calls[0].native.is_none(), "{finish}: parseability does not prove a call end");
+        assert_eq!(response.error.as_deref(), Some(reason), "{finish}");
+        assert_eq!(response.head().stop, Some(crate::message::StopReason::Error(reason.to_owned())));
+        assert_eq!(
+            crate::completion::message::turn_failure(
+                &response.choice,
+                response.head().stop.as_ref(),
+                response.finish_reason().as_ref(),
+            ),
+            Some(format!("the turn failed, so none of its tool calls ran: {reason}")),
+        );
+    }
+}
+
+/// G221: no native terminal arrives at EOF/partial, regardless of whether
+/// the call's own end already arrived. No terminal or Native is invented.
+#[test]
+fn native_cohere_eof_and_partial_do_not_invent_tool_call_completion() {
+    let wire = super::super::NativeChat::new(super::super::CohereConfig::new("key"), "command-a");
+    for finished in [false, true] {
+        let mut events = vec![call_start(0, "call_1", "add"), call_delta(0, "{\"x\":1}")];
+        if finished {
+            events.push(call_end(0));
+        }
+        let mut frames = stream(events, "MAX_TOKENS");
+        frames.pop().expect("remove only the never-received terminal");
+        let received = || frames.iter().map(|frame| WireFrame::Text(frame.to_string()));
+        let error = crate::test_utils::history::decode(&wire, crate::wire::Mode::Streaming, received())
+            .expect_err("native EOF never states a provider terminal");
+        assert!(matches!(error, ProviderError::Truncated), "{error}");
+        let (partial, ended) = crate::test_utils::history_conformance::partial(
+            &wire, crate::wire::Mode::Streaming, received(),
+        );
+        assert!(!ended);
+        assert_eq!(partial.finish_reason(), None);
+        assert_eq!(partial.error, None);
+        assert_eq!(partial.aborted.as_deref(), Some("the caller stopped reading before the provider ended the reply"));
+        assert!(partial.choice.iter().all(|part| part.native_item().is_none()));
+        let calls = partial.tool_calls().collect::<Vec<_>>();
+        assert_eq!(calls.len(), if finished { 1 } else { 0 });
+        if let Some(call) = calls.first() {
+            assert_eq!(call.id.provider().expect("received call ID").as_str(), "call_1");
+            assert_eq!(call.function.name.as_str(), "add");
+            assert_eq!(call.function.arguments_value(), json!({"x":1}));
+            assert_eq!(call.native, None);
+        }
+    }
+}
+
+/// G221: unary whole() explicitly stops each received call before end().
+#[test]
+fn native_cohere_unary_whole_keeps_its_explicit_call_stop() {
+    let wire = super::super::NativeChat::new(super::super::CohereConfig::new("key"), "command-a");
+    let call = json!({"id":"call_1","type":"function",
+        "function":{"name":"add","arguments":"{\"x\":1}"}});
+    for finish in ["MAX_TOKENS", "COMPLETE", "TOOL_CALL"] {
+        let frames = whole(json!({"role":"assistant","content":[],"tool_calls":[call.clone()]}), finish);
+        let response = crate::test_utils::history::decode(
+            &wire,
+            crate::wire::Mode::Unary,
+            frames.iter().map(|frame| WireFrame::Text(frame.to_string())),
+        ).expect("the native whole reply explicitly closes its call");
+        let calls = response.tool_calls().collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id.provider().expect("received call ID").as_str(), "call_1");
+        assert_eq!(calls[0].function.name.as_str(), "add");
+        assert_eq!(calls[0].function.arguments_value(), json!({"x":1}));
+        assert_eq!(calls[0].native.as_ref().expect("whole() supplied the genuine call stop").item, call);
+        assert_eq!(response.error, None);
+        assert_eq!(response.raw, frames[0]);
+        assert_eq!(crate::completion::message::turn_failure(
+            &response.choice, response.head().stop.as_ref(), response.finish_reason().as_ref(),
+        ), None);
+    }
+}
