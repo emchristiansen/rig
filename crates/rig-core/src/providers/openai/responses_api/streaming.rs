@@ -1544,6 +1544,22 @@ impl ResponsesDecoder {
             .iter()
             .find(|item| item.str("type") == Some("message"))
             .and_then(|item| nonempty(item.str("id")));
+        if whole
+            && self.reasoning.is_empty()
+            && !response
+                .arr("output")
+                .iter()
+                .any(|item| item.str("type") == Some("reasoning"))
+            && let Some(text) = response.str("reasoning").filter(|text| !text.is_empty())
+        {
+            let at = out.fresh_index();
+            out.whole_reasoning_with_authority(
+                at,
+                Value::Null,
+                text,
+                ReasoningAuthority::ProviderRestated,
+            )?;
+        }
         // Whole-response indices are source positions, not writer Part indices.
         for (index, item) in response.arr("output").iter().enumerate() {
             // A streamed terminal drains never-done calls from their actual
@@ -1553,20 +1569,12 @@ impl ResponsesDecoder {
             }
         }
         // Some gateways report only a top-level reasoning string.
-        if self.reasoning.is_empty()
+        if !whole
+            && self.reasoning.is_empty()
             && let Some(text) = response.str("reasoning").filter(|text| !text.is_empty())
         {
             let at = out.fresh_index();
-            if whole {
-                out.whole_reasoning_with_authority(
-                    at,
-                    Value::Null,
-                    text,
-                    ReasoningAuthority::ProviderRestated,
-                )?;
-            } else {
-                out.whole(at, Block::Reasoning { redacted: false }, Value::Null, text)?;
-            }
+            out.whole(at, Block::Reasoning { redacted: false }, Value::Null, text)?;
         }
         self.flush(FlushBoundary::GenuineTerminal, &mut out)?;
         let issuer = self.issuer(&response);

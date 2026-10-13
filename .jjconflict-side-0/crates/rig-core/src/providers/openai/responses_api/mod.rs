@@ -399,6 +399,9 @@ fn input(
                     };
                     let item = match block {
                         AssistantContent::Text(text) => {
+                            if text.text.is_empty() {
+                                continue;
+                            }
                             let synthetic = match texts {
                                 0 => format!("msg_rig_{position}"),
                                 n => format!("msg_rig_{position}_{n}"),
