@@ -276,3 +276,6 @@ mod schema_tests;
 
 #[cfg(test)]
 mod transport_tests;
+
+#[cfg(test)]
+mod request_tests;
