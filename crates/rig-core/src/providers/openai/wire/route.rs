@@ -18,7 +18,7 @@ use crate::providers::openai::responses_api::{
     ResponsesToolDefinition, SystemInstructionsPlacement,
 };
 use crate::wire::document::Reassemble;
-use crate::wire::{Decoder, Descriptor, Encoded, Flow, Mode, Out, Wire, WireEvent, WireFrame};
+use crate::wire::{Decoder, Descriptor, Encoded, Flow, IncompleteEof, Mode, Out, Wire, WireEvent, WireFrame};
 
 use super::OpenAIConfig;
 use super::chat::{Chat, ChatDecoder, ChatEvent};
@@ -192,6 +192,13 @@ impl Wire for OpenAiWire {
         }
     }
 
+    fn decoder_in<'id>(&self, mode: Mode) -> Self::Decoder<'id> {
+        match self {
+            Self::Chat(wire) => OpenAiDecoder::Chat(wire.decoder_in(mode)),
+            Self::Responses(wire) => OpenAiDecoder::Responses(wire.decoder_in(mode)),
+        }
+    }
+
     fn reassembler(&self) -> Self::Reassembler {
         match self {
             Self::Chat(wire) => OpenAiReassembler::Chat(wire.reassembler()),
@@ -268,10 +275,24 @@ impl<'id> Decoder<'id, Completion> for OpenAiDecoder {
         }
     }
 
+    fn flush_before_terminal_error(
+        &mut self,
+        out: Out<'id, Completion>,
+    ) -> Result<(), ProviderError> {
+        on_route!(self, decoder => decoder.flush_before_terminal_error(out))
+    }
+
     fn eof(&mut self, out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
         on_route!(self, decoder => decoder.eof(out))
+    }
+
+    fn incomplete_eof(&self) -> IncompleteEof {
+        on_route!(self, decoder => decoder.incomplete_eof())
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod decoder_hooks_tests;
