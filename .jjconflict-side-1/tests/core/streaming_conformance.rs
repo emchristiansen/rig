@@ -126,9 +126,10 @@ mod chatgpt {
                     "test-token",
                 )
                 .with_account_id("account-id")
+                .with_caller_identity(rig_core::test_utils::test_caller_identity())
                 .client()
                 .with_http(SequencedStreamingHttpClient::new(byte_chunks(chunks)?))
-                .completion("gpt-5.4");
+                .responses("gpt-5.4");
                 let request = CompletionRequest::new("hello");
                 let stream = model.stream(request)?;
                 Ok(conformance::fixtures::drain(stream).await)
@@ -141,6 +142,37 @@ mod chatgpt {
             driver: driver(),
             ..openai_responses::fixture()
         }
+    }
+}
+
+/// The OpenAI Responses SSE pipeline with the incomplete-terminal opt-in set.
+///
+/// HTTP SSE refuses a terminal `response.incomplete` by default, and the
+/// shared `openai_responses::driver()` measures that default. The opt-in is
+/// per request, carried by the wire the request goes out on, so the one
+/// contract whose fixture *is* the incomplete shape drives it through this
+/// separate driver rather than flipping the shared one, which would silently
+/// stop every other scenario from measuring the strict default.
+mod openai_responses_opt_in {
+    use super::*;
+    use rig_core::completion::CompletionModel as _;
+    use rig_core::providers::openai::responses_api::streaming::IncompleteTerminal;
+    use rig_core::test_utils::SequencedStreamingHttpClient;
+
+    pub fn driver_tolerating_incomplete() -> conformance::WireDriver {
+        conformance::WireDriver::new("openai", |chunks| {
+            Box::pin(async move {
+                let model = rig_core::driver::Bind::bind(
+                    rig_core::providers::openai::OpenAI::new("test-key"),
+                    SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
+                )
+                .responses("gpt-5.4")
+                .map_wire(|wire| wire.with_streamed_incomplete(IncompleteTerminal::Accept));
+                let request = model.completion_request("hello").build();
+                let stream = model.stream(request).await?;
+                Ok(conformance::fixtures::drain(stream).await)
+            })
+        })
     }
 }
 
@@ -307,14 +339,17 @@ mod grammar_guards {
     /// on `response.output_item.done` with arguments truncated mid-JSON and
     /// item status `incomplete`, then ends with `response.incomplete`. The
     /// pipeline must accept both frames (no `Corrupt` classification), end
-    /// with a `Length` terminal, and keep the call with what its partial
-    /// arguments state, their text kept beside them.
+    /// with a `Length` terminal, retaining the unfinished call as incomplete
+    /// evidence that cannot be dispatched.
+    /// Partial success is a per-request opt-in on HTTP SSE, so this drives the
+    /// opted-in pipeline; the strict default is pinned by
+    /// `incomplete_mid_tool_call_errors_without_the_opt_in`.
     #[tokio::test]
     async fn incomplete_mid_tool_call_ends_with_length_and_keeps_the_call() {
         use rig_core::completion::FinishReason;
         use rig_core::message::AssistantContent;
 
-        let driver = openai_responses::driver();
+        let driver = super::openai_responses_opt_in::driver_tolerating_incomplete();
         let drained = driver
             .drive(conformance::ok_chunks(
                 openai_responses::incomplete_mid_tool_call_frames(),
@@ -348,6 +383,30 @@ mod grammar_guards {
         assert!(
             matches!(calls.as_slice(), [call] if call.function.invalid_arguments.is_some()),
             "the cut-off call is kept with its partial text: {calls:?}"
+        );
+    }
+
+    /// The strict half of the same fixture: without the opt-in, HTTP SSE
+    /// ends the turn with an error rather than a terminal record, so the cut
+    /// turn is never presented as completed.
+    #[tokio::test]
+    async fn incomplete_mid_tool_call_errors_without_the_opt_in() {
+        let drained = openai_responses::driver()
+            .drive(conformance::ok_chunks(
+                openai_responses::incomplete_mid_tool_call_frames(),
+            ))
+            .await
+            .expect("stream should drive");
+
+        assert_eq!(
+            drained.error_count(),
+            1,
+            "the strict default must surface the incomplete terminal as one error: {:?}",
+            drained.items
+        );
+        assert!(
+            drained.response.is_none(),
+            "a refused incomplete terminal must not produce a terminal record"
         );
     }
 
@@ -484,6 +543,14 @@ mod grammar_guards {
             })),
         ];
 
+        // Complete-part preservation and display text are distinct projections.
+        conformance::multi_part_same_id_reasoning_keeps_every_part(
+            &driver,
+            frames.clone(),
+            &["s1", "s2", "enc"],
+        )
+        .await
+        .expect("every completed sibling must survive in order");
         let drained = driver
             .drive(conformance::ok_chunks(frames))
             .await
