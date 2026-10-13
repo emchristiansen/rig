@@ -294,7 +294,22 @@ fn raw_reasoning_text_is_not_written_into_the_item_as_a_summary() {
     assert_eq!(reasoning.payload.item["summary"], json!([]));
     let response = decoded.outcome.expect("genuine completed reply");
     assert_eq!(response.raw["output"][0], done, "the provider's done item remains exact raw evidence");
-    assert_eq!(replayed_input(&response)[0]["summary"], json!([]), "raw reasoning never becomes a fabricated summary");
+    // G204: replayed_input is the complete q/assistant/next request.
+    let input = replayed_input(&response);
+    assert_eq!(input.len(), 3);
+    assert_eq!(input[0], json!({"type":"message","role":"user",
+        "content":[{"type":"input_text","text":"q"}]}));
+    assert_eq!(input[2], json!({"type":"message","role":"user",
+        "content":[{"type":"input_text","text":"next"}]}));
+    assert_eq!(input.iter().map(|item| (item["type"].clone(), item["id"].clone()))
+        .collect::<Vec<_>>(), [
+            (json!("message"), serde_json::Value::Null),
+            (json!("reasoning"), json!("rs_1")),
+            (json!("message"), serde_json::Value::Null),
+        ]);
+    let replayed = input.iter().find(|item| item["id"] == "rs_1" && item["type"] == "reasoning")
+        .expect("the actual received reasoning item replays inside the full ordered input");
+    assert_eq!(replayed["summary"], json!([]), "raw reasoning never becomes a fabricated summary");
 }
 
 /// A `response.failed` after a fully-delivered tool call: the call ended
@@ -1708,10 +1723,10 @@ fn contradictory_done_keeps_delivered_text_and_restates_structured_reasoning() {
     assert_eq!(replay.iter().find(|item| item["id"]=="msg_1").expect("text replay")["content"][0]["text"],"ByeBye");
 }
 
-/// An item that names no `type` is kept in history and never sent back,
-/// as pi drops it.
+/// G172 keeps the untyped ProviderItem and its genuine issuer for replay.
+/// G203 observes it inside the complete q/assistant/next request.
 #[test]
-fn an_item_without_a_type_never_replays() {
+fn an_item_without_a_type_replays_its_received_provider_payload() {
     let output = [
         json!({"id": "x_1", "payload": {"n": 1}}),
         message("msg_1", "Noted."),
@@ -1727,7 +1742,22 @@ fn an_item_without_a_type_never_replays() {
         assert_eq!(item.payload.item, output[0]);
         assert_eq!(item.payload.provider.as_deref(), Some("openai"));
         assert_eq!(response.raw["output"][0], output[0]);
-        assert_eq!(replayed_input(&response)[0], output[0]);
+        let input = replayed_input(&response);
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[0], json!({"type":"message","role":"user",
+            "content":[{"type":"input_text","text":"q"}]}));
+        assert_eq!(input[3], json!({"type":"message","role":"user",
+            "content":[{"type":"input_text","text":"next"}]}));
+        assert_eq!(input.iter().map(|item| (item["type"].clone(), item["id"].clone()))
+            .collect::<Vec<_>>(), [
+                (json!("message"), serde_json::Value::Null),
+                (serde_json::Value::Null, json!("x_1")),
+                (json!("message"), json!("msg_1")),
+                (json!("message"), serde_json::Value::Null),
+            ]);
+        let replayed = input.iter().find(|item| item["id"] == "x_1" && item.get("type").is_none())
+            .expect("the actual untyped item replays inside the full ordered input");
+        assert_eq!(replayed, &output[0]);
         assert_eq!(replayed_ids(&response), [json!("x_1"), json!("msg_1")]);
     }
 }
