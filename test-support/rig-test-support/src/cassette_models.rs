@@ -366,7 +366,7 @@ impl OllamaModels {
 
     /// The chat model for `model`.
     pub fn completion(&self, model: impl Into<String>) -> Model<openai::wire::Chat> {
-        self.client().completion(model)
+        self.client().compatible_completion(model)
     }
 
     /// The chat model for `model`, on the daemon's native `/api/chat`.

@@ -28,7 +28,9 @@
         let identity = CallerIdentity::new("stream-consumer-test", "stream-consumer-test/1", None)
             .expect("explicit test identity");
         let model = Model::new(
-            OpenAIConfig::new("test-key").with_caller_identity(identity).responses("gpt-5.4"),
+            rig_core::providers::openai::responses_api::wire::Responses::new(
+                OpenAIConfig::new("test-key").with_caller_identity(identity), "gpt-5.4",
+            ),
             MockStreamingClient { sse_bytes: Bytes::from(sse) },
         );
         model.stream(CompletionRequest::new("fixture")).expect("actual mock stream opens")
