@@ -1700,9 +1700,21 @@ fn carried_reasoning_item(
             ),
         ));
     }
-    let mut item = reasoning.payload.item.as_object().cloned().ok_or_else(|| {
-        EncodeError::request("a carried Responses reasoning item must be an object")
-    })?;
+    let mut item = match &reasoning.payload.item {
+        Value::Object(item) => item.clone(),
+        Value::Null
+            if reasoning.payload.provider.is_none()
+                && !id.is_empty()
+                && !reasoning.has_opaque_parts() =>
+        {
+            Map::new()
+        }
+        _ => {
+            return Err(EncodeError::request(
+                "a carried Responses reasoning item must be an object",
+            ));
+        }
+    };
     let mut summary = Vec::new();
     let mut content = Vec::new();
     let mut encrypted = None;
