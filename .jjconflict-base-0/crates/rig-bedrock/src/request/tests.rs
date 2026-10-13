@@ -344,6 +344,7 @@ fn only_nova_and_claude_get_a_result_status() {
         UserContent::ToolResult(ToolResult {
             call: CallId::from_wire(id),
             name: name("t"),
+            answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::text("out")],
             is_error,
         })

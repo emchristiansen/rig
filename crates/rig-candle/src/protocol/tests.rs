@@ -299,25 +299,31 @@ fn every_renderer_takes_any_media_the_adapter_hands_over() {
 /// One namespaced function call and one custom call (whose input parses as
 /// JSON): the two shapes every JSON-only wire refuses by name.
 fn unrepresentable_calls() -> [(rig_core::message::AssistantContent, &'static str); 2] {
-    use rig_core::message::AssistantContent;
+    use rig_core::message::{
+        AssistantContent, CallId, CustomToolCall, ToolCall, ToolFunction, ToolName,
+    };
     [
         (
-            AssistantContent::tool_call_with_namespace(
-                "fc_1",
-                "call_1".to_owned(),
-                "add",
-                Some("math".to_owned()),
-                serde_json::json!({"x": 1}),
+            AssistantContent::ToolCall(
+                ToolCall::from_wire(
+                    "call_1",
+                    ToolFunction::new(
+                        ToolName::new("add").expect("fixture name"),
+                        serde_json::json!({"x": 1}),
+                    ),
+                )
+                .with_namespace(Some("math".to_owned())),
             ),
             "cannot represent tool namespaces, so call `add` qualified by namespace `math`",
         ),
         (
-            AssistantContent::custom_tool_call(
-                "ctc_1",
-                "call_2",
-                "apply_patch",
-                None,
-                r#"{"x": 1}"#,
+            AssistantContent::CustomToolCall(
+                CustomToolCall::new(
+                    CallId::from_wire("call_2"),
+                    ToolName::new("apply_patch").expect("fixture name"),
+                    r#"{"x": 1}"#,
+                )
+                .with_namespace(None),
             ),
             "carries JSON tool arguments only, so custom tool call `apply_patch`",
         ),
@@ -334,10 +340,9 @@ fn every_prompt_format_refuses_namespaced_and_custom_calls() {
         for (content, refusal) in unrepresentable_calls() {
             let request = request(vec![
                 Message::user("go"),
-                Message::Assistant {
-                    id: None,
-                    content: vec![content],
-                },
+                Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                    content,
+                ])),
             ]);
             let error = render_prompt(&request, protocol).expect_err("refused, not dropped");
             assert!(
@@ -373,10 +378,9 @@ fn opaque_responses_parts_are_refused_before_request_content_is_discarded() {
             content: vec![ReasoningContent::OpaqueContent(raw)],
         }),
     ] {
-        let history = vec![Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::text("known"), part],
-        }];
+        let history = vec![Message::Assistant(rig_core::message::AssistantMessage::new(
+            vec![AssistantContent::text("known"), part],
+        ))];
         let request = request(history);
         for protocol in [
             ConversationProtocol::Llama3,
