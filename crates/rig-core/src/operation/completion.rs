@@ -1796,6 +1796,64 @@ impl<'id> Out<'id, Completion> {
         }
     }
 
+    /// Apply Gemini's bare signature metadata on the existing provider item.
+    /// Known already-signed carriers update both views; all other custody
+    /// keeps the ordinary raw edit, and already delivered Ends stay historical.
+    pub(crate) fn edit_gemini_signature(
+        &mut self,
+        index: usize,
+        signature: &str,
+        selected_issuer: &str,
+    ) -> Result<(), ProviderError> {
+        let mut shared = self.lock();
+        let Shared { fold, items, .. } = &mut *shared;
+        if let Some(draft) = fold.open.get_mut(&index) {
+            if let Some(fields) = draft.item.as_object_mut() {
+                fields.insert("thoughtSignature".to_owned(), serde_json::Value::from(signature));
+            }
+            return Ok(());
+        }
+        let position = *fold.ended.get(&index).ok_or_else(|| not_open(index))?;
+        let queued = items.iter_mut().find_map(|item| match item {
+            Ok(Item::Event(StreamEvent::End { part, content, .. }))
+                if part.index() == position => Some(content),
+            _ => None,
+        });
+        let content = queued.or_else(|| fold.choice.get_mut(position).and_then(Option::as_mut));
+        let Some(content) = content else {
+            return Ok(());
+        };
+        match content {
+            AssistantContent::CarriedText(text) => {
+                if text.payload.provider.as_deref() == Some(selected_issuer)
+                    && let Some(fields) = text.payload.item.as_object_mut()
+                    && fields.get("thoughtSignature").is_some_and(serde_json::Value::is_string)
+                    && let crate::message::CarriedTextContent::GeminiSignedAnswer(answer) = &mut text.content
+                {
+                    answer.signature = crate::message::GeminiThoughtSignature::new(signature);
+                    fields.insert("thoughtSignature".to_owned(), serde_json::Value::from(signature));
+                    return Ok(());
+                }
+            }
+            AssistantContent::CarriedReasoning(reasoning) => {
+                if reasoning.payload.provider.as_deref() == Some(selected_issuer)
+                    && let [CarriedReasoningPart::Text { signature: Some(held), .. }] = reasoning.content.as_mut_slice()
+                    && let Some(fields) = reasoning.payload.item.as_object_mut()
+                    && fields.get("thoughtSignature").is_some_and(serde_json::Value::is_string)
+                {
+                    *held = signature.to_owned();
+                    fields.insert("thoughtSignature".to_owned(), serde_json::Value::from(signature));
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+        if let Some(fields) = item_of(content).and_then(serde_json::Value::as_object_mut) {
+            fields.insert("thoughtSignature".to_owned(), serde_json::Value::from(signature));
+        }
+        Ok(())
+    }
+
     /// Close the item at `index` the provider never stated complete: its
     /// block becomes visible with no native, and an opaque item is kept but
     /// does not replay. Empty text and reasoning are dropped, and so is a
@@ -2581,3 +2639,6 @@ mod runtime_boundary_tests;
 
 #[cfg(test)]
 mod anthropic_pause_tests;
+
+#[cfg(test)]
+mod gemini_signature_tests;

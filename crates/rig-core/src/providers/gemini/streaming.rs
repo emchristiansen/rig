@@ -601,11 +601,7 @@ impl GenerateContentDecoder {
                 self.signature = Some(signature.to_owned());
                 return Ok(());
             };
-            return out.edit(index, |item| {
-                if let Some(item) = item.as_object_mut() {
-                    item.insert("thoughtSignature".to_owned(), Value::from(signature));
-                }
-            });
+            return out.edit_gemini_signature(index, signature, self.carried_issuer);
         }
         self.open(Block::Opaque { replay: data }, part.clone(), "", out)
     }
