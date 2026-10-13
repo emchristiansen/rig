@@ -1906,7 +1906,7 @@ fn presealed_groq_native_tools_keep_absent_empty_and_null_distinct() {
         request.additional_params = Some(json!({"tools":null}));
         let error = chat.encode(request, mode).expect_err("explicit null is refused");
         assert_eq!(error.to_string(),
-            "Groq `additional_params.tools` must be an array of native tool objects");
+            "RequestError: Groq `additional_params.tools` must be an array of native tool objects");
         assert!(error.unsupported_option().is_none());
     }
 }
@@ -2099,7 +2099,7 @@ fn presealed_groq_null_tools_refuse_before_an_independent_catalog_defect() {
             "tools":null}));
         let error = chat.encode(request, mode).expect_err("null tools are refused preseal");
         assert_eq!(error.to_string(),
-            "Groq `additional_params.tools` must be an array of native tool objects");
+            "RequestError: Groq `additional_params.tools` must be an array of native tool objects");
         assert!(error.unsupported_option().is_none());
     }
 }
