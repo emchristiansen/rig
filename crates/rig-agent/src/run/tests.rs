@@ -1630,3 +1630,86 @@ async fn a_responses_length_terminal_never_dispatches_a_parseable_call_without_d
     assert!(matches!(error, PromptError::Provider(ProviderError::Response(ref message))
         if message.contains("none of its tool calls ran") && message.contains(reason)));
 }
+
+
+/// The zero-retry policy is an added input: this control proves refusal before
+/// CallTools under that policy, rather than the default engine execution policy.
+#[test]
+fn anthropic_first_fragment_overflow_is_refused_with_zero_malformed_retries() {
+    use rig_core::providers::anthropic::{Anthropic, completion::CLAUDE_SONNET_4_6};
+    use rig_core::wire::{Decoder, Mode, Wire, WireEvent, WireFrame};
+
+    let wire = Anthropic::new("test-key").completion(CLAUDE_SONNET_4_6).wire;
+    let oversized = "x".repeat(32 * 1024 * 1024 + 1);
+    let block = json!({"type":"tool_use","id":"call_1","name":"add","input":{}});
+    let delta = json!({"type":"content_block_delta","index":0,
+        "delta":{"type":"input_json_delta","partial_json":oversized}});
+    let raw_delta = delta.to_string();
+    let WireEvent::Known(classified) = wire
+        .decoder_in(Mode::Streaming)
+        .classify(WireFrame::Text(raw_delta.clone()))
+    else {
+        panic!("the actual reader accepts the complete received delta");
+    };
+    assert_eq!(classified.fields, delta);
+    assert_eq!(
+        classified.fields["delta"]["partial_json"].as_str(),
+        Some(oversized.as_str())
+    );
+
+    let frames = vec![
+        json!({"type":"message_start","message":{
+            "id":"msg_g217","type":"message","role":"assistant",
+            "model":CLAUDE_SONNET_4_6,"content":[],"stop_reason":null,
+            "stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}
+        }}).to_string(),
+        json!({"type":"content_block_start","index":0,"content_block":block}).to_string(),
+        raw_delta,
+        json!({"type":"content_block_stop","index":0}).to_string(),
+        json!({"type":"message_delta",
+            "delta":{"stop_reason":"tool_use","stop_sequence":null},
+            "usage":{"output_tokens":0}}).to_string(),
+    ];
+    let response = rig_core::test_utils::history::decode(
+        &wire,
+        Mode::Streaming,
+        frames.into_iter().map(WireFrame::Text),
+    ).expect("the explicit block stop and tool_use terminal complete the provider turn");
+    assert_eq!(response.finish_reason(), Some(FinishReason::ToolCalls));
+    assert_eq!(response.error, None);
+    assert_eq!(response.stop(), StopReason::ToolUse);
+    assert_eq!(response.origin.provider, rig_core::providers::anthropic::PROVIDER_NAME);
+    let calls = response.tool_calls().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    let call = calls[0];
+    assert_eq!(call.id.provider().expect("the received call ID survives").as_str(), "call_1");
+    assert_eq!(call.function.name.as_str(), "add");
+    assert_eq!(call.function.namespace, None);
+    assert_eq!(call.function.arguments_value(), json!({}));
+    assert_eq!(call.function.invalid_arguments.as_deref(), Some(""));
+    assert!(call.native.is_none(), "the actual malformed-block stop clears Native evidence");
+    // This is the assembled unary document, not the original delta envelope:
+    // unparseable input leaves the exact received opening block unchanged.
+    assert_eq!(response.raw["content"], json!([block]));
+
+    let turn = ModelTurn::new(
+        response.head(),
+        response.choice.clone(),
+        response.usage.clone(),
+        policy(&["add"]),
+        response.raw.clone(),
+    ).with_finish_reason(response.finish_reason());
+    let mut run = AgentRun::new("add things")
+        .max_turns(2)
+        .max_consecutive_malformed_tool_calls(0);
+    expect_call_model(&mut run);
+    expect_continue(run.model_response(turn).expect("the actual completed turn is retained"));
+    let error = run.next_step().expect_err("zero malformed retries refuse before CallTools");
+    let expected = format!(
+        "tool `add` was called with arguments that are not a JSON object on 1 consecutive \
+         turns, more than the 0 retries allowed: {}",
+        crate::run::policy::arguments_parse_error("")
+    );
+    assert!(matches!(error,
+        PromptError::Provider(ProviderError::Response(ref message)) if message == &expected));
+}

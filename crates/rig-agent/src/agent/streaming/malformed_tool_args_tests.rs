@@ -619,3 +619,134 @@ async fn the_malformed_call_context_reports_the_patched_tool_choice() {
         assert_eq!(choices, [Some(ToolChoice::Required)], "{surface:?}");
     }
 }
+
+
+/// The actual default engine must not execute even a tool that accepts {}.
+/// The initial turn is the real Anthropic decoder's completed malformed call;
+/// only the safe recovery answer uses the existing scripted model.
+#[tokio::test]
+async fn anthropic_first_fragment_overflow_never_executes_a_tool_at_the_default_retry_cap() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    use crate::tool::{Tool, ToolContext};
+    use rig_core::completion::FinishReason;
+    use rig_core::message::StopReason;
+    use rig_core::providers::anthropic::{Anthropic, completion::CLAUDE_SONNET_4_6};
+    use rig_core::wire::{Decoder, Mode, Wire, WireEvent, WireFrame};
+
+    struct CountingAdd(Arc<AtomicUsize>);
+    impl Tool for CountingAdd {
+        const NAME: &'static str = "add";
+        // Accept {}, so deserialization cannot falsely hide tool execution.
+        type Args = serde_json::Value;
+        type Output = usize;
+        type Error = crate::test_utils::MockToolError;
+        fn description(&self) -> String {
+            "Count actual add tool executions".to_owned()
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{}})
+        }
+        async fn call(
+            &self,
+            _context: &mut ToolContext,
+            _args: Self::Args,
+        ) -> Result<Self::Output, Self::Error> {
+            self.0.fetch_add(1, SeqCst);
+            Ok(0)
+        }
+    }
+
+    let wire = Anthropic::new("test-key").completion(CLAUDE_SONNET_4_6).wire;
+    let oversized = "x".repeat(32 * 1024 * 1024 + 1);
+    let block = json!({"type":"tool_use","id":"call_1","name":"add","input":{}});
+    let delta = json!({"type":"content_block_delta","index":0,
+        "delta":{"type":"input_json_delta","partial_json":oversized}});
+    let raw_delta = delta.to_string();
+    let WireEvent::Known(classified) = wire
+        .decoder_in(Mode::Streaming)
+        .classify(WireFrame::Text(raw_delta.clone()))
+    else {
+        panic!("the actual reader accepts the complete received delta");
+    };
+    assert_eq!(classified.fields, delta);
+    assert_eq!(classified.fields["delta"]["partial_json"].as_str(), Some(oversized.as_str()));
+    let frames = vec![
+        json!({"type":"message_start","message":{
+            "id":"msg_g217","type":"message","role":"assistant",
+            "model":CLAUDE_SONNET_4_6,"content":[],"stop_reason":null,
+            "stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}
+        }}).to_string(),
+        json!({"type":"content_block_start","index":0,"content_block":block}).to_string(),
+        raw_delta,
+        json!({"type":"content_block_stop","index":0}).to_string(),
+        json!({"type":"message_delta",
+            "delta":{"stop_reason":"tool_use","stop_sequence":null},
+            "usage":{"output_tokens":0}}).to_string(),
+    ];
+    let response = rig_core::test_utils::history::decode(
+        &wire, Mode::Streaming, frames.into_iter().map(WireFrame::Text),
+    ).expect("the received block stop and tool_use terminal complete the turn");
+    assert_eq!(response.finish_reason(), Some(FinishReason::ToolCalls));
+    assert_eq!(response.stop(), StopReason::ToolUse);
+    assert_eq!(response.error, None);
+    assert_eq!(response.origin.provider, rig_core::providers::anthropic::PROVIDER_NAME);
+    assert_eq!(response.raw["content"], json!([block]));
+    let calls = response.tool_calls().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id.provider().expect("the received ID survives").as_str(), "call_1");
+    assert_eq!(calls[0].function.name.as_str(), "add");
+    assert_eq!(calls[0].function.namespace, None);
+    assert_eq!(calls[0].function.arguments_value(), json!({}));
+    assert_eq!(calls[0].function.invalid_arguments.as_deref(), Some(""));
+    assert!(calls[0].native.is_none(), "the actual malformed stop clears Native evidence");
+
+    for surface in SURFACES {
+        let executions = Arc::new(AtomicUsize::new(0));
+        let recovery = model(surface, &[Turn::Answer]);
+        let recorded = recovery.clone();
+        let agent = AgentBuilder::new(recovery)
+            .tool(CountingAdd(executions.clone()))
+            .build();
+        let mut run = AgentRun::new("add things").max_turns(3);
+        assert_eq!(serde_json::to_value(&run).expect("serialize run")["max_consecutive_malformed_tool_calls"], json!(null));
+        let AgentRunStep::CallModel { turn: turn_number, .. } = run.next_step().expect("initial model step") else {
+            panic!("the initial model call is pending");
+        };
+        let definitions = agent.tool_definitions(None).await.expect("real registered tool definitions");
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].name, "add");
+        run.advertise_tools(turn_number, definitions);
+        let turn = ModelTurn::new(
+            response.head(), response.choice.clone(), response.usage,
+            TurnPolicy::new(["add".to_owned()].into(), None, None).expect("add policy"),
+            response.raw.clone(),
+        ).with_finish_reason(response.finish_reason());
+        assert!(matches!(run.model_response(turn), Ok(ModelTurnOutcome::Continue { .. })));
+        // No malformed retry-cap override and no invalid-call hook: resume
+        // executes the real shared default engine's pending tool step.
+        let outcome = drive(surface, agent.resume(run)).await;
+        assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
+        assert_eq!(executions.load(SeqCst), 0, "{surface:?}: no tool body executed during the whole run");
+        let requests = recorded.requests();
+        assert_eq!(requests.len(), 1, "{surface:?}: only the safe recovery model call is scripted");
+        let results = requests[0].chat_history.iter().flat_map(|message| match message {
+            Message::User { content } => content.as_slice(),
+            Message::System { .. } | Message::Assistant(_) => &[],
+        }).filter_map(|item| match item {
+            UserContent::ToolResult(result) => Some(result),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(results.len(), 1, "{surface:?}: the pending malformed call is actually answered");
+        let result = results[0];
+        assert_eq!(result.call.provider().expect("received call ID").as_str(), "call_1");
+        assert_eq!(result.name.as_str(), "add");
+        assert!(result.is_error, "{surface:?}: the default handler answers malformed input");
+        let feedback = result.content.iter().map(|content| match content {
+            ToolResultContent::Text(text) => text.text.as_str(),
+            other => panic!("expected default text feedback, got {other:?}"),
+        }).collect::<String>();
+        assert_eq!(feedback,
+            "The arguments for tool `add` are not a JSON object: . \
+             Call the tool again with a JSON object as its arguments.");
+    }
+}

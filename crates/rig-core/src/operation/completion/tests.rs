@@ -1323,3 +1323,62 @@ fn accumulated_oversized_tool_input_keeps_the_bound_and_sticky_invalid_marker() 
         "the truncated input must not fabricate an unflagged call"
     );
 }
+
+#[test]
+fn announced_empty_input_does_not_bypass_first_fragment_overflow() {
+    let oversized = "x".repeat(super::MAX_TOOL_INPUT_BYTES + 1);
+    let decoded = write(|out| {
+        out.open(7, Block::Call {
+            id: CallId::from_wire("call_1"), name: name("add"), namespace: None,
+        }, Value::Null)?;
+        out.announce(7, json!({}))?;
+        out.push(7, &oversized)?;
+        {
+            let shared = out.lock();
+            let super::Body::Call { arguments, .. } = &shared.fold.open[&7].body else {
+                panic!("the actual announced call");
+            };
+            assert_eq!(arguments.announced, Some(json!({})));
+            assert!(arguments.overflowed);
+            assert!(arguments.text.is_empty(), "the oversized first fragment is not retained");
+        }
+        out.finish(7)
+    });
+    let response = response(decoded);
+    let calls = response.tool_calls().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id.provider().expect("actual supplied ID").as_str(), "call_1");
+    assert_eq!(calls[0].function.name.as_str(), "add");
+    assert_eq!(calls[0].function.namespace, None);
+    assert_eq!(calls[0].function.arguments_value(), json!({}));
+    assert_eq!(calls[0].function.invalid_arguments.as_deref(), Some(""));
+    assert!(calls[0].native.is_none(), "this direct writer control supplied no native item");
+}
+
+#[test]
+fn announced_empty_input_without_a_fragment_stays_valid() {
+    let decoded = write(|out| {
+        out.open(7, Block::Call {
+            id: CallId::from_wire("call_1"), name: name("add"), namespace: None,
+        }, Value::Null)?;
+        out.announce(7, json!({}))?;
+        {
+            let shared = out.lock();
+            let super::Body::Call { arguments, .. } = &shared.fold.open[&7].body else {
+                panic!("the actual untouched announced call");
+            };
+            assert_eq!(arguments.announced, Some(json!({})));
+            assert!(!arguments.overflowed);
+            assert!(arguments.text.is_empty());
+        }
+        out.finish(7)
+    });
+    let response = response(decoded);
+    let calls = response.tool_calls().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id.provider().expect("actual supplied ID").as_str(), "call_1");
+    assert_eq!(calls[0].function.name.as_str(), "add");
+    assert_eq!(calls[0].function.namespace, None);
+    assert_eq!(calls[0].function.arguments_value(), json!({}));
+    assert_eq!(calls[0].function.invalid_arguments, None);
+}
