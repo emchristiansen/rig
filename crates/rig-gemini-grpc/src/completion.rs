@@ -910,3 +910,6 @@ mod request_tests;
 
 #[cfg(test)]
 mod reasoning_scope_tests;
+
+#[cfg(test)]
+mod reply_tests;
