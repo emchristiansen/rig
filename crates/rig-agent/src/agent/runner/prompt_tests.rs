@@ -950,6 +950,7 @@ fn completion_call_without_identity_fields_deserializes() {
 fn completion_call_identity_round_trips() {
     let call = CompletionCall::new(0, crate::completion::Usage::default(), json!({}))
         .with_identity(ResponseIdentity {
+            message_id: None,
             response_id: Some("resp_1".into()),
             provider_request_id: Some("req_1".into()),
         });
