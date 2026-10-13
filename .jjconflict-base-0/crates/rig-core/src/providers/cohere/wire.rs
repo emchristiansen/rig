@@ -1,14 +1,14 @@
-//! Cohere's configuration, and its chat wire: the OpenAI Compatibility API
-//! by default, or the native chat API when the wire's route opts in.
+//! Cohere's configuration, and its chat wire: document requests use the
+//! native chat API by default; other requests use the Compatibility API.
 //!
 //! ```
 //! use rig_core::providers::cohere::{ChatRoute, CohereConfig};
 //! let config = CohereConfig::new("key").with_base_url("https://api.cohere.ai/");
 //! assert_eq!(config.base_url, "https://api.cohere.ai");
 //! let chat = config.completion("command-a-03-2025");
-//! assert_eq!(chat.route, ChatRoute::Compatibility);
-//! let chat = chat.with_route(ChatRoute::Auto);
 //! assert_eq!(chat.route, ChatRoute::Auto);
+//! let chat = chat.with_route(ChatRoute::Compatibility);
+//! assert_eq!(chat.route, ChatRoute::Compatibility);
 //! ```
 
 use crate::client::env::{self, EnvError};
@@ -64,7 +64,7 @@ impl CohereConfig {
     }
 
     /// The chat wire for `model` under this API root, on the
-    /// [`ChatRoute::Compatibility`] route.
+    /// [`ChatRoute::Auto`] route.
     pub fn completion(&self, model: impl Into<String>) -> CohereChat {
         let model = model.into();
         CohereChat {
@@ -72,32 +72,32 @@ impl CohereConfig {
                 .with_base_url(format!("{}{COMPATIBILITY_PATH}", self.base_url))
                 .chat(model.clone()),
             native_api: NativeChat::new(self.clone(), model),
-            route: ChatRoute::Compatibility,
+            route: ChatRoute::Auto,
         }
     }
 }
 
 /// Which Cohere API a chat request goes to. The default is
-/// [`Compatibility`](Self::Compatibility); the native API is opt-in.
+/// [`Auto`](Self::Auto): native for documents, Compatibility otherwise.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatRoute {
     /// The native API for a request that carries documents, so Cohere
     /// grounds the answer in them and cites them, and the Compatibility
     /// API for any other.
+    #[default]
     Auto,
     /// The native API for every request.
     Native,
     /// The Compatibility API for every request, with documents sent as
     /// text in the history.
-    #[default]
     Compatibility,
 }
 
 /// Cohere chat: each request goes to the OpenAI Compatibility API or the
 /// native chat API, as [`ChatRoute`] says. Requests stay on the
-/// Compatibility API unless [`with_route`](Self::with_route) opts in to
-/// the native one.
+/// automatic route by default: native for documents, Compatibility otherwise.
+/// [`with_route`](Self::with_route) selects either API explicitly.
 ///
 /// The two are different APIs to history replay. A turn made on one route
 /// replays on the other from its canonical fields only, so its citations

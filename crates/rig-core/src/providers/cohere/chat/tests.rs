@@ -129,11 +129,11 @@ fn the_route_follows_the_request_and_the_setting() {
         "the Compatibility API gets documents as text: {body}"
     );
     let default = CohereConfig::new("key").completion("command-a-03-2025");
-    assert_eq!(default.route, ChatRoute::Compatibility);
+    assert_eq!(default.route, ChatRoute::Auto);
     let (path, _) = sent(&default, with_documents(), Mode::Unary);
     assert_eq!(
-        path, "/compatibility/v1/chat/completions",
-        "the native API is opt-in"
+        path, "/v2/chat",
+        "default documents keep their native meaning"
     );
 }
 
@@ -856,5 +856,92 @@ fn mandatory_tool_choice_refuses_conflicting_raw_override() {
             sent(&native(), request, Mode::Unary).1["tool_choice"],
             "raw precedence"
         );
+    }
+}
+
+// G37's source condition: no documents means the very same Compatibility
+// encoder, option mapper and replay target, with no route-specific shaping.
+#[test]
+fn default_document_free_requests_equal_compatibility_bytes() {
+    for mode in [Mode::Unary, Mode::Streaming] {
+        for choice in [
+            None,
+            Some(ToolChoice::Auto),
+            Some(ToolChoice::None),
+            Some(ToolChoice::Required),
+            Some(ToolChoice::Specific {
+                function_names: vec![ToolName::new("lookup").unwrap()],
+            }),
+        ] {
+            let default = CohereConfig::new("key")
+                .completion(MODEL)
+                .with_strict_tools();
+            let explicit = default.clone().with_route(ChatRoute::Compatibility);
+            let mut request = CompletionRequest::new("hi")
+                .tool(tool("lookup"))
+                .temperature(0.2)
+                .max_tokens(64);
+            request.tool_choice = choice;
+            request.additional_params = Some(json!({"seed":7, "metadata":{"kept":[null,1]}}));
+            let prepared_default = Completion::prepare(request.clone(), &default.describe())
+                .expect("default prepares");
+            let prepared_explicit =
+                Completion::prepare(request, &explicit.describe()).expect("explicit prepares");
+            let automatic = default
+                .encode(prepared_default, mode)
+                .expect("default encodes");
+            let compatibility = explicit
+                .encode(prepared_explicit, mode)
+                .expect("explicit encodes");
+            assert_eq!(automatic.request.method(), compatibility.request.method());
+            assert_eq!(automatic.request.uri(), compatibility.request.uri());
+            assert_eq!(automatic.request.headers(), compatibility.request.headers());
+            let (crate::wire::Body::Bytes(actual), crate::wire::Body::Bytes(expected)) =
+                (automatic.request.body(), compatibility.request.body())
+            else {
+                panic!("chat bodies are bytes");
+            };
+            assert_eq!(actual, expected);
+            assert_eq!(automatic.framing, compatibility.framing);
+            assert_eq!(automatic.route, compatibility.route);
+            assert_eq!(automatic.request_id_header, compatibility.request_id_header);
+            assert_eq!(
+                automatic.response_header_prefix,
+                compatibility.response_header_prefix
+            );
+            assert_eq!(
+                automatic.relaxed_content_type,
+                compatibility.relaxed_content_type
+            );
+        }
+    }
+}
+
+#[test]
+fn default_document_requests_keep_native_structured_documents() {
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let default = CohereConfig::new("key").completion(MODEL);
+        assert_eq!(default.route, ChatRoute::Auto);
+        assert_eq!(ChatRoute::default(), ChatRoute::Auto);
+        let mut request = CompletionRequest::new("Which dock?");
+        request.documents = documents();
+        let (path, body) = sent(&default, request, mode);
+        assert_eq!(path, "/v2/chat");
+        assert_eq!(
+            body["documents"],
+            json!([
+                {"id":"harbor-1", "data":{"region":"north", "source":"registry", "text":"Beacon amber-73 is at Dock Seven."}},
+                {"id":"doc_1", "data":{"text":"Beacon violet-19 is at Dock Three."}},
+            ])
+        );
+        assert_eq!(
+            body["messages"],
+            json!([{"role":"user", "content":[{"type":"text", "text":"Which dock?"}]}])
+        );
+        if mode == Mode::Streaming {
+            assert_eq!(body["stream"], true);
+        } else {
+            assert!(body.get("stream").is_none());
+        }
     }
 }
