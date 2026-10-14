@@ -2042,3 +2042,89 @@ async fn a_decoded_phased_preface_stays_in_history_but_not_output_tool_answer() 
     assert_eq!(decoded.choice, original_choice);
     assert_eq!(http.requests().len(), 1);
 }
+
+/// Synthetic context-limit terminal at the existing native decoder and AgentRun boundary.
+#[tokio::test]
+async fn a_context_window_terminal_never_dispatches_a_call_the_writer_did_not_finish() {
+    use rig_core::providers::anthropic::{Anthropic, completion::CLAUDE_SONNET_4_6};
+    use rig_core::wire::{Mode, WireFrame};
+    let wire = Anthropic::new("test-key")
+        .completion(CLAUDE_SONNET_4_6)
+        .wire;
+    for finished in [false, true] {
+        let mut frames = vec![
+            json!({"type":"message_start","message":{
+                "id":"msg_length","type":"message","role":"assistant",
+                "model":CLAUDE_SONNET_4_6,"content":[],"stop_reason":null,
+                "stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}
+            }}),
+            json!({"type":"content_block_start","index":0,
+                "content_block":{"type":"tool_use","id":"call_1","name":"add","input":{}}}),
+            json!({"type":"content_block_delta","index":0,
+                "delta":{"type":"input_json_delta","partial_json":"{\"x\":1,\"y\":2}"}}),
+        ];
+        if finished {
+            frames.push(json!({"type":"content_block_stop","index":0}));
+        }
+        frames.push(json!({"type":"message_delta",
+            "delta":{"stop_reason":"model_context_window_exceeded","stop_sequence":null},
+            "usage":{"output_tokens":0}}));
+        let response = rig_core::test_utils::history::decode(
+            &wire,
+            Mode::Streaming,
+            frames
+                .into_iter()
+                .map(|frame| WireFrame::Text(frame.to_string())),
+        )
+        .expect("the genuine provider terminal arrives");
+        assert_eq!(response.finish_reason(), Some(FinishReason::Length));
+        let call = response
+            .tool_calls()
+            .next()
+            .expect("the received call remains diagnosable");
+        assert_eq!(call.function.arguments_value(), json!({"x":1,"y":2}));
+        assert_eq!(
+            call.function.invalid_arguments, None,
+            "parseability alone does not prove completion"
+        );
+        let reason = "the provider ended the reply with a tool call it never finished";
+        if finished {
+            assert_eq!(response.error, None);
+            assert_eq!(response.head().stop, Some(StopReason::Length));
+        } else {
+            assert_eq!(response.error.as_deref(), Some(reason));
+            assert_eq!(
+                response.head().stop,
+                Some(StopReason::Error(reason.to_owned()))
+            );
+            assert!(call.native.is_none(), "the incomplete call has no Native");
+        }
+        let turn = ModelTurn::new(
+            response.head(),
+            response.choice.clone(),
+            response.usage.clone(),
+            policy(&["add"]),
+            response.raw.clone(),
+        )
+        .with_finish_reason(response.finish_reason());
+        let mut run = AgentRun::new("add things").max_turns(2);
+        expect_call_model(&mut run);
+        expect_continue(
+            run.model_response(turn)
+                .expect("the received model turn is retained"),
+        );
+        if finished {
+            let calls = expect_call_tools(&mut run);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].tool_call.function.name, "add");
+        } else {
+            let error = run
+                .next_step()
+                .expect_err("the failed turn cannot dispatch tools");
+            assert!(
+                matches!(error, PromptError::Provider(ProviderError::Response(ref message))
+                if message.contains("none of its tool calls ran") && message.contains(reason))
+            );
+        }
+    }
+}

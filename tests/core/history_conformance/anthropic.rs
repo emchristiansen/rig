@@ -254,7 +254,7 @@ impl HistoryFixture for MessagesHistory {
         [
             ("end_turn", Ending::Success),
             ("stop_sequence", Ending::Success),
-            ("pause_turn", Ending::Success),
+            ("pause_turn", Ending::Failure),
             ("max_tokens", Ending::Success),
             ("model_context_window_exceeded", Ending::Success),
             ("tool_use", Ending::Success),

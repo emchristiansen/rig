@@ -142,12 +142,12 @@ impl Counts {
 }
 
 /// How a Messages `stop_reason` ends the turn, and the error a refusal
-/// reports. A reason Anthropic does not document is
-/// [`FinishReason::Other`], which fails the turn.
+/// reports. A paused server turn remains [`FinishReason::Other`], as does
+/// an unrecognized reason; both fail the turn under the default policy.
 fn finish_of(reason: &str, details: Option<&Value>) -> (Option<FinishReason>, Option<String>) {
     let reason = match reason {
         "end_turn" | "stop_sequence" => FinishReason::Stop,
-        "max_tokens" => FinishReason::Length,
+        "max_tokens" | "model_context_window_exceeded" => FinishReason::Length,
         "tool_use" => FinishReason::ToolCalls,
         // A refusal fails the turn with its explanation (pi's rule).
         "refusal" => {
