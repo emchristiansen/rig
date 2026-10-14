@@ -351,4 +351,7 @@ impl HistoryFixture for MessagesHistory {
 rig_history_conformance::history_conformance_suite! {
     wire: "anthropic",
     fixture: ANTHROPIC_HISTORY,
+    h05_field_ablation: tests::anthropic_h05_preserves_the_typed_boundary,
 }
+
+mod tests;

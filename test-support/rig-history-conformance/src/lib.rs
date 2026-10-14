@@ -2732,10 +2732,18 @@ fn name(name: &str) -> ToolName {
 /// [`ROWS`], and the `HISTORY_WIRE` constant the registry links.
 ///
 /// `wire` is the wire's name in [`HISTORY_WIRES`]; `fixture` is an
-/// expression producing its [`HistoryFixture`].
+/// expression producing its [`HistoryFixture`]. The optional
+/// `h05_field_ablation` function path takes the same fixture by reference
+/// and returns `()`, replacing only that row's body.
 #[macro_export]
 macro_rules! history_conformance_suite {
     (wire: $wire:literal, fixture: $fixture:expr $(,)?) => {
+        $crate::history_conformance_suite!(@emit $wire, $fixture, $crate::h05_field_ablation);
+    };
+    (wire: $wire:literal, fixture: $fixture:expr, h05_field_ablation: $h05:path $(,)?) => {
+        $crate::history_conformance_suite!(@emit $wire, $fixture, $h05);
+    };
+    (@emit $wire:literal, $fixture:expr, $h05:path) => {
         /// The wire this suite covers, for the workspace registry.
         pub const HISTORY_WIRE: &str = $wire;
 
@@ -2745,7 +2753,15 @@ macro_rules! history_conformance_suite {
             h02_cross_model_canonical,
             h03_stream_equals_whole,
             h04_unknown_kept,
-            h05_field_ablation,
+        }
+
+        #[test]
+        fn h05_field_ablation() {
+            let _: () = ($h05)(&$fixture);
+        }
+
+        $crate::__history_conformance_rows! {
+            $fixture;
             h06_malformed_arguments,
             h07_failed_turns,
             h08_pairing,
