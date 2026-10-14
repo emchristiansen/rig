@@ -891,21 +891,16 @@ pub async fn truncation_preserves_content_without_terminal(
         checks.note("EOF mid-tool-args: no terminal");
     }
 
-    // EOF after a tool call's frames, before the provider's end. A call is
-    // visible once it closes: on a wire that closes calls at the end, the
-    // cut call never surfaces.
+    // EOF after a fully delivered tool call, before the stream terminal.
     let drained = fixture
         .driver
         .drive(ok_chunks(fixture.tool_call_frames.clone()))
         .await?;
     checks.require(
-        drained
-            .tool_call_names()
-            .iter()
-            .all(|name| *name == fixture.expected_tool_name),
+        drained.tool_call_names() == vec![fixture.expected_tool_name],
         || {
             format!(
-                "only the delivered call may surface: observed {:?}",
+                "a fully delivered tool call must survive truncation exactly once: observed {:?}",
                 drained.tool_call_names()
             )
         },
@@ -919,9 +914,8 @@ pub async fn truncation_preserves_content_without_terminal(
     Ok(checks.report())
 }
 
-/// A transport failure after a tool call's frames ends the reply: the `Err`
-/// is the last item, and there is no terminal record. A call the wire closed
-/// before the failure precedes it; one still open never surfaces.
+/// A transport failure after a fully delivered tool call yields that call
+/// exactly once, then the `Err`, with no terminal record.
 pub async fn transport_error_after_tool_call_yields_err_then_end(
     fixture: &ProviderWireFixture,
 ) -> Result<ScenarioReport, ConformanceError> {
@@ -935,13 +929,10 @@ pub async fn transport_error_after_tool_call_yields_err_then_end(
     let drained = fixture.driver.drive(chunks).await?;
 
     checks.require(
-        drained
-            .tool_call_names()
-            .iter()
-            .all(|name| *name == fixture.expected_tool_name),
+        drained.tool_call_names() == vec![fixture.expected_tool_name],
         || {
             format!(
-                "only the delivered call may precede the transport error: observed {:?}",
+                "the delivered tool call must precede the transport error exactly once: observed {:?}",
                 drained.tool_call_names()
             )
         },

@@ -456,3 +456,93 @@ async fn law_one_fatal_report_last_keeps_genuine_text_events() -> Result<(), Pro
     assert_valid_event_stream(&drained.items, &drained.choice);
     Ok(())
 }
+
+/// The original Responses fixture has an explicit completed item before EOF.
+#[tokio::test]
+async fn completed_responses_call_survives_eof_exactly_once() -> Result<(), ConformanceError> {
+    truncation_preserves_content_without_terminal(&fixtures::openai_responses::fixture()).await?;
+    Ok(())
+}
+
+/// Terminal transport cleanup flushes the same completed item before its error.
+#[tokio::test]
+async fn completed_responses_call_precedes_transport_error_exactly_once()
+-> Result<(), ConformanceError> {
+    transport_error_after_tool_call_yields_err_then_end(&fixtures::openai_responses::fixture())
+        .await?;
+    Ok(())
+}
+
+/// Synthetic consumer observations remove or duplicate a genuine delivered End.
+/// Provider input and its actual driver remain unchanged.
+fn synthetic_call_observation_fixture(duplicate: bool) -> ProviderWireFixture {
+    let mut fixture = fixtures::openai_responses::fixture();
+    let driver = std::sync::Arc::new(fixture.driver);
+    fixture.driver = WireDriver::new("synthetic call observation", move |chunks| {
+        let driver = driver.clone();
+        Box::pin(async move {
+            let mut drained = driver.drive(chunks).await?;
+            let call_end = drained.items.iter().position(|item| {
+                matches!(
+                    item,
+                    Ok(Item::Event(StreamEvent::End {
+                        content: AssistantContent::ToolCall(_),
+                        ..
+                    }))
+                )
+            });
+            if let Some(index) = call_end {
+                if duplicate {
+                    let repeated = drained.items[index].clone();
+                    drained.items.insert(index + 1, repeated);
+                } else {
+                    drained.items.remove(index);
+                }
+                // The exact old universal predicate accepts both missing and
+                // repeated observations; it cannot establish multiplicity.
+                assert!(
+                    drained
+                        .tool_call_names()
+                        .iter()
+                        .all(|name| *name == "get_weather")
+                );
+            }
+            Ok(drained)
+        })
+    });
+    fixture
+}
+
+#[tokio::test]
+async fn synthetic_missing_completed_call_fails_both_scenario_counts() {
+    for transport in [false, true] {
+        let fixture = synthetic_call_observation_fixture(false);
+        let result = if transport {
+            transport_error_after_tool_call_yields_err_then_end(&fixture).await
+        } else {
+            truncation_preserves_content_without_terminal(&fixture).await
+        };
+        let error = result.expect_err("missing delivered call must fail exact-once");
+        let ConformanceError::Contract { details, .. } = error else {
+            panic!("the synthetic observation must fail the count predicate");
+        };
+        assert!(details.contains("exactly once"));
+    }
+}
+
+#[tokio::test]
+async fn synthetic_duplicate_completed_call_fails_both_scenario_counts() {
+    for transport in [false, true] {
+        let fixture = synthetic_call_observation_fixture(true);
+        let result = if transport {
+            transport_error_after_tool_call_yields_err_then_end(&fixture).await
+        } else {
+            truncation_preserves_content_without_terminal(&fixture).await
+        };
+        let error = result.expect_err("repeated delivered call must fail exact-once");
+        let ConformanceError::Contract { details, .. } = error else {
+            panic!("the synthetic observation must fail the count predicate");
+        };
+        assert!(details.contains("exactly once"));
+    }
+}
