@@ -201,3 +201,36 @@ fn meaningful_signature_and_unknown_reasoning_are_not_empty_known_items() {
         assert_eq!(driven.response.raw["output"][0], item);
     }
 }
+
+/// Synthetic private state pins field presence without introducing provider data.
+#[test]
+fn synthetic_reasoning_raw_state_preserves_only_received_empty_content_arrays() {
+    for content in [
+        None,
+        Some(json!([])),
+        Some(json!([
+            {"type":"reasoning_text", "text":"previous text", "future_part":false}
+        ])),
+    ] {
+        let mut received = json!({"type":"reasoning", "id":"rs_raw", "summary":[],
+            "encrypted_content":"cipher_raw", "future_root":[null,7]});
+        if let Some(content) = &content {
+            received["content"] = content.clone();
+        }
+        // An explicitly synthetic empty current state, retaining received evidence.
+        let state = super::super::ReasoningState {
+            item: Some(received.clone()),
+            ..Default::default()
+        };
+        let mut expected = received.clone();
+        if content
+            .as_ref()
+            .is_some_and(|parts| !parts.as_array().expect("array").is_empty())
+        {
+            expected.as_object_mut().expect("object").remove("content");
+        }
+        assert_eq!(state.raw(), expected);
+        assert_eq!(state.item.as_ref(), Some(&received));
+        assert!(state.content.is_empty());
+    }
+}

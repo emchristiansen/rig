@@ -335,7 +335,12 @@ impl ReasoningState {
             "summary".into(),
             json!(self.summary.values().collect::<Vec<_>>()),
         );
-        if !self.content.is_empty() {
+        if !self.content.is_empty()
+            || fields
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        {
             fields.insert(
                 "content".into(),
                 json!(self.content.values().collect::<Vec<_>>()),
