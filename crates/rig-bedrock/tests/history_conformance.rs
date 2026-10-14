@@ -781,6 +781,7 @@ fn an_orphan_first_result_still_leaves_a_user_message_first() {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: CallId::from_wire("gone"),
                 name: ToolName::new("lookup").expect("a tool name"),
+                answers: rig_core::message::AnsweredToolCall::Function,
                 content: vec![ToolResultContent::text("stale")],
                 is_error: false,
             })],
