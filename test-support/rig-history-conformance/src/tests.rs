@@ -1,13 +1,26 @@
 //! The private failed-cut predicate observes carried custody, not request admission.
 
 use super::*;
-use rig_core::providers::anthropic::{AnthropicConfig, completion::CLAUDE_SONNET_4_6};
+use rig_core::providers::anthropic::{AnthropicConfig, Messages, completion::CLAUDE_SONNET_4_6};
 use rig_core::wire::WireFrame;
 use serde_json::json;
 
+fn observer_wire() -> Messages {
+    let provider = AnthropicConfig::new("synthetic-test-key");
+    Messages {
+        default_max_tokens: provider.dialect.default_max_tokens(CLAUDE_SONNET_4_6),
+        tool_input_streaming: provider.dialect.quirks.tool_input_streaming,
+        provider,
+        model: CLAUDE_SONNET_4_6.to_owned(),
+        prompt_caching: false,
+        static_prefix_cache_ttl: None,
+        strict_tools: false,
+    }
+}
+
 fn decoded_hosted_cut() -> CompletionResponse {
     // Newly authored synthetic received frames use the real Messages decoder/fold.
-    let wire = AnthropicConfig::new("synthetic-test-key").completion(CLAUDE_SONNET_4_6);
+    let wire = observer_wire();
     let frames = [
         json!({"type":"message_start", "message":{"type":"message", "id":"msg_observer",
             "role":"assistant", "model":CLAUDE_SONNET_4_6, "content":[], "stop_reason":null,
@@ -45,7 +58,7 @@ fn h07_decoded_failed_hosted_cut_is_retained_as_carried_custody() {
     let response = decoded_hosted_cut();
     let before = response.clone();
     let source_serde = serde_json::to_vec(&response).expect("whole received custody");
-    let wire = AnthropicConfig::new("synthetic-test-key").completion(CLAUDE_SONNET_4_6);
+    let wire = observer_wire();
     let history = vec![
         Message::user("q"),
         response.message().expect("real failed message"),
@@ -79,7 +92,7 @@ fn h07_synthetic_ordinary_leaks_and_nonfailed_carried_heads_fail_the_actual_pred
     let response = decoded_hosted_cut();
     let before = response.clone();
     let source_serde = serde_json::to_vec(&response).expect("whole received custody");
-    let wire = AnthropicConfig::new("synthetic-test-key").completion(CLAUDE_SONNET_4_6);
+    let wire = observer_wire();
     let raw = json!({"type":"message", "id":"msg_ordinary_control", "model":CLAUDE_SONNET_4_6,
     "role":"assistant", "stop_reason":"tool_use", "stop_sequence":null,
     "usage":{"input_tokens":1,"output_tokens":3}, "content":[
