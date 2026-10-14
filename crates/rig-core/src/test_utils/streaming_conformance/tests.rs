@@ -496,7 +496,7 @@ fn synthetic_call_observation_fixture(duplicate: bool) -> ProviderWireFixture {
                     let repeated = drained.items[index].clone();
                     drained.items.insert(index + 1, repeated);
                 } else {
-                    drained.items.remove(index);
+                    drop(drained.items.remove(index));
                 }
                 // The exact old universal predicate accepts both missing and
                 // repeated observations; it cannot establish multiplicity.
