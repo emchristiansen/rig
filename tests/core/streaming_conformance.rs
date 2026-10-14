@@ -339,15 +339,16 @@ mod grammar_guards {
     /// on `response.output_item.done` with arguments truncated mid-JSON and
     /// item status `incomplete`, then ends with `response.incomplete`. The
     /// pipeline must accept both frames (no `Corrupt` classification), end
-    /// with a `Length` terminal, retaining the unfinished call as incomplete
-    /// evidence that cannot be dispatched.
+    /// with a `Length` terminal, discarding the explicitly incomplete call while
+    /// retaining its exact received item in the raw response.
     /// Partial success is a per-request opt-in on HTTP SSE, so this drives the
     /// opted-in pipeline; the strict default is pinned by
     /// `incomplete_mid_tool_call_errors_without_the_opt_in`.
     #[tokio::test]
-    async fn incomplete_mid_tool_call_ends_with_length_and_keeps_the_call() {
+    async fn incomplete_mid_tool_call_ends_with_length_and_discards_the_incomplete_item() {
         use rig_core::completion::FinishReason;
         use rig_core::message::AssistantContent;
+        use rig_core::streaming::{DiscardReason, Item, StreamEvent};
 
         let driver = super::openai_responses_opt_in::driver_tolerating_incomplete();
         let drained = driver
@@ -381,8 +382,31 @@ mod grammar_guards {
             })
             .collect();
         assert!(
-            matches!(calls.as_slice(), [call] if call.function.invalid_arguments.is_some()),
-            "the cut-off call is kept with its partial text: {calls:?}"
+            calls.is_empty(),
+            "an explicitly incomplete item is not a canonical call: {calls:?}"
+        );
+        let discards: Vec<_> = drained
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Ok(Item::Event(StreamEvent::Discard { reason, .. })) => Some(reason),
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(discards.as_slice(), [reason] if **reason == DiscardReason::Incomplete));
+        assert!(!drained.items.iter().any(|item| matches!(
+            item,
+            Ok(Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(_),
+                ..
+            }))
+        )));
+        assert_eq!(
+            response.raw["output"],
+            serde_json::json!([{
+                "type":"function_call", "id":"fc_1", "arguments":"{\"x\":48151",
+                "call_id":"call_1", "name":"add", "status":"incomplete"
+            }])
         );
     }
 
