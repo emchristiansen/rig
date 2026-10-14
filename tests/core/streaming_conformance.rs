@@ -725,11 +725,9 @@ mod interleaved_constant_id_reasoning {
         .expect("scenario should hold");
     }
 
-    /// Two id-less calls to one tool in a single turn stay distinct — no name-as-id
-    /// collapse, no fabricated durable id.
+    /// Id-less calls without explicit stops refuse at the retained-ID terminal boundary.
     #[tokio::test]
-    async fn interactions_two_id_less_calls_to_the_same_tool_stay_distinct() {
-        use rig_core::message::AssistantContent;
+    async fn interactions_two_id_less_calls_without_stops_refuse_at_the_terminal() {
         use rig_core::streaming::StreamEvent;
         use serde_json::json;
 
@@ -751,6 +749,88 @@ mod interleaved_constant_id_reasoning {
         let frames = vec![
             call(0, "Tokyo"),
             call(1, "Paris"),
+            sse(&json!({
+                "event_type": "interaction.completed",
+                "interaction": {
+                    "id": "int-1",
+                    "model": "gemini-2.5-pro",
+                    "status": "completed",
+                },
+            })),
+        ];
+
+        let drained = interactions::fixture()
+            .driver
+            .drive(conformance::ok_chunks(frames))
+            .await
+            .expect("the stream reports its refusal in band");
+        assert_eq!(drained.error_count(), 1, "{:?}", drained.items);
+        let errors = drained
+            .items
+            .iter()
+            .filter_map(|item| item.as_ref().err())
+            .collect::<Vec<_>>();
+        assert_eq!(errors[0].kind, rig_core::error::ErrorKind::Response);
+        assert!(!errors[0].retryable);
+        assert_eq!(
+            errors[0].message,
+            "ResponseError: the reply finalized item 1073741824 at a provider terminal without a named function call and retained ID"
+        );
+        assert!(errors[0].detail.is_none());
+        assert!(drained.response.is_none());
+        assert!(drained.choice.is_empty());
+        let starts = drained
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Ok(rig::streaming::Item::Event(StreamEvent::Start {
+                    part,
+                    kind: rig::streaming::PartKind::ToolCall,
+                    name: Some(name),
+                    ..
+                })) => Some((part, name)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[0].1.as_str(), "get_weather");
+        assert_eq!(starts[1].1.as_str(), "get_weather");
+        assert_ne!(starts[0].0, starts[1].0);
+        assert!(drained.items.iter().all(|item| !matches!(
+            item,
+            Ok(rig::streaming::Item::Event(
+                StreamEvent::End { .. } | StreamEvent::Discard { .. }
+            ))
+        )));
+    }
+
+    /// New completed control: only explicit step stops are added to the original fixture.
+    #[tokio::test]
+    async fn interactions_two_explicitly_stopped_id_less_calls_to_the_same_tool_stay_distinct() {
+        use rig_core::message::AssistantContent;
+        use rig_core::streaming::StreamEvent;
+        use serde_json::json;
+
+        let sse = |frame: &serde_json::Value| {
+            conformance::WireInput::Bytes(bytes::Bytes::from(format!("data: {frame}\n\n")))
+        };
+        let call = |index: u64, city: &str| {
+            sse(&json!({
+                "event_type": "step.delta",
+                "index": index,
+                "delta": {
+                    "type": "function_call",
+                    "name": "get_weather",
+                    "arguments": {"city": city},
+                    // No wire id: the wire genuinely omits it here.
+                },
+            }))
+        };
+        let frames = vec![
+            call(0, "Tokyo"),
+            sse(&json!({"event_type":"step.stop","index":0})),
+            call(1, "Paris"),
+            sse(&json!({"event_type":"step.stop","index":1})),
             sse(&json!({
                 "event_type": "interaction.completed",
                 "interaction": {
