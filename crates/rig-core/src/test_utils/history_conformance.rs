@@ -29,7 +29,7 @@ pub fn decode<W: Wire<Op = Completion>>(
     let fold = Completion::fold(request, &mut Call::new(&describe, mode));
     let shared = Mutex::new(Shared::new(fold));
     let fed = crate::driver::feed(
-        &mut wire.decoder(),
+        &mut wire.decoder_in(mode),
         Some(wire.reassembler()),
         &shared,
         frames,
@@ -59,7 +59,7 @@ pub fn cut<W: Wire<Op = Completion>>(
     let request = CompletionRequest::new("restate");
     let fold = Completion::fold(&request, &mut Call::new(&describe, mode));
     let shared = Mutex::new(Shared::new(fold));
-    let mut decoder = wire.decoder();
+    let mut decoder = wire.decoder_in(mode);
     let mut reassembler = wire.reassembler();
     let mut failure = None;
     for frame in frames {
@@ -103,3 +103,6 @@ fn reply_of(provider: &str) -> Reply {
         response_headers: crate::completion::ProviderResponseHeaders::new(),
     }
 }
+
+#[cfg(test)]
+mod tests;
