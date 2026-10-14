@@ -1116,6 +1116,7 @@ fn assistant_part_in(
             let call = Value::Object(object([("name", name), ("args", args), ("id", id)]));
             Value::Object(object([
                 ("functionCall", Some(call)),
+                ("thought", Some(json!(false))),
                 ("thoughtSignature", signature),
             ]))
         }

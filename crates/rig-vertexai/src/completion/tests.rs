@@ -202,3 +202,5 @@ fn a_raw_null_generation_config_keeps_the_typed_fields() {
     assert_eq!(config.max_output_tokens, Some(64));
     assert!(config.thinking_config.is_some());
 }
+
+mod function_thought_controls;

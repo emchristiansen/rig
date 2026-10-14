@@ -3015,3 +3015,5 @@ fn a_signed_answer_text_round_trips_through_serde_upstream() {
     assert_eq!(part["thoughtSignature"], "c2lnbmVk");
     assert_ne!(part.get("thought"), Some(&json!(true)));
 }
+
+mod function_thought_controls;
