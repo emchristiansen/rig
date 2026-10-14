@@ -1288,6 +1288,51 @@ fn paired(
     hosted: &HashSet<usize>,
     last: bool,
 ) -> Vec<AssistantContent> {
+    use crate::message::{CarriedPosition, CarriedReasoningPart};
+
+    let direct_responses = target.api() == Api::from_static("openai.responses")
+        && target.provider() == crate::providers::openai::wire::OPENAI.name;
+    let carried_needs_next = |block: &AssistantContent| {
+        let AssistantContent::CarriedReasoning(reasoning) = block else {
+            return false;
+        };
+        direct_responses
+            && reasoning.payload.provider.as_deref() == Some(target.provider())
+            && reasoning.payload.item.as_object().is_some()
+            && reasoning.payload.item_type() == Some("reasoning")
+            && reasoning.id.as_deref().is_some_and(|id| {
+                !id.is_empty()
+                    && reasoning.payload.item.get("id").and_then(serde_json::Value::as_str)
+                        == Some(id)
+            })
+            && !reasoning.has_opaque_parts()
+            && target.needs_next(&reasoning.payload.item)
+            // Pair only the ciphertext the encoder will actually select.
+            && reasoning.content.iter().find(|part| matches!(part,
+                CarriedReasoningPart::Encrypted(_) | CarriedReasoningPart::Redacted { .. }
+            )).is_some_and(|part| match part {
+                CarriedReasoningPart::Encrypted(cipher) => {
+                    !cipher.is_empty()
+                        && reasoning.payload.item.get("encrypted_content")
+                            .and_then(serde_json::Value::as_str) == Some(cipher.as_str())
+                }
+                _ => false,
+            })
+    };
+    let retained_carried_text = |text: &CarriedText| {
+        direct_responses
+            && text.payload.provider.as_deref() == Some(target.provider())
+            && text.item_id.as_deref().is_some_and(|id| !id.is_empty())
+            && matches!(
+                text.payload.position,
+                CarriedPosition::MessageContent { .. }
+            )
+            && matches!(
+                (&text.content, text.payload.item_type()),
+                (CarriedTextContent::Text(_), Some("output_text"))
+                    | (CarriedTextContent::Refusal(_), Some("refusal"))
+            )
+    };
     let pair = |block: &AssistantContent| match block {
         AssistantContent::Opaque(opaque) if opaque.replay => target.hosted_pair(&opaque.item),
         _ => None,
@@ -1330,7 +1375,11 @@ fn paired(
                         .filter(|item| !target.identity(item).is_empty())
                 }),
             })
-            .is_some_and(|item| target.needs_next(item));
+            .is_some_and(|item| target.needs_next(item))
+            || content
+                .get(at)
+                .and_then(Option::as_ref)
+                .is_some_and(carried_needs_next);
         // The partner must go back as the item the provider issued: its item,
         // or a rebuild that keeps its identity, never a block with neither.
         let next_gone =
@@ -1341,6 +1390,7 @@ fn paired(
                     AssistantContent::Opaque(opaque) => !opaque.replay,
                     // A request without tools gets the call as text.
                     AssistantContent::ToolCall(_) if !tools => true,
+                    AssistantContent::CarriedText(text) if retained_carried_text(text) => false,
                     next => {
                         next.native_item().is_none()
                             && next
@@ -1918,3 +1968,6 @@ mod gemini_tests;
 
 #[cfg(test)]
 mod image_preflight_tests;
+
+#[cfg(test)]
+mod carried_pairing_tests;
