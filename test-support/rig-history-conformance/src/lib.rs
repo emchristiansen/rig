@@ -1206,8 +1206,19 @@ pub fn h06_malformed_arguments<F: HistoryFixture>(fixture: &F) {
     }
 }
 
+/// The failed-cut observation permits carried custody without granting replay.
+fn failed_cut_custody(message: &Message) -> bool {
+    match message {
+        Message::Assistant(turn) => {
+            turn.stop.as_ref().is_some_and(StopReason::is_failure)
+                && turn.content.iter().all(AssistantContent::is_carried)
+        }
+        Message::User { .. } | Message::System { .. } => true,
+    }
+}
 /// H7. Every documented finish ends a turn as documented, a reply cut off
-/// before its end is a failed turn, and the adapter skips failed turns.
+/// before its end is a failed turn, and adaptation retains only carried
+/// custody from failed turns.
 pub fn h07_failed_turns<F: HistoryFixture>(fixture: &F) {
     let wire = fixture.wire(fixture.model());
     let finishes = fixture.finishes();
@@ -1259,10 +1270,8 @@ pub fn h07_failed_turns<F: HistoryFixture>(fixture: &F) {
         let replay = describe.replay.expect("a replay target");
         let adapted = rig_core::completion::history::adapt(&history, replay);
         assert!(
-            adapted
-                .iter()
-                .all(|message| !matches!(message, Message::Assistant(_))),
-            "a failed turn is never replayed: {adapted:?}"
+            adapted.iter().all(failed_cut_custody),
+            "a failed cut retains only carried content in failed assistant turns: {adapted:?}"
         );
     }
     if let (Some(error), Some(mut frames)) = (
@@ -2825,3 +2834,6 @@ macro_rules! __history_conformance_rows {
         )+
     };
 }
+
+#[cfg(test)]
+mod tests;

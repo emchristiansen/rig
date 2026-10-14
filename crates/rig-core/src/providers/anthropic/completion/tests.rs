@@ -4833,3 +4833,763 @@ fn g226_opaque_reasoning_is_refused_before_foreign_omission() {
         }
     }
 }
+// HC001 synthetic received variants use the actual Messages decoder and fold.
+const HC001_REFUSAL: &str = "Cannot continue Anthropic Messages: an aborted turn's unresolved server call `srv_hc001` must be resolved or removed from history before continuing";
+
+fn hc001_wire() -> Messages {
+    AnthropicConfig::new("synthetic-test-key").completion(CLAUDE_SONNET_4_6)
+}
+
+fn hc001_use(id: &str) -> Value {
+    json!({"type":"server_tool_use", "id":id, "name":"web_search", "input":{"query":"synthetic query"}})
+}
+
+fn hc001_result(id: &str) -> Value {
+    json!({"type":"web_search_tool_result", "tool_use_id":id,
+        "content":[{"type":"web_search_result", "url":"https://example.com/hc001",
+            "title":"Synthetic received result", "encrypted_content":" exact encrypted result\n "}]})
+}
+
+fn hc001_prefix(
+    wire: &Messages,
+    blocks: &[Value],
+    close_last: bool,
+) -> completion::CompletionResponse {
+    let mut frames = vec![json!({"type":"message_start", "message":{
+        "type":"message", "id":"msg_hc001", "role":"assistant", "model":wire.model,
+        "content":[], "stop_reason":null, "stop_sequence":null,
+        "usage":{"input_tokens":3,"output_tokens":0}}})];
+    for (index, block) in blocks.iter().enumerate() {
+        frames.push(json!({"type":"content_block_start", "index":index, "content_block":block}));
+        if close_last || index + 1 < blocks.len() {
+            frames.push(json!({"type":"content_block_stop", "index":index}));
+        }
+    }
+    let (response, ended) = crate::test_utils::history_conformance::partial(
+        wire,
+        Mode::Streaming,
+        frames
+            .iter()
+            .map(|frame| WireFrame::Text(frame.to_string())),
+    );
+    assert!(!ended, "the synthetic prefix has no provider end");
+    assert!(matches!(response.stop(), message::StopReason::Aborted(_)));
+    assert_eq!(response.raw["content"], json!(blocks));
+    response
+}
+
+fn hc001_complete(
+    wire: &Messages,
+    blocks: Vec<Value>,
+    reason: &str,
+) -> completion::CompletionResponse {
+    let raw = json!({"type":"message", "id":"msg_hc001_complete", "role":"assistant",
+        "model":wire.model, "content":blocks, "stop_reason":reason, "stop_sequence":null,
+        "usage":{"input_tokens":3,"output_tokens":5}});
+    crate::test_utils::decode_reply(
+        wire,
+        &CompletionRequest::new("synthetic fixture"),
+        Mode::Unary,
+        [WireFrame::Text(raw.to_string())],
+        raw,
+    )
+    .expect("actual Messages decoder and fold")
+}
+
+fn hc001_request(
+    source: &completion::CompletionResponse,
+    next: Option<message::Message>,
+) -> CompletionRequest {
+    let mut history = vec![message::Message::user("q")];
+    if let Some(turn) = source.message() {
+        history.push(turn);
+    }
+    history.extend(next);
+    CompletionRequest::from(history).max_tokens(64)
+}
+
+// Tuple return permits custody assertions without a Result-returning assertion helper.
+fn hc001_encode(
+    wire: &Messages,
+    request: &CompletionRequest,
+    sources: &[&completion::CompletionResponse],
+    prepared: bool,
+) -> (Result<Value, ProviderError>, ()) {
+    let history = request.chat_history.clone();
+    let history_serde = serde_json::to_vec(&history).expect("complete history serde");
+    let raw_options = request.additional_params.clone();
+    let before: Vec<_> = sources
+        .iter()
+        .map(|source| {
+            (
+                (**source).clone(),
+                serde_json::to_vec(*source).expect("complete received response serde"),
+            )
+        })
+        .collect();
+    let result = if prepared {
+        Completion::prepare(request.clone(), &wire.describe())
+    } else {
+        Ok(request.clone())
+    }
+    .and_then(|request| {
+        wire.encode(request, Mode::Unary)
+            .map(|encoded| json_body(&encoded.request))
+            .map_err(ProviderError::from)
+    });
+    assert_eq!(request.chat_history, history);
+    assert_eq!(
+        serde_json::to_vec(&request.chat_history).expect("history after"),
+        history_serde
+    );
+    assert_eq!(request.additional_params, raw_options);
+    for (source, (saved, serde)) in sources.iter().zip(before) {
+        assert_eq!(
+            **source, saved,
+            "whole genuine received response/raw/choice stays exact"
+        );
+        assert_eq!(serde_json::to_vec(*source).expect("source after"), serde);
+    }
+    (result, ())
+}
+
+fn hc001_refused(result: Result<Value, ProviderError>) {
+    let error = result.expect_err("unresolved aborted hosted occurrence refuses");
+    let ProviderError::Request(source) = error else {
+        panic!("native Request refusal");
+    };
+    assert_eq!(source.to_string(), HC001_REFUSAL);
+}
+
+fn hc001_body(messages: Vec<Value>) -> Value {
+    json!({"model":CLAUDE_SONNET_4_6, "max_tokens":64, "messages":messages})
+}
+
+fn hc001_user(text: &str) -> Value {
+    json!({"role":"user", "content":[{"type":"text","text":text}]})
+}
+fn hc001_assistant(parts: Vec<Value>) -> Value {
+    json!({"role":"assistant", "content":parts})
+}
+
+#[test]
+fn hc001_closed_aborted_use_refuses_native_encode_and_prepared_model_without_transport() {
+    let wire = hc001_wire();
+    let source = hc001_prefix(&wire, &[hc001_use("srv_hc001")], true);
+    let request = hc001_request(&source, Some(message::Message::user("next")));
+    for prepared in [false, true] {
+        hc001_refused(hc001_encode(&wire, &request, &[&source], prepared).0);
+    }
+    let before = source.clone();
+    let history = request.chat_history.clone();
+    let client = crate::test_utils::RecordingHttpClient::new("no transport reply may be read");
+    let model = crate::driver::Model::new(wire, client.clone());
+    let error = match model.prepare_exchange(request.clone(), Mode::Unary) {
+        Err(error) => error,
+        Ok(_) => panic!("actual Model preparation must refuse before opening transport"),
+    };
+    let ProviderError::Request(cause) = error else {
+        panic!("Model preserves the Request refusal");
+    };
+    assert_eq!(cause.to_string(), HC001_REFUSAL);
+    assert!(client.requests().is_empty());
+    assert_eq!(request.chat_history, history);
+    assert_eq!(source, before);
+}
+
+#[test]
+fn hc001_same_and_later_assistant_results_admit_exact_received_bodies() {
+    let wire = hc001_wire();
+    let used = hc001_use("srv_hc001");
+    let result = hc001_result("srv_hc001");
+    let same = hc001_prefix(&wire, &[used.clone(), result.clone()], true);
+    let request = hc001_request(&same, Some(message::Message::user("next")));
+    for prepared in [false, true] {
+        assert_eq!(
+            hc001_encode(&wire, &request, &[&same], prepared)
+                .0
+                .expect("same-response pairing"),
+            hc001_body(vec![
+                hc001_user("q"),
+                hc001_assistant(vec![used.clone(), result.clone()]),
+                hc001_user("next")
+            ])
+        );
+    }
+    let first = hc001_prefix(&wire, &[used.clone()], true);
+    let later = hc001_complete(&wire, vec![result.clone()], "end_turn");
+    let request = CompletionRequest::from(vec![
+        message::Message::user("q"),
+        first.message().expect("first received turn"),
+        later.message().expect("later received turn"),
+        message::Message::user("next"),
+    ])
+    .max_tokens(64);
+    for prepared in [false, true] {
+        assert_eq!(
+            hc001_encode(&wire, &request, &[&first, &later], prepared)
+                .0
+                .expect("later-response pairing"),
+            hc001_body(vec![
+                hc001_user("q"),
+                hc001_assistant(vec![used.clone()]),
+                hc001_assistant(vec![result.clone()]),
+                hc001_user("next")
+            ])
+        );
+    }
+}
+
+#[test]
+fn hc001_wrong_previous_or_reused_id_results_never_certify_an_older_occurrence() {
+    let wire = hc001_wire();
+    for blocks in [
+        vec![hc001_use("srv_hc001"), hc001_result("srv_other")],
+        vec![hc001_result("srv_hc001"), hc001_use("srv_hc001")],
+        vec![
+            hc001_use("srv_hc001"),
+            hc001_use("srv_hc001"),
+            hc001_result("srv_hc001"),
+        ],
+        vec![hc001_use("srv_hc001"), hc001_result("")],
+    ] {
+        let source = hc001_prefix(&wire, &blocks, true);
+        let request = hc001_request(&source, Some(message::Message::user("next")));
+        for prepared in [false, true] {
+            hc001_refused(hc001_encode(&wire, &request, &[&source], prepared).0);
+        }
+    }
+    let first = hc001_prefix(&wire, &[hc001_use("srv_hc001")], true);
+    let reused = hc001_complete(
+        &wire,
+        vec![hc001_use("srv_hc001"), hc001_result("srv_hc001")],
+        "end_turn",
+    );
+    let request = CompletionRequest::from(vec![
+        message::Message::user("q"),
+        first.message().expect("first occurrence"),
+        reused.message().expect("new occurrence"),
+        message::Message::user("next"),
+    ])
+    .max_tokens(64);
+    for prepared in [false, true] {
+        hc001_refused(hc001_encode(&wire, &request, &[&first, &reused], prepared).0);
+    }
+}
+
+#[test]
+fn hc001_results_only_continuation_allows_a_later_hosted_result_before_new_input() {
+    let wire = hc001_wire();
+    let client_raw = json!({"type":"tool_use", "id":"toolu_hc001", "name":"lookup", "input":{"q":"synthetic query"}});
+    let source = hc001_prefix(&wire, &[hc001_use("srv_hc001"), client_raw.clone()], true);
+    let call = source
+        .tool_calls()
+        .next()
+        .expect("real ordinary client call");
+    let output = message::Message::User {
+        content: vec![message::UserContent::ToolResult(
+            call.result(vec![message::ToolResultContent::text("client result")]),
+        )],
+    };
+    let later = hc001_complete(&wire, vec![hc001_result("srv_hc001")], "end_turn");
+    let request = CompletionRequest::from(vec![
+        message::Message::user("q"),
+        source.message().expect("mixed source"),
+        output,
+        later.message().expect("later hosted result"),
+        message::Message::user("next"),
+    ])
+    .max_tokens(64);
+    // Direct native encoding keeps this received client block and result. Shared
+    // failed-turn adaptation has its separate existing client-call disposition.
+    assert_eq!(
+        hc001_encode(&wire, &request, &[&source, &later], false)
+            .0
+            .expect("mixed continuation"),
+        hc001_body(vec![
+            hc001_user("q"),
+            hc001_assistant(vec![hc001_use("srv_hc001"), client_raw]),
+            json!({"role":"user", "content":[{"type":"tool_result", "tool_use_id":"toolu_hc001",
+                "content":[{"type":"text","text":"client result"}]}]}),
+            hc001_assistant(vec![hc001_result("srv_hc001")]),
+            hc001_user("next")
+        ])
+    );
+    assert_eq!(
+        hc001_encode(&wire, &request, &[&source, &later], true)
+            .0
+            .expect("prepared continuation"),
+        hc001_body(vec![
+            hc001_user("q"),
+            hc001_assistant(vec![hc001_use("srv_hc001")]),
+            hc001_assistant(vec![hc001_result("srv_hc001")]),
+            hc001_user("next")
+        ])
+    );
+    let no_result = hc001_request(
+        &source,
+        Some(message::Message::User {
+            content: vec![message::UserContent::ToolResult(
+                call.result(vec![message::ToolResultContent::text("client result")]),
+            )],
+        }),
+    );
+    let direct = hc001_encode(&wire, &no_result, &[&source], false)
+        .0
+        .expect("results-only continuation stays open");
+    assert_eq!(
+        direct,
+        hc001_body(vec![
+            hc001_user("q"),
+            hc001_assistant(vec![
+                hc001_use("srv_hc001"),
+                json!({"type":"tool_use", "id":"toolu_hc001", "name":"lookup", "input":{"q":"synthetic query"}})
+            ]),
+            json!({"role":"user", "content":[{"type":"tool_result", "tool_use_id":"toolu_hc001",
+            "content":[{"type":"text","text":"client result"}]}]})
+        ])
+    );
+}
+
+#[test]
+fn hc001_no_new_input_and_wire_omitted_blank_user_text_stay_open() {
+    let wire = hc001_wire();
+    let source = hc001_prefix(&wire, &[hc001_use("srv_hc001")], true);
+    for next in [
+        None,
+        Some(message::Message::user("")),
+        Some(message::Message::user(" \n\t ")),
+    ] {
+        let request = hc001_request(&source, next);
+        for prepared in [false, true] {
+            assert_eq!(
+                hc001_encode(&wire, &request, &[&source], prepared)
+                    .0
+                    .expect("no ordinary user boundary"),
+                hc001_body(vec![
+                    hc001_user("q"),
+                    hc001_assistant(vec![hc001_use("srv_hc001")])
+                ])
+            );
+        }
+    }
+}
+
+#[test]
+fn hc001_nonblank_text_and_non_tool_result_media_are_new_input_boundaries() {
+    let wire = hc001_wire();
+    let source = hc001_prefix(&wire, &[hc001_use("srv_hc001")], true);
+    for input in [
+        message::UserContent::text(" next "),
+        message::UserContent::Image(message::Image {
+            data: message::DocumentSourceKind::url("https://example.com/synthetic.png"),
+            media_type: None,
+            detail: None,
+            native: None,
+        }),
+    ] {
+        let request = hc001_request(
+            &source,
+            Some(message::Message::User {
+                content: vec![input],
+            }),
+        );
+        for prepared in [false, true] {
+            hc001_refused(hc001_encode(&wire, &request, &[&source], prepared).0);
+        }
+    }
+}
+
+#[test]
+fn hc001_non_aborted_stops_and_an_open_hosted_input_preserve_the_existing_routes() {
+    let wire = hc001_wire();
+    for reason in [
+        "end_turn",
+        "pause_turn",
+        "max_tokens",
+        "tool_use",
+        "refusal",
+    ] {
+        let source = hc001_complete(&wire, vec![hc001_use("srv_hc001")], reason);
+        let request = hc001_request(&source, Some(message::Message::user("next")));
+        for prepared in [false, true] {
+            assert_eq!(
+                hc001_encode(&wire, &request, &[&source], prepared)
+                    .0
+                    .expect("non-Aborted carrier route"),
+                hc001_body(vec![
+                    hc001_user("q"),
+                    hc001_assistant(vec![hc001_use("srv_hc001")]),
+                    hc001_user("next")
+                ])
+            );
+        }
+    }
+    let open = hc001_prefix(&wire, &[hc001_use("srv_hc001")], false);
+    assert!(
+        open.choice.is_empty(),
+        "actual decoder withholds the open protected use"
+    );
+    for prepared in [false, true] {
+        assert_eq!(
+            hc001_encode(
+                &wire,
+                &hc001_request(&open, Some(message::Message::user("next"))),
+                &[&open],
+                prepared
+            )
+            .0
+            .expect("open source route"),
+            hc001_body(vec![hc001_user("q"), hc001_user("next")])
+        );
+    }
+}
+
+#[test]
+fn hc001_ordinary_client_calls_and_non_hosted_carried_text_do_not_become_server_uses() {
+    let wire = hc001_wire();
+    let client = json!({"type":"tool_use", "id":"toolu_hc001", "name":"lookup", "input":{}});
+    let source = hc001_prefix(&wire, &[client.clone()], true);
+    let request = hc001_request(&source, Some(message::Message::user("next")));
+    assert_eq!(
+        hc001_encode(&wire, &request, &[&source], false)
+            .0
+            .expect("ordinary native client route"),
+        hc001_body(vec![
+            hc001_user("q"),
+            hc001_assistant(vec![client]),
+            hc001_user("next")
+        ])
+    );
+    assert_eq!(
+        hc001_encode(&wire, &request, &[&source], true)
+            .0
+            .expect("shared failed client omission unchanged"),
+        hc001_body(vec![hc001_user("q"), hc001_user("next")])
+    );
+    let text_source = hc001_complete(
+        &wire,
+        vec![json!({"type":"text", "text":"synthetic known text"})],
+        "pause_turn",
+    );
+    let mut request = hc001_request(&text_source, Some(message::Message::user("next")));
+    // Labelled synthetic stop boundary on genuinely decoded inspection text.
+    let message::Message::Assistant(turn) = &mut request.chat_history[1] else {
+        panic!("real head clone");
+    };
+    turn.stop = Some(message::StopReason::Aborted(
+        "synthetic stop boundary".to_owned(),
+    ));
+    for prepared in [false, true] {
+        assert_eq!(
+            hc001_encode(&wire, &request, &[&text_source], prepared)
+                .0
+                .expect("other carried class"),
+            hc001_body(vec![
+                hc001_user("q"),
+                hc001_assistant(vec![json!({"type":"text","text":"synthetic known text"})]),
+                hc001_user("next")
+            ])
+        );
+    }
+}
+
+#[test]
+fn hc001_compatible_dialects_keep_original_hosted_shapes_and_proper_carrier_refusals() {
+    for dialect in [
+        &super::super::wire::MOONSHOT,
+        &super::super::wire::ZAI,
+        &super::super::wire::MINIMAX,
+        &super::super::wire::XIAOMIMIMO,
+    ] {
+        let wire =
+            AnthropicConfig::with_key(dialect, "synthetic-test-key").completion(CLAUDE_SONNET_4_6);
+        let source = hc001_prefix(&wire, &[hc001_use("srv_hc001")], true);
+        let request = hc001_request(&source, Some(message::Message::user("next")));
+        assert_eq!(
+            hc001_encode(&wire, &request, &[&source], false)
+                .0
+                .expect("compatible direct native route"),
+            hc001_body(vec![
+                hc001_user("q"),
+                hc001_assistant(vec![hc001_use("srv_hc001")]),
+                hc001_user("next")
+            ])
+        );
+        assert_eq!(
+            hc001_encode(&wire, &request, &[&source], true)
+                .0
+                .expect("compatible failed Opaque omission unchanged"),
+            hc001_body(vec![hc001_user("q"), hc001_user("next")])
+        );
+        let proper = hc001_prefix(&hc001_wire(), &[hc001_use("srv_hc001")], true);
+        let error = hc001_encode(
+            &wire,
+            &hc001_request(&proper, Some(message::Message::user("next"))),
+            &[&proper],
+            false,
+        )
+        .0
+        .expect_err("foreign proper carrier still refuses");
+        let ProviderError::Request(cause) = error else {
+            panic!("existing carried shape refusal");
+        };
+        assert!(
+            cause
+                .downcast_ref::<message::UnrepresentableOpaqueContent>()
+                .is_some()
+        );
+    }
+}
+
+#[test]
+fn hc001_raw_admission_and_messages_override_cannot_bypass_targeted_canonical_refusal() {
+    let wire = hc001_wire();
+    let source = hc001_prefix(
+        &wire,
+        &[hc001_use("srv_hc001"), hc001_result("srv_hc001")],
+        true,
+    );
+    let mut request = hc001_request(&source, Some(message::Message::user("next")));
+    request.additional_params = Some(json!({"metadata":{"user_id":"synthetic exact metadata"},
+        "temperature":0.125, "messages":[{"role":"user","content":"synthetic raw replacement"}]}));
+    for prepared in [false, true] {
+        assert_eq!(
+            hc001_encode(&wire, &request, &[&source], prepared)
+                .0
+                .expect("existing admitted raw merge"),
+            json!({"model":CLAUDE_SONNET_4_6, "max_tokens":64, "temperature":0.125,
+                "metadata":{"user_id":"synthetic exact metadata"},
+                "messages":[{"role":"user","content":"synthetic raw replacement"}]})
+        );
+    }
+    let unresolved = hc001_prefix(&wire, &[hc001_use("srv_hc001")], true);
+    request.chat_history =
+        hc001_request(&unresolved, Some(message::Message::user("next"))).chat_history;
+    for prepared in [false, true] {
+        hc001_refused(hc001_encode(&wire, &request, &[&unresolved], prepared).0);
+    }
+    // Explicit scope limitation: raw-only server history has no canonical
+    // Aborted occurrence and is not certified by this policy.
+    let mut raw_only = CompletionRequest::new("canonical unrelated prompt").max_tokens(64);
+    let messages = json!([
+        hc001_user("q"),
+        hc001_assistant(vec![hc001_use("srv_hc001")]),
+        hc001_user("next")
+    ]);
+    raw_only.additional_params = Some(json!({"messages":messages}));
+    assert_eq!(
+        hc001_encode(&wire, &raw_only, &[], false)
+            .0
+            .expect("raw-only path remains outside policy"),
+        json!({"model":CLAUDE_SONNET_4_6,"max_tokens":64,"messages":messages})
+    );
+}
+
+#[test]
+fn hc001_original_shape_errors_precede_policy_and_policy_precedes_budget_and_cache_errors() {
+    let wire = hc001_wire();
+    let source = hc001_prefix(&wire, &[hc001_use("srv_hc001")], true);
+    for boundary in ["foreign", "edited", "malformed_result"] {
+        let mut request = hc001_request(&source, Some(message::Message::user("next")));
+        let message::Message::Assistant(turn) = &mut request.chat_history[1] else {
+            panic!("genuine head clone");
+        };
+        let mut extra = turn.content[0].clone();
+        let AssistantContent::CarriedText(part) = &mut extra else {
+            panic!("actual received carrier");
+        };
+        match boundary {
+            "foreign" => part.payload.provider = Some("synthetic foreign clone".to_owned()),
+            "edited" => {
+                part.content = message::CarriedTextContent::Opaque("synthetic edit".to_owned())
+            }
+            "malformed_result" => {
+                part.payload.item =
+                    json!({"type":"web_search_tool_result","tool_use_id":7,"content":[]})
+            }
+            _ => unreachable!("listed synthetic boundary"),
+        }
+        turn.content.push(extra);
+        let error = hc001_encode(&wire, &request, &[&source], false)
+            .0
+            .expect_err("shape refusal wins");
+        let ProviderError::Request(cause) = error else {
+            panic!("typed original shape refusal");
+        };
+        assert!(
+            cause
+                .downcast_ref::<message::UnrepresentableOpaqueContent>()
+                .is_some()
+        );
+    }
+    let mut request = hc001_request(&source, Some(message::Message::user("next")));
+    request.max_tokens = None;
+    let mut no_budget = wire.clone();
+    no_budget.default_max_tokens = None;
+    hc001_refused(hc001_encode(&no_budget, &request, &[&source], false).0);
+    request.chat_history = vec![message::Message::user("unrelated")];
+    let error = hc001_encode(&no_budget, &request, &[&source], false)
+        .0
+        .expect_err("existing budget refusal");
+    let ProviderError::Request(cause) = error else {
+        panic!("budget Request error");
+    };
+    assert_eq!(cause.to_string(), "`max_tokens` must be set for Anthropic");
+    let mut request = hc001_request(&source, Some(message::Message::user("next")));
+    request.options.cache = Some(completion::CacheRetention::Long);
+    request.additional_params = Some(json!({"cache_control":{"type":"ephemeral","ttl":"5m"}}));
+    hc001_refused(hc001_encode(&wire, &request, &[&source], false).0);
+    request.chat_history = vec![message::Message::user("unrelated")];
+    let error = hc001_encode(&wire, &request, &[&source], false)
+        .0
+        .expect_err("existing cache conflict");
+    let ProviderError::Request(cause) = error else {
+        panic!("cache Request error");
+    };
+    assert_eq!(
+        cause.to_string(),
+        "Raw top-level cache_control conflicts with the typed automatic caching TTL"
+    );
+}
+
+#[test]
+fn hc001_opaque_raw_sibling_and_empty_use_id_never_acquire_pairing_authority() {
+    let wire = hc001_wire();
+    let source = hc001_prefix(&wire, &[hc001_use("srv_hc001")], true);
+    let mut request = hc001_request(&source, Some(message::Message::user("next")));
+    let message::Message::Assistant(turn) = &mut request.chat_history[1] else {
+        panic!("genuine head clone");
+    };
+    // Synthetic raw sibling with no carried issuer does not certify the use.
+    turn.content.push(AssistantContent::Opaque(message::Opaque {
+        item: hc001_result("srv_hc001"),
+        replay: true,
+    }));
+    hc001_refused(hc001_encode(&wire, &request, &[&source], false).0);
+    let mut request = hc001_request(&source, Some(message::Message::user("next")));
+    let message::Message::Assistant(turn) = &mut request.chat_history[1] else {
+        panic!("genuine head clone");
+    };
+    let AssistantContent::CarriedText(part) = &mut turn.content[0] else {
+        panic!("actual carrier clone");
+    };
+    part.payload.item["id"] = json!("");
+    for prepared in [false, true] {
+        assert_eq!(
+            hc001_encode(&wire, &request, &[&source], prepared)
+                .0
+                .expect("empty ID stays on old route"),
+            hc001_body(vec![
+                hc001_user("q"),
+                hc001_assistant(vec![hc001_use("")]),
+                hc001_user("next")
+            ])
+        );
+    }
+}
+
+#[test]
+fn hc001_previous_response_and_result_after_new_input_do_not_certify_completion() {
+    let wire = hc001_wire();
+    let source = hc001_prefix(&wire, &[hc001_use("srv_hc001")], true);
+    let result = hc001_complete(&wire, vec![hc001_result("srv_hc001")], "end_turn");
+    for history in [
+        vec![
+            message::Message::user("q"),
+            result.message().expect("earlier result"),
+            source.message().expect("later use"),
+            message::Message::user("next"),
+        ],
+        vec![
+            message::Message::user("q"),
+            source.message().expect("earlier use"),
+            message::Message::user("next"),
+            result.message().expect("result after boundary"),
+        ],
+    ] {
+        let request = CompletionRequest::from(history).max_tokens(64);
+        for prepared in [false, true] {
+            hc001_refused(hc001_encode(&wire, &request, &[&source, &result], prepared).0);
+        }
+    }
+}
+
+#[test]
+fn hc001_provider_document_and_json_call_checks_keep_priority_over_hosted_policy() {
+    let wire = hc001_wire();
+    let source = hc001_prefix(&wire, &[hc001_use("srv_hc001")], true);
+    let mut request = hc001_request(&source, Some(message::Message::user("next")));
+    let message::Message::Assistant(turn) = &mut request.chat_history[1] else {
+        panic!("genuine head clone");
+    };
+    let AssistantContent::CarriedText(part) = &turn.content[0] else {
+        panic!("received hosted payload");
+    };
+    // Synthetic category clone retains the actual payload/issuer; no issuer is minted.
+    let payload = part.payload.clone();
+    turn.content
+        .push(AssistantContent::ProviderItem(message::ProviderItem {
+            payload,
+        }));
+    let error = hc001_encode(&wire, &request, &[&source], false)
+        .0
+        .expect_err("provider-item refusal wins");
+    let ProviderError::Request(cause) = error else {
+        panic!("existing provider Request refusal");
+    };
+    assert!(
+        cause
+            .downcast_ref::<message::UnreplayableProviderItem>()
+            .is_some()
+    );
+    let mut request = hc001_request(
+        &source,
+        Some(message::Message::User {
+            content: vec![message::UserContent::Document(message::Document {
+                data: message::DocumentData::File(message::DocumentSourceKind::url(
+                    "https://example.com/synthetic.txt",
+                )),
+                media_type: Some(message::DocumentMediaType::TXT),
+                additional_params: None,
+            })],
+        }),
+    );
+    let error = hc001_encode(&wire, &request, &[&source], false)
+        .0
+        .expect_err("document check wins");
+    let ProviderError::Request(cause) = error else {
+        panic!("existing document Request refusal");
+    };
+    assert_eq!(
+        cause.to_string(),
+        "Only string or base64 data is supported for plain text documents"
+    );
+    let client = hc001_complete(
+        &wire,
+        vec![json!({"type":"tool_use","id":"toolu_hc001","name":"lookup","input":{}})],
+        "tool_use",
+    );
+    let mut call = client.choice[0].clone();
+    let AssistantContent::ToolCall(tool) = &mut call else {
+        panic!("actual decoded client call");
+    };
+    tool.function.namespace = Some("synthetic namespace clone".to_owned());
+    request.chat_history =
+        hc001_request(&source, Some(message::Message::user("next"))).chat_history;
+    let message::Message::Assistant(turn) = &mut request.chat_history[1] else {
+        panic!("genuine head clone");
+    };
+    turn.content.push(call);
+    let error = hc001_encode(&wire, &request, &[&source, &client], false)
+        .0
+        .expect_err("JSON call shape wins");
+    let ProviderError::Request(cause) = error else {
+        panic!("existing call-kind Request refusal");
+    };
+    assert!(
+        matches!(cause.downcast_ref::<message::UnrepresentableToolCall>(),
+        Some(message::UnrepresentableToolCall::Namespace { wire, name, namespace })
+            if *wire == ANTHROPIC_MESSAGES_WIRE && name.as_str() == "lookup" && namespace == "synthetic namespace clone")
+    );
+}

@@ -182,8 +182,9 @@ pub(crate) fn drop_unbound_thinking(body: &mut Map<String, Value>) {
 ///
 /// When no `max_tokens` applies, an option is refused, `additional_params`
 /// is not an object or carries malformed `tools` or `cache_control`, the
-/// caching settings conflict, or a part has a form the wire's `encodes`
-/// refuses.
+/// caching settings conflict, a part has a form the wire's `encodes`
+/// refuses, or ordinary new user input follows an unresolved server use
+/// carried from an aborted Anthropic turn.
 pub(super) fn body(
     wire: &Messages,
     request: &CompletionRequest,
@@ -200,6 +201,7 @@ pub(super) fn body(
             }
         }
     }
+    check_aborted_hosted_replay(wire, &request.chat_history)?;
     if request.options.cache == Some(completion::CacheRetention::Long)
         && let Some(raw) = request
             .additional_params
@@ -242,6 +244,72 @@ pub(super) fn body(
     )
 }
 
+/// Refuse an unresolved received server use from an aborted turn before
+/// ordinary new user input. Results-only and no-new-input continuations stay open.
+fn check_aborted_hosted_replay(wire: &Messages, history: &[Message]) -> Result<(), EncodeError> {
+    use crate::completion::{Pairing, ReplayTarget};
+
+    if wire.provider.dialect.name != super::PROVIDER_NAME {
+        return Ok(());
+    }
+    let hosted = |block: &AssistantContent| match block {
+        AssistantContent::CarriedText(part) if carried_hosted(part) => wire
+            .hosted_pair(&part.payload.item)
+            .filter(|(_, id)| !id.is_empty()),
+        _ => None,
+    };
+    for (message_index, message) in history.iter().enumerate() {
+        let Message::Assistant(turn) = message else {
+            continue;
+        };
+        if !matches!(turn.stop, Some(message::StopReason::Aborted(_))) {
+            continue;
+        }
+        for (block_index, block) in turn.content.iter().enumerate() {
+            let Some((Pairing::Use, id)) = hosted(block) else {
+                continue;
+            };
+            let mut reused = false;
+            'later: for (later_index, later) in history.iter().enumerate().skip(message_index) {
+                match later {
+                    Message::Assistant(later_turn) => {
+                        let after = if later_index == message_index {
+                            block_index + 1
+                        } else {
+                            0
+                        };
+                        for next in later_turn.content.iter().skip(after) {
+                            let Some((side, next_id)) = hosted(next) else {
+                                continue;
+                            };
+                            if next_id != id {
+                                continue;
+                            }
+                            match side {
+                                Pairing::Use => reused = true,
+                                Pairing::Result if !reused => break 'later,
+                                Pairing::Result => {}
+                            }
+                        }
+                    }
+                    Message::User { content }
+                        if content.iter().any(|part| match part {
+                            UserContent::Text(text) => !text.text.trim().is_empty(),
+                            UserContent::ToolResult(_) => false,
+                            _ => true,
+                        }) =>
+                    {
+                        return Err(EncodeError::request(format!(
+                            "Cannot continue Anthropic Messages: an aborted turn's unresolved server call `{id}` must be resolved or removed from history before continuing"
+                        )));
+                    }
+                    Message::System { .. } | Message::User { .. } => {}
+                }
+            }
+        }
+    }
+    Ok(())
+}
 /// The wire's own encoding of `request`: messages, tools, the typed fields
 /// and the cache markers placed inside them.
 fn base(

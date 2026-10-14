@@ -338,3 +338,108 @@ fn r002_cut_hosted_request_evidence() {
     }
     panic!("the original rich prefix must expose the real carried hosted use");
 }
+/// Permanent policy control at the exact original rich-fixture cut 10.
+#[test]
+fn hc001_original_cut10_refuses_native_and_prepared_model_before_transport() {
+    let fixture = &ANTHROPIC_HISTORY;
+    let wire = fixture.wire(fixture.model);
+    let frames = fixture
+        .reply(Shape::Rich, Mode::Streaming)
+        .expect("unchanged original rich stream");
+    let frame_bytes: Vec<_> = frames
+        .iter()
+        .map(|frame| match frame {
+            WireFrame::Text(text) => text.clone(),
+            _ => panic!("the original rich frames are text"),
+        })
+        .collect();
+    let (response, ended) =
+        rig_history_conformance::partial(&wire, Mode::Streaming, frames.iter().take(10).cloned());
+    assert!(!ended);
+    let expected = json!({"type":"server_tool_use", "id":"srvtoolu_1",
+        "name":"web_search", "input":{"query":"rig"}});
+    let part = response
+        .choice
+        .iter()
+        .find_map(|block| match block {
+            AssistantContent::CarriedText(part)
+                if part.payload.item_type() == Some("server_tool_use") =>
+            {
+                Some(part)
+            }
+            _ => None,
+        })
+        .expect("exact cut 10 closes the genuine hosted use");
+    assert_eq!(part.payload.item, expected);
+    assert_eq!(part.payload.provider.as_deref(), Some("anthropic"));
+    assert_eq!(
+        part.payload.position,
+        rig_core::message::CarriedPosition::MessageContent {
+            item_index: 0,
+            part_index: 2
+        }
+    );
+    assert_eq!(
+        part.content,
+        rig_core::message::CarriedTextContent::Opaque(String::new())
+    );
+    assert_eq!(response.tool_calls().count(), 0);
+    let received_before = response.clone();
+    let received_serde = serde_json::to_vec(&response).expect("whole received response serde");
+    let history = vec![
+        Message::user("q"),
+        response.message().expect("genuine failed turn"),
+        Message::user("next"),
+    ];
+    let history_before = history.clone();
+    let history_serde = serde_json::to_vec(&history).expect("whole original history serde");
+    let describe = wire.describe();
+    let adapted =
+        rig_core::completion::history::adapt(&history, describe.replay.expect("real target"));
+    assert!(matches!(&adapted[1], Message::Assistant(turn)
+        if matches!(turn.stop, Some(rig_core::message::StopReason::Aborted(_)))
+            && turn.content.len() == 1
+            && matches!(&turn.content[0], AssistantContent::CarriedText(part) if part.payload.item == expected)));
+    let request = CompletionRequest::from(adapted.clone());
+    let direct = wire
+        .encode(request, Mode::Unary)
+        .expect_err("the exact original carrier now refuses at native encode");
+    let expected_error = "Cannot continue Anthropic Messages: an aborted turn's unresolved server call `srvtoolu_1` must be resolved or removed from history before continuing";
+    let rig_core::error::ProviderError::Request(cause) =
+        rig_core::error::ProviderError::from(direct)
+    else {
+        panic!("native Request refusal");
+    };
+    assert_eq!(cause.to_string(), expected_error);
+    let client = rig_core::test_utils::RecordingHttpClient::new("no transport reply may be read");
+    let model = rig_core::driver::Model::new(wire, client.clone());
+    let failure = match model.stream(CompletionRequest::from(history.clone())) {
+        Err(error) => error,
+        Ok(_) => panic!("Model must refuse during preparation before opening transport"),
+    };
+    let rig_core::error::ProviderError::Request(cause) = failure else {
+        panic!("prepared Model Request refusal");
+    };
+    assert_eq!(cause.to_string(), expected_error);
+    assert!(client.requests().is_empty());
+    assert_eq!(response, received_before);
+    assert_eq!(
+        serde_json::to_vec(&response).expect("source after"),
+        received_serde
+    );
+    assert_eq!(history, history_before);
+    assert_eq!(
+        serde_json::to_vec(&history).expect("history after"),
+        history_serde
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| match frame {
+                WireFrame::Text(text) => text.clone(),
+                _ => panic!("original text frame"),
+            })
+            .collect::<Vec<_>>(),
+        frame_bytes
+    );
+}
