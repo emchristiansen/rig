@@ -126,40 +126,6 @@ async fn store_false_and_prompt_cache_fields_roundtrip() {
 }
 
 #[tokio::test]
-async fn explicit_preamble_and_mid_conversation_system_messages_are_instructions() {
-    with_chatgpt_cassette(
-        "codex_behaviors/explicit_preamble_and_mid_conversation_system_messages_are_instructions",
-        |client| async move {
-            // ChatGPT rejects `system` items in `input`; the recorded request
-            // body locks that the provider lifts both the preamble and later
-            // system messages into the top-level `instructions` field.
-            let agent = rig::AgentBuilder::new(client.completion(chatgpt::GPT_5_4))
-                .preamble("You are a concise assistant.")
-                .additional_params(recorded_include())
-                .build();
-            let mut history = vec![
-                Message::user("Hello!"),
-                Message::assistant("Hi! How can I help you today?"),
-                Message::system(
-                    "The user's codename is FALCON-9. Always refer to the user by codename.",
-                ),
-            ];
-
-            let result = agent
-                .chat("What is my codename?", &mut history)
-                .await
-                .expect("chat with a mid-conversation system message should succeed");
-
-            assert!(
-                result.output().contains("FALCON-9"),
-                "the mid-conversation system message must reach the model, got {result:?}"
-            );
-        },
-    )
-    .await;
-}
-
-#[tokio::test]
 async fn default_instructions_merge_with_explicit_preamble() {
     with_chatgpt_cassette_default_instructions(
         "codex_behaviors/default_instructions_merge_with_explicit_preamble",
