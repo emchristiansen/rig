@@ -619,7 +619,8 @@ async fn envelope_less_reasoning_deltas_are_superseded_without_duplication() {
     let reasoning: Vec<_> = choice
         .iter()
         .filter_map(|content| match content {
-            AssistantContent::Reasoning(reasoning) => Some(reasoning),
+            AssistantContent::Reasoning(reasoning) => Some(reasoning.text.clone()),
+            AssistantContent::CarriedReasoning(reasoning) => Some(reasoning.display_text()),
             _ => None,
         })
         .collect();
@@ -627,7 +628,7 @@ async fn envelope_less_reasoning_deltas_are_superseded_without_duplication() {
         panic!("deltas and their done block must collapse to one reasoning item: {reasoning:?}");
     };
     assert_eq!(
-        reasoning.text.matches(summary).count(),
+        reasoning.matches(summary).count(),
         1,
         "the restated summary must supersede its deltas, not duplicate them"
     );
