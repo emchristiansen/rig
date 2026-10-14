@@ -205,6 +205,3 @@ async fn unicode_split_across_stream_chunks_reassembles() {
     );
 }
 
-/// An 8 KiB tool result reaches the model intact.
-
-/// A system message plus a multi-turn history keeps its order.
