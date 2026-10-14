@@ -10,6 +10,8 @@
 //! Cassette IDs are scrub placeholders; assertions derive expected IDs from
 //! the recorded turn and never mint literal IDs.
 
+mod parallel_function_capture;
+
 use futures::StreamExt;
 use rig::completion::FinishReason;
 use rig::completion::{CompletionResponse, Effort};
