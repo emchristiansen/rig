@@ -61,6 +61,7 @@ async fn drain_stream(mut stream: rig::streaming::CompletionStream) -> StreamRun
                 // A closed assembly has no completed call to project.
             }
             Item::Event(StreamEvent::Start { .. })
+            | Item::Event(StreamEvent::Resume { .. })
             | Item::Event(StreamEvent::Arguments { .. })
             | Item::Event(StreamEvent::End { .. })
             | Item::Unknown(_) => {}
