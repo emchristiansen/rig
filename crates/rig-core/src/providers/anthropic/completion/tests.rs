@@ -4874,7 +4874,16 @@ fn hc001_prefix(
     );
     assert!(!ended, "the synthetic prefix has no provider end");
     assert!(matches!(response.stop(), message::StopReason::Aborted(_)));
-    assert_eq!(response.raw["content"], json!(blocks));
+    // The cut helper supplies a null Reply.raw; reconstruction is a separate view.
+    assert_eq!(response.raw, Value::Null);
+    use crate::wire::document::Reassemble as _;
+    let mut document = wire.reassembler();
+    for frame in &frames {
+        document.absorb(&WireFrame::Text(frame.to_string()));
+    }
+    let mut expected_document = frames[0]["message"].clone();
+    expected_document["content"] = json!(blocks);
+    assert_eq!(document.finish(), expected_document);
     response
 }
 
