@@ -416,6 +416,7 @@ pub fn assert_valid_event_stream(
         .iter()
         .filter_map(|content| match content {
             AssistantContent::Text(text) => Some(text.text.as_str()),
+            AssistantContent::CarriedText(text) => Some(text.text()),
             _ => None,
         })
         .collect();
@@ -466,14 +467,17 @@ pub fn assert_valid_event_stream(
         matches!(
             event,
             StreamEvent::End {
-                content: AssistantContent::Reasoning(_),
+                content: AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_),
                 ..
             }
         )
     });
-    let aggregated_reasoning = choice
-        .iter()
-        .any(|content| matches!(content, AssistantContent::Reasoning(_)));
+    let aggregated_reasoning = choice.iter().any(|content| {
+        matches!(
+            content,
+            AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)
+        )
+    });
     assert!(
         yielded_reasoning || !aggregated_reasoning,
         "law 5 (reasoning provenance): aggregated reasoning with no reasoning yielded"
@@ -562,6 +566,18 @@ impl DrainedStream {
             .iter()
             .filter_map(|content| match content {
                 AssistantContent::Text(text) => Some(text.text.as_str()),
+                AssistantContent::CarriedText(text) => Some(text.text()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn choice_reasoning_texts(&self) -> Vec<String> {
+        self.choice
+            .iter()
+            .filter_map(|content| match content {
+                AssistantContent::Reasoning(reasoning) => Some(reasoning.text.clone()),
+                AssistantContent::CarriedReasoning(reasoning) => Some(reasoning.display_text()),
                 _ => None,
             })
             .collect()
@@ -1171,6 +1187,7 @@ pub async fn terminal_body_content_merges_per_kind(
             .iter()
             .filter_map(|content| match content {
                 AssistantContent::Text(text) => Some(text.text.as_str()),
+                AssistantContent::CarriedText(text) => Some(text.text()),
                 _ => None,
             })
             .collect();
@@ -1307,10 +1324,10 @@ pub async fn reasoning_summary_deltas_are_superseded_without_duplication(
         drained.completed_cleanly(),
         || "the reasoning stream must complete without errors",
     )?;
-    let reasoning = drained.choice_reasoning();
+    let reasoning = drained.choice_reasoning_texts();
     let occurrences: usize = reasoning
         .iter()
-        .map(|item| item.text.matches(summary_text).count())
+        .map(|text| text.matches(summary_text).count())
         .sum();
     checks.require(occurrences == 1, || {
         format!(
@@ -1422,14 +1439,14 @@ pub async fn interleaved_reasoning_aggregates_to_one_item(
         drained.completed_cleanly(),
         || "the interleaved stream must complete without errors",
     )?;
-    let reasoning = drained.choice_reasoning();
+    let reasoning = drained.choice_reasoning_texts();
     checks.require(reasoning.len() == 1, || {
         format!(
             "interleaved deltas and their completed block must collapse to one reasoning item, observed {}",
             reasoning.len()
         )
     })?;
-    let carries_text = reasoning.iter().any(|item| item.text == expected_text);
+    let carries_text = reasoning.iter().any(|text| text == expected_text);
     checks.require(carries_text, || {
         format!("the reasoning item must carry the completed block's text {expected_text:?}")
     })?;
@@ -1504,9 +1521,19 @@ pub async fn interleaved_signed_full_reasoning_does_not_erase_prior_thought(
     )?;
     assert_reasoning_tool_reasoning(&checks, &drained, first, tool_name, second)?;
     let signed = drained
-        .choice_reasoning()
-        .last()
-        .is_some_and(|reasoning| reasoning.native.is_some());
+        .choice
+        .iter()
+        .rev()
+        .find(|content| matches!(content, AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)))
+        .is_some_and(|content| match content {
+            AssistantContent::CarriedReasoning(reasoning) => reasoning.content.iter().any(|part| {
+                matches!(part, crate::message::CarriedReasoningPart::Text { signature: Some(_), .. })
+            }),
+            AssistantContent::Reasoning(reasoning) => reasoning.native.as_ref().is_some_and(|native| {
+                native.item.get("thoughtSignature").and_then(serde_json::Value::as_str).is_some()
+            }),
+            _ => false,
+        });
     checks.require(signed, || "the post-boundary block must keep its signature")?;
 
     checks.note("pre-boundary thought survived; signed block completed the post-boundary part");
@@ -2589,3 +2616,6 @@ pub mod fixtures {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
