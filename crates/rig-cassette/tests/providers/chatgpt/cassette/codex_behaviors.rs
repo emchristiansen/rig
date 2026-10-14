@@ -188,3 +188,6 @@ async fn default_instructions_merge_with_explicit_preamble() {
     )
     .await;
 }
+
+#[cfg(test)]
+mod explicit_history_tests;
