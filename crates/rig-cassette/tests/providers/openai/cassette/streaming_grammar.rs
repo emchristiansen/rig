@@ -527,6 +527,7 @@ async fn structured_output_stream_yields_schema_conformant_text() {
                 .iter()
                 .filter_map(|content| match content {
                     AssistantContent::Text(text) => Some(text.text.as_str()),
+                    AssistantContent::CarriedText(text) => Some(text.text()),
                     _ => None,
                 })
                 .collect();
