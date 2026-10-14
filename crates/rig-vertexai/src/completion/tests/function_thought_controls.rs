@@ -97,7 +97,7 @@ fn actual_vertex_native_call_replays_true_signature_metadata_and_whole_part_unch
     let AssistantContent::ToolCall(call) = block else { panic!("real decoded function call") };
     assert_eq!(call.id, rig_core::message::CallId::from_wire("call_1"));
     assert_eq!(call.function.name.as_str(), "lookup");
-    assert_eq!(call.function.arguments, json!({"q":"x"}));
+    assert_eq!(call.function.arguments_value(), json!({"q":"x"}));
     let before_raw = response.raw.clone();
     for prepared in [false, true] {
         let request = request(call.clone(), response.message().expect("genuine received turn"));

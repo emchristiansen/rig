@@ -91,7 +91,7 @@ async fn actual_rest_native_call_replays_true_signature_metadata_and_whole_part_
     let AssistantContent::ToolCall(call) = block else { panic!("real decoded function call") };
     assert_eq!(call.id, crate::message::CallId::from_wire("call_1"));
     assert_eq!(call.function.name.as_str(), "lookup");
-    assert_eq!(call.function.arguments, json!({"q":"x"}));
+    assert_eq!(call.function.arguments_value(), json!({"q":"x"}));
     for prepared in [false, true] {
         let body = encoded(request(call.clone(), response.message().expect("genuine received turn")),
             "gemini-2.5-flash", prepared);
