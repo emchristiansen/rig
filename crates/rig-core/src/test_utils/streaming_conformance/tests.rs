@@ -370,3 +370,89 @@ async fn unsigned_interleaving_fixture_refuses_the_signature_requirement()
     assert_eq!(details, "the post-boundary block must keep its signature");
     Ok(())
 }
+
+// The event sequence is produced by the real Mock driver. Only the inserted
+// error observations below are synthetic.
+async fn law_one_completed_mock_text() -> Result<DrainedStream, ProviderError> {
+    let model = MockCompletionModel::from_stream_turns([vec![
+        MockStreamEvent::text("Paris"),
+        MockStreamEvent::final_response_with_total_tokens(6),
+    ]]);
+    let drained = fixtures::drain(model.stream(CompletionRequest::new(
+        "synthetic error observation control",
+    ))?)
+    .await;
+    assert!(drained.completed_cleanly());
+    assert_eq!(drained.texts().concat(), "Paris");
+    assert_eq!(drained.choice_texts(), vec!["Paris"]);
+    assert_eq!(model.request_count(), 1);
+    Ok(drained)
+}
+
+fn law_one_synthetic_corrupt_report() -> ErrorReport {
+    let Err(error) = serde_json::from_str::<serde_json::Value>("{") else {
+        panic!("the synthetic incomplete object must fail JSON parsing");
+    };
+    let error =
+        ProviderError::CorruptFrame(crate::error::CorruptFrame::text(None, "{", error).into());
+    let report = ErrorReport::from(&error);
+    assert!(matches!(
+        report.detail,
+        Some(crate::error::ErrorDetail::CorruptFrame(_))
+    ));
+    report
+}
+
+#[tokio::test]
+async fn law_one_typed_corrupt_report_allows_genuine_later_events() -> Result<(), ProviderError> {
+    let mut drained = law_one_completed_mock_text().await?;
+    drained
+        .items
+        .insert(0, Err(law_one_synthetic_corrupt_report()));
+    assert_valid_event_stream(&drained.items, &drained.choice);
+    Ok(())
+}
+
+#[tokio::test]
+async fn law_one_response_error_refuses_genuine_later_events() -> Result<(), ProviderError> {
+    let mut drained = law_one_completed_mock_text().await?;
+    // The message deliberately mentions corruption; it confers no recovery.
+    let report = ErrorReport::from(&ProviderError::Response("corrupt frame".to_owned()));
+    assert!(report.detail.is_none());
+    drained.items.insert(0, Err(report));
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_valid_event_stream(&drained.items, &drained.choice);
+    }));
+    let Err(panic) = failure else {
+        panic!("an ordinary Response error must be terminal");
+    };
+    assert!(panic_message(panic.as_ref()).contains("law 1 (terminal error)"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn law_one_missing_corrupt_detail_refuses_genuine_later_events() -> Result<(), ProviderError>
+{
+    let mut drained = law_one_completed_mock_text().await?;
+    let mut report = law_one_synthetic_corrupt_report();
+    report.detail = None;
+    drained.items.insert(0, Err(report));
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_valid_event_stream(&drained.items, &drained.choice);
+    }));
+    let Err(panic) = failure else {
+        panic!("an error without the typed corrupt detail must be terminal");
+    };
+    assert!(panic_message(panic.as_ref()).contains("law 1 (terminal error)"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn law_one_fatal_report_last_keeps_genuine_text_events() -> Result<(), ProviderError> {
+    let mut drained = law_one_completed_mock_text().await?;
+    let report = ErrorReport::from(&ProviderError::Response("fatal control".to_owned()));
+    assert!(report.detail.is_none());
+    drained.items.push(Err(report));
+    assert_valid_event_stream(&drained.items, &drained.choice);
+    Ok(())
+}

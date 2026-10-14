@@ -368,8 +368,8 @@ pub fn transport_error_chunk() -> http_client::Result<WireInput> {
 ///
 /// Laws (universal — they hold for truncated and errored streams too):
 ///
-/// 1. **Terminal error.** An error is the stream's last item: nothing
-///    follows it.
+/// 1. **Fatal error.** A fatal error is the stream's last item. Typed
+///    corrupt-frame errors permit later items.
 /// 2. **Text conservation.** The aggregated text is exactly the
 ///    concatenation of the yielded text deltas: accumulated delta content
 ///    equals the payload the aggregate delivers.
@@ -388,12 +388,17 @@ pub fn assert_valid_event_stream(
 ) {
     use crate::message::AssistantContent;
 
-    // Law 1: an error is the last item.
-    if let Some(error_index) = items.iter().position(Result::is_err) {
+    // Law 1: a fatal error is the last item.
+    if let Some(error_index) = items.iter().position(|item| {
+        matches!(item, Err(error) if !matches!(
+            &error.detail,
+            Some(crate::error::ErrorDetail::CorruptFrame(_))
+        ))
+    }) {
         assert_eq!(
             error_index + 1,
             items.len(),
-            "law 1 (terminal error): an item followed the stream's error"
+            "law 1 (terminal error): an item followed the stream's fatal error"
         );
     }
     let events: Vec<&StreamEvent> = items
