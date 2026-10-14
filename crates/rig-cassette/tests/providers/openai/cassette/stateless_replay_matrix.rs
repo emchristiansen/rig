@@ -31,7 +31,7 @@
 
 use futures::StreamExt;
 use rig::completion::ToolDefinition;
-use rig::message::{AssistantContent, Message, Text, ToolResultContent, UserContent};
+use rig::message::{AssistantContent, Message, ToolResultContent, UserContent};
 use rig::providers::openai;
 use serde_json::Value;
 
@@ -209,22 +209,29 @@ fn recorded_messages(body: &str) -> Vec<(String, String)> {
 fn text_block_items(response: &rig::completion::CompletionResponse) -> Vec<(String, String)> {
     texts(&response.choice)
         .into_iter()
-        .map(|text| {
-            let field = |key: &str| {
-                text.native
-                    .as_ref()
-                    .and_then(|native| native.item[key].as_str())
-                    .unwrap_or_default()
-                    .to_owned()
-            };
-            (field("id"), field("phase"))
+        .map(|content| match content {
+            AssistantContent::Text(text) => {
+                let field = |key: &str| {
+                    text.native
+                        .as_ref()
+                        .and_then(|native| native.item[key].as_str())
+                        .unwrap_or_default()
+                        .to_owned()
+                };
+                (field("id"), field("phase"))
+            }
+            AssistantContent::CarriedText(text) => (
+                text.item_id.clone().unwrap_or_default(),
+                text.phase.clone().unwrap_or_default(),
+            ),
+            _ => unreachable!("private texts projection selects known text only"),
         })
         .collect()
 }
 
 /// The text blocks the unary decoder makes of the recorded stream's own
 /// terminal response: the same content, stated at once.
-fn unary_text_of(model: &str, body: &str) -> Vec<Text> {
+fn unary_text_of(model: &str, body: &str) -> Vec<AssistantContent> {
     let wire =
         openai::responses_api::wire::Responses::new(openai::OpenAIConfig::new("unused"), model);
     let reply = rig_test_support::history_survival::portability::decode_whole_reply(
@@ -235,11 +242,20 @@ fn unary_text_of(model: &str, body: &str) -> Vec<Text> {
     texts(&reply.choice)
 }
 
-fn texts(choice: &[AssistantContent]) -> Vec<Text> {
+fn texts(choice: &[AssistantContent]) -> Vec<AssistantContent> {
     choice
         .iter()
         .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.clone()),
+            AssistantContent::Text(_) => Some(content.clone()),
+            AssistantContent::CarriedText(text)
+                if matches!(
+                    text.content,
+                    rig::message::CarriedTextContent::Text(_)
+                        | rig::message::CarriedTextContent::Refusal(_)
+                ) =>
+            {
+                Some(content.clone())
+            }
             _ => None,
         })
         .collect()
