@@ -13,6 +13,7 @@
 //! | --- | --- | --- |
 //! | [`tool_choice_specific_is_refused_on_the_streaming_path_too`] | the same, streaming | a guard covering one surface would let the old behaviour back |
 //! | tool result carrying an image | result: image | `image_tool_result.rs`, on the vision server |
+//! | [`the_smoke_tier_round_trip_is_covered_elsewhere`] | smoke-tier round trip | cross-references `tools::tools_roundtrip` rather than re-recording it |
 //!
 //! # Two interesting rows
 //!

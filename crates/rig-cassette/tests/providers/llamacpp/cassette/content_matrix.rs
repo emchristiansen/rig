@@ -9,6 +9,8 @@
 //! | Cell | Shape | Pinned |
 //! | --- | --- | --- |
 //! | [`an_answer_fully_consumed_by_a_stop_sequence_is_an_empty_turn`] | empty content | 200 on the wire, an empty successful turn |
+//! | [`consecutive_same_role_messages_are_sent_as_sent`] | user, user | rig does not merge or reorder them; the template accepts both |
+//! | [`unicode_split_across_stream_chunks_reassembles`] | emoji + CJK, streaming | multi-byte characters survive SSE chunk boundaries |
 //!
 //! # Why the empty-answer cell exists
 //!
