@@ -2128,3 +2128,77 @@ async fn a_context_window_terminal_never_dispatches_a_call_the_writer_did_not_fi
         }
     }
 }
+
+/// Synthetic signed-thinking-only context terminal at the real Messages and AgentRun boundary.
+#[test]
+fn a_context_limit_reasoning_only_turn_gets_conditional_output_budget_advice() {
+    use rig_core::providers::anthropic::{Anthropic, completion::CLAUDE_SONNET_4_6};
+    use rig_core::wire::{Mode, WireFrame};
+
+    let wire = Anthropic::new("test-key")
+        .completion(CLAUDE_SONNET_4_6)
+        .wire;
+    let body = json!({
+        "id":"msg_context_reasoning", "type":"message", "role":"assistant",
+        "model":CLAUDE_SONNET_4_6,
+        "content":[{"type":"thinking", "thinking":"thinking, never answering",
+            "signature":"c2ln"}],
+        "stop_reason":"model_context_window_exceeded", "stop_sequence":null,
+        "usage":{"input_tokens":1,"output_tokens":1}
+    });
+    let response = rig_core::test_utils::history::decode(
+        &wire,
+        Mode::Unary,
+        [WireFrame::Text(body.to_string())],
+    )
+    .expect("the genuine whole terminal decodes");
+    assert_eq!(response.raw, body);
+    assert_eq!(response.finish_reason(), Some(FinishReason::Length));
+    assert_eq!(response.error, None);
+    assert_eq!(response.head().stop, Some(StopReason::Length));
+    let [AssistantContent::Reasoning(reasoning)] = response.choice.as_slice() else {
+        panic!("the received signed thinking is the only canonical block");
+    };
+    assert_eq!(reasoning.text, "thinking, never answering");
+    assert_eq!(
+        reasoning
+            .native
+            .as_ref()
+            .expect("the genuine signed item")
+            .item,
+        body["content"][0]
+    );
+    assert_eq!(response.tool_calls().count(), 0);
+    let turn = ModelTurn::new(
+        response.head(),
+        response.choice.clone(),
+        response.usage.clone(),
+        policy(&["add"]),
+        response.raw.clone(),
+    )
+    .with_finish_reason(response.finish_reason());
+    let mut run = AgentRun::new("solve this");
+    let _ = expect_call_model(&mut run);
+    expect_continue(
+        run.model_response(turn)
+            .expect("the received turn enters resolution"),
+    );
+    let error = run
+        .next_step()
+        .expect_err("answerless context truncation still fails");
+    let PromptError::Provider(ProviderError::Response(message)) = error else {
+        panic!("the existing typed Response refusal is retained");
+    };
+    assert_eq!(
+        message,
+        "the model produced no answer and stopped with finish_reason=Length; \
+         the turn reached a token limit before producing one — \
+         if the limit was the output budget, raise max_tokens for this request"
+    );
+    assert_eq!(response.raw, body);
+    assert!(
+        run.new_messages
+            .iter()
+            .all(|message| !matches!(message, Message::Assistant(_)))
+    );
+}

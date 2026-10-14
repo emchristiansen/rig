@@ -125,7 +125,7 @@ impl ProviderToolDefinition {
 pub enum FinishReason {
     /// Natural end of the response.
     Stop,
-    /// The response hit the output-token limit.
+    /// A token limit, such as the output budget or context window, cut the response.
     Length,
     /// The model stopped to call one or more tools.
     ToolCalls,
@@ -155,13 +155,13 @@ impl FinishReason {
         matches!(self, Self::Length | Self::ContentFilter)
     }
 
-    /// Formats an answerless-turn diagnostic with budget or filtering advice
+    /// Formats an answerless-turn diagnostic with limit or filtering advice
     /// for known truncation reasons, and a generic explanation otherwise.
     pub fn no_answer_message(&self) -> String {
         let remedy = match self {
             Self::Length => {
-                "the turn ran out of output budget before producing one — \
-                 raise max_tokens for this request"
+                "the turn reached a token limit before producing one — \
+                 if the limit was the output budget, raise max_tokens for this request"
             }
             Self::ContentFilter => {
                 "the provider filtered the response — the content, not the \

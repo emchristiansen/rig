@@ -115,7 +115,7 @@ impl Origin {
 pub enum StopReason {
     /// The model finished.
     Stop,
-    /// The output-token limit cut the turn.
+    /// A token limit, such as the output budget or context window, cut the turn.
     Length,
     /// The model stopped to call tools.
     ToolUse,
