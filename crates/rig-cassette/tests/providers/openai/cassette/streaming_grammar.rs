@@ -438,13 +438,12 @@ async fn incomplete_mid_tool_call_normalizes_to_length() {
                 .completion(openai::GPT_5_6)
                 .map_wire(super::super::support::accepting_streamed_incomplete);
             let request = CompletionRequest::new(
-                    "Add 48151.62342 and 27182.81828 using the add tool. You must call the tool.",
-                )
-                .tool(rig::tool::tool_definition(&Adder))
-                .tool_choice(rig::message::ToolChoice::Required)
-                .max_tokens(16)
-                .additional_params(json!({ "reasoning": { "effort": "low" } }))
-                ;
+                "Add 48151.62342 and 27182.81828 using the add tool. You must call the tool.",
+            )
+            .tool(rig::tool::tool_definition(&Adder))
+            .tool_choice(rig::message::ToolChoice::Required)
+            .max_tokens(16)
+            .additional_params(json!({ "reasoning": { "effort": "low" } }));
             let run = drain_stream(model.stream(request).expect("stream should start")).await;
 
             assert_terminal(&run, FinishReason::Length);
@@ -617,10 +616,10 @@ async fn incomplete_max_output_tokens_normalizes_to_length() {
                 .openai
                 .completion(openai::GPT_5_6)
                 .map_wire(super::super::support::accepting_streamed_incomplete);
-            let request = CompletionRequest::new("Write a 300-word essay about the history of lighthouses.")
-                .max_tokens(32)
-                .additional_params(json!({ "reasoning": { "effort": "low" } }))
-                ;
+            let request =
+                CompletionRequest::new("Write a 300-word essay about the history of lighthouses.")
+                    .max_tokens(32)
+                    .additional_params(json!({ "reasoning": { "effort": "low" } }));
             let run = drain_stream(model.stream(request).expect("stream should start")).await;
 
             assert_terminal(&run, FinishReason::Length);
