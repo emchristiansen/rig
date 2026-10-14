@@ -24,10 +24,10 @@ use crate::cassettes::recorded_statuses_and_bodies;
 use super::super::cassette_support::*;
 const NO_THINK: &str = "/no_think ";
 use rig::completion::CompletionRequest;
-use rig::message::{Message, AssistantMessage, AssistantContent, UserContent, ToolResult, ToolResultContent, CallId, ToolName};
+use rig::message::{Message, UserContent};
 use serde_json::json;
 use crate::cassettes::{recorded_json_request, recorded_sse_json_frames};
-use crate::support::{assistant_text_response, collect_stream_final_response};
+use crate::support::collect_stream_final_response;
 
 /// A turn whose whole answer is eaten by a stop sequence is an empty turn:
 /// llama.cpp answers `200` with `finish_reason: "stop"` and `content: ""`,

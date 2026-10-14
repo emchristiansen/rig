@@ -43,7 +43,6 @@ use crate::support::{Adder, OperationArgs, Subtract};
 
 use super::super::cassette_support::*;
 use rig::completion::CompletionRequest;
-use rig::message::{Message, AssistantMessage, AssistantContent, UserContent, ToolResult, ToolResultContent, CallId, ToolName};
 use serde_json::json;
 use crate::cassettes::{recorded_json_request, recorded_statuses_and_bodies};
 
@@ -98,13 +97,6 @@ async fn tool_choice_specific_is_refused_on_the_streaming_path_too() {
 // Tool result payloads
 // ---------------------------------------------------------------------------
 
-fn lookup_call_turn(id: &str) -> Message {
-    Message::Assistant(AssistantMessage::new(vec![AssistantContent::tool_call(
-        id,
-        ToolName::new("lookup").expect("tool name"),
-        json!({}),
-    )]))
-}
 
 /// A tool result carrying plain text.
 
