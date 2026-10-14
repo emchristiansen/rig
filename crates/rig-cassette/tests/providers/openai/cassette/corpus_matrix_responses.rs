@@ -61,7 +61,7 @@ fn reasoning_wire_accepting_incomplete(
             .openai
             .completion(rig::providers::openai::GPT_5_MINI)
             .map_wire(super::super::support::accepting_streamed_incomplete),
-        thinking: cells::ThinkingWire::OpenAiResponses,
+        thinking: cells::ThinkingWire::OpenAiResponsesRecordedDefault,
         route: None,
         temperature: None,
         additional_params: None,
@@ -167,4 +167,66 @@ async fn reasoning_tool_unary() {
         },
     )
     .await;
+}
+
+#[test]
+fn capped_streamed_recorded_default_selector_keeps_the_original_input() {
+    use rig::providers::openai::{OpenAIConfig, Route};
+    use rig::test_utils::SequencedHttpClient;
+    use rig_test_support::cassette_models::OpenAiModels;
+
+    let http = SequencedHttpClient::new([]);
+    let config = OpenAIConfig::new("selector-control");
+    let client = OpenAiCassette {
+        openai: OpenAiModels::new(config.clone(), http.clone()),
+        chat: OpenAiModels::new(config.with_route(Route::Chat), http),
+    };
+    let cell = cells::REASONING_CAPPED_STREAMED;
+    assert_eq!(cell.thinking, cells::Thinking::On);
+    assert_eq!(cell.program.max_tokens, Some(16));
+    assert!(cell.program.streamed);
+    assert_eq!(cell.program.preamble, Some(cells::BASIC_PREAMBLE));
+    assert_eq!(cell.program.prompt, cells::BASIC_PROMPT);
+    assert_eq!(cell.program.hooks, &[crate::corpus_matrix::corpus::Hook::RecordSettled]);
+    assert!(matches!(
+        cell.program.ending,
+        crate::corpus_matrix::corpus::Ending::Failed(rig::error::ErrorKind::Response)
+    ));
+
+    let selected = reasoning_wire_accepting_incomplete(&client);
+    assert!(matches!(selected.thinking, cells::ThinkingWire::OpenAiResponsesRecordedDefault));
+    let program = selected.program(&cell);
+    let original = serde_json::json!({
+        "reasoning": {"effort": "low", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"]
+    });
+    assert_eq!(program.additional_params.expect("recorded caller parameters")(), original);
+    assert_eq!(program.max_tokens, Some(16));
+    assert!(program.streamed);
+    assert_eq!(program.preamble, cell.program.preamble);
+    assert_eq!(program.prompt, cell.program.prompt);
+    assert_eq!(program.hooks, cell.program.hooks);
+    assert!(matches!(
+        program.ending,
+        crate::corpus_matrix::corpus::Ending::Failed(rig::error::ErrorKind::Response)
+    ));
+
+    let current = reasoning_wire(&client);
+    assert!(matches!(current.thinking, cells::ThinkingWire::OpenAiResponses));
+    assert_eq!(
+        current.program(&cell).additional_params.expect("normal caller parameters")(),
+        serde_json::json!({
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "include": ["reasoning.encrypted_content"], "store": false
+        })
+    );
+    assert!(matches!(wire(&client).thinking, cells::ThinkingWire::OpenAiResponses));
+    assert_eq!(
+        cells::ThinkingWire::OpenAiResponses.params(false)(),
+        serde_json::json!({"reasoning": {"effort": "minimal"}, "store": false})
+    );
+    assert_eq!(
+        cells::ThinkingWire::OpenAiResponsesRecordedDefault.params(false)(),
+        cells::ThinkingWire::OpenAiResponses.params(false)()
+    );
 }

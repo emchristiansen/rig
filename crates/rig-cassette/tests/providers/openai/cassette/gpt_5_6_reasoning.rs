@@ -24,6 +24,8 @@ use rig::providers::openai::extension::{
     OpenAiExt, OpenAiExtras, OpenAiOptions, OpenAiResponsesOptions, ReasoningContext, ReasoningMode,
 };
 
+mod original_input;
+
 const PROMPT: &str = "Reply with exactly: OK";
 const FIVE_TURN_PROMPTS: [(&str, &str); 5] = [
     (
@@ -332,7 +334,7 @@ async fn five_turn_streaming_reasoning_metadata_roundtrip() {
             for (turn_index, (prompt, expected_text)) in FIVE_TURN_PROMPTS.into_iter().enumerate() {
                 let history = stored_turns
                     .iter()
-                    .flat_map(|turn| [turn.user.clone(), turn.assistant.clone()]);
+                    .flat_map(|turn| [turn.user.clone(), original_input::assistant(turn)]);
                 let user_message = Message::user(prompt);
                 let request = CompletionRequest::new(user_message.clone())
                     .messages(history)

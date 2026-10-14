@@ -81,6 +81,8 @@ pub(crate) enum ThinkingWire {
     Anthropic,
     OpenAiChat,
     OpenAiResponses,
+    /// The capped stream's original caller parameters, leaving storage unset.
+    OpenAiResponsesRecordedDefault,
     Gemini,
     DeepSeek,
     Doubleword,
@@ -111,6 +113,14 @@ fn openai_responses_thinking(on: bool) -> serde_json::Value {
     } else {
         serde_json::json!({"reasoning": {"effort": "minimal"}, "store": false})
     }
+}
+
+/// The original capped-stream caller input leaves provider storage at its default.
+fn openai_responses_recorded_default_thinking() -> serde_json::Value {
+    serde_json::json!({
+        "reasoning": {"effort": "low", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"]
+    })
 }
 
 /// The OpenAI Responses wire's parameters for a cell that names none: the
@@ -161,6 +171,10 @@ impl ThinkingWire {
             (Self::OpenAiChat, false) => || openai_chat_thinking(false),
             (Self::OpenAiResponses, true) => || openai_responses_thinking(true),
             (Self::OpenAiResponses, false) => || openai_responses_thinking(false),
+            (Self::OpenAiResponsesRecordedDefault, true) => {
+                openai_responses_recorded_default_thinking
+            }
+            (Self::OpenAiResponsesRecordedDefault, false) => || openai_responses_thinking(false),
             (Self::Gemini, true) => || gemini_thinking(true),
             (Self::Gemini, false) => || gemini_thinking(false),
             (Self::DeepSeek, true) => || deepseek_thinking(true),
