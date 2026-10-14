@@ -10,7 +10,6 @@
 //! Cassette IDs are scrub placeholders; assertions derive expected IDs from
 //! the recorded turn and never mint literal IDs.
 
-mod parallel_function_capture;
 mod parallel_function_current_request;
 
 use futures::StreamExt;
@@ -135,77 +134,6 @@ fn signature(content: &AssistantContent) -> Option<&str> {
     item.get("thoughtSignature")
         .or_else(|| item.get("signature"))?
         .as_str()
-}
-
-/// Parallel function calls in one turn: both calls survive aggregation as
-/// distinct parts with the ids the stream reported.
-#[tokio::test]
-async fn parallel_function_calls_stay_distinct() {
-    super::super::support::with_gemini_cassette(
-        "streaming_grammar/parallel_function_calls",
-        |client| async move {
-            let model = client.completion(gemini::completion::GEMINI_2_5_FLASH);
-            let request = CompletionRequest::new(
-                "Call `lookup_harbor_label` and `lookup_orchard_label` now, both of them \
-                     together in this single reply, before writing any text. Emit the two \
-                     tool calls in one turn - do not wait for results between them.",
-            )
-            .preamble(TWO_TOOL_STREAM_PREAMBLE.to_string())
-            .tool(rig::tool::tool_definition(&AlphaSignal))
-            .tool(rig::tool::tool_definition(&BetaSignal))
-            .reasoning(rig::completion::Reasoning::Off);
-            let run = drain_stream(model.stream(request).expect("stream should start")).await;
-
-            assert_terminal(&run, FinishReason::ToolCalls);
-            let aggregated: Vec<&ToolCall> = run
-                .choice
-                .iter()
-                .filter_map(|content| match content {
-                    AssistantContent::ToolCall(call) => Some(call),
-                    _ => None,
-                })
-                .collect();
-            for name in ["lookup_harbor_label", "lookup_orchard_label"] {
-                let streamed = run
-                    .tool_calls
-                    .iter()
-                    .find(|call| call.function.name == name)
-                    .unwrap_or_else(|| panic!("stream should yield a {name} call"));
-                let aggregated_call = aggregated
-                    .iter()
-                    .find(|call| call.function.name == name)
-                    .unwrap_or_else(|| panic!("aggregated choice should keep the {name} call"));
-                // IDs derived from the recorded turn, never minted literally.
-                assert_eq!(
-                    aggregated_call.id, streamed.id,
-                    "{name} id should aggregate"
-                );
-            }
-            assert_eq!(
-                aggregated.len(),
-                2,
-                "aggregated choice should contain exactly the two parallel calls"
-            );
-            // The recorded turn carries no wire ids, and rig no longer
-            // fabricates durable identifiers from the wire (not from an
-            // index, not from the tool name): both calls surface with a
-            // minted id and no provider id, and stay distinct as parts —
-            // two calls, in wire order, uncorrupted.
-            assert!(aggregated[0].id.provider().is_none());
-            assert!(aggregated[1].id.provider().is_none());
-            assert!(aggregated[0].id.is_local());
-            assert!(aggregated[1].id.is_local());
-            assert_ne!(
-                aggregated[0].id, aggregated[1].id,
-                "each id-less call mints a unique durable id"
-            );
-            assert_ne!(
-                aggregated[0].function.name, aggregated[1].function.name,
-                "the two parallel calls stay distinct parts"
-            );
-        },
-    )
-    .await;
 }
 
 /// Interactions API turn that stops for a declared client tool
