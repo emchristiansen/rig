@@ -281,7 +281,7 @@ async fn decoded_carried_only_paris_matches_actual_stream_text() -> anyhow::Resu
         matches!(buffered.choice.as_slice(), [AssistantContent::CarriedText(text)]
         if text.text() == "Paris" && text.phase.as_deref() == Some("final_answer")
             && text.payload.item == body["output"][0]["content"][0]
-            && text.payload.provider.is_none())
+            && text.payload.provider.as_deref() == Some("openai"))
     );
     assert_eq!(buffered.text(), "Paris");
     assert_eq!(buffered.usage.input_tokens, Some(4));
