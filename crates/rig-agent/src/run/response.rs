@@ -274,6 +274,9 @@ pub(crate) fn finalize_output_tool_choice(
             !matches!(
                 item,
                 AssistantContent::ToolCall(_) | AssistantContent::Text(_)
+            ) && !matches!(
+                item,
+                AssistantContent::CarriedText(text) if !text.text().is_empty()
             )
         })
         .cloned()

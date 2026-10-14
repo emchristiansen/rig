@@ -5928,3 +5928,78 @@ async fn carried_answer_telemetry_obeys_the_existing_content_consent_flag() {
         }
     }
 }
+
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct CarriedOutputToolValue {
+    x: u64,
+}
+
+#[tokio::test]
+async fn typed_output_tool_recovery_accepts_a_decoded_phased_preface_and_completed_call() {
+    use rig_core::providers::openai::{OpenAIConfig, responses_api::wire::Responses};
+    use rig_core::test_utils::RecordingHttpClient;
+    let mut body = phased_carried_answer_body("provider preface");
+    body["output"][0]["phase"] = json!("commentary");
+    body["output"]
+        .as_array_mut()
+        .expect("synthetic received output is an array")
+        .push(json!({
+            "type":"function_call", "id":"fc_output", "call_id":"call_output",
+            "name":"final_result", "status":"completed", "arguments":"{\"x\":1}",
+        }));
+    let http = RecordingHttpClient::new(body.to_string().into_bytes());
+    let model = rig_core::Model::new(
+        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"),
+        http.clone(),
+    );
+    let lifecycle = FinishLifecycleHook::default();
+    let recorder = RecordingHook::default();
+    let agent = AgentBuilder::new(model)
+        .output_schema::<CarriedOutputToolValue>()
+        .output_mode(OutputMode::Tool)
+        .add_hook(lifecycle.clone())
+        .add_hook(recorder.clone())
+        .build();
+    let typed = crate::agent::TypedRun::<CarriedOutputToolValue>::output_tool(
+        agent.prompt("answer").max_turns(1),
+    )
+    .await
+    .expect("existing typed recovery parses exactly the completed call JSON");
+    assert_eq!(typed.output.x, 1);
+    assert_eq!(typed.requests(), 1);
+    assert_eq!(recorder.count(StepEventKind::ToolDispatch), 0);
+    let snapshots = lifecycle
+        .snapshots
+        .lock()
+        .expect("actual completion snapshots");
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(
+        snapshots[0]
+            .content
+            .iter()
+            .filter(|part| matches!(part,
+                AssistantContent::ToolCall(call) if call.function.name.as_str() == "final_result"
+            ))
+            .count(),
+        1
+    );
+    assert!(matches!(snapshots[0].content.as_slice(),
+        [AssistantContent::CarriedText(text), AssistantContent::ToolCall(call)]
+        if text.text() == "provider preface" && text.phase.as_deref() == Some("commentary")
+            && call.function.arguments_value() == json!({"x":1})));
+
+    assert_eq!(typed.completion_calls[0].raw, body);
+    let Some(Message::Assistant(saved)) = typed.messages.last() else {
+        panic!("the genuine accepted assistant turn stays in history");
+    };
+    assert!(saved.content.iter().any(|part| matches!(part,
+        AssistantContent::CarriedText(text)
+            if text.text() == "provider preface" && text.phase.as_deref() == Some("commentary"))));
+    assert_eq!(saved.tool_calls().count(), 0);
+    assert_eq!(
+        rig_core::transcript::assistant_text_from_choice(&saved.content),
+        "provider preface{\"x\":1}"
+    );
+    assert_eq!(http.requests().len(), 1);
+}

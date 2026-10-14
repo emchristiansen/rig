@@ -1847,3 +1847,198 @@ async fn a_decoded_carried_json_answer_satisfies_the_existing_output_schema() {
     assert_eq!(output.requests(), 1);
     assert_eq!(http.requests().len(), 1);
 }
+
+
+/// Caller-owned controls have no provider issuance or native evidence.
+fn caller_owned_output_tool_call() -> AssistantContent {
+    AssistantContent::ToolCall(ToolCall::new(
+        rig_core::message::CallId::Local(rig_core::message::LocalCallId::new()),
+        ToolFunction::new(
+            rig_core::message::ToolName::new("final_result").expect("tool name"),
+            json!({"x":1}),
+        ),
+    ))
+}
+
+#[test]
+fn ordinary_text_output_tool_finalization_stays_exact() {
+    let choice = vec![
+        AssistantContent::text("ordinary preface"),
+        caller_owned_output_tool_call(),
+    ];
+    assert_eq!(
+        response::finalize_output_tool_choice(&choice, r#"{"x":1}"#),
+        Some(vec![AssistantContent::text(r#"{"x":1}"#)])
+    );
+    assert_eq!(choice[0], AssistantContent::text("ordinary preface"));
+}
+
+#[test]
+fn a_no_tool_carried_json_choice_is_not_finalized() {
+    use rig_core::message::{CarriedPayload, CarriedText, CarriedTextContent};
+    let choice = vec![AssistantContent::CarriedText(CarriedText::new(
+        CarriedTextContent::Text(r#"{"x":1}"#.to_owned()),
+        CarriedPayload::new(json!({"type":"caller_owned","text":"RAW_ONLY"}), None),
+    ))];
+    let before = choice.clone();
+    assert_eq!(
+        response::finalize_output_tool_choice(&choice, "unused"),
+        None
+    );
+    let output = response::PromptResponse::from_content(choice.clone(), Usage::default());
+    assert_eq!(output.output(), r#"{"x":1}"#);
+    assert_eq!(choice, before);
+}
+
+#[test]
+fn output_tool_finalization_removes_only_nonempty_carried_canonical_prose() {
+    use rig_core::message::{
+        CarriedPayload, CarriedReasoning, CarriedReasoningPart, CarriedText, CarriedTextContent,
+        DocumentSourceKind, GeminiSignedAnswer, GeminiThoughtSignature, Image, Opaque,
+    };
+    let raw = json!({"type":"caller_owned","sibling":{"text":"RAW_ONLY"}});
+    let carried = |content| {
+        AssistantContent::CarriedText(CarriedText::new(
+            content,
+            CarriedPayload::new(raw.clone(), None),
+        ))
+    };
+    let empty_media = carried(CarriedTextContent::InspectionOnlyMedia(String::new()));
+    let empty_signed = carried(CarriedTextContent::GeminiSignedAnswer(
+        GeminiSignedAnswer::new("", GeminiThoughtSignature::new("sig-neighbor")),
+    ));
+    let neighbors = vec![
+        empty_media,
+        empty_signed,
+        AssistantContent::reasoning("known reasoning"),
+        AssistantContent::CarriedReasoning(CarriedReasoning::new(
+            vec![
+                CarriedReasoningPart::Summary("carried reasoning".to_owned()),
+                CarriedReasoningPart::Encrypted("caller-owned ciphertext".to_owned()),
+            ],
+            CarriedPayload::new(raw.clone(), None),
+        )),
+        AssistantContent::Image(Image {
+            data: DocumentSourceKind::url("https://example.test/caller-owned-image"),
+            ..Image::default()
+        }),
+        AssistantContent::provider_item(
+            json!({"type":"future","text":"RAW_PROVIDER_ONLY"}),
+            "synthetic-caller",
+        ),
+        AssistantContent::Opaque(Opaque {
+            item: json!({"type":"future","text":"RAW_OPAQUE_ONLY"}),
+            replay: false,
+        }),
+    ];
+    let mut choice = vec![
+        AssistantContent::text("ordinary preface"),
+        carried(CarriedTextContent::Text("carried preface".to_owned())),
+        carried(CarriedTextContent::InspectionOnlyText(" \n".to_owned())),
+        carried(CarriedTextContent::Opaque(
+            "edited canonical preface".to_owned(),
+        )),
+    ];
+    choice.extend(neighbors.clone());
+    choice.push(caller_owned_output_tool_call());
+    let original = choice.clone();
+    let mut expected = neighbors.clone();
+    expected.push(AssistantContent::text(r#"{"x":1}"#));
+    let finalized = response::finalize_output_tool_choice(&choice, r#"{"x":1}"#)
+        .expect("the caller-owned output call finalizes");
+    assert_eq!(finalized, expected);
+    assert_eq!(
+        choice, original,
+        "returned-content filtering never changes caller custody"
+    );
+    let output = response::PromptResponse::from_content(finalized, Usage::default());
+    assert_eq!(output.output(), r#"{"x":1}"#);
+}
+
+#[tokio::test]
+async fn a_decoded_phased_preface_stays_in_history_but_not_output_tool_answer() {
+    use rig_core::providers::openai::{OpenAIConfig, responses_api::wire::Responses};
+    use rig_core::test_utils::RecordingHttpClient;
+    let body = json!({
+        "id":"resp_output_preface", "object":"response", "created_at":0,
+        "status":"completed", "model":"gpt-4o-mini", "tools":[],
+        "output":[
+            {"type":"message", "id":"msg_output_preface", "role":"assistant",
+                "status":"completed", "phase":"commentary",
+                "content":[{"type":"output_text", "text":"provider preface", "annotations":[]}]},
+            {"type":"function_call", "id":"fc_output", "call_id":"call_output",
+                "name":"final_result", "status":"completed", "arguments":"{\"x\":1}"},
+        ],
+    });
+    let http = RecordingHttpClient::new(body.to_string().into_bytes());
+    let model = rig_core::Model::new(
+        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"),
+        http.clone(),
+    );
+    let schema = json!({"type":"object", "properties":{"x":{"type":"integer"}}, "required":["x"]});
+    let decoded = model
+        .call(rig_core::completion::CompletionRequest::new("answer").tool(
+            rig_core::completion::ToolDefinition {
+                name: rig_core::message::ToolName::new("final_result").expect("output-tool name"),
+                description: "Return the structured answer.".to_owned(),
+                parameters: schema.clone(),
+            },
+        ))
+        .await
+        .expect("the actual Responses decoder accepts the completed call");
+    assert_eq!(decoded.raw, body);
+    assert!(matches!(decoded.choice.as_slice(),
+        [AssistantContent::CarriedText(text), AssistantContent::ToolCall(call)]
+        if text.text() == "provider preface" && text.phase.as_deref() == Some("commentary")
+            && call.function.name.as_str() == "final_result"
+            && call.function.arguments_value() == json!({"x":1})));
+    let completed = decoded
+        .tool_calls()
+        .next()
+        .expect("the real completed output call exists");
+    assert_eq!(
+        completed
+            .native
+            .as_ref()
+            .expect("real completed native evidence")
+            .item,
+        body["output"][1]
+    );
+    let preface = decoded.choice[0].clone();
+    let original_choice = decoded.choice.clone();
+    let turn = ModelTurn::new(
+        decoded.head(),
+        decoded.choice.clone(),
+        decoded.usage.clone(),
+        TurnPolicy::new(tool_names(&[]), None, Some("final_result".to_owned())).expect("policy"),
+        decoded.raw.clone(),
+    )
+    .with_finish_reason(decoded.finish_reason());
+    let mut run = AgentRun::new("answer")
+        .max_turns(2)
+        .with_output_tool_name("final_result")
+        .with_output_validation(Some(schema), 1);
+    expect_call_model(&mut run);
+    expect_continue(
+        run.model_response(turn)
+            .expect("the genuine turn is ingested"),
+    );
+    let AgentRunStep::Done(output) = run.next_step().expect("the output call finalizes") else {
+        panic!("an output-tool call must finish without a tool execution step");
+    };
+    assert_eq!(output.output(), r#"{"x":1}"#);
+    assert_eq!(output.content, vec![AssistantContent::text(r#"{"x":1}"#)]);
+    assert_eq!(output.output_tool_calls(), 1);
+    assert_eq!(output.completion_calls[0].raw, body);
+    let Some(Message::Assistant(saved)) = output.messages.last() else {
+        panic!("the actual assistant turn is persisted");
+    };
+    assert!(saved.content.iter().any(|part| part == &preface));
+    assert_eq!(saved.tool_calls().count(), 0);
+    assert_eq!(
+        rig_core::transcript::assistant_text_from_choice(&saved.content),
+        "provider preface{\"x\":1}"
+    );
+    assert_eq!(decoded.choice, original_choice);
+    assert_eq!(http.requests().len(), 1);
+}
