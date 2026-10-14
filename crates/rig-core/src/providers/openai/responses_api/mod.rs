@@ -1803,7 +1803,7 @@ fn carried_reasoning_item(
     item.remove("content");
     item.remove("encrypted_content");
     item.remove("signature");
-    if !content.is_empty() {
+    if !content.is_empty() || raw_content.is_some_and(Vec::is_empty) {
         item.insert("content".to_owned(), Value::Array(content));
     }
     if let Some(data) = encrypted {

@@ -726,3 +726,167 @@ fn completed_object_arguments_use_current_canonical_object_on_rebuild() {
         assert_eq!(sent["arguments"], json!(if edit { r#"{"edited":2}"# } else { r#"{"old":1}"# }));
     }
 }
+
+// These NEW field-presence controls use synthetic complete replies through the
+// real decoder and fold. The received objects and stored history stay exact.
+fn content_presence_response(content: Option<Value>) -> crate::completion::CompletionResponse {
+    let mut reasoning = json!({"type":"reasoning", "id":"rs_content", "summary":[],
+        "encrypted_content":"cipher_content", "future_reasoning":{"kept":[null,true]}});
+    if let Some(content) = content {
+        reasoning["content"] = content;
+    }
+    let body = json!({"id":"resp_content", "object":"response", "created_at":0,
+        "status":"completed", "model":"gpt-5.4", "output":[reasoning,
+        {"type":"message", "id":"msg_content", "role":"assistant", "status":"completed",
+         "content":[{"type":"output_text", "text":"answer", "annotations":[]}]}]});
+    let response = crate::test_utils::history::decode(
+        &wire(),
+        Mode::Unary,
+        [crate::wire::WireFrame::Text(body.to_string())],
+    )
+    .expect("real complete reply");
+    assert_eq!(response.raw, body);
+    response
+}
+
+fn assert_content_presence_request(history: Vec<Message>, expected_reasoning: Value, stored: bool) {
+    let before = history.clone();
+    let serialized_before = serde_json::to_vec(&history).expect("complete history serde");
+    let mut request = CompletionRequest::from(history.clone());
+    request.additional_params = Some(json!({"store":stored}));
+    let target = wire();
+    let prepared = Completion::prepare(request, &target.describe()).expect("real prepare");
+    let encoded = target.encode(prepared, Mode::Unary).expect("real encode");
+    let mut expected = json!({"model":"gpt-5.4", "store":stored, "input":[
+        {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"question"}]},
+        expected_reasoning,
+        {"type":"message", "id":"msg_content", "role":"assistant", "status":"completed",
+         "content":[{"type":"output_text", "text":"answer", "annotations":[]}]},
+        {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"next"}]}
+    ]});
+    if !stored {
+        expected["include"] = json!(["reasoning.encrypted_content"]);
+    }
+    assert_eq!(crate::test_utils::json_body(&encoded.request), expected);
+    assert_eq!(history, before);
+    assert_eq!(
+        serde_json::to_vec(&history).expect("history after"),
+        serialized_before
+    );
+}
+
+fn content_presence_history(response: &crate::completion::CompletionResponse) -> Vec<Message> {
+    vec![
+        Message::user("question"),
+        response.message().expect("real assistant"),
+        Message::user("next"),
+    ]
+}
+
+#[test]
+fn received_empty_reasoning_content_array_survives_stored_and_stateless_full_requests() {
+    let response = content_presence_response(Some(json!([])));
+    let before = response.clone();
+    let stored_before = serde_json::to_vec(&response).expect("stored response");
+    for stored in [false, true] {
+        assert_content_presence_request(
+            content_presence_history(&response),
+            response.raw["output"][0].clone(),
+            stored,
+        );
+        assert_eq!(response, before);
+        assert_eq!(
+            serde_json::to_vec(&response).expect("stored after"),
+            stored_before
+        );
+    }
+}
+
+#[test]
+fn received_absent_reasoning_content_stays_absent_in_full_requests() {
+    let response = content_presence_response(None);
+    let before = response.clone();
+    let stored_before = serde_json::to_vec(&response).expect("stored response");
+    assert!(response.raw["output"][0].get("content").is_none());
+    for stored in [false, true] {
+        assert_content_presence_request(
+            content_presence_history(&response),
+            response.raw["output"][0].clone(),
+            stored,
+        );
+        assert_eq!(response, before);
+        assert_eq!(
+            serde_json::to_vec(&response).expect("stored after"),
+            stored_before
+        );
+    }
+}
+
+#[test]
+fn edited_away_nonempty_reasoning_content_neither_replays_stale_text_nor_mints_empty_array() {
+    let response = content_presence_response(Some(json!([
+        {"type":"reasoning_text", "text":"stale thought", "future_part":7}
+    ])));
+    let before = response.clone();
+    let stored_before = serde_json::to_vec(&response).expect("stored response");
+    let mut history = content_presence_history(&response);
+    let Message::Assistant(turn) = &mut history[1] else {
+        panic!("real assistant");
+    };
+    let AssistantContent::CarriedReasoning(reasoning) = &mut turn.content[0] else {
+        panic!("real reasoning");
+    };
+    assert!(
+        matches!(&reasoning.content[0], CarriedReasoningPart::Text { text, .. } if text == "stale thought")
+    );
+    reasoning
+        .content
+        .retain(|part| !matches!(part, CarriedReasoningPart::Text { .. }));
+    // Explicit caller edit of the canonical content only; received raw is kept.
+    assert_eq!(reasoning.payload.item, response.raw["output"][0]);
+    let mut expected = response.raw["output"][0].clone();
+    expected
+        .as_object_mut()
+        .expect("reasoning object")
+        .remove("content");
+    for stored in [false, true] {
+        assert_content_presence_request(history.clone(), expected.clone(), stored);
+        assert_eq!(response, before);
+        assert_eq!(
+            serde_json::to_vec(&response).expect("stored after"),
+            stored_before
+        );
+    }
+}
+
+#[test]
+fn explicitly_unissued_null_reasoning_does_not_mint_empty_content() {
+    let response = content_presence_response(None);
+    let before = response.clone();
+    let stored_before = serde_json::to_vec(&response).expect("stored response");
+    let mut history = content_presence_history(&response);
+    let Message::Assistant(turn) = &mut history[1] else {
+        panic!("real assistant");
+    };
+    // Replace only the reasoning input with an explicitly caller-authored,
+    // unissued carrier; no Origin or Native is manufactured for it.
+    turn.content[0] = AssistantContent::CarriedReasoning(
+        crate::message::CarriedReasoning::new(
+            vec![CarriedReasoningPart::Encrypted("cipher_content".to_owned())],
+            CarriedPayload::new(Value::Null, None),
+        )
+        .with_id(Some("rs_unissued".to_owned())),
+    );
+    for stored in [false, true] {
+        assert_content_presence_request(
+            history.clone(),
+            json!({"type":"reasoning", "id":"rs_unissued", "summary":[], "encrypted_content":"cipher_content"}),
+            stored,
+        );
+        assert_eq!(response, before);
+        assert_eq!(
+            serde_json::to_vec(&response).expect("stored after"),
+            stored_before
+        );
+    }
+}
