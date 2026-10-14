@@ -17,4 +17,7 @@ pub const XIAOMIMIMO_MESSAGES_HISTORY: MessagesHistory = MessagesHistory {
 rig_history_conformance::history_conformance_suite! {
     wire: "anthropic_xiaomimimo",
     fixture: XIAOMIMIMO_MESSAGES_HISTORY,
+    h05_field_ablation: tests::xiaomimimo_h05_preserves_the_typed_boundary,
 }
+
+mod tests;
