@@ -4,7 +4,7 @@
 //! drives raw wire bytes (SSE or NDJSON) through a provider's *complete*
 //! streaming path — bytes → decode → the writer's parts →
 //! [`CompletionStream`](crate::streaming::CompletionStream) → its response
-//! — and asserts the streaming contract: an error is the stream's last item,
+//! — and asserts the streaming contract: a fatal error is the stream's last item,
 //! a reply the provider did not end has no response, and every part the
 //! stream emits reaches the response exactly once. Scenarios state the contract; a per-provider
 //! [`ProviderWireFixture`] supplies the frames, since each wire format spells
@@ -962,9 +962,8 @@ pub async fn transport_error_after_tool_call_yields_err_then_end(
     Ok(checks.report())
 }
 
-/// A malformed frame between valid content and the provider's end ends the
-/// reply: it surfaces as the stream's last item, content before it is kept,
-/// and there is no response.
+/// A malformed frame surfaces as a typed corrupt-frame error. Content is
+/// preserved and the genuine terminal still completes the reply.
 pub async fn malformed_frame_ends_the_reply(
     fixture: &ProviderWireFixture,
 ) -> Result<ScenarioOutcome, ConformanceError> {
@@ -987,19 +986,21 @@ pub async fn malformed_frame_ends_the_reply(
         )
     })?;
     checks.require(
-        drained.first_error_index() == Some(drained.items.len() - 1),
-        || "the malformed frame's error must be the stream's last item",
+        drained.items.iter().filter_map(|item| item.as_ref().err()).all(|error| {
+            matches!(&error.detail, Some(crate::error::ErrorDetail::CorruptFrame(_)))
+        }),
+        || "the malformed frame must report the typed recoverable corruption",
     )?;
     checks.require(
         drained.texts() == fixture.expected_texts,
         || "content before the malformed frame must be preserved",
     )?;
     checks.require(
-        !drained.has_terminal(),
-        || "a reply cut by a corrupt frame has no response",
+        drained.has_terminal(),
+        || "the genuine terminal after typed corruption must still complete the reply",
     )?;
 
-    checks.note("Err surfaced last; content kept; no response");
+    checks.note("typed corruption surfaced; content kept; genuine terminal completed");
     Ok(checks.ran())
 }
 
@@ -1057,8 +1058,8 @@ pub async fn unknown_event_is_skipped(
     Ok(checks.ran())
 }
 
-/// A *known* event whose payload is schema-defective ends the reply: it
-/// surfaces as the stream's last item, and there is no response.
+/// A known event with a schema-defective payload surfaces as typed corruption,
+/// and the genuine terminal still completes the reply.
 ///
 /// Pins the round-5 known-type strictness policy (a defective known event is
 /// never demoted to an unknown one).
@@ -1089,11 +1090,17 @@ pub async fn defective_known_event_ends_the_reply(
         )
     })?;
     checks.require(
-        !drained.has_terminal(),
-        || "a reply cut by a defective event has no response",
+        drained.items.iter().filter_map(|item| item.as_ref().err()).all(|error| {
+            matches!(&error.detail, Some(crate::error::ErrorDetail::CorruptFrame(_)))
+        }),
+        || "the defective known frame must report the typed recoverable corruption",
+    )?;
+    checks.require(
+        drained.has_terminal(),
+        || "the genuine terminal after typed corruption must still complete the reply",
     )?;
 
-    checks.note("defective known event ended the reply with its Err");
+    checks.note("defective known event surfaced typed corruption; genuine terminal completed");
     Ok(checks.ran())
 }
 
