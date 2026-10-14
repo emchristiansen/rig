@@ -17,4 +17,7 @@ pub const ZAI_MESSAGES_HISTORY: MessagesHistory = MessagesHistory {
 rig_history_conformance::history_conformance_suite! {
     wire: "anthropic_zai",
     fixture: ZAI_MESSAGES_HISTORY,
+    h05_field_ablation: tests::zai_h05_preserves_the_typed_boundary,
 }
+
+mod tests;
