@@ -659,3 +659,6 @@ fn direct_native_encoding_keeps_originless_canonical_reasoning_ungated() {
         "role":"assistant", "content":"Answer.", "thinking":"theirs"
     }));
 }
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+mod streaming_grammar_originals;
