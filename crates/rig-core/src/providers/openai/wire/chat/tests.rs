@@ -902,3 +902,5 @@ async fn per_choice_usage_is_observed_as_the_decoder_reads_it() {
 
 // Original history matrix stages under G240/G241.
 mod history_originals;
+
+mod llamacpp_originals;
