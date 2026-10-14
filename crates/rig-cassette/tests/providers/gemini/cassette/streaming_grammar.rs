@@ -11,6 +11,7 @@
 //! the recorded turn and never mint literal IDs.
 
 mod parallel_function_capture;
+mod parallel_function_current_request;
 
 use futures::StreamExt;
 use rig::completion::FinishReason;
