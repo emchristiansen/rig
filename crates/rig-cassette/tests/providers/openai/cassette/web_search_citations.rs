@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use rig::completion::{CompletionRequest, ProviderToolDefinition};
-use rig::message::Text;
+use rig::message::AssistantContent;
 use rig::providers::openai::{GPT_5_4_MINI, OpenAIConfig};
 use rig_test_support::cassette_models::OpenAiModels;
 use rig_test_support::citations::{
@@ -39,9 +39,9 @@ fn request() -> CompletionRequest {
 /// What each route delivered.
 #[derive(Default)]
 struct Observed {
-    streamed: Vec<Text>,
+    streamed: Vec<AssistantContent>,
     streamed_unknown_types: Vec<String>,
-    unary: Vec<Text>,
+    unary: Vec<AssistantContent>,
 }
 
 /// The hosted search answers with cited text on both routes. The streamed

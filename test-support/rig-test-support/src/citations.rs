@@ -3,14 +3,14 @@
 
 use futures::StreamExt;
 use rig_core::completion::Usage;
-use rig_core::message::{AssistantContent, Source, SourceLocation, Text};
+use rig_core::message::{AssistantContent, Citation, Source, SourceLocation};
 use rig_core::streaming::{CompletionStream, Item, StreamEvent};
 use serde_json::{Map, Value};
 
 /// What a drained stream delivered.
 pub struct Drained {
     /// The text blocks its parts ended with, in order.
-    pub texts: Vec<Text>,
+    pub texts: Vec<AssistantContent>,
     /// The `type` of every unmodeled payload it delivered, in order.
     pub unknown_types: Vec<String>,
     /// The usage of the response it folded into.
@@ -27,10 +27,9 @@ pub async fn drain(mut stream: CompletionStream) -> Drained {
         let item = item.expect("the stream item is ok");
         items.push(Ok(item.clone()));
         match item {
-            Item::Event(StreamEvent::End {
-                content: AssistantContent::Text(text),
-                ..
-            }) => texts.push(text),
+            Item::Event(StreamEvent::End { content, .. }) if known_text(&content).is_some() => {
+                texts.push(content)
+            }
             Item::Unknown(payload) => unknown_types.push(
                 serde_json::to_value(&payload).expect("the payload serializes")["type"]
                     .as_str()
@@ -53,28 +52,73 @@ pub async fn drain(mut stream: CompletionStream) -> Drained {
 }
 
 /// The text blocks of a reply's choice, in order.
-pub fn choice_texts(choice: &[AssistantContent]) -> Vec<Text> {
+pub fn choice_texts(choice: &[AssistantContent]) -> Vec<AssistantContent> {
     choice
         .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.clone()),
-            _ => None,
-        })
+        .filter(|content| known_text(content).is_some())
+        .cloned()
         .collect()
 }
 
-/// The extras a Responses text block carries: those of the message item it
-/// holds.
-pub fn content_extras(text: &Text) -> Option<Map<String, Value>> {
-    recorded_extras(&text.native.as_ref()?.item)
+fn known_text(content: &AssistantContent) -> Option<&str> {
+    match content {
+        AssistantContent::Text(text) => Some(text.text.as_str()),
+        AssistantContent::CarriedText(text)
+            if matches!(
+                text.content,
+                rig_core::message::CarriedTextContent::Text(_)
+                    | rig_core::message::CarriedTextContent::Refusal(_)
+            ) =>
+        {
+            Some(text.text())
+        }
+        _ => None,
+    }
+}
+
+fn content_citations(content: &AssistantContent) -> &[Citation] {
+    match content {
+        AssistantContent::Text(text) => text.citations(),
+        AssistantContent::CarriedText(text) if known_text(content).is_some() => text.citations(),
+        _ => &[],
+    }
+}
+
+fn cited<'a>(content: &'a AssistantContent, citation: &Citation) -> Option<&'a str> {
+    match content {
+        AssistantContent::Text(text) => text.cited(citation),
+        AssistantContent::CarriedText(_) => {
+            let text = known_text(content)?;
+            match citation.span {
+                Some(span) => text.get(span.range()),
+                None => Some(text),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Preserved part extras for carried text; containing-item extras for ordinary Text.
+pub fn content_extras(content: &AssistantContent) -> Option<Map<String, Value>> {
+    match content {
+        AssistantContent::Text(text) => recorded_extras(&text.native.as_ref()?.item),
+        AssistantContent::CarriedText(text) if known_text(content).is_some() => {
+            extras_from_parts(std::iter::once(&text.payload.item))
+        }
+        _ => None,
+    }
 }
 
 /// The extras a recorded message item's content parts state, in part
 /// order: every non-empty sibling of `text` and `type`, arrays concatenated
 /// across parts.
 pub fn recorded_extras(item: &Value) -> Option<Map<String, Value>> {
+    extras_from_parts(item["content"].as_array().into_iter().flatten())
+}
+
+fn extras_from_parts<'a>(parts: impl IntoIterator<Item = &'a Value>) -> Option<Map<String, Value>> {
     let mut extras = Map::new();
-    for part in item["content"].as_array().into_iter().flatten() {
+    for part in parts {
         for (key, value) in part.as_object().into_iter().flatten() {
             let empty = value.is_null()
                 || value.as_array().is_some_and(Vec::is_empty)
@@ -169,21 +213,28 @@ pub fn recorded_url_sources(item: &Value) -> Vec<Source> {
 /// message item, in order: one part per item, its extras stated once. Its
 /// citations are the item's annotations, each citing the whole block,
 /// since the offsets' unit is undocumented.
-pub fn assert_texts_match_items(route: &str, texts: &[Text], items: &[Value]) {
-    let texts: Vec<&Text> = texts.iter().filter(|text| !text.text.is_empty()).collect();
+pub fn assert_texts_match_items(route: &str, texts: &[AssistantContent], items: &[Value]) {
+    let texts: Vec<&AssistantContent> = texts
+        .iter()
+        .filter(|text| known_text(text).is_some_and(|text| !text.is_empty()))
+        .collect();
     assert_eq!(
         texts.len(),
         items.len(),
         "{route}: one text part per message item"
     );
     for (text, item) in texts.into_iter().zip(items) {
-        assert_eq!(text.text, recorded_text(item), "{route}: the item's text");
+        assert_eq!(
+            known_text(text).expect("selected known text"),
+            recorded_text(item),
+            "{route}: the item's text"
+        );
         assert_eq!(
             content_extras(text),
             recorded_extras(item),
             "{route}: the item's extras, once"
         );
-        let citations = text.citations();
+        let citations = content_citations(text);
         assert_eq!(
             citations
                 .iter()
@@ -198,8 +249,8 @@ pub fn assert_texts_match_items(route: &str, texts: &[Text], items: &[Value]) {
         for citation in citations {
             assert_eq!(citation.span, None, "{route}: the citation's span");
             assert_eq!(
-                text.cited(citation),
-                Some(text.text.as_str()),
+                cited(text, citation),
+                known_text(text),
                 "{route}: the cited text"
             );
         }

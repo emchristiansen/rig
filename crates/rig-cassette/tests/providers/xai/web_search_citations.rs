@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use rig::completion::{CompletionRequest, Cost, ProviderToolDefinition, Usage};
-use rig::message::Text;
+use rig::message::AssistantContent;
 use rig_test_support::citations::{
     annotation_count, assert_texts_match_items, choice_texts, drain, item_snapshots, messages,
 };
@@ -31,9 +31,9 @@ fn request() -> CompletionRequest {
 /// What each route delivered.
 #[derive(Default)]
 struct Observed {
-    streamed: Vec<Text>,
+    streamed: Vec<AssistantContent>,
     streamed_usage: Usage,
-    unary: Vec<Text>,
+    unary: Vec<AssistantContent>,
     unary_usage: Usage,
 }
 
