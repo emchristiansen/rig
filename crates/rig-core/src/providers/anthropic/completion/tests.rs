@@ -5249,7 +5249,13 @@ fn hc001_non_aborted_stops_and_an_open_hosted_input_preserve_the_existing_routes
             )
             .0
             .expect("open source route"),
-            hc001_body(vec![hc001_user("q"), hc001_user("next")])
+            if prepared {
+                hc001_body(vec![
+                    json!({"role":"user", "content":[{"type":"text","text":"q"}, {"type":"text","text":"next"}]}),
+                ])
+            } else {
+                hc001_body(vec![hc001_user("q"), hc001_user("next")])
+            }
         );
     }
 }
@@ -5274,7 +5280,9 @@ fn hc001_ordinary_client_calls_and_non_hosted_carried_text_do_not_become_server_
         hc001_encode(&wire, &request, &[&source], true)
             .0
             .expect("shared failed client omission unchanged"),
-        hc001_body(vec![hc001_user("q"), hc001_user("next")])
+        hc001_body(vec![
+            json!({"role":"user", "content":[{"type":"text","text":"q"}, {"type":"text","text":"next"}]})
+        ])
     );
     let text_source = hc001_complete(
         &wire,
@@ -5329,7 +5337,9 @@ fn hc001_compatible_dialects_keep_original_hosted_shapes_and_proper_carrier_refu
             hc001_encode(&wire, &request, &[&source], true)
                 .0
                 .expect("compatible failed Opaque omission unchanged"),
-            hc001_body(vec![hc001_user("q"), hc001_user("next")])
+            hc001_body(vec![
+                json!({"role":"user", "content":[{"type":"text","text":"q"}, {"type":"text","text":"next"}]})
+            ])
         );
         let proper = hc001_prefix(&hc001_wire(), &[hc001_use("srv_hc001")], true);
         let error = hc001_encode(
