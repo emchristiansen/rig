@@ -1259,14 +1259,7 @@ where
         )
     };
     let buffered = model.call(request()).await?;
-    let buffered_text = buffered
-        .choice
-        .iter()
-        .filter_map(|item| match item {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect::<String>();
+    let buffered_text = buffered.text();
 
     let mut stream = model.stream(request())?;
     let mut streamed_text = String::new();
