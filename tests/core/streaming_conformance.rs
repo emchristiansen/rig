@@ -162,8 +162,10 @@ mod openai_responses_opt_in {
         conformance::WireDriver::new("openai", |chunks| {
             Box::pin(async move {
                 let wire = rig_core::providers::openai::responses_api::wire::Responses::new(
-                    rig_core::providers::openai::OpenAIConfig::new("test-key"), "gpt-5.4",
-                ).with_streamed_incomplete(IncompleteTerminal::Accept);
+                    rig_core::providers::openai::OpenAIConfig::new("test-key"),
+                    "gpt-5.4",
+                )
+                .with_streamed_incomplete(IncompleteTerminal::Accept);
                 let model = rig_core::driver::Model::new(
                     wire,
                     SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
