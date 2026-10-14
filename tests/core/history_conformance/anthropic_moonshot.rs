@@ -20,4 +20,7 @@ pub const MOONSHOT_HISTORY: MessagesHistory = MessagesHistory {
 rig_history_conformance::history_conformance_suite! {
     wire: "anthropic_moonshot",
     fixture: MOONSHOT_HISTORY,
+    h05_field_ablation: tests::moonshot_h05_preserves_the_typed_boundary,
 }
+
+mod tests;
