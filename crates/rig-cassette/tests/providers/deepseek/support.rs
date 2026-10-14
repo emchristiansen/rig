@@ -340,6 +340,7 @@ pub(super) async fn collect_raw_stream_outcome(
             Ok(
                 Item::Unknown(_)
                 | Item::Event(StreamEvent::Start { .. })
+                | Item::Event(StreamEvent::Resume { .. })
                 | Item::Event(StreamEvent::End { .. }),
             ) => {}
             Err(error) => outcome.errors.push(error.to_string()),
