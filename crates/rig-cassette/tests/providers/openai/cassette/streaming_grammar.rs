@@ -318,6 +318,7 @@ async fn three_turn_tool_session_replays_rs_ids_across_turns() {
                     AssistantContent::Reasoning(reasoning) => {
                         reasoning.native.as_ref()?.item["id"].as_str()
                     }
+                    AssistantContent::CarriedReasoning(reasoning) => reasoning.id.as_deref(),
                     _ => None,
                 })
                 .collect();
