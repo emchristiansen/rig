@@ -463,6 +463,66 @@ async fn the_response_create_frame_carries_the_codex_shaping() {
     openapi_schema::assert_invalid(Schema::WebSocketResponseCreate, &bad_envelope);
 }
 
+#[tokio::test]
+async fn standard_codex_prefix_and_routing_survive_full_and_incremental_sends() {
+    let wire = codex_wire()
+        .provider
+        .with_instructions("provider base")
+        .responses("gpt-5.4");
+    let identity =
+        CodexIdentity::from_ids("session-derived", "thread-derived").expect("Codex identity");
+    let script = Script::new()
+        .turn([completed("resp_1")])
+        .turn([completed("resp_2")]);
+    let mut session =
+        CodexWebSocketSession::from_connection(wire, identity, script.connection(), None)
+            .expect("Codex session");
+    session
+        .completion(
+            user_request("first")
+                .preamble("caller base")
+                .additional_params(json!({"service_tier":"priority"})),
+        )
+        .await
+        .expect("full turn completes");
+    session
+        .send_incremental(delta("second"))
+        .await
+        .expect("delta sends");
+
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(
+        frames[0]["input"][0],
+        json!({
+            "type":"message", "role":"developer",
+            "id":"msg_3333557a-9135-5aeb-b8f2-d31c4d718f4b",
+            "content":[{"type":"input_text", "text":"provider base\n\ncaller base"}],
+            "internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]},
+        })
+    );
+    assert_eq!(frames[0]["input"][1]["content"][0]["text"], "first");
+    assert_eq!(frames[0]["input"].as_array().expect("input array").len(), 2);
+    assert_eq!(
+        frames[1]["input"],
+        json!([
+            {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"second"}]},
+        ])
+    );
+    assert_eq!(frames[1]["previous_response_id"], "resp_1");
+    for (frame, bytes) in frames.iter().zip(script.sent()) {
+        assert!(frame.get("instructions").is_none());
+        assert_eq!(frame["prompt_cache_key"], "thread-derived");
+        assert_eq!(
+            frame["client_metadata"],
+            json!({"session_id":"session-derived", "thread_id":"thread-derived"})
+        );
+        assert!(
+            bytes.starts_with(r#"{"model":"gpt-5.4","stream":true,"service_tier":"priority","#)
+        );
+    }
+}
+
 /// Lite full sends carry one deterministic prefix and the per-frame marker;
 /// incremental sends carry the marker and delta only.
 #[tokio::test]

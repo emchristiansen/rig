@@ -511,7 +511,7 @@ impl CodexWebSocketSession {
                 generate: options.generate,
             },
         )?;
-        let frame = encode_frame(&body)?;
+        let frame = encode_frame(&body, self.session.wire.codex_request_shape.is_standard())?;
         self.session.send_encoded(envelope, frame).await
     }
 
@@ -556,7 +556,7 @@ impl CodexWebSocketSession {
                 generate: None,
             },
         )?;
-        let frame = encode_frame(&body)?;
+        let frame = encode_frame(&body, self.session.wire.codex_request_shape.is_standard())?;
         self.session.send_encoded(envelope, frame).await
     }
 
