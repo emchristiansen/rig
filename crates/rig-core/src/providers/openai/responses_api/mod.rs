@@ -1510,6 +1510,9 @@ impl<'de> Deserialize<'de> for ResponsesRequestTool {
 ///
 /// Serialized because it is a field of the [`wire::Responses`] wire, which is
 /// data a host may store.
+/// In the Standard Codex shape, text lifted by [`Self::Instructions`] or
+/// [`Self::AllInstructions`] becomes a leading developer input message instead
+/// of the top-level `instructions` field.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemInstructionsPlacement {
