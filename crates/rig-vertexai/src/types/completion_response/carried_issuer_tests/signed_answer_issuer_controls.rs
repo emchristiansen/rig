@@ -97,6 +97,68 @@ fn g227_actual_vertex_answer_keeps_its_genuine_signature_on_vertex() {
 }
 
 #[test]
+fn binary_answer_text_signature_is_kept_and_replayed_on_its_part() {
+    use base64::{Engine as _, prelude::BASE64_STANDARD};
+
+    let signature = b"\x00\x01answer-sig\xff";
+    let encoded_signature = "AAFhbnN3ZXItc2ln/w==";
+    let part = vertexai::model::Part::new()
+        .set_text("the answer")
+        .set_thought_signature(signature.to_vec());
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([
+        vertexai::model::Candidate::new()
+            .set_content(
+                vertexai::model::Content::new()
+                    .set_role("model")
+                    .set_parts([part]),
+            )
+            .set_finish_reason(vertexai::model::candidate::FinishReason::Stop),
+    ]);
+    let raw = Value::Object(rest_chunk(&received).expect("actual SDK REST document"));
+    let response = futures::executor::block_on(
+        Model::new(
+            crate::completion::GenerateContent::new(GEMINI_2_5_FLASH),
+            Received(received),
+        )
+        .call(CompletionRequest::new("q")),
+    )
+    .expect("actual VertexDecoder/fold");
+
+    assert_eq!(response.raw, raw);
+    let [AssistantContent::CarriedText(answer)] = response.choice.as_slice() else {
+        panic!("one received signed answer");
+    };
+    assert_eq!(answer.payload.provider.as_deref(), Some(PROVIDER_NAME));
+    assert_eq!(
+        answer.payload.item,
+        json!({"text": "the answer", "thoughtSignature": encoded_signature})
+    );
+    let signed = answer.signed_answer().expect("signed-answer getter");
+    assert_eq!(signed.text, "the answer");
+    assert_eq!(signed.signature.as_str(), encoded_signature);
+    assert_eq!(BASE64_STANDARD.encode(signature), encoded_signature);
+    assert_eq!(
+        BASE64_STANDARD
+            .decode(signed.signature.as_str())
+            .expect("binary answer signature"),
+        signature.to_vec()
+    );
+
+    let choice = response.choice.clone();
+    let encoded = vertex_encoded(response.message().expect("received turn"), Some(&choice));
+    assert_eq!(encoded.contents.len(), 3);
+    let replayed = &encoded.contents[1];
+    assert_eq!(replayed.role, "model");
+    assert_eq!(replayed.parts.len(), 1);
+    let replayed_part = &replayed.parts[0];
+    assert_eq!(replayed_part.text().map(String::as_str), Some("the answer"));
+    assert_eq!(replayed_part.thought_signature.to_vec(), signature.to_vec());
+    assert!(!replayed_part.thought);
+    assert_eq!(response.raw, raw);
+    assert_eq!(response.choice, choice);
+}
+
+#[test]
 fn g227_actual_vertex_answer_to_rest_projects_known_text_without_foreign_signature() {
     let response=vertex_response(); let choice=response.choice.clone(); let raw=response.raw.clone();
     let wire=rig_core::providers::gemini::completion::GenerateContent::new(GeminiConfig::new("test-key"), GEMINI_2_5_FLASH);

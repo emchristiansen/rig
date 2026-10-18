@@ -292,17 +292,24 @@ impl ScyllaDbVectorStore {
     }
 
     /// Cosine similarity, returning zero when either vector has zero norm.
-    /// Extra components of the longer vector are ignored.
-    fn cosine_similarity(vec1: &[f32], vec2: &[f32]) -> f32 {
+    /// Errors when the vector lengths differ.
+    fn cosine_similarity(vec1: &[f32], vec2: &[f32]) -> Result<f32, VectorStoreError> {
+        if vec1.len() != vec2.len() {
+            return Err(VectorStoreError::DatastoreError(
+                "ScyllaDB search cosine similarity dimension mismatch (vector values not shown)"
+                    .into(),
+            ));
+        }
+
         let dot_product: f32 = vec1.iter().zip(vec2.iter()).map(|(a, b)| a * b).sum();
         let norm1: f32 = vec1.iter().map(|x| x * x).sum::<f32>().sqrt();
         let norm2: f32 = vec2.iter().map(|x| x * x).sum::<f32>().sqrt();
 
-        if norm1 == 0.0 || norm2 == 0.0 {
+        Ok(if norm1 == 0.0 || norm2 == 0.0 {
             0.0
         } else {
             dot_product / (norm1 * norm2)
-        }
+        })
     }
 
     async fn generate_query_vector(&self, query: &str) -> Result<Vec<f32>, VectorStoreError> {
@@ -390,7 +397,7 @@ impl ScyllaDbVectorStore {
         {
             let (id, vector, metadata, _) = row_result.map_err(VectorStoreError::datastore)?;
 
-            let score = Self::cosine_similarity(&query_vector, &vector) as f64;
+            let score = Self::cosine_similarity(&query_vector, &vector)? as f64;
 
             if req.threshold().is_some_and(|threshold| score < threshold) {
                 continue;

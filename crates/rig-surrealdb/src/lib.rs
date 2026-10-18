@@ -42,8 +42,8 @@ where
 
 /// Measure applied to the stored embeddings.
 ///
-/// Results are always thresholded and ordered as if larger values rank better,
-/// which holds for the similarity measures but inverts the distance ones.
+/// Distance measures use a maximum threshold and rank smaller values first.
+/// Similarity measures use a minimum threshold and rank larger values first.
 pub enum SurrealDistanceFunction {
     Knn,
     Hamming,
@@ -314,13 +314,19 @@ where
         let Self {
             distance_function, ..
         } = self;
+        let (comparison, order) = match distance_function {
+            SurrealDistanceFunction::Knn
+            | SurrealDistanceFunction::Hamming
+            | SurrealDistanceFunction::Euclidean => ("<=", "asc"),
+            SurrealDistanceFunction::Cosine | SurrealDistanceFunction::Jaccard => (">=", "desc"),
+        };
 
         format!(
             "
             SELECT id {document} {embedded_text}, {distance_function}($vec, embedding) as distance \
               from type::table($tablename) \
-              where {distance_function}($vec, embedding) >= $threshold AND $filter \
-              order by distance desc \
+              where {distance_function}($vec, embedding) {comparison} $threshold AND $filter \
+              order by distance {order} \
             LIMIT $limit",
         )
     }
@@ -332,8 +338,8 @@ where
 {
     type Filter = SurrealSearchFilter;
 
-    /// Returns matches scored by distance and keyed by record id, ordered by descending
-    /// distance value. Errors when a stored document does not deserialize into `T`.
+    /// Returns matches scored by the configured measure and keyed by record id,
+    /// ordered from best to worst. Errors when a stored document does not deserialize into `T`.
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<SurrealSearchFilter>,

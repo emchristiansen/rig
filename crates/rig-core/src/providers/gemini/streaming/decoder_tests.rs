@@ -3,6 +3,8 @@ use crate::completion::{CompletionRequest, CompletionResponse, FinishReason};
 use crate::providers::gemini::GeminiConfig;
 use serde_json::json;
 
+mod retained_predicates;
+
 fn wire() -> super::super::completion::GenerateContent {
     GeminiConfig::new("test-key").completion("gemini-2.5-flash")
 }

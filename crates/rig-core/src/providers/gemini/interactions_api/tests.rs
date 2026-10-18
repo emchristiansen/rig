@@ -439,6 +439,16 @@ fn a_tool_round_trip_is_top_level_steps() {
         ),
     );
     let assistant = Message::Assistant(message::AssistantMessage::new(vec![
+        message::AssistantContent::CarriedReasoning(message::CarriedReasoning::new(
+            vec![message::CarriedReasoningPart::Text {
+                text: String::new(),
+                signature: Some("sig".to_owned()),
+            }],
+            message::CarriedPayload::new(
+                json!({"type": "thought", "signature": "sig"}),
+                Some(PROVIDER_NAME.to_owned()),
+            ),
+        )),
         message::AssistantContent::text("Adding."),
         message::AssistantContent::ToolCall(call.clone()),
     ]));
@@ -459,11 +469,13 @@ fn a_tool_round_trip_is_top_level_steps() {
         kinds,
         [
             "user_input",
+            "thought",
             "model_output",
             "function_call",
             "function_result"
         ]
     );
+    assert_eq!(steps[1], json!({"type": "thought", "signature": "sig"}));
 }
 
 // ── the Interactions wire ───────────────────────────────────────────────

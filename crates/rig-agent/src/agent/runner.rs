@@ -721,7 +721,22 @@ impl AgentRunner {
         let (history_override, memory_handle) = match &self.origin {
             RunOrigin::Resume(_) => match self.resumed_memory() {
                 Ok(resolved) => resolved,
-                Err(err) => return Err(err.into()),
+                Err(err) => {
+                    if self.config.hooks.observes(StepEventKind::RunSettled) {
+                        let reason = err.to_string();
+                        self.config
+                            .hooks
+                            .on_run_settled(
+                                &hook_ctx,
+                                RunSettled {
+                                    outcome: SettledOutcome::Error(&reason),
+                                    messages: None,
+                                },
+                            )
+                            .await;
+                    }
+                    return Err(err.into());
+                }
             },
             RunOrigin::Prompt(_) => {
                 // A memory load is a dispatch too: drive the bus while resolving.

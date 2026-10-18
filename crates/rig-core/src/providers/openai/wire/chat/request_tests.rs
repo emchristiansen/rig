@@ -40,6 +40,60 @@ fn body(request: CompletionRequest) -> Value {
     body_on(&wire(), request)
 }
 
+#[test]
+fn deepseek_keeps_system_text_parts_in_unary_and_streaming_requests() {
+    let wire = OpenAIConfig::with_key(&crate::providers::openai::wire::DEEPSEEK, "key")
+        .chat("deepseek-flash");
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let request = CompletionRequest::from(vec![
+            Message::system("You are a concise assistant. Answer directly."),
+            Message::user("Explain Rust."),
+        ]);
+        let request = crate::operation::Completion::prepare(request, &wire.describe())
+            .expect("the request prepares");
+        let body = json_body(&wire.encode(request, mode).expect("encodes").request);
+        assert_eq!(
+            body["messages"][0],
+            json!({
+                "role": "system",
+                "content": [{
+                    "type": "text",
+                    "text": "You are a concise assistant. Answer directly."
+                }]
+            })
+        );
+        assert_eq!(body["messages"][1]["content"], "Explain Rust.");
+    }
+}
+
+#[test]
+fn deepseek_preserves_system_shape_after_raw_merging() {
+    let wire = OpenAIConfig::with_key(&crate::providers::openai::wire::DEEPSEEK, "key")
+        .chat("deepseek-flash");
+    let messages = json!([
+        {"role": "system", "content": [
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"}
+        ]},
+        {"role": "system", "content": "explicit string"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "question"},
+            {"type": "text", "text": "continued"}
+        ]},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "answer"},
+            {"type": "text", "text": "continued"}
+        ]}
+    ]);
+    let mut request = CompletionRequest::new("fallback");
+    request.additional_params = Some(json!({"messages": messages}));
+    let body = body_on(&wire, request);
+    assert_eq!(body["messages"][0], messages[0]);
+    assert_eq!(body["messages"][1], messages[1]);
+    assert_eq!(body["messages"][2]["content"], "question\ncontinued");
+    assert_eq!(body["messages"][3]["content"], "answercontinued");
+}
+
 fn result(call: &str, content: Vec<ToolResultContent>) -> UserContent {
     UserContent::ToolResult(ToolResult {
         call: CallId::from_wire(call),
