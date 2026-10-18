@@ -668,6 +668,7 @@ impl<ToolState> AgentBuilder<ToolState> {
                 .note_model(config.bus.raw_key(&suffix).as_str(), id);
         }
         config.model_spec_key = Some(config.model_key.clone());
+        config.model_spec_id = config.bus.model_id(config.model_key.raw().as_str());
         for (suffix, slot) in dynamic_contexts {
             // The slot is this builder's own, filled exactly once.
             let key = config.bus.key(&suffix);
