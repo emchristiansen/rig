@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    ArrayRef, BinaryArray, DictionaryArray, FixedSizeBinaryArray, FixedSizeListArray, Float32Array,
-    Float64Array, GenericListArray, Int8Array, Int16Array, Int32Array, Int64Array,
-    LargeBinaryArray, LargeStringArray, MapArray, NullArray, RecordBatch, StringArray, StructArray,
-    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, FixedSizeBinaryArray,
+    FixedSizeListArray, Float32Array, Float64Array, GenericListArray, Int8Array, Int16Array,
+    Int32Array, Int64Array, IntervalDayTimeArray, IntervalMonthDayNanoArray, LargeBinaryArray,
+    LargeListArray, LargeStringArray, ListArray, MapArray, NullArray, RecordBatch, StringArray,
+    StructArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     builder::{
         FixedSizeListBuilder, Int32Builder, ListBuilder, MapBuilder, StringBuilder,
-        StringDictionaryBuilder, StringRunBuilder, UnionBuilder,
+        StringDictionaryBuilder, StringRunBuilder, StructBuilder, UnionBuilder,
     },
-    types::{Float64Type, Int8Type, Int16Type, Int32Type},
+    types::{Float64Type, Int8Type, Int16Type, Int32Type, IntervalDayTime, IntervalMonthDayNano},
 };
 use lancedb::arrow::arrow_schema::{DataType, Field, Fields};
 use serde_json::json;
@@ -250,6 +251,223 @@ fn primitive_and_null_columns_preserve_null_rows() {
 }
 
 #[test]
+fn cp01_sliced_boolean_and_byte_nulls_differ_from_false_and_empty() {
+    let columns = vec![
+        (
+            "boolean",
+            Arc::new(BooleanArray::from(vec![
+                Some(true),
+                None,
+                Some(false),
+                Some(true),
+            ])) as ArrayRef,
+        ),
+        (
+            "string",
+            Arc::new(StringArray::from(vec![
+                Some("outside"),
+                None,
+                Some(""),
+                Some("text"),
+            ])) as ArrayRef,
+        ),
+        (
+            "large_string",
+            Arc::new(LargeStringArray::from(vec![
+                Some("outside"),
+                None,
+                Some(""),
+                Some("text"),
+            ])) as ArrayRef,
+        ),
+        (
+            "binary",
+            Arc::new(BinaryArray::from(vec![
+                Some(b"outside".as_slice()),
+                None,
+                Some(b"".as_slice()),
+                Some(b"x".as_slice()),
+            ])) as ArrayRef,
+        ),
+        (
+            "large_binary",
+            Arc::new(LargeBinaryArray::from(vec![
+                Some(b"outside".as_slice()),
+                None,
+                Some(b"".as_slice()),
+                Some(b"x".as_slice()),
+            ])) as ArrayRef,
+        ),
+    ];
+    let batch = RecordBatch::try_from_iter(
+        columns
+            .into_iter()
+            .map(|(name, array)| (name, array.slice(1, 3))),
+    )
+    .unwrap();
+    assert_eq!(
+        record_batch_to_json(&batch).unwrap(),
+        vec![
+            json!({"boolean": null, "string": null, "large_string": null, "binary": null, "large_binary": null}),
+            json!({"boolean": false, "string": "", "large_string": "", "binary": [], "large_binary": []}),
+            json!({"boolean": true, "string": "text", "large_string": "text", "binary": [120], "large_binary": [120]}),
+        ]
+    );
+}
+
+#[test]
+fn cp01_sliced_variable_lists_distinguish_null_empty_and_null_elements() {
+    let rows = vec![
+        Some(vec![Some(99)]),
+        None,
+        Some(vec![]),
+        Some(vec![None, Some(7)]),
+    ];
+    let list = ListArray::from_iter_primitive::<Int32Type, _, _>(rows.clone()).slice(1, 3);
+    let large_list = LargeListArray::from_iter_primitive::<Int32Type, _, _>(rows).slice(1, 3);
+    let batch = RecordBatch::try_from_iter(vec![
+        ("list", Arc::new(list) as ArrayRef),
+        ("large_list", Arc::new(large_list) as ArrayRef),
+    ])
+    .unwrap();
+    assert_eq!(
+        record_batch_to_json(&batch).unwrap(),
+        vec![
+            json!({"list": null, "large_list": null}),
+            json!({"list": [], "large_list": []}),
+            json!({"list": [null, 7], "large_list": [null, 7]}),
+        ]
+    );
+}
+
+#[test]
+fn cp01_sliced_fixed_lists_distinguish_null_parent_from_null_elements() {
+    let list = FixedSizeListArray::from_iter_primitive::<Int32Type, _, _>(
+        vec![
+            Some(vec![Some(99), Some(98)]),
+            None,
+            Some(vec![None, None]),
+            Some(vec![Some(7), None]),
+        ],
+        2,
+    )
+    .slice(1, 3);
+    let batch = RecordBatch::try_from_iter(vec![("list", Arc::new(list) as ArrayRef)]).unwrap();
+    assert_eq!(
+        record_batch_to_json(&batch).unwrap(),
+        vec![
+            json!({"list": null}),
+            json!({"list": [null, null]}),
+            json!({"list": [7, null]}),
+        ]
+    );
+}
+
+#[test]
+fn cp01_sliced_struct_parent_null_hides_populated_children() {
+    let names = Arc::new(StringArray::from(vec![
+        Some("outside"),
+        Some("hidden"),
+        None,
+        Some(""),
+    ])) as ArrayRef;
+    let lists = Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+        Some(vec![Some(99)]),
+        Some(vec![Some(1)]),
+        None,
+        Some(vec![]),
+    ])) as ArrayRef;
+    let nulls = BooleanArray::from(vec![Some(true), None, Some(true), Some(true)])
+        .nulls()
+        .cloned();
+    let structs = StructArray::new(
+        Fields::from(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("items", lists.data_type().clone(), true),
+        ]),
+        vec![names, lists],
+        nulls,
+    )
+    .slice(1, 3);
+    let batch =
+        RecordBatch::try_from_iter(vec![("record", Arc::new(structs) as ArrayRef)]).unwrap();
+    assert_eq!(
+        record_batch_to_json(&batch).unwrap(),
+        vec![
+            json!({"record": null}),
+            json!({"record": {"name": null, "items": null}}),
+            json!({"record": {"name": "", "items": []}}),
+        ]
+    );
+}
+
+#[test]
+fn cp01_nested_struct_nulls_remain_null_inside_lists() {
+    let fields = Fields::from(vec![Field::new("name", DataType::Utf8, true)]);
+    let mut builder = ListBuilder::new(StructBuilder::new(
+        fields,
+        vec![Box::new(StringBuilder::new())],
+    ));
+    builder
+        .values()
+        .field_builder::<StringBuilder>(0)
+        .unwrap()
+        .append_value("hidden");
+    builder.values().append(false);
+    builder
+        .values()
+        .field_builder::<StringBuilder>(0)
+        .unwrap()
+        .append_value("");
+    builder.values().append(true);
+    builder.append(true);
+    builder.append(false);
+    builder.append(true);
+    let batch =
+        RecordBatch::try_from_iter(vec![("records", Arc::new(builder.finish()) as ArrayRef)])
+            .unwrap();
+    assert_eq!(
+        record_batch_to_json(&batch).unwrap(),
+        vec![
+            json!({"records": [null, {"name": ""}]}),
+            json!({"records": null}),
+            json!({"records": []}),
+        ]
+    );
+}
+
+#[test]
+fn cp01_sliced_interval_nulls_remain_distinct_from_zero_intervals() {
+    let day_time = IntervalDayTimeArray::from(vec![
+        Some(IntervalDayTime::new(99, 99)),
+        None,
+        Some(IntervalDayTime::new(0, 0)),
+        Some(IntervalDayTime::new(-2, 300)),
+    ])
+    .slice(1, 3);
+    let month_day_nano = IntervalMonthDayNanoArray::from(vec![
+        Some(IntervalMonthDayNano::new(99, 99, 99)),
+        None,
+        Some(IntervalMonthDayNano::new(0, 0, 0)),
+        Some(IntervalMonthDayNano::new(4, -2, 300)),
+    ])
+    .slice(1, 3);
+    let batch = RecordBatch::try_from_iter(vec![
+        ("day_time", Arc::new(day_time) as ArrayRef),
+        ("month_day_nano", Arc::new(month_day_nano) as ArrayRef),
+    ])
+    .unwrap();
+    assert_eq!(
+        record_batch_to_json(&batch).unwrap(),
+        vec![
+            json!({"day_time": null, "month_day_nano": null}),
+            json!({"day_time": {"days": 0, "milliseconds": 0}, "month_day_nano": {"months": 0, "days": 0, "nanoseconds": 0}}),
+            json!({"day_time": {"days": -2, "milliseconds": 300}, "month_day_nano": {"months": 4, "days": -2, "nanoseconds": 300}}),
+        ]
+    );
+}
+
+#[test]
 fn fixed_size_binary_uses_row_count_and_preserves_nulls() {
     let wide = FixedSizeBinaryArray::try_from_iter([vec![42; 16]].into_iter()).unwrap();
     let wide_batch =
@@ -380,7 +598,7 @@ async fn test_run_end_deserialization() {
                 "some_run_end": "abc"
             }),
             json!({
-                "some_run_end": ""
+                "some_run_end": null
             }),
             json!({
                 "some_run_end": "def"

@@ -100,32 +100,35 @@ fn type_matcher(column: &ArrayRef) -> Result<Vec<Value>, VectorStoreError> {
         }
         DataType::Interval(IntervalUnit::DayTime) => Ok(column
             .as_primitive::<IntervalDayTimeType>()
-            .values()
             .iter()
-            .map(|IntervalDayTime { days, milliseconds }| {
-                json!({
-                    "days": days,
-                    "milliseconds": milliseconds,
+            .map(|interval| {
+                interval.map_or(Value::Null, |IntervalDayTime { days, milliseconds }| {
+                    json!({
+                        "days": days,
+                        "milliseconds": milliseconds,
+                    })
                 })
             })
             .collect()),
         DataType::Interval(IntervalUnit::MonthDayNano) => Ok(column
             .as_primitive::<IntervalMonthDayNanoType>()
-            .values()
             .iter()
-            .map(
-                |IntervalMonthDayNano {
-                     months,
-                     days,
-                     nanoseconds,
-                 }| {
-                    json!({
-                        "months": months,
-                        "days": days,
-                        "nanoseconds": nanoseconds,
-                    })
-                },
-            )
+            .map(|interval| {
+                interval.map_or(
+                    Value::Null,
+                    |IntervalMonthDayNano {
+                         months,
+                         days,
+                         nanoseconds,
+                     }| {
+                        json!({
+                            "months": months,
+                            "days": days,
+                            "nanoseconds": nanoseconds,
+                        })
+                    },
+                )
+            })
             .collect()),
         DataType::Utf8 => json_arm!(byte_values, Utf8Type),
         DataType::LargeUtf8 => json_arm!(byte_values, LargeUtf8Type),
@@ -137,25 +140,23 @@ fn type_matcher(column: &ArrayRef) -> Result<Vec<Value>, VectorStoreError> {
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()
             .map_err(VectorStoreError::JsonError),
-        DataType::Boolean => {
-            let bool_array = column.as_boolean();
-            (0..bool_array.len())
-                .map(|i| bool_array.value(i))
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(VectorStoreError::JsonError)
-        }
+        DataType::Boolean => column
+            .as_boolean()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(VectorStoreError::JsonError),
         DataType::FixedSizeList(..) => {
             let list_array = column.as_fixed_size_list();
-            nested_values((0..list_array.len()).map(|i| list_array.value(i)))
+            nested_values(list_array.iter())
         }
         DataType::List(..) => {
             let list_array = column.as_list::<i32>();
-            nested_values((0..list_array.len()).map(|i| list_array.value(i)))
+            nested_values(list_array.iter())
         }
         DataType::LargeList(..) => {
             let list_array = column.as_list::<i64>();
-            nested_values((0..list_array.len()).map(|i| list_array.value(i)))
+            nested_values(list_array.iter())
         }
         DataType::Struct(..) => {
             let struct_array = column.as_struct();
@@ -169,7 +170,17 @@ fn type_matcher(column: &ArrayRef) -> Result<Vec<Value>, VectorStoreError> {
                 &struct_columns,
                 struct_array.len(),
                 &struct_array.column_names(),
-            ))
+            )
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if struct_array.is_null(index) {
+                    Value::Null
+                } else {
+                    value
+                }
+            })
+            .collect())
         }
         DataType::Map(..) => column
             .as_map()
@@ -197,7 +208,7 @@ fn type_matcher(column: &ArrayRef) -> Result<Vec<Value>, VectorStoreError> {
         },
         DataType::Union(..) => match column.as_any().downcast_ref::<UnionArray>() {
             Some(union_array) => {
-                nested_values((0..union_array.len()).map(|i| union_array.value(i)))
+                nested_values((0..union_array.len()).map(|i| Some(union_array.value(i))))
             }
             None => Err(VectorStoreError::datastore(ArrowError::CastError(format!(
                 "Can't cast column {column:?} to union array"
@@ -278,9 +289,10 @@ fn byte_values<T: ByteArrayType>(column: &ArrayRef) -> Result<Vec<Value>, serde_
 where
     T::Native: Serialize,
 {
-    let byte_array = column.as_bytes::<T>();
-    (0..byte_array.len())
-        .map(|i| serde_json::to_value(byte_array.value(i)))
+    column
+        .as_bytes::<T>()
+        .iter()
+        .map(serde_json::to_value)
         .collect()
 }
 
@@ -305,11 +317,16 @@ fn dictionary_values<T: ArrowDictionaryKeyType>(
         .collect()
 }
 
-/// Converts each nested array to one JSON array value.
-fn nested_values(arrays: impl Iterator<Item = ArrayRef>) -> Result<Vec<Value>, VectorStoreError> {
+/// Converts each nested array to a JSON array, preserving null parent rows.
+fn nested_values(
+    arrays: impl Iterator<Item = Option<ArrayRef>>,
+) -> Result<Vec<Value>, VectorStoreError> {
     arrays
-        .map(|array| {
-            serde_json::to_value(type_matcher(&array)?).map_err(VectorStoreError::JsonError)
+        .map(|array| match array {
+            Some(array) => {
+                serde_json::to_value(type_matcher(&array)?).map_err(VectorStoreError::JsonError)
+            }
+            None => Ok(Value::Null),
         })
         .collect()
 }

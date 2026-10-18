@@ -166,9 +166,8 @@ fn a_result_is_a_string_or_its_parts() {
     );
 }
 
-/// User parts: a PDF as a file part with its data or the URL that names
-/// it, a file id, an image with `detail: auto` by default, a video by URL,
-/// and a string document as text.
+/// Base64 PDFs, file ids, images and video keep their wire shapes. A PDF
+/// URL is refused before adaptation.
 #[test]
 fn user_parts_take_their_wire_shapes() {
     let document = |data: DocumentSourceKind, media_type| {
@@ -184,10 +183,6 @@ fn user_parts_take_their_wire_shapes() {
             DocumentSourceKind::Base64("JVBERi0xLjQK".into()),
             Some(DocumentMediaType::PDF),
         ),
-        document(
-            DocumentSourceKind::Url("https://example.com/x.pdf".into()),
-            Some(DocumentMediaType::PDF),
-        ),
         document(DocumentSourceKind::FileId("file_abc".into()), None),
         UserContent::Image(Image {
             data: DocumentSourceKind::Base64("iVBORw0KGgo=".into()),
@@ -198,6 +193,31 @@ fn user_parts_take_their_wire_shapes() {
     ];
     let openrouter = OpenAIConfig::with_key(&crate::providers::openai::wire::OPENROUTER, "key")
         .chat("google/gemini-2.5-flash");
+    let mut with_url = content.clone();
+    with_url.insert(
+        2,
+        document(
+            DocumentSourceKind::Url("https://example.com/x.pdf".into()),
+            Some(DocumentMediaType::PDF),
+        ),
+    );
+    let error = crate::operation::Completion::prepare(
+        CompletionRequest::from(vec![Message::User { content: with_url }]),
+        &openrouter.describe(),
+    )
+    .expect_err("the PDF URL is refused before adaptation");
+    let crate::error::ProviderError::Request(source) = error else {
+        panic!("expected a request refusal: {error:?}");
+    };
+    let Some(crate::message::MessageError::ConversionError(diagnostic)) =
+        source.downcast_ref::<crate::message::MessageError>()
+    else {
+        panic!("expected the concrete PDF conversion error: {source:?}");
+    };
+    assert_eq!(
+        diagnostic,
+        "OpenAI chat completions does not accept URL files; use the Responses API or pass base64-encoded bytes",
+    );
     let sent = body_on(
         &openrouter,
         CompletionRequest::from(vec![Message::User { content }]),
@@ -207,8 +227,6 @@ fn user_parts_take_their_wire_shapes() {
         json!([
             {"type": "text", "text": "look"},
             {"type": "file", "file": {"file_data": "data:application/pdf;base64,JVBERi0xLjQK",
-                "filename": "document.pdf"}},
-            {"type": "file", "file": {"file_data": "https://example.com/x.pdf",
                 "filename": "document.pdf"}},
             {"type": "text", "text": "(document omitted: the provider cannot receive it in this form)"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},

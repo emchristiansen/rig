@@ -1733,33 +1733,34 @@ async fn a_unary_reply_and_a_streamed_reply_fold_to_the_same_answer() {
 /// reasoning.
 #[tokio::test]
 async fn a_trailing_thought_signature_stays_on_the_part_that_carried_it() {
-    use crate::message::{AssistantContent, AssistantMessage, Message};
+    use crate::message::{
+        AssistantContent, AssistantMessage, CarriedPayload, CarriedPosition, CarriedText,
+        CarriedTextContent, GeminiSignedAnswer, GeminiThoughtSignature, Message,
+    };
     let buffered = unary("gemini-3-flash-preview", SIGNED_UNARY).await;
     let streamed = streamed("gemini-3-flash-preview", SIGNED_STREAM).await;
-    let texts = |response: &crate::completion::CompletionResponse| {
-        response
-            .choice
-            .iter()
-            .map(|part| match part {
-                AssistantContent::Text(text) => (text.text.clone(), None),
-                AssistantContent::CarriedText(text) => (
-                    text.text().to_owned(),
-                    text.signed_answer()
-                        .map(|answer| answer.signature.as_str().to_owned()),
-                ),
-                other => panic!("answer text only: {other:?}"),
-            })
-            .collect::<Vec<_>>()
+    let signed = |text: &str| {
+        AssistantContent::CarriedText(CarriedText::new(
+            CarriedTextContent::GeminiSignedAnswer(GeminiSignedAnswer::new(
+                text,
+                GeminiThoughtSignature::new("signature_REDACTED_1"),
+            )),
+            CarriedPayload::new(
+                json!({"text": text, "thoughtSignature": "signature_REDACTED_1"}),
+                Some("gcp.gemini".to_owned()),
+            )
+            .with_position(CarriedPosition::MessageContent {
+                item_index: 0,
+                part_index: 0,
+            }),
+        ))
     };
+    assert_eq!(buffered.choice.to_vec(), vec![signed("289")]);
     assert_eq!(
-        texts(&buffered),
-        vec![("289".to_owned(), Some("signature_REDACTED_1".to_owned()))]
-    );
-    assert_eq!(
-        texts(&streamed),
+        streamed.choice.to_vec(),
         vec![
-            ("289".to_owned(), None),
-            (String::new(), Some("signature_REDACTED_1".to_owned()))
+            AssistantContent::text("289").with_native(json!({"text": "289"})),
+            signed("")
         ]
     );
     assert_eq!(buffered.finish_reason(), streamed.finish_reason());
@@ -1813,19 +1814,30 @@ const SIGNED_ONE_PART_STREAM: &str = concat!(
 
 #[tokio::test]
 async fn a_signature_on_its_own_text_part_stays_on_that_text_on_both_transports() {
+    use crate::message::{
+        AssistantContent, CarriedPayload, CarriedPosition, CarriedText, CarriedTextContent,
+        GeminiSignedAnswer, GeminiThoughtSignature,
+    };
+
     let buffered = unary("gemini-3-flash-preview", SIGNED_ONE_PART).await;
     let streamed = streamed("gemini-3-flash-preview", SIGNED_ONE_PART_STREAM).await;
 
-    for response in [&buffered, &streamed] {
-        let [message::AssistantContent::CarriedText(text)] = response.choice.as_slice() else {
-            panic!("one signed answer text: {:?}", response.choice);
-        };
-        assert_eq!(text.text(), "done");
-        assert_eq!(
-            text.signed_answer().map(|answer| answer.signature.as_str()),
-            Some("signature_REDACTED_1")
-        );
-    }
+    let expected = vec![AssistantContent::CarriedText(CarriedText::new(
+        CarriedTextContent::GeminiSignedAnswer(GeminiSignedAnswer::new(
+            "done",
+            GeminiThoughtSignature::new("signature_REDACTED_1"),
+        )),
+        CarriedPayload::new(
+            json!({"text": "done", "thoughtSignature": "signature_REDACTED_1"}),
+            Some("gcp.gemini".to_owned()),
+        )
+        .with_position(CarriedPosition::MessageContent {
+            item_index: 0,
+            part_index: 0,
+        }),
+    ))];
+    assert_eq!(buffered.choice.to_vec(), expected);
+    assert_eq!(streamed.choice.to_vec(), expected);
 }
 
 /// The singular HTTP request the wire encodes.
