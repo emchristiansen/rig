@@ -49,7 +49,7 @@ fn type_matcher(column: &ArrayRef) -> Result<Vec<Value>, VectorStoreError> {
     }
 
     match column.data_type() {
-        DataType::Null => Ok(vec![serde_json::Value::Null]),
+        DataType::Null => Ok(vec![Value::Null; column.len()]),
         DataType::Float32 => json_arm!(primitive_values, Float32Type),
         DataType::Float64 => json_arm!(primitive_values, Float64Type),
         DataType::Int8 => json_arm!(primitive_values, Int8Type),
@@ -100,60 +100,63 @@ fn type_matcher(column: &ArrayRef) -> Result<Vec<Value>, VectorStoreError> {
         }
         DataType::Interval(IntervalUnit::DayTime) => Ok(column
             .as_primitive::<IntervalDayTimeType>()
-            .values()
             .iter()
-            .map(|IntervalDayTime { days, milliseconds }| {
-                json!({
-                    "days": days,
-                    "milliseconds": milliseconds,
+            .map(|interval| {
+                interval.map_or(Value::Null, |IntervalDayTime { days, milliseconds }| {
+                    json!({
+                        "days": days,
+                        "milliseconds": milliseconds,
+                    })
                 })
             })
             .collect()),
         DataType::Interval(IntervalUnit::MonthDayNano) => Ok(column
             .as_primitive::<IntervalMonthDayNanoType>()
-            .values()
             .iter()
-            .map(
-                |IntervalMonthDayNano {
-                     months,
-                     days,
-                     nanoseconds,
-                 }| {
-                    json!({
-                        "months": months,
-                        "days": days,
-                        "nanoseconds": nanoseconds,
-                    })
-                },
-            )
+            .map(|interval| {
+                interval.map_or(
+                    Value::Null,
+                    |IntervalMonthDayNano {
+                         months,
+                         days,
+                         nanoseconds,
+                     }| {
+                        json!({
+                            "months": months,
+                            "days": days,
+                            "nanoseconds": nanoseconds,
+                        })
+                    },
+                )
+            })
             .collect()),
         DataType::Utf8 => json_arm!(byte_values, Utf8Type),
         DataType::LargeUtf8 => json_arm!(byte_values, LargeUtf8Type),
         DataType::Binary => json_arm!(byte_values, BinaryType),
         DataType::LargeBinary => json_arm!(byte_values, LargeBinaryType),
-        DataType::FixedSizeBinary(n) => (0..*n)
-            .map(|i| serde_json::to_value(column.as_fixed_size_binary().value(i as usize)))
+        DataType::FixedSizeBinary(..) => column
+            .as_fixed_size_binary()
+            .iter()
+            .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()
             .map_err(VectorStoreError::JsonError),
-        DataType::Boolean => {
-            let bool_array = column.as_boolean();
-            (0..bool_array.len())
-                .map(|i| bool_array.value(i))
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(VectorStoreError::JsonError)
-        }
+        DataType::Boolean => column
+            .as_boolean()
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(VectorStoreError::JsonError),
         DataType::FixedSizeList(..) => {
             let list_array = column.as_fixed_size_list();
-            nested_values((0..list_array.len()).map(|i| list_array.value(i)))
+            nested_values(list_array.iter())
         }
         DataType::List(..) => {
             let list_array = column.as_list::<i32>();
-            nested_values((0..list_array.len()).map(|i| list_array.value(i)))
+            nested_values(list_array.iter())
         }
         DataType::LargeList(..) => {
             let list_array = column.as_list::<i64>();
-            nested_values((0..list_array.len()).map(|i| list_array.value(i)))
+            nested_values(list_array.iter())
         }
         DataType::Struct(..) => {
             let struct_array = column.as_struct();
@@ -167,52 +170,45 @@ fn type_matcher(column: &ArrayRef) -> Result<Vec<Value>, VectorStoreError> {
                 &struct_columns,
                 struct_array.len(),
                 &struct_array.column_names(),
-            ))
-        }
-        DataType::Map(..) => {
-            let map_columns = column
-                .as_map()
-                .entries()
-                .columns()
-                .iter()
-                .map(type_matcher)
-                .collect::<Result<Vec<_>, _>>()?;
-
-            Ok(build_map(&map_columns))
-        }
-        DataType::Dictionary(keys_type, ..) => {
-            let (keys, v) = match **keys_type {
-                DataType::Int8 => dictionary_keys::<Int8Type>(column)?,
-                DataType::Int16 => dictionary_keys::<Int16Type>(column)?,
-                DataType::Int32 => dictionary_keys::<Int32Type>(column)?,
-                DataType::Int64 => dictionary_keys::<Int64Type>(column)?,
-                DataType::UInt8 => dictionary_keys::<UInt8Type>(column)?,
-                DataType::UInt16 => dictionary_keys::<UInt16Type>(column)?,
-                DataType::UInt32 => dictionary_keys::<UInt32Type>(column)?,
-                DataType::UInt64 => dictionary_keys::<UInt64Type>(column)?,
-                _ => {
-                    return Err(VectorStoreError::datastore(ArrowError::CastError(format!(
-                        "Dictionary keys type is not accepted: {keys_type:?}"
-                    ))));
+            )
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if struct_array.is_null(index) {
+                    Value::Null
+                } else {
+                    value
                 }
-            };
-
-            let values = type_matcher(v)?;
-
-            Ok(keys
-                .iter()
-                .zip(values)
-                .map(|(k, v)| {
-                    let mut map = serde_json::Map::new();
-                    map.insert(k.clone(), v);
-                    map
-                })
-                .map(Value::Object)
-                .collect())
+            })
+            .collect())
         }
+        DataType::Map(..) => column
+            .as_map()
+            .iter()
+            .map(|entries| match entries {
+                Some(entries) => Ok(build_map(
+                    type_matcher(entries.column(0))?,
+                    type_matcher(entries.column(1))?,
+                )),
+                None => Ok(Value::Null),
+            })
+            .collect(),
+        DataType::Dictionary(keys_type, ..) => match **keys_type {
+            DataType::Int8 => dictionary_values::<Int8Type>(column),
+            DataType::Int16 => dictionary_values::<Int16Type>(column),
+            DataType::Int32 => dictionary_values::<Int32Type>(column),
+            DataType::Int64 => dictionary_values::<Int64Type>(column),
+            DataType::UInt8 => dictionary_values::<UInt8Type>(column),
+            DataType::UInt16 => dictionary_values::<UInt16Type>(column),
+            DataType::UInt32 => dictionary_values::<UInt32Type>(column),
+            DataType::UInt64 => dictionary_values::<UInt64Type>(column),
+            _ => Err(VectorStoreError::datastore(ArrowError::CastError(format!(
+                "Dictionary keys type is not accepted: {keys_type:?}"
+            )))),
+        },
         DataType::Union(..) => match column.as_any().downcast_ref::<UnionArray>() {
             Some(union_array) => {
-                nested_values((0..union_array.len()).map(|i| union_array.value(i)))
+                nested_values((0..union_array.len()).map(|i| Some(union_array.value(i))))
             }
             None => Err(VectorStoreError::datastore(ArrowError::CastError(format!(
                 "Can't cast column {column:?} to union array"
@@ -283,7 +279,6 @@ where
 {
     column
         .as_primitive::<T>()
-        .values()
         .iter()
         .map(serde_json::to_value)
         .collect()
@@ -294,35 +289,44 @@ fn byte_values<T: ByteArrayType>(column: &ArrayRef) -> Result<Vec<Value>, serde_
 where
     T::Native: Serialize,
 {
-    let byte_array = column.as_bytes::<T>();
-    (0..byte_array.len())
-        .map(|i| serde_json::to_value(byte_array.value(i)))
+    column
+        .as_bytes::<T>()
+        .iter()
+        .map(serde_json::to_value)
         .collect()
 }
 
-/// Returns a dictionary-encoded column's keys, serialized as strings, alongside
-/// its value array.
-fn dictionary_keys<T: ArrowDictionaryKeyType>(
+/// Resolves each dictionary key to its JSON value, preserving null rows.
+fn dictionary_values<T: ArrowDictionaryKeyType>(
     column: &ArrayRef,
-) -> Result<(Vec<String>, &ArrayRef), serde_json::Error>
-where
-    T::Native: Serialize,
-{
+) -> Result<Vec<Value>, VectorStoreError> {
     let dict_array = column.as_dictionary::<T>();
-    let keys = dict_array
-        .keys()
-        .values()
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((keys, dict_array.values()))
+    let values = type_matcher(dict_array.values())?;
+    dict_array
+        .keys_iter()
+        .map(|key| match key {
+            Some(index) if dict_array.values().is_valid(index) => {
+                values.get(index).cloned().ok_or_else(|| {
+                    VectorStoreError::datastore(ArrowError::CastError(format!(
+                        "Dictionary index {index} has no decoded value"
+                    )))
+                })
+            }
+            _ => Ok(Value::Null),
+        })
+        .collect()
 }
 
-/// Converts each nested array to one JSON array value.
-fn nested_values(arrays: impl Iterator<Item = ArrayRef>) -> Result<Vec<Value>, VectorStoreError> {
+/// Converts each nested array to a JSON array, preserving null parent rows.
+fn nested_values(
+    arrays: impl Iterator<Item = Option<ArrayRef>>,
+) -> Result<Vec<Value>, VectorStoreError> {
     arrays
-        .map(|array| {
-            serde_json::to_value(type_matcher(&array)?).map_err(VectorStoreError::JsonError)
+        .map(|array| match array {
+            Some(array) => {
+                serde_json::to_value(type_matcher(&array)?).map_err(VectorStoreError::JsonError)
+            }
+            None => Ok(Value::Null),
         })
         .collect()
 }
@@ -345,28 +349,22 @@ fn build_struct(columns: &[Vec<Value>], num_rows: usize, col_names: &[&str]) -> 
         .collect()
 }
 
-/// Assembles one single-entry JSON object per map entry from its key and value
-/// columns.
-fn build_map(columns: &[Vec<Value>]) -> Vec<Value> {
-    let (Some(keys), Some(values)) = (columns.first(), columns.get(1)) else {
-        return Vec::new();
-    };
-
-    keys.iter()
-        .zip(values)
-        .map(|(k, v)| {
-            let mut map = serde_json::Map::new();
-            map.insert(
-                match k {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => k.to_string(),
-                },
-                v.clone(),
-            );
-            map
-        })
-        .map(Value::Object)
-        .collect()
+/// Assembles one JSON object from a map row's key and value columns.
+fn build_map(keys: Vec<Value>, values: Vec<Value>) -> Value {
+    Value::Object(
+        keys.into_iter()
+            .zip(values)
+            .map(|(k, v)| {
+                (
+                    match k {
+                        Value::String(s) => s,
+                        _ => k.to_string(),
+                    },
+                    v,
+                )
+            })
+            .collect(),
+    )
 }
 
 #[cfg(test)]

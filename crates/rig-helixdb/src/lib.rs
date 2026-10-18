@@ -158,8 +158,9 @@ impl HelixDBVectorStore {
         &self.client
     }
 
-    /// Embeds the query and runs `VectorSearch`. An absent request threshold is
-    /// sent as zero.
+    /// Embeds the query, runs `VectorSearch`, and applies the request's local
+    /// threshold and payload filter. An absent threshold is sent as zero but
+    /// adds no local cutoff.
     async fn vector_search(
         &self,
         req: &rig_core::vector_store::VectorSearchRequest<HelixDBFilter>,
@@ -178,7 +179,30 @@ impl HelixDBVectorStore {
             .await
             .map_err(VectorStoreError::datastore)?;
 
-        Ok(result.vec_docs)
+        Self::select_results(result.vec_docs, req)
+    }
+
+    fn select_results(
+        results: Vec<QueryResult>,
+        req: &rig_core::vector_store::VectorSearchRequest<HelixDBFilter>,
+    ) -> Result<Vec<QueryResult>, VectorStoreError> {
+        let mut selected = Vec::new();
+        for result in results {
+            if !req
+                .threshold()
+                .is_none_or(|threshold| -(result.score - 1.) >= threshold)
+            {
+                continue;
+            }
+            if let Some(filter) = req.filter() {
+                let payload = serde_json::from_str(&result.json_payload)?;
+                if !filter.satisfies(&payload) {
+                    continue;
+                }
+            }
+            selected.push(result);
+        }
+        Ok(selected)
     }
 }
 
@@ -234,19 +258,6 @@ impl VectorStoreIndex for HelixDBVectorStore {
             .vector_search(&req)
             .await?
             .into_iter()
-            .filter(|x| {
-                let is_threshold = req.threshold().is_none_or(|t| -(x.score - 1.) >= t);
-
-                is_threshold
-                    && req
-                        .filter()
-                        .zip(serde_json::from_str(&x.json_payload).ok())
-                        .is_none_or(
-                            |(filter, payload): (&Filter<serde_json::Value>, serde_json::Value)| {
-                                filter.satisfies(&payload)
-                            },
-                        )
-            })
             .map(|x| {
                 let doc: T = serde_json::from_str(&x.json_payload)?;
 
@@ -261,8 +272,8 @@ impl VectorStoreIndex for HelixDBVectorStore {
         Ok(docs)
     }
 
-    /// Like `top_n` but returns only scores and ids, and ignores the
-    /// request filter.
+    /// Like `top_n` but returns only scores and ids. Payloads are decoded only
+    /// when the request has a filter.
     async fn top_n_ids(
         &self,
         req: rig_core::vector_store::VectorSearchRequest<HelixDBFilter>,
@@ -271,7 +282,6 @@ impl VectorStoreIndex for HelixDBVectorStore {
             .vector_search(&req)
             .await?
             .into_iter()
-            .filter(|x| -(x.score - 1.) >= req.threshold().unwrap_or_default())
             .map(|x| VectorSearchIdResult {
                 score: -(x.score - 1.),
                 id: x.id,
@@ -281,3 +291,6 @@ impl VectorStoreIndex for HelixDBVectorStore {
         Ok(docs)
     }
 }
+
+#[cfg(test)]
+mod tests;

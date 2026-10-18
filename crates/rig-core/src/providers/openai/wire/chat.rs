@@ -156,7 +156,10 @@ fn tool_message(
     supports_image_tool_results: bool,
 ) -> Result<Value, EncodeError> {
     if !supports_image_tool_results
-        && result.content.iter().any(|part| matches!(part, ToolResultContent::Image(_)))
+        && result
+            .content
+            .iter()
+            .any(|part| matches!(part, ToolResultContent::Image(_)))
     {
         return Err(EncodeError::request(concat!(
             "this provider does not accept an image in a tool result. ",
@@ -607,7 +610,8 @@ impl Chat {
                         crate::message::CarriedTextReplay::ProviderPart(_) => {
                             return Err(crate::message::UnrepresentableOpaqueContent::new(
                                 "OpenAI Chat Completions",
-                            ).into());
+                            )
+                            .into());
                         }
                     }
                 }
@@ -869,19 +873,20 @@ fn messages_mut(map: &mut Map<String, Value>) -> impl Iterator<Item = &mut Map<S
         .filter_map(Value::as_object_mut)
 }
 
-/// DeepSeek takes message `content` as a plain string, echoes tool calls back
-/// with an `index`, and needs an explicit empty `content` on a tool-call-only
-/// assistant turn.
+/// DeepSeek retains system content parts and flattens other text content,
+/// echoes tool calls with an `index`, and supplies empty content for a
+/// tool-call-only assistant turn.
 fn finalize_deepseek(map: &mut serde_json::Map<String, serde_json::Value>) {
     if let Some(messages) = map.get_mut("messages").and_then(Value::as_array_mut) {
         for message in messages {
             let Some(message) = message.as_object_mut() else {
                 continue;
             };
-            let is_assistant =
-                message.get("role").and_then(serde_json::Value::as_str) == Some("assistant");
+            let role = message.get("role").and_then(serde_json::Value::as_str);
+            let is_assistant = role == Some("assistant");
+            let is_system = role == Some("system");
 
-            if let Some(content) = message.get_mut("content") {
+            if !is_system && let Some(content) = message.get_mut("content") {
                 let separator = if is_assistant { "" } else { "\n" };
                 // Preserve nontext parts so unsupported attachments are rejected
                 // rather than silently omitted from the prompt.
@@ -1213,7 +1218,9 @@ fn finalize_openrouter(map: &mut serde_json::Map<String, serde_json::Value>, pro
     }
 }
 
-pub(crate) fn apply_openrouter_prompt_caching(map: &mut serde_json::Map<String, serde_json::Value>) {
+pub(crate) fn apply_openrouter_prompt_caching(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+) {
     let Some(messages) = map.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
@@ -1508,9 +1515,11 @@ impl crate::completion::ReplayTarget for Chat {
             (AssistantContent::CarriedReasoning(reasoning), _) => {
                 self.provider.dialect.quirks.reasoning_details && !reasoning.content.is_empty()
             }
-            (AssistantContent::CarriedText(text), _) => text.known_text_projection().is_some_and(|known| {
-                !known.is_empty() || self.provider.dialect.name == super::dialects::OPENAI.name
-            }),
+            (AssistantContent::CarriedText(text), _) => {
+                text.known_text_projection().is_some_and(|known| {
+                    !known.is_empty() || self.provider.dialect.name == super::dialects::OPENAI.name
+                })
+            }
             (AssistantContent::ProviderItem(_), _) => false,
             (AssistantContent::Text(text), Replay::Item(item)) => {
                 !text.text.is_empty() || item.get("audio").is_some()
@@ -2803,10 +2812,10 @@ struct ObservedChatError {
     message: Option<String>,
 }
 
+pub(crate) use carried::fold_groq_native_tools;
 use carried::{
     carried_details, carried_finish_reason, flatten_text_content_parts, sanitize_plain_text_history,
 };
-pub(crate) use carried::fold_groq_native_tools;
 mod carried;
 mod document;
 mod reported;
@@ -2828,3 +2837,6 @@ mod carried_tests;
 
 #[cfg(test)]
 mod gemini_tests;
+
+#[cfg(test)]
+mod document_diagnostics_tests;

@@ -40,6 +40,60 @@ fn body(request: CompletionRequest) -> Value {
     body_on(&wire(), request)
 }
 
+#[test]
+fn deepseek_keeps_system_text_parts_in_unary_and_streaming_requests() {
+    let wire = OpenAIConfig::with_key(&crate::providers::openai::wire::DEEPSEEK, "key")
+        .chat("deepseek-flash");
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let request = CompletionRequest::from(vec![
+            Message::system("You are a concise assistant. Answer directly."),
+            Message::user("Explain Rust."),
+        ]);
+        let request = crate::operation::Completion::prepare(request, &wire.describe())
+            .expect("the request prepares");
+        let body = json_body(&wire.encode(request, mode).expect("encodes").request);
+        assert_eq!(
+            body["messages"][0],
+            json!({
+                "role": "system",
+                "content": [{
+                    "type": "text",
+                    "text": "You are a concise assistant. Answer directly."
+                }]
+            })
+        );
+        assert_eq!(body["messages"][1]["content"], "Explain Rust.");
+    }
+}
+
+#[test]
+fn deepseek_preserves_system_shape_after_raw_merging() {
+    let wire = OpenAIConfig::with_key(&crate::providers::openai::wire::DEEPSEEK, "key")
+        .chat("deepseek-flash");
+    let messages = json!([
+        {"role": "system", "content": [
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"}
+        ]},
+        {"role": "system", "content": "explicit string"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "question"},
+            {"type": "text", "text": "continued"}
+        ]},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "answer"},
+            {"type": "text", "text": "continued"}
+        ]}
+    ]);
+    let mut request = CompletionRequest::new("fallback");
+    request.additional_params = Some(json!({"messages": messages}));
+    let body = body_on(&wire, request);
+    assert_eq!(body["messages"][0], messages[0]);
+    assert_eq!(body["messages"][1], messages[1]);
+    assert_eq!(body["messages"][2]["content"], "question\ncontinued");
+    assert_eq!(body["messages"][3]["content"], "answercontinued");
+}
+
 fn result(call: &str, content: Vec<ToolResultContent>) -> UserContent {
     UserContent::ToolResult(ToolResult {
         call: CallId::from_wire(call),
@@ -112,9 +166,8 @@ fn a_result_is_a_string_or_its_parts() {
     );
 }
 
-/// User parts: a PDF as a file part with its data or the URL that names
-/// it, a file id, an image with `detail: auto` by default, a video by URL,
-/// and a string document as text.
+/// Base64 PDFs, file ids, images and video keep their wire shapes. A PDF
+/// URL is refused before adaptation.
 #[test]
 fn user_parts_take_their_wire_shapes() {
     let document = |data: DocumentSourceKind, media_type| {
@@ -130,10 +183,6 @@ fn user_parts_take_their_wire_shapes() {
             DocumentSourceKind::Base64("JVBERi0xLjQK".into()),
             Some(DocumentMediaType::PDF),
         ),
-        document(
-            DocumentSourceKind::Url("https://example.com/x.pdf".into()),
-            Some(DocumentMediaType::PDF),
-        ),
         document(DocumentSourceKind::FileId("file_abc".into()), None),
         UserContent::Image(Image {
             data: DocumentSourceKind::Base64("iVBORw0KGgo=".into()),
@@ -144,6 +193,31 @@ fn user_parts_take_their_wire_shapes() {
     ];
     let openrouter = OpenAIConfig::with_key(&crate::providers::openai::wire::OPENROUTER, "key")
         .chat("google/gemini-2.5-flash");
+    let mut with_url = content.clone();
+    with_url.insert(
+        2,
+        document(
+            DocumentSourceKind::Url("https://example.com/x.pdf".into()),
+            Some(DocumentMediaType::PDF),
+        ),
+    );
+    let error = crate::operation::Completion::prepare(
+        CompletionRequest::from(vec![Message::User { content: with_url }]),
+        &openrouter.describe(),
+    )
+    .expect_err("the PDF URL is refused before adaptation");
+    let crate::error::ProviderError::Request(source) = error else {
+        panic!("expected a request refusal: {error:?}");
+    };
+    let Some(crate::message::MessageError::ConversionError(diagnostic)) =
+        source.downcast_ref::<crate::message::MessageError>()
+    else {
+        panic!("expected the concrete PDF conversion error: {source:?}");
+    };
+    assert_eq!(
+        diagnostic,
+        "OpenAI chat completions does not accept URL files; use the Responses API or pass base64-encoded bytes",
+    );
     let sent = body_on(
         &openrouter,
         CompletionRequest::from(vec![Message::User { content }]),
@@ -153,8 +227,6 @@ fn user_parts_take_their_wire_shapes() {
         json!([
             {"type": "text", "text": "look"},
             {"type": "file", "file": {"file_data": "data:application/pdf;base64,JVBERi0xLjQK",
-                "filename": "document.pdf"}},
-            {"type": "file", "file": {"file_data": "https://example.com/x.pdf",
                 "filename": "document.pdf"}},
             {"type": "text", "text": "(document omitted: the provider cannot receive it in this form)"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},

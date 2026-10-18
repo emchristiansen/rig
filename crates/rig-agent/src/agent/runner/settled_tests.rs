@@ -6,6 +6,7 @@ use rig_core::test_utils::MockCompletionModel;
 
 use crate::agent::{
     AgentBuilder, AgentHook, HookContext, RunSettled, RunStart, RunStartAction, SettledOutcome,
+    StepEventKind,
 };
 use crate::completion::PromptError;
 
@@ -48,6 +49,73 @@ async fn a_blocking_run_a_hook_stops_settles_with_the_error() {
             .is_some_and(|seen| seen.starts_with("error:") && seen.ends_with("stopped at start")),
         "{seen:?}"
     );
+}
+
+#[derive(Clone)]
+struct MemoryBindingSettlement {
+    subscribed: bool,
+    errors: Arc<Mutex<Vec<String>>>,
+}
+
+impl AgentHook for MemoryBindingSettlement {
+    fn observes(&self, kind: StepEventKind) -> bool {
+        self.subscribed && kind == StepEventKind::RunSettled
+    }
+
+    async fn on_run_settled(&self, _ctx: &HookContext, event: RunSettled<'_>) {
+        let SettledOutcome::Error(reason) = event.outcome else {
+            panic!("binding the configured memory fails");
+        };
+        assert!(
+            event.messages.is_none(),
+            "the driver never received the run"
+        );
+        self.errors.lock().expect("settlements").push(reason.into());
+    }
+}
+
+#[tokio::test]
+async fn resumed_memory_binding_failure_settles_only_when_subscribed() {
+    use rig_core::{memory::MemoryError, message::Message, serve::adapters::ModelAdapter};
+
+    use crate::run::AgentRun;
+
+    for subscribed in [true, false] {
+        let model = MockCompletionModel::text("never asked");
+        let memory_handler = MockCompletionModel::text("also never asked");
+        let settled = MemoryBindingSettlement {
+            subscribed,
+            errors: Arc::default(),
+        };
+        let agent = AgentBuilder::new(model.clone())
+            .memory_handler(ModelAdapter::new("wrong-family", memory_handler.clone()))
+            .add_hook(settled.clone())
+            .build();
+        let run = AgentRun::from_spec(&agent.run_spec(), Message::user("resume me"), None);
+
+        let error = agent
+            .resume(run)
+            .conversation("thread")
+            .await
+            .expect_err("a completion handler cannot bind as memory");
+
+        assert!(
+            matches!(&error, PromptError::Memory(MemoryError::Internal(reason))
+                if reason.contains("serves the completion family, not memory")),
+            "{error:?}"
+        );
+        let seen = settled.errors.lock().expect("settlements");
+        if subscribed {
+            assert_eq!(*seen, vec![error.to_string()], "exactly one settlement");
+        } else {
+            assert!(seen.is_empty(), "an unsubscribed hook is not notified");
+        }
+        assert!(model.requests().is_empty(), "no completion was dispatched");
+        assert!(
+            memory_handler.requests().is_empty(),
+            "binding fails before dispatching to the configured handler"
+        );
+    }
 }
 
 mod slow_stream {}

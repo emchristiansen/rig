@@ -1,4 +1,4 @@
-use super::{Mem, SurrealSearchFilter, SurrealVectorStore};
+use super::{Mem, SurrealDistanceFunction, SurrealSearchFilter, SurrealVectorStore};
 use rig_core::{
     embeddings::Embedding,
     vector_store::{
@@ -7,7 +7,7 @@ use rig_core::{
     },
 };
 use serde_json::json;
-use surrealdb::Surreal;
+use surrealdb::{Surreal, engine::local::Db};
 
 /// A deterministic embedding runtime: every text embeds to three zeros.
 #[derive(Clone)]
@@ -47,6 +47,77 @@ impl rig_core::driver::Transport<rig_core::driver::Local<rig_core::operation::Em
             Ok(rig_core::driver::Step::End(response)),
         ])))
     }
+}
+
+fn assert_query_direction(
+    store: &SurrealVectorStore<Db>,
+    function: &str,
+    comparison: &str,
+    order: &str,
+) {
+    for with_document in [false, true] {
+        let projection = if with_document {
+            "id , document , embedded_text,"
+        } else {
+            "id ,"
+        };
+        let expected = format!(
+            "SELECT {projection} {function}($vec, embedding) as distance \
+             from type::table($tablename) \
+             where {function}($vec, embedding) {comparison} $threshold AND $filter \
+             order by distance {order} LIMIT $limit"
+        );
+        let query = store
+            .search_query(with_document)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(query, expected);
+    }
+}
+
+/// Checks generated queries without connecting to a database or embedding provider.
+#[test]
+fn explicit_distance_queries_use_maximum_threshold_and_ascending_order() {
+    for (function, sql_function) in [
+        (SurrealDistanceFunction::Knn, "vector::distance::knn"),
+        (
+            SurrealDistanceFunction::Hamming,
+            "vector::distance::hamming",
+        ),
+        (
+            SurrealDistanceFunction::Euclidean,
+            "vector::distance::euclidean",
+        ),
+    ] {
+        let store = SurrealVectorStore::new(
+            MockEmbeddingModel::model(),
+            Surreal::<Db>::init(),
+            None,
+            function,
+        );
+        assert_query_direction(&store, sql_function, "<=", "asc");
+    }
+}
+
+/// Checks the default similarity query without a database or embedding provider.
+#[test]
+fn default_cosine_query_keeps_minimum_threshold_and_descending_order() {
+    let store =
+        SurrealVectorStore::with_defaults(MockEmbeddingModel::model(), Surreal::<Db>::init());
+    assert_query_direction(&store, "vector::similarity::cosine", ">=", "desc");
+}
+
+/// Checks the other admitted similarity measure without contacting a database.
+#[test]
+fn jaccard_query_keeps_minimum_threshold_and_descending_order() {
+    let store = SurrealVectorStore::new(
+        MockEmbeddingModel::model(),
+        Surreal::<Db>::init(),
+        None,
+        SurrealDistanceFunction::Jaccard,
+    );
+    assert_query_direction(&store, "vector::similarity::jaccard", ">=", "desc");
 }
 
 #[allow(clippy::panic)]

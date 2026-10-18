@@ -406,19 +406,7 @@ impl VectorStoreIndex for LanceDbVectorIndex {
             .await?
             .into_iter()
             .enumerate()
-            .map(|(i, value)| {
-                Ok(VectorSearchResult {
-                    score: match value.get("_distance") {
-                        Some(Value::Number(distance)) => distance.as_f64().unwrap_or_default(),
-                        _ => 0.0,
-                    },
-                    id: match value.get(self.id_field.as_str()) {
-                        Some(Value::String(id)) => id.clone(),
-                        _ => format!("unknown{i}"),
-                    },
-                    document: serde_json::from_value(value).map_err(VectorStoreError::JsonError)?,
-                })
-            })
+            .map(|(i, value)| search_result(value, &self.id_field, i))
             .collect()
     }
 
@@ -446,18 +434,42 @@ impl VectorStoreIndex for LanceDbVectorIndex {
         execute_query(&self.build_query(query))
             .await?
             .into_iter()
-            .map(|value| {
-                Ok(VectorSearchIdResult {
-                    score: match value.get("distance") {
-                        Some(Value::Number(distance)) => distance.as_f64().unwrap_or_default(),
-                        _ => 0.0,
-                    },
-                    id: match value.get(self.id_field.as_str()) {
-                        Some(Value::String(id)) => id.clone(),
-                        _ => "".to_string(),
-                    },
-                })
-            })
+            .map(|value| Ok(search_id_result(&value, &self.id_field)))
             .collect()
     }
 }
+
+fn search_distance(value: &Value) -> f64 {
+    match value.get("_distance") {
+        Some(Value::Number(distance)) => distance.as_f64().unwrap_or_default(),
+        _ => 0.0,
+    }
+}
+
+fn search_result<T: DeserializeOwned>(
+    value: Value,
+    id_field: &str,
+    index: usize,
+) -> Result<VectorSearchResult<T>, VectorStoreError> {
+    Ok(VectorSearchResult {
+        score: search_distance(&value),
+        id: match value.get(id_field) {
+            Some(Value::String(id)) => id.clone(),
+            _ => format!("unknown{index}"),
+        },
+        document: serde_json::from_value(value).map_err(VectorStoreError::JsonError)?,
+    })
+}
+
+fn search_id_result(value: &Value, id_field: &str) -> VectorSearchIdResult {
+    VectorSearchIdResult {
+        score: search_distance(value),
+        id: match value.get(id_field) {
+            Some(Value::String(id)) => id.clone(),
+            _ => "".to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests;
