@@ -587,6 +587,7 @@ async fn streamed_phase_round_trips_on_follow_up() {
                     .as_ref()
                     .and_then(|native| native.item["phase"].as_str()),
             ),
+            AssistantContent::CarriedText(text) => Some(text.phase.as_deref()),
             _ => None,
         })
         .collect();
