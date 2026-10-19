@@ -512,7 +512,7 @@ impl CodexWebSocketSession {
                 generate: options.generate,
             },
         )?;
-        let frame = encode_frame(&body)?;
+        let frame = encode_frame(&body, self.session.wire.codex_request_shape.is_standard())?;
         self.session.send_encoded(envelope, frame).await
     }
 
@@ -557,7 +557,7 @@ impl CodexWebSocketSession {
                 generate: None,
             },
         )?;
-        let frame = encode_frame(&body)?;
+        let frame = encode_frame(&body, self.session.wire.codex_request_shape.is_standard())?;
         self.session.send_encoded(envelope, frame).await
     }
 
@@ -577,14 +577,15 @@ impl CodexWebSocketSession {
     /// [`Self::send_incremental`] continues it.
     ///
     /// A warmup generates nothing, so its request may carry no conversation
-    /// at all: only its instructions (system messages) and tools, sent with
-    /// an empty `input`. It still needs at least one message, so a warmup
+    /// at all: only its instructions (system messages) and tools. Standard
+    /// Codex sends nonempty effective instructions as a leading developer
+    /// input item. It still needs at least one message, so a warmup
     /// without instructions is refused before anything is sent. That is the
     /// Codex client's session-start prewarm: the warmup of the request the
     /// session's first turn will make, before that turn's items exist. The
     /// first turn then goes out as a
     /// [`send_incremental`](Self::send_incremental) of its items, chaining
-    /// the warmup's response ID and reusing its model, instructions, tools
+    /// the warmup's response ID and reusing its model, instruction context, tools
     /// and other properties. When the first turn needs different properties,
     /// it is a full [`send`](Self::send) instead, as the official client
     /// falls back to a full request when they do not match. Set the frame

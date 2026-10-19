@@ -324,9 +324,11 @@ fn the_chatgpt_dialect_requests_stateless_ciphertext_and_keeps_controls_unset() 
         Some(&serde_json::json!(["reasoning.encrypted_content"]))
     );
     assert_eq!(
-        body.get("instructions").and_then(serde_json::Value::as_str),
+        body.pointer("/input/0/content/0/text")
+            .and_then(serde_json::Value::as_str),
         Some("You are ChatGPT, a helpful AI assistant.")
     );
+    assert!(body.get("instructions").is_none());
 }
 
 /// The Codex request Muninn's HTTP lane builds, in the typed shape it builds
@@ -380,11 +382,10 @@ fn encoded_bytes(wire: &Responses, request: CompletionRequest, mode: Mode) -> St
     String::from_utf8(body.to_vec()).expect("the body is UTF-8")
 }
 
-/// The whole Codex request keeps the fork's exact JSON values with sampling
-/// unset. Serialization key order differs, so this comparison makes no byte
-/// parity claim. The original expected strings remain the value fixture.
+/// The Codex request retains every original value outside the instruction
+/// field's move into the developer prefix.
 #[test]
-fn the_codex_lane_sends_the_fork_request_values_when_sampling_is_unset() {
+fn the_codex_lane_keeps_values_while_moving_instructions_to_input() {
     let preserve_order = serde_json::to_string(&serde_json::json!({ "b": 0, "a": 0 }))
         .expect("serializes")
         == r#"{"b":0,"a":0}"#;
@@ -409,9 +410,20 @@ fn the_codex_lane_sends_the_fork_request_values_when_sampling_is_unset() {
         );
         let actual: serde_json::Value =
             serde_json::from_str(&bytes).expect("actual encoded request JSON");
-        let expected: serde_json::Value =
+        let mut expected: serde_json::Value =
             serde_json::from_str(&expected).expect("original fork request JSON");
+        let instructions = expected
+            .as_object_mut()
+            .expect("object")
+            .remove("instructions")
+            .expect("original instructions");
+        expected["input"].as_array_mut().expect("input array").insert(0, serde_json::json!({
+            "type":"message", "role":"developer",
+            "content":[{"type":"input_text", "text":instructions}],
+            "internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]},
+        }));
         assert_eq!(actual, expected, "{mode:?}");
+        assert!(bytes.starts_with(r#"{"model":"gpt-5.4","stream":true,"#));
     }
 }
 
@@ -564,9 +576,11 @@ fn the_chatgpt_dialect_merges_its_instructions_ahead_of_the_callers() {
     );
 
     assert_eq!(
-        body.get("instructions").and_then(serde_json::Value::as_str),
+        body.pointer("/input/0/content/0/text")
+            .and_then(serde_json::Value::as_str),
         Some("You are ChatGPT, a helpful AI assistant.\n\nRespond tersely.")
     );
+    assert!(body.get("instructions").is_none());
 }
 
 /// ...and they are not stated twice when the caller's preamble already
@@ -581,16 +595,18 @@ fn the_chatgpt_dialect_does_not_repeat_instructions_the_caller_already_carries()
     );
 
     assert_eq!(
-        body.get("instructions").and_then(serde_json::Value::as_str),
+        body.pointer("/input/0/content/0/text")
+            .and_then(serde_json::Value::as_str),
         Some(carried)
     );
+    assert!(body.get("instructions").is_none());
 }
 
 /// This gateway rejects the `system` role in `input` outright, so every
-/// system message is lifted — the leading run *and* the mid-conversation
-/// ones — leaving only the non-system turns as input items.
+/// system message is lifted into the developer prefix, including those
+/// between turns. The two user turns retain their order and content.
 #[test]
-fn the_chatgpt_dialect_lifts_every_system_message_into_instructions() {
+fn the_chatgpt_dialect_lifts_every_system_message_into_the_developer_prefix() {
     let body = encoded_body_of(
         &chatgpt(),
         turn(vec![
@@ -603,7 +619,8 @@ fn the_chatgpt_dialect_lifts_every_system_message_into_instructions() {
     );
 
     assert_eq!(
-        body.get("instructions").and_then(serde_json::Value::as_str),
+        body.pointer("/input/0/content/0/text")
+            .and_then(serde_json::Value::as_str),
         Some(
             "You are ChatGPT, a helpful AI assistant.\n\nSystem one\n\nMid-conversation instruction"
         )
@@ -612,9 +629,13 @@ fn the_chatgpt_dialect_lifts_every_system_message_into_instructions() {
         body.get("input")
             .and_then(serde_json::Value::as_array)
             .map(Vec::len),
-        Some(2),
-        "only the two user turns remain as input: {body}"
+        Some(3),
+        "the developer prefix and two user turns remain: {body}"
     );
+    assert!(body.get("instructions").is_none());
+    assert_eq!(body["input"][0]["role"], "developer");
+    assert_eq!(body["input"][1]["content"][0]["text"], "hi");
+    assert_eq!(body["input"][2]["content"][0]["text"], "again");
 }
 
 /// A turn whose terminal event restates the assembled output.
@@ -1078,6 +1099,78 @@ fn standard_request_shape_keeps_the_existing_codex_wire_body() {
     assert_eq!(tools.len(), 2);
     assert_eq!(tools[0]["name"], "lookup");
     assert_eq!(tools[1], namespace);
+}
+
+#[test]
+fn standard_codex_routes_first_after_identity_and_service_tier_merging() {
+    let wire = muninn_configured_chatgpt()
+        .with_codex_identity(derived_identity())
+        .expect("Codex identity");
+    let request = CompletionRequest::new("hello")
+        .preamble("provider base\n\ncaller base")
+        .service_tier(crate::completion::ServiceTier::Flex)
+        .additional_params(serde_json::json!({
+            "service_tier":"priority", "client_metadata":{"caller":"kept"},
+            "prompt_cache_key":"caller-cache",
+        }));
+    let bytes = encoded_bytes(&wire, request.clone(), Mode::Unary);
+    assert!(bytes.starts_with(r#"{"model":"gpt-5.4","stream":true,"service_tier":"priority","#));
+    let body: serde_json::Value = serde_json::from_str(&bytes).expect("JSON body");
+    assert!(body.get("instructions").is_none());
+    assert_eq!(
+        body["input"],
+        serde_json::json!([
+            {
+                "type":"message", "role":"developer",
+                "id":"msg_3333557a-9135-5aeb-b8f2-d31c4d718f4b",
+                "content":[{"type":"input_text", "text":"provider base\n\ncaller base"}],
+                "internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]},
+            },
+            {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"hello"}]},
+        ])
+    );
+    assert_eq!(body["prompt_cache_key"], "caller-cache");
+    assert_eq!(
+        body["client_metadata"],
+        serde_json::json!({
+            "caller":"kept", "session_id":"session-derived", "thread_id":"thread-derived",
+        })
+    );
+    assert_eq!(bytes, encoded_bytes(&wire, request, Mode::Streaming));
+}
+
+#[test]
+fn standard_codex_without_base_instructions_keeps_only_the_original_input() {
+    let bytes = encoded_bytes(
+        &muninn_configured_chatgpt(),
+        CompletionRequest::new("hello"),
+        Mode::Unary,
+    );
+    let body: serde_json::Value = serde_json::from_str(&bytes).expect("JSON body");
+    assert!(body.get("instructions").is_none());
+    assert_eq!(
+        body["input"],
+        serde_json::json!([
+            {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"hello"}]},
+        ])
+    );
+    assert!(body.get("service_tier").is_none());
+    assert!(bytes.starts_with(r#"{"model":"gpt-5.4","stream":true,"#));
+}
+
+#[test]
+fn ordinary_responses_retains_top_level_instructions_and_its_original_order() {
+    let wire = openai();
+    let bytes = encoded_bytes(
+        &wire,
+        CompletionRequest::new("hello").preamble("base"),
+        Mode::Unary,
+    );
+    let body: serde_json::Value = serde_json::from_str(&bytes).expect("JSON body");
+    assert_eq!(body["instructions"], "base");
+    assert_eq!(body["input"].as_array().expect("input array").len(), 1);
+    assert_eq!(body["input"][0]["role"], "user");
+    assert!(bytes.starts_with(r#"{"model":"gpt-4o","input":["#));
 }
 
 #[test]

@@ -123,9 +123,12 @@ impl Responses {
             "Responses completion request",
             &body,
         );
-        let (builder, body) = self
-            .request_compression
-            .apply(builder, serde_json::to_vec(&body)?)?;
+        let bytes = if codex && self.codex_request_shape.is_standard() {
+            serde_json::to_vec(&super::codex_request::RoutingFirst(&body))?
+        } else {
+            serde_json::to_vec(&body)?
+        };
+        let (builder, body) = self.request_compression.apply(builder, bytes)?;
         let request = builder
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(Body::Bytes(body))?;

@@ -812,7 +812,12 @@ impl ResponsesWebSocketSession {
                 generate: options.generate,
             },
         )?;
-        let frame = encode_frame(&body)?;
+        let frame = encode_frame(
+            &body,
+            self.wire.provider.dialect.quirks.responses.contract
+                == super::wire::ResponsesContract::Codex
+                && self.wire.codex_request_shape.is_standard(),
+        )?;
         self.send_encoded(envelope, frame).await
     }
 
@@ -1386,13 +1391,17 @@ pub(crate) enum Chaining {
 }
 
 /// Serialize the frame sealed by the Responses request merge.
-fn encode_frame(request: &FinalBody) -> Result<String, ProviderError> {
+fn encode_frame(request: &FinalBody, routing_first: bool) -> Result<String, ProviderError> {
     crate::providers::internal::trace_json(
         crate::providers::internal::LogTarget::Completions,
         "OpenAI websocket request",
         request,
     );
-    Ok(serde_json::to_string(request)?)
+    Ok(if routing_first {
+        serde_json::to_string(&super::codex_request::RoutingFirst(request))?
+    } else {
+        serde_json::to_string(request)?
+    })
 }
 
 /// Feed one message to the turn's reassembler and decoder.
