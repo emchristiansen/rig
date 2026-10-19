@@ -508,3 +508,226 @@ async fn concurrent_nested_resolutions_keep_rewrites_isolated_by_dispatch() {
     assert_eq!(salvaged_args(&context, first.id), Some(json!({"id": 7})));
     assert_eq!(salvaged_args(&context, second.id), Some(json!({"id": 8})));
 }
+
+fn model(label: &str) -> ModelRef {
+    ModelRef::new(label)
+}
+
+enum RouteDecision {
+    Continue,
+    Select(ModelRef),
+    Stop,
+}
+
+type RouteLog = Arc<Mutex<Vec<(&'static str, Option<String>)>>>;
+
+struct RouteRecorder {
+    label: &'static str,
+    log: RouteLog,
+    decision: RouteDecision,
+}
+
+impl AgentHook for RouteRecorder {
+    fn on_model_select(
+        &self,
+        _ctx: &HookContext,
+        event: ModelSelection<'_>,
+    ) -> ModelSelectionAction {
+        self.log
+            .lock()
+            .expect("route log")
+            .push((self.label, Some(event.selected_model.to_string())));
+        match &self.decision {
+            RouteDecision::Continue => ModelSelectionAction::continue_run(),
+            RouteDecision::Select(model) => ModelSelectionAction::select(model.clone()),
+            RouteDecision::Stop => ModelSelectionAction::stop("routing stopped"),
+        }
+    }
+}
+
+fn model_selection<'a>(prompt: &'a Message, default_model: &'a ModelRef) -> ModelSelection<'a> {
+    ModelSelection {
+        prompt,
+        history: &[],
+        request_patch: None,
+        previous_model: None,
+        default_model,
+        selected_model: default_model,
+    }
+}
+
+#[test]
+fn model_selections_chain_in_registration_order_and_last_wins() {
+    let default = model("default");
+    let first = model("first");
+    let last = model("last");
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut stack = HookStack::with(RouteRecorder {
+        label: "continue",
+        log: log.clone(),
+        decision: RouteDecision::Continue,
+    });
+    stack.push(RouteRecorder {
+        label: "first",
+        log: log.clone(),
+        decision: RouteDecision::Select(first),
+    });
+    stack.push(RouteRecorder {
+        label: "last",
+        log: log.clone(),
+        decision: RouteDecision::Select(last),
+    });
+    let prompt = Message::user("route");
+
+    let action = stack.on_model_select(&ctx(), model_selection(&prompt, &default));
+
+    let ModelSelectionAction::Select(selected) = action else {
+        panic!("stack should select the last candidate");
+    };
+    assert_eq!(selected.as_str(), "last");
+    assert_eq!(
+        log.lock().expect("route log").as_slice(),
+        &[
+            ("continue", Some("default".to_owned())),
+            ("first", Some("default".to_owned())),
+            ("last", Some("first".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn model_selection_stop_short_circuits_later_hooks() {
+    let default = model("default");
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut stack = HookStack::with(RouteRecorder {
+        label: "stop",
+        log: log.clone(),
+        decision: RouteDecision::Stop,
+    });
+    stack.push(RouteRecorder {
+        label: "later",
+        log: log.clone(),
+        decision: RouteDecision::Select(model("later")),
+    });
+    let prompt = Message::user("route");
+
+    assert!(matches!(
+        stack.on_model_select(&ctx(), model_selection(&prompt, &default)),
+        ModelSelectionAction::Stop(reason) if reason == "routing stopped"
+    ));
+    assert_eq!(
+        log.lock().expect("route log").as_slice(),
+        &[("stop", Some("default".to_owned()))]
+    );
+}
+
+#[test]
+fn nested_model_selection_stacks_preserve_candidate_chaining() {
+    let default = model("default");
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let inner = HookStack::with(RouteRecorder {
+        label: "inner",
+        log: log.clone(),
+        decision: RouteDecision::Select(model("inner")),
+    });
+    let mut outer = HookStack::with(RouteRecorder {
+        label: "outer-before",
+        log: log.clone(),
+        decision: RouteDecision::Select(model("outer")),
+    });
+    outer.push(inner);
+    outer.push(RouteRecorder {
+        label: "outer-after",
+        log: log.clone(),
+        decision: RouteDecision::Continue,
+    });
+    let prompt = Message::user("route");
+
+    let action = outer.on_model_select(&ctx(), model_selection(&prompt, &default));
+
+    let ModelSelectionAction::Select(selected) = action else {
+        panic!("nested stack should preserve the inner selection");
+    };
+    assert_eq!(selected.as_str(), "inner");
+    assert_eq!(
+        log.lock().expect("route log").as_slice(),
+        &[
+            ("outer-before", Some("default".to_owned())),
+            ("inner", Some("outer".to_owned())),
+            ("outer-after", Some("inner".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn nested_model_selection_stack_without_a_selection_preserves_outer_candidate() {
+    let default = model("default");
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let inner = HookStack::with(RouteRecorder {
+        label: "inner-continue",
+        log: log.clone(),
+        decision: RouteDecision::Continue,
+    });
+    let mut outer = HookStack::with(RouteRecorder {
+        label: "outer-select",
+        log: log.clone(),
+        decision: RouteDecision::Select(model("outer")),
+    });
+    outer.push(inner);
+    outer.push(RouteRecorder {
+        label: "outer-after",
+        log: log.clone(),
+        decision: RouteDecision::Continue,
+    });
+    let prompt = Message::user("route");
+
+    let action = outer.on_model_select(&ctx(), model_selection(&prompt, &default));
+
+    let ModelSelectionAction::Select(selected) = action else {
+        panic!("outer selection should survive a continuing nested stack");
+    };
+    assert_eq!(selected.as_str(), "outer");
+    assert_eq!(
+        log.lock().expect("route log").as_slice(),
+        &[
+            ("outer-select", Some("default".to_owned())),
+            ("inner-continue", Some("outer".to_owned())),
+            ("outer-after", Some("outer".to_owned())),
+        ]
+    );
+}
+
+#[test]
+fn nested_model_selection_stop_short_circuits_the_outer_stack() {
+    let default = model("default");
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let inner = HookStack::with(RouteRecorder {
+        label: "inner-stop",
+        log: log.clone(),
+        decision: RouteDecision::Stop,
+    });
+    let mut outer = HookStack::with(RouteRecorder {
+        label: "outer-before",
+        log: log.clone(),
+        decision: RouteDecision::Select(model("outer")),
+    });
+    outer.push(inner);
+    outer.push(RouteRecorder {
+        label: "outer-after",
+        log: log.clone(),
+        decision: RouteDecision::Select(model("unreachable")),
+    });
+    let prompt = Message::user("route");
+
+    assert!(matches!(
+        outer.on_model_select(&ctx(), model_selection(&prompt, &default)),
+        ModelSelectionAction::Stop(reason) if reason == "routing stopped"
+    ));
+    assert_eq!(
+        log.lock().expect("route log").as_slice(),
+        &[
+            ("outer-before", Some("default".to_owned())),
+            ("inner-stop", Some("outer".to_owned())),
+        ]
+    );
+}
