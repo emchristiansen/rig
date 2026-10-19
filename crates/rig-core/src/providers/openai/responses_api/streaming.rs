@@ -13,7 +13,7 @@ use crate::providers::internal::wire;
 use crate::streaming::{DiscardReason, ReasoningAuthority, SourceOrder};
 use crate::wire::{Decoder, Flow, IncompleteEof, Out, WireCitation, WireEvent, WireFrame};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod reader;
@@ -315,7 +315,7 @@ struct ReasoningState {
     id: Option<String>,
     summary: BTreeMap<u64, Value>,
     content: BTreeMap<u64, Value>,
-    item: Option<Value>,
+    item: Option<Map<String, Value>>,
     complete: bool,
     encrypted: Option<String>,
     signature: Option<String>,
@@ -323,11 +323,10 @@ struct ReasoningState {
 
 impl ReasoningState {
     fn raw(&self) -> Value {
-        let mut item = self
+        let mut fields = self
             .item
             .clone()
-            .unwrap_or_else(|| json!({"type":"reasoning"}));
-        let fields = item.as_object_mut().expect("reasoning item is an object");
+            .unwrap_or_else(|| Map::from_iter([("type".to_owned(), json!("reasoning"))]));
         if let Some(id) = &self.id {
             fields.insert("id".into(), json!(id));
         }
@@ -354,7 +353,7 @@ impl ReasoningState {
         if let Some(signature) = &self.signature {
             fields.insert("signature".into(), json!(signature));
         }
-        item
+        Value::Object(fields)
     }
 
     fn carried(&self) -> bool {
@@ -948,19 +947,18 @@ impl ResponsesDecoder {
             parts.insert(part, raw);
         }
         if let Some(delta) = delta {
-            self.reasoning_delta(index, &delta, out)?;
+            self.active_message_part = None;
+            Self::reasoning_delta(reasoning, index, &delta, out)?;
         }
         Ok(())
     }
 
     fn reasoning_delta(
-        &mut self,
+        reasoning: &mut ReasoningState,
         index: u64,
         delta: &str,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
-        self.active_message_part = None;
-        let reasoning = self.reasoning.get_mut(&index).expect("reasoning state");
         if reasoning.at.is_none() {
             let at = out.fresh_index();
             out.in_source_order(SourceOrder::new(index, 0), |out| {
@@ -1025,7 +1023,7 @@ impl ResponsesDecoder {
             state.signature = nonempty(item.str("signature")).or_else(|| state.signature.clone());
         }
         if state.item.is_none() || !state.complete {
-            state.item = Some(item.clone());
+            state.item = Some(serde_json::from_value(item.clone())?);
         }
         state.complete |= completed;
         Ok(())

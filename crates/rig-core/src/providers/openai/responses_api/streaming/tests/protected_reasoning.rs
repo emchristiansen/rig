@@ -330,8 +330,9 @@ fn synthetic_reasoning_raw_state_preserves_only_received_empty_content_arrays() 
             received["content"] = content.clone();
         }
         // An explicitly synthetic empty current state, retaining received evidence.
+        let received_fields = received.as_object().expect("reasoning object").clone();
         let state = super::super::ReasoningState {
-            item: Some(received.clone()),
+            item: Some(received_fields.clone()),
             ..Default::default()
         };
         let mut expected = received.clone();
@@ -342,7 +343,7 @@ fn synthetic_reasoning_raw_state_preserves_only_received_empty_content_arrays() 
             expected.as_object_mut().expect("object").remove("content");
         }
         assert_eq!(state.raw(), expected);
-        assert_eq!(state.item.as_ref(), Some(&received));
+        assert_eq!(state.item.as_ref(), Some(&received_fields));
         assert!(state.content.is_empty());
     }
 }
