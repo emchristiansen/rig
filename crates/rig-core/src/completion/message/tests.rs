@@ -261,13 +261,13 @@ fn only_empty_inspection_media_with_matching_stop_fails_its_run() {
         ),
     ] {
         assert_eq!(
-            turn_failure(&[media.clone()], stop.as_ref(), finish.as_ref()),
+            turn_failure(std::slice::from_ref(&media), stop.as_ref(), finish.as_ref()),
             None
         );
     }
     assert_eq!(
         turn_failure(
-            &[media.clone()],
+            std::slice::from_ref(&media),
             Some(&StopReason::Stop),
             Some(&FinishReason::Length)
         ),
@@ -275,7 +275,7 @@ fn only_empty_inspection_media_with_matching_stop_fails_its_run() {
     );
     assert_eq!(
         turn_failure(
-            &[media.clone()],
+            std::slice::from_ref(&media),
             Some(&StopReason::Length),
             Some(&FinishReason::Length)
         ),
