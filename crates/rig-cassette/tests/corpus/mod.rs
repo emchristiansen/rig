@@ -3175,7 +3175,8 @@ fn head_end_id(log: &EffectLog, tool_turns: usize) -> u64 {
     records[end].id.as_u64()
 }
 
-/// The golden's records after `tool_turns` tool turns, under its header.
+/// The golden's records after `tool_turns` tool turns, with recorded
+/// delivery metadata restricted to those records.
 fn tail_after(log: &EffectLog, tool_turns: usize) -> EffectLog {
     let head_end = head_end_id(log, tool_turns);
     EffectLog {
@@ -3187,6 +3188,7 @@ fn tail_after(log: &EffectLog, tool_turns: usize) -> EffectLog {
             .cloned()
             .collect(),
     }
+    .tail(0)
 }
 
 /// `Resume::Never` never suspends, so no tail is ever asked for it.

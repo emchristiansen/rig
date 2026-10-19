@@ -25,7 +25,7 @@
 use serde_json::Value;
 
 use rig_core::completion::{CompletionRequest, CompletionResponse};
-use rig_core::error::EncodeError;
+use rig_core::error::{EncodeError, ErrorKind, ProviderError};
 use rig_core::message::{
     AssistantContent, AssistantMessage, CallId, DocumentData, Image, Message, Origin, StopReason,
     Text, ToolCall, ToolFunction, ToolName, ToolResult, ToolResultContent, UserContent,
@@ -707,6 +707,20 @@ fn sent_as<F: HistoryFixture>(
     tools: generated::Tools,
 ) -> Result<Value, String> {
     let wire = fixture.wire(model);
+    let request = request_as(fixture, history, tools);
+    let prepared = Completion::prepare(request, &wire.describe()).map_err(|e| e.to_string())?;
+    fixture
+        .body(&wire, prepared, mode)
+        .map_err(|error| error.to_string())
+}
+
+/// The caller's request before validation and adaptation, with the same
+/// tool declarations and trailing prompt as [`sent_as`].
+fn request_as<F: HistoryFixture>(
+    fixture: &F,
+    history: Vec<Message>,
+    tools: generated::Tools,
+) -> CompletionRequest {
     let mut request = CompletionRequest::new("next");
     match tools {
         generated::Tools::Declared => request.tools = tools_of(&history),
@@ -728,10 +742,7 @@ fn sent_as<F: HistoryFixture>(
     }
     request.chat_history = history;
     request.chat_history.push(Message::user("next"));
-    let prepared = Completion::prepare(request, &wire.describe()).map_err(|e| e.to_string())?;
-    fixture
-        .body(&wire, prepared, mode)
-        .map_err(|error| error.to_string())
+    request
 }
 
 /// A definition for every tool `history` calls or answers, as a request
@@ -2450,18 +2461,68 @@ fn reloaded(history: &[Message], how: Numbers) -> Vec<Message> {
 
 /// H17. Generated histories (`generated::history`) of the fixture's own
 /// turns (every reply shape and generated replies, whole and streamed) and
-/// other models' turns: every one encodes; every call in the body has
-/// exactly one result, right after it in the wire's shape, and no result
-/// lacks a call; roles alternate on a wire that requires it, and a wire
-/// that requires a leading user message gets one. A store that rewrites
+/// other models' turns: a zero-block tool result is refused before
+/// adaptation with its exact request error; every accepted history encodes.
+/// Every call in the body has exactly one result, right after it in the
+/// wire's shape, and no result lacks a call; roles alternate on a wire
+/// that requires it, and a wire that requires a leading user message gets
+/// one. A store that rewrites
 /// numbers sends the same body after a reload, and a stored own turn
 /// replays the same items. The seed is fixed; `RIG_HISTORY_CASES` raises
 /// the case count (256 by default). Each check asserts it ran, unless the
-/// fixture states why the wire has nothing for it.
+/// fixture states why the wire has nothing for it. A paired control checks
+/// that one empty text block is admitted and encodes.
 pub fn h17_generated_histories<F: HistoryFixture>(fixture: &F) {
     let own = own_turns(fixture);
     let reached = Reached::default();
     let problems = |history: &[Message], mode: Mode, tools: generated::Tools| -> Vec<String> {
+        let empty_result = history.iter().enumerate().find_map(|(index, message)| {
+            let Message::User { content } = message else {
+                return None;
+            };
+            content
+                .iter()
+                .enumerate()
+                .find_map(|(position, part)| match part {
+                    UserContent::ToolResult(result) if result.content.is_empty() => {
+                        Some((index, position, &result.name))
+                    }
+                    _ => None,
+                })
+        });
+        if let Some((index, position, name)) = empty_result {
+            let wire = fixture.wire(fixture.model());
+            let request = request_as(fixture, history.to_vec(), tools);
+            let expected = format!(
+                "RequestError: tool result for `{name}` at index {position} of the user message at index {index} has no content; providers reject empty content blocks"
+            );
+            let mut problems = Vec::new();
+            for (stage, result) in [
+                ("validation", request.validate_message_content()),
+                (
+                    "preparation",
+                    Completion::prepare(request, &wire.describe()).map(|_| ()),
+                ),
+            ] {
+                match result {
+                    Err(error)
+                        if matches!(&error, ProviderError::Request(_))
+                            && error.kind() == ErrorKind::Request
+                            && error.to_string() == expected => {}
+                    Err(error) => problems.push(format!(
+                        "zero-block result {stage} returned {error:?} ({:?}): {error}; expected Request with {expected}",
+                        error.kind(),
+                    )),
+                    Ok(()) => problems.push(format!(
+                        "zero-block result passed {stage}; expected Request with {expected}"
+                    )),
+                }
+            }
+            if problems.is_empty() {
+                reached.hit("zero-block rejected");
+            }
+            return problems;
+        }
         let body = match sent_as(fixture, fixture.model(), history.to_vec(), mode, tools) {
             Ok(body) => body,
             Err(error) => return vec![format!("it does not encode: {error}")],
@@ -2493,6 +2554,43 @@ pub fn h17_generated_histories<F: HistoryFixture>(fixture: &F) {
         }
         problems
     };
+    let call = ToolCall::new(
+        CallId::from_wire("call_empty_result"),
+        ToolFunction::new(name("lookup"), serde_json::json!({})),
+    );
+    let paired_history = |content| {
+        vec![
+            Message::user("q"),
+            Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+                call.clone(),
+            )])),
+            Message::User {
+                content: vec![UserContent::ToolResult(call.result(content))],
+            },
+        ]
+    };
+    let empty = paired_history(Vec::new());
+    let blank = paired_history(vec![ToolResultContent::text("")]);
+    for mode in MODES {
+        let found = problems(&empty, mode, generated::Tools::Declared);
+        assert!(
+            found.is_empty(),
+            "{mode:?}: zero-block result control: {found:?}"
+        );
+        let request = request_as(fixture, blank.clone(), generated::Tools::Declared);
+        request
+            .validate_message_content()
+            .expect("one empty text block is content");
+        sent_as(
+            fixture,
+            fixture.model(),
+            blank.clone(),
+            mode,
+            generated::Tools::Declared,
+        )
+        .unwrap_or_else(|error| panic!("{mode:?}: one empty text block encodes: {error}"));
+        reached.hit("empty text encoded");
+    }
     for case in 0..cases() {
         let mut rng = generated::Rng::new(0x5eed_0000 + case);
         let history = generated::history(&mut rng, &own);
@@ -2533,7 +2631,12 @@ pub fn h17_generated_histories<F: HistoryFixture>(fixture: &F) {
             );
         }
     }
-    let mut checks = vec!["encoded", "store"];
+    let mut checks = vec![
+        "encoded",
+        "store",
+        "zero-block rejected",
+        "empty text encoded",
+    ];
     checks.extend(rule_checks(fixture));
     if fixture.keeps_natives() {
         checks.push("stored items");
