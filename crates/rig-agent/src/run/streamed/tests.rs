@@ -713,10 +713,27 @@ fn finish_passes_raw_choice_through_for_plain_text_turns() {
 }
 
 #[test]
-fn argument_deltas_are_held_until_the_current_call_can_be_validated() {
-    let mut asm = assembler();
-    let stream = items([vec![
+fn original_unnamed_argument_delta_stream_is_rejected_at_its_start() {
+    let stream = serde_json::Value::Array(vec![
         event(json!({"event":"start", "part":0, "kind":"tool_call"})),
+        event(json!({"event":"arguments", "part":0, "json":"{\"x\""})),
+        event(json!({"event":"arguments", "part":0, "json":":1}"})),
+        event(
+            json!({"event":"end", "part":0, "content":AssistantContent::ToolCall(tool_call("tc_1", "add"))}),
+        ),
+    ]);
+    assert_eq!(
+        Transcript::parse_prefix(stream),
+        Err(rig_core::streaming::SequenceError::WrongKind(0))
+    );
+}
+
+#[test]
+fn argument_deltas_are_held_until_a_named_unregistered_call_can_be_validated() {
+    let mut asm = assembler();
+    // Only `add` is registered; the named start stays held until End validates the call.
+    let stream = items([vec![
+        event(json!({"event":"start", "part":0, "kind":"tool_call", "name":"unregistered_add"})),
         event(json!({"event":"arguments", "part":0, "json":"{\"x\""})),
         event(json!({"event":"arguments", "part":0, "json":":1}"})),
         event(
@@ -766,7 +783,7 @@ fn finish_keeps_folded_images_in_their_original_order() {
 }
 
 #[test]
-fn completed_namespaced_and_custom_calls_are_refused_at_their_end() {
+fn completed_namespaced_calls_are_refused_at_their_end() {
     use rig_core::message::UndispatchableToolCall;
     let call = tool_call("tc1", "add").with_namespace(Some("math".to_owned()));
     let mut namespaced = assembler();
@@ -782,7 +799,30 @@ fn completed_namespaced_and_custom_calls_are_refused_at_their_end() {
     assert_eq!(refused.content, AssistantContent::ToolCall(call));
     assert!(namespaced.pending_tool_calls.is_empty());
     assert!(namespaced.pending_invalid.is_none());
+}
 
+#[test]
+fn original_unnamed_custom_call_stream_is_rejected_at_its_start() {
+    // G11: only the unavailable independent ctc_1 item-ID input is omitted.
+    let content = AssistantContent::custom_tool_call(
+        "call_1",
+        ToolName::new("add").unwrap(),
+        None,
+        r#"{"x":1}"#,
+    );
+    let custom_stream = serde_json::Value::Array(vec![
+        event(json!({"event":"start", "part":0, "kind":"custom_tool_call"})),
+        event(json!({"event":"end", "part":0, "content":content.clone()})),
+    ]);
+    assert_eq!(
+        Transcript::parse_prefix(custom_stream),
+        Err(rig_core::streaming::SequenceError::WrongKind(0))
+    );
+}
+
+#[test]
+fn completed_named_custom_calls_are_refused_at_their_end() {
+    use rig_core::message::UndispatchableToolCall;
     // G11: only the unavailable independent ctc_1 item-ID input is omitted.
     let content = AssistantContent::custom_tool_call(
         "call_1",
@@ -791,7 +831,7 @@ fn completed_namespaced_and_custom_calls_are_refused_at_their_end() {
         r#"{"x":1}"#,
     );
     let custom_stream = items([vec![
-        event(json!({"event":"start", "part":0, "kind":"custom_tool_call"})),
+        event(json!({"event":"start", "part":0, "kind":"custom_tool_call", "name":"add"})),
         event(json!({"event":"end", "part":0, "content":content.clone()})),
     ]]);
     let mut custom = assembler();

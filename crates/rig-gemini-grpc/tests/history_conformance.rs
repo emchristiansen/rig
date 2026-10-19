@@ -210,6 +210,7 @@ impl HistoryFixture for GrpcHistory {
                 "/candidates",
                 "/candidates/0/content",
                 "/candidates/0/content/parts",
+                "/candidates/0/content/parts/4/functionCall/name",
                 "/candidates/0/finishReason",
             ],
             frames: |mut document| {
@@ -278,6 +279,35 @@ fn fitted(value: &mut Value, typed: &Value) {
         }
         _ => {}
     }
+}
+
+#[test]
+fn h05_grpc_missing_function_call_name_is_refused() {
+    use rig_core::error::ProviderError;
+    use rig_core::message::EmptyToolName;
+    use rig_core::test_utils::history::decode;
+
+    let fixture = GrpcHistory;
+    let mut ablation = fixture
+        .ablation()
+        .expect("the gRPC ablation fixture exists");
+    let call = ablation
+        .document
+        .pointer_mut("/candidates/0/content/parts/4/functionCall")
+        .and_then(Value::as_object_mut)
+        .expect("the original ablation fixture has the fifth part's function call");
+    assert_eq!(call.shift_remove("name"), Some(json!("lookup")));
+    let result = decode(
+        &fixture.wire(fixture.model()),
+        Mode::Unary,
+        (ablation.frames)(ablation.document),
+    );
+    assert!(
+        matches!(result, Err(ProviderError::Request(ref error))
+            if error.downcast_ref::<EmptyToolName>() == Some(&EmptyToolName)
+                && error.to_string() == EmptyToolName.to_string()),
+        "the unchanged removed-name ablation reports the exact empty tool name error: {result:?}"
+    );
 }
 
 /// Whole and streamed turns keep their provider-frame coordinates. Rich
@@ -652,8 +682,100 @@ fn h03_grpc_interleaved_signed_reasoning(
     );
 }
 
+fn h07_grpc_failed_turns(fixture: &GrpcHistory) {
+    use rig_core::error::ProviderError;
+    use rig_core::message::{Message, StopReason};
+    use rig_history_conformance::{decode, partial};
+
+    let failed_cut_custody = |message: &Message| match message {
+        Message::Assistant(turn) => {
+            turn.stop.as_ref().is_some_and(StopReason::is_failure)
+                && turn.content.iter().all(AssistantContent::is_carried)
+        }
+        Message::User { .. } | Message::System { .. } => true,
+    };
+    let wire = fixture.wire(fixture.model());
+    let finishes = fixture.finishes();
+    assert!(!finishes.is_empty(), "the wire documents its finishes");
+    for (name, frames, ending) in finishes {
+        let response = decode(
+            &wire,
+            &CompletionRequest::new("restate"),
+            Mode::Unary,
+            frames,
+        );
+        if name == "MALFORMED_FUNCTION_CALL" {
+            assert_eq!(ending, Ending::Failure);
+            assert!(
+                matches!(response, Err(ProviderError::Response(ref message))
+                    if message == "Gemini stopped with finish_reason=MalformedFunctionCall: no finish message provided"),
+                "the unchanged malformed-call finish reports its exact response error: {response:?}"
+            );
+            continue;
+        }
+        let response =
+            response.unwrap_or_else(|error| panic!("the `{name}` reply decodes: {error}"));
+        let failed = response.stop().is_failure();
+        assert_eq!(
+            failed,
+            ending == Ending::Failure,
+            "`{name}` ends as {:?}",
+            response.stop()
+        );
+    }
+    let Some(count) = fixture
+        .reply(Shape::Rich, Mode::Streaming)
+        .map(|frames| frames.len())
+    else {
+        return;
+    };
+    for cut in 1..count {
+        let frames = fixture
+            .reply(Shape::Rich, Mode::Streaming)
+            .unwrap_or_default();
+        let (response, ended) = partial(&wire, Mode::Streaming, frames.into_iter().take(cut));
+        if ended {
+            continue;
+        }
+        let Some(Message::Assistant(turn)) = response.message() else {
+            continue;
+        };
+        assert!(
+            turn.stop.as_ref().is_some_and(StopReason::is_failure),
+            "a reply cut after {cut} frames is a failed turn: {:?}",
+            turn.stop
+        );
+        let history = vec![
+            Message::user("q"),
+            Message::Assistant(turn),
+            Message::user("next"),
+        ];
+        let describe = wire.describe();
+        let replay = describe.replay.expect("a replay target");
+        let adapted = rig_core::completion::history::adapt(&history, replay);
+        assert!(
+            adapted.iter().all(failed_cut_custody),
+            "a failed cut retains only carried content in failed assistant turns: {adapted:?}"
+        );
+    }
+    if let (Some(error), Some(mut frames)) = (
+        fixture.error_frame(),
+        fixture.reply(Shape::Rich, Mode::Streaming),
+    ) {
+        frames.truncate(frames.len().saturating_sub(1).max(1));
+        frames.push(error);
+        let (response, _) = partial(&wire, Mode::Streaming, frames);
+        assert!(
+            response.stop().is_failure(),
+            "an in-band error fails the turn: {:?}",
+            response.stop()
+        );
+    }
+}
+
 rig_history_conformance::history_conformance_suite! {
     wire: "gemini_grpc",
     fixture: GrpcHistory,
     h03_stream_equals_whole: h03_grpc_stream_equals_whole,
+    h07_failed_turns: h07_grpc_failed_turns,
 }

@@ -2850,7 +2850,8 @@ fn name(name: &str) -> ToolName {
 /// expression producing its [`HistoryFixture`]. The optional
 /// `h03_stream_equals_whole` and `h05_field_ablation` function paths take
 /// the same fixture by reference and return `()`, replacing only their
-/// respective row bodies.
+/// respective row bodies. `h07_failed_turns` may accompany
+/// `h03_stream_equals_whole` to replace only H07.
 #[macro_export]
 macro_rules! history_conformance_suite {
     (wire: $wire:literal, fixture: $fixture:expr $(,)?) => {
@@ -2865,7 +2866,13 @@ macro_rules! history_conformance_suite {
     (wire: $wire:literal, fixture: $fixture:expr, h03_stream_equals_whole: $h03:path, h05_field_ablation: $h05:path $(,)?) => {
         $crate::history_conformance_suite!(@emit $wire, $fixture, $h03, $h05);
     };
+    (wire: $wire:literal, fixture: $fixture:expr, h03_stream_equals_whole: $h03:path, h07_failed_turns: $h07:path $(,)?) => {
+        $crate::history_conformance_suite!(@emit $wire, $fixture, $h03, $crate::h05_field_ablation, $h07);
+    };
     (@emit $wire:literal, $fixture:expr, $h03:path, $h05:path) => {
+        $crate::history_conformance_suite!(@emit $wire, $fixture, $h03, $h05, $crate::h07_failed_turns);
+    };
+    (@emit $wire:literal, $fixture:expr, $h03:path, $h05:path, $h07:path) => {
         /// The wire this suite covers, for the workspace registry.
         pub const HISTORY_WIRE: &str = $wire;
 
@@ -2893,7 +2900,15 @@ macro_rules! history_conformance_suite {
         $crate::__history_conformance_rows! {
             $fixture;
             h06_malformed_arguments,
-            h07_failed_turns,
+        }
+
+        #[test]
+        fn h07_failed_turns() {
+            let _: () = ($h07)(&$fixture);
+        }
+
+        $crate::__history_conformance_rows! {
+            $fixture;
             h08_pairing,
             h09_capability_downgrades,
             h10_persistence,
