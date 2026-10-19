@@ -78,7 +78,7 @@ fn test_content_delta_text_event() {
     let WireEvent::Known(event) = decoder.classify(WireFrame::Text(event_json.to_string())) else {
         panic!("expected step delta");
     };
-    decoder
+    let _ = decoder
         .decode(event, crate::wire::Out::new(&shared))
         .expect("parts should exist");
     let shared = shared.lock().expect("reply state");
@@ -545,7 +545,7 @@ fn test_content_delta_function_call_event() {
     let WireEvent::Known(event) = decoder.classify(WireFrame::Text(event_json.to_string())) else {
         panic!("expected step delta");
     };
-    decoder
+    let _ = decoder
         .decode(event, crate::wire::Out::new(&shared))
         .expect("parts should exist");
     {
@@ -598,7 +598,7 @@ fn test_content_delta_function_call_event() {
     else {
         panic!("expected step stop");
     };
-    decoder
+    let _ = decoder
         .decode(stop, crate::wire::Out::new(&shared))
         .expect("existing empty stop");
     let state = shared.lock().expect("reply state");
@@ -1041,7 +1041,7 @@ fn cf_full_delta_partial_start_keeps_one_part_until_stop() {
         let WireEvent::Known(event) = decoder.classify(frame(event)) else {
             panic!("known call frame");
         };
-        decoder
+        let _ = decoder
             .decode(event, crate::wire::Out::new(&shared))
             .expect("the existing open slot is updated");
         let state = shared.lock().expect("reply state");
@@ -1062,7 +1062,7 @@ fn cf_full_delta_partial_start_keeps_one_part_until_stop() {
     else {
         panic!("known stop");
     };
-    decoder
+    let _ = decoder
         .decode(stop, crate::wire::Out::new(&shared))
         .expect("the stop closes the same slot");
     let state = shared.lock().expect("reply state");
@@ -1116,7 +1116,7 @@ fn a_full_kind_call_without_an_id_keeps_the_completed_hook_refusal() {
     }))) else {
         panic!("known full-kind frame");
     };
-    decoder
+    let _ = decoder
         .decode(full, crate::wire::Out::new(&shared))
         .expect("no new early missing-ID refusal");
     let Some(Open::Call { block, .. }) = decoder.steps.get(&0) else {
@@ -1220,7 +1220,7 @@ fn the_full_kind_refusal_does_not_change_announced_values_on_step_start() {
         let WireEvent::Known(event) = decoder.classify(frame(event)) else {
             panic!("known step event");
         };
-        decoder
+        let _ = decoder
             .decode(event, crate::wire::Out::new(&shared))
             .expect("the other announced-Value path stays unchanged");
     }
@@ -1272,7 +1272,7 @@ fn closed_full_prefix(
         let WireEvent::Known(event) = decoder.classify(frame(event.clone())) else {
             panic!("known received frame");
         };
-        decoder
+        let _ = decoder
             .decode(event, crate::wire::Out::new(&shared))
             .expect("valid prefix");
     }
@@ -1437,7 +1437,7 @@ fn an_announced_full_updated_call_closes_only_at_successful_stop_and_ignores_lat
     else {
         panic!("known stop");
     };
-    decoder
+    let _ = decoder
         .decode(event, crate::wire::Out::new(&shared))
         .expect("existing stop finalizer succeeds");
     assert!(decoder.closed_full_calls.contains(&id));
@@ -1476,7 +1476,7 @@ fn an_announced_full_updated_call_closes_only_at_successful_stop_and_ignores_lat
         )) else {
             panic!("known late fragment");
         };
-        decoder
+        let _ = decoder
             .decode(event, crate::wire::Out::new(&shared))
             .expect("existing closed-ID ignore");
         assert_eq!(closed_full_prior_events(&shared), prior);
@@ -1584,7 +1584,7 @@ fn ordinary_associated_partial_arguments_and_open_missing_id_partials_are_unchan
     let WireEvent::Known(event) = decoder.classify(frame(json!({
         "event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"after\":true}"},
     }))) else { panic!("known ordinary associated fragment"); };
-    decoder
+    let _ = decoder
         .decode(event, crate::wire::Out::new(&shared))
         .expect("existing default subject unchanged");
     assert!(matches!(decoder.steps.get(&0), Some(Open::Call { .. })));
@@ -1603,7 +1603,7 @@ fn ordinary_associated_partial_arguments_and_open_missing_id_partials_are_unchan
     }))) else {
         panic!("known open partial fragment");
     };
-    pending
+    let _ = pending
         .decode(event, crate::wire::Out::new(&pending_shared))
         .expect("existing open partial unchanged");
     assert!(!pending.call_ids_by_step.contains_key(&1));

@@ -1624,7 +1624,7 @@ const MATRIX_WEBP: &str = "UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAwA0JaQAA3AA/
 
 /// Each media part `history` still holds, by kind, with the strings one of
 /// which its encoding contains: its URL, file id, text, or the head of
-/// its data (and a text document's decoded text).
+/// its data (and a text document's decoded text or complete UTF-8 bytes).
 fn payloads(history: &[Message]) -> Vec<(&'static str, Vec<String>)> {
     use base64::Engine as _;
     use rig_core::message::DocumentSourceKind as Source;
@@ -1656,7 +1656,10 @@ fn payloads(history: &[Message]) -> Vec<(&'static str, Vec<String>)> {
                         UserContent::Video(video) => found.push(("video", needles(&video.data))),
                         UserContent::Document(document) => {
                             let needles = match &document.data {
-                                DocumentData::Text(text) => vec![text.clone()],
+                                DocumentData::Text(text) => vec![
+                                    text.clone(),
+                                    base64::prelude::BASE64_STANDARD.encode(text.as_bytes()),
+                                ],
                                 DocumentData::File(source) => needles(source),
                             };
                             found.push(("document", needles));
