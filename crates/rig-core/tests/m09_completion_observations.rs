@@ -675,7 +675,7 @@ async fn missing_usage_output_and_optional_cached_counts_decode_without_defaults
         let mut body = response(json!([]));
         body.as_object_mut()
             .expect("response object")
-            .remove("output");
+            .shift_remove("output");
         if let Some(usage) = usage {
             body.as_object_mut()
                 .expect("response object")

@@ -190,7 +190,7 @@ fn default_call_starts_still_wait_for_a_name_and_serialize_identically() {
     encoded[0]["value"]
         .as_object_mut()
         .expect("Start")
-        .remove("name");
+        .shift_remove("name");
     assert!(matches!(
         Transcript::parse_prefix(encoded),
         Err(SequenceError::WrongKind(_))

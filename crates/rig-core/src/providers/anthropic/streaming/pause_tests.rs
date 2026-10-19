@@ -128,7 +128,7 @@ fn assert_paused(response: &crate::completion::CompletionResponse) {
 #[test]
 fn original_paused_unary_values_keep_both_received_blocks_and_other_finish() {
     let original = unary("pause_turn");
-    let response = decode(&wire(), Mode::Unary, &[original.clone()]);
+    let response = decode(&wire(), Mode::Unary, std::slice::from_ref(&original));
     assert_eq!(response.raw, original);
     assert_paused(&response);
     let AssistantContent::CarriedText(text) = &response.choice[0] else {

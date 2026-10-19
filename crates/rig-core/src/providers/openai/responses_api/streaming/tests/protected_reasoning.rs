@@ -340,7 +340,10 @@ fn synthetic_reasoning_raw_state_preserves_only_received_empty_content_arrays() 
             .as_ref()
             .is_some_and(|parts| !parts.as_array().expect("array").is_empty())
         {
-            expected.as_object_mut().expect("object").remove("content");
+            expected
+                .as_object_mut()
+                .expect("object")
+                .shift_remove("content");
         }
         assert_eq!(state.raw(), expected);
         assert_eq!(state.item.as_ref(), Some(&received_fields));

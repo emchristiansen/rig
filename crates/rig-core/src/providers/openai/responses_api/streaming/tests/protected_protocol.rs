@@ -86,7 +86,7 @@ fn an_unparseable_restatement_is_not_reemitted_over_streamed_fragments() {
 fn a_fragmentless_unparseable_restatement_keeps_raw_and_is_discarded_as_incomplete() {
     // G186: this exact incomplete fixture is discarded, not a live Arguments event.
     let frame = malformed_function_call_done("incomplete", 1);
-    let driven = drive(&[frame.clone()]);
+    let driven = drive(std::slice::from_ref(&frame));
     assert!(driven.errors.is_empty());
     assert_eq!(
         driven

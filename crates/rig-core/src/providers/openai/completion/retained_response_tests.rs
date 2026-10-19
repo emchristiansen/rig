@@ -149,7 +149,7 @@ fn recorded_length_repair_does_not_hide_wrong_call_identity_type() {
 fn recorded_required_fields_choices_shape_and_usage_are_not_relaxed() {
     for key in ["id", "model", "choices"] {
         let mut raw = recorded("stop", json!([]));
-        raw.as_object_mut().unwrap().remove(key);
+        raw.as_object_mut().unwrap().shift_remove(key);
         let error = serde_json::from_value::<CompletionResponse>(raw).unwrap_err();
         assert_eq!(error.to_string(), format!("missing field `{key}`"));
     }

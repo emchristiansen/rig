@@ -419,7 +419,7 @@ async fn full_done_unannounced_function_custom_and_other_slots_keep_their_whole_
     let message = json!({"type":"message","id":"msg_other","role":"assistant",
         "status":"completed","content":[part]});
     let terminal = full_done(json!([function, custom, message]));
-    let response = collect(&[terminal.clone()])
+    let response = collect(std::slice::from_ref(&terminal))
         .await
         .expect("unannounced Whole slots retain their current operation");
     assert_eq!(response.error, None);

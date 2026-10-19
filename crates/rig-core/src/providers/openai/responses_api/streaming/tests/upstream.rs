@@ -1222,15 +1222,14 @@ fn recorded_whole_replies(provider: &str) -> Vec<serde_json::Value> {
                     vec![body]
                 } else {
                     let mut framer = rig_http::http_client::framing::SseFramer::new();
-                    let documents = framer
+                    framer
                         .push(body.as_bytes())
                         .filter_map(|frame| {
                             serde_json::from_str::<serde_json::Value>(&frame.data).ok()
                         })
                         .filter(|event| event["type"] == "response.completed")
                         .map(|event| event["response"].clone())
-                        .collect();
-                    documents
+                        .collect()
                 };
                 replies.extend(documents.into_iter().filter(|document| {
                     document["object"] == "response"
@@ -1489,7 +1488,10 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
         }
         if status.get("status").is_none() {
             let mut missing_status = sample_response("completed");
-            missing_status.as_object_mut().unwrap().remove("status");
+            missing_status
+                .as_object_mut()
+                .unwrap()
+                .shift_remove("status");
             missing_status["output"] = body["output"].clone();
             let error = crate::test_utils::decode_reply(
                 &wire(),
@@ -1581,7 +1583,7 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
     }
     for required in ["id", "object", "created_at", "status", "model"] {
         let mut body = sample_response("completed");
-        body.as_object_mut().unwrap().remove(required);
+        body.as_object_mut().unwrap().shift_remove(required);
         let raw = body.to_string();
         let error = crate::test_utils::decode_reply(
             &wire(),
@@ -2651,14 +2653,14 @@ fn admitted_call_stage_events(events: &[serde_json::Value]) -> Vec<serde_json::V
                 Some("response.output_item.done") => Some("completed"),
                 _ => None,
             };
-            if event["item"]["type"] == "function_call" {
-                if let Some(stage) = stage {
-                    event["item"]
-                        .as_object_mut()
-                        .expect("fixture function item")
-                        .entry("status")
-                        .or_insert_with(|| json!(stage));
-                }
+            if event["item"]["type"] == "function_call"
+                && let Some(stage) = stage
+            {
+                event["item"]
+                    .as_object_mut()
+                    .expect("fixture function item")
+                    .entry("status")
+                    .or_insert_with(|| json!(stage));
             }
             event
         })

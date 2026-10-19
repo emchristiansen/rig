@@ -5166,7 +5166,7 @@ fn hc001_same_and_later_assistant_results_admit_exact_received_bodies() {
             ])
         );
     }
-    let first = hc001_prefix(&wire, &[used.clone()], true);
+    let first = hc001_prefix(&wire, std::slice::from_ref(&used), true);
     let later = hc001_complete(&wire, vec![result.clone()], "end_turn");
     let request = CompletionRequest::from(vec![
         message::Message::user("q"),
@@ -5405,7 +5405,7 @@ fn hc001_non_aborted_stops_and_an_open_hosted_input_preserve_the_existing_routes
 fn hc001_ordinary_client_calls_and_non_hosted_carried_text_do_not_become_server_uses() {
     let wire = hc001_wire();
     let client = json!({"type":"tool_use", "id":"toolu_hc001", "name":"lookup", "input":{}});
-    let source = hc001_prefix(&wire, &[client.clone()], true);
+    let source = hc001_prefix(&wire, std::slice::from_ref(&client), true);
     let request = hc001_request(&source, Some(message::Message::user("next")));
     assert_eq!(
         hc001_encode(&wire, &request, &[&source], false)

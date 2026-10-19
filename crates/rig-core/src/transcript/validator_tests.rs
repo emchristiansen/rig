@@ -183,7 +183,7 @@ fn stored_results_require_the_kind_of_call_they_answer() {
         let removed = stored
             .as_object_mut()
             .expect("a result serializes as an object")
-            .remove("answers");
+            .shift_remove("answers");
         assert_eq!(removed, Some(serde_json::json!(kind)));
         let error = serde_json::from_value::<crate::message::ToolResult>(stored)
             .expect_err("a result with no kind must not be inferred");

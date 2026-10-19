@@ -435,7 +435,10 @@ fn incomplete_terminal_refusal_acceptance_and_unary_acceptance_are_independent()
     incomplete["status"] = json!("incomplete");
     incomplete["incomplete_details"] = json!({"reason":"max_output_tokens"});
     let frame = json!({"type":"response.incomplete","sequence_number":2,"response":incomplete});
-    let refused = decoded(ResponsesStreamOptions::strict(), &[frame.clone()]);
+    let refused = decoded(
+        ResponsesStreamOptions::strict(),
+        std::slice::from_ref(&frame),
+    );
     assert!(refused.outcome.is_err());
     assert!(refused.ended().is_empty());
     let accepted = decoded(
@@ -1068,7 +1071,7 @@ fn strict_document_repair_matches_decoder_and_default_document_stays_lenient() {
     envelope_less
         .as_object_mut()
         .unwrap()
-        .remove("sequence_number");
+        .shift_remove("sequence_number");
     let frame = WireFrame::Text(envelope_less.to_string());
     let mut strict = super::document::Response::with_strict_reader(false);
     strict.absorb(&frame);

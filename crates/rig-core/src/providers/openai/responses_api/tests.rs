@@ -3132,11 +3132,11 @@ fn strict_tools_apply_only_their_own_transformation_to_declared_tools() {
         json!(false)
     );
     let mut untouched = rewritten.clone();
-    untouched.remove("strict");
-    untouched.remove("parameters");
+    untouched.shift_remove("strict");
+    untouched.shift_remove("parameters");
     let mut expected = function.as_object().expect("fixture is an object").clone();
-    expected.remove("strict");
-    expected.remove("parameters");
+    expected.shift_remove("strict");
+    expected.shift_remove("parameters");
     assert_eq!(
         untouched, expected,
         "strict mode must leave the empty description, the explicit null and \
@@ -3212,7 +3212,10 @@ fn carried_reasoning_object_preserves_root_and_known_part_siblings() {
         .expect("object reasoning encodes")
         .expect("identified reasoning");
     let mut expected = raw.clone();
-    expected.as_object_mut().expect("object").remove("status");
+    expected
+        .as_object_mut()
+        .expect("object")
+        .shift_remove("status");
     assert_eq!(
         encoded, expected,
         "only the existing status omission applies; siblings stay exact"

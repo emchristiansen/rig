@@ -138,10 +138,8 @@ fn g227_opaque_carried_text_keeps_the_existing_typed_refusal() {
         ),
     )]));
     let wire = super::super::GeminiConfig::new("test-key").completion(GEMINI_2_5_FLASH);
-    let error = ProviderError::from(
-        Completion::prepare(history(message), &wire.describe())
-            .expect_err("opaque carried content is not a known signed answer"),
-    );
+    let error = Completion::prepare(history(message), &wire.describe())
+        .expect_err("opaque carried content is not a known signed answer");
     assert!(matches!(&error, ProviderError::Request(inner)
         if inner.downcast_ref::<UnrepresentableOpaqueContent>().is_some()));
 }

@@ -183,7 +183,7 @@ fn standard_signatures(content: &mut serde_json::Value) {
             .is_some_and(|text| BASE64.decode(text).is_err() && URL_SAFE.decode(text).is_err());
         if invalid {
             if let Some(fields) = part.as_object_mut() {
-                fields.remove("thoughtSignature");
+                fields.shift_remove("thoughtSignature");
             }
         } else if let Some(signature) = part.get_mut("thoughtSignature")
             && let Some(text) = signature.as_str()

@@ -328,6 +328,14 @@ fn system_in_place_keeps_positions_and_leading_keeps_joined_behavior() {
 #[derive(Debug)]
 struct RefuseHtml;
 
+fn assert_declared_html_document(document: &Document) {
+    assert_eq!(
+        document,
+        &html(),
+        "preflight sees the original declared media and all metadata"
+    );
+}
+
 impl ReplayTarget for RefuseHtml {
     fn api(&self) -> Api {
         TARGET.api()
@@ -352,11 +360,7 @@ impl ReplayTarget for RefuseHtml {
         panic!("declared document refusal must precede adaptation");
     }
     fn check_document(&self, document: &Document) -> Result<(), EncodeError> {
-        assert_eq!(
-            document,
-            &html(),
-            "preflight sees the original declared media and all metadata"
-        );
+        assert_declared_html_document(document);
         Err(EncodeError::request("declared HTML cannot be sent"))
     }
 }

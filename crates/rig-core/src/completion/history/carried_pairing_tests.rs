@@ -307,7 +307,7 @@ fn synthetic_reasoning_provider_and_identity_boundaries_keep_old_no_tools_bodies
                     .item
                     .as_object_mut()
                     .expect("raw object")
-                    .remove("id");
+                    .shift_remove("id");
             }
             "wrong_kind" => reason.payload.item["type"] = json!("synthetic_wrong_kind"),
             "absent_raw_cipher" => {
@@ -316,7 +316,7 @@ fn synthetic_reasoning_provider_and_identity_boundaries_keep_old_no_tools_bodies
                     .item
                     .as_object_mut()
                     .expect("raw object")
-                    .remove("encrypted_content");
+                    .shift_remove("encrypted_content");
             }
             "cipher_mismatch" => {
                 for part in &mut reason.content {
@@ -344,11 +344,11 @@ fn synthetic_reasoning_provider_and_identity_boundaries_keep_old_no_tools_bodies
                     .item
                     .as_object_mut()
                     .expect("raw object")
-                    .remove("encrypted_content");
+                    .shift_remove("encrypted_content");
                 projected
                     .as_object_mut()
                     .expect("expected object")
-                    .remove("encrypted_content");
+                    .shift_remove("encrypted_content");
             }
             _ => unreachable!("listed synthetic boundary"),
         }
@@ -465,11 +465,11 @@ fn synthetic_carried_follower_boundaries_omit_only_qualified_reasoning() {
             "foreign_provider" => text.payload.provider = Some("synthetic-foreign".to_owned()),
             "no_id" => {
                 text.item_id = None;
-                sent.as_object_mut().expect("message").remove("id");
+                sent.as_object_mut().expect("message").shift_remove("id");
             }
             "empty_id" => {
                 text.item_id = Some(String::new());
-                sent.as_object_mut().expect("message").remove("id");
+                sent.as_object_mut().expect("message").shift_remove("id");
             }
             "wrong_kind" => {
                 text.payload.item["type"] = json!("refusal");
@@ -498,7 +498,7 @@ fn synthetic_carried_follower_boundaries_omit_only_qualified_reasoning() {
         if matches!(boundary, "inspection_text" | "inspection_media" | "signed") {
             sent.as_object_mut()
                 .expect("projected known text")
-                .remove("phase");
+                .shift_remove("phase");
         }
         assert_eq!(
             send(&source, &target, &input, false, true)

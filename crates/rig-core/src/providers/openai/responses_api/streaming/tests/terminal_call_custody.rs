@@ -457,7 +457,7 @@ fn terminal_completion_matches_present_empty_and_named_namespaces_exactly() {
         assert_eq!(call.function.arguments_value(), json!({"q":"rig"}));
         assert_eq!(call.native.as_ref().unwrap().item, item);
         let mut omitted = item.clone();
-        omitted.as_object_mut().unwrap().remove("namespace");
+        omitted.as_object_mut().unwrap().shift_remove("namespace");
         let driven = drive(&[announcement, completed_with_output(json!([omitted]))]);
         assert!(
             matches!(driven.errors.as_slice(), [ProviderError::Response(message)]

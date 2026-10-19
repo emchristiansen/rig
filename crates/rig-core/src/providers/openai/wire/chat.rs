@@ -269,11 +269,10 @@ impl Chat {
             body,
             crate::providers::openai::options::Endpoint::ChatCompletions,
         )?;
-        let traced_body = body.deserialize::<Value>()?;
         crate::providers::internal::trace_json(
             crate::providers::internal::LogTarget::Completions,
             "OpenAI Chat Completions request",
-            &traced_body,
+            &body,
         );
         let request = builder.body(body.into_body())?;
         let framing = match mode {

@@ -451,11 +451,13 @@ mod typed_tool_calls {
     #[test]
     fn a_result_that_does_not_say_what_it_answers_is_rejected() {
         let mut json: serde_json::Value = serde_json::from_str(FUNCTION_RESULT).expect("json");
-        json.as_object_mut().expect("object").remove("answers");
+        json.as_object_mut()
+            .expect("object")
+            .shift_remove("answers");
         let error =
             serde_json::from_value::<UserContent>(json.clone()).expect_err("`answers` is required");
         assert!(error.to_string().contains("answers"), "{error}");
-        json.as_object_mut().expect("object").remove("type");
+        json.as_object_mut().expect("object").shift_remove("type");
         assert!(serde_json::from_value::<ToolResult>(json).is_err());
     }
 
@@ -580,7 +582,7 @@ mod typed_tool_calls {
 
     #[test]
     fn missing_ids_are_minted_across_both_call_kinds() {
-        let content = vec![
+        let content = [
             AssistantContent::ToolCall(ToolCall::from_wire(
                 "",
                 ToolFunction::new(

@@ -368,7 +368,6 @@ fn unfinished_ordered_reservations_are_absent() {
     assert_eq!(labels(&observed(&shared)), ["survivor"]);
     // G48: the genuine end closes incomplete calls instead of old discard.
     // This unnamed reservation contributes no canonical call in either view.
-    drop(out);
     assert_eq!(labels(&finish(shared)), ["survivor"]);
 }
 
@@ -420,7 +419,6 @@ fn snapshot_is_non_destructive_and_does_not_change_finish() {
         if call.function.name.as_str()=="lookup" && call.function.arguments_value()==json!({"q":"rust"})));
     scripted_tail(&mut out).expect("the exact original script tail");
     let before_finish = observed(&shared);
-    drop(out);
     let finished = finish(shared);
     assert_eq!(
         finished, before_finish,
@@ -603,7 +601,6 @@ fn snapshots_are_pure_reads_for_selected_original_cases() {
             out.push(0, "!").expect("original suffix");
             out.finish(0).expect("text completes");
             let last = observed(&shared);
-            drop(out);
             assert_eq!(finish(shared), last);
             assert_eq!(reference, {
                 let shared = Mutex::new(Shared::new(Turn::relayed("test")));
@@ -613,7 +610,6 @@ fn snapshots_are_pure_reads_for_selected_original_cases() {
                 let _ = observed(&shared);
                 out.push(0, "!").expect("original suffix");
                 out.finish(0).expect("text completes");
-                drop(out);
                 finish(shared)
             });
         }

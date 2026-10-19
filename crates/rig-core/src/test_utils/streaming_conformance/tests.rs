@@ -20,8 +20,7 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 /// Synthetic fixture isolates canonical conservation through the existing
 /// Responses decoder rather than recording a new provider exchange.
 #[tokio::test]
-async fn rich_carried_text_conserves_deltas_and_missing_choice_fails_law_two()
--> Result<(), ProviderError> {
+async fn rich_carried_text_conserves_deltas_and_missing_choice_fails_law_two() {
     // Required envelope and event coordinates are synthetic received data.
     let part = json!({"type":"output_text", "text":"Paris", "annotations":[{
         "type":"url_citation", "url":"https://example.test/paris", "title":"Paris",
@@ -51,9 +50,12 @@ async fn rich_carried_text_conserves_deltas_and_missing_choice_fails_law_two()
         Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"),
         http.clone(),
     );
-    let drained =
-        fixtures::drain(model.stream(CompletionRequest::new("synthetic conservation control"))?)
-            .await;
+    let drained = fixtures::drain(
+        model
+            .stream(CompletionRequest::new("synthetic conservation control"))
+            .expect("synthetic conservation stream starts"),
+    )
+    .await;
     assert!(drained.completed_cleanly());
     assert_eq!(drained.texts().concat(), "Paris");
     assert_eq!(drained.choice_texts(), vec!["Paris"]);
@@ -62,9 +64,13 @@ async fn rich_carried_text_conserves_deltas_and_missing_choice_fails_law_two()
         if text.text() == "Paris" && text.phase.as_deref() == Some("final_answer")
             && text.payload.item == part && text.payload.provider.as_deref() == Some("openai"))
     );
-    let response = drained.response.as_ref().ok_or_else(|| {
-        ProviderError::Response("synthetic fixture must reach its terminal".to_owned())
-    })?;
+    let response = drained
+        .response
+        .as_ref()
+        .ok_or_else(|| {
+            ProviderError::Response("synthetic fixture must reach its terminal".to_owned())
+        })
+        .expect("synthetic fixture must reach its terminal");
     assert_eq!(response.raw, body);
     assert_eq!(response.usage.input_tokens, Some(4));
     assert_eq!(response.usage.output_tokens, Some(2));
@@ -81,14 +87,12 @@ async fn rich_carried_text_conserves_deltas_and_missing_choice_fails_law_two()
         panic!("missing canonical carried text must violate conservation");
     };
     assert!(panic_message(panic.as_ref()).contains("law 2 (text conservation)"));
-    Ok(())
 }
 
 /// Synthetic Gemini control covers the real signed/plain decoder route and
 /// ordinary text order, without giving payload-only siblings text authority.
 #[tokio::test]
-async fn ordinary_and_mixed_text_keep_order_without_raw_only_promotion() -> Result<(), ProviderError>
-{
+async fn ordinary_and_mixed_text_keep_order_without_raw_only_promotion() {
     for signed in [false, true] {
         let first = if signed {
             json!({"text":"Pa", "thoughtSignature":"synthetic-signed-pa",
@@ -108,9 +112,12 @@ async fn ordinary_and_mixed_text_keep_order_without_raw_only_promotion() -> Resu
             GenerateContent::new(GeminiConfig::new("synthetic-test-key"), "gemini-2.5-flash"),
             http.clone(),
         );
-        let drained =
-            fixtures::drain(model.stream(CompletionRequest::new("synthetic text-order control"))?)
-                .await;
+        let drained = fixtures::drain(
+            model
+                .stream(CompletionRequest::new("synthetic text-order control"))
+                .expect("synthetic text-order stream starts"),
+        )
+        .await;
         assert!(drained.completed_cleanly());
         assert_eq!(drained.texts().concat(), "Paris");
         assert_eq!(drained.choice_texts(), vec!["Pa", "ris"]);
@@ -126,9 +133,13 @@ async fn ordinary_and_mixed_text_keep_order_without_raw_only_promotion() -> Resu
                 [AssistantContent::Text(first), AssistantContent::Text(second)]
                 if first.text == "Pa" && second.text == "ris"));
         }
-        let response = drained.response.as_ref().ok_or_else(|| {
-            ProviderError::Response("synthetic fixture must reach its terminal".to_owned())
-        })?;
+        let response = drained
+            .response
+            .as_ref()
+            .ok_or_else(|| {
+                ProviderError::Response("synthetic fixture must reach its terminal".to_owned())
+            })
+            .expect("synthetic fixture must reach its terminal");
         assert_eq!(response.text(), "Paris");
         assert_eq!(response.usage.total_tokens, Some(6));
         // The streamed document deliberately merges adjacent parts. Pin
@@ -138,13 +149,12 @@ async fn ordinary_and_mixed_text_keep_order_without_raw_only_promotion() -> Resu
         assert_eq!(http.requests().len(), 1);
         assert_eq!(http.remaining_responses(), 0);
     }
-    Ok(())
 }
 
 /// Synthetic signed-thought fixture exercises the existing Gemini producer;
 /// the negative half alters only an observation by withholding its real End.
 #[tokio::test]
-async fn carried_reasoning_requires_its_actual_end_for_law_five() -> Result<(), ProviderError> {
+async fn carried_reasoning_requires_its_actual_end_for_law_five() {
     let thought = json!({"text":"think", "thought":true, "thoughtSignature":"synthetic-thought"});
     let body = json!({"responseId":"resp_ut005_thought", "modelVersion":"gemini-2.5-flash",
         "candidates":[{"index":0, "content":{"role":"model",
@@ -159,8 +169,12 @@ async fn carried_reasoning_requires_its_actual_end_for_law_five() -> Result<(), 
         GenerateContent::new(GeminiConfig::new("synthetic-test-key"), "gemini-2.5-flash"),
         http.clone(),
     );
-    let mut drained =
-        fixtures::drain(model.stream(CompletionRequest::new("synthetic reasoning control"))?).await;
+    let mut drained = fixtures::drain(
+        model
+            .stream(CompletionRequest::new("synthetic reasoning control"))
+            .expect("synthetic reasoning stream starts"),
+    )
+    .await;
     assert!(drained.completed_cleanly());
     assert!(matches!(drained.choice.as_slice(),
         [AssistantContent::CarriedReasoning(reasoning), AssistantContent::Text(text)]
@@ -185,9 +199,13 @@ async fn carried_reasoning_requires_its_actual_end_for_law_five() -> Result<(), 
             .count(),
         1
     );
-    let response = drained.response.as_ref().ok_or_else(|| {
-        ProviderError::Response("synthetic fixture must reach its terminal".to_owned())
-    })?;
+    let response = drained
+        .response
+        .as_ref()
+        .ok_or_else(|| {
+            ProviderError::Response("synthetic fixture must reach its terminal".to_owned())
+        })
+        .expect("synthetic fixture must reach its terminal");
     assert_eq!(response.raw, body);
     assert_eq!(response.usage.reasoning_tokens, Some(1));
     assert_eq!(response.usage.output_tokens, Some(3));
@@ -212,20 +230,23 @@ async fn carried_reasoning_requires_its_actual_end_for_law_five() -> Result<(), 
         panic!("withheld reasoning End must violate provenance");
     };
     assert!(panic_message(panic.as_ref()).contains("law 5 (reasoning provenance)"));
-    Ok(())
 }
 
 /// Existing mock operations produce ordinary reasoning through the same
 /// writer/fold; this keeps the old public helper and law-5 route covered.
 #[tokio::test]
-async fn ordinary_reasoning_retains_public_and_private_projection() -> Result<(), ProviderError> {
+async fn ordinary_reasoning_retains_public_and_private_projection() {
     let model = MockCompletionModel::from_stream_turns([vec![
         MockStreamEvent::reasoning("plain thought"),
         MockStreamEvent::text("Paris"),
         MockStreamEvent::final_response_with_total_tokens(6),
     ]]);
-    let drained =
-        fixtures::drain(model.stream(CompletionRequest::new("synthetic ordinary control"))?).await;
+    let drained = fixtures::drain(
+        model
+            .stream(CompletionRequest::new("synthetic ordinary control"))
+            .expect("synthetic ordinary stream starts"),
+    )
+    .await;
     assert!(drained.completed_cleanly());
     assert!(matches!(drained.choice.as_slice(),
         [AssistantContent::Reasoning(reasoning), AssistantContent::Text(text)]
@@ -237,18 +258,19 @@ async fn ordinary_reasoning_retains_public_and_private_projection() -> Result<()
     );
     assert_eq!(drained.choice_texts(), vec!["Paris"]);
     assert_eq!(model.request_count(), 1);
-    Ok(())
 }
 
 /// This uses the unchanged existing synthetic interleaving fixture, rather
 /// than minting a signature or substituting Native presence for one.
 #[tokio::test]
-async fn unchanged_signed_interleaving_fixture_keeps_signature_and_order()
--> Result<(), ConformanceError> {
+async fn unchanged_signed_interleaving_fixture_keeps_signature_and_order() {
     let (frames, first, tool_name, second) =
         fixtures::gemini_rest::interleaved_signed_thought_frames();
     let driver = fixtures::gemini_rest::fixture().driver;
-    let drained = driver.drive(ok_chunks(frames.clone())).await?;
+    let drained = driver
+        .drive(ok_chunks(frames.clone()))
+        .await
+        .expect("the unchanged signed fixture drains");
     assert!(drained.completed_cleanly());
     let [
         AssistantContent::CarriedReasoning(before),
@@ -274,19 +296,18 @@ async fn unchanged_signed_interleaving_fixture_keeps_signature_and_order()
     let report = interleaved_signed_full_reasoning_does_not_erase_prior_thought(
         &driver, frames, first, tool_name, second,
     )
-    .await?;
+    .await
+    .expect("the unchanged signed fixture satisfies interleaving");
     assert_eq!(
         report.name,
         "interleaved_signed_full_reasoning_does_not_erase_prior_thought"
     );
-    Ok(())
 }
 
 /// A new unsigned synthetic control removes only thoughtSignature from the
 /// existing received fixture and must fail the exact signature requirement.
 #[tokio::test]
-async fn unsigned_interleaving_fixture_refuses_the_signature_requirement()
--> Result<(), ConformanceError> {
+async fn unsigned_interleaving_fixture_refuses_the_signature_requirement() {
     let (mut frames, first, tool_name, second) =
         fixtures::gemini_rest::interleaved_signed_thought_frames();
     let original = frames[2]
@@ -298,10 +319,13 @@ async fn unsigned_interleaving_fixture_refuses_the_signature_requirement()
                 "gemini",
                 "the existing fixture is SSE bytes",
             )
-        })?;
-    let text = std::str::from_utf8(original).map_err(|error| {
-        ConformanceError::contract("unsigned_synthetic_fixture", "gemini", error.to_string())
-    })?;
+        })
+        .expect("the existing fixture is SSE bytes");
+    let text = std::str::from_utf8(original)
+        .map_err(|error| {
+            ConformanceError::contract("unsigned_synthetic_fixture", "gemini", error.to_string())
+        })
+        .expect("the existing SSE bytes are UTF-8");
     let data = text
         .strip_prefix("data: ")
         .and_then(|text| text.strip_suffix("\n\n"))
@@ -311,10 +335,13 @@ async fn unsigned_interleaving_fixture_refuses_the_signature_requirement()
                 "gemini",
                 "the existing frame is one SSE data record",
             )
-        })?;
-    let original_value: serde_json::Value = serde_json::from_str(data).map_err(|error| {
-        ConformanceError::contract("unsigned_synthetic_fixture", "gemini", error.to_string())
-    })?;
+        })
+        .expect("the existing frame is one SSE data record");
+    let original_value: serde_json::Value = serde_json::from_str(data)
+        .map_err(|error| {
+            ConformanceError::contract("unsigned_synthetic_fixture", "gemini", error.to_string())
+        })
+        .expect("the existing SSE data is JSON");
     let mut unsigned = original_value.clone();
     let part = unsigned["candidates"][0]["content"]["parts"][0]
         .as_object_mut()
@@ -324,15 +351,19 @@ async fn unsigned_interleaving_fixture_refuses_the_signature_requirement()
                 "gemini",
                 "the thought part is an object",
             )
-        })?;
-    assert_eq!(part.remove("thoughtSignature"), Some(json!("sig-1")));
+        })
+        .expect("the thought part is an object");
+    assert_eq!(part.shift_remove("thoughtSignature"), Some(json!("sig-1")));
     assert_eq!(
         unsigned["candidates"][0]["content"]["parts"][0],
         json!({"text":"signed conclusion", "thought":true})
     );
     frames[2] = WireInput::Bytes(Bytes::from(format!("data: {unsigned}\n\n")));
     let driver = fixtures::gemini_rest::fixture().driver;
-    let drained = driver.drive(ok_chunks(frames.clone())).await?;
+    let drained = driver
+        .drive(ok_chunks(frames.clone()))
+        .await
+        .expect("the unsigned fixture drains");
     assert!(drained.completed_cleanly());
     let [
         AssistantContent::CarriedReasoning(before),
@@ -368,7 +399,6 @@ async fn unsigned_interleaving_fixture_refuses_the_signature_requirement()
         "interleaved_signed_full_reasoning_does_not_erase_prior_thought"
     );
     assert_eq!(details, "the post-boundary block must keep its signature");
-    Ok(())
 }
 
 // The event sequence is produced by the real Mock driver. Only the inserted
@@ -414,8 +444,10 @@ async fn law_one_typed_corrupt_report_allows_genuine_later_events() -> Result<()
 }
 
 #[tokio::test]
-async fn law_one_response_error_refuses_genuine_later_events() -> Result<(), ProviderError> {
-    let mut drained = law_one_completed_mock_text().await?;
+async fn law_one_response_error_refuses_genuine_later_events() {
+    let mut drained = law_one_completed_mock_text()
+        .await
+        .expect("the completed mock text fixture drains");
     // The message deliberately mentions corruption; it confers no recovery.
     let report = ErrorReport::from(&ProviderError::Response("corrupt frame".to_owned()));
     assert!(report.detail.is_none());
@@ -427,13 +459,13 @@ async fn law_one_response_error_refuses_genuine_later_events() -> Result<(), Pro
         panic!("an ordinary Response error must be terminal");
     };
     assert!(panic_message(panic.as_ref()).contains("law 1 (terminal error)"));
-    Ok(())
 }
 
 #[tokio::test]
-async fn law_one_missing_corrupt_detail_refuses_genuine_later_events() -> Result<(), ProviderError>
-{
-    let mut drained = law_one_completed_mock_text().await?;
+async fn law_one_missing_corrupt_detail_refuses_genuine_later_events() {
+    let mut drained = law_one_completed_mock_text()
+        .await
+        .expect("the completed mock text fixture drains");
     let mut report = law_one_synthetic_corrupt_report();
     report.detail = None;
     drained.items.insert(0, Err(report));
@@ -444,17 +476,17 @@ async fn law_one_missing_corrupt_detail_refuses_genuine_later_events() -> Result
         panic!("an error without the typed corrupt detail must be terminal");
     };
     assert!(panic_message(panic.as_ref()).contains("law 1 (terminal error)"));
-    Ok(())
 }
 
 #[tokio::test]
-async fn law_one_fatal_report_last_keeps_genuine_text_events() -> Result<(), ProviderError> {
-    let mut drained = law_one_completed_mock_text().await?;
+async fn law_one_fatal_report_last_keeps_genuine_text_events() {
+    let mut drained = law_one_completed_mock_text()
+        .await
+        .expect("the completed mock text fixture drains");
     let report = ErrorReport::from(&ProviderError::Response("fatal control".to_owned()));
     assert!(report.detail.is_none());
     drained.items.push(Err(report));
     assert_valid_event_stream(&drained.items, &drained.choice);
-    Ok(())
 }
 
 /// The original Responses fixture has an explicit completed item before EOF.

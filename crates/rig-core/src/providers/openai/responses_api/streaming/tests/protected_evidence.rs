@@ -21,7 +21,6 @@ fn a_malformed_known_frame_surfaces_on_the_sse_stream_carrying_the_frame_as_sent
         let mut framer = rig_http::http_client::framing::SseFramer::new();
         let frames = framer
             .push(body.as_bytes())
-            .into_iter()
             .map(|event| WireFrame::Text(event.data));
         let error = crate::driver::feed_frames!(
             ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()),

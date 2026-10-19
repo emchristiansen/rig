@@ -1381,13 +1381,13 @@ async fn empty_signed_reasoning_sibling_opens_a_new_part_after_close() {
     ]);
     let mut completed = Vec::new();
     while let Some(item) = stream.next().await {
-        if let Item::Event(StreamEvent::End { part, content, .. }) = item.expect("stream item") {
-            if matches!(
+        if let Item::Event(StreamEvent::End { part, content, .. }) = item.expect("stream item")
+            && matches!(
                 content,
                 AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)
-            ) {
-                completed.push((part, content));
-            }
+            )
+        {
+            completed.push((part, content));
         }
     }
     assert_eq!(completed.len(), 2, "two distinct parts complete");
@@ -1448,10 +1448,10 @@ async fn whole_reasoning_keeps_distinct_parts_and_genuine_received_ids() {
     ]);
     let mut completed = Vec::new();
     while let Some(item) = stream.next().await {
-        if let Item::Event(StreamEvent::End { part, content, .. }) = item.expect("stream item") {
-            if let Some(id) = actual_reasoning_id(&content) {
-                completed.push((part, id.to_owned()));
-            }
+        if let Item::Event(StreamEvent::End { part, content, .. }) = item.expect("stream item")
+            && let Some(id) = actual_reasoning_id(&content)
+        {
+            completed.push((part, id.to_owned()));
         }
     }
     assert_eq!(completed.len(), 2);

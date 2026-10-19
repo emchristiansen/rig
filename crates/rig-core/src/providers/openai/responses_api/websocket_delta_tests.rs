@@ -85,7 +85,7 @@ fn lite_delta_lowers_canonical_image_detail_and_preserves_identical_raw_input() 
     canonical["content"][0]
         .as_object_mut()
         .expect("the image part is an object")
-        .remove("detail");
+        .shift_remove("detail");
     assert_eq!(items, vec![canonical, raw]);
 }
 

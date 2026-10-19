@@ -798,7 +798,7 @@ fn a_whole_interaction_and_its_stream_agree() {
         assert_eq!(part.payload.item, thought);
         assert_eq!(part.payload.provider.as_deref(), Some("gcp.gemini"));
         assert_eq!(
-            serde_json::to_value(&part.payload.position).unwrap(),
+            serde_json::to_value(part.payload.position).unwrap(),
             json!({"kind":"whole"})
         );
     }
@@ -826,7 +826,7 @@ fn a_thought_start_with_its_summary_agrees_with_the_whole() {
         assert_eq!(part.payload.item, thought);
         assert_eq!(part.payload.provider.as_deref(), Some("gcp.gemini"));
         assert_eq!(
-            serde_json::to_value(&part.payload.position).unwrap(),
+            serde_json::to_value(part.payload.position).unwrap(),
             json!({"kind":"whole"})
         );
     }
