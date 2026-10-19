@@ -2089,16 +2089,14 @@ impl<'id> Out<'id, Completion> {
         let Some(draft) = fold.open.get(&index) else {
             return not_open(index);
         };
-        let Body::Call { .. } = &draft.body else {
+        let Body::Call { id, name, .. } = &draft.body else {
             return ProviderError::Response(format!(
                 "the reply refused item {index} as a malformed function call, but it is not a function call"
             ));
         };
+        let (id, name) = (id.clone(), name.clone());
         let Some(draft) = fold.open.remove(&index) else {
             return not_open(index);
-        };
-        let Body::Call { id, name, .. } = draft.body else {
-            unreachable!("the open item's function kind was checked under the same lock")
         };
         if fold.run == Some(index) {
             fold.run = None;

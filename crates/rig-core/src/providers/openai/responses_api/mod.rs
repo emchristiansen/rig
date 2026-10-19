@@ -745,10 +745,8 @@ pub(crate) fn project_raw_parameters(raw: &Value) -> Result<Map<String, Value>, 
             "Invalid OpenAI Responses additional_params payload: {error}"
         ))
     })?;
-    let mut fields = match serde_json::to_value(parameters)? {
-        Value::Object(fields) => fields,
-        _ => unreachable!("the raw parameter projection serializes a struct"),
-    };
+    let mut fields =
+        serde_json::from_value::<Map<String, Value>>(serde_json::to_value(parameters)?)?;
     if let Some(tools) = tools {
         fields.insert("tools".to_owned(), tools);
     }
