@@ -247,3 +247,159 @@ fn a_key_a_script_names_survives_its_source_being_re_recorded() {
         .collect();
     assert_eq!(kept, ["openai/rerecorded.yaml#0"]);
 }
+
+/// These JSON documents isolate the names-only census from AWS framing.
+#[test]
+fn a_split_tool_use_start_names_the_call_before_its_input_arrives() {
+    let split = |name: &str| {
+        let body = serde_json::json!([
+            {"contentBlockStart": {"contentBlockIndex": 0, "start": {
+                "toolUse": {"name": name, "toolUseId": "call_1"}
+            }}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {
+                "toolUse": {"input": "{}"}
+            }}},
+            {"contentBlockStop": {"contentBlockIndex": 0}},
+            {"messageStop": {"stopReason": "tool_use"}}
+        ]);
+        entry(
+            "bedrock",
+            "POST /model/{model}/converse-stream",
+            &reply("application/json", &body.to_string()),
+            "bedrock/split.yaml#0".into(),
+        )
+    };
+    let ping = split("ping");
+    let pong = split("pong");
+    assert_eq!(ping.calls, ["ping"]);
+    assert_eq!(ping.ends, ["tool_use"]);
+    assert_eq!(pong.calls, ["pong"]);
+    assert_eq!(ping.shape, pong.shape);
+    assert_ne!(ping.script_key(), pong.script_key());
+}
+
+#[test]
+fn named_call_parents_keep_definition_and_server_exclusions() {
+    for parent in ["function", "functionCall", "toolUse"] {
+        let named = serde_json::json!({"name": "ping"});
+        assert!(is_call(
+            named.as_object().expect("named object"),
+            Some(parent)
+        ));
+        for field in DEFINITION {
+            let mut definition = named.clone();
+            definition[*field] = serde_json::json!({});
+            assert!(
+                !is_call(
+                    definition.as_object().expect("definition object"),
+                    Some(parent)
+                ),
+                "{parent}: {definition}"
+            );
+        }
+        for kind in SERVER_CALLS {
+            let server = serde_json::json!({"name": "ping", "type": kind, "input": {}});
+            assert!(
+                !is_call(server.as_object().expect("server object"), Some(parent)),
+                "{parent}: {server}"
+            );
+        }
+    }
+}
+
+#[test]
+fn retained_scripts_follow_recomputed_reply_keys_without_changing_their_sequence() {
+    let recorded = entry(
+        "bedrock",
+        "POST /model/{model}/converse-stream",
+        &reply(
+            "application/json",
+            r#"[{"start":{"toolUse":{"name":"ping","toolUseId":"call_1"}}},{"delta":{"toolUse":{"input":"{}"}}},{"stopReason":"tool_use"}]"#,
+        ),
+        "bedrock/rerecorded.yaml#2".into(),
+    );
+    let mut old = recorded.clone();
+    old.calls.clear();
+    let unchanged = candidate(
+        r#"{"choices":[{"finish_reason":"stop","message":{"content":"old"}}]}"#,
+        "openai/rerecorded.yaml#0",
+    );
+    let old_key = old.script_key();
+    let current_key = recorded.script_key();
+    assert_ne!(old_key, current_key);
+    let mut scripts = Scripts::from([
+        (
+            "bedrock/pruned.yaml".into(),
+            vec![
+                Some(old_key.clone()),
+                None,
+                Some("unmapped".into()),
+                Some(old_key.clone()),
+            ],
+        ),
+        (
+            "other/pruned.yaml".into(),
+            vec![Some(old_key.clone()), None],
+        ),
+        (
+            "openai/pruned.yaml".into(),
+            vec![Some(unchanged.script_key())],
+        ),
+    ]);
+    let refreshed = refresh_committed(&[old.clone(), unchanged.clone()], &mut scripts)
+        .expect("retained keys have one reply-derived replacement");
+    assert_eq!(refreshed, [recorded.clone(), unchanged.clone()]);
+    assert_eq!(
+        scripts,
+        Scripts::from([
+            (
+                "bedrock/pruned.yaml".into(),
+                vec![
+                    Some(current_key.clone()),
+                    None,
+                    Some("unmapped".into()),
+                    Some(current_key)
+                ],
+            ),
+            ("other/pruned.yaml".into(), vec![Some(old_key), None],),
+            (
+                "openai/pruned.yaml".into(),
+                vec![Some(unchanged.script_key())],
+            ),
+        ])
+    );
+    let candidates = [unchanged];
+    let stranded_sources: Vec<&str> = stranded(&refreshed, &candidates, &scripts)
+        .map(|entry| entry.source.as_str())
+        .collect();
+    assert_eq!(stranded_sources, ["bedrock/rerecorded.yaml#2"]);
+    // Retained pins use this same reply refresh, preserving all recorded data.
+    let pinned = refresh(&old);
+    assert_eq!(pinned, recorded);
+    assert_eq!(pinned.then, old.then);
+    assert_eq!(pinned.source, old.source);
+}
+
+#[test]
+fn conflicting_recomputed_keys_refuse_before_changing_retained_scripts() {
+    let old = |name: &str| {
+        let body = serde_json::json!({"start": {"toolUse": {"name": name}}}).to_string();
+        let mut entry = entry(
+            "bedrock",
+            "POST /model/{model}/converse-stream",
+            &reply("application/json", &body),
+            format!("bedrock/{name}.yaml#0"),
+        );
+        entry.calls.clear();
+        entry
+    };
+    let committed = [old("ping"), old("pong")];
+    let key = committed[0].script_key();
+    assert_eq!(key, committed[1].script_key());
+    let mut scripts = Scripts::from([("bedrock/pruned.yaml".into(), vec![Some(key), None])]);
+    let before = scripts.clone();
+    let error = refresh_committed(&committed, &mut scripts)
+        .expect_err("one old key cannot choose between different reply-derived keys");
+    assert!(error.contains("maps to more than one reply key"), "{error}");
+    assert_eq!(scripts, before);
+}

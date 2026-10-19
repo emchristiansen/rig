@@ -185,45 +185,29 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let cassettes = root.join(CASSETTES);
     let dir = root.join(BANK);
     let committed = read(&dir)?;
-    let committed_scripts = match std::fs::read_to_string(dir.join(SCRIPTS)) {
+    let mut committed_scripts = match std::fs::read_to_string(dir.join(SCRIPTS)) {
         Ok(text) => parse_scripts(&text)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Scripts::new(),
         Err(error) => return Err(format!("{BANK}/{SCRIPTS}: {error}")),
     };
+    committed_scripts.retain(|fixture, _| !cassettes.join(fixture).is_file());
+    let committed = refresh_committed(&committed, &mut committed_scripts)?;
     let excluded = hand_derived(root)?;
     let (mut candidates, mut scripts) = observe(&cassettes, &excluded)?;
     let pinned = pin(&dir, &cassettes, &candidates)?;
-    // An entry whose fixture is gone is still a real recording; what the
-    // bank reads off it is read again.
+    // An entry whose fixture is gone is still a real recording; its
+    // metadata and the retained scripts now use the same reply-derived keys.
     candidates.extend(
         committed
             .iter()
             .filter(|kept| !source_exists(&cassettes, &kept.source))
-            .map(|kept| {
-                entry(
-                    &kept.provider,
-                    &kept.encoder,
-                    &kept.then.exchange(),
-                    kept.source.clone(),
-                )
-            }),
+            .cloned(),
     );
-    for (fixture, script) in committed_scripts {
-        if !cassettes.join(&fixture).is_file() {
-            scripts.insert(fixture, script);
-        }
-    }
+    scripts.extend(committed_scripts);
     // A re-recorded fixture can stop giving a key a kept script still names;
     // the committed reply that gave it is still a real recording.
     let stranded: Vec<Entry> = stranded(&committed, &candidates, &scripts)
-        .map(|kept| {
-            entry(
-                &kept.provider,
-                &kept.encoder,
-                &kept.then.exchange(),
-                kept.source.clone(),
-            )
-        })
+        .cloned()
         .collect();
     candidates.extend(stranded);
     let bank = build(candidates);
@@ -269,6 +253,42 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
     println!("wrote {}", dir.display());
     Ok(())
+}
+
+/// Recompute an entry's metadata from its unchanged recorded reply.
+fn refresh(kept: &Entry) -> Entry {
+    entry(
+        &kept.provider,
+        &kept.encoder,
+        &kept.then.exchange(),
+        kept.source.clone(),
+    )
+}
+
+/// Refresh committed entries and the old keys in retained fixture scripts.
+fn refresh_committed(committed: &[Entry], scripts: &mut Scripts) -> Result<Vec<Entry>, String> {
+    let refreshed: Vec<Entry> = committed.iter().map(refresh).collect();
+    let mut keys = BTreeMap::new();
+    for (old, new) in committed.iter().zip(&refreshed) {
+        let key = (old.provider.clone(), old.script_key());
+        let updated = new.script_key();
+        if keys.get(&key).is_some_and(|previous| previous != &updated) {
+            return Err(format!(
+                "{BANK}: committed key {} for {} maps to more than one reply key",
+                key.1, key.0
+            ));
+        }
+        keys.insert(key, updated);
+    }
+    for (fixture, script) in scripts {
+        let provider = fixture.split('/').next().unwrap_or_default();
+        for key in script.iter_mut().flatten() {
+            if let Some(updated) = keys.get(&(provider.to_owned(), key.clone())) {
+                *key = updated.clone();
+            }
+        }
+    }
+    Ok(refreshed)
 }
 
 /// The committed entries whose key a script names and no candidate gives.
@@ -481,9 +501,9 @@ fn walk(
 }
 
 /// Whether an object with a `name` is a call of a client tool: it carries
-/// arguments, or it is a function under `function` (a streamed call's first
-/// delta names the function before any argument), and it is neither a
-/// definition nor a call the provider runs itself.
+/// arguments, or is under `function`, `functionCall` or `toolUse` (a
+/// streamed call can name the tool before its arguments arrive), and is
+/// neither a definition nor a call the provider runs itself.
 fn is_call(map: &serde_json::Map<String, Value>, parent: Option<&str>) -> bool {
     let server = map
         .get("type")
@@ -491,7 +511,9 @@ fn is_call(map: &serde_json::Map<String, Value>, parent: Option<&str>) -> bool {
         .is_some_and(|kind| SERVER_CALLS.contains(&kind));
     let definition = DEFINITION.iter().any(|key| map.contains_key(*key));
     let arguments = ARGUMENTS.iter().any(|key| map.contains_key(*key));
-    !server && !definition && (arguments || matches!(parent, Some("function" | "functionCall")))
+    !server
+        && !definition
+        && (arguments || matches!(parent, Some("function" | "functionCall" | "toolUse")))
 }
 
 /// One entry per key: the smallest reply, then the first source in order.
@@ -537,8 +559,8 @@ fn render_entries(entries: &[Entry]) -> Result<String, String> {
 }
 
 /// The replies of every fixture `pinned.txt` lists, in fixture and
-/// interaction order: from the corpus while the fixture exists, else as the
-/// committed bank kept them.
+/// interaction order: from the corpus while the fixture exists, else from
+/// the committed bank, with metadata recomputed from each unchanged reply.
 fn pin(dir: &Path, cassettes: &Path, candidates: &[Entry]) -> Result<Vec<Entry>, String> {
     let listed = match std::fs::read_to_string(dir.join(PINNED_LIST)) {
         Ok(text) => parse_pinned(&text),
@@ -560,7 +582,7 @@ fn pin(dir: &Path, cassettes: &Path, candidates: &[Entry]) -> Result<Vec<Entry>,
         let mut replies: Vec<Entry> = source
             .iter()
             .filter(|entry| fixture_of(&entry.source) == fixture)
-            .cloned()
+            .map(refresh)
             .collect();
         if replies.is_empty() {
             return Err(format!(

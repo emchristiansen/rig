@@ -506,17 +506,17 @@ bedrock/model_ids/retired_model_id_preserves_provider_error.yaml	POST /model/{mo
 bedrock/raw_completion/raw_response_text_matches_normalized_choice_text.yaml	POST /model/{model}/converse;b7203d342f8a8b60;
 bedrock/raw_provider_data/guardrail_trace_survives_into_raw_completion.yaml	POST /model/{model}/converse;da06e691b713b6a7;
 bedrock/raw_provider_data/request_id_survives_into_raw_completion.yaml	POST /model/{model}/converse;b7203d342f8a8b60;
-bedrock/raw_streaming/raw_stream_emits_required_zero_arg_tool_call.yaml	POST /model/{model}/converse-stream;aadfb53ba018b4e8;
-bedrock/raw_streaming/raw_stream_emits_tool_call_before_text.yaml	POST /model/{model}/converse-stream;aadfb53ba018b4e8;
-bedrock/raw_streaming/raw_stream_surfaces_two_distinct_tool_calls.yaml	POST /model/{model}/converse-stream;4b0f009b29d39bfe;
+bedrock/raw_streaming/raw_stream_emits_required_zero_arg_tool_call.yaml	POST /model/{model}/converse-stream;aadfb53ba018b4e8;ping
+bedrock/raw_streaming/raw_stream_emits_tool_call_before_text.yaml	POST /model/{model}/converse-stream;aadfb53ba018b4e8;ping
+bedrock/raw_streaming/raw_stream_surfaces_two_distinct_tool_calls.yaml	POST /model/{model}/converse-stream;4b0f009b29d39bfe;subtract
 bedrock/raw_streaming/raw_stream_text_response_smoke.yaml	POST /model/{model}/converse-stream;58893cc428c885f4;
 bedrock/streaming/streaming_smoke.yaml	POST /model/{model}/converse-stream;58893cc428c885f4;
-bedrock/streaming/streaming_tools_smoke.yaml	POST /model/{model}/converse-stream;4b0f009b29d39bfe;	POST /model/{model}/converse-stream;58893cc428c885f4;
+bedrock/streaming/streaming_tools_smoke.yaml	POST /model/{model}/converse-stream;4b0f009b29d39bfe;subtract	POST /model/{model}/converse-stream;58893cc428c885f4;
 bedrock/tool_choice/none_nonstreaming_no_tools.yaml	POST /model/{model}/converse;b7203d342f8a8b60;
 bedrock/tool_choice/none_streaming_no_tools.yaml	POST /model/{model}/converse-stream;58893cc428c885f4;
 bedrock/tool_choice/required_forces_function_call.yaml	POST /model/{model}/converse;d641ee6c32653bd1;add
 bedrock/tool_choice/specific_add_raw_nonstreaming.yaml	POST /model/{model}/converse;d641ee6c32653bd1;add
-bedrock/tool_choice/specific_add_raw_streaming.yaml	POST /model/{model}/converse-stream;aadfb53ba018b4e8;
+bedrock/tool_choice/specific_add_raw_streaming.yaml	POST /model/{model}/converse-stream;aadfb53ba018b4e8;add
 chatgpt/codex_behaviors/default_instructions_merge_with_explicit_preamble.yaml	POST /backend-api/codex/responses;85b37547ed997e40;
 chatgpt/codex_behaviors/explicit_preamble_and_mid_conversation_system_messages_are_instructions.yaml	POST /backend-api/codex/responses;85b37547ed997e40;
 chatgpt/codex_behaviors/store_false_and_prompt_cache_fields_roundtrip.yaml	POST /backend-api/codex/responses;85b37547ed997e40;
@@ -1441,7 +1441,7 @@ llamacpp/bare_openai_client/raw_response_text_matches_normalized_choice_text.yam
 llamacpp/bare_openai_client/tool_call_stream_without_the_single_chunk_const.yaml	POST /v1/chat/completions;59a9886eea7a3355;subtract	POST /v1/chat/completions;74a599ae8bedffec;
 llamacpp/content_matrix/consecutive_same_role.yaml	POST /v1/chat/completions;0e939b9cd7b45f35;
 llamacpp/content_matrix/empty_answer_with_stop.yaml	POST /v1/chat/completions;0e939b9cd7b45f35;
-llamacpp/content_matrix/long_tool_output.yaml	POST /v1/chat/completions;1e4e50054488619c;
+llamacpp/content_matrix/long_tool_output.yaml	POST /v1/chat/completions;0e939b9cd7b45f35;
 llamacpp/content_matrix/system_plus_history.yaml	POST /v1/chat/completions;0e939b9cd7b45f35;
 llamacpp/content_matrix/unicode_across_chunks.yaml	POST /v1/chat/completions;476cea21032cef26;
 llamacpp/context/context_smoke.yaml	POST /v1/chat/completions;1e4e50054488619c;
@@ -1733,10 +1733,11 @@ ollama/reasoning_roundtrip/streaming.yaml	POST /v1/chat/completions;b9fbdfee0b00
 ollama/reasoning_tool_roundtrip/nonstreaming.yaml	POST /v1/chat/completions;ef9fb6bb0bbe8828;get_weather	POST /v1/chat/completions;22f6c59516ace485;
 ollama/reasoning_tool_roundtrip/streaming.yaml	POST /v1/chat/completions;71673396efbe4767;get_weather	POST /v1/chat/completions;b9fbdfee0b00af54;
 ollama/streaming/streaming_smoke.yaml	POST /v1/chat/completions;ad5f1cf921b3df68;
-ollama/streaming_grammar/chat_sourced_history_replay.yaml	POST /v1/chat/completions;ad5f1cf921b3df68;
-ollama/streaming_grammar/parallel_tool_calls.yaml	POST /v1/chat/completions;160bcd545660cf36;lookup_harbor_label,lookup_orchard_label
-ollama/streaming_grammar/same_tool_twice.yaml	POST /v1/chat/completions;160bcd545660cf36;add
+ollama/streaming_grammar/chat_sourced_history_replay.yaml	POST /api/chat;39ed95675029fc6e;
+ollama/streaming_grammar/parallel_tool_calls.yaml	POST /api/chat;7e2664d48ed6c6c6;lookup_harbor_label,lookup_orchard_label
+ollama/streaming_grammar/same_tool_twice.yaml	POST /api/chat;54c1b0e9d571fcad;add
 ollama/streaming_grammar/thinking_and_tool_call.yaml	POST /v1/chat/completions;71673396efbe4767;lookup_harbor_label
+ollama/streaming_grammar/thinking_and_tool_call_native_original.yaml	POST /api/chat;7314b9fbc2fb944d;lookup_harbor_label
 ollama/streaming_tools/streaming_tools_smoke.yaml	POST /v1/chat/completions;160bcd545660cf36;subtract	POST /v1/chat/completions;ad5f1cf921b3df68;
 ollama/structured_output/raw_with_thinking.yaml	POST /v1/chat/completions;22f6c59516ace485;
 ollama/structured_output/structured_output_smoke.yaml	POST /v1/chat/completions;c388bd63f494e85e;
@@ -1773,6 +1774,30 @@ openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_text.yaml	
 openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_raw_parallel_tool.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
 openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_raw_single_tool.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
 openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_raw_text.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/blocking_gpt_4_1_mini_normalized_parallel_tool.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4_1_mini_normalized_single_tool.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4_1_mini_normalized_text.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4_1_mini_raw_parallel_tool.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4_1_mini_raw_single_tool.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4_1_mini_raw_text.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4o_mini_normalized_parallel_tool.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4o_mini_normalized_single_tool.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4o_mini_normalized_text.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4o_mini_raw_parallel_tool.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4o_mini_raw_single_tool.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/blocking_gpt_4o_mini_raw_text.yaml	POST /v1/chat/completions;8fe14392e5f46d8a;
+openai/chat_history_roundtrip_originals/streaming_gpt_4_1_mini_normalized_parallel_tool.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4_1_mini_normalized_single_tool.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4_1_mini_normalized_text.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4_1_mini_raw_parallel_tool.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4_1_mini_raw_single_tool.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4_1_mini_raw_text.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4o_mini_normalized_parallel_tool.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4o_mini_normalized_single_tool.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4o_mini_normalized_text.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4o_mini_raw_parallel_tool.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4o_mini_raw_single_tool.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
+openai/chat_history_roundtrip_originals/streaming_gpt_4o_mini_raw_text.yaml	POST /v1/chat/completions;61a0cad11a0661c8;
 openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_absent.yaml	POST /v1/chat/completions;b0b04c538d47c2a5;
 openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_two.yaml	POST /v1/chat/completions;8f007d0be24ecd31;
 openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_zero.yaml	POST /v1/chat/completions;b0b04c538d47c2a5;
@@ -2226,7 +2251,7 @@ openai/reasoning_matrix_chat/capped.yaml	POST /v1/chat/completions;6d68815ca0ed2
 openai/reasoning_matrix_chat/off.yaml	POST /v1/chat/completions;5ce71b034eefdc3d;
 openai/reasoning_matrix_chat/text_streamed.yaml	POST /v1/chat/completions;16667897d6fcd5f7;
 openai/reasoning_matrix_responses/capped.yaml	POST /v1/responses;0c89f03266355882;
-openai/reasoning_matrix_responses/capped_streamed.yaml	POST /v1/responses;740ed685945bdc7b;
+openai/reasoning_matrix_responses/capped_streamed.yaml	POST /v1/responses;14ea41654b5a66a6;
 openai/reasoning_matrix_responses/text_streamed.yaml	POST /v1/responses;49a11f03cb673e82;
 openai/reasoning_matrix_responses/text_unary.yaml	POST /v1/responses;ad722512ead76196;
 openai/reasoning_roundtrip/nonstreaming.yaml	POST /v1/responses;a8b30942baba89bf;	POST /v1/responses;a8b30942baba89bf;
