@@ -392,3 +392,62 @@ fn absent_function_args_default_but_explicit_nonobjects_refuse() {
         );
     }
 }
+
+#[test]
+fn test_partial_usage_serde_roundtrip_with_all_optional_fields() {
+    let json_data = serde_json::json!({
+        "promptTokenCount": 100,
+        "cachedContentTokenCount": 25,
+        "candidatesTokenCount": 50,
+        "thoughtsTokenCount": 15,
+        "totalTokenCount": 190,
+        "promptTokensDetails": [
+            { "modality": "TEXT", "tokenCount": 80 },
+            { "modality": "IMAGE", "tokenCount": 20 }
+        ],
+        "cacheTokensDetails": [
+            { "modality": "TEXT", "tokenCount": 25 }
+        ],
+        "candidatesTokensDetails": [
+            { "modality": "TEXT", "tokenCount": 50 }
+        ],
+        "toolUsePromptTokenCount": 12,
+        "toolUsePromptTokensDetails": [
+            { "modality": "TEXT", "tokenCount": 12 }
+        ],
+        "trafficType": "PROVISIONED_THROUGHPUT"
+    });
+
+    let usage: Usage =
+        serde_json::from_value(json_data.clone()).expect("usage metadata should deserialize");
+    assert_eq!(usage.prompt_token_count, 100);
+    assert_eq!(usage.cached_content_token_count, Some(25));
+    assert_eq!(usage.candidates_token_count, Some(50));
+    assert_eq!(usage.thoughts_token_count, Some(15));
+    assert_eq!(usage.total_token_count, 190);
+    assert!(usage.prompt_tokens_details.is_some());
+    assert_eq!(
+        usage
+            .prompt_tokens_details
+            .as_ref()
+            .expect("prompt token details present")
+            .len(),
+        2
+    );
+    assert!(usage.cache_tokens_details.is_some());
+    assert!(usage.candidates_tokens_details.is_some());
+    assert_eq!(usage.tool_use_prompt_token_count, Some(12));
+    assert!(usage.tool_use_prompt_tokens_details.is_some());
+    assert!(matches!(
+        usage.traffic_type,
+        Some(Traffic::ProvisionedThroughput)
+    ));
+
+    let token_usage = crate::providers::gemini::completion::usage_of(&json_data);
+    assert_eq!(token_usage.input_tokens, Some(100));
+    assert_eq!(token_usage.cached_input_tokens, Some(25));
+    assert_eq!(token_usage.output_tokens, Some(50));
+    assert_eq!(token_usage.reasoning_tokens, Some(15));
+    assert_eq!(token_usage.tool_use_prompt_tokens, Some(12));
+    assert_eq!(token_usage.total_tokens, Some(190));
+}
