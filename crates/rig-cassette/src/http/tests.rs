@@ -285,7 +285,7 @@ fn gemini_interactions_policy_requires_api_key_header() {
 #[tokio::test]
 async fn direct_recorder_keeps_no_credential_a_source_stamped() {
     let policy =
-        CassettePolicy::for_scenario("chatgpt", "agent/completion_smoke", ReplayMatching::Ordered);
+        CassettePolicy::for_scenario("chatgpt", CassetteSpec::new("agent/completion_smoke"));
     let interactions = Arc::new(Mutex::new(Vec::new()));
     let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
     let recorder = DirectRecorder {
@@ -1171,7 +1171,7 @@ async fn a_source_credential_sent_through_the_driver_is_never_recorded() {
     });
 
     let policy =
-        CassettePolicy::for_scenario("openai", "agent/completion_smoke", ReplayMatching::Ordered);
+        CassettePolicy::for_scenario("openai", CassetteSpec::new("agent/completion_smoke"));
     let interactions = Arc::new(Mutex::new(Vec::new()));
     let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
     let recorder = DirectRecorder {
@@ -1184,30 +1184,16 @@ async fn a_source_credential_sent_through_the_driver_is_never_recorded() {
             origin: format!("http://{address}"),
         }),
     };
-    let provider = rig_core::providers::openai::OpenAI::new("static-key")
+    let provider = rig_core::providers::openai::OpenAIConfig::new("static-key")
         .with_base_url(format!("http://{address}/v1"))
         .with_account_id("static-account")
         .with_credential_source(FixedSource);
-    let response = {
-        use rig_core::completion::CompletionModel as _;
-        rig_core::driver::Bound::new(
-            provider.chat("gpt-4o"),
-            DirectRecordingHttpClient::new(Some(recorder)),
-        )
-        .completion(rig_core::completion::CompletionRequest {
-            model: None,
-            chat_history: vec![rig_core::message::Message::user("hi")],
-            documents: Vec::new(),
-            tools: Vec::new(),
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        })
-        .await
-    };
+    let response = rig_core::Model::new(
+        provider.chat("gpt-4o"),
+        DirectRecordingHttpClient::new(Some(recorder)),
+    )
+    .call(rig_core::completion::CompletionRequest::new("hi"))
+    .await;
     response.expect("the local upstream answers");
 
     let received = received.lock().expect("unpoisoned").clone();

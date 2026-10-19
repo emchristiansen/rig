@@ -455,7 +455,9 @@ fn apply_change(value: &mut Value, change: &Change) -> Result<(), &'static str> 
             let Some(Value::Array(items)) = value.pointer_mut(&change.path) else {
                 return Err("the recording holds no array here");
             };
-            let end = at + removed.len();
+            let Some(end) = at.checked_add(removed.len()) else {
+                return Err("the recording holds other items here");
+            };
             if items.get(at..end) != Some(removed.as_slice()) {
                 return Err("the recording holds other items here");
             }
