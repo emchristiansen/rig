@@ -12,10 +12,10 @@ A call needs HTTPS to create it and a secure websocket for its control socket. T
 
 ```toml
 [dependencies]
-rig-core = { version = "0.42", features = ["websocket"] }
-rig-reqwest = "0.42"
-rig-tungstenite = "0.42"
-rig-webrtc = "0.42"
+rig-core = { version = "0.44", features = ["websocket"] }
+rig-reqwest = "0.44"
+rig-tungstenite = "0.44"
+rig-webrtc = "0.44"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
