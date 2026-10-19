@@ -57,10 +57,8 @@ async fn text_only_stream_without_terminal_record_is_rejected_as_truncated() {
         match item {
             Err(error) => {
                 assert!(
-                    error
-                        .to_string()
-                        .contains("the reply ended before the provider ended it"),
-                    "truncation should surface as a truncated reply, got: {error}"
+                    error.to_string().contains("terminal record"),
+                    "truncation should surface as a terminal-record error, got: {error}"
                 );
                 saw_error = true;
                 break;

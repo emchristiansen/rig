@@ -1,5 +1,42 @@
 {
   "header": {
+    "stream_done": {
+      "1": [
+        {
+          "item": 4,
+          "response": {
+            "choice": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "provider": "call-1"
+                },
+                "function": {
+                  "name": "final_result",
+                  "arguments": {
+                    "title": "Seattle Rust Meetup",
+                    "category": "Technology",
+                    "summary": "A meetup."
+                  }
+                }
+              }
+            ],
+            "usage": {},
+            "origin": {
+              "api": "mock.script",
+              "provider": "mock",
+              "model": "mock-model"
+            },
+            "finish_reason": null,
+            "raw": {
+              "usage": {},
+              "response_id": null,
+              "model": null
+            }
+          }
+        }
+      ]
+    },
     "run_spec": 17304775086552656482,
     "handlers": [
       {

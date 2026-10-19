@@ -125,6 +125,10 @@
             "event": "start",
             "part": 0,
             "kind": "tool_call",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            },
             "name": "write_note"
           }
         },

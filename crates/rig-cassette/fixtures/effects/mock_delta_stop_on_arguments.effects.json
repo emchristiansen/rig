@@ -1,5 +1,41 @@
 {
   "header": {
+    "stream_done": {
+      "1": [
+        {
+          "item": 4,
+          "response": {
+            "choice": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "provider": "call-1"
+                },
+                "function": {
+                  "name": "add",
+                  "arguments": {
+                    "x": 2,
+                    "y": 3
+                  }
+                }
+              }
+            ],
+            "usage": {},
+            "origin": {
+              "api": "mock.script",
+              "provider": "mock",
+              "model": "mock-model"
+            },
+            "finish_reason": null,
+            "raw": {
+              "usage": {},
+              "response_id": null,
+              "model": null
+            }
+          }
+        }
+      ]
+    },
     "run_spec": 11449158697782856603,
     "handlers": [
       {
