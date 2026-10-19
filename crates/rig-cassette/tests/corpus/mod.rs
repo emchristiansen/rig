@@ -3191,6 +3191,33 @@ fn tail_after(log: &EffectLog, tool_turns: usize) -> EffectLog {
     .tail(0)
 }
 
+#[test]
+fn causal_streamed_tail_retains_only_its_recorded_done_responses() {
+    let log = golden("anthropic_causal_completion_streamed");
+    let first = rig_core::effect::EffectId::from_raw(1);
+    let last = rig_core::effect::EffectId::from_raw(4);
+    assert_eq!(
+        log.header.stream_done.keys().copied().collect::<Vec<_>>(),
+        vec![first, last],
+    );
+    let tail = tail_after(&log, 1);
+    assert_eq!(
+        tail.records
+            .iter()
+            .map(|record| record.id.as_u64())
+            .collect::<Vec<_>>(),
+        vec![3, 4],
+    );
+    assert_eq!(
+        tail.header.stream_done.keys().copied().collect::<Vec<_>>(),
+        vec![last],
+    );
+    assert_eq!(
+        tail.header.stream_done.get(&last),
+        log.header.stream_done.get(&last),
+    );
+}
+
 /// `Resume::Never` never suspends, so no tail is ever asked for it.
 fn unreachable_resume() -> EffectLog {
     panic!("a run that never suspends has no tail")
