@@ -1,6 +1,5 @@
 use super::*;
 use crate::proto;
-use futures::StreamExt as _;
 use message::{AssistantContent, AssistantMessage, CarriedReasoningPart, Message};
 use rig_core::completion::{CompletionResponse, FinishReason};
 use serde_json::json;

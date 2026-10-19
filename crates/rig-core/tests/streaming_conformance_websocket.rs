@@ -101,7 +101,7 @@ async fn drain_openai_responses_websocket_events(
             Ok(ResponsesWebSocketEvent::Response { kind, response }) => {
                 serde_json::json!({ "type": kind, "response": response }).to_string()
             }
-            Ok(ResponsesWebSocketEvent::Unknown(value)) => value.value().to_string(),
+            Ok(ResponsesWebSocketEvent::Unknown(value)) => value.payload.value().to_string(),
             // `response.done` is a websocket-only trailer the fixtures never
             // script.
             Ok(ResponsesWebSocketEvent::Done(_)) => continue,
