@@ -425,13 +425,7 @@ fn last_text(history: &[Message]) -> String {
         .rev()
         .find_map(|message| match message {
             Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
-                let text: String = content
-                    .iter()
-                    .filter_map(|part| match part {
-                        AssistantContent::Text(text) => Some(text.text.as_str()),
-                        _ => None,
-                    })
-                    .collect();
+                let text = rig_core::transcript::assistant_text_from_choice(content);
                 (!text.is_empty()).then_some(text)
             }
             _ => None,

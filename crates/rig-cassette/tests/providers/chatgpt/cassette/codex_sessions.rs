@@ -359,14 +359,7 @@ async fn long_history_replay_nonstreaming() {
                 .await
                 .expect("long history replay should be accepted by the Responses API");
 
-            let text: String = response
-                .choice
-                .iter()
-                .filter_map(|content| match content {
-                    AssistantContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect();
+            let text = rig::transcript::assistant_text_from_choice(&response.choice);
             let lowered = text.to_ascii_lowercase();
             assert!(
                 lowered.contains("teal"),
