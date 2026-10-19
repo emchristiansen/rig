@@ -2848,17 +2848,24 @@ fn name(name: &str) -> ToolName {
 ///
 /// `wire` is the wire's name in [`HISTORY_WIRES`]; `fixture` is an
 /// expression producing its [`HistoryFixture`]. The optional
-/// `h05_field_ablation` function path takes the same fixture by reference
-/// and returns `()`, replacing only that row's body.
+/// `h03_stream_equals_whole` and `h05_field_ablation` function paths take
+/// the same fixture by reference and return `()`, replacing only their
+/// respective row bodies.
 #[macro_export]
 macro_rules! history_conformance_suite {
     (wire: $wire:literal, fixture: $fixture:expr $(,)?) => {
-        $crate::history_conformance_suite!(@emit $wire, $fixture, $crate::h05_field_ablation);
+        $crate::history_conformance_suite!(@emit $wire, $fixture, $crate::h03_stream_equals_whole, $crate::h05_field_ablation);
+    };
+    (wire: $wire:literal, fixture: $fixture:expr, h03_stream_equals_whole: $h03:path $(,)?) => {
+        $crate::history_conformance_suite!(@emit $wire, $fixture, $h03, $crate::h05_field_ablation);
     };
     (wire: $wire:literal, fixture: $fixture:expr, h05_field_ablation: $h05:path $(,)?) => {
-        $crate::history_conformance_suite!(@emit $wire, $fixture, $h05);
+        $crate::history_conformance_suite!(@emit $wire, $fixture, $crate::h03_stream_equals_whole, $h05);
     };
-    (@emit $wire:literal, $fixture:expr, $h05:path) => {
+    (wire: $wire:literal, fixture: $fixture:expr, h03_stream_equals_whole: $h03:path, h05_field_ablation: $h05:path $(,)?) => {
+        $crate::history_conformance_suite!(@emit $wire, $fixture, $h03, $h05);
+    };
+    (@emit $wire:literal, $fixture:expr, $h03:path, $h05:path) => {
         /// The wire this suite covers, for the workspace registry.
         pub const HISTORY_WIRE: &str = $wire;
 
@@ -2866,7 +2873,15 @@ macro_rules! history_conformance_suite {
             $fixture;
             h01_same_model_verbatim,
             h02_cross_model_canonical,
-            h03_stream_equals_whole,
+        }
+
+        #[test]
+        fn h03_stream_equals_whole() {
+            let _: () = ($h03)(&$fixture);
+        }
+
+        $crate::__history_conformance_rows! {
+            $fixture;
             h04_unknown_kept,
         }
 

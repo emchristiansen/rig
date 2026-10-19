@@ -280,7 +280,380 @@ fn fitted(value: &mut Value, typed: &Value) {
     }
 }
 
+/// Whole and streamed turns keep their provider-frame coordinates. Rich
+/// PNG and Interleaved second-thought comparisons remain separate.
+fn h03_grpc_stream_equals_whole(fixture: &GrpcHistory) {
+    use rig_core::message::{CarriedPosition, CarriedTextContent};
+    use rig_core::test_utils::history::{assert_restated_agrees, decode};
+
+    let wire = fixture.wire(fixture.model());
+    for shape in [Shape::Rich, Shape::Interleaved, Shape::Unknown] {
+        let (Some(whole), Some(streamed)) = (
+            fixture.reply(shape, Mode::Unary),
+            fixture.reply(shape, Mode::Streaming),
+        ) else {
+            assert!(shape != Shape::Rich, "every wire supplies the rich reply");
+            continue;
+        };
+        if shape == Shape::Interleaved {
+            h03_grpc_interleaved_signed_reasoning(&wire, whole, streamed);
+            continue;
+        }
+        if shape != Shape::Rich {
+            assert_restated_agrees(&wire, whole, streamed);
+            continue;
+        }
+
+        let png = json!({ "inlineData": { "mimeType": "image/png", "data": "aW1hZ2U=" } });
+        let positions = |frames: &[GenerateContentResponse]| {
+            let mut positions = Vec::new();
+            for (frame_index, frame) in frames.iter().enumerate() {
+                let document = to_rest(frame).expect("the actual fixture frame transcodes");
+                let parts = document
+                    .pointer("/candidates/0/content/parts")
+                    .and_then(Value::as_array)
+                    .expect("the actual fixture frame has parts");
+                for (part_index, part) in parts.iter().enumerate() {
+                    if part == &png {
+                        positions.push((frame_index, part_index));
+                    }
+                }
+            }
+            positions
+        };
+        let whole_positions = positions(&whole);
+        let streamed_positions = positions(&streamed);
+        assert_eq!(
+            whole_positions.len(),
+            1,
+            "one exact PNG in the whole fixture: {whole_positions:?}"
+        );
+        let (whole_frame_index, whole_part_index) = whole_positions
+            .first()
+            .expect("the unique whole PNG position exists");
+        assert_eq!(
+            streamed_positions.len(),
+            1,
+            "one exact PNG in the streamed fixture: {streamed_positions:?}"
+        );
+        let (stream_frame_index, stream_part_index) = streamed_positions
+            .first()
+            .expect("the unique streamed PNG position exists");
+        assert_eq!(*whole_frame_index, 0);
+        assert_eq!(*whole_part_index, 2);
+        assert_eq!(*stream_part_index, 0);
+        let whole_frame = to_rest(
+            whole
+                .get(*whole_frame_index)
+                .expect("the located whole frame exists"),
+        )
+        .expect("the whole PNG frame transcodes");
+        let stream_frame = to_rest(
+            streamed
+                .get(*stream_frame_index)
+                .expect("the located streamed frame exists"),
+        )
+        .expect("the streamed PNG frame transcodes");
+        let whole_part = whole_frame
+            .pointer("/candidates/0/content/parts")
+            .and_then(Value::as_array)
+            .and_then(|parts| parts.get(*whole_part_index))
+            .expect("the whole PNG position exists");
+        let stream_part = stream_frame
+            .pointer("/candidates/0/content/parts")
+            .and_then(Value::as_array)
+            .and_then(|parts| parts.get(*stream_part_index))
+            .expect("the streamed PNG position exists");
+        assert_eq!(whole_part, &png);
+        assert_eq!(stream_part, &png);
+
+        let unary = decode(&wire, Mode::Unary, whole).expect("the whole Rich reply decodes");
+        let stream =
+            decode(&wire, Mode::Streaming, streamed).expect("the streamed Rich reply decodes");
+        assert!(
+            matches!(unary.choice.get(2), Some(AssistantContent::CarriedText(_))),
+            "the whole Rich PNG is carried at content index 2: {:?}",
+            unary.choice
+        );
+        let whole_media = unary
+            .choice
+            .get(2)
+            .and_then(|content| match content {
+                AssistantContent::CarriedText(media) => Some(media),
+                _ => None,
+            })
+            .expect("the checked whole carried media exists");
+        assert!(
+            matches!(stream.choice.get(2), Some(AssistantContent::CarriedText(_))),
+            "the streamed Rich PNG is carried at content index 2: {:?}",
+            stream.choice
+        );
+        let stream_media = stream
+            .choice
+            .get(2)
+            .and_then(|content| match content {
+                AssistantContent::CarriedText(media) => Some(media),
+                _ => None,
+            })
+            .expect("the checked stream carried media exists");
+        for (media, fixture_part, part_index) in [
+            (whole_media, whole_part, *whole_part_index),
+            (stream_media, stream_part, *stream_part_index),
+        ] {
+            assert_eq!(
+                media.content,
+                CarriedTextContent::InspectionOnlyMedia(String::new())
+            );
+            assert_eq!(media.payload.item, *fixture_part);
+            assert_eq!(
+                media.payload.provider.as_deref(),
+                Some(rig_core::providers::gemini::PROVIDER_NAME)
+            );
+            assert_eq!(
+                media.payload.position,
+                CarriedPosition::MessageContent {
+                    item_index: 0,
+                    part_index: u64::try_from(part_index)
+                        .expect("the fixture index fits a carried position"),
+                }
+            );
+        }
+        assert_eq!(whole_media.content, stream_media.content);
+        assert_eq!(whole_media.payload.item, stream_media.payload.item);
+        assert_eq!(whole_media.payload.provider, stream_media.payload.provider);
+
+        const PART_INDEX: &str = "/content/2/payload/position/part_index";
+        let whole_turn = serde_json::to_value(unary.message().expect("the whole Rich turn exists"))
+            .expect("the whole Rich turn serializes");
+        let mut streamed_turn =
+            serde_json::to_value(stream.message().expect("the streamed Rich turn exists"))
+                .expect("the streamed Rich turn serializes");
+        assert_eq!(
+            whole_turn.pointer(PART_INDEX),
+            Some(&json!(whole_part_index))
+        );
+        assert_eq!(
+            streamed_turn.pointer(PART_INDEX),
+            Some(&json!(stream_part_index))
+        );
+        *streamed_turn
+            .pointer_mut(PART_INDEX)
+            .expect("the exact streamed coordinate exists") = whole_turn
+            .pointer(PART_INDEX)
+            .expect("the exact whole coordinate exists")
+            .clone();
+        assert_eq!(
+            whole_turn, streamed_turn,
+            "the Rich turns agree everywhere except the PNG's transport-local part_index"
+        );
+    }
+    // Both empty reply modes report the existing exact no-message error.
+    if let (Some(whole), Some(streamed)) = (
+        fixture.empty_reply(Mode::Unary),
+        fixture.empty_reply(Mode::Streaming),
+    ) {
+        let error = decode(&wire, Mode::Unary, whole)
+            .expect_err("the unchanged unary empty fixture has no message or tool call");
+        assert!(
+            matches!(error, rig_core::error::ProviderError::Response(ref message)
+                if message == rig_core::message::EMPTY_RESPONSE_ERROR),
+            "the unary empty reply reports the exact no-message response error: {error:?}"
+        );
+        let error = decode(&wire, Mode::Streaming, streamed)
+            .expect_err("the unchanged streamed empty fixture has no message or tool call");
+        assert!(
+            matches!(error, rig_core::error::ProviderError::Response(ref message)
+                if message == rig_core::message::EMPTY_RESPONSE_ERROR),
+            "the streamed empty reply reports the exact no-message response error: {error:?}"
+        );
+    }
+}
+
+/// The Interleaved second thought retains its position in its actual
+/// signed provider part, independently of the unchanged first thought.
+fn h03_grpc_interleaved_signed_reasoning(
+    wire: &GenerateContent,
+    whole: Vec<GenerateContentResponse>,
+    streamed: Vec<GenerateContentResponse>,
+) {
+    use rig_core::message::{CarriedPosition, CarriedReasoningPart};
+    use rig_core::test_utils::history::decode;
+
+    let signed = json!({
+        "text": "second", "thought": true, "thoughtSignature": "c2lnLXNlY29uZA=="
+    });
+    let positions = |frames: &[GenerateContentResponse]| {
+        let mut positions = Vec::new();
+        for (frame_index, frame) in frames.iter().enumerate() {
+            let document = to_rest(frame).expect("the actual Interleaved frame transcodes");
+            let parts = document
+                .pointer("/candidates/0/content/parts")
+                .and_then(Value::as_array)
+                .expect("the actual Interleaved frame has parts");
+            for (part_index, part) in parts.iter().enumerate() {
+                if part == &signed {
+                    positions.push((frame_index, part_index));
+                }
+            }
+        }
+        positions
+    };
+    let whole_positions = positions(&whole);
+    let streamed_positions = positions(&streamed);
+    assert_eq!(
+        whole_positions.len(),
+        1,
+        "one exact signed second thought in the whole fixture: {whole_positions:?}"
+    );
+    let (whole_frame_index, whole_part_index) = whole_positions
+        .first()
+        .expect("the unique whole signed second thought position exists");
+    assert_eq!(
+        streamed_positions.len(),
+        1,
+        "one exact signed second thought in the streamed fixture: {streamed_positions:?}"
+    );
+    let (stream_frame_index, stream_part_index) = streamed_positions
+        .first()
+        .expect("the unique streamed signed second thought position exists");
+    assert_eq!(*whole_frame_index, 0);
+    assert_eq!(*whole_part_index, 2);
+    assert_eq!(*stream_frame_index, 2);
+    assert_eq!(*stream_part_index, 0);
+    let whole_frame = to_rest(
+        whole
+            .get(*whole_frame_index)
+            .expect("the located whole frame exists"),
+    )
+    .expect("the whole signed thought frame transcodes");
+    let stream_frame = to_rest(
+        streamed
+            .get(*stream_frame_index)
+            .expect("the located streamed frame exists"),
+    )
+    .expect("the streamed signed thought frame transcodes");
+    let whole_part = whole_frame
+        .pointer("/candidates/0/content/parts")
+        .and_then(Value::as_array)
+        .and_then(|parts| parts.get(*whole_part_index))
+        .expect("the whole signed thought position exists");
+    let stream_part = stream_frame
+        .pointer("/candidates/0/content/parts")
+        .and_then(Value::as_array)
+        .and_then(|parts| parts.get(*stream_part_index))
+        .expect("the streamed signed thought position exists");
+    assert_eq!(whole_part, &signed);
+    assert_eq!(stream_part, &signed);
+
+    let unary = decode(wire, Mode::Unary, whole).expect("the whole Interleaved reply decodes");
+    let stream =
+        decode(wire, Mode::Streaming, streamed).expect("the streamed Interleaved reply decodes");
+    assert!(
+        matches!(
+            unary.choice.get(2),
+            Some(AssistantContent::CarriedReasoning(_))
+        ),
+        "the whole second thought is carried at content index 2: {:?}",
+        unary.choice
+    );
+    let whole_thought = unary
+        .choice
+        .get(2)
+        .and_then(|content| match content {
+            AssistantContent::CarriedReasoning(thought) => Some(thought),
+            _ => None,
+        })
+        .expect("the checked whole carried thought exists");
+    assert!(
+        matches!(
+            stream.choice.get(2),
+            Some(AssistantContent::CarriedReasoning(_))
+        ),
+        "the streamed second thought is carried at content index 2: {:?}",
+        stream.choice
+    );
+    let stream_thought = stream
+        .choice
+        .get(2)
+        .and_then(|content| match content {
+            AssistantContent::CarriedReasoning(thought) => Some(thought),
+            _ => None,
+        })
+        .expect("the checked stream carried thought exists");
+    for (thought, fixture_part, part_index) in [
+        (whole_thought, whole_part, *whole_part_index),
+        (stream_thought, stream_part, *stream_part_index),
+    ] {
+        assert_eq!(
+            thought.content,
+            vec![CarriedReasoningPart::Text {
+                text: "second".to_owned(),
+                signature: Some("c2lnLXNlY29uZA==".to_owned()),
+            }]
+        );
+        assert_eq!(thought.payload.item, *fixture_part);
+        assert_eq!(
+            thought.payload.provider.as_deref(),
+            Some(rig_core::providers::gemini::PROVIDER_NAME)
+        );
+        assert_eq!(
+            thought.payload.position,
+            CarriedPosition::MessageContent {
+                item_index: 0,
+                part_index: u64::try_from(part_index)
+                    .expect("the signed thought fixture index fits a carried position"),
+            }
+        );
+    }
+    assert_eq!(whole_thought.content, stream_thought.content);
+    assert_eq!(whole_thought.payload.item, stream_thought.payload.item);
+    assert_eq!(
+        whole_thought.payload.provider,
+        stream_thought.payload.provider
+    );
+
+    const PART_INDEX: &str = "/content/2/payload/position/part_index";
+    let whole_turn =
+        serde_json::to_value(unary.message().expect("the whole Interleaved turn exists"))
+            .expect("the whole Interleaved turn serializes");
+    let mut streamed_turn = serde_json::to_value(
+        stream
+            .message()
+            .expect("the streamed Interleaved turn exists"),
+    )
+    .expect("the streamed Interleaved turn serializes");
+    assert_eq!(
+        whole_turn.pointer(PART_INDEX),
+        Some(&json!(whole_part_index))
+    );
+    assert_eq!(
+        streamed_turn.pointer(PART_INDEX),
+        Some(&json!(stream_part_index))
+    );
+    let first_whole = whole_turn
+        .pointer("/content/0")
+        .expect("the first whole thought exists");
+    let first_streamed = streamed_turn
+        .pointer("/content/0")
+        .expect("the first streamed thought exists");
+    assert_eq!(
+        first_whole, first_streamed,
+        "the first thought stays strictly equal"
+    );
+    *streamed_turn
+        .pointer_mut(PART_INDEX)
+        .expect("the exact streamed signed thought coordinate exists") = whole_turn
+        .pointer(PART_INDEX)
+        .expect("the exact whole signed thought coordinate exists")
+        .clone();
+    assert_eq!(
+        whole_turn, streamed_turn,
+        "the Interleaved turns agree except the second thought's transport-local part_index"
+    );
+}
+
 rig_history_conformance::history_conformance_suite! {
     wire: "gemini_grpc",
     fixture: GrpcHistory,
+    h03_stream_equals_whole: h03_grpc_stream_equals_whole,
 }
