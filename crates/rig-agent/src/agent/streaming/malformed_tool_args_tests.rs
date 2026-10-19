@@ -1,12 +1,12 @@
-//! A tool call whose arguments are not a JSON object never reaches the tool.
+//! A completed tool call whose arguments are not a JSON object never reaches the tool.
 //! The tool step offers it to the invalid-call hook, then answers it with a
 //! tool result so the model can call again. A model that keeps sending
 //! malformed arguments is answered until `max_turns`, or stopped after
 //! `max_consecutive_malformed_tool_calls` consecutive turns when that is set.
-//! Most original fixtures sample both surfaces. G234 keeps two subjects'
-//! Blocking feedback/hook predicates, labels their original fragmented
-//! Streamed inputs as refusals, and samples completed-response Streaming
-//! separately without changing the shared fixture producer.
+//! Original fragmented malformed inputs are strict refusals before the
+//! invalid-call hook. Blocking policy controls retain their assertions;
+//! separately named completed-response Streaming controls observe those
+//! policies without changing the fragmented fixture producer.
 
 use std::sync::{Arc, Mutex};
 
@@ -188,7 +188,10 @@ async fn run(
     let recorded = model.clone();
     let agent = AgentBuilder::new(model).tool(MockAddTool).build();
     let runner = configure(agent.prompt("add 2 and something").max_turns(10));
-    let outcome = drive(surface, runner).await;
+    let outcome = match surface {
+        Surface::Blocking => drive(surface, runner).await,
+        Surface::Streamed => drive_fragmented_fixture(runner).await,
+    };
     (outcome, recorded.requests())
 }
 
@@ -305,6 +308,19 @@ async fn retry_answers_with_the_hooks_feedback() {
             r.add_hook(hook.clone())
         })
         .await;
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            assert!(
+                hook.seen().is_empty(),
+                "no completed malformed call reached the hook"
+            );
+            continue;
+        }
         assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
         assert_eq!(
             answer_text(&requests, 1),
@@ -321,6 +337,19 @@ async fn skip_answers_with_a_skipped_result() {
             r.add_hook(hook.clone())
         })
         .await;
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            assert!(
+                hook.seen().is_empty(),
+                "no completed malformed call reached the hook"
+            );
+            continue;
+        }
         assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
         assert_eq!(answer_text(&requests, 1), "add: skipped");
     }
@@ -334,6 +363,19 @@ async fn stop_ends_the_run_with_the_hooks_reason() {
             r.add_hook(hook.clone())
         })
         .await;
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            assert!(
+                hook.seen().is_empty(),
+                "no completed malformed call reached the hook"
+            );
+            continue;
+        }
         let error = outcome.expect_err("stop ends the run");
         assert!(error.contains("operator halted"), "{surface:?}: {error}");
         assert_eq!(requests.len(), 1, "{surface:?}");
@@ -354,6 +396,19 @@ async fn fail_and_repair_end_the_run_naming_the_tool_and_the_parse_error() {
                 r.add_hook(hook.clone())
             })
             .await;
+            if matches!(surface, Surface::Streamed) {
+                assert!(outcome.is_err(), "the original fatal fragment is refused");
+                assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+                assert!(
+                hook.seen().is_empty(),
+                "no completed malformed call reached the hook"
+            );
+                continue;
+            }
             let error = outcome.expect_err("the run fails");
             assert!(
                 error.contains("tool `add` was called with arguments that are not a JSON object: ")
@@ -370,6 +425,15 @@ async fn without_a_limit_malformed_arguments_are_answered_until_max_turns() {
     let script = [Turn::Malformed; 10];
     for surface in SURFACES {
         let (outcome, requests) = run(surface, &script, |r| r).await;
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            continue;
+        }
         let error = outcome.expect_err("the turn budget ends the run");
         assert!(
             error.contains("reached the max turns limit of 10"),
@@ -395,6 +459,19 @@ async fn a_model_that_keeps_sending_malformed_arguments_stops_after_the_limit() 
                 .add_hook(hook.clone())
         })
         .await;
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            assert!(
+                hook.seen().is_empty(),
+                "no completed malformed call reached the hook"
+            );
+            continue;
+        }
         let error = outcome.expect_err("the limit ends the run");
         assert!(
             error.contains("tool `add` was called with arguments that are not a JSON object on 4 consecutive turns")
@@ -417,6 +494,15 @@ async fn the_limit_is_configurable() {
             r.max_consecutive_malformed_tool_calls(1)
         })
         .await;
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            continue;
+        }
         let error = outcome.expect_err("the limit ends the run");
         assert!(
             error.contains("on 2 consecutive turns"),
@@ -441,6 +527,15 @@ async fn none_clears_the_limit() {
                 .max_consecutive_malformed_tool_calls(None)
         })
         .await;
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            continue;
+        }
         assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
         assert_eq!(requests.len(), 4, "{surface:?}");
     }
@@ -462,6 +557,15 @@ async fn a_well_formed_call_between_malformed_ones_resets_the_count() {
             r.max_consecutive_malformed_tool_calls(3)
         })
         .await;
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            continue;
+        }
         assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
         assert_eq!(requests.len(), 8, "{surface:?}");
         assert!(!answer(&requests[4].chat_history, 4).is_some_and(|result| result.is_error));
@@ -480,6 +584,15 @@ async fn ignore_does_not_lift_the_limit() {
                 .unhandled_invalid_tool_call(UnhandledInvalidToolCall::Ignore)
         })
         .await;
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            continue;
+        }
         let error = outcome.expect_err("the limit ends the run");
         assert!(
             error.contains("on 4 consecutive turns"),
@@ -527,9 +640,20 @@ async fn the_count_survives_a_serialize_and_resume() {
         let model = model(surface, &[Turn::Malformed, Turn::Malformed, Turn::Answer]);
         let recorded = model.clone();
         let agent = AgentBuilder::new(model).tool(MockAddTool).build();
-        let error = drive(surface, agent.resume(restored))
-            .await
-            .expect_err("the persisted count reaches the limit");
+        let outcome = match surface {
+            Surface::Blocking => drive(surface, agent.resume(restored)).await,
+            Surface::Streamed => drive_fragmented_fixture(agent.resume(restored)).await,
+        };
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                recorded.request_count(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            continue;
+        }
+        let error = outcome.expect_err("the persisted count reaches the limit");
         assert!(
             error.contains("on 4 consecutive turns"),
             "{surface:?}: {error}"
@@ -611,10 +735,23 @@ async fn the_structured_output_path_is_unchanged() {
 async fn the_malformed_call_context_reports_the_patched_tool_choice() {
     for surface in SURFACES {
         let hook = Decide::new(None).patching(ToolChoice::Required);
-        let (outcome, _) = run(surface, &[Turn::Malformed, Turn::Answer], |r| {
+        let (outcome, requests) = run(surface, &[Turn::Malformed, Turn::Answer], |r| {
             r.add_hook(hook.clone())
         })
         .await;
+        if matches!(surface, Surface::Streamed) {
+            assert!(outcome.is_err(), "the original fatal fragment is refused");
+            assert_eq!(
+                requests.len(),
+                1,
+                "no recovery request on the fragmented stage"
+            );
+            assert!(
+                hook.seen().is_empty(),
+                "no completed malformed call reached the hook"
+            );
+            continue;
+        }
         assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
         let choices: Vec<_> = hook.seen().into_iter().map(|c| c.tool_choice).collect();
         assert_eq!(choices, [Some(ToolChoice::Required)], "{surface:?}");
@@ -752,8 +889,9 @@ async fn anthropic_first_fragment_overflow_never_executes_a_tool_at_the_default_
     }
 }
 
-// G234 confines its stage exception to the two subjects below. The shared
-// model()/run() helpers and all other users keep the original script path.
+// G234 originally separated two subjects. The additional completed-response
+// controls below preserve the other policies on that same received-turn stage.
+// model() keeps every original fragmented fixture unchanged.
 #[derive(Clone)]
 struct CompletedFrameTransport {
     turns: Arc<Mutex<std::collections::VecDeque<rig_core::completion::CompletionResponse>>>,
@@ -934,5 +1072,414 @@ async fn completed_response_streaming_preserves_malformed_hook_context_and_patch
         assert!(answer_text(&requests, 1).contains("not a JSON object"));
         assert_eq!(context.tool_choice, patched_choice);
         assert!(requests.iter().all(|request| request.tool_choice == patched_choice));
+    }
+}
+
+// Positive fragmented-stream observer conjunctions beyond the original two
+// G234 subjects are intentionally lost; these are completed-response controls.
+// They establish neither legacy-producer nor full Streaming parity.
+
+/// The original fatal fragment never reaches a completed turn or policy hook.
+async fn drive_fragmented_fixture(runner: AgentRunner) -> Result<String, String> {
+    use rig_core::error::{ErrorDetail, ErrorKind};
+    use rig_core::streaming::{Item, StreamEvent};
+    let mut stream = runner.stream();
+    let mut call_ends = 0;
+    let mut completed_calls = 0;
+    let mut final_answers = 0;
+    let mut refusal = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(_),
+                ..
+            }))) => call_ends += 1,
+            Ok(MultiTurnStreamItem::CompletionCall(_)) => completed_calls += 1,
+            Ok(MultiTurnStreamItem::FinalResponse(_)) => final_answers += 1,
+            Ok(_) => {}
+            Err(error) => {
+                refusal = Some(error);
+                break;
+            }
+        }
+    }
+    assert!(stream.next().await.is_none());
+    assert_eq!(call_ends, 0);
+    assert_eq!(
+        completed_calls, 0,
+        "the original producer never reaches its scripted terminal"
+    );
+    assert_eq!(final_answers, 0);
+    let error = refusal.expect("the original fragmented RAW is refused");
+    let message = error.to_string();
+    let crate::run::PromptError::Report(report) = error else {
+        panic!("the fragmented malformed detail stays typed at the agent boundary");
+    };
+    assert_eq!(report.kind, ErrorKind::Response);
+    assert_eq!(
+        report.message,
+        "tool call `add` arrived with malformed JSON input: expected value at line 1 column 15"
+    );
+    let Some(ErrorDetail::MalformedToolInput(input)) = report.detail else {
+        panic!("actual malformed detail");
+    };
+    assert_eq!(input.name.as_str(), "add");
+    assert_eq!(input.raw, RAW);
+    assert_eq!(input.error, "expected value at line 1 column 15");
+    assert_eq!(
+        input
+            .id
+            .provider()
+            .expect("actual received call ID")
+            .as_str(),
+        "tool_call_1"
+    );
+    let provider = input
+        .provider
+        .expect("the received correlation is retained");
+    assert_eq!(provider.call_id.as_str(), "tool_call_1");
+    assert_eq!(provider.item_id, None);
+    Err(message)
+}
+
+impl CompletedFrameTransport {
+    fn request_count(&self) -> usize {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+}
+
+/// Build the original scripted unary completions before delivering their frames.
+async fn completed_frame_model(
+    script: &[Turn],
+) -> (
+    rig_core::driver::Model<rig_core::test_utils::MockScript, CompletedFrameTransport>,
+    CompletedFrameTransport,
+) {
+    let unary = model(Surface::Blocking, script);
+    let mut turns = std::collections::VecDeque::new();
+    for (index, turn) in script.iter().enumerate() {
+        let response = unary
+            .call(CompletionRequest::new("add 2 and something"))
+            .await
+            .expect("the unary mock produces the actual completed typed fixture");
+        assert_eq!(
+            response.origin.provider,
+            rig_core::test_utils::MOCK_PROVIDER
+        );
+        if matches!(turn, Turn::Malformed) {
+            let calls = response.tool_calls().collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                calls[0]
+                    .id
+                    .provider()
+                    .expect("actual received call ID")
+                    .as_str(),
+                call_id(index + 1)
+            );
+            assert_eq!(calls[0].function.name.as_str(), "add");
+            assert_eq!(calls[0].function.invalid_arguments.as_deref(), Some(RAW));
+            assert!(calls[0].native.is_none());
+        }
+        turns.push_back(response);
+    }
+    let transport = CompletedFrameTransport {
+        turns: Arc::new(Mutex::new(turns)),
+        requests: Arc::default(),
+    };
+    let recorded = transport.clone();
+    (
+        rig_core::driver::Model::new(unary.wire.clone(), transport),
+        recorded,
+    )
+}
+
+async fn run_script_completed_frame_stage(
+    script: &[Turn],
+    configure: impl FnOnce(AgentRunner) -> AgentRunner,
+) -> (Result<String, String>, Vec<CompletionRequest>) {
+    let (completed, recorded) = completed_frame_model(script).await;
+    let agent = AgentBuilder::new(completed).tool(MockAddTool).build();
+    let outcome = drive(
+        Surface::Streamed,
+        configure(agent.prompt("add 2 and something").max_turns(10)),
+    )
+    .await;
+    let captured = recorded
+        .requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        captured
+            .iter()
+            .all(|(mode, _)| *mode == rig_core::wire::Mode::Streaming)
+    );
+    (
+        outcome,
+        captured.into_iter().map(|(_, request)| request).collect(),
+    )
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_retry_answers_with_the_hooks_feedback() {
+    for surface in [Surface::Streamed] {
+        let hook = Decide::new(Some(InvalidToolCallAction::retry(
+            "arguments were not JSON; try again",
+        )));
+        let (outcome, requests) =
+            run_script_completed_frame_stage(&[Turn::Malformed, Turn::Answer], |r| {
+                r.add_hook(hook.clone())
+            })
+            .await;
+        assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
+        assert_eq!(
+            answer_text(&requests, 1),
+            "arguments were not JSON; try again"
+        );
+    }
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_skip_answers_with_a_skipped_result() {
+    for surface in [Surface::Streamed] {
+        let hook = Decide::new(Some(InvalidToolCallAction::skip("add: skipped")));
+        let (outcome, requests) =
+            run_script_completed_frame_stage(&[Turn::Malformed, Turn::Answer], |r| {
+                r.add_hook(hook.clone())
+            })
+            .await;
+        assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
+        assert_eq!(answer_text(&requests, 1), "add: skipped");
+    }
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_stop_ends_the_run_with_the_hooks_reason() {
+    for surface in [Surface::Streamed] {
+        let hook = Decide::new(Some(InvalidToolCallAction::stop("operator halted")));
+        let (outcome, requests) =
+            run_script_completed_frame_stage(&[Turn::Malformed, Turn::Answer], |r| {
+                r.add_hook(hook.clone())
+            })
+            .await;
+        let error = outcome.expect_err("stop ends the run");
+        assert!(error.contains("operator halted"), "{surface:?}: {error}");
+        assert_eq!(requests.len(), 1, "{surface:?}");
+    }
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_fail_and_repair_end_the_run_naming_the_tool_and_the_parse_error()
+ {
+    for action in [
+        InvalidToolCallAction::fail(),
+        InvalidToolCallAction::repair("add"),
+    ] {
+        for surface in [Surface::Streamed] {
+            let hook = Decide::new(Some(action.clone()));
+            let (outcome, requests) =
+                run_script_completed_frame_stage(&[Turn::Malformed, Turn::Answer], |r| {
+                    r.add_hook(hook.clone())
+                })
+                .await;
+            let error = outcome.expect_err("the run fails");
+            assert!(
+                error.contains("tool `add` was called with arguments that are not a JSON object: ")
+                    && error.contains("at line 1 column"),
+                "{surface:?} {action:?}: {error}"
+            );
+            assert_eq!(requests.len(), 1, "{surface:?} {action:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_without_a_limit_malformed_arguments_are_answered_until_max_turns()
+ {
+    let script = [Turn::Malformed; 10];
+    for surface in [Surface::Streamed] {
+        let (outcome, requests) = run_script_completed_frame_stage(&script, |r| r).await;
+        let error = outcome.expect_err("the turn budget ends the run");
+        assert!(
+            error.contains("reached the max turns limit of 10"),
+            "{surface:?}: {error}"
+        );
+        assert_eq!(requests.len(), 10, "{surface:?}");
+        for turn in 1..10 {
+            assert!(
+                answer_text(&requests, turn).contains("not a JSON object"),
+                "{surface:?}: call {turn} is answered with feedback"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_a_model_that_keeps_sending_malformed_arguments_stops_after_the_limit()
+ {
+    let script = [Turn::Malformed; 8];
+    for surface in [Surface::Streamed] {
+        let hook = Decide::new(Some(InvalidToolCallAction::retry("again")));
+        let (outcome, requests) = run_script_completed_frame_stage(&script, |r| {
+            r.max_consecutive_malformed_tool_calls(3)
+                .add_hook(hook.clone())
+        })
+        .await;
+        let error = outcome.expect_err("the limit ends the run");
+        assert!(
+            error.contains("tool `add` was called with arguments that are not a JSON object on 4 consecutive turns")
+                && !error.contains("max turns"),
+            "{surface:?}: {error}"
+        );
+        assert_eq!(
+            requests.len(),
+            4,
+            "{surface:?}: three retries, then the limit"
+        );
+        assert_eq!(hook.seen().len(), 3, "{surface:?}: hook retries count");
+    }
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_the_limit_is_configurable() {
+    for surface in [Surface::Streamed] {
+        let (outcome, requests) = run_script_completed_frame_stage(&[Turn::Malformed; 3], |r| {
+            r.max_consecutive_malformed_tool_calls(1)
+        })
+        .await;
+        let error = outcome.expect_err("the limit ends the run");
+        assert!(
+            error.contains("on 2 consecutive turns"),
+            "{surface:?}: {error}"
+        );
+        assert_eq!(requests.len(), 2, "{surface:?}");
+    }
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_none_clears_the_limit() {
+    let script = [
+        Turn::Malformed,
+        Turn::Malformed,
+        Turn::Malformed,
+        Turn::Answer,
+    ];
+    for surface in [Surface::Streamed] {
+        let (outcome, requests) = run_script_completed_frame_stage(&script, |r| {
+            r.max_consecutive_malformed_tool_calls(1)
+                .max_consecutive_malformed_tool_calls(None)
+        })
+        .await;
+        assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
+        assert_eq!(requests.len(), 4, "{surface:?}");
+    }
+    let run = AgentRun::new("add")
+        .max_consecutive_malformed_tool_calls(1)
+        .max_consecutive_malformed_tool_calls(None);
+    let json = serde_json::to_value(&run).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(json["max_consecutive_malformed_tool_calls"], json!(null));
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_a_well_formed_call_between_malformed_ones_resets_the_count()
+ {
+    use Turn::{Answer, Malformed, WellFormed};
+    let script = [
+        Malformed, Malformed, Malformed, WellFormed, Malformed, Malformed, Malformed, Answer,
+    ];
+    for surface in [Surface::Streamed] {
+        let (outcome, requests) = run_script_completed_frame_stage(&script, |r| {
+            r.max_consecutive_malformed_tool_calls(3)
+        })
+        .await;
+        assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
+        assert_eq!(requests.len(), 8, "{surface:?}");
+        assert!(!answer(&requests[4].chat_history, 4).is_some_and(|result| result.is_error));
+    }
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_ignore_does_not_lift_the_limit() {
+    let mut script = vec![Turn::Malformed; 6];
+    script.push(Turn::Answer);
+    for surface in [Surface::Streamed] {
+        let (outcome, requests) = run_script_completed_frame_stage(&script, |r| {
+            r.max_consecutive_malformed_tool_calls(3)
+                .unhandled_invalid_tool_call(UnhandledInvalidToolCall::Ignore)
+        })
+        .await;
+        let error = outcome.expect_err("the limit ends the run");
+        assert!(
+            error.contains("on 4 consecutive turns"),
+            "{surface:?}: {error}"
+        );
+        assert_eq!(requests.len(), 4, "{surface:?}");
+    }
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_the_count_survives_a_serialize_and_resume() {
+    let mut run = AgentRun::new("add 2 and something")
+        .max_turns(10)
+        .max_consecutive_malformed_tool_calls(3);
+    for turn in 1..=2 {
+        assert!(matches!(
+            run.next_step(),
+            Ok(AgentRunStep::CallModel { .. })
+        ));
+        let call = ToolCall::from_wire(call_id(turn), ToolFunction::parse(add(), RAW));
+        let outcome = run.model_response(ModelTurn::new(
+            AssistantMessage::default(),
+            vec![AssistantContent::ToolCall(call.clone())],
+            Usage::default(),
+            TurnPolicy::new(["add".to_owned()].into(), None, None).expect("policy"),
+            json!({}),
+        ));
+        assert!(matches!(outcome, Ok(ModelTurnOutcome::Continue { .. })));
+        assert!(matches!(
+            run.next_step(),
+            Ok(AgentRunStep::CallTools { .. })
+        ));
+        run.tool_results(vec![UserContent::ToolResult(
+            call.error_result(vec![ToolResultContent::text("not a JSON object")]),
+        )])
+        .unwrap_or_else(|error| panic!("{error}"));
+    }
+    let saved = serde_json::to_string(&run).unwrap_or_else(|error| panic!("{error}"));
+
+    for surface in [Surface::Streamed] {
+        let restored: AgentRun =
+            serde_json::from_str(&saved).unwrap_or_else(|error| panic!("{error}"));
+        let (model, recorded) =
+            completed_frame_model(&[Turn::Malformed, Turn::Malformed, Turn::Answer]).await;
+        let agent = AgentBuilder::new(model).tool(MockAddTool).build();
+        let error = drive(surface, agent.resume(restored))
+            .await
+            .expect_err("the persisted count reaches the limit");
+        assert!(
+            error.contains("on 4 consecutive turns"),
+            "{surface:?}: {error}"
+        );
+        assert_eq!(recorded.request_count(), 2, "{surface:?}");
+    }
+}
+
+#[tokio::test]
+async fn completed_response_streaming_keeps_the_malformed_call_context_reports_the_patched_tool_choice()
+ {
+    for surface in [Surface::Streamed] {
+        let hook = Decide::new(None).patching(ToolChoice::Required);
+        let (outcome, _) =
+            run_script_completed_frame_stage(&[Turn::Malformed, Turn::Answer], |r| {
+                r.add_hook(hook.clone())
+            })
+            .await;
+        assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
+        let choices: Vec<_> = hook.seen().into_iter().map(|c| c.tool_choice).collect();
+        assert_eq!(choices, [Some(ToolChoice::Required)], "{surface:?}");
     }
 }
