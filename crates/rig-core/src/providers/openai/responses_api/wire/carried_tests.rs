@@ -187,9 +187,10 @@ fn responses_raw_outer_controls_are_ignored_but_typed_codex_controls_are_refused
     assert!(body.get("max_output_tokens").is_none());
     assert!(body.get("temperature").is_none());
     assert_eq!(body.get("store"), Some(&json!(false)));
-    assert!(
-        body.get("include").is_none(),
-        "store:false alone does not ask for ciphertext"
+    assert_eq!(
+        body.get("include"),
+        Some(&json!(["reasoning.encrypted_content"])),
+        "store:false keeps reasoning available for stateless replay"
     );
     for (max_tokens, temperature, expected) in [
         (

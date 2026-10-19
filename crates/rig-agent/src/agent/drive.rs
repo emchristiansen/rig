@@ -44,6 +44,7 @@ pub(crate) fn default_owner() -> String {
 pub(crate) struct AnonymousModel {
     key: Key<family::Completion>,
     registrar: Registrar,
+    model_ids: Arc<Mutex<HashMap<String, ModelId>>>,
 }
 
 impl AnonymousModel {
@@ -55,6 +56,10 @@ impl AnonymousModel {
 impl Drop for AnonymousModel {
     fn drop(&mut self) {
         self.registrar.deregister(self.key.raw());
+        self.model_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(self.key.raw().as_str());
     }
 }
 
@@ -84,7 +89,7 @@ pub(crate) struct AgentBus {
 }
 
 /// A registered model's provider (its wire's descriptor name) and model id.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelId {
     pub(crate) provider: String,
     pub(crate) model: Option<String>,
@@ -297,6 +302,7 @@ impl AgentBus {
         Arc::new(AnonymousModel {
             key,
             registrar: self.registrar.clone(),
+            model_ids: self.model_ids.clone(),
         })
     }
 

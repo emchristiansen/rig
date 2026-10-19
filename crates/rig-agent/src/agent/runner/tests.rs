@@ -1006,3 +1006,140 @@ async fn a_model_spec_drops_a_refused_cache_and_reads_a_handler_routes_label() {
     );
     assert_eq!(own.requests().len(), 1, "the refused run sent nothing");
 }
+
+fn same_label_spec_model(provider: &str, id: &str) -> MockCompletionModel {
+    let mut model = MockCompletionModel::from_turns([
+        MockTurn::text("fresh"),
+        MockTurn::text("retained"),
+        MockTurn::text("prebuilt"),
+    ]);
+    model.wire = rig_core::test_utils::MockScript::new(provider).with_id(id);
+    model
+}
+
+async fn same_label_replacement_uses_current_identity(
+    original_provider: &str,
+    original_id: &str,
+    policy: rig_core::completion::OnUnsupported,
+) -> anyhow::Result<()> {
+    use rig_core::catalog::Catalog;
+    use rig_core::completion::{Effort, Reasoning};
+
+    let spec = Catalog::builtin()
+        .resolve("anthropic/claude-haiku-4-5")
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Haiku fixture is listed"))?;
+    let original = same_label_spec_model(original_provider, original_id);
+    let replacement = same_label_spec_model("anthropic", "claude-opus-4-8");
+    let agent = AgentBuilder::named_model("default", original.clone())
+        .model_spec(spec)
+        .reasoning(Effort::High)
+        .on_unsupported(policy)
+        .build();
+    let retained = agent.clone();
+    let prebuilt = agent.prompt("built before replacement");
+    agent.register_model("default", replacement.clone());
+
+    let fresh_result = agent.prompt("fresh").run().await;
+    let retained_result = retained.prompt("retained clone").run().await;
+    let prebuilt_result = prebuilt.run().await;
+    for result in [fresh_result, retained_result, prebuilt_result] {
+        let _ = result?;
+    }
+    anyhow::ensure!(original.requests().is_empty(), "original model was called");
+    let requests = replacement.requests();
+    anyhow::ensure!(
+        requests.len() == 3,
+        "each configuration calls the replacement"
+    );
+    anyhow::ensure!(
+        requests
+            .iter()
+            .all(|request| { request.options.reasoning == Some(Reasoning::Effort(Effort::High)) }),
+        "replacement lost supported reasoning under {policy:?}"
+    );
+    Ok(())
+}
+
+/// Exercises same-label rebinding through the local runtime, without provider traffic.
+#[tokio::test]
+async fn model_spec_same_label_changed_model_error_uses_live_identity() -> anyhow::Result<()> {
+    same_label_replacement_uses_current_identity(
+        "anthropic",
+        "claude-haiku-4-5",
+        rig_core::completion::OnUnsupported::Error,
+    )
+    .await
+}
+
+/// Ignore must preserve an option accepted by the replacement's catalog entry.
+#[tokio::test]
+async fn model_spec_same_label_changed_model_ignore_uses_live_identity() -> anyhow::Result<()> {
+    same_label_replacement_uses_current_identity(
+        "anthropic",
+        "claude-haiku-4-5",
+        rig_core::completion::OnUnsupported::Ignore,
+    )
+    .await
+}
+
+/// A provider-only identity change invalidates the old explicit fixture spec.
+#[tokio::test]
+async fn model_spec_same_label_changed_provider_error_uses_live_identity() -> anyhow::Result<()> {
+    same_label_replacement_uses_current_identity(
+        "fixture-provider",
+        "claude-opus-4-8",
+        rig_core::completion::OnUnsupported::Error,
+    )
+    .await
+}
+
+/// The provider string participates even when the model-id string stays equal.
+#[tokio::test]
+async fn model_spec_same_label_changed_provider_ignore_uses_live_identity() -> anyhow::Result<()> {
+    same_label_replacement_uses_current_identity(
+        "fixture-provider",
+        "claude-opus-4-8",
+        rig_core::completion::OnUnsupported::Ignore,
+    )
+    .await
+}
+
+/// Equal provider/model ids keep an explicit override that differs from the catalog.
+#[tokio::test]
+async fn model_spec_same_label_equal_identity_retains_explicit_override() -> anyhow::Result<()> {
+    use rig_core::catalog::Catalog;
+    use rig_core::completion::{Effort, OnUnsupported, Reasoning};
+
+    for policy in [OnUnsupported::Error, OnUnsupported::Ignore] {
+        let mut explicit = Catalog::builtin()
+            .resolve("anthropic/claude-haiku-4-5")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Haiku fixture is listed"))?;
+        explicit.reasoning.levels = vec![Effort::High];
+        let original = same_label_spec_model("anthropic", "claude-haiku-4-5");
+        let replacement = same_label_spec_model("anthropic", "claude-haiku-4-5");
+        let agent = AgentBuilder::named_model("default", original.clone())
+            .model_spec(explicit)
+            .reasoning(Effort::High)
+            .on_unsupported(policy)
+            .build();
+        let retained = agent.clone();
+        let prebuilt = agent.prompt("built before replacement");
+        agent.register_model("default", replacement.clone());
+
+        let _ = agent.prompt("fresh").run().await?;
+        let _ = retained.prompt("retained").run().await?;
+        let _ = prebuilt.run().await?;
+        anyhow::ensure!(original.requests().is_empty(), "original model was called");
+        let requests = replacement.requests();
+        anyhow::ensure!(requests.len() == 3, "replacement call count changed");
+        anyhow::ensure!(
+            requests.iter().all(|request| {
+                request.options.reasoning == Some(Reasoning::Effort(Effort::High))
+            }),
+            "equal identity discarded the explicit override under {policy:?}"
+        );
+    }
+    Ok(())
+}

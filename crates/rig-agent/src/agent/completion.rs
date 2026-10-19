@@ -238,6 +238,8 @@ pub(crate) struct AgentConfig {
     /// The key of the model [`Self::model_spec`] describes: the default
     /// model the agent was built with.
     pub(crate) model_spec_key: Option<Key<family::Completion>>,
+    /// The default model's provider and model id when the agent was built.
+    pub(crate) model_spec_id: Option<super::drive::ModelId>,
     /// The provider and model id of each model the builder registers from
     /// a model value, by key suffix, until build records them on the bus.
     pub(crate) pending_model_ids: Vec<(String, super::drive::ModelId)>,
@@ -300,6 +302,7 @@ impl AgentConfig {
             provider_options: rig_core::completion::ProviderOptions::default(),
             model_spec: None,
             model_spec_key: None,
+            model_spec_id: None,
             pending_model_ids: Vec::new(),
             record_telemetry_content: false,
             accept_unknown_finish_reasons: false,
@@ -387,8 +390,9 @@ impl AgentConfig {
             return Ok(());
         };
         let key = self.bus.model_key(label.as_str());
+        let id = self.bus.model_id(key.raw().as_str());
         let spec = match &self.model_spec_key {
-            Some(own) if own.raw() == key.raw() => Some(declared),
+            Some(own) if own.raw() == key.raw() && self.model_spec_id == id => Some(declared),
             _ => self.catalog_entry(&key, label),
         };
         let Some(spec) = spec else {

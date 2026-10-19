@@ -551,6 +551,94 @@ fn sole(encoded: &crate::wire::Encoded) -> &http::Request<crate::wire::Body> {
     &encoded.request
 }
 
+#[test]
+fn test_build_interaction_stream_path() {
+    let wire = InteractionResume::new(
+        crate::providers::gemini::GeminiConfig::new("test-key"),
+        "interaction-123",
+    );
+    let encoded = wire
+        .encode(probe(), Mode::Streaming)
+        .expect("the stream read encodes");
+    let path_and_query = sole(&encoded)
+        .uri()
+        .path_and_query()
+        .expect("stream route")
+        .as_str();
+    assert_eq!(
+        path_and_query,
+        "/v1beta/interactions/interaction-123?stream=true&alt=sse"
+    );
+    let path = path_and_query
+        .strip_suffix("&alt=sse")
+        .expect("the framing suffix");
+    assert_eq!(path, "/v1beta/interactions/interaction-123?stream=true");
+
+    let encoded = wire
+        .after_event("event-456")
+        .encode(probe(), Mode::Streaming)
+        .expect("the resumed stream read encodes");
+    let path_and_query = sole(&encoded)
+        .uri()
+        .path_and_query()
+        .expect("resumed route")
+        .as_str();
+    assert_eq!(
+        path_and_query,
+        "/v1beta/interactions/interaction-123?stream=true&last_event_id=event-456&alt=sse"
+    );
+    let path = path_and_query
+        .strip_suffix("&alt=sse")
+        .expect("the framing suffix");
+    assert_eq!(
+        path,
+        "/v1beta/interactions/interaction-123?stream=true&last_event_id=event-456"
+    );
+}
+
+#[test]
+fn the_mode_chooses_the_query_and_the_framing_and_the_key_is_a_header() {
+    let wire = interactions_wire();
+    let unary = wire
+        .encode(probe(), Mode::Unary)
+        .expect("the unary request encodes");
+    assert_eq!(sole(&unary).uri().path(), "/v1beta/interactions");
+    assert_eq!(sole(&unary).uri().query(), None);
+    assert_eq!(unary.framing, crate::wire::Framing::Whole);
+    assert_eq!(
+        sole(&unary)
+            .headers()
+            .get("x-goog-api-key")
+            .and_then(|value| value.to_str().ok()),
+        Some("test-key")
+    );
+
+    let streaming = wire
+        .encode(probe(), Mode::Streaming)
+        .expect("the streaming request encodes");
+    assert_eq!(sole(&streaming).uri().query(), Some("alt=sse"));
+    assert_eq!(streaming.framing, crate::wire::Framing::Sse);
+    assert_eq!(streaming.request_id_header, None);
+    let body = match sole(&streaming).body() {
+        crate::wire::Body::Bytes(bytes) => bytes,
+        crate::wire::Body::Multipart(_) => panic!("interactions posts JSON"),
+    };
+    let body: Value = serde_json::from_slice(body).expect("the request body is JSON");
+    assert_eq!(body.get("stream"), Some(&json!(true)));
+}
+
+#[test]
+fn the_interactions_wire_keeps_its_span_names() {
+    let wire = interactions_wire();
+    let telemetry = wire.describe().telemetry.expect("mode-specific operation");
+    // Derived Debug uniquely identifies these unit variants without deprecated constructors.
+    assert_eq!(format!("{:?}", telemetry(Mode::Unary)), "Interactions");
+    assert_eq!(
+        format!("{:?}", telemetry(Mode::Streaming)),
+        "InteractionsStreaming"
+    );
+}
+
 /// A `background: true` interaction outlives its create request and a
 /// dropped stream resumes from the last event seen. Both are the same
 /// interaction read again, so both are requests on one wire: the poll GETs
