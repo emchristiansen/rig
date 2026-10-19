@@ -751,3 +751,66 @@ async fn each_block_reason_classifies_the_same_on_the_stream_as_unary() {
         );
     }
 }
+
+#[test]
+fn test_streaming_completion_response_has_finish_reason_and_model_version() {
+    use crate::completion::{CompletionResponse, ReplayTarget};
+
+    let model = "gemini-2.5-pro-preview-05-06";
+    let wire = crate::providers::gemini::GeminiConfig::new("test-key").completion(model);
+    let mut origin = crate::message::Origin::new(wire.api(), wire.provider(), wire.model());
+    origin.response_model = Some(model.to_string());
+    // Constructed metadata only; this is not a decoded provider reply.
+    let raw = json!({
+        "usageMetadata": {"promptTokenCount": 0, "totalTokenCount": 0},
+        "finishReason": "STOP",
+        "modelVersion": model
+    });
+    let usage = crate::providers::gemini::completion::usage_of(&raw["usageMetadata"]);
+    let response = CompletionResponse::new(Vec::new(), usage, origin, raw)
+        .with_finish_reason(FinishReason::Stop);
+
+    assert!(matches!(response.finish_reason(), Some(FinishReason::Stop)));
+    assert_eq!(response.model(), Some("gemini-2.5-pro-preview-05-06"));
+
+    let json = serde_json::to_string(&response).expect("serialize normalized response");
+    let deserialized: CompletionResponse =
+        serde_json::from_str(&json).expect("deserialize normalized response");
+    assert!(matches!(
+        deserialized.finish_reason(),
+        Some(FinishReason::Stop)
+    ));
+    assert_eq!(deserialized.model(), Some("gemini-2.5-pro-preview-05-06"));
+}
+
+#[test]
+fn test_streaming_completion_response_token_usage() {
+    use crate::completion::{CompletionResponse, ReplayTarget};
+
+    let model = "gemini-2.0-flash-001";
+    let wire = crate::providers::gemini::GeminiConfig::new("test-key").completion(model);
+    let mut origin = crate::message::Origin::new(wire.api(), wire.provider(), wire.model());
+    origin.response_model = Some(model.to_string());
+    // Constructed metadata only; this is not a decoded provider reply.
+    let raw = json!({
+        "usageMetadata": {
+            "promptTokenCount": 75,
+            "candidatesTokenCount": 75,
+            "totalTokenCount": 150
+        },
+        "finishReason": "STOP",
+        "modelVersion": model
+    });
+    let usage = crate::providers::gemini::completion::usage_of(&raw["usageMetadata"]);
+    let response = CompletionResponse::new(Vec::new(), usage, origin, raw)
+        .with_finish_reason(FinishReason::Stop);
+
+    let token_usage = &response.usage;
+    assert_eq!(token_usage.input_tokens, Some(75));
+    assert_eq!(token_usage.output_tokens, Some(75));
+    assert_eq!(token_usage.reasoning_tokens, None);
+    assert_eq!(token_usage.cached_input_tokens, None);
+    assert_eq!(token_usage.total_tokens, Some(150));
+    assert!(matches!(response.finish_reason(), Some(FinishReason::Stop)));
+    assert_eq!(response.model(), Some("gemini-2.0-flash-001"));
+}
