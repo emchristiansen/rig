@@ -10,8 +10,8 @@
 //! `cargo package --list`, which reports what Cargo will do without building a
 //! tarball. A full `cargo package` would resolve sibling path dependencies
 //! against the registry, which fails on a release PR for versions that are not
-//! published yet. Sizes are therefore the uncompressed sum of listed files,
-//! which bounds the compressed size from above.
+//! published yet. Sizes are sums of available on-disk listed files, not
+//! measurements of the tarball or its compressed size.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -49,16 +49,17 @@ const DOCS_RS_EXCLUDED: &[(&str, &str)] = &[(
     "surrealdb's `diskann` dependency does not compile on the nightly docs.rs uses",
 )];
 
-/// crates.io's documented hard cap, on the *compressed* tarball. Not the gate:
-/// the thing the gate exists to keep the workspace away from.
+/// crates.io's compressed tarball cap, reported only as diagnostic context.
+/// This guard does not measure or verify compressed archives.
 const CRATES_IO_CAP: u64 = 10 * 1024 * 1024;
 
-/// The gate, on uncompressed bytes, for every publishable crate. `rig-core` is
-/// the largest at roughly 4.3 MiB uncompressed and 0.9 MiB compressed, so this
-/// leaves it room to grow while still failing loudly on a structural
-/// regression - the facade's pre-allowlist package was 30.2 MiB uncompressed.
-/// Raising it is fine, as a reviewed diff, which is the point.
+/// The uncompressed listed-file backstop for publishable crates except `rig-core`.
 const SIZE_CEILING: u64 = 8 * 1024 * 1024;
+
+/// Backstop for core's ported providers and colocated tests. The measured 0.44
+/// archive has 8,381,205 B under src/, including 4,345,165 B in test-named paths;
+/// that filename/directory classification does not cover every inline test.
+const CORE_SIZE_CEILING: u64 = 12 * 1024 * 1024;
 
 /// Dependencies a crate really needs but never names in a checked-in file,
 /// with the reason. Code a build script writes into `OUT_DIR` is not on disk
@@ -90,10 +91,11 @@ pub(crate) fn check(workspace: &Path) -> Result<(), String> {
 
     if failures.is_empty() {
         println!(
-            "ok: the facade publishes only its allowlist, {} published crates are under \
-             {SIZE_CEILING} B uncompressed and name only dependencies their sources use, \
-             the facade guard covers every root feature, and docs.rs documents every \
-             feature not excluded",
+            "ok: the facade publishes only its allowlist, {} published crates meet their \
+             uncompressed listed-file backstops (rig-core: {CORE_SIZE_CEILING} B; others: \
+             {SIZE_CEILING} B) and name only dependencies their sources use, the facade \
+             guard covers every root feature, and docs.rs documents every feature not \
+             excluded; compressed archive sizes were not checked",
             packages.len()
         );
         return Ok(());
@@ -151,9 +153,9 @@ fn facade_ships_only_its_source(workspace: &Path) -> Result<Vec<String>, String>
     )])
 }
 
-/// 2. Every publishable crate stays far below the registry's cap. The facade's
-///    allowlist is the sharp guard; this is the backstop for the crates that
-///    have no allowlist at all.
+/// 2. Every publishable crate meets its uncompressed listed-file backstop.
+///    The facade's allowlist is the sharp guard; these per-package limits do
+///    not verify compressed registry size.
 fn packages_stay_under_the_ceiling(
     workspace: &Path,
     packages: &BTreeMap<String, Package>,
@@ -168,11 +170,17 @@ fn packages_stay_under_the_ceiling(
             .filter_map(|file| std::fs::metadata(package.root.join(file)).ok())
             .map(|file| file.len())
             .sum();
-        if bytes > SIZE_CEILING {
+        let ceiling = if name == "rig-core" {
+            CORE_SIZE_CEILING
+        } else {
+            SIZE_CEILING
+        };
+        if bytes > ceiling {
             failures.push(format!(
-                "  {name}: packages to {bytes} B uncompressed, over this repository's \
-                 {SIZE_CEILING} B ceiling (crates.io caps the compressed tarball at \
-                 {CRATES_IO_CAP} B). Inspect it with: cargo package -p {name} --list"
+                "  {name}: listed files total {bytes} B uncompressed, over this repository's \
+                 {ceiling} B backstop (compressed size not checked; crates.io caps the \
+                 compressed tarball at {CRATES_IO_CAP} B). Inspect it with: cargo package \
+                 -p {name} --list"
             ));
         }
     }
