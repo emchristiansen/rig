@@ -27,10 +27,11 @@ use crate::test_utils::{
     MockSubtractTool, MockToolError, MockTurn,
 };
 use crate::tool::{
-    Tool, ToolContext, ToolExecutionError,
+    Tool, ToolContext, ToolExecutionError, ToolSet,
     server::{ToolServer, ToolServerHandle},
 };
 use rig_core::driver::{Exchange, Opening};
+use rig_core::error::ProviderError;
 use rig_core::message::{
     AssistantContent, ToolCall as MessageToolCall, ToolChoice, ToolFunction, UserContent,
 };
@@ -6713,4 +6714,386 @@ async fn response_retry_preserves_model_turn_hook_order_across_surfaces() {
             StepEventKind::ModelTurnFinished,
         ]
     );
+}
+
+#[derive(serde::Deserialize)]
+struct SecondGenerationArgs {
+    new: String,
+}
+
+struct SecondGenerationTool(Arc<AtomicU32>);
+
+impl Tool for SecondGenerationTool {
+    const NAME: &'static str = FirstGenerationTool::NAME;
+    type Error = rig::tool::ToolExecutionError;
+    type Args = SecondGenerationArgs;
+    type Output = String;
+
+    fn description(&self) -> String {
+        "second generation schema".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {"new": {"type": "string"}},
+            "required": ["new"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        self.0.fetch_add(1, SeqCst);
+        Ok(format!("second:{}", args.new))
+    }
+}
+
+#[derive(Default)]
+struct LateFinalResultIndex {
+    searches: AtomicU32,
+}
+
+impl VectorStoreIndex for LateFinalResultIndex {
+    type Filter = Filter<serde_json::Value>;
+
+    async fn top_n<T: for<'a> Deserialize<'a> + WasmCompatSend>(
+        &self,
+        _req: VectorSearchRequest,
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn top_n_ids(
+        &self,
+        _req: VectorSearchRequest,
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
+        if self.searches.fetch_add(1, SeqCst) == 0 {
+            Ok(Vec::new())
+        } else {
+            Ok(vec![VectorSearchIdResult {
+                score: 1.0,
+                id: "final_result".to_string(),
+            }])
+        }
+    }
+}
+
+#[tokio::test]
+async fn blocking_turn_dispatches_the_registry_generation_it_advertised() {
+    let first_calls = Arc::new(AtomicU32::new(0));
+    let second_calls = Arc::new(AtomicU32::new(0));
+    let handle: ToolServerHandle = ToolServer::new()
+        .tool(FirstGenerationTool(first_calls.clone()))
+        .run();
+    let inner = MockCompletionModel::from_turns([
+        MockTurn::tool_call(
+            "tc-generation",
+            FirstGenerationTool::NAME,
+            json!({"old": "payload"}),
+        ),
+        MockTurn::text("done"),
+    ]);
+    let (model, request_started, release_response) = PausingScript::model(inner);
+    let runner = AgentBuilder::new(model)
+        .tool_server_handle(handle.clone())
+        .build()
+        .prompt("use the generation tool")
+        .max_turns(3);
+
+    let run = runner.run();
+    let replace = async {
+        request_started.notified().await;
+        handle.add_tool(SecondGenerationTool(second_calls.clone()));
+        release_response.notify_one();
+    };
+    let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(run, replace)
+    })
+    .await
+    .expect("in-flight blocking replacement must not hang");
+    let response = response.expect("blocking run should use its pinned tool generation");
+
+    assert_eq!(response.output(), "done");
+    assert_eq!(first_calls.load(SeqCst), 1);
+    assert_eq!(second_calls.load(SeqCst), 0);
+}
+
+#[tokio::test]
+async fn streaming_turn_dispatches_the_registry_generation_it_advertised() {
+    let first_calls = Arc::new(AtomicU32::new(0));
+    let second_calls = Arc::new(AtomicU32::new(0));
+    let handle: ToolServerHandle = ToolServer::new()
+        .tool(FirstGenerationTool(first_calls.clone()))
+        .run();
+    let turns = [
+        ScriptedTurn::ToolCalls(vec![ScriptedToolCall {
+            id: "tc-generation",
+            name: FirstGenerationTool::NAME,
+            args: json!({"old": "payload"}),
+        }]),
+        ScriptedTurn::Text("done"),
+    ];
+    let inner = MockCompletionModel::from_stream_turns(
+        turns
+            .iter()
+            .map(|turn| turn.as_stream_events(StreamShape::Complete)),
+    );
+    let (model, request_started, release_response) = PausingScript::model(inner);
+    let runner = AgentBuilder::new(model)
+        .tool_server_handle(handle.clone())
+        .build()
+        .prompt("use the generation tool")
+        .max_turns(3);
+
+    let drive = async {
+        let mut stream = runner.stream();
+        let mut final_output = None;
+        while let Some(item) = stream.next().await {
+            if let MultiTurnStreamItem::FinalResponse(response) =
+                item.expect("streaming run should use its pinned tool generation")
+            {
+                final_output = Some(response.output().to_string());
+            }
+        }
+        final_output
+    };
+    let replace = async {
+        request_started.notified().await;
+        handle.add_tool(SecondGenerationTool(second_calls.clone()));
+        release_response.notify_one();
+    };
+    let (final_output, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(drive, replace)
+    })
+    .await
+    .expect("in-flight streaming replacement must not hang");
+
+    assert_eq!(final_output.as_deref(), Some("done"));
+    assert_eq!(first_calls.load(SeqCst), 1);
+    assert_eq!(second_calls.load(SeqCst), 0);
+}
+
+#[tokio::test]
+async fn initial_output_tool_collision_uses_a_unique_synthetic_name() {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("real", "final_result", json!({})),
+        MockTurn::tool_call("output", "final_result_1", json!({ "answer": "done" })),
+    ]);
+    let probe = model.clone();
+    let response = AgentBuilder::new(model)
+        .tool(FinalResultTool)
+        .output_schema::<Answer>()
+        .output_mode(OutputMode::Tool)
+        .build()
+        .prompt("go")
+        .max_turns(2)
+        .run()
+        .await
+        .expect("the real tool should dispatch before the unique output tool finalizes");
+
+    assert!(response.output().contains("done"));
+    let requests = probe.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "real-tool dispatch must continue to a second model turn"
+    );
+    let tool_names = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tool_names.len(), 2);
+    for expected in ["final_result", "final_result_1"] {
+        assert_eq!(
+            tool_names.iter().filter(|name| **name == expected).count(),
+            1,
+            "the first request should advertise `{expected}` exactly once: {tool_names:?}"
+        );
+    }
+
+    assert!(
+        requests[1].chat_history.iter().any(|message| matches!(
+            message,
+            Message::User { content }
+                if content.iter().any(|item| matches!(
+                    item,
+                    UserContent::ToolResult(result)
+                        if result.call.provider().map(rig_core::message::ProviderCallId::as_str) == Some("real")
+                            && result.content.iter().any(|content| matches!(
+                                content,
+                                rig_core::message::ToolResultContent::Text(text)
+                                    if text.text == "real final_result output"
+                            ))
+                ))
+        )),
+        "the real `final_result` call must execute normally and its result must reach the follow-up request"
+    );
+}
+
+#[tokio::test]
+async fn late_output_tool_collision_fails_before_blocking_provider_for_all_choices() {
+    let cases = [
+        ("inherited", None),
+        (
+            "required",
+            Some(RequestPatch::new().tool_choice(ToolChoice::Required)),
+        ),
+        (
+            "none",
+            Some(RequestPatch::new().tool_choice(ToolChoice::None)),
+        ),
+        (
+            "specific",
+            Some(RequestPatch::new().tool_choice(ToolChoice::Specific {
+                function_names: vec![
+                    rig_core::message::ToolName::new("final_result").expect("original tool name"),
+                ],
+            })),
+        ),
+    ];
+
+    for (case, second_turn_patch) in cases {
+        let handle = ToolServer::new().tool(MockAddTool).run();
+        let model = MockCompletionModel::from_turns([
+            MockTurn::tool_call("add-1", "add", json!({ "x": 1, "y": 2 })),
+            MockTurn::tool_call(
+                "shadowed",
+                "final_result",
+                json!({ "answer": "wrongly finalized" }),
+            ),
+        ]);
+        let probe = model.clone();
+        let err = AgentBuilder::new(model)
+            .tool_server_handle(handle.clone())
+            .output_schema::<Answer>()
+            .output_mode(OutputMode::Tool)
+            .add_hook(RegisterLateFinalResultTool {
+                handle,
+                second_turn_patch,
+            })
+            .build()
+            .prompt("go")
+            .max_turns(3)
+            .run()
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, PromptError::Provider(ProviderError::Request(_))),
+            "{case}: expected a local completion request error, got {err:?}"
+        );
+        assert_eq!(
+            probe.request_count(),
+            1,
+            "{case}: the colliding second request must not reach the provider"
+        );
+        assert_structured_output_collision_error(&err.to_string());
+    }
+}
+
+#[tokio::test]
+async fn late_output_tool_collision_fails_before_streaming_provider() {
+    let handle = ToolServer::new().tool(MockAddTool).run();
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("add-1", "add", json!({ "x": 1, "y": 2 })),
+            MockStreamEvent::final_response_with_total_tokens(0),
+        ],
+        vec![
+            MockStreamEvent::tool_call(
+                "shadowed",
+                "final_result",
+                json!({ "answer": "wrongly finalized" }),
+            ),
+            MockStreamEvent::final_response_with_total_tokens(0),
+        ],
+    ]);
+    let probe = model.clone();
+    let mut stream = AgentBuilder::new(model)
+        .tool_server_handle(handle.clone())
+        .output_schema::<Answer>()
+        .output_mode(OutputMode::Tool)
+        .add_hook(RegisterLateFinalResultTool {
+            handle,
+            second_turn_patch: None,
+        })
+        .build()
+        .prompt("go")
+        .max_turns(3)
+        .stream();
+
+    let mut collisions = Vec::new();
+    let mut saw_final_response = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Err(err) => collisions.push(err),
+            Ok(MultiTurnStreamItem::FinalResponse(_)) => saw_final_response = true,
+            Ok(_) => {}
+        }
+    }
+    assert_eq!(
+        collisions.len(),
+        1,
+        "the stream should terminate with exactly one collision error"
+    );
+    assert!(
+        !saw_final_response,
+        "a collision error must terminate the stream without a final response"
+    );
+    let err = collisions.pop().expect("one collision error was asserted");
+
+    assert!(
+        matches!(&err, PromptError::Provider(ProviderError::Request(_))),
+        "expected a local streaming completion request error, got {err:?}"
+    );
+    assert_eq!(
+        probe.request_count(),
+        1,
+        "the colliding second stream must not reach the provider"
+    );
+    assert_structured_output_collision_error(&err.to_string());
+}
+
+#[tokio::test]
+async fn retrieved_output_tool_collision_fails_before_provider_request() {
+    let mut retrieved_tools = ToolSet::default();
+    retrieved_tools.add_tool(FinalResultTool);
+    let handle = ToolServer::new()
+        .tool(MockAddTool)
+        .retrieved_tools(1, LateFinalResultIndex::default(), retrieved_tools)
+        .run();
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("add-1", "add", json!({ "x": 1, "y": 2 })),
+        MockTurn::tool_call(
+            "shadowed",
+            "final_result",
+            json!({ "answer": "wrongly finalized" }),
+        ),
+    ]);
+    let probe = model.clone();
+    let err = AgentBuilder::new(model)
+        .tool_server_handle(handle)
+        .output_schema::<Answer>()
+        .output_mode(OutputMode::Tool)
+        .build()
+        .prompt("go")
+        .max_turns(3)
+        .run()
+        .await
+        .expect_err("the retrieved second-turn collision should fail locally");
+
+    assert!(matches!(
+        &err,
+        PromptError::Provider(ProviderError::Request(_))
+    ));
+    assert_eq!(
+        probe.request_count(),
+        1,
+        "the colliding retrieved tool must prevent the second provider request"
+    );
+    assert_structured_output_collision_error(&err.to_string());
 }
