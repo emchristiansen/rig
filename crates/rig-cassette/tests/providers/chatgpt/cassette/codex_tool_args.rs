@@ -162,8 +162,7 @@ async fn zero_argument_tool_call_streaming() {
             let request = CompletionRequest::new(REQUIRED_ZERO_ARG_TOOL_PROMPT)
                 .preamble("Follow the tool-calling instructions exactly.".to_string())
                 .tool(zero_arg_tool_definition("ping"))
-                .additional_params(recorded_include())
-                ;
+                .additional_params(recorded_include());
 
             let stream = model
                 .stream(request)
@@ -184,8 +183,7 @@ async fn zero_argument_tool_call_nonstreaming() {
             let request = CompletionRequest::new(REQUIRED_ZERO_ARG_TOOL_PROMPT)
                 .preamble("Follow the tool-calling instructions exactly.".to_string())
                 .tool(zero_arg_tool_definition("ping"))
-                .additional_params(recorded_include())
-                ;
+                .additional_params(recorded_include());
 
             let response = model
                 .call(request)
@@ -265,8 +263,7 @@ async fn nested_arguments_streaming() {
             let request = CompletionRequest::new(NESTED_ARGS_PROMPT)
                 .preamble(NESTED_ARGS_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&PlanTrip))
-                .additional_params(recorded_include())
-                ;
+                .additional_params(recorded_include());
 
             let observation = collect_raw_stream_observation(
                 model
@@ -304,21 +301,20 @@ async fn unicode_arguments_streaming() {
             .preamble(
                 "You must call the echo tool with the exact text the user provides. \
                      Do not translate, reword, or drop any characters."
-                        .to_string(),
-                )
-                .tool(ToolDefinition {
-                    name: rig_core::message::ToolName::new("echo").expect("tool name"),
-                    description: "Echo a message back to the user.".to_string(),
-                    parameters: json!({
-                        "type": "object",
-                        "properties": {
-                            "message": { "type": "string" }
-                        },
-                        "required": ["message"]
-                    }),
-                })
-                .additional_params(recorded_include())
-                ;
+                    .to_string(),
+            )
+            .tool(ToolDefinition {
+                name: rig_core::message::ToolName::new("echo").expect("tool name"),
+                description: "Echo a message back to the user.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string" }
+                    },
+                    "required": ["message"]
+                }),
+            })
+            .additional_params(recorded_include());
 
             let observation = collect_raw_stream_observation(
                 model

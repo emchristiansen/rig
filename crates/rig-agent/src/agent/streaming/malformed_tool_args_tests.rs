@@ -399,14 +399,14 @@ async fn fail_and_repair_end_the_run_naming_the_tool_and_the_parse_error() {
             if matches!(surface, Surface::Streamed) {
                 assert!(outcome.is_err(), "the original fatal fragment is refused");
                 assert_eq!(
-                requests.len(),
-                1,
-                "no recovery request on the fragmented stage"
-            );
+                    requests.len(),
+                    1,
+                    "no recovery request on the fragmented stage"
+                );
                 assert!(
-                hook.seen().is_empty(),
-                "no completed malformed call reached the hook"
-            );
+                    hook.seen().is_empty(),
+                    "no completed malformed call reached the hook"
+                );
                 continue;
             }
             let error = outcome.expect_err("the run fails");
@@ -758,18 +758,17 @@ async fn the_malformed_call_context_reports_the_patched_tool_choice() {
     }
 }
 
-
 /// The actual default engine must not execute even a tool that accepts {}.
 /// The initial turn is the real Anthropic decoder's completed malformed call;
 /// only the safe recovery answer uses the existing scripted model.
 #[tokio::test]
 async fn anthropic_first_fragment_overflow_never_executes_a_tool_at_the_default_retry_cap() {
-    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use crate::tool::{Tool, ToolContext};
     use rig_core::completion::FinishReason;
     use rig_core::message::StopReason;
     use rig_core::providers::anthropic::{Anthropic, completion::CLAUDE_SONNET_4_6};
     use rig_core::wire::{Decoder, Mode, Wire, WireEvent, WireFrame};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
     struct CountingAdd(Arc<AtomicUsize>);
     impl Tool for CountingAdd {
@@ -794,7 +793,9 @@ async fn anthropic_first_fragment_overflow_never_executes_a_tool_at_the_default_
         }
     }
 
-    let wire = Anthropic::new("test-key").completion(CLAUDE_SONNET_4_6).wire;
+    let wire = Anthropic::new("test-key")
+        .completion(CLAUDE_SONNET_4_6)
+        .wire;
     let oversized = "x".repeat(32 * 1024 * 1024 + 1);
     let block = json!({"type":"tool_use","id":"call_1","name":"add","input":{}});
     let delta = json!({"type":"content_block_delta","index":0,
@@ -807,36 +808,57 @@ async fn anthropic_first_fragment_overflow_never_executes_a_tool_at_the_default_
         panic!("the actual reader accepts the complete received delta");
     };
     assert_eq!(classified.fields, delta);
-    assert_eq!(classified.fields["delta"]["partial_json"].as_str(), Some(oversized.as_str()));
+    assert_eq!(
+        classified.fields["delta"]["partial_json"].as_str(),
+        Some(oversized.as_str())
+    );
     let frames = vec![
         json!({"type":"message_start","message":{
             "id":"msg_g217","type":"message","role":"assistant",
             "model":CLAUDE_SONNET_4_6,"content":[],"stop_reason":null,
             "stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}
-        }}).to_string(),
+        }})
+        .to_string(),
         json!({"type":"content_block_start","index":0,"content_block":block}).to_string(),
         raw_delta,
         json!({"type":"content_block_stop","index":0}).to_string(),
         json!({"type":"message_delta",
             "delta":{"stop_reason":"tool_use","stop_sequence":null},
-            "usage":{"output_tokens":0}}).to_string(),
+            "usage":{"output_tokens":0}})
+        .to_string(),
     ];
     let response = rig_core::test_utils::history::decode(
-        &wire, Mode::Streaming, frames.into_iter().map(WireFrame::Text),
-    ).expect("the received block stop and tool_use terminal complete the turn");
+        &wire,
+        Mode::Streaming,
+        frames.into_iter().map(WireFrame::Text),
+    )
+    .expect("the received block stop and tool_use terminal complete the turn");
     assert_eq!(response.finish_reason(), Some(FinishReason::ToolCalls));
     assert_eq!(response.stop(), StopReason::ToolUse);
     assert_eq!(response.error, None);
-    assert_eq!(response.origin.provider, rig_core::providers::anthropic::PROVIDER_NAME);
+    assert_eq!(
+        response.origin.provider,
+        rig_core::providers::anthropic::PROVIDER_NAME
+    );
     assert_eq!(response.raw["content"], json!([block]));
     let calls = response.tool_calls().collect::<Vec<_>>();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id.provider().expect("the received ID survives").as_str(), "call_1");
+    assert_eq!(
+        calls[0]
+            .id
+            .provider()
+            .expect("the received ID survives")
+            .as_str(),
+        "call_1"
+    );
     assert_eq!(calls[0].function.name.as_str(), "add");
     assert_eq!(calls[0].function.namespace, None);
     assert_eq!(calls[0].function.arguments_value(), json!({}));
     assert_eq!(calls[0].function.invalid_arguments.as_deref(), Some(""));
-    assert!(calls[0].native.is_none(), "the actual malformed stop clears Native evidence");
+    assert!(
+        calls[0].native.is_none(),
+        "the actual malformed stop clears Native evidence"
+    );
 
     for surface in SURFACES {
         let executions = Arc::new(AtomicUsize::new(0));
@@ -846,46 +868,90 @@ async fn anthropic_first_fragment_overflow_never_executes_a_tool_at_the_default_
             .tool(CountingAdd(executions.clone()))
             .build();
         let mut run = AgentRun::new("add things").max_turns(3);
-        assert_eq!(serde_json::to_value(&run).expect("serialize run")["max_consecutive_malformed_tool_calls"], json!(null));
-        let AgentRunStep::CallModel { turn: turn_number, .. } = run.next_step().expect("initial model step") else {
+        assert_eq!(
+            serde_json::to_value(&run).expect("serialize run")["max_consecutive_malformed_tool_calls"],
+            json!(null)
+        );
+        let AgentRunStep::CallModel {
+            turn: turn_number, ..
+        } = run.next_step().expect("initial model step")
+        else {
             panic!("the initial model call is pending");
         };
-        let definitions = agent.tool_definitions(None).await.expect("real registered tool definitions");
+        let definitions = agent
+            .tool_definitions(None)
+            .await
+            .expect("real registered tool definitions");
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].name, "add");
         run.advertise_tools(turn_number, definitions);
         let turn = ModelTurn::new(
-            response.head(), response.choice.clone(), response.usage,
+            response.head(),
+            response.choice.clone(),
+            response.usage,
             TurnPolicy::new(["add".to_owned()].into(), None, None).expect("add policy"),
             response.raw.clone(),
-        ).with_finish_reason(response.finish_reason());
-        assert!(matches!(run.model_response(turn), Ok(ModelTurnOutcome::Continue { .. })));
+        )
+        .with_finish_reason(response.finish_reason());
+        assert!(matches!(
+            run.model_response(turn),
+            Ok(ModelTurnOutcome::Continue { .. })
+        ));
         // No malformed retry-cap override and no invalid-call hook: resume
         // executes the real shared default engine's pending tool step.
         let outcome = drive(surface, agent.resume(run)).await;
         assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
-        assert_eq!(executions.load(SeqCst), 0, "{surface:?}: no tool body executed during the whole run");
+        assert_eq!(
+            executions.load(SeqCst),
+            0,
+            "{surface:?}: no tool body executed during the whole run"
+        );
         let requests = recorded.requests();
-        assert_eq!(requests.len(), 1, "{surface:?}: only the safe recovery model call is scripted");
-        let results = requests[0].chat_history.iter().flat_map(|message| match message {
-            Message::User { content } => content.as_slice(),
-            Message::System { .. } | Message::Assistant(_) => &[],
-        }).filter_map(|item| match item {
-            UserContent::ToolResult(result) => Some(result),
-            _ => None,
-        }).collect::<Vec<_>>();
-        assert_eq!(results.len(), 1, "{surface:?}: the pending malformed call is actually answered");
+        assert_eq!(
+            requests.len(),
+            1,
+            "{surface:?}: only the safe recovery model call is scripted"
+        );
+        let results = requests[0]
+            .chat_history
+            .iter()
+            .flat_map(|message| match message {
+                Message::User { content } => content.as_slice(),
+                Message::System { .. } | Message::Assistant(_) => &[],
+            })
+            .filter_map(|item| match item {
+                UserContent::ToolResult(result) => Some(result),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results.len(),
+            1,
+            "{surface:?}: the pending malformed call is actually answered"
+        );
         let result = results[0];
-        assert_eq!(result.call.provider().expect("received call ID").as_str(), "call_1");
+        assert_eq!(
+            result.call.provider().expect("received call ID").as_str(),
+            "call_1"
+        );
         assert_eq!(result.name.as_str(), "add");
-        assert!(result.is_error, "{surface:?}: the default handler answers malformed input");
-        let feedback = result.content.iter().map(|content| match content {
-            ToolResultContent::Text(text) => text.text.as_str(),
-            other => panic!("expected default text feedback, got {other:?}"),
-        }).collect::<String>();
-        assert_eq!(feedback,
+        assert!(
+            result.is_error,
+            "{surface:?}: the default handler answers malformed input"
+        );
+        let feedback = result
+            .content
+            .iter()
+            .map(|content| match content {
+                ToolResultContent::Text(text) => text.text.as_str(),
+                other => panic!("expected default text feedback, got {other:?}"),
+            })
+            .collect::<String>();
+        assert_eq!(
+            feedback,
             "The arguments for tool `add` are not a JSON object: . \
-             Call the tool again with a JSON object as its arguments.");
+             Call the tool again with a JSON object as its arguments."
+        );
     }
 }
 
@@ -912,21 +978,30 @@ impl rig_core::driver::Transport<rig_core::test_utils::MockScript> for Completed
                 "G234 completed-response transport is a labelled streaming fixture".to_owned(),
             ));
         }
-        self.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((exchange.mode, request));
-        let response = self.turns.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        let response = self
+            .turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop_front();
         let Some(response) = response else {
-            return Opening::failed(ProviderError::Provider("G234 fixture has no completed response left".to_owned()));
+            return Opening::failed(ProviderError::Provider(
+                "G234 fixture has no completed response left".to_owned(),
+            ));
         };
         let document = response.raw.clone();
         let request_id = response.provider_request_id.clone();
         let headers = response.provider_response_headers.clone();
         Opening::ready(
-            Opened::new(futures::stream::iter([Ok(MockFrame::Response(Box::new(response)))]))
-                .with_document(document)
-                .with_request_id(request_id)
-                .with_captured_response_headers(headers),
+            Opened::new(futures::stream::iter([Ok(MockFrame::Response(Box::new(
+                response,
+            )))]))
+            .with_document(document)
+            .with_request_id(request_id)
+            .with_captured_response_headers(headers),
         )
     }
 }
@@ -940,13 +1015,25 @@ async fn run_completed_frame_stage(
     let unary = model(Surface::Blocking, &[Turn::Malformed, Turn::Answer]);
     let mut turns = std::collections::VecDeque::new();
     for _ in 0..2 {
-        let response = unary.call(CompletionRequest::new("add 2 and something")).await
+        let response = unary
+            .call(CompletionRequest::new("add 2 and something"))
+            .await
             .expect("the actual unary mock produces the completed typed fixture");
-        assert_eq!(response.origin.provider, rig_core::test_utils::MOCK_PROVIDER);
+        assert_eq!(
+            response.origin.provider,
+            rig_core::test_utils::MOCK_PROVIDER
+        );
         if turns.is_empty() {
             let calls = response.tool_calls().collect::<Vec<_>>();
             assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].id.provider().expect("actual received call ID").as_str(), "tool_call_1");
+            assert_eq!(
+                calls[0]
+                    .id
+                    .provider()
+                    .expect("actual received call ID")
+                    .as_str(),
+                "tool_call_1"
+            );
             assert_eq!(calls[0].function.name.as_str(), "add");
             assert_eq!(calls[0].function.invalid_arguments.as_deref(), Some(RAW));
             assert!(calls[0].native.is_none());
@@ -960,12 +1047,25 @@ async fn run_completed_frame_stage(
     let recorded = transport.clone();
     let completed = rig_core::driver::Model::new(unary.wire.clone(), transport);
     let agent = AgentBuilder::new(completed).tool(MockAddTool).build();
-    let outcome = drive(Surface::Streamed,
+    let outcome = drive(
+        Surface::Streamed,
         configure(agent.prompt("add 2 and something").max_turns(10)),
-    ).await;
-    let captured = recorded.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-    assert!(captured.iter().all(|(mode, _)| *mode == rig_core::wire::Mode::Streaming));
-    (outcome, captured.into_iter().map(|(_, request)| request).collect())
+    )
+    .await;
+    let captured = recorded
+        .requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        captured
+            .iter()
+            .all(|(mode, _)| *mode == rig_core::wire::Mode::Streaming)
+    );
+    (
+        outcome,
+        captured.into_iter().map(|(_, request)| request).collect(),
+    )
 }
 
 /// G234 retains the exact original fragmented Streamed script as refusal,
@@ -989,33 +1089,58 @@ async fn assert_original_fragmented_stage_refusal(with_hook: bool) {
     while let Some(item) = stream.next().await {
         match item {
             Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::End {
-                content: AssistantContent::ToolCall(_), ..
+                content: AssistantContent::ToolCall(_),
+                ..
             }))) => call_ends += 1,
             Ok(MultiTurnStreamItem::CompletionCall(_)) => completed_calls += 1,
             Ok(MultiTurnStreamItem::FinalResponse(_)) => final_answers += 1,
-            Ok(_) => {},
-            Err(error) => { refusal = Some(error); break; },
+            Ok(_) => {}
+            Err(error) => {
+                refusal = Some(error);
+                break;
+            }
         }
     }
     assert!(stream.next().await.is_none());
     assert_eq!(call_ends, 0);
-    assert_eq!(completed_calls, 0, "the original producer never reaches its scripted terminal");
+    assert_eq!(
+        completed_calls, 0,
+        "the original producer never reaches its scripted terminal"
+    );
     assert_eq!(final_answers, 0);
-    let crate::run::PromptError::Report(report) = refusal.expect("exact fragmented RAW is refused") else {
+    let crate::run::PromptError::Report(report) = refusal.expect("exact fragmented RAW is refused")
+    else {
         panic!("the existing relayed malformed detail remains typed at the agent boundary");
     };
     assert_eq!(report.kind, ErrorKind::Response);
-    assert_eq!(report.message, "tool call `add` arrived with malformed JSON input: expected value at line 1 column 15");
-    let Some(ErrorDetail::MalformedToolInput(input)) = report.detail else { panic!("actual malformed detail"); };
+    assert_eq!(
+        report.message,
+        "tool call `add` arrived with malformed JSON input: expected value at line 1 column 15"
+    );
+    let Some(ErrorDetail::MalformedToolInput(input)) = report.detail else {
+        panic!("actual malformed detail");
+    };
     assert_eq!(input.name.as_str(), "add");
     assert_eq!(input.raw, RAW);
     assert_eq!(input.error, "expected value at line 1 column 15");
-    assert_eq!(input.id.provider().expect("actual call ID").as_str(), "tool_call_1");
-    let provider = input.provider.expect("the exact received correlation is retained");
+    assert_eq!(
+        input.id.provider().expect("actual call ID").as_str(),
+        "tool_call_1"
+    );
+    let provider = input
+        .provider
+        .expect("the exact received correlation is retained");
     assert_eq!(provider.call_id.as_str(), "tool_call_1");
     assert_eq!(provider.item_id, None);
-    assert_eq!(recorded.requests().len(), 1, "no recovery request was made on this original stage");
-    assert!(hook.seen().is_empty(), "no completed malformed call reached the invalid-call hook");
+    assert_eq!(
+        recorded.requests().len(),
+        1,
+        "no recovery request was made on this original stage"
+    );
+    assert!(
+        hook.seen().is_empty(),
+        "no completed malformed call reached the invalid-call hook"
+    );
 }
 
 #[tokio::test]
@@ -1035,10 +1160,15 @@ async fn completed_response_streaming_preserves_default_malformed_feedback_and_r
     let surface = Surface::Streamed;
     let (outcome, requests) = run_completed_frame_stage(|r| r).await;
     assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
-    assert_eq!(requests.len(), 2, "{surface:?}: the model gets another turn");
+    assert_eq!(
+        requests.len(),
+        2,
+        "{surface:?}: the model gets another turn"
+    );
     let text = answer_text(&requests, 1);
     assert!(
-        text.starts_with("The arguments for tool `add` are not a JSON object: ") && text.contains(RAW),
+        text.starts_with("The arguments for tool `add` are not a JSON object: ")
+            && text.contains(RAW),
         "{surface:?}: the answer names the problem and the arguments: {text}",
     );
 }
@@ -1055,23 +1185,47 @@ async fn completed_response_streaming_preserves_malformed_hook_context_and_patch
         }
         let (outcome, requests) = run_completed_frame_stage(|r| r.add_hook(hook.clone())).await;
         assert_eq!(outcome.as_deref(), Ok("recovered"), "{surface:?}");
-        assert_eq!(requests.len(), 2, "the actual completed stage reaches the recovery request");
+        assert_eq!(
+            requests.len(),
+            2,
+            "the actual completed stage reaches the recovery request"
+        );
         let seen = hook.seen();
-        let [context] = seen.as_slice() else { panic!("{surface:?}: the hook is consulted once, saw {seen:?}"); };
+        let [context] = seen.as_slice() else {
+            panic!("{surface:?}: the hook is consulted once, saw {seen:?}");
+        };
         assert_eq!(context.tool_name, "add");
         assert_eq!(context.args.as_deref(), Some(RAW));
-        assert!(matches!(&context.reason, InvalidToolCallReason::MalformedArguments { error } if !error.is_empty()),
-            "{surface:?}: {:?}", context.reason);
-        assert_eq!(context.tool_call_id.as_ref().and_then(|id| id.provider()).map(|id| id.as_str()), Some("tool_call_1"));
+        assert!(
+            matches!(&context.reason, InvalidToolCallReason::MalformedArguments { error } if !error.is_empty()),
+            "{surface:?}: {:?}",
+            context.reason
+        );
+        assert_eq!(
+            context
+                .tool_call_id
+                .as_ref()
+                .and_then(|id| id.provider())
+                .map(|id| id.as_str()),
+            Some("tool_call_1")
+        );
         assert_eq!(context.available_tools, ["add"]);
         assert_eq!(context.allowed_tools, ["add"]);
-        assert_eq!(context.is_streaming, matches!(surface, Surface::Streamed), "{surface:?}");
+        assert_eq!(
+            context.is_streaming,
+            matches!(surface, Surface::Streamed),
+            "{surface:?}"
+        );
         assert!(context.chat_history.iter().any(|message| matches!(message,
             Message::Assistant(AssistantMessage { content, .. }) if content.iter().any(|item| matches!(item, AssistantContent::ToolCall(_)))
         )), "{surface:?}: the diagnostic history holds the committed turn");
         assert!(answer_text(&requests, 1).contains("not a JSON object"));
         assert_eq!(context.tool_choice, patched_choice);
-        assert!(requests.iter().all(|request| request.tool_choice == patched_choice));
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.tool_choice == patched_choice)
+        );
     }
 }
 

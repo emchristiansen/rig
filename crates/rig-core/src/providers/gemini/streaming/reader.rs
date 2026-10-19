@@ -42,7 +42,10 @@ struct Content {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum Role { User, Model }
+enum Role {
+    User,
+    Model,
+}
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
@@ -57,12 +60,18 @@ struct Part {
 #[derive(Deserialize)]
 #[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
-struct InlineData { mime_type: String, data: String }
+struct InlineData {
+    mime_type: String,
+    data: String,
+}
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
-struct FileData { mime_type: Option<String>, file_uri: String }
+struct FileData {
+    mime_type: Option<String>,
+    file_uri: String,
+}
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
@@ -101,11 +110,17 @@ struct FunctionResponseInlineData {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-enum HostedLanguage { LanguageUnspecified, Python }
+enum HostedLanguage {
+    LanguageUnspecified,
+    Python,
+}
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
-struct HostedCode { language: HostedLanguage, code: String }
+struct HostedCode {
+    language: HostedLanguage,
+    code: String,
+}
 
 #[derive(Deserialize)]
 enum HostedOutcome {
@@ -121,7 +136,10 @@ enum HostedOutcome {
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
-struct HostedResult { outcome: HostedOutcome, output: Option<String> }
+struct HostedResult {
+    outcome: HostedOutcome,
+    output: Option<String>,
+}
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -190,12 +208,18 @@ enum HarmProbability {
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
-struct SafetyRating { category: HarmCategory, probability: HarmProbability }
+struct SafetyRating {
+    category: HarmCategory,
+    probability: HarmProbability,
+}
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
-struct PromptFeedback { block_reason: Option<BlockReason>, safety_ratings: Option<Vec<SafetyRating>> }
+struct PromptFeedback {
+    block_reason: Option<BlockReason>,
+    safety_ratings: Option<Vec<SafetyRating>>,
+}
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
@@ -236,7 +260,12 @@ fn unknown_metadata_label<'de, D: serde::Deserializer<'de>>(
 #[derive(Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum Modality {
-    ModalityUnspecified, Text, Image, Video, Audio, Document,
+    ModalityUnspecified,
+    Text,
+    Image,
+    Video,
+    Audio,
+    Document,
     #[serde(untagged)]
     Unknown(#[serde(deserialize_with = "unknown_metadata_label")] ()),
 }
@@ -244,7 +273,9 @@ enum Modality {
 #[derive(Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum Traffic {
-    TrafficTypeUnspecified, OnDemand, ProvisionedThroughput,
+    TrafficTypeUnspecified,
+    OnDemand,
+    ProvisionedThroughput,
     #[serde(untagged)]
     Unknown(#[serde(deserialize_with = "unknown_metadata_label")] ()),
 }
@@ -260,7 +291,12 @@ struct Citations {
 #[derive(Deserialize)]
 #[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
-struct Citation { uri: Option<String>, start_index: Option<i32>, end_index: Option<i32>, license: Option<String> }
+struct Citation {
+    uri: Option<String>,
+    start_index: Option<i32>,
+    end_index: Option<i32>,
+    license: Option<String>,
+}
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
@@ -283,10 +319,19 @@ struct TopCandidate {
 #[derive(Deserialize)]
 #[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
-struct Logprob { token: Option<String>, token_id: Option<i32>, log_probability: Option<f64> }
+struct Logprob {
+    token: Option<String>,
+    token_id: Option<i32>,
+    log_probability: Option<f64>,
+}
 
-fn field<T: serde::de::DeserializeOwned>(fields: &Map<String, Value>, name: &str) -> Result<(), serde_json::Error> {
-    if let Some(value) = fields.get(name) { serde_json::from_value::<T>(value.clone())?; }
+fn field<T: serde::de::DeserializeOwned>(
+    fields: &Map<String, Value>,
+    name: &str,
+) -> Result<(), serde_json::Error> {
+    if let Some(value) = fields.get(name) {
+        serde_json::from_value::<T>(value.clone())?;
+    }
     Ok(())
 }
 
@@ -332,11 +377,19 @@ pub(super) fn read(fields: &Map<String, Value>) -> Result<(), serde_json::Error>
                 match kind {
                     SelectedKind::Text => field::<String>(&part.fields, "text")?,
                     SelectedKind::InlineData => field::<InlineData>(&part.fields, "inlineData")?,
-                    SelectedKind::FunctionCall => field::<FunctionCall>(&part.fields, "functionCall")?,
-                    SelectedKind::FunctionResponse => field::<FunctionResponse>(&part.fields, "functionResponse")?,
+                    SelectedKind::FunctionCall => {
+                        field::<FunctionCall>(&part.fields, "functionCall")?
+                    }
+                    SelectedKind::FunctionResponse => {
+                        field::<FunctionResponse>(&part.fields, "functionResponse")?
+                    }
                     SelectedKind::FileData => field::<FileData>(&part.fields, "fileData")?,
-                    SelectedKind::ExecutableCode => field::<HostedCode>(&part.fields, "executableCode")?,
-                    SelectedKind::CodeExecutionResult => field::<HostedResult>(&part.fields, "codeExecutionResult")?,
+                    SelectedKind::ExecutableCode => {
+                        field::<HostedCode>(&part.fields, "executableCode")?
+                    }
+                    SelectedKind::CodeExecutionResult => {
+                        field::<HostedResult>(&part.fields, "codeExecutionResult")?
+                    }
                 }
             }
         }

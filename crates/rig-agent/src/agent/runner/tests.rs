@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use futures::StreamExt;
 use serde_json::json;
@@ -1142,4 +1145,146 @@ async fn model_spec_same_label_equal_identity_retains_explicit_override() -> any
         );
     }
     Ok(())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotValue {
+    value: usize,
+}
+
+impl rig_core::tool::ContextValue for SnapshotValue {
+    const KEY: &'static str = "test.snapshot_value";
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotResult(usize);
+
+impl rig_core::tool::ContextValue for SnapshotResult {
+    const KEY: &'static str = "test.snapshot_result";
+}
+
+#[derive(Clone, Default)]
+struct SnapshotMutatingTool(Arc<Mutex<Vec<usize>>>);
+
+impl Tool for SnapshotMutatingTool {
+    const NAME: &'static str = "snapshot_mutator";
+    type Error = rig::tool::ToolExecutionError;
+    type Args = serde_json::Value;
+    type Output = String;
+
+    fn description(&self) -> String {
+        "Mutates its per-dispatch context snapshot".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    async fn call(
+        &self,
+        context: &mut ToolContext,
+        _args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        let initial = context.require::<SnapshotValue>()?.value;
+        self.0.lock().expect("observed values").push(initial);
+        let updated = initial + 1;
+        context.insert(SnapshotValue { value: updated })?;
+        context.insert_result(SnapshotResult(updated))?;
+        Ok(updated.to_string())
+    }
+}
+
+#[derive(Clone, Default)]
+struct SnapshotResults(Arc<Mutex<Vec<usize>>>);
+
+impl AgentHook for SnapshotResults {
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        let Some(context) = event.tool_context() else {
+            return OutcomeAction::proceed();
+        };
+        self.0.lock().expect("result values").push(
+            context
+                .require_result::<SnapshotResult>()
+                .expect("per-dispatch result metadata")
+                .0,
+        );
+        OutcomeAction::proceed()
+    }
+}
+
+#[tokio::test]
+async fn agent_dispatch_snapshot_isolates_tool_mutations() {
+    let mut context = ToolContext::new();
+    context.insert(SnapshotValue { value: 0 }).unwrap();
+    let tool = SnapshotMutatingTool::default();
+    let results = SnapshotResults::default();
+
+    AgentBuilder::new(MockCompletionModel::from_turns([
+        MockTurn::tool_call("tc1", SnapshotMutatingTool::NAME, json!({})),
+        MockTurn::tool_call("tc2", SnapshotMutatingTool::NAME, json!({})),
+        MockTurn::text("done"),
+    ]))
+    .tool(tool.clone())
+    .add_hook(results.clone())
+    .build()
+    .prompt("go")
+    .tool_context(context)
+    .max_turns(4)
+    .run()
+    .await
+    .expect("agent run");
+
+    assert_eq!(*tool.0.lock().expect("observed values"), vec![0, 0]);
+    assert_eq!(*results.0.lock().expect("result values"), vec![1, 1]);
+}
+
+#[tokio::test]
+async fn direct_completion_model_requests_are_intentionally_hook_free() {
+    #[derive(Clone)]
+    struct CountCompletionCalls(Arc<AtomicUsize>);
+
+    impl AgentHook for CountCompletionCalls {
+        async fn on_completion_call(
+            &self,
+            _ctx: &HookContext,
+            _event: crate::agent::CompletionCallEvent<'_>,
+        ) -> crate::agent::CompletionCallAction {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            crate::agent::CompletionCallAction::Continue
+        }
+    }
+
+    let model = MockCompletionModel::text("raw response");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _agent = AgentBuilder::new(model.clone())
+        .add_hook(CountCompletionCalls(calls.clone()))
+        .build();
+
+    model
+        .call(rig_core::completion::CompletionRequest::new("raw request"))
+        .await
+        .expect("direct model request should succeed");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(model.request_count(), 1);
+}
+
+#[tokio::test]
+async fn runner_can_replace_additional_params_wholesale() {
+    let model = MockCompletionModel::text("done");
+    AgentBuilder::new(model.clone())
+        .additional_params(json!({"baseline": true}))
+        .build()
+        .prompt("go")
+        .replace_additional_params(json!({"replacement": true}))
+        .run()
+        .await
+        .expect("runner request should succeed");
+
+    let requests = model.requests();
+    let request = requests.first().expect("one request");
+    assert_eq!(
+        request.additional_params,
+        Some(json!({"replacement": true}))
+    );
 }

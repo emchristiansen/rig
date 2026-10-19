@@ -695,10 +695,16 @@ fn a_dialect_without_an_identity_requirement_keeps_its_behavior() {
 
     let plain = identity_headers(&OpenAIConfig::new("sk-test").with_originator("ccc"));
     assert_eq!(plain["originator"], "ccc");
-    assert_eq!(plain["user-agent"], format!(
-        "rig/{} ({} {}; ccc)",
-        env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH,
-    ).as_str());
+    assert_eq!(
+        plain["user-agent"],
+        format!(
+            "rig/{} ({} {}; ccc)",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+        )
+        .as_str()
+    );
     assert!(plain.get(VERSION_HEADER).is_none());
 }
 
@@ -726,8 +732,9 @@ fn a_whole_caller_identity_reaches_the_request_exactly_as_given() {
     assert_eq!(identity.originator(), "client_exec");
     assert_eq!(identity.version(), Some("1.2.3"));
 
-    let unversioned =
-        identity_headers(&OpenAIConfig::new("sk-test").with_caller_identity(client_exec_identity(None)));
+    let unversioned = identity_headers(
+        &OpenAIConfig::new("sk-test").with_caller_identity(client_exec_identity(None)),
+    );
     assert_eq!(unversioned["originator"], "client_exec");
     assert!(unversioned.get(VERSION_HEADER).is_none());
 }
@@ -789,8 +796,8 @@ fn a_configured_identity_keeps_its_kind_through_serialization() {
         Some(ConfiguredIdentity::Exact(_))
     ));
 
-    let originator =
-        serde_json::to_value(OpenAIConfig::new("sk-test").with_originator("ccc")).expect("serializes");
+    let originator = serde_json::to_value(OpenAIConfig::new("sk-test").with_originator("ccc"))
+        .expect("serializes");
     assert_eq!(
         originator["identity"],
         serde_json::json!({"kind": "originator", "originator": "ccc"})

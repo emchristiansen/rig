@@ -117,7 +117,6 @@ fn unencodable_value_is_an_error_not_a_panic() {
     assert!(!c.contains::<TupleKeyed>());
 }
 
-
 use crate::tool::{DynamicTool, ToolOutput};
 use crate::wasm_compat::WasmBoxedFuture;
 use std::sync::Arc;
@@ -175,4 +174,3 @@ fn cancelling_inline_execution_preserves_the_callers_context() {
         &scope
     ));
 }
-

@@ -369,4 +369,3 @@ async fn a_cancelled_completion_releases_its_rpc_and_leaves_the_client_usable() 
     );
     assert_eq!(credentials.issued(), 2);
 }
-

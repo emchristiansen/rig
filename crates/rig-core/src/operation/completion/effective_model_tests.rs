@@ -30,15 +30,28 @@ fn getter_from_model_fold(configured: &str, requested: Option<&str>, expected: &
             let mut owned = out.effective_model();
             owned.push_str("caller-owned edit");
             assert_ne!(owned, expected);
-            assert_eq!(out.effective_model(), expected, "editing the owned clone cannot change the fold");
+            assert_eq!(
+                out.effective_model(),
+                expected,
+                "editing the owned clone cannot change the fold"
+            );
             let shared = out.lock();
             assert_eq!(shared.fold.origin, before);
             assert_eq!(shared.fold.carried_issuer, issuer);
-            assert!(shared.items.is_empty(), "reading the model emits no event or provider item");
+            assert!(
+                shared.items.is_empty(),
+                "reading the model emits no event or provider item"
+            );
             Err(ProviderError::Truncated)
         });
-        assert!(matches!(decoded.outcome, Err(ProviderError::Truncated)), "no response terminal is fabricated");
-        assert!(decoded.items.iter().all(Result::is_err), "the getter yields no stream event");
+        assert!(
+            matches!(decoded.outcome, Err(ProviderError::Truncated)),
+            "no response terminal is fabricated"
+        );
+        assert!(
+            decoded.items.iter().all(Result::is_err),
+            "the getter yields no stream event"
+        );
     }
 }
 

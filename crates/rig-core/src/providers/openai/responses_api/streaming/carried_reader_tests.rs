@@ -64,9 +64,15 @@ async fn recorded_compaction_decodes_as_a_carried_item_and_replays_exactly() {
         .expect("the actual Responses decoder reads the recorded reply");
     assert_eq!(response.raw, raw);
     assert_eq!(response.text(), "ACK-1");
-    assert_eq!(response.provider_request_id.as_deref(), Some("req_REDACTED_1"));
+    assert_eq!(
+        response.provider_request_id.as_deref(),
+        Some("req_REDACTED_1")
+    );
     assert_eq!(response.response_id(), raw["id"].as_str());
-    assert_eq!(response.message_id.as_ref().map(|id| id.as_str()), raw["output"][1]["id"].as_str());
+    assert_eq!(
+        response.message_id.as_ref().map(|id| id.as_str()),
+        raw["output"][1]["id"].as_str()
+    );
     assert_eq!(response.usage.input_tokens, Some(21));
     assert_eq!(response.usage.output_tokens, Some(7));
     assert_eq!(response.usage.total_tokens, Some(28));
@@ -682,15 +688,27 @@ fn malformed_never_done_arguments_drop_only_at_a_genuine_terminal() {
             ResponsesStreamOptions::strict().with_incomplete(IncompleteTerminal::Accept),
             &[added, argument_delta("{\"city\":\"Paris\""), end],
         );
-        let items: Vec<_> = result.items.iter()
-            .map(|item| item.clone().expect("unasserted malformed fragments drop without error"))
+        let items: Vec<_> = result
+            .items
+            .iter()
+            .map(|item| {
+                item.clone()
+                    .expect("unasserted malformed fragments drop without error")
+            })
             .collect();
         let transcript = Transcript::parse(serde_json::to_value(&items).expect("transcript"))
             .expect("the started Part closes by discard");
-        let part = transcript.events().find_map(|event| match event {
-            StreamEvent::Start { part, kind: PartKind::ToolCall, .. } => Some(*part),
-            _ => None,
-        }).expect("actual fragment assembly started");
+        let part = transcript
+            .events()
+            .find_map(|event| match event {
+                StreamEvent::Start {
+                    part,
+                    kind: PartKind::ToolCall,
+                    ..
+                } => Some(*part),
+                _ => None,
+            })
+            .expect("actual fragment assembly started");
         assert!(transcript.events().any(|event| matches!(event,
             StreamEvent::Discard { part: discarded, reason: DiscardReason::UnfinishedAtTerminal }
                 if *discarded == part)));
@@ -710,25 +728,38 @@ async fn valid_never_done_json_values_fail_unfinished_without_native_or_discard(
         ("481", "481"),
         ("[481,null]", "[481,null]"),
         ("\"quoted\"", "\"quoted\""),
-        ("\"{\\\"city\\\":\\\"Paris\\\"}\"", "\"{\\\"city\\\":\\\"Paris\\\"}\""),
+        (
+            "\"{\\\"city\\\":\\\"Paris\\\"}\"",
+            "\"{\\\"city\\\":\\\"Paris\\\"}\"",
+        ),
         ("null", "null"),
         (" \t null \n", "null"),
         ("   ", "{}"),
     ] {
         let added = json!({"type":"response.output_item.added","sequence_number":0,
             "output_index":1,"item":function("in_progress", "", Some(""))});
-        let mut stream = streamed(&[added.clone(), argument_delta(raw), terminal(json!([]))],
-            IncompleteTerminal::Refuse);
+        let mut stream = streamed(
+            &[added.clone(), argument_delta(raw), terminal(json!([]))],
+            IncompleteTerminal::Refuse,
+        );
         while let Some(item) = stream.next().await {
             let item = item.expect("valid fragments survive the genuine terminal");
             assert!(!matches!(item, Item::Event(StreamEvent::Discard { .. })));
             if let Item::Event(StreamEvent::End {
-                content: AssistantContent::ToolCall(call), ..
-            }) = &item {
-                assert!(call.native.is_none(), "unfinished delivered call has no native");
+                content: AssistantContent::ToolCall(call),
+                ..
+            }) = &item
+            {
+                assert!(
+                    call.native.is_none(),
+                    "unfinished delivered call has no native"
+                );
             }
         }
-        let response = stream.finish().await.expect("the stream returns its failed folded response");
+        let response = stream
+            .finish()
+            .await
+            .expect("the stream returns its failed folded response");
         let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else {
             panic!("one unfinished canonical function call for {raw}");
         };
@@ -741,36 +772,59 @@ async fn valid_never_done_json_values_fail_unfinished_without_native_or_discard(
         } else {
             json!({})
         };
-        assert_eq!(call.function.arguments_value(), canonical, "current canonical arguments for {raw}");
+        assert_eq!(
+            call.function.arguments_value(),
+            canonical,
+            "current canonical arguments for {raw}"
+        );
         let invalid = match raw {
             "{\"city\":\"Paris\"}" | "   " => None,
             _ => Some(expected),
         };
-        assert_eq!(call.function.invalid_arguments.as_deref(), invalid,
-            "preserved non-object value for {raw}");
+        assert_eq!(
+            call.function.invalid_arguments.as_deref(),
+            invalid,
+            "preserved non-object value for {raw}"
+        );
         let error = "the provider ended the reply with a tool call it never finished";
         assert_eq!(response.error.as_deref(), Some(error));
-        assert_eq!(response.stop(), crate::message::StopReason::Error(error.to_owned()));
+        assert_eq!(
+            response.stop(),
+            crate::message::StopReason::Error(error.to_owned())
+        );
         let history = response.message().expect("failed canonical call history");
         let Message::Assistant(turn) = &history else {
             panic!("assistant failure history");
         };
         assert_eq!(turn.content, response.choice);
-        assert_eq!(turn.stop, Some(crate::message::StopReason::Error(error.to_owned())));
+        assert_eq!(
+            turn.stop,
+            Some(crate::message::StopReason::Error(error.to_owned()))
+        );
         // AgentRun reads this shared failure rule before dispatch; its actual
         // no-dispatch control lives in the separately owned runtime lane.
-        assert_eq!(crate::message::turn_failure(
-            &response.choice, turn.stop.as_ref(), response.finish_reason().as_ref(),
-        ).as_deref(), Some(
-            "the turn failed, so none of its tool calls ran: the provider ended the reply with a tool call it never finished"
-        ));
+        assert_eq!(
+            crate::message::turn_failure(
+                &response.choice,
+                turn.stop.as_ref(),
+                response.finish_reason().as_ref(),
+            )
+            .as_deref(),
+            Some(
+                "the turn failed, so none of its tool calls ran: the provider ended the reply with a tool call it never finished"
+            )
+        );
         let received_terminal = terminal(json!([]));
         let received_raw = received_terminal.to_string();
         let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict());
-        let WireEvent::Known(super::ResponsesEvent::Frame { frame, raw: captured, .. }) =
-            decoder.classify(WireFrame::Text(received_raw.clone())) else {
-                panic!("the actual reader retains the received terminal");
-            };
+        let WireEvent::Known(super::ResponsesEvent::Frame {
+            frame,
+            raw: captured,
+            ..
+        }) = decoder.classify(WireFrame::Text(received_raw.clone()))
+        else {
+            panic!("the actual reader retains the received terminal");
+        };
         assert_eq!(captured, received_raw);
         assert_eq!(frame, received_terminal);
         assert_eq!(frame["response"]["output"], json!([]));
@@ -789,7 +843,10 @@ async fn explicitly_done_json_values_replay_exactly_without_discard() {
         ("481", "481"),
         ("[481,null]", "[481,null]"),
         ("\"quoted\"", "\"quoted\""),
-        ("\"{\\\"city\\\":\\\"Paris\\\"}\"", "\"{\\\"city\\\":\\\"Paris\\\"}\""),
+        (
+            "\"{\\\"city\\\":\\\"Paris\\\"}\"",
+            "\"{\\\"city\\\":\\\"Paris\\\"}\"",
+        ),
         ("null", "null"),
         (" \t null \n", "null"),
         ("   ", "{}"),
@@ -797,14 +854,23 @@ async fn explicitly_done_json_values_replay_exactly_without_discard() {
         let added = json!({"type":"response.output_item.added","sequence_number":0,
             "output_index":1,"item":function("in_progress", "", Some(""))});
         let authoritative = function("completed", raw, Some(""));
-        let mut stream = streamed(&[
-            added, argument_delta(raw), done(1, authoritative.clone()), terminal(json!([])),
-        ], IncompleteTerminal::Refuse);
+        let mut stream = streamed(
+            &[
+                added,
+                argument_delta(raw),
+                done(1, authoritative.clone()),
+                terminal(json!([])),
+            ],
+            IncompleteTerminal::Refuse,
+        );
         while let Some(item) = stream.next().await {
             let item = item.expect("explicitly done fragments complete at terminal");
             assert!(!matches!(item, Item::Event(StreamEvent::Discard { .. })));
         }
-        let response = stream.finish().await.expect("actual Model's genuine terminal");
+        let response = stream
+            .finish()
+            .await
+            .expect("actual Model's genuine terminal");
         assert!(response.error.is_none());
         assert_eq!(response.stop(), crate::message::StopReason::ToolUse);
         let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else {
@@ -813,14 +879,21 @@ async fn explicitly_done_json_values_replay_exactly_without_discard() {
         assert_eq!(call.id.provider().unwrap().as_str(), "call_1");
         assert_eq!(call.function.name.as_str(), "add");
         assert_eq!(call.function.namespace.as_deref(), Some(""));
-        assert_eq!(call.native.as_ref().expect("received done evidence").item, authoritative);
+        assert_eq!(
+            call.native.as_ref().expect("received done evidence").item,
+            authoritative
+        );
         let received_terminal = terminal(json!([]));
         let received_raw = received_terminal.to_string();
         let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict());
-        let WireEvent::Known(super::ResponsesEvent::Frame { frame, raw: captured, .. }) =
-            decoder.classify(WireFrame::Text(received_raw.clone())) else {
-                panic!("the actual reader retains the received terminal");
-            };
+        let WireEvent::Known(super::ResponsesEvent::Frame {
+            frame,
+            raw: captured,
+            ..
+        }) = decoder.classify(WireFrame::Text(received_raw.clone()))
+        else {
+            panic!("the actual reader retains the received terminal");
+        };
         assert_eq!(captured, received_raw);
         assert_eq!(frame, received_terminal);
         assert_eq!(frame["response"]["output"], json!([]));
@@ -832,13 +905,20 @@ async fn explicitly_done_json_values_replay_exactly_without_discard() {
             .message(response.message().expect("canonical call history"));
         let original = Completion::prepare(original_request.clone(), &wire.describe())
             .expect("original no-tools history adaptation");
-        let original = wire.encode(original, Mode::Unary)
+        let original = wire
+            .encode(original, Mode::Unary)
             .expect("original no-tools request");
         let original_body = crate::test_utils::json_body(&original.request);
         let original_input = original_body["input"].as_array().expect("original input");
-        assert!(original_input.iter().all(|item| item["type"] != "function_call"));
-        let original_assistant = original_input.iter()
-            .find(|item| item["role"] == "assistant").expect("original textual call");
+        assert!(
+            original_input
+                .iter()
+                .all(|item| item["type"] != "function_call")
+        );
+        let original_assistant = original_input
+            .iter()
+            .find(|item| item["role"] == "assistant")
+            .expect("original textual call");
         let expected_no_tools = if raw == "{\"city\":\"Paris\"}" {
             r#"[called tool add with {"city":"Paris"}]"#
         } else {
@@ -853,10 +933,16 @@ async fn explicitly_done_json_values_replay_exactly_without_discard() {
             json!({}),
         ));
         let request = Completion::prepare(request, &wire.describe()).expect("history adaptation");
-        let encoded = wire.encode(request, Mode::Unary).expect("actual Responses encoder");
+        let encoded = wire
+            .encode(request, Mode::Unary)
+            .expect("actual Responses encoder");
         let body = crate::test_utils::json_body(&encoded.request);
-        let call = body["input"].as_array().expect("input").iter()
-            .find(|item| item["type"] == "function_call").expect("replayed call");
+        let call = body["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .expect("replayed call");
         assert_eq!(call["arguments"], expected, "exact F JSON value for {raw}");
         assert_eq!(call["namespace"], "");
     }
@@ -866,13 +952,18 @@ async fn explicitly_done_json_values_replay_exactly_without_discard() {
 async fn fragment_only_clean_eof_leaves_call_open_without_end_discard_or_response() {
     let added = json!({"type":"response.output_item.added","sequence_number":0,
         "output_index":1,"item":function("in_progress", "", None)});
-    let mut stream = streamed(&[added, argument_delta("{\"city\":\"Paris\"")],
-        IncompleteTerminal::Refuse);
+    let mut stream = streamed(
+        &[added, argument_delta("{\"city\":\"Paris\"")],
+        IncompleteTerminal::Refuse,
+    );
     let mut started = false;
     while let Some(item) = stream.next().await {
         let item = item.expect("clean EOF is not a provider failure");
         match item {
-            Item::Event(StreamEvent::Start { kind: PartKind::ToolCall, .. }) => started = true,
+            Item::Event(StreamEvent::Start {
+                kind: PartKind::ToolCall,
+                ..
+            }) => started = true,
             Item::Event(StreamEvent::End { .. } | StreamEvent::Discard { .. }) => {
                 panic!("EOF cannot close an unasserted call")
             }
@@ -881,12 +972,18 @@ async fn fragment_only_clean_eof_leaves_call_open_without_end_discard_or_respons
     }
     assert!(started);
     let partial = stream.partial();
-    assert!(partial.choice.is_empty(), "F drops open tool inputs from canonical choice");
+    assert!(
+        partial.choice.is_empty(),
+        "F drops open tool inputs from canonical choice"
+    );
     assert!(partial.response_id().is_none());
     assert!(partial.finish_reason().is_none());
     assert!(partial.message_id.is_none());
     assert!(partial.error.is_none());
-    assert!(matches!(stream.finish().await, Err(ProviderError::Truncated)));
+    assert!(matches!(
+        stream.finish().await,
+        Err(ProviderError::Truncated)
+    ));
 }
 
 #[test]
@@ -895,8 +992,10 @@ fn reasoning_string_content_and_typed_text_restatements_share_the_same_kind() {
         "content":["kept"],"status":"completed"});
     let last = json!({"type":"reasoning","id":"rs_1","summary":[],
         "content":[{"type":"reasoning_text","text":"kept"}],"status":"completed"});
-    let result = decoded(ResponsesStreamOptions::strict(),
-        &[done(0, first), terminal(json!([last]))]);
+    let result = decoded(
+        ResponsesStreamOptions::strict(),
+        &[done(0, first), terminal(json!([last]))],
+    );
     let response = result.outcome.expect("both F known-text forms are valid");
     let [AssistantContent::CarriedReasoning(reasoning)] = response.choice.as_slice() else {
         panic!("carried reasoning content");
@@ -916,9 +1015,16 @@ fn reasoning_part_and_done_restatements_do_not_emit_live_reasoning_deltas() {
             "summary_index":0,"item_id":"rs_1","text":"kept"}),
     ] {
         let result = decoded(ResponsesStreamOptions::strict(), &[observed]);
-        assert!(result.events().iter().all(|event|
-            !matches!(event, StreamEvent::Reasoning { .. })));
-        assert!(result.ended().is_empty(), "unasserted known snapshots do not complete a block");
+        assert!(
+            result
+                .events()
+                .iter()
+                .all(|event| !matches!(event, StreamEvent::Reasoning { .. }))
+        );
+        assert!(
+            result.ended().is_empty(),
+            "unasserted known snapshots do not complete a block"
+        );
         assert!(matches!(result.outcome, Err(ProviderError::Truncated)));
     }
 }
@@ -927,10 +1033,18 @@ fn reasoning_part_and_done_restatements_do_not_emit_live_reasoning_deltas() {
 async fn malformed_known_terminal_cannot_take_raw_custody_before_a_genuine_terminal() {
     let mut malformed = terminal(json!([]));
     malformed["response"]["usage"]["output_tokens"] = json!("not a counter");
-    let genuine = terminal(json!([message(json!([{"type":"output_text","text":"kept"}]))]));
-    let mut stream = streamed(&[malformed.clone(), delta(0, 0, "kept"), genuine.clone()],
-        IncompleteTerminal::Refuse);
-    let error = stream.next().await.expect("corruption delivered").expect_err("typed malformed terminal");
+    let genuine = terminal(json!([message(
+        json!([{"type":"output_text","text":"kept"}])
+    )]));
+    let mut stream = streamed(
+        &[malformed.clone(), delta(0, 0, "kept"), genuine.clone()],
+        IncompleteTerminal::Refuse,
+    );
+    let error = stream
+        .next()
+        .await
+        .expect("corruption delivered")
+        .expect_err("typed malformed terminal");
     let Some(ErrorDetail::CorruptFrame(detail)) = error.report().detail else {
         panic!("typed corruption detail");
     };
@@ -938,7 +1052,10 @@ async fn malformed_known_terminal_cannot_take_raw_custody_before_a_genuine_termi
     while let Some(item) = stream.next().await {
         item.expect("later genuine terminal");
     }
-    let response = stream.finish().await.expect("delivered corruption was drained");
+    let response = stream
+        .finish()
+        .await
+        .expect("delivered corruption was drained");
     assert_eq!(response.raw, genuine["response"]);
     assert_eq!(response.text(), "kept");
     assert_eq!(response.usage.output_tokens, Some(5));
@@ -948,7 +1065,10 @@ async fn malformed_known_terminal_cannot_take_raw_custody_before_a_genuine_termi
 fn strict_document_repair_matches_decoder_and_default_document_stays_lenient() {
     use crate::wire::document::Reassemble;
     let mut envelope_less = terminal(json!([]));
-    envelope_less.as_object_mut().unwrap().remove("sequence_number");
+    envelope_less
+        .as_object_mut()
+        .unwrap()
+        .remove("sequence_number");
     let frame = WireFrame::Text(envelope_less.to_string());
     let mut strict = super::document::Response::with_strict_reader(false);
     strict.absorb(&frame);
@@ -956,8 +1076,8 @@ fn strict_document_repair_matches_decoder_and_default_document_stays_lenient() {
     let mut repaired = super::document::Response::with_strict_reader(true);
     repaired.absorb(&frame);
     assert_eq!(repaired.finish(), envelope_less["response"]);
-    let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict())
-        .with_envelope_repair();
+    let decoder =
+        ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()).with_envelope_repair();
     assert!(matches!(decoder.classify(frame), WireEvent::Known(_)));
 
     // U's existing sparse raw-document fixtures continue to use Default.
@@ -974,16 +1094,25 @@ async fn partial_eof_stamps_only_folded_carried_issuer_and_keeps_delivered_ends_
     let item = json!({"type":"future_item","id":"future_1","payload":[null,7]});
     let reasoning = json!({"type":"reasoning","id":"rs_1","summary":[{"type":"future_summary","raw":true}],
         "content":[{"type":"reasoning_text","text":"kept"}],"status":"completed"});
-    let mut stream = streamed(&[done(0, item.clone()), done(1, reasoning)], IncompleteTerminal::Refuse);
+    let mut stream = streamed(
+        &[done(0, item.clone()), done(1, reasoning)],
+        IncompleteTerminal::Refuse,
+    );
     let mut ended_provider = false;
     let mut ended_reasoning = false;
     while let Some(item) = stream.next().await {
         match item.expect("clean partial EOF") {
-            Item::Event(StreamEvent::End { content: AssistantContent::ProviderItem(observed), .. }) => {
+            Item::Event(StreamEvent::End {
+                content: AssistantContent::ProviderItem(observed),
+                ..
+            }) => {
                 assert_eq!(observed.payload.provider, None);
                 ended_provider = true;
             }
-            Item::Event(StreamEvent::End { content: AssistantContent::CarriedReasoning(observed), .. }) => {
+            Item::Event(StreamEvent::End {
+                content: AssistantContent::CarriedReasoning(observed),
+                ..
+            }) => {
                 assert_eq!(observed.payload.provider, None);
                 ended_reasoning = true;
             }
@@ -992,7 +1121,11 @@ async fn partial_eof_stamps_only_folded_carried_issuer_and_keeps_delivered_ends_
     }
     assert!(ended_provider && ended_reasoning);
     let partial = stream.partial();
-    let [AssistantContent::ProviderItem(folded), AssistantContent::CarriedReasoning(reasoning)] = partial.choice.as_slice() else {
+    let [
+        AssistantContent::ProviderItem(folded),
+        AssistantContent::CarriedReasoning(reasoning),
+    ] = partial.choice.as_slice()
+    else {
         panic!("provider item then reasoning survive partial EOF");
     };
     assert_eq!(folded.payload.item, item);
@@ -1005,7 +1138,10 @@ async fn partial_eof_stamps_only_folded_carried_issuer_and_keeps_delivered_ends_
     assert!(partial.response_id().is_none());
     assert!(partial.finish_reason().is_none());
     assert!(partial.error.is_none());
-    assert!(matches!(stream.finish().await, Err(ProviderError::Truncated)));
+    assert!(matches!(
+        stream.finish().await,
+        Err(ProviderError::Truncated)
+    ));
 }
 
 #[test]
@@ -1025,29 +1161,43 @@ fn repaired_lifecycle_preserves_every_genuine_sibling_in_the_raw_document() {
 
 #[test]
 fn repaired_known_events_synthesize_only_their_required_coordinates_and_keep_raw() {
-    let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict())
-        .with_envelope_repair();
+    let decoder =
+        ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()).with_envelope_repair();
     for (received, fields) in [
-        (json!({"type":"response.completed","response":response(json!([]))}),
-            vec!["sequence_number"]),
-        (json!({"type":"response.output_item.done","item":message(json!([]))}),
-            vec!["sequence_number", "output_index"]),
-        (json!({"type":"response.output_text.delta","delta":"kept"}),
-            vec!["sequence_number", "output_index", "content_index"]),
-        (json!({"type":"response.reasoning_summary_text.delta","delta":"thought"}),
-            vec!["sequence_number", "output_index", "summary_index"]),
-        (json!({"type":"response.reasoning_text.delta","delta":"thought"}),
-            vec!["sequence_number", "output_index"]),
+        (
+            json!({"type":"response.completed","response":response(json!([]))}),
+            vec!["sequence_number"],
+        ),
+        (
+            json!({"type":"response.output_item.done","item":message(json!([]))}),
+            vec!["sequence_number", "output_index"],
+        ),
+        (
+            json!({"type":"response.output_text.delta","delta":"kept"}),
+            vec!["sequence_number", "output_index", "content_index"],
+        ),
+        (
+            json!({"type":"response.reasoning_summary_text.delta","delta":"thought"}),
+            vec!["sequence_number", "output_index", "summary_index"],
+        ),
+        (
+            json!({"type":"response.reasoning_text.delta","delta":"thought"}),
+            vec!["sequence_number", "output_index"],
+        ),
     ] {
         let raw = received.to_string();
         let mut expected = received;
         for field in fields {
             expected[field] = json!(0);
         }
-        let WireEvent::Known(super::ResponsesEvent::Frame { frame, raw: captured, .. }) =
-            decoder.classify(WireFrame::Text(raw.clone())) else {
-                panic!("only missing required bookkeeping is repaired");
-            };
+        let WireEvent::Known(super::ResponsesEvent::Frame {
+            frame,
+            raw: captured,
+            ..
+        }) = decoder.classify(WireFrame::Text(raw.clone()))
+        else {
+            panic!("only missing required bookkeeping is repaired");
+        };
         assert_eq!(frame, expected);
         assert_eq!(captured, raw);
     }

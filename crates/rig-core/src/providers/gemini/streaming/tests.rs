@@ -133,18 +133,20 @@ async fn test_unary_model_preserves_multiple_received_text_parts_and_raw() {
 
     let parts = json_data["candidates"][0]["content"]["parts"].clone();
     // G200: actual unary transport captures the whole received body.
-    let wire = crate::providers::gemini::GeminiConfig::new("test-key")
-        .completion("gemini-2.5-flash");
+    let wire =
+        crate::providers::gemini::GeminiConfig::new("test-key").completion("gemini-2.5-flash");
     let body = serde_json::to_vec(&json_data).expect("the original fixture is JSON");
-    let response = crate::driver::Model::new(
-        wire,
-        crate::test_utils::RecordingHttpClient::new(body),
-    )
-    .call(crate::completion::CompletionRequest::new("restate"))
-    .await
-    .expect("the actual unary reply decodes");
-    let [AssistantContent::Text(first), AssistantContent::Text(second), AssistantContent::Text(third)]
-        = response.choice.as_slice() else {
+    let response =
+        crate::driver::Model::new(wire, crate::test_utils::RecordingHttpClient::new(body))
+            .call(crate::completion::CompletionRequest::new("restate"))
+            .await
+            .expect("the actual unary reply decodes");
+    let [
+        AssistantContent::Text(first),
+        AssistantContent::Text(second),
+        AssistantContent::Text(third),
+    ] = response.choice.as_slice()
+    else {
         panic!("Expected three received text blocks: {:?}", response.choice);
     };
     assert_eq!(first.text, "Hello, ");
@@ -152,7 +154,10 @@ async fn test_unary_model_preserves_multiple_received_text_parts_and_raw() {
     assert_eq!(third.text, " How are you?");
     assert_eq!(response.text(), "Hello, world! How are you?");
     for (index, text) in [first, second, third].into_iter().enumerate() {
-        assert_eq!(text.native.as_ref().map(|native| &native.item), Some(&parts[index]));
+        assert_eq!(
+            text.native.as_ref().map(|native| &native.item),
+            Some(&parts[index])
+        );
     }
     assert_eq!(response.raw["candidates"][0]["content"]["parts"], parts);
 }
@@ -263,12 +268,21 @@ fn test_deserialize_stream_response_with_mixed_parts() {
     };
     // G141: unsigned thought is genuinely carried, with the same ordered text.
     assert_eq!(thought.display_text(), "Let me think about this...");
-    assert_eq!(thought.content, vec![crate::message::CarriedReasoningPart::Text {
-        text: "Let me think about this...".to_owned(), signature: None,
-    }]);
-    assert_eq!(thought.payload.item,
-        json!({"text": "Let me think about this...", "thought": true}));
-    assert_eq!(thought.provider(), Some(crate::providers::gemini::completion::PROVIDER_NAME));
+    assert_eq!(
+        thought.content,
+        vec![crate::message::CarriedReasoningPart::Text {
+            text: "Let me think about this...".to_owned(),
+            signature: None,
+        }]
+    );
+    assert_eq!(
+        thought.payload.item,
+        json!({"text": "Let me think about this...", "thought": true})
+    );
+    assert_eq!(
+        thought.provider(),
+        Some(crate::providers::gemini::completion::PROVIDER_NAME)
+    );
     assert_eq!(text.text, "Here's my response: ");
     assert_eq!(call.function.name, "search");
     assert_eq!(last.text, "I found the answer!");
@@ -294,8 +308,10 @@ fn test_deserialize_stream_response_with_empty_parts() {
     });
 
     let error = decoded(json_data).expect_err("an empty unary reply refuses");
-    assert!(matches!(error, crate::error::ProviderError::Response(message)
-        if message == crate::message::EMPTY_RESPONSE_ERROR));
+    assert!(
+        matches!(error, crate::error::ProviderError::Response(message)
+        if message == crate::message::EMPTY_RESPONSE_ERROR)
+    );
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
@@ -642,21 +658,38 @@ fn two_signed_thought_parts_keep_both_signatures() {
     .expect("the reply decodes");
     // G141: each real carried thought retains its signature and received part.
     // Only the retired Native-only observation is replaced.
-    let [AssistantContent::CarriedReasoning(first), AssistantContent::CarriedReasoning(second),
-        AssistantContent::Text(answer)] = response.choice.as_slice() else {
-        panic!("two ordered signed thoughts and their answer: {:?}", response.choice);
+    let [
+        AssistantContent::CarriedReasoning(first),
+        AssistantContent::CarriedReasoning(second),
+        AssistantContent::Text(answer),
+    ] = response.choice.as_slice()
+    else {
+        panic!(
+            "two ordered signed thoughts and their answer: {:?}",
+            response.choice
+        );
     };
     assert_eq!(answer.text, "answer");
     let mut signatures = Vec::new();
     for (thought, text) in [(first, "one"), (second, "two")] {
-        let [crate::message::CarriedReasoningPart::Text { text: actual, signature: Some(signature) }] =
-            thought.content.as_slice() else {
-                panic!("one genuinely signed thought part: {thought:?}");
-            };
+        let [
+            crate::message::CarriedReasoningPart::Text {
+                text: actual,
+                signature: Some(signature),
+            },
+        ] = thought.content.as_slice()
+        else {
+            panic!("one genuinely signed thought part: {thought:?}");
+        };
         assert_eq!(actual, text);
-        assert_eq!(thought.payload.item,
-            json!({"thought": true, "text": text, "thoughtSignature": signature}));
-        assert_eq!(thought.provider(), Some(crate::providers::gemini::completion::PROVIDER_NAME));
+        assert_eq!(
+            thought.payload.item,
+            json!({"thought": true, "text": text, "thoughtSignature": signature})
+        );
+        assert_eq!(
+            thought.provider(),
+            Some(crate::providers::gemini::completion::PROVIDER_NAME)
+        );
         signatures.push(signature.as_str());
     }
     assert_eq!(signatures, ["b25l", "dHdv"], "{:?}", response.choice);

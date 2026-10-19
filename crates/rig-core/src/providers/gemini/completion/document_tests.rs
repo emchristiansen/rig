@@ -42,9 +42,15 @@ fn test_markdown_url_document_conversion_to_file_data_part() {
 fn declared_text_like_base64_documents_decode_into_text() {
     use base64::Engine;
     for media_type in [
-        DocumentMediaType::TXT, DocumentMediaType::RTF, DocumentMediaType::HTML,
-        DocumentMediaType::CSS, DocumentMediaType::MARKDOWN, DocumentMediaType::CSV,
-        DocumentMediaType::XML, DocumentMediaType::Javascript, DocumentMediaType::Python,
+        DocumentMediaType::TXT,
+        DocumentMediaType::RTF,
+        DocumentMediaType::HTML,
+        DocumentMediaType::CSS,
+        DocumentMediaType::MARKDOWN,
+        DocumentMediaType::CSV,
+        DocumentMediaType::XML,
+        DocumentMediaType::Javascript,
+        DocumentMediaType::Python,
     ] {
         let doc = UserContent::document_base64(
             base64::engine::general_purpose::STANDARD.encode("Δ: exact text"),
@@ -94,5 +100,9 @@ fn reported_usage_keeps_thought_and_tool_use_counts_separate() {
 fn text_documents_without_declared_media_type_keep_the_protected_refusal() {
     let part = UserContent::document_text("text", None);
     let error = user_part(part, None).expect_err("a document must declare its media type");
-    assert!(error.to_string().contains("A mime type is required for document inputs to Gemini"));
+    assert!(
+        error
+            .to_string()
+            .contains("A mime type is required for document inputs to Gemini")
+    );
 }

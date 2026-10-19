@@ -151,12 +151,32 @@ fn a_segment_of_a_later_part_counts_from_that_part() {
     assert_eq!(first.text, &ANSWER[..split]);
     assert_eq!(second.text, &ANSWER[split..]);
     assert_eq!(response.text(), ANSWER);
-    assert_eq!(first.native.as_ref().map(|native| &native.item), Some(&parts[0]));
-    assert_eq!(second.native.as_ref().map(|native| &native.item), Some(&parts[1]));
+    assert_eq!(
+        first.native.as_ref().map(|native| &native.item),
+        Some(&parts[0])
+    );
+    assert_eq!(
+        second.native.as_ref().map(|native| &native.item),
+        Some(&parts[1])
+    );
     assert!(first.citations().is_empty());
     assert_eq!(cited(second), expected_grounding());
-    assert_eq!(second.citations()[0].span.as_ref().expect("first span").range(), 0..27);
-    assert_eq!(second.citations()[1].span.as_ref().expect("second span").range(), 28..45);
+    assert_eq!(
+        second.citations()[0]
+            .span
+            .as_ref()
+            .expect("first span")
+            .range(),
+        0..27
+    );
+    assert_eq!(
+        second.citations()[1]
+            .span
+            .as_ref()
+            .expect("second span")
+            .range(),
+        28..45
+    );
 }
 
 /// A stream sends the grounding with its last chunk, its segments counted
@@ -314,7 +334,10 @@ fn a_cited_turn_replays_its_parts_unchanged() {
         panic!("one genuine carried signed answer: {:?}", cited.choice);
     };
     assert_eq!(text.known_text_projection(), Some(ANSWER));
-    assert_eq!(text.signed_answer().map(|answer| answer.signature.as_str()), Some("c2ln"));
+    assert_eq!(
+        text.signed_answer().map(|answer| answer.signature.as_str()),
+        Some("c2ln")
+    );
     assert_eq!(text.payload.item, parts[0]);
     assert_eq!(text.citations().len(), 2);
     assert_eq!(replayed(&cited), replayed(&plain));
@@ -367,10 +390,20 @@ fn a_reversed_or_huge_range_is_dropped_without_panicking() {
             for mode in [Mode::Unary, Mode::Streaming] {
                 let reply = finished(chunk(json!([{"text": ANSWER}]), metadata.clone()));
                 let result = decode(&wire(), mode, [frame(reply)]);
-                if recitation["endIndex"].as_u64().expect("an original integer offset") > i32::MAX as u64 {
-                    let error = result.expect_err("huge recitation offsets refuse before range handling");
-                    assert!(matches!(error.report().detail,
-                        Some(crate::error::ErrorDetail::CorruptFrame(_))), "{error}");
+                if recitation["endIndex"]
+                    .as_u64()
+                    .expect("an original integer offset")
+                    > i32::MAX as u64
+                {
+                    let error =
+                        result.expect_err("huge recitation offsets refuse before range handling");
+                    assert!(
+                        matches!(
+                            error.report().detail,
+                            Some(crate::error::ErrorDetail::CorruptFrame(_))
+                        ),
+                        "{error}"
+                    );
                 } else {
                     let response = result.expect("the reversed in-range reply decodes");
                     assert_eq!(response.text(), ANSWER);

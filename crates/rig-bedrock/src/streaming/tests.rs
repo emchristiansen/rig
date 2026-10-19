@@ -650,7 +650,6 @@ fn every_citation_kind_resolves_the_same_unary_and_streamed() {
     }
 }
 
-
 /// Reported totals need not equal the sum of the two other counters.
 #[test]
 fn g225_whole_and_stream_keep_exact_reported_usage_and_cache_components() {
@@ -664,13 +663,18 @@ fn g225_whole_and_stream_keep_exact_reported_usage_and_cache_components() {
         &Converse::new(CLAUDE),
         Mode::Unary,
         [ConverseFrame::Whole(whole)],
-    ).expect("the real whole decoder folds reported usage");
-    let stream = streamed(CLAUDE, vec![
-        delta(0, json!({"text":"answer"})),
-        stop(0),
-        json!({"messageStop":{"stopReason":"end_turn"}}),
-        json!({"metadata":{"usage":reported,"metrics":{"latencyMs":5}}}),
-    ]).expect("the real stream decoder folds reported usage");
+    )
+    .expect("the real whole decoder folds reported usage");
+    let stream = streamed(
+        CLAUDE,
+        vec![
+            delta(0, json!({"text":"answer"})),
+            stop(0),
+            json!({"messageStop":{"stopReason":"end_turn"}}),
+            json!({"metadata":{"usage":reported,"metrics":{"latencyMs":5}}}),
+        ],
+    )
+    .expect("the real stream decoder folds reported usage");
     for response in [unary, stream] {
         assert_eq!(response.usage.input_tokens, Some(10));
         assert_eq!(response.usage.output_tokens, Some(5));
@@ -678,17 +682,22 @@ fn g225_whole_and_stream_keep_exact_reported_usage_and_cache_components() {
         assert_eq!(response.usage.cached_input_tokens, Some(100));
         assert_eq!(response.usage.cache_creation_input_tokens, Some(7));
         assert_eq!(response.raw["usage"], reported);
-        assert!(matches!(response.choice.as_slice(), [AssistantContent::Text(text)]
-            if text.text == "answer"));
+        assert!(
+            matches!(response.choice.as_slice(), [AssistantContent::Text(text)]
+            if text.text == "answer")
+        );
     }
 }
 
 #[test]
 fn g225_missing_reported_fields_keep_zero_defaults_and_cache_optional_values() {
-    for reported in [json!({}), json!({
-        "inputTokens":null,"outputTokens":null,"totalTokens":null,
-        "cacheReadInputTokens":null,"cacheWriteInputTokens":null,
-    })] {
+    for reported in [
+        json!({}),
+        json!({
+            "inputTokens":null,"outputTokens":null,"totalTokens":null,
+            "cacheReadInputTokens":null,"cacheWriteInputTokens":null,
+        }),
+    ] {
         let counted = super::usage(&reported);
         assert_eq!(counted.input_tokens, Some(0));
         assert_eq!(counted.output_tokens, Some(0));
@@ -704,7 +713,6 @@ fn g225_missing_reported_fields_keep_zero_defaults_and_cache_optional_values() {
     assert_eq!(counted.cache_creation_input_tokens, Some(7));
 }
 
-
 /// SDK transport delivers the completed text prefix before the capture fault.
 #[tokio::test]
 async fn capture_fault_keeps_completed_prefix_and_is_one_fatal_response() {
@@ -715,19 +723,32 @@ async fn capture_fault_keeps_completed_prefix_and_is_one_fatal_response() {
 
     let bad_payload = br#"{"contentBlockIndex":0,"delta":"#;
     let frames: [(&str, &[u8]); 4] = [
-        ("contentBlockDelta", br#"{"contentBlockIndex":0,"delta":{"text":"valid prefix"}}"#),
+        (
+            "contentBlockDelta",
+            br#"{"contentBlockIndex":0,"delta":{"text":"valid prefix"}}"#,
+        ),
         ("contentBlockStop", br#"{"contentBlockIndex":0}"#),
         ("contentBlockDelta", bad_payload),
-        ("metadata", br#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#),
+        (
+            "metadata",
+            br#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#,
+        ),
     ];
     let mut body = Vec::new();
     let mut suffix: Vec<u8> = Vec::new();
     for (index, (event, payload)) in frames.into_iter().enumerate() {
         let message = Message::new(payload.to_vec())
-            .add_header(Header::new(":message-type", HeaderValue::String("event".into())))
-            .add_header(Header::new(":event-type", HeaderValue::String(event.into())));
+            .add_header(Header::new(
+                ":message-type",
+                HeaderValue::String("event".into()),
+            ))
+            .add_header(Header::new(
+                ":event-type",
+                HeaderValue::String(event.into()),
+            ));
         let mut frame = Vec::new();
-        aws_smithy_eventstream::frame::write_message_to(&message, &mut frame).expect("real SDK frame");
+        aws_smithy_eventstream::frame::write_message_to(&message, &mut frame)
+            .expect("real SDK frame");
         if index >= 2 {
             suffix.extend(&frame);
         }
@@ -742,9 +763,12 @@ async fn capture_fault_keeps_completed_prefix_and_is_one_fatal_response() {
             content_type: "application/vnd.amazon.eventstream",
         })
         .build();
-    let runtime: crate::client::BedrockRuntime = aws_sdk_bedrockruntime::Client::from_conf(config).into();
+    let runtime: crate::client::BedrockRuntime =
+        aws_sdk_bedrockruntime::Client::from_conf(config).into();
     let model = rig_core::Model::new(Converse::new(NOVA), runtime);
-    let mut stream = model.stream(rig_core::completion::CompletionRequest::new("probe")).expect("valid request");
+    let mut stream = model
+        .stream(rig_core::completion::CompletionRequest::new("probe"))
+        .expect("valid request");
     let mut prefix = Vec::new();
     let error = loop {
         match stream.next().await.expect("the capture fault arrives") {
@@ -753,11 +777,19 @@ async fn capture_fault_keeps_completed_prefix_and_is_one_fatal_response() {
         }
     };
     assert_eq!(prefix.len(), 3);
-    assert!(matches!(&prefix[0], Item::Event(StreamEvent::Start { part, kind: rig_core::streaming::PartKind::Text, .. }) if part.index() == 0));
-    assert!(matches!(&prefix[1], Item::Event(StreamEvent::Text { text, .. }) if text == "valid prefix"));
-    assert!(matches!(&prefix[2], Item::Event(StreamEvent::End { content: AssistantContent::Text(text), .. }) if text.text == "valid prefix"));
+    assert!(
+        matches!(&prefix[0], Item::Event(StreamEvent::Start { part, kind: rig_core::streaming::PartKind::Text, .. }) if part.index() == 0)
+    );
+    assert!(
+        matches!(&prefix[1], Item::Event(StreamEvent::Text { text, .. }) if text == "valid prefix")
+    );
+    assert!(
+        matches!(&prefix[2], Item::Event(StreamEvent::End { content: AssistantContent::Text(text), .. }) if text.text == "valid prefix")
+    );
     let cause = serde_json::from_slice::<Value>(bad_payload).expect_err("malformed fixture");
-    let expected = format!("Bedrock Converse event-stream JSON payload failed: {cause}; payload_bytes={bad_payload:?}; unvalidated_wire_bytes={suffix:?}");
+    let expected = format!(
+        "Bedrock Converse event-stream JSON payload failed: {cause}; payload_bytes={bad_payload:?}; unvalidated_wire_bytes={suffix:?}"
+    );
     assert!(matches!(&error, ProviderError::Response(detail) if detail == &expected));
     assert_eq!(error.kind(), rig_core::error::ErrorKind::Response);
     assert!(!error.is_retryable());
@@ -766,9 +798,17 @@ async fn capture_fault_keeps_completed_prefix_and_is_one_fatal_response() {
     assert!(stream.next().await.is_none());
     assert!(stream.next().await.is_none());
     let partial = stream.partial();
-    assert_eq!(partial.choice, vec![AssistantContent::Text("valid prefix".into())]);
-    assert_eq!(partial.raw, json!({"output":{"message":{"content":[{"text":"valid prefix"}]}}}));
-    assert!(matches!(stream.finish().await, Err(ProviderError::Response(detail)) if detail == expected));
+    assert_eq!(
+        partial.choice,
+        vec![AssistantContent::Text("valid prefix".into())]
+    );
+    assert_eq!(
+        partial.raw,
+        json!({"output":{"message":{"content":[{"text":"valid prefix"}]}}})
+    );
+    assert!(
+        matches!(stream.finish().await, Err(ProviderError::Response(detail)) if detail == expected)
+    );
 }
 
 /// A capture failure before blockStop never manufactures a completed call.
@@ -798,10 +838,17 @@ async fn capture_fault_before_tool_stop_refuses_with_a_genuine_completed_control
                 continue;
             }
             let message = Message::new(payload.to_vec())
-                .add_header(Header::new(":message-type", HeaderValue::String("event".into())))
-                .add_header(Header::new(":event-type", HeaderValue::String(event.into())));
+                .add_header(Header::new(
+                    ":message-type",
+                    HeaderValue::String("event".into()),
+                ))
+                .add_header(Header::new(
+                    ":event-type",
+                    HeaderValue::String(event.into()),
+                ));
             let mut frame = Vec::new();
-            aws_smithy_eventstream::frame::write_message_to(&message, &mut frame).expect("real SDK frame");
+            aws_smithy_eventstream::frame::write_message_to(&message, &mut frame)
+                .expect("real SDK frame");
             if index >= 2 {
                 suffix.extend(&frame);
             }
@@ -816,7 +863,8 @@ async fn capture_fault_before_tool_stop_refuses_with_a_genuine_completed_control
                 content_type: "application/vnd.amazon.eventstream",
             })
             .build();
-        let runtime: crate::client::BedrockRuntime = aws_sdk_bedrockruntime::Client::from_conf(config).into();
+        let runtime: crate::client::BedrockRuntime =
+            aws_sdk_bedrockruntime::Client::from_conf(config).into();
         let model = rig_core::Model::new(Converse::new(NOVA), runtime);
         let mut request = CompletionRequest::new("probe");
         request.tools = vec![ToolDefinition::new(
@@ -837,21 +885,32 @@ async fn capture_fault_before_tool_stop_refuses_with_a_genuine_completed_control
             }
         }
         assert!(items.iter().any(|item| matches!(item, Item::Event(StreamEvent::Arguments { json, .. }) if json == "{\"x\":1}")));
-        let completed: Vec<_> = items.iter().filter_map(|item| match item {
-            Item::Event(StreamEvent::End { content: AssistantContent::ToolCall(call), .. }) => Some(call),
-            _ => None,
-        }).collect();
+        let completed: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End {
+                    content: AssistantContent::ToolCall(call),
+                    ..
+                }) => Some(call),
+                _ => None,
+            })
+            .collect();
         if malformed {
             assert!(completed.is_empty());
             let error = failure.expect("capture refuses malformed JSON before stop");
-            let cause = serde_json::from_slice::<Value>(bad_payload).expect_err("malformed fixture");
-            let expected = format!("Bedrock Converse event-stream JSON payload failed: {cause}; payload_bytes={bad_payload:?}; unvalidated_wire_bytes={suffix:?}");
+            let cause =
+                serde_json::from_slice::<Value>(bad_payload).expect_err("malformed fixture");
+            let expected = format!(
+                "Bedrock Converse event-stream JSON payload failed: {cause}; payload_bytes={bad_payload:?}; unvalidated_wire_bytes={suffix:?}"
+            );
             assert!(matches!(&error, ProviderError::Response(detail) if detail == &expected));
             assert_eq!(error.kind(), rig_core::error::ErrorKind::Response);
             assert!(!error.is_retryable());
             assert!(std::error::Error::source(&error).is_none());
             assert!(stream.next().await.is_none());
-            assert!(matches!(stream.finish().await, Err(ProviderError::Response(detail)) if detail == expected));
+            assert!(
+                matches!(stream.finish().await, Err(ProviderError::Response(detail)) if detail == expected)
+            );
         } else {
             assert!(failure.is_none());
             assert_eq!(completed.len(), 1);
@@ -861,7 +920,10 @@ async fn capture_fault_before_tool_stop_refuses_with_a_genuine_completed_control
             assert_eq!(call.function.arguments_value(), json!({"x":1}));
             let response = stream.finish().await.expect("genuine complete control");
             assert_eq!(response.stop(), StopReason::ToolUse);
-            assert_eq!(response.raw.pointer("/output/message/content/0/toolUse"), Some(&json!({"toolUseId":"call_1","name":"add","input":{"x":1}})));
+            assert_eq!(
+                response.raw.pointer("/output/message/content/0/toolUse"),
+                Some(&json!({"toolUseId":"call_1","name":"add","input":{"x":1}}))
+            );
         }
     }
 }
@@ -876,17 +938,30 @@ async fn incomplete_binary_frame_at_eof_keeps_prefix_and_truncates() {
 
     for pending_bytes in [8, 12] {
         let frames: [(&str, &[u8]); 3] = [
-            ("contentBlockDelta", br#"{"contentBlockIndex":0,"delta":{"text":"valid prefix"}}"#),
+            (
+                "contentBlockDelta",
+                br#"{"contentBlockIndex":0,"delta":{"text":"valid prefix"}}"#,
+            ),
             ("contentBlockStop", br#"{"contentBlockIndex":0}"#),
-            ("metadata", br#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#),
+            (
+                "metadata",
+                br#"{"usage":{"inputTokens":1,"outputTokens":1,"totalTokens":2}}"#,
+            ),
         ];
         let mut body = Vec::new();
         for (index, (event, payload)) in frames.into_iter().enumerate() {
             let message = Message::new(payload.to_vec())
-                .add_header(Header::new(":message-type", HeaderValue::String("event".into())))
-                .add_header(Header::new(":event-type", HeaderValue::String(event.into())));
+                .add_header(Header::new(
+                    ":message-type",
+                    HeaderValue::String("event".into()),
+                ))
+                .add_header(Header::new(
+                    ":event-type",
+                    HeaderValue::String(event.into()),
+                ));
             let mut frame = Vec::new();
-            aws_smithy_eventstream::frame::write_message_to(&message, &mut frame).expect("real SDK frame");
+            aws_smithy_eventstream::frame::write_message_to(&message, &mut frame)
+                .expect("real SDK frame");
             if index == 2 {
                 body.extend(&frame[..pending_bytes]);
             } else {
@@ -902,9 +977,12 @@ async fn incomplete_binary_frame_at_eof_keeps_prefix_and_truncates() {
                 content_type: "application/vnd.amazon.eventstream",
             })
             .build();
-        let runtime: crate::client::BedrockRuntime = aws_sdk_bedrockruntime::Client::from_conf(config).into();
+        let runtime: crate::client::BedrockRuntime =
+            aws_sdk_bedrockruntime::Client::from_conf(config).into();
         let model = rig_core::Model::new(Converse::new(NOVA), runtime);
-        let mut stream = model.stream(rig_core::completion::CompletionRequest::new("probe")).expect("valid request");
+        let mut stream = model
+            .stream(rig_core::completion::CompletionRequest::new("probe"))
+            .expect("valid request");
         let mut items = Vec::new();
         let mut failures = 0;
         while let Some(item) = stream.next().await {
@@ -918,8 +996,17 @@ async fn incomplete_binary_frame_at_eof_keeps_prefix_and_truncates() {
         }
         assert_eq!(failures, 1);
         assert!(items.iter().any(|item| matches!(item, Item::Event(StreamEvent::End { content: AssistantContent::Text(text), .. }) if text.text == "valid prefix")));
-        assert_eq!(stream.partial().choice, vec![AssistantContent::Text("valid prefix".into())]);
-        assert_eq!(stream.partial().raw, json!({"output":{"message":{"content":[{"text":"valid prefix"}]}}}));
-        assert!(matches!(stream.finish().await, Err(ProviderError::Truncated)));
+        assert_eq!(
+            stream.partial().choice,
+            vec![AssistantContent::Text("valid prefix".into())]
+        );
+        assert_eq!(
+            stream.partial().raw,
+            json!({"output":{"message":{"content":[{"text":"valid prefix"}]}}})
+        );
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
     }
 }

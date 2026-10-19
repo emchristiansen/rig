@@ -343,16 +343,21 @@ fn custom_and_namespaced_calls_render_truthfully() {
     // item-ID assignments are omitted; all remaining exact inputs survive.
     // G123 separately replaces only the retired rendered explicit: ID prefix.
     let output = vec![
-        AssistantContent::ToolCall(crate::message::ToolCall::new(
-            crate::message::CallId::from_wire("call_1"),
-            crate::message::ToolFunction::new(
-                crate::message::ToolName::new("add").expect("the original function name is nonempty"),
-                json!({"x": 1}),
-            ),
-        ).with_namespace(Some("math".to_owned()))),
+        AssistantContent::ToolCall(
+            crate::message::ToolCall::new(
+                crate::message::CallId::from_wire("call_1"),
+                crate::message::ToolFunction::new(
+                    crate::message::ToolName::new("add")
+                        .expect("the original function name is nonempty"),
+                    json!({"x": 1}),
+                ),
+            )
+            .with_namespace(Some("math".to_owned())),
+        ),
         AssistantContent::CustomToolCall(crate::message::CustomToolCall::new(
             crate::message::CallId::from_wire("call_2"),
-            crate::message::ToolName::new("apply_patch").expect("the original custom name is nonempty"),
+            crate::message::ToolName::new("apply_patch")
+                .expect("the original custom name is nonempty"),
             r#"{"x": 1}"#,
         )),
     ];

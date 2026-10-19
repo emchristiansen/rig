@@ -619,11 +619,15 @@ pub(crate) fn project_payload(payload: &[u8], sink: &mut ObservationSink<'_>) {
         return;
     };
     if payload.kind.as_deref() == Some("error") {
-        payload.unwrapped.error.unwrap_or(PayloadError {
-            code: payload.code,
-            kind: None,
-            message: payload.message,
-        }).emit(sink);
+        payload
+            .unwrapped
+            .error
+            .unwrap_or(PayloadError {
+                code: payload.code,
+                kind: None,
+                message: payload.message,
+            })
+            .emit(sink);
         return;
     }
     let object = payload.response.unwrap_or(payload.unwrapped);
@@ -642,11 +646,13 @@ pub(crate) fn project_payload(payload: &[u8], sink: &mut ObservationSink<'_>) {
         });
     }
     let verdict = AdapterVerdict {
-        finish_reason: object.status
+        finish_reason: object
+            .status
             .filter(|status| status != "in_progress" && status != "queued")
             .map(|value| sink.scrub(&value)),
         block_reason: None,
-        detail: object.incomplete_details
+        detail: object
+            .incomplete_details
             .and_then(|details| details.reason)
             .map(|value| sink.scrub(&value)),
         model: object.model.map(|value| sink.scrub(&value)),
@@ -705,7 +711,8 @@ impl PayloadError {
             code: self.code,
             kind: self.kind,
             message: self.message,
-        }.emit(sink);
+        }
+        .emit(sink);
     }
 }
 

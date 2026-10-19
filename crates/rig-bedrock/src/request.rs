@@ -447,9 +447,9 @@ pub(crate) fn document(document: &Document) -> Result<Value, EncodeError> {
             _ => "text/txt",
         });
     let data = match &document.data {
-        DocumentData::Text(text) => std::borrow::Cow::Owned(
-            DocumentSourceKind::Raw(text.as_bytes().to_vec()),
-        ),
+        DocumentData::Text(text) => {
+            std::borrow::Cow::Owned(DocumentSourceKind::Raw(text.as_bytes().to_vec()))
+        }
         DocumentData::File(data) => std::borrow::Cow::Borrowed(data),
     };
     let mut block = media(mime, &["pdf", "html", "csv", "md", "txt"], &data)?;

@@ -594,9 +594,10 @@ impl ResponsesDecoder {
             if message.id.as_deref() != Some(id)
                 || self.parents.get(&source) != Some(&Parent::Message)
                 || occupied(source)
-                || self.message_ids.iter().any(|(other, slot)| {
-                    *slot == source && other.as_str() != id
-                })
+                || self
+                    .message_ids
+                    .iter()
+                    .any(|(other, slot)| *slot == source && other.as_str() != id)
             {
                 return Err(ProviderError::Response(format!(
                     "conflicting Responses terminal message ownership at output {source}: item {id} does not exclusively own its message state"
@@ -626,22 +627,28 @@ impl ResponsesDecoder {
                         }
                         continue;
                     }
-                    let opaque = !matches!(pending.raw.str("type"),
-                        Some("output_text" | "refusal"));
+                    let opaque =
+                        !matches!(pending.raw.str("type"), Some("output_text" | "refusal"));
                     if let Some(stored) = message.parts.get(part)
                         && stored.opaque != opaque
                     {
-                        return Err(conflicting_kind(source, "content", *part,
-                            stored.opaque, opaque));
+                        return Err(conflicting_kind(
+                            source,
+                            "content",
+                            *part,
+                            stored.opaque,
+                            opaque,
+                        ));
                     }
-                    if let Some(raw) = usize::try_from(*part).ok()
+                    if let Some(raw) = usize::try_from(*part)
+                        .ok()
                         .and_then(|part| content.get(part))
                     {
-                        let incoming = !matches!(raw.str("type"),
-                            Some("output_text" | "refusal"));
+                        let incoming = !matches!(raw.str("type"), Some("output_text" | "refusal"));
                         if opaque != incoming {
-                            return Err(conflicting_kind(source, "content", *part,
-                                opaque, incoming));
+                            return Err(conflicting_kind(
+                                source, "content", *part, opaque, incoming,
+                            ));
                         }
                     }
                 }
@@ -653,15 +660,13 @@ impl ResponsesDecoder {
         }
         // Every claim is proved before moving the same states and their maps.
         // Writer Part indices, activation and already delivered SourceOrder stay unchanged.
-        self.messages = std::mem::take(&mut self.messages).into_iter()
-            .map(|(source, message)| {
-                (moves.get(&source).copied().unwrap_or(source), message)
-            })
+        self.messages = std::mem::take(&mut self.messages)
+            .into_iter()
+            .map(|(source, message)| (moves.get(&source).copied().unwrap_or(source), message))
             .collect();
-        self.parents = std::mem::take(&mut self.parents).into_iter()
-            .map(|(source, parent)| {
-                (moves.get(&source).copied().unwrap_or(source), parent)
-            })
+        self.parents = std::mem::take(&mut self.parents)
+            .into_iter()
+            .map(|(source, parent)| (moves.get(&source).copied().unwrap_or(source), parent))
             .collect();
         for slot in self.message_ids.values_mut() {
             if let Some(destination) = moves.get(slot) {
@@ -1587,7 +1592,9 @@ impl ResponsesDecoder {
                 // blank signature metadata has no canonical text contribution.
                 // Retain the untouched item as evidence, including its original signature.
                 let mut projection = item.clone();
-                if projection.str("signature").is_some_and(|value| value.trim().is_empty())
+                if projection
+                    .str("signature")
+                    .is_some_and(|value| value.trim().is_empty())
                     && let Some(fields) = projection.as_object_mut()
                 {
                     fields.remove("signature");
@@ -1595,16 +1602,28 @@ impl ResponsesDecoder {
                 let mut reasoning = super::carried_reasoning(&projection, None)?;
                 reasoning.payload.item = item.clone();
                 let known_root = item.as_object().is_some_and(|fields| {
-                    fields.keys().all(|key| matches!(key.as_str(),
-                        "type" | "id" | "summary" | "content" | "encrypted_content"
-                        | "signature" | "status"))
+                    fields.keys().all(|key| {
+                        matches!(
+                            key.as_str(),
+                            "type"
+                                | "id"
+                                | "summary"
+                                | "content"
+                                | "encrypted_content"
+                                | "signature"
+                                | "status"
+                        )
+                    })
                 });
                 let empty_known = reasoning.id.as_deref().is_some_and(|id| !id.is_empty())
-                    && known_root && reasoning.content.iter().all(|part| match part {
+                    && known_root
+                    && reasoning.content.iter().all(|part| match part {
                         crate::message::CarriedReasoningPart::Summary(text) => text.is_empty(),
                         crate::message::CarriedReasoningPart::Text { text, signature } => {
-                            text.is_empty() && signature.as_deref()
-                                .is_none_or(|signature| signature.trim().is_empty())
+                            text.is_empty()
+                                && signature
+                                    .as_deref()
+                                    .is_none_or(|signature| signature.trim().is_empty())
                         }
                         _ => false,
                     });
@@ -1730,7 +1749,10 @@ impl ResponsesDecoder {
             ("kind", item.str("type") == Some("function_call")),
             ("name", item.str("name") == Some(call.name.as_str())),
             ("call ID", item.str("call_id") == Some(call_id.as_str())),
-            ("namespace", item.str("namespace") == call.namespace.as_deref()),
+            (
+                "namespace",
+                item.str("namespace") == call.namespace.as_deref(),
+            ),
         ] {
             if !matches {
                 return Err(ProviderError::Response(format!(
@@ -1775,7 +1797,9 @@ impl ResponsesDecoder {
             )?;
         }
         // Whole-response indices are source positions, not writer Part indices.
-        let mut first_error = self.relocate_terminal_messages(response.arr("output")).err();
+        let mut first_error = self
+            .relocate_terminal_messages(response.arr("output"))
+            .err();
         for (index, item) in response.arr("output").iter().enumerate() {
             // after a conflict, only independently validated later reasoning
             // may join the buffered prefix. No successful terminal is sealed.
@@ -1784,7 +1808,7 @@ impl ResponsesDecoder {
             }
             match self.terminal_announced_function_call(item, &mut out) {
                 Ok(true) => continue,
-                Ok(false) => {},
+                Ok(false) => {}
                 Err(error) => {
                     first_error.get_or_insert(error);
                     continue;
@@ -2007,12 +2031,10 @@ impl<'id> Decoder<'id, Completion> for ResponsesDecoder {
                     Err(ProviderError::from_provider_body(raw))
                 }
                 kind if is_lifecycle_event(kind) => Ok(Flow::More),
-                kind => {
-                    match self.item_event(kind, frame, &mut out) {
-                        Ok(()) => Ok(Flow::More),
-                        Err(error) => Err(self.refuse_buffered(error, &mut out)),
-                    }
-                }
+                kind => match self.item_event(kind, frame, &mut out) {
+                    Ok(()) => Ok(Flow::More),
+                    Err(error) => Err(self.refuse_buffered(error, &mut out)),
+                },
             },
             ResponsesEvent::Whole(body) => self.terminal(body, true, out),
             ResponsesEvent::Failure(raw) => {

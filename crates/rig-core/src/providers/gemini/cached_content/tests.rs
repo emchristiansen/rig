@@ -255,7 +255,6 @@ async fn a_reply_of_the_other_shape_names_the_shape_it_carried() {
     );
 }
 
-
 #[test]
 fn model_is_qualified_idempotently() {
     assert_eq!(qualify_model("gemini-2.5-flash"), "models/gemini-2.5-flash");
@@ -371,9 +370,9 @@ async fn pagination_stops_on_an_empty_cursor() {
         caches.wire.clone().with_page_size(1),
         caches.transport.clone(),
     )
-        .list()
-        .await
-        .expect("listing should terminate");
+    .list()
+    .await
+    .expect("listing should terminate");
 
     let names: Vec<_> = listed.iter().map(|entry| entry.name.as_str()).collect();
     assert_eq!(names, ["cachedContents/a"]);
@@ -394,9 +393,9 @@ async fn the_bound_cache_follows_the_listing_cursor() {
         caches.wire.clone().with_page_size(1),
         caches.transport.clone(),
     )
-        .list()
-        .await
-        .expect("both pages decode");
+    .list()
+    .await
+    .expect("both pages decode");
     assert_eq!(
         all.iter()
             .map(|cache| cache.name.as_str())
@@ -442,8 +441,8 @@ async fn a_deletes_empty_object_is_the_acknowledgement() {
 
     let reply = crate::driver::Model::new(wire, http)
         .call(CachedContentRequest::Delete("leaky".to_owned()))
-    .await
-    .expect("the empty object acknowledges the delete");
+        .await
+        .expect("the empty object acknowledges the delete");
 
     assert!(
         matches!(reply, CachedContentReply::Acknowledged),

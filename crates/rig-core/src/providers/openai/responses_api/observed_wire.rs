@@ -1,7 +1,7 @@
 use super::observed_types::{self as message, Text};
 use super::observed_values::{
-    AdditionalParams, OpenAIServiceTier, OutputRole, Reasoning, ResponseObject, ResponseStatus, ToolStatus,
-    TruncationStrategy,
+    AdditionalParams, OpenAIServiceTier, OutputRole, Reasoning, ResponseObject, ResponseStatus,
+    ToolStatus, TruncationStrategy,
 };
 use crate::json_utils;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -1083,9 +1083,7 @@ const OPENAI_RESPONSES_PART_KEY: &str = "openai_responses_part";
 const REFUSAL_PART_KIND: &str = "refusal";
 
 /// The retained JSON value of an opaque Responses message part, when `params` marks one.
-pub(crate) fn opaque_message_part(
-    params: Option<&AdditionalParams>,
-) -> Option<&Value> {
+pub(crate) fn opaque_message_part(params: Option<&AdditionalParams>) -> Option<&Value> {
     let marker = params?.wire_extras(OPENAI_RESPONSES_PART_KEY)?;
     (marker.get("kind").and_then(Value::as_str) == Some("opaque"))
         .then(|| marker.get("value"))

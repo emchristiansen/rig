@@ -654,10 +654,15 @@ fn direct_native_encoding_keeps_originless_canonical_reasoning_ungated() {
             AssistantContent::text("Answer."),
         ])),
     ];
-    let encoded = wire().encode(request, Mode::Unary).expect("direct native encode");
-    assert_eq!(json_body(&encoded.request)["messages"][1], json!({
-        "role":"assistant", "content":"Answer.", "thinking":"theirs"
-    }));
+    let encoded = wire()
+        .encode(request, Mode::Unary)
+        .expect("direct native encode");
+    assert_eq!(
+        json_body(&encoded.request)["messages"][1],
+        json!({
+            "role":"assistant", "content":"Answer.", "thinking":"theirs"
+        })
+    );
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]

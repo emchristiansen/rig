@@ -84,14 +84,25 @@ fn an_error_payload_emits_only_its_exact_envelope_despite_usage_and_wrapped_meta
     for (payload, expected) in [
         (
             json!({"type":"error","usage":{"output_tokens":2},"code":"server_error","message":"boom","response":{"status":"failed","usage":{"total_tokens":99}}}),
-            AdapterErrorEnvelope { code: Some("server_error".to_owned()), status: None, message: Some("boom".to_owned()) },
+            AdapterErrorEnvelope {
+                code: Some("server_error".to_owned()),
+                status: None,
+                message: Some("boom".to_owned()),
+            },
         ),
         (
             json!({"type":"error","usage":{"output_tokens":2},"code":"ignored","message":"ignored","error":{"code":503,"status":"unavailable","message":"nested"}}),
-            AdapterErrorEnvelope { code: Some("503".to_owned()), status: Some("unavailable".to_owned()), message: Some("nested".to_owned()) },
+            AdapterErrorEnvelope {
+                code: Some("503".to_owned()),
+                status: Some("unavailable".to_owned()),
+                message: Some("nested".to_owned()),
+            },
         ),
     ] {
-        assert_eq!(project(&[payload]), vec![AdapterEvent::ErrorEnvelope { error: expected }]);
+        assert_eq!(
+            project(&[payload]),
+            vec![AdapterEvent::ErrorEnvelope { error: expected }]
+        );
     }
 }
 
@@ -118,15 +129,30 @@ fn absent_or_unusable_counts_remain_absent_and_zero_is_a_real_snapshot() {
 #[test]
 fn unary_usage_retains_reported_total_without_deriving_an_absent_total() {
     for (usage, expected_total) in [
-        (json!({"input_tokens":7,"output_tokens":3,"total_tokens":13}), Some(13)),
+        (
+            json!({"input_tokens":7,"output_tokens":3,"total_tokens":13}),
+            Some(13),
+        ),
         (json!({"input_tokens":7,"output_tokens":3}), None),
-        (json!({"input_tokens":7,"output_tokens":3,"total_tokens":"unknown"}), None),
+        (
+            json!({"input_tokens":7,"output_tokens":3,"total_tokens":"unknown"}),
+            None,
+        ),
     ] {
         let events = project(&[json!({"status":"completed","usage":usage})]);
-        assert_eq!(events[0], AdapterEvent::Usage { usage: AdapterUsage {
-            input_tokens: Some(7), output_tokens: Some(3), total_tokens: expected_total,
-            cached_input_tokens: None, reasoning_tokens: None, tool_input_tokens: None,
-        }});
+        assert_eq!(
+            events[0],
+            AdapterEvent::Usage {
+                usage: AdapterUsage {
+                    input_tokens: Some(7),
+                    output_tokens: Some(3),
+                    total_tokens: expected_total,
+                    cached_input_tokens: None,
+                    reasoning_tokens: None,
+                    tool_input_tokens: None,
+                }
+            }
+        );
         assert_eq!(events.len(), 2);
         assert!(matches!(events[1], AdapterEvent::Provider { .. }));
     }
@@ -134,30 +160,53 @@ fn unary_usage_retains_reported_total_without_deriving_an_absent_total() {
 
 #[test]
 fn a_wrapped_object_without_usage_does_not_fall_back_to_top_level_usage() {
-    let events = project(&[json!({"status":"failed","usage":{"input_tokens":11,"total_tokens":99},"error":{"code":"ignored"},"response":{"status":"completed","model":"wrapped"}})]);
-    assert_eq!(events, vec![AdapterEvent::Provider { verdict: crate::wire::AdapterVerdict {
-        finish_reason: Some("completed".to_owned()), block_reason: None,
-        detail: None, model: Some("wrapped".to_owned()),
-    }}]);
+    let events = project(&[
+        json!({"status":"failed","usage":{"input_tokens":11,"total_tokens":99},"error":{"code":"ignored"},"response":{"status":"completed","model":"wrapped"}}),
+    ]);
+    assert_eq!(
+        events,
+        vec![AdapterEvent::Provider {
+            verdict: crate::wire::AdapterVerdict {
+                finish_reason: Some("completed".to_owned()),
+                block_reason: None,
+                detail: None,
+                model: Some("wrapped".to_owned()),
+            }
+        }]
+    );
 }
 
 #[test]
 fn malformed_typed_payload_fields_abort_all_projection_including_usable_usage() {
     for corruption in [
-        json!({"type":7}), json!({"id":7}), json!({"model":[]}),
-        json!({"status":false}), json!({"incomplete_details":false}),
-        json!({"incomplete_details":{"reason":7}}), json!({"usage":false}),
+        json!({"type":7}),
+        json!({"id":7}),
+        json!({"model":[]}),
+        json!({"status":false}),
+        json!({"incomplete_details":false}),
+        json!({"incomplete_details":{"reason":7}}),
+        json!({"usage":false}),
         json!({"usage":{"input_tokens_details":false}}),
-        json!({"error":"bad"}), json!({"error":{"type":7}}),
-        json!({"error":{"message":7}}), json!({"message":7}),
-        json!({"response":false}), json!({"response":{"id":7}}),
+        json!({"error":"bad"}),
+        json!({"error":{"type":7}}),
+        json!({"error":{"message":7}}),
+        json!({"message":7}),
+        json!({"response":false}),
+        json!({"response":{"id":7}}),
     ] {
         let mut payload = json!({"status":"failed","usage":{"input_tokens":7,"total_tokens":9},"error":{"code":"capacity","message":"boom"}});
-        payload.as_object_mut().expect("payload").extend(corruption.as_object().expect("corruption").clone());
+        payload
+            .as_object_mut()
+            .expect("payload")
+            .extend(corruption.as_object().expect("corruption").clone());
         assert!(project(&[payload.clone()]).is_empty(), "{payload}");
     }
-    let malformed_unwrapped = json!({"id":7,"response":{"status":"completed","usage":{"input_tokens":7}}});
-    assert!(project(&[malformed_unwrapped]).is_empty(), "the full typed payload is read before choosing its response");
+    let malformed_unwrapped =
+        json!({"id":7,"response":{"status":"completed","usage":{"input_tokens":7}}});
+    assert!(
+        project(&[malformed_unwrapped]).is_empty(),
+        "the full typed payload is read before choosing its response"
+    );
     let malformed_error_event = json!({"type":"error","message":7,"usage":{"input_tokens":7}});
     assert!(project(&[malformed_error_event]).is_empty());
 }
@@ -449,8 +498,12 @@ fn recognized_raw_prompt_cache_options_keep_exact_values_without_unknown_passthr
         Value::Null,
     ] {
         let request = codex_request(json!({"prompt_cache_options":value,"unknown_outer":[null,9]}));
-        let body = wire.responses_request(&request,
-            super::super::Delivery::Http(crate::wire::Mode::Unary)).expect("existing request merge");
+        let body = wire
+            .responses_request(
+                &request,
+                super::super::Delivery::Http(crate::wire::Mode::Unary),
+            )
+            .expect("existing request merge");
         assert_eq!(body.get("prompt_cache_options"), Some(&value));
         assert!(body.get("unknown_outer").is_none());
     }

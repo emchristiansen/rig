@@ -956,7 +956,8 @@ fn apply(
         Rewrite::ResponsesReasoningCiphertext => {
             let wanted = body.get("reasoning").is_some_and(|value| !value.is_null())
                 || body.get("store") == Some(&Value::Bool(false));
-            let reasoning = body.get("model")
+            let reasoning = body
+                .get("model")
                 .and_then(Value::as_str)
                 .and_then(crate::providers::openai::options::reasons);
             if wanted && reasoning != Some(false) {
@@ -1032,7 +1033,10 @@ fn apply(
             if *kind == BodyRewrite::GroqCompoundTools {
                 crate::providers::openai::wire::chat::fold_groq_native_tools(
                     body,
-                    request.additional_params.as_ref().and_then(|raw| raw.get("tools")),
+                    request
+                        .additional_params
+                        .as_ref()
+                        .and_then(|raw| raw.get("tools")),
                 )?;
             }
         }

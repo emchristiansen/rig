@@ -191,7 +191,9 @@ async fn run_model(client: OpenAiCassette, cell: Cell) -> Observation {
                         content: AssistantContent::ToolCall(tool_call),
                         ..
                     })) => {
-                        observation.arguments.push(tool_call.function.arguments_value());
+                        observation
+                            .arguments
+                            .push(tool_call.function.arguments_value());
                     }
                     Ok(_) => {}
                     Err(error) => observation.errors.push(error.to_string()),

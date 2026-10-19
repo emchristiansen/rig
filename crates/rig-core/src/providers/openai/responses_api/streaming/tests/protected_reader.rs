@@ -1,7 +1,9 @@
 //! Strict known/unknown classification at the actual Responses reader.
 
+use super::super::{
+    ResponsesEvent, ResponsesStreamOptions, classify_responses_frame, classify_responses_payload,
+};
 use super::helpers::*;
-use super::super::{ResponsesEvent, ResponsesStreamOptions, classify_responses_frame, classify_responses_payload};
 use crate::message::AssistantContent;
 use crate::wire::WireEvent;
 use serde_json::{Value, json};
@@ -106,7 +108,11 @@ fn reasoning_text_done_emits_nothing() {
         "content_index":0,"sequence_number":7,"text":"the model's raw chain of thought"
     })]);
     assert!(driven.errors.is_empty(), "{:?}", driven.errors);
-    assert!(driven.items.is_empty(), "the bookkeeping done emits no reasoning fragments or fabricated part: {:?}", driven.items);
+    assert!(
+        driven.items.is_empty(),
+        "the bookkeeping done emits no reasoning fragments or fabricated part: {:?}",
+        driven.items
+    );
     assert!(driven.response.choice.is_empty());
 }
 
@@ -160,7 +166,10 @@ fn classify_defective_known_content_part_is_corrupt() {
 fn content_part_known_tag_decodes() {
     let part = json!({"type":"output_text","text":"hi"});
     let WireEvent::Known(ResponsesEvent::Frame { frame, .. }) =
-        classify_responses_frame(&part_frame(part.clone()).to_string()) else { panic!("known output_text part"); };
+        classify_responses_frame(&part_frame(part.clone()).to_string())
+    else {
+        panic!("known output_text part");
+    };
     assert_eq!(frame["part"], part);
     assert_eq!(frame["part"]["text"], "hi");
 }
@@ -168,16 +177,28 @@ fn content_part_known_tag_decodes() {
 // F streaming/tests.rs:202
 #[test]
 fn content_part_known_tag_with_defective_payload_errors() {
-    for part in [json!({"type":"output_text","text":42}), json!({"type":"summary_text","text":42})] {
-        assert!(matches!(classify_responses_frame(&part_frame(part).to_string()), WireEvent::Corrupt(_)));
+    for part in [
+        json!({"type":"output_text","text":42}),
+        json!({"type":"summary_text","text":42}),
+    ] {
+        assert!(matches!(
+            classify_responses_frame(&part_frame(part).to_string()),
+            WireEvent::Corrupt(_)
+        ));
     }
 }
 
 // F streaming/tests.rs:214
 #[test]
 fn content_part_non_string_type_errors() {
-    for part in [json!({"type":42,"text":"hi"}), json!({"type":null,"text":"hi"})] {
-        assert!(matches!(classify_responses_frame(&part_frame(part).to_string()), WireEvent::Corrupt(_)));
+    for part in [
+        json!({"type":42,"text":"hi"}),
+        json!({"type":null,"text":"hi"}),
+    ] {
+        assert!(matches!(
+            classify_responses_frame(&part_frame(part).to_string()),
+            WireEvent::Corrupt(_)
+        ));
     }
 }
 
@@ -185,8 +206,14 @@ fn content_part_non_string_type_errors() {
 #[test]
 fn content_part_duplicate_type_key_dispatches_on_the_last_occurrence() {
     let raw = r#"{"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":0,"sequence_number":1,"part":{"type":"bogus","type":"output_text","text":"hi"}}"#;
-    let WireEvent::Known(ResponsesEvent::Frame { frame, raw: received, .. }) = classify_responses_frame(raw)
-        else { panic!("nested part discriminator resolves its last occurrence"); };
+    let WireEvent::Known(ResponsesEvent::Frame {
+        frame,
+        raw: received,
+        ..
+    }) = classify_responses_frame(raw)
+    else {
+        panic!("nested part discriminator resolves its last occurrence");
+    };
     assert_eq!(frame["part"], json!({"type":"output_text","text":"hi"}));
     assert_eq!(received, raw);
 }
@@ -197,7 +224,10 @@ fn content_part_unknown_tag_is_preserved_verbatim() {
     let part = json!({"type":"future_refusal","refusal":"no"});
     let event = part_frame(part.clone());
     let WireEvent::Known(ResponsesEvent::Frame { frame, raw, .. }) =
-        classify_responses_frame(&event.to_string()) else { panic!("unknown nested part stays a known valid envelope"); };
+        classify_responses_frame(&event.to_string())
+    else {
+        panic!("unknown nested part stays a known valid envelope");
+    };
     assert_eq!(frame["part"], part);
     assert_eq!(serde_json::from_str::<Value>(&raw).unwrap()["part"], part);
 }
@@ -217,7 +247,10 @@ fn content_part_added_deserializes_snake_case_part_type() {
         }
     });
     let WireEvent::Known(ResponsesEvent::Frame { kind, frame, .. }) =
-        classify_responses_frame(&value.to_string()) else { panic!("known snake-case part event"); };
+        classify_responses_frame(&value.to_string())
+    else {
+        panic!("known snake-case part event");
+    };
     assert_eq!(kind, "response.content_part.added");
     assert_eq!(frame, value);
 }
@@ -237,7 +270,10 @@ fn content_part_done_deserializes_snake_case_part_type() {
         }
     });
     let WireEvent::Known(ResponsesEvent::Frame { kind, frame, .. }) =
-        classify_responses_frame(&value.to_string()) else { panic!("known snake-case part event"); };
+        classify_responses_frame(&value.to_string())
+    else {
+        panic!("known snake-case part event");
+    };
     assert_eq!(kind, "response.content_part.done");
     assert_eq!(frame, value);
 }
@@ -257,7 +293,10 @@ fn reasoning_summary_part_added_deserializes_snake_case_part_type() {
         }
     });
     let WireEvent::Known(ResponsesEvent::Frame { kind, frame, .. }) =
-        classify_responses_frame(&value.to_string()) else { panic!("known snake-case part event"); };
+        classify_responses_frame(&value.to_string())
+    else {
+        panic!("known snake-case part event");
+    };
     assert_eq!(kind, "response.reasoning_summary_part.added");
     assert_eq!(frame, value);
 }
@@ -277,7 +316,10 @@ fn reasoning_summary_part_done_deserializes_snake_case_part_type() {
         }
     });
     let WireEvent::Known(ResponsesEvent::Frame { kind, frame, .. }) =
-        classify_responses_frame(&value.to_string()) else { panic!("known snake-case part event"); };
+        classify_responses_frame(&value.to_string())
+    else {
+        panic!("known snake-case part event");
+    };
     assert_eq!(kind, "response.reasoning_summary_part.done");
     assert_eq!(frame, value);
 }
@@ -325,8 +367,11 @@ fn summary_delta_and_done_keep_their_own_members() {
         "sequence_number": 3,
         "text": "the whole summary",
     });
-    let WireEvent::Known(ResponsesEvent::Frame { kind, frame, .. }) = classify_responses_frame(&done.to_string())
-        else { panic!("a well-formed done event decodes"); };
+    let WireEvent::Known(ResponsesEvent::Frame { kind, frame, .. }) =
+        classify_responses_frame(&done.to_string())
+    else {
+        panic!("a well-formed done event decodes");
+    };
     assert_eq!(kind, "response.reasoning_summary_text.done");
     assert_eq!(frame["text"], "the whole summary");
 }
@@ -337,9 +382,15 @@ fn arguments_done_and_the_done_item_reconcile_through_one_type() {
     let args_done = json!({"type":"response.function_call_arguments.done","item_id":"fc_1",
         "output_index":0,"sequence_number":1,"arguments":"{\"a\": 1}"});
     let WireEvent::Known(ResponsesEvent::Frame { frame, raw, .. }) =
-        classify_responses_frame(&args_done.to_string()) else { panic!("args done decodes"); };
+        classify_responses_frame(&args_done.to_string())
+    else {
+        panic!("args done decodes");
+    };
     assert_eq!(frame["arguments"], "{\"a\": 1}");
-    assert_eq!(serde_json::from_str::<Value>(&raw).unwrap()["arguments"], "{\"a\": 1}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap()["arguments"],
+        "{\"a\": 1}"
+    );
     let item = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"f",
         "arguments":"{\"a\":1}","status":"completed"});
     let response = folded_body_with(ResponsesStreamOptions::strict(), &[
@@ -347,7 +398,8 @@ fn arguments_done_and_the_done_item_reconcile_through_one_type() {
         json!({"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":item}),
         completed_with_output(json!([item])),
     ]).expect("same actual call assembly");
-    let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else { panic!("one reconciled call"); };
+    let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else {
+        panic!("one reconciled call");
+    };
     assert_eq!(call.function.arguments_value(), json!({"a":1}));
 }
-

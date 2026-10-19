@@ -1,11 +1,11 @@
 //! Exact malformed-frame custody through real framed and byte transports.
 
-use super::helpers::*;
 use super::super::{ResponsesDecoder, ResponsesStreamOptions};
+use super::helpers::*;
 use crate::error::{ErrorKind, ProviderError};
-use crate::wire::WireFrame;
 use crate::providers::openai::wire::OpenAIConfig;
 use crate::test_utils::MockStreamingClient;
+use crate::wire::WireFrame;
 use futures::StreamExt;
 
 // F streaming/tests.rs:5857
@@ -19,10 +19,17 @@ fn a_malformed_known_frame_surfaces_on_the_sse_stream_carrying_the_frame_as_sent
             malformed.event_type, malformed.frame
         );
         let mut framer = rig_http::http_client::framing::SseFramer::new();
-        let frames = framer.push(body.as_bytes()).into_iter().map(|event| WireFrame::Text(event.data));
+        let frames = framer
+            .push(body.as_bytes())
+            .into_iter()
+            .map(|event| WireFrame::Text(event.data));
         let error = crate::driver::feed_frames!(
-            ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()), "openai", frames
-        ).outcome.unwrap_err();
+            ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()),
+            "openai",
+            frames
+        )
+        .outcome
+        .unwrap_err();
         let ProviderError::CorruptFrame(corrupt) = &error else {
             panic!(
                 "{}: expected a corrupt frame, got {error:?}",
@@ -136,7 +143,9 @@ async fn a_corrupt_byte_frame_keeps_its_exact_bytes_on_every_driver_entrypoint()
         ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()),
         "openai",
         [WireFrame::Bytes(received.clone())]
-    ).outcome.expect_err("the frame cannot decode");
+    )
+    .outcome
+    .expect_err("the frame cannot decode");
     let ProviderError::CorruptFrame(corrupt) = &error else {
         panic!("expected a corrupt frame, got {error:?}");
     };
@@ -146,7 +155,8 @@ async fn a_corrupt_byte_frame_keeps_its_exact_bytes_on_every_driver_entrypoint()
         OpenAIConfig::new("test-key").responses("gpt-5.4"),
         ScriptedFrames(vec![WireFrame::Bytes(received.clone())]),
     );
-    let mut stream = model.stream(crate::completion::CompletionRequest::new("fixture"))
+    let mut stream = model
+        .stream(crate::completion::CompletionRequest::new("fixture"))
         .expect("actual Responses wire over an actual byte-frame Transport");
     let mut error = None;
     while let Some(item) = stream.next().await {
@@ -161,4 +171,3 @@ async fn a_corrupt_byte_frame_keeps_its_exact_bytes_on_every_driver_entrypoint()
     };
     assert_eq!(corrupt.evidence(), &FrameEvidence::Bytes(received));
 }
-

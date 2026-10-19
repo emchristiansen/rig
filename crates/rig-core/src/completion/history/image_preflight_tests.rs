@@ -346,7 +346,10 @@ fn first_original_image_refusal_stops_before_later_images_or_omission() {
         error.to_string(),
         "RequestError: Only base64 encoded strings are allowed for image input on AWS Bedrock"
     );
-    assert_eq!(*target.seen.lock().expect("first refusal"), [accepted, refused]);
+    assert_eq!(
+        *target.seen.lock().expect("first refusal"),
+        [accepted, refused]
+    );
 }
 
 #[test]

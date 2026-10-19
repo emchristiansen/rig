@@ -13,8 +13,8 @@ use serde_json::json;
 use crate::completion::CompletionRequest;
 use crate::driver::Model;
 use crate::message::{
-    AssistantContent, AssistantMessage, CallId, Message, ToolName, ToolResult,
-    ToolResultContent, UserContent,
+    AssistantContent, AssistantMessage, CallId, Message, ToolName, ToolResult, ToolResultContent,
+    UserContent,
 };
 use crate::providers::openai::wire::{LLAMACPP, OpenAIConfig};
 use crate::test_utils::{RecordingHttpClient, json_body};
@@ -61,7 +61,9 @@ async fn a_system_message_plus_history_keeps_its_order() {
             Message::User {
                 content: vec![UserContent::text("Codeword one is heliotrope.")],
             },
-            Message::Assistant(AssistantMessage::new(vec![AssistantContent::text("Noted.")])),
+            Message::Assistant(AssistantMessage::new(vec![AssistantContent::text(
+                "Noted.",
+            )])),
             Message::User {
                 content: vec![UserContent::text("Codeword two is quicksilver.")],
             },

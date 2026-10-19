@@ -78,9 +78,7 @@ fn request() -> rig::completion::CompletionRequest {
 }
 
 fn tool_request() -> rig::completion::CompletionRequest {
-    CompletionRequest::new(TOOL_PROMPT)
-        .tool(weather_tool())
-        
+    CompletionRequest::new(TOOL_PROMPT).tool(weather_tool())
 }
 
 /// The `msg_…` id of the envelope's output message, when it issued one.

@@ -173,7 +173,9 @@ fn event(message: &Message) -> Result<Option<Value>, serde_json::Error> {
         return Ok(None);
     };
     let payload = serde_json::from_slice(message.payload())?;
-    Ok(Some(Value::Object(serde_json::Map::from_iter([(kind, payload)]))))
+    Ok(Some(Value::Object(serde_json::Map::from_iter([(
+        kind, payload,
+    )]))))
 }
 
 #[cfg(test)]

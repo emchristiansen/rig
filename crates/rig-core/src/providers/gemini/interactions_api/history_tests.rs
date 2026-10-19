@@ -148,9 +148,18 @@ fn a_mixed_output_reaches_another_model_as_its_canonical_blocks() {
     let AssistantContent::Image(image) = &response.choice[1] else {
         panic!("a canonical PNG: {:?}", response.choice);
     };
-    assert_eq!(image.data, crate::message::DocumentSourceKind::Base64("aW1n".to_owned()));
+    assert_eq!(
+        image.data,
+        crate::message::DocumentSourceKind::Base64("aW1n".to_owned())
+    );
     assert_eq!(image.media_type, Some(ImageMediaType::PNG));
-    assert_eq!(image.native.as_ref().map(|native| &native.item["content"][0]), Some(&image_item()));
+    assert_eq!(
+        image
+            .native
+            .as_ref()
+            .map(|native| &native.item["content"][0]),
+        Some(&image_item())
+    );
     assert_eq!(
         replayed_to(&wire("gemini-2.5-flash"), &response),
         [
@@ -403,9 +412,15 @@ fn only_closed_unsigned_png_output_is_a_canonical_image() {
     let [AssistantContent::Image(image)] = response.choice.as_slice() else {
         panic!("one canonical closed PNG: {:?}", response.choice);
     };
-    assert_eq!(image.data, crate::message::DocumentSourceKind::Base64("aW1n".to_owned()));
+    assert_eq!(
+        image.data,
+        crate::message::DocumentSourceKind::Base64("aW1n".to_owned())
+    );
     assert_eq!(image.media_type, Some(ImageMediaType::PNG));
-    assert_eq!(image.native.as_ref().map(|native| &native.item), Some(&step));
+    assert_eq!(
+        image.native.as_ref().map(|native| &native.item),
+        Some(&step)
+    );
     assert_eq!(response.raw["steps"][0], step);
     assert_eq!(replayed_to(&wire(MODEL), &response), [step]);
     for item in [
@@ -419,7 +434,10 @@ fn only_closed_unsigned_png_output_is_a_canonical_image() {
         let step = json!({"type": "model_output", "content": [item.clone()]});
         let response = whole(vec![step.clone()], "completed");
         let [AssistantContent::CarriedText(text)] = response.choice.as_slice() else {
-            panic!("an unselected image stays inspection-only: {:?}", response.choice);
+            panic!(
+                "an unselected image stays inspection-only: {:?}",
+                response.choice
+            );
         };
         assert_eq!(text.known_text_projection(), Some(""));
         assert_eq!(text.payload.item, item);

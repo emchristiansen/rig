@@ -122,7 +122,9 @@ fn exact_prefix_ids_are_stable_and_change_only_with_their_inputs() {
 }
 
 fn request_with_raw_item(item: Value) -> crate::completion::CompletionRequest {
-    use crate::message::{AssistantContent, AssistantMessage, CarriedPayload, Message, ProviderItem};
+    use crate::message::{
+        AssistantContent, AssistantMessage, CarriedPayload, Message, ProviderItem,
+    };
     crate::completion::CompletionRequest::new("hello").message(Message::Assistant(
         AssistantMessage::new(vec![AssistantContent::ProviderItem(ProviderItem {
             payload: CarriedPayload::new(item, None),
@@ -166,10 +168,16 @@ fn named_developer_items_keep_their_name_at_the_real_request_boundary() {
 
 #[test]
 fn canonical_function_calls_omit_role_and_raw_null_role_items_remain_exact() {
-    use crate::message::{AssistantContent, AssistantMessage, Message, ToolCall, ToolFunction, ToolName};
-    let call = ToolCall::from_wire("call_1", ToolFunction::new(
-        ToolName::new("lookup").expect("nonempty name"), serde_json::json!({}),
-    ));
+    use crate::message::{
+        AssistantContent, AssistantMessage, Message, ToolCall, ToolFunction, ToolName,
+    };
+    let call = ToolCall::from_wire(
+        "call_1",
+        ToolFunction::new(
+            ToolName::new("lookup").expect("nonempty name"),
+            serde_json::json!({}),
+        ),
+    );
     let mut target = lite_wire();
     target.codex_request_shape = CodexRequestShape::Standard;
     let request = crate::completion::CompletionRequest::new("hello").message(Message::Assistant(
@@ -194,22 +202,35 @@ fn canonical_function_calls_omit_role_and_raw_null_role_items_remain_exact() {
 #[test]
 fn generated_lite_prefix_has_exact_bytes_and_its_schema_refuses_conflicting_role() {
     let target = lite_wire();
-    let body = encoded_body(&target, crate::completion::CompletionRequest::new("hello").preamble("base"));
+    let body = encoded_body(
+        &target,
+        crate::completion::CompletionRequest::new("hello").preamble("base"),
+    );
     let expected = shaped_json(Some("base"), Vec::new(), "thread-a");
-    assert_eq!(&body["input"].as_array().expect("encoded input")[..2],
-        &expected["input"].as_array().expect("expected input")[..2]);
+    assert_eq!(
+        &body["input"].as_array().expect("encoded input")[..2],
+        &expected["input"].as_array().expect("expected input")[..2]
+    );
     assert_eq!(prefix_ids(&body), prefix_ids(&expected));
-    assert_eq!(body["input"][1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
-        serde_json::json!(["model.base_instructions"]));
+    assert_eq!(
+        body["input"][1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        serde_json::json!(["model.base_instructions"])
+    );
     for item in body["input"].as_array().expect("input array") {
         let encoded = serde_json::to_string(item).expect("actual input item serializes");
         if encoded.contains("\"role\"") {
-            assert_eq!(encoded.matches("\"role\"").count(), 1,
-                "an input item must not serialize duplicate role keys: {encoded}");
+            assert_eq!(
+                encoded.matches("\"role\"").count(),
+                1,
+                "an input item must not serialize duplicate role keys: {encoded}"
+            );
         }
     }
     let serialized = serde_json::to_vec(&body).expect("actual request JSON bytes");
-    assert_eq!(serde_json::from_slice::<Value>(&serialized).expect("JSON bytes read back"), body);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&serialized).expect("JSON bytes read back"),
+        body
+    );
     openapi_schema::assert_valid(Schema::AdditionalToolsItem, &body["input"][0]);
     openapi_schema::assert_valid(Schema::LiteInputItemView, &body["input"][0]);
     let mut conflicting = body["input"][0].clone();
@@ -476,8 +497,12 @@ fn lite_wire() -> super::super::wire::Responses {
         "test-key",
     );
     config = config.with_caller_identity(
-        crate::providers::openai::wire::CallerIdentity::new("fixture-origin", "fixture-agent/1.0", None)
-            .expect("caller headers are valid"),
+        crate::providers::openai::wire::CallerIdentity::new(
+            "fixture-origin",
+            "fixture-agent/1.0",
+            None,
+        )
+        .expect("caller headers are valid"),
     );
     config.instructions = None;
     super::super::wire::Responses::new(config, "gpt-6-sol")

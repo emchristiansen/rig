@@ -262,8 +262,11 @@ async fn test_completion_usage_includes_tool_input_and_reasoning_output() {
     assert_eq!(converted.usage.reasoning_tokens, Some(10));
     assert_eq!(converted.usage.tool_use_prompt_tokens, Some(12));
     assert_eq!(converted.usage.total_tokens, Some(100));
-    assert_eq!(converted.raw, serde_json::from_str::<serde_json::Value>(fixture)
-        .expect("the original received body is JSON"));
+    assert_eq!(
+        converted.raw,
+        serde_json::from_str::<serde_json::Value>(fixture)
+            .expect("the original received body is JSON")
+    );
 }
 
 #[tokio::test]
@@ -1436,8 +1439,8 @@ fn original_result_image_order_and_source_errors_survive_mixed_request_preflight
 
 #[test]
 fn original_result_text_and_json_preflight_adds_no_function_or_custom_policy() {
-    use crate::wire::Operation as _;
     use crate::message::{AnsweredToolCall, CallId, LocalCallId, ToolResult, ToolResultContent};
+    use crate::wire::Operation as _;
     for model in ["gemini-2.5-flash", "gemini-3-flash-preview"] {
         let target = wire(model);
         for answers in [AnsweredToolCall::Function, AnsweredToolCall::Custom] {
@@ -1713,10 +1716,20 @@ async fn a_unary_reply_and_a_streamed_reply_fold_to_the_same_answer() {
     let streamed = streamed("gemini-2.5-flash", CEDAR_STREAM).await;
     assert_eq!(folded(&buffered), folded(&streamed));
     // G141: the decoded Text retains its genuine part; the constructor has none.
-    assert_eq!(buffered.choice.first().map(message::AssistantContent::canonical),
-        Some(message::AssistantContent::text("cedar")));
-    assert_eq!(buffered.choice.first().and_then(message::AssistantContent::native_item),
-        Some(&json!({"text": "cedar"})));
+    assert_eq!(
+        buffered
+            .choice
+            .first()
+            .map(message::AssistantContent::canonical),
+        Some(message::AssistantContent::text("cedar"))
+    );
+    assert_eq!(
+        buffered
+            .choice
+            .first()
+            .and_then(message::AssistantContent::native_item),
+        Some(&json!({"text": "cedar"}))
+    );
     assert_eq!(
         buffered.finish_reason(),
         Some(crate::completion::FinishReason::Stop)

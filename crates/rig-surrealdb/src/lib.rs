@@ -282,8 +282,8 @@ where
     }
 
     /// Embeds the query and runs the search. The request filter is bound as a
-    /// query parameter, defaulting to `true` when absent, and an absent threshold
-    /// binds zero.
+    /// query parameter, defaulting to `true` when absent. An absent threshold
+    /// leaves distance searches unbounded and keeps the similarity minimum at zero.
     async fn run_search_query(
         &self,
         req: &VectorSearchRequest<SurrealSearchFilter>,
@@ -292,7 +292,7 @@ where
         let embedded_query: Vec<f64> = self.model.embed_text(req.query()).await?.vec;
 
         self.surreal
-            .query(self.search_query(with_document).as_str())
+            .query(self.search_query(with_document, req.threshold()).as_str())
             .bind(("vec", embedded_query))
             .bind(("tablename", self.documents_table.clone()))
             .bind(("threshold", req.threshold().unwrap_or(0.)))
@@ -307,7 +307,7 @@ where
             .map_err(VectorStoreError::datastore)
     }
 
-    fn search_query(&self, with_document: bool) -> String {
+    fn search_query(&self, with_document: bool, threshold: Option<f64>) -> String {
         let document = if with_document { ", document" } else { "" };
         let embedded_text = if with_document { ", embedded_text" } else { "" };
 
@@ -317,15 +317,20 @@ where
         let (comparison, order) = match distance_function {
             SurrealDistanceFunction::Knn
             | SurrealDistanceFunction::Hamming
-            | SurrealDistanceFunction::Euclidean => ("<=", "asc"),
-            SurrealDistanceFunction::Cosine | SurrealDistanceFunction::Jaccard => (">=", "desc"),
+            | SurrealDistanceFunction::Euclidean => (threshold.map(|_| "<="), "asc"),
+            SurrealDistanceFunction::Cosine | SurrealDistanceFunction::Jaccard => {
+                (Some(">="), "desc")
+            }
         };
+        let cutoff = comparison.map_or_else(String::new, |comparison| {
+            format!("{distance_function}($vec, embedding) {comparison} $threshold AND ")
+        });
 
         format!(
             "
             SELECT id {document} {embedded_text}, {distance_function}($vec, embedding) as distance \
               from type::table($tablename) \
-              where {distance_function}($vec, embedding) {comparison} $threshold AND $filter \
+              where {cutoff}$filter \
               order by distance {order} \
             LIMIT $limit",
         )

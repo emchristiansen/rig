@@ -427,7 +427,10 @@ impl CorruptFrame {
     /// not parse them again or substitute a JSON parsing diagnostic.
     #[doc(hidden)]
     pub fn received_bytes(bytes: Vec<u8>, reason: impl fmt::Display) -> Self {
-        Self::bytes(bytes, <serde_json::Error as serde::de::Error>::custom(reason))
+        Self::bytes(
+            bytes,
+            <serde_json::Error as serde::de::Error>::custom(reason),
+        )
     }
 
     /// A text frame that failed to decode, with the discriminator value the

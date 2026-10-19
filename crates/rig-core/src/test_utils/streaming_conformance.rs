@@ -588,7 +588,12 @@ impl DrainedStream {
             .collect()
     }
 
-    /// Reasoning parts in the aggregated choice, in order.
+    /// Ordinary [`AssistantContent::Reasoning`] parts in the aggregated
+    /// choice, in order.
+    ///
+    /// This borrowed typed view excludes [`AssistantContent::CarriedReasoning`].
+    /// Inspect [`Self::choice`] for provider-carried reasoning and its preserved
+    /// payload; the conformance laws separately observe both forms' display text.
     pub fn choice_reasoning(&self) -> Vec<&crate::message::Reasoning> {
         self.choice
             .iter()
@@ -977,9 +982,16 @@ pub async fn malformed_frame_ends_the_reply(
         )
     })?;
     checks.require(
-        drained.items.iter().filter_map(|item| item.as_ref().err()).all(|error| {
-            matches!(&error.detail, Some(crate::error::ErrorDetail::CorruptFrame(_)))
-        }),
+        drained
+            .items
+            .iter()
+            .filter_map(|item| item.as_ref().err())
+            .all(|error| {
+                matches!(
+                    &error.detail,
+                    Some(crate::error::ErrorDetail::CorruptFrame(_))
+                )
+            }),
         || "the malformed frame must report the typed recoverable corruption",
     )?;
     checks.require(
@@ -1081,9 +1093,16 @@ pub async fn defective_known_event_ends_the_reply(
         )
     })?;
     checks.require(
-        drained.items.iter().filter_map(|item| item.as_ref().err()).all(|error| {
-            matches!(&error.detail, Some(crate::error::ErrorDetail::CorruptFrame(_)))
-        }),
+        drained
+            .items
+            .iter()
+            .filter_map(|item| item.as_ref().err())
+            .all(|error| {
+                matches!(
+                    &error.detail,
+                    Some(crate::error::ErrorDetail::CorruptFrame(_))
+                )
+            }),
         || "the defective known frame must report the typed recoverable corruption",
     )?;
     checks.require(
@@ -1527,14 +1546,31 @@ pub async fn interleaved_signed_full_reasoning_does_not_erase_prior_thought(
         .choice
         .iter()
         .rev()
-        .find(|content| matches!(content, AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)))
+        .find(|content| {
+            matches!(
+                content,
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)
+            )
+        })
         .is_some_and(|content| match content {
             AssistantContent::CarriedReasoning(reasoning) => reasoning.content.iter().any(|part| {
-                matches!(part, crate::message::CarriedReasoningPart::Text { signature: Some(_), .. })
+                matches!(
+                    part,
+                    crate::message::CarriedReasoningPart::Text {
+                        signature: Some(_),
+                        ..
+                    }
+                )
             }),
-            AssistantContent::Reasoning(reasoning) => reasoning.native.as_ref().is_some_and(|native| {
-                native.item.get("thoughtSignature").and_then(serde_json::Value::as_str).is_some()
-            }),
+            AssistantContent::Reasoning(reasoning) => {
+                reasoning.native.as_ref().is_some_and(|native| {
+                    native
+                        .item
+                        .get("thoughtSignature")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                })
+            }
             _ => false,
         });
     checks.require(signed, || "the post-boundary block must keep its signature")?;

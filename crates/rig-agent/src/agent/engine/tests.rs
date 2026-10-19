@@ -20,17 +20,18 @@ use crate::agent::AgentBuilder;
 use crate::agent::hook::{AgentHook, HookContext, RequestPatch, StepEventKind};
 use crate::agent::run::OutputMode;
 use crate::agent::streaming::MultiTurnStreamItem;
-use crate::completion::{Message, PromptError, Usage};
+use crate::completion::{FinishReason, Message, PromptError, Usage};
 use crate::streaming::{Item, StreamEvent};
 use crate::test_utils::{
     MockAddTool, MockCompletionModel, MockOperationArgs, MockScript, MockStreamEvent,
     MockSubtractTool, MockToolError, MockTurn,
 };
 use crate::tool::{
-    Tool, ToolContext, ToolExecutionError,
+    Tool, ToolContext, ToolExecutionError, ToolSet,
     server::{ToolServer, ToolServerHandle},
 };
 use rig_core::driver::{Exchange, Opening};
+use rig_core::error::ProviderError;
 use rig_core::message::{
     AssistantContent, ToolCall as MessageToolCall, ToolChoice, ToolFunction, UserContent,
 };
@@ -1465,6 +1466,10 @@ mod structured_tool_results {
 /// streaming side is already pinned by `assert_stream_usage_recorded_on_chat_spans`.
 mod span_safety_net {
 
+    use super::{BoundedResponseRetry, TestRetryMode};
+    use crate::agent::MultiTurnStreamItem;
+    use crate::test_utils::MockStreamEvent;
+    use futures::StreamExt;
     use serde_json::Value;
 
     use crate::agent::{AgentBuilder, HookContext, OutcomeAction, OutcomeEvent};
@@ -1622,6 +1627,183 @@ mod span_safety_net {
                 .any(|value| value.contains("RAW_EXECUTION_OUTPUT_42")),
             "a Stop must not leak raw execution telemetry; captured: {captured:?}"
         );
+    }
+    /// Values recorded after span creation, matching the original capture stage.
+    fn recorded_strings<'a>(
+        span: &'a rig_core::test_utils::CapturedSpan,
+        field: &str,
+    ) -> Vec<&'a str> {
+        span.recorded
+            .iter()
+            .filter(|(name, _)| name == field)
+            .map(|(_, value)| value.as_str().expect("the original observed field is text"))
+            .collect()
+    }
+
+    async fn run_blocking_response_retry_with_content_telemetry() {
+        AgentBuilder::new(MockCompletionModel::from_turns([
+            MockTurn::text("rejected"),
+            MockTurn::text("accepted"),
+        ]))
+        .record_content_telemetry(true)
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Repeat,
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .run()
+        .await
+        .expect("blocking retry should succeed");
+    }
+
+    async fn run_streaming_response_retry_with_content_telemetry() {
+        let mut stream = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+            [
+                MockStreamEvent::text("rejected"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            [
+                MockStreamEvent::text("accepted"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]))
+        .record_content_telemetry(true)
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Repeat,
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .stream();
+
+        let mut saw_final = false;
+        while let Some(item) = stream.next().await {
+            if let MultiTurnStreamItem::FinalResponse(response) =
+                item.expect("streaming retry item")
+            {
+                saw_final = true;
+                assert_eq!(response.output(), "accepted");
+            }
+        }
+        assert!(saw_final, "streaming retry should produce a final response");
+    }
+
+    #[tokio::test]
+    async fn response_retry_records_only_accepted_content_on_both_surfaces() {
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
+        let captured = TraceCapture::default();
+        let _default = tracing::subscriber::set_default(captured.subscriber());
+
+        // Register both transport callsites under this subscriber before
+        // inspecting field recordings.
+        run_blocking_response_retry_with_content_telemetry().await;
+        run_streaming_response_retry_with_content_telemetry().await;
+        tracing::callsite::rebuild_interest_cache();
+        captured.clear();
+
+        run_blocking_response_retry_with_content_telemetry().await;
+        let blocking = captured.spans();
+        let blocking_chats = blocking
+            .iter()
+            .filter(|span| span.name == "chat")
+            .collect::<Vec<_>>();
+        assert_eq!(blocking_chats.len(), 2);
+        assert!(
+            blocking_chats
+                .iter()
+                .all(|span| span.target == "rig::agent_chat")
+        );
+        assert!(
+            !blocking_chats[0]
+                .recorded
+                .iter()
+                .any(|(name, _)| name == "gen_ai.output.messages"),
+            "rejected blocking content must not be recorded as model output"
+        );
+        assert!(
+            blocking_chats[1]
+                .recorded
+                .iter()
+                .any(|(name, _)| name == "gen_ai.output.messages"),
+            "accepted blocking content must be recorded as model output"
+        );
+        let blocking_output = recorded_strings(blocking_chats[1], "gen_ai.output.messages");
+        assert!(
+            !blocking_output.is_empty(),
+            "accepted blocking output value"
+        );
+        assert!(
+            blocking_output
+                .iter()
+                .any(|value| value.contains("accepted"))
+        );
+        assert!(
+            blocking_output
+                .iter()
+                .all(|value| !value.contains("rejected"))
+        );
+        let blocking_completion = blocking
+            .iter()
+            .find(|span| span.name == "invoke_agent")
+            .map(|span| recorded_strings(span, "gen_ai.completion"))
+            .expect("accepted blocking run-level completion");
+        assert_eq!(blocking_completion, &["accepted"]);
+
+        captured.clear();
+        run_streaming_response_retry_with_content_telemetry().await;
+        let streaming = captured.spans();
+        // Both delivery modes use the current chat operation name. This
+        // checks accepted-content recording, not the retired chat_streaming label.
+        let streaming_chats = streaming
+            .iter()
+            .filter(|span| span.name == "chat")
+            .collect::<Vec<_>>();
+        assert_eq!(streaming_chats.len(), 2);
+        assert!(
+            streaming_chats
+                .iter()
+                .all(|span| span.target == "rig::agent_chat")
+        );
+        assert!(
+            !streaming_chats[0]
+                .recorded
+                .iter()
+                .any(|(name, _)| name == "gen_ai.output.messages"),
+            "rejected streaming content must not be recorded as model output"
+        );
+        assert!(
+            streaming_chats[1]
+                .recorded
+                .iter()
+                .any(|(name, _)| name == "gen_ai.output.messages"),
+            "accepted streaming content must be recorded as model output"
+        );
+        let streaming_output = recorded_strings(streaming_chats[1], "gen_ai.output.messages");
+        assert!(
+            !streaming_output.is_empty(),
+            "accepted streaming output value"
+        );
+        assert!(
+            streaming_output
+                .iter()
+                .any(|value| value.contains("accepted"))
+        );
+        assert!(
+            streaming_output
+                .iter()
+                .all(|value| !value.contains("rejected"))
+        );
+        let streaming_completion = streaming
+            .iter()
+            .find(|span| span.name == "invoke_agent")
+            .map(|span| recorded_strings(span, "gen_ai.completion"))
+            .expect("accepted streaming run-level completion");
+        assert_eq!(streaming_completion, &["accepted"]);
     }
 }
 
@@ -5065,8 +5247,11 @@ async fn completion_outcomes_carry_their_own_attempts_response_headers_streamed(
             let headers = self.headers.clone();
             Opening::new(async move {
                 let opened = opening.await?;
-                let headers = headers.lock().expect("header snapshots")
-                    .pop_front().expect("one header snapshot per attempt");
+                let headers = headers
+                    .lock()
+                    .expect("header snapshots")
+                    .pop_front()
+                    .expect("one header snapshot per attempt");
                 Ok(opened.with_captured_response_headers(headers))
             })
         }
@@ -5078,12 +5263,20 @@ async fn completion_outcomes_carry_their_own_attempts_response_headers_streamed(
             MockStreamEvent::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
             MockStreamEvent::FinalResponse(Default::default()),
         ],
-        vec![MockStreamEvent::text("5"), MockStreamEvent::FinalResponse(Default::default())],
+        vec![
+            MockStreamEvent::text("5"),
+            MockStreamEvent::FinalResponse(Default::default()),
+        ],
     ]);
-    let model = rig_core::Model::new(scripted.wire, CapturedHeaders {
-        inner: scripted.transport,
-        headers: Arc::new(Mutex::new([codex_headers("20"), codex_headers("21")].into())),
-    });
+    let model = rig_core::Model::new(
+        scripted.wire,
+        CapturedHeaders {
+            inner: scripted.transport,
+            headers: Arc::new(Mutex::new(
+                [codex_headers("20"), codex_headers("21")].into(),
+            )),
+        },
+    );
     let mut stream = AgentBuilder::new(model)
         .tool(crate::test_utils::MockAddTool)
         .add_hook(hook.clone())
@@ -5863,7 +6056,6 @@ fn no_dispatch_events_are_built_outside_the_scope() -> anyhow::Result<()> {
     Ok(())
 }
 
-
 fn phased_carried_answer_body(answer: &str) -> serde_json::Value {
     json!({
         "id":"resp_carried_answer", "object":"response", "created_at":0,
@@ -5882,21 +6074,30 @@ async fn a_decoded_phased_responses_answer_survives_agent_chat_output() {
     let body = phased_carried_answer_body(answer);
     let http = RecordingHttpClient::new(body.to_string().into_bytes());
     let model = rig_core::Model::new(
-        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"), http.clone(),
+        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"),
+        http.clone(),
     );
     let agent = AgentBuilder::new(model).build();
     let mut history = Vec::new();
-    let response = agent.chat("answer", &mut history).await.expect("the decoded answer succeeds");
+    let response = agent
+        .chat("answer", &mut history)
+        .await
+        .expect("the decoded answer succeeds");
     assert_eq!(response.output(), answer);
-    assert!(matches!(response.content.as_slice(), [AssistantContent::CarriedText(text)]
-        if text.text() == answer && text.phase.as_deref() == Some("final_answer")));
+    assert!(
+        matches!(response.content.as_slice(), [AssistantContent::CarriedText(text)]
+        if text.text() == answer && text.phase.as_deref() == Some("final_answer"))
+    );
     assert_eq!(response.completion_calls.len(), 1);
     assert_eq!(response.completion_calls[0].raw, body);
     assert_eq!(http.requests().len(), 1);
     let Some(Message::Assistant(turn)) = history.last() else {
         panic!("chat keeps the actual assistant answer in caller history");
     };
-    assert_eq!(rig_core::transcript::assistant_text_from_choice(&turn.content), answer);
+    assert_eq!(
+        rig_core::transcript::assistant_text_from_choice(&turn.content),
+        answer
+    );
 }
 
 #[tokio::test]
@@ -5913,22 +6114,29 @@ async fn carried_answer_telemetry_obeys_the_existing_content_consent_flag() {
         let body = phased_carried_answer_body(answer);
         let http = RecordingHttpClient::new(body.to_string().into_bytes());
         let model = rig_core::Model::new(
-            Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"), http.clone(),
+            Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"),
+            http.clone(),
         );
         let response = AgentBuilder::new(model)
-            .record_content_telemetry(consent).build()
-            .prompt("answer").run().await.expect("the decoded answer succeeds");
+            .record_content_telemetry(consent)
+            .build()
+            .prompt("answer")
+            .run()
+            .await
+            .expect("the decoded answer succeeds");
         assert_eq!(response.output(), answer);
         assert_eq!(http.requests().len(), 1);
         let recorded = capture.values_of("gen_ai.completion");
         if consent {
-            assert!(recorded.iter().any(|value| value.as_str() == Some(answer)), "{recorded:?}");
+            assert!(
+                recorded.iter().any(|value| value.as_str() == Some(answer)),
+                "{recorded:?}"
+            );
         } else {
             assert!(recorded.is_empty(), "{recorded:?}");
         }
     }
 }
-
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct CarriedOutputToolValue {
@@ -6002,4 +6210,890 @@ async fn typed_output_tool_recovery_accepts_a_decoded_phased_preface_and_complet
         "provider preface{\"x\":1}"
     );
     assert_eq!(http.requests().len(), 1);
+}
+
+#[derive(Clone, Debug, Default)]
+struct EscalatingCap {
+    calls: Arc<AtomicU32>,
+}
+
+impl AgentHook for EscalatingCap {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        _event: crate::agent::CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
+        let call = self.calls.fetch_add(1, SeqCst);
+        CompletionCallAction::patch(RequestPatch::new().max_tokens(if call == 0 {
+            16
+        } else {
+            512
+        }))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TerminationProbe {
+    observations: Arc<Mutex<Vec<Termination>>>,
+}
+
+impl TerminationProbe {
+    fn observations(&self) -> Vec<Termination> {
+        self.observations.lock().expect("observations").clone()
+    }
+}
+
+impl AgentHook for TerminationProbe {
+    async fn on_model_turn_finished(
+        &self,
+        _ctx: &HookContext,
+        event: ModelTurnFinished<'_>,
+    ) -> ModelTurnAction {
+        self.observations
+            .lock()
+            .expect("observations")
+            .push((event.finish_reason.cloned(), event.max_tokens));
+        ModelTurnAction::continue_run()
+    }
+}
+
+#[derive(Clone, Default)]
+struct StatefulCompletionPatch {
+    calls: Arc<AtomicU32>,
+}
+
+impl StatefulCompletionPatch {
+    fn calls(&self) -> u32 {
+        self.calls.load(SeqCst)
+    }
+}
+
+impl AgentHook for StatefulCompletionPatch {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        _event: crate::agent::CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
+        let call = self.calls.fetch_add(1, SeqCst);
+        CompletionCallAction::patch(RequestPatch::new().temperature(if call == 0 {
+            0.1
+        } else {
+            0.9
+        }))
+    }
+}
+
+type Termination = (Option<FinishReason>, Option<u64>);
+
+#[tokio::test]
+async fn retry_reports_the_second_attempts_own_effective_max_tokens() {
+    let probe = TerminationProbe::default();
+    let escalating = EscalatingCap::default();
+    let model = MockCompletionModel::from_turns([
+        MockTurn::text("rejected").with_finish_reason(FinishReason::Length),
+        MockTurn::text("accepted").with_finish_reason(FinishReason::Stop),
+    ]);
+
+    AgentBuilder::new(model.clone())
+        // The agent's baseline, which neither attempt should report.
+        .max_tokens(64)
+        .add_hook(escalating.clone())
+        // Ahead of the hook that asks for the repeat: a non-continue action
+        // short-circuits the hooks behind it, so a probe registered after
+        // `BoundedResponseRetry` would never see the truncated attempt.
+        .add_hook(probe.clone())
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Repeat,
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .run()
+        .await
+        .expect("repeat should recover");
+
+    assert_eq!(
+        probe.observations(),
+        vec![
+            (Some(FinishReason::Length), Some(16)),
+            (Some(FinishReason::Stop), Some(512)),
+        ],
+        "each attempt must report its own post-patch cap, not the agent baseline of 64"
+    );
+    // ...and what the hook reported is what the provider was actually sent.
+    let requests = model.requests();
+    assert_eq!(requests[0].max_tokens, Some(16));
+    assert_eq!(requests[1].max_tokens, Some(512));
+    assert_eq!(escalating.calls.load(SeqCst), 2);
+}
+
+#[tokio::test]
+async fn streaming_retry_reports_the_second_attempts_own_effective_max_tokens() {
+    let probe = TerminationProbe::default();
+    let escalating = EscalatingCap::default();
+    let model = MockCompletionModel::from_stream_turns([
+        [
+            MockStreamEvent::Text("rejected".to_string()),
+            MockStreamEvent::FinalResponse(rig_core::operation::Finish {
+                usage: Usage::default(),
+                reason: Some(FinishReason::Length),
+                ..Default::default()
+            }),
+        ],
+        [
+            MockStreamEvent::Text("accepted".to_string()),
+            MockStreamEvent::FinalResponse(rig_core::operation::Finish {
+                usage: Usage::default(),
+                reason: Some(FinishReason::Stop),
+                ..Default::default()
+            }),
+        ],
+    ]);
+
+    let mut stream = AgentBuilder::new(model.clone())
+        .max_tokens(64)
+        .add_hook(escalating.clone())
+        .add_hook(probe.clone())
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Repeat,
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .stream();
+    while let Some(item) = stream.next().await {
+        item.expect("streaming item");
+    }
+
+    assert_eq!(
+        probe.observations(),
+        vec![
+            (Some(FinishReason::Length), Some(16)),
+            (Some(FinishReason::Stop), Some(512)),
+        ],
+        "streaming must report each attempt's own post-patch cap, as blocking does"
+    );
+    let requests = model.requests();
+    assert_eq!(requests[0].max_tokens, Some(16));
+    assert_eq!(requests[1].max_tokens, Some(512));
+}
+
+#[tokio::test]
+async fn blocking_model_turn_feedback_preserves_rejected_response() {
+    let model =
+        MockCompletionModel::from_turns([MockTurn::text("rejected"), MockTurn::text("accepted")]);
+    let response = AgentBuilder::new(model.clone())
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Feedback("try another approach"),
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .run()
+        .await
+        .expect("feedback retry should recover");
+
+    assert_eq!(response.output(), "accepted");
+    assert_eq!(
+        response.messages,
+        vec![
+            Message::user("question"),
+            mock_reply("rejected"),
+            Message::user("try another approach"),
+            mock_reply("accepted"),
+        ]
+    );
+    let second_request = &model.requests()[1];
+    assert_eq!(
+        second_request.chat_history.clone(),
+        vec![
+            Message::user("question"),
+            mock_reply("rejected"),
+            Message::user("try another approach"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn blocking_model_turn_repeat_preserves_prompt_history_with_fresh_preparation() {
+    let first_usage = retry_usage(10, 3);
+    let second_usage = retry_usage(7, 2);
+    let completion_patch = StatefulCompletionPatch::default();
+    let model = MockCompletionModel::from_turns([
+        MockTurn::text("rejected").with_usage(first_usage),
+        MockTurn::text("accepted").with_usage(second_usage),
+    ]);
+    let response = AgentBuilder::new(model.clone())
+        .add_hook(completion_patch.clone())
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Repeat,
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .run()
+        .await
+        .expect("repeat should recover");
+
+    assert_eq!(response.output(), "accepted");
+    assert_eq!(response.usage, first_usage + second_usage);
+    assert_eq!(response.completion_calls.len(), 2);
+    let messages = response.messages;
+    assert_eq!(
+        messages,
+        vec![Message::user("question"), mock_reply("accepted")]
+    );
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    let first = requests[0].chat_history.clone();
+    let second = requests[1].chat_history.clone();
+    assert_eq!(first, vec![Message::user("question")]);
+    assert_eq!(
+        second, first,
+        "Repeat must preserve the prompt and preceding history"
+    );
+    assert_eq!(requests[0].temperature, Some(0.1));
+    assert_eq!(requests[1].temperature, Some(0.9));
+    assert_eq!(completion_patch.calls(), 2);
+}
+
+#[derive(Clone, Default)]
+struct RawCaptureHook {
+    completion_responses: Arc<Mutex<Vec<serde_json::Value>>>,
+    turns: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl RawCaptureHook {
+    fn completion_responses(&self) -> Vec<serde_json::Value> {
+        self.completion_responses
+            .lock()
+            .expect("completion response raws")
+            .clone()
+    }
+
+    fn turns(&self) -> Vec<serde_json::Value> {
+        self.turns.lock().expect("turn raws").clone()
+    }
+}
+
+impl AgentHook for RawCaptureHook {
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        if let Some(response) = event.completion() {
+            self.completion_responses
+                .lock()
+                .expect("completion response raws")
+                .push(response.raw.clone());
+        }
+        OutcomeAction::proceed()
+    }
+
+    async fn on_model_turn_finished(
+        &self,
+        _ctx: &HookContext,
+        event: ModelTurnFinished<'_>,
+    ) -> ModelTurnAction {
+        self.turns
+            .lock()
+            .expect("turn raws")
+            .push(event.raw.clone());
+        ModelTurnAction::continue_run()
+    }
+}
+
+#[derive(Clone, Default)]
+struct RetryOnceCapturingRaw {
+    seen: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl AgentHook for RetryOnceCapturingRaw {
+    async fn on_model_turn_finished(
+        &self,
+        _ctx: &HookContext,
+        event: ModelTurnFinished<'_>,
+    ) -> ModelTurnAction {
+        let mut seen = self.seen.lock().expect("retry raws");
+        seen.push(event.raw.clone());
+        if seen.len() == 1 {
+            ModelTurnAction::repeat()
+        } else {
+            ModelTurnAction::continue_run()
+        }
+    }
+}
+
+fn raw_payload(attempt: &str) -> serde_json::Value {
+    json!({
+        "id": format!("resp-{attempt}"),
+        "system_fingerprint": format!("fp-{attempt}"),
+        "provider_only": attempt,
+    })
+}
+
+fn call_raws(calls: &[crate::agent::CompletionCall]) -> Vec<serde_json::Value> {
+    calls.iter().map(|call| call.raw.clone()).collect()
+}
+
+#[tokio::test]
+async fn hook_events_carry_raw_blocking() {
+    let payload = raw_payload("blocking");
+
+    let hook = RawCaptureHook::default();
+    let response = AgentBuilder::new(MockCompletionModel::from_turns([
+        MockTurn::text("reply").with_raw(payload.clone())
+    ]))
+    .add_hook(hook.clone())
+    .build()
+    .prompt("prompt")
+    .await
+    .expect("blocking response");
+
+    assert_eq!(hook.completion_responses(), std::slice::from_ref(&payload));
+    assert_eq!(hook.turns(), std::slice::from_ref(&payload));
+    assert_eq!(call_raws(&response.completion_calls), [payload]);
+}
+
+#[tokio::test]
+async fn completion_calls_carry_each_attempts_own_raw_blocking() {
+    let first = raw_payload("turn-1");
+    let second = raw_payload("turn-2");
+    assert_ne!(first, second);
+
+    let hook = RawCaptureHook::default();
+    let response = AgentBuilder::new(MockCompletionModel::from_turns([
+        MockTurn::tool_call("tc1", "add", json!({"x": 2, "y": 3})).with_raw(first.clone()),
+        MockTurn::text("5").with_raw(second.clone()),
+    ]))
+    .tool(crate::test_utils::MockAddTool)
+    .add_hook(hook.clone())
+    .build()
+    .prompt("add 2 and 3")
+    .max_turns(3)
+    .await
+    .expect("blocking tool run");
+
+    assert_eq!(
+        call_raws(&response.completion_calls),
+        [first.clone(), second.clone()],
+        "each recorded call carries its own attempt's payload"
+    );
+    assert_eq!(hook.completion_responses(), [first.clone(), second.clone()]);
+    assert_eq!(hook.turns(), [first, second]);
+}
+
+#[tokio::test]
+async fn retried_turn_records_the_retried_attempts_own_raw_blocking() {
+    let first = raw_payload("attempt-1");
+    let second = raw_payload("attempt-2");
+
+    let hook = RetryOnceCapturingRaw::default();
+    let response = AgentBuilder::new(MockCompletionModel::from_turns([
+        MockTurn::text("first attempt").with_raw(first.clone()),
+        MockTurn::text("second attempt").with_raw(second.clone()),
+    ]))
+    .add_hook(hook.clone())
+    .build()
+    .prompt("prompt")
+    .max_turns(3)
+    .await
+    .expect("retried run");
+
+    assert_eq!(response.output(), "second attempt");
+    assert_eq!(
+        *hook.seen.lock().expect("retry raws"),
+        [first.clone(), second.clone()],
+        "each attempt's event carries that attempt's payload — no stale leak"
+    );
+    assert_eq!(
+        call_raws(&response.completion_calls),
+        [first, second],
+        "the retried attempt's record carries the retried attempt's payload"
+    );
+}
+
+#[tokio::test]
+async fn response_retry_preserves_model_turn_hook_order_across_surfaces() {
+    let blocking_events = RecordingHook::default();
+    AgentBuilder::new(MockCompletionModel::from_turns([
+        MockTurn::text("rejected"),
+        MockTurn::text("accepted"),
+    ]))
+    .add_hook(blocking_events.clone())
+    .add_hook(BoundedResponseRetry::new(
+        "rejected",
+        1,
+        TestRetryMode::Repeat,
+    ))
+    .build()
+    .prompt("question")
+    .max_turns(2)
+    .run()
+    .await
+    .expect("blocking retry");
+
+    let streaming_events = RecordingHook::default();
+    let mut stream = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        [
+            MockStreamEvent::text("rejected"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        [
+            MockStreamEvent::text("accepted"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]))
+    .add_hook(streaming_events.clone())
+    .add_hook(BoundedResponseRetry::new(
+        "rejected",
+        1,
+        TestRetryMode::Repeat,
+    ))
+    .build()
+    .prompt("question")
+    .max_turns(2)
+    .stream();
+    while let Some(item) = stream.next().await {
+        item.expect("streaming retry item");
+    }
+
+    let shared_order = |events: &RecordingHook| {
+        events
+            .events
+            .lock()
+            .expect("events")
+            .iter()
+            .copied()
+            .filter(|event| {
+                matches!(
+                    event,
+                    StepEventKind::CompletionCall | StepEventKind::ModelTurnFinished
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        StepEventKind::CompletionCall,
+        StepEventKind::ModelTurnFinished,
+        StepEventKind::CompletionCall,
+        StepEventKind::ModelTurnFinished,
+    ];
+    assert_eq!(shared_order(&blocking_events), expected);
+    assert_eq!(shared_order(&streaming_events), expected);
+
+    let blocking_order = blocking_events.events.lock().expect("events").clone();
+    assert_eq!(
+        blocking_order,
+        vec![
+            StepEventKind::CompletionCall,
+            StepEventKind::CompletionDispatch,
+            StepEventKind::ModelTurnFinished,
+            StepEventKind::CompletionCall,
+            StepEventKind::CompletionDispatch,
+            StepEventKind::ModelTurnFinished,
+        ]
+    );
+    let streaming_order = streaming_events.events.lock().expect("events").clone();
+    assert_eq!(
+        streaming_order,
+        vec![
+            StepEventKind::CompletionCall,
+            StepEventKind::TextDelta,
+            StepEventKind::CompletionDispatch,
+            StepEventKind::ModelTurnFinished,
+            StepEventKind::CompletionCall,
+            StepEventKind::TextDelta,
+            StepEventKind::CompletionDispatch,
+            StepEventKind::ModelTurnFinished,
+        ]
+    );
+}
+
+#[derive(serde::Deserialize)]
+struct SecondGenerationArgs {
+    new: String,
+}
+
+struct SecondGenerationTool(Arc<AtomicU32>);
+
+impl Tool for SecondGenerationTool {
+    const NAME: &'static str = FirstGenerationTool::NAME;
+    type Error = rig::tool::ToolExecutionError;
+    type Args = SecondGenerationArgs;
+    type Output = String;
+
+    fn description(&self) -> String {
+        "second generation schema".to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {"new": {"type": "string"}},
+            "required": ["new"]
+        })
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, ToolExecutionError> {
+        self.0.fetch_add(1, SeqCst);
+        Ok(format!("second:{}", args.new))
+    }
+}
+
+#[derive(Default)]
+struct LateFinalResultIndex {
+    searches: AtomicU32,
+}
+
+impl VectorStoreIndex for LateFinalResultIndex {
+    type Filter = Filter<serde_json::Value>;
+
+    async fn top_n<T: for<'a> Deserialize<'a> + WasmCompatSend>(
+        &self,
+        _req: VectorSearchRequest,
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
+        Ok(Vec::new())
+    }
+
+    async fn top_n_ids(
+        &self,
+        _req: VectorSearchRequest,
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
+        if self.searches.fetch_add(1, SeqCst) == 0 {
+            Ok(Vec::new())
+        } else {
+            Ok(vec![VectorSearchIdResult {
+                score: 1.0,
+                id: "final_result".to_string(),
+            }])
+        }
+    }
+}
+
+#[tokio::test]
+async fn blocking_turn_dispatches_the_registry_generation_it_advertised() {
+    let first_calls = Arc::new(AtomicU32::new(0));
+    let second_calls = Arc::new(AtomicU32::new(0));
+    let handle: ToolServerHandle = ToolServer::new()
+        .tool(FirstGenerationTool(first_calls.clone()))
+        .run();
+    let inner = MockCompletionModel::from_turns([
+        MockTurn::tool_call(
+            "tc-generation",
+            FirstGenerationTool::NAME,
+            json!({"old": "payload"}),
+        ),
+        MockTurn::text("done"),
+    ]);
+    let (model, request_started, release_response) = PausingScript::model(inner);
+    let runner = AgentBuilder::new(model)
+        .tool_server_handle(handle.clone())
+        .build()
+        .prompt("use the generation tool")
+        .max_turns(3);
+
+    let run = runner.run();
+    let replace = async {
+        request_started.notified().await;
+        handle.add_tool(SecondGenerationTool(second_calls.clone()));
+        release_response.notify_one();
+    };
+    let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(run, replace)
+    })
+    .await
+    .expect("in-flight blocking replacement must not hang");
+    let response = response.expect("blocking run should use its pinned tool generation");
+
+    assert_eq!(response.output(), "done");
+    assert_eq!(first_calls.load(SeqCst), 1);
+    assert_eq!(second_calls.load(SeqCst), 0);
+}
+
+#[tokio::test]
+async fn streaming_turn_dispatches_the_registry_generation_it_advertised() {
+    let first_calls = Arc::new(AtomicU32::new(0));
+    let second_calls = Arc::new(AtomicU32::new(0));
+    let handle: ToolServerHandle = ToolServer::new()
+        .tool(FirstGenerationTool(first_calls.clone()))
+        .run();
+    let turns = [
+        ScriptedTurn::ToolCalls(vec![ScriptedToolCall {
+            id: "tc-generation",
+            name: FirstGenerationTool::NAME,
+            args: json!({"old": "payload"}),
+        }]),
+        ScriptedTurn::Text("done"),
+    ];
+    let inner = MockCompletionModel::from_stream_turns(
+        turns
+            .iter()
+            .map(|turn| turn.as_stream_events(StreamShape::Complete)),
+    );
+    let (model, request_started, release_response) = PausingScript::model(inner);
+    let runner = AgentBuilder::new(model)
+        .tool_server_handle(handle.clone())
+        .build()
+        .prompt("use the generation tool")
+        .max_turns(3);
+
+    let drive = async {
+        let mut stream = runner.stream();
+        let mut final_output = None;
+        while let Some(item) = stream.next().await {
+            if let MultiTurnStreamItem::FinalResponse(response) =
+                item.expect("streaming run should use its pinned tool generation")
+            {
+                final_output = Some(response.output().to_string());
+            }
+        }
+        final_output
+    };
+    let replace = async {
+        request_started.notified().await;
+        handle.add_tool(SecondGenerationTool(second_calls.clone()));
+        release_response.notify_one();
+    };
+    let (final_output, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(drive, replace)
+    })
+    .await
+    .expect("in-flight streaming replacement must not hang");
+
+    assert_eq!(final_output.as_deref(), Some("done"));
+    assert_eq!(first_calls.load(SeqCst), 1);
+    assert_eq!(second_calls.load(SeqCst), 0);
+}
+
+#[tokio::test]
+async fn initial_output_tool_collision_uses_a_unique_synthetic_name() {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("real", "final_result", json!({})),
+        MockTurn::tool_call("output", "final_result_1", json!({ "answer": "done" })),
+    ]);
+    let probe = model.clone();
+    let response = AgentBuilder::new(model)
+        .tool(FinalResultTool)
+        .output_schema::<Answer>()
+        .output_mode(OutputMode::Tool)
+        .build()
+        .prompt("go")
+        .max_turns(2)
+        .run()
+        .await
+        .expect("the real tool should dispatch before the unique output tool finalizes");
+
+    assert!(response.output().contains("done"));
+    let requests = probe.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "real-tool dispatch must continue to a second model turn"
+    );
+    let tool_names = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tool_names.len(), 2);
+    for expected in ["final_result", "final_result_1"] {
+        assert_eq!(
+            tool_names.iter().filter(|name| **name == expected).count(),
+            1,
+            "the first request should advertise `{expected}` exactly once: {tool_names:?}"
+        );
+    }
+
+    assert!(
+        requests[1].chat_history.iter().any(|message| matches!(
+            message,
+            Message::User { content }
+                if content.iter().any(|item| matches!(
+                    item,
+                    UserContent::ToolResult(result)
+                        if result.call.provider().map(rig_core::message::ProviderCallId::as_str) == Some("real")
+                            && result.content.iter().any(|content| matches!(
+                                content,
+                                rig_core::message::ToolResultContent::Text(text)
+                                    if text.text == "real final_result output"
+                            ))
+                ))
+        )),
+        "the real `final_result` call must execute normally and its result must reach the follow-up request"
+    );
+}
+
+#[tokio::test]
+async fn late_output_tool_collision_fails_before_blocking_provider_for_all_choices() {
+    let cases = [
+        ("inherited", None),
+        (
+            "required",
+            Some(RequestPatch::new().tool_choice(ToolChoice::Required)),
+        ),
+        (
+            "none",
+            Some(RequestPatch::new().tool_choice(ToolChoice::None)),
+        ),
+        (
+            "specific",
+            Some(RequestPatch::new().tool_choice(ToolChoice::Specific {
+                function_names: vec![
+                    rig_core::message::ToolName::new("final_result").expect("original tool name"),
+                ],
+            })),
+        ),
+    ];
+
+    for (case, second_turn_patch) in cases {
+        let handle = ToolServer::new().tool(MockAddTool).run();
+        let model = MockCompletionModel::from_turns([
+            MockTurn::tool_call("add-1", "add", json!({ "x": 1, "y": 2 })),
+            MockTurn::tool_call(
+                "shadowed",
+                "final_result",
+                json!({ "answer": "wrongly finalized" }),
+            ),
+        ]);
+        let probe = model.clone();
+        let err = AgentBuilder::new(model)
+            .tool_server_handle(handle.clone())
+            .output_schema::<Answer>()
+            .output_mode(OutputMode::Tool)
+            .add_hook(RegisterLateFinalResultTool {
+                handle,
+                second_turn_patch,
+            })
+            .build()
+            .prompt("go")
+            .max_turns(3)
+            .run()
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, PromptError::Provider(ProviderError::Request(_))),
+            "{case}: expected a local completion request error, got {err:?}"
+        );
+        assert_eq!(
+            probe.request_count(),
+            1,
+            "{case}: the colliding second request must not reach the provider"
+        );
+        assert_structured_output_collision_error(&err.to_string());
+    }
+}
+
+#[tokio::test]
+async fn late_output_tool_collision_fails_before_streaming_provider() {
+    let handle = ToolServer::new().tool(MockAddTool).run();
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("add-1", "add", json!({ "x": 1, "y": 2 })),
+            MockStreamEvent::final_response_with_total_tokens(0),
+        ],
+        vec![
+            MockStreamEvent::tool_call(
+                "shadowed",
+                "final_result",
+                json!({ "answer": "wrongly finalized" }),
+            ),
+            MockStreamEvent::final_response_with_total_tokens(0),
+        ],
+    ]);
+    let probe = model.clone();
+    let mut stream = AgentBuilder::new(model)
+        .tool_server_handle(handle.clone())
+        .output_schema::<Answer>()
+        .output_mode(OutputMode::Tool)
+        .add_hook(RegisterLateFinalResultTool {
+            handle,
+            second_turn_patch: None,
+        })
+        .build()
+        .prompt("go")
+        .max_turns(3)
+        .stream();
+
+    let mut collisions = Vec::new();
+    let mut saw_final_response = false;
+    while let Some(item) = stream.next().await {
+        match item {
+            Err(err) => collisions.push(err),
+            Ok(MultiTurnStreamItem::FinalResponse(_)) => saw_final_response = true,
+            Ok(_) => {}
+        }
+    }
+    assert_eq!(
+        collisions.len(),
+        1,
+        "the stream should terminate with exactly one collision error"
+    );
+    assert!(
+        !saw_final_response,
+        "a collision error must terminate the stream without a final response"
+    );
+    let err = collisions.pop().expect("one collision error was asserted");
+
+    assert!(
+        matches!(&err, PromptError::Provider(ProviderError::Request(_))),
+        "expected a local streaming completion request error, got {err:?}"
+    );
+    assert_eq!(
+        probe.request_count(),
+        1,
+        "the colliding second stream must not reach the provider"
+    );
+    assert_structured_output_collision_error(&err.to_string());
+}
+
+#[tokio::test]
+async fn retrieved_output_tool_collision_fails_before_provider_request() {
+    let mut retrieved_tools = ToolSet::default();
+    retrieved_tools.add_tool(FinalResultTool);
+    let handle = ToolServer::new()
+        .tool(MockAddTool)
+        .retrieved_tools(1, LateFinalResultIndex::default(), retrieved_tools)
+        .run();
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("add-1", "add", json!({ "x": 1, "y": 2 })),
+        MockTurn::tool_call(
+            "shadowed",
+            "final_result",
+            json!({ "answer": "wrongly finalized" }),
+        ),
+    ]);
+    let probe = model.clone();
+    let err = AgentBuilder::new(model)
+        .tool_server_handle(handle)
+        .output_schema::<Answer>()
+        .output_mode(OutputMode::Tool)
+        .build()
+        .prompt("go")
+        .max_turns(3)
+        .run()
+        .await
+        .expect_err("the retrieved second-turn collision should fail locally");
+
+    assert!(matches!(
+        &err,
+        PromptError::Provider(ProviderError::Request(_))
+    ));
+    assert_eq!(
+        probe.request_count(),
+        1,
+        "the colliding retrieved tool must prevent the second provider request"
+    );
+    assert_structured_output_collision_error(&err.to_string());
 }

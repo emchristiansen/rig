@@ -426,8 +426,8 @@ fn grpc_unary_and_streamed_finish_include_tool_input_and_reasoning_output() {
             "cachedContentTokenCount": 40, "candidatesTokenCount": 30,
             "thoughtsTokenCount": 34, "totalTokenCount": 239}
     });
-    let frame: GenerateContentResponse = crate::rest::from_rest(raw.clone())
-        .expect("the real protobuf fixture transcodes");
+    let frame: GenerateContentResponse =
+        crate::rest::from_rest(raw.clone()).expect("the real protobuf fixture transcodes");
     let unary = complete(frame.clone()).expect("the real unary decoder completes");
     let streamed = futures::executor::block_on(stream_from_events(vec![Ok(frame)]).finish())
         .expect("the real streamed decoder completes");
@@ -441,7 +441,10 @@ fn grpc_unary_and_streamed_finish_include_tool_input_and_reasoning_output() {
         assert_eq!(response.usage.cache_creation_input_tokens, None);
         assert_eq!(response.choice.len(), 1);
         assert_eq!(response.text(), "hi");
-        assert_eq!(response.finish_reason(), Some(rig_core::completion::FinishReason::Stop));
+        assert_eq!(
+            response.finish_reason(),
+            Some(rig_core::completion::FinishReason::Stop)
+        );
         assert_eq!(response.response_id(), Some("usage-190-grpc"));
         assert_eq!(response.model(), Some("gemini-2.5-flash"));
         assert_eq!(response.raw, raw);
@@ -456,8 +459,8 @@ fn grpc_missing_candidate_and_base_counts_and_negative_cast_overflow_use_the_rea
         "usageMetadata": {"toolUsePromptTokenCount": 75,
             "cachedContentTokenCount": 40, "thoughtsTokenCount": 34}
     });
-    let frame: GenerateContentResponse = crate::rest::from_rest(raw.clone())
-        .expect("the missing-count protobuf fixture transcodes");
+    let frame: GenerateContentResponse =
+        crate::rest::from_rest(raw.clone()).expect("the missing-count protobuf fixture transcodes");
     let unary = complete(frame.clone()).expect("missing counts stay optional");
     let streamed = futures::executor::block_on(stream_from_events(vec![Ok(frame)]).finish())
         .expect("missing counts stay optional when streamed");
@@ -471,14 +474,18 @@ fn grpc_missing_candidate_and_base_counts_and_negative_cast_overflow_use_the_rea
         assert_eq!(response.raw, raw);
     }
     for (usage, message) in [
-        (serde_json::json!({"promptTokenCount": -1, "toolUsePromptTokenCount": 1}),
-            "Gemini input token count overflow"),
-        (serde_json::json!({"candidatesTokenCount": -1, "thoughtsTokenCount": 1}),
-            "Gemini output token count overflow"),
+        (
+            serde_json::json!({"promptTokenCount": -1, "toolUsePromptTokenCount": 1}),
+            "Gemini input token count overflow",
+        ),
+        (
+            serde_json::json!({"candidatesTokenCount": -1, "thoughtsTokenCount": 1}),
+            "Gemini output token count overflow",
+        ),
     ] {
         raw["usageMetadata"] = usage;
-        let frame: GenerateContentResponse = crate::rest::from_rest(raw.clone())
-            .expect("signed counts still transcode unchanged");
+        let frame: GenerateContentResponse =
+            crate::rest::from_rest(raw.clone()).expect("signed counts still transcode unchanged");
         let unary = complete(frame.clone()).expect_err("the existing signed cast overflows");
         let streamed = futures::executor::block_on(stream_from_events(vec![Ok(frame)]).finish())
             .expect_err("the existing signed cast overflows when streamed");

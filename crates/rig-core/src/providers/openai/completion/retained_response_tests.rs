@@ -31,7 +31,11 @@ fn recorded_null_envelope_fields_keep_exact_defaults_and_omissions() {
     assert_eq!(serialized["system_fingerprint"], Value::Null);
     assert_eq!(serialized["usage"], Value::Null);
     assert!(serialized.get("service_tier").is_none());
-    assert!(serialized["choices"][0]["message"].get("tool_calls").is_none());
+    assert!(
+        serialized["choices"][0]["message"]
+            .get("tool_calls")
+            .is_none()
+    );
 }
 
 #[test]
@@ -59,18 +63,26 @@ fn recorded_gateway_role_reasoning_alias_and_signature_remain_typed() {
 #[test]
 fn recorded_length_drops_only_cut_calls_and_retains_valid_sibling() {
     for finish in ["length", "max_tokens", "model_length"] {
-        let raw = recorded(finish, json!([
-            function("before", json!("{\"x\":1}")),
-            function("empty", json!("")),
-            function("cut", json!("{\"x\":")),
-            function("after", json!({"x": 2}))
-        ]));
+        let raw = recorded(
+            finish,
+            json!([
+                function("before", json!("{\"x\":1}")),
+                function("empty", json!("")),
+                function("cut", json!("{\"x\":")),
+                function("after", json!({"x": 2}))
+            ]),
+        );
         let response: CompletionResponse = serde_json::from_value(raw).unwrap();
         let Message::Assistant { tool_calls, .. } = &response.choices[0].message else {
             panic!("recorded assistant changed role");
         };
-        assert_eq!(tool_calls.iter().map(|call| call.id.as_str()).collect::<Vec<_>>(),
-            ["before", "after"]);
+        assert_eq!(
+            tool_calls
+                .iter()
+                .map(|call| call.id.as_str())
+                .collect::<Vec<_>>(),
+            ["before", "after"]
+        );
         assert_eq!(tool_calls[0].function.arguments, json!({"x": 1}));
         assert_eq!(tool_calls[1].function.arguments, json!({"x": 2}));
         assert_eq!(response.choices[0].finish_reason, finish);
@@ -81,38 +93,56 @@ fn recorded_length_drops_only_cut_calls_and_retains_valid_sibling() {
 fn recorded_nonlength_malformed_arguments_remain_errors() {
     for finish in ["stop", "tool_calls", "future_finish", "LENGTH"] {
         let raw = recorded(finish, json!([function("cut", json!("{\"x\":"))]));
-        assert!(serde_json::from_value::<CompletionResponse>(raw).is_err(), "{finish}");
+        assert!(
+            serde_json::from_value::<CompletionResponse>(raw).is_err(),
+            "{finish}"
+        );
     }
 }
 
 #[test]
 fn recorded_length_repair_does_not_hide_missing_function_name() {
-    let raw = recorded("length", json!([{
-        "id": "cut", "function": {"arguments": ""}
-    }]));
+    let raw = recorded(
+        "length",
+        json!([{
+            "id": "cut", "function": {"arguments": ""}
+        }]),
+    );
     let strict_error = serde_json::from_value::<Choice>(raw["choices"][0].clone()).unwrap_err();
     let error = serde_json::from_value::<CompletionResponse>(raw).unwrap_err();
     assert_eq!(error.to_string(), strict_error.to_string());
-    let valid_arguments = recorded("length", json!([{
-        "id": "cut", "function": {"arguments": "{}"}
-    }]));
+    let valid_arguments = recorded(
+        "length",
+        json!([{
+            "id": "cut", "function": {"arguments": "{}"}
+        }]),
+    );
     let error = serde_json::from_value::<CompletionResponse>(valid_arguments).unwrap_err();
     assert_eq!(error.to_string(), "missing field `name`");
 }
 
 #[test]
 fn recorded_length_repair_does_not_hide_wrong_call_identity_type() {
-    let raw = recorded("length", json!([{
-        "id": 7, "function": {"name": "lookup", "arguments": ""}
-    }]));
+    let raw = recorded(
+        "length",
+        json!([{
+            "id": 7, "function": {"name": "lookup", "arguments": ""}
+        }]),
+    );
     let strict_error = serde_json::from_value::<Choice>(raw["choices"][0].clone()).unwrap_err();
     let error = serde_json::from_value::<CompletionResponse>(raw).unwrap_err();
     assert_eq!(error.to_string(), strict_error.to_string());
-    let valid_arguments = recorded("length", json!([{
-        "id": 7, "function": {"name": "lookup", "arguments": "{}"}
-    }]));
+    let valid_arguments = recorded(
+        "length",
+        json!([{
+            "id": 7, "function": {"name": "lookup", "arguments": "{}"}
+        }]),
+    );
     let error = serde_json::from_value::<CompletionResponse>(valid_arguments).unwrap_err();
-    assert_eq!(error.to_string(), "invalid type: integer `7`, expected a string");
+    assert_eq!(
+        error.to_string(),
+        "invalid type: integer `7`, expected a string"
+    );
 }
 
 #[test]
@@ -161,16 +191,24 @@ fn recorded_usage_keeps_groq_timings_audio_cache_and_root_type_identity() {
 fn recorded_message_dependencies_keep_user_and_tool_result_serde() {
     let user: Message = serde_json::from_value(json!({
         "role": "user", "content": "question"
-    })).unwrap();
-    assert_eq!(serde_json::to_value(user).unwrap(), json!({
-        "role": "user", "content": "question"
-    }));
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(user).unwrap(),
+        json!({
+            "role": "user", "content": "question"
+        })
+    );
     let tool: Message = serde_json::from_value(json!({
         "role": "tool", "tool_call_id": "provider-call",
         "content": [{"type": "text", "text": "result"},
             {"type": "image_url", "image_url": {"url": "https://example.invalid/image"}}]
-    })).unwrap();
+    }))
+    .unwrap();
     let serialized = serde_json::to_value(tool).unwrap();
     assert_eq!(serialized["tool_call_id"], "provider-call");
-    assert_eq!(serialized["content"][1]["image_url"], json!({"url": "https://example.invalid/image"}));
+    assert_eq!(
+        serialized["content"][1]["image_url"],
+        json!({"url": "https://example.invalid/image"})
+    );
 }

@@ -14,13 +14,18 @@ fn a_companion_frame_keeps_received_bytes_and_the_framing_reason_without_reparsi
         assert_eq!(corrupt.frame_bytes(), Some(bytes.as_slice()));
         assert_eq!(corrupt.evidence(), &FrameEvidence::Bytes(bytes.clone()));
         assert_eq!(corrupt.error().to_string(), reason);
-        let display = format!("frame failed to decode: {reason}; frame bytes: {}", bytes.escape_ascii());
+        let display = format!(
+            "frame failed to decode: {reason}; frame bytes: {}",
+            bytes.escape_ascii()
+        );
         assert_eq!(corrupt.to_string(), display);
         let error = ProviderError::CorruptFrame(Arc::new(corrupt));
         assert_eq!(error.kind(), ErrorKind::Json);
         let report = error.report();
         assert_eq!(report.source_chain, [display, reason.to_owned()]);
-        let ErrorDetail::CorruptFrame(detail) = report.detail.as_ref().expect("typed frame evidence") else {
+        let ErrorDetail::CorruptFrame(detail) =
+            report.detail.as_ref().expect("typed frame evidence")
+        else {
             panic!("the corrupt-frame classification survives reporting");
         };
         assert_eq!(detail.evidence, FrameEvidence::Bytes(bytes.clone()));
@@ -30,7 +35,10 @@ fn a_companion_frame_keeps_received_bytes_and_the_framing_reason_without_reparsi
             json!({"evidence":{"kind":"bytes","frame":bytes},"error":reason}),
         );
         let serialized = serde_json::to_value(&report).expect("serialize report");
-        assert_eq!(serde_json::from_value::<ErrorReport>(serialized).expect("read exact report"), report);
+        assert_eq!(
+            serde_json::from_value::<ErrorReport>(serialized).expect("read exact report"),
+            report
+        );
     }
 }
 

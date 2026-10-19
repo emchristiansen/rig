@@ -215,7 +215,10 @@ fn selected_non_reasoning_model_overrides_reasoning_wire_default_for_ciphertext(
     let mut request = prompt().provider_options(shared(OpenAiShared::default().store(false)));
     request.model = Some("gpt-4o-mini".to_owned());
     let body = prepared_body_of(&wire, request);
-    assert_eq!(body, merged(baseline, json!({"model":"gpt-4o-mini", "store":false})));
+    assert_eq!(
+        body,
+        merged(baseline, json!({"model":"gpt-4o-mini", "store":false}))
+    );
     assert!(body.get("include").is_none());
 }
 

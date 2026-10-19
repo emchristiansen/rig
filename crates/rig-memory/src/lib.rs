@@ -354,8 +354,8 @@ impl HeuristicTokenCounter {
                 self.bytes_to_tokens(item.payload.item.to_string().len())
             }
             AssistantContent::CustomToolCall(call) => {
-                let name_bytes = call.name.as_str().len()
-                    + call.namespace.as_ref().map_or(0, String::len);
+                let name_bytes =
+                    call.name.as_str().len() + call.namespace.as_ref().map_or(0, String::len);
                 self.bytes_to_tokens(name_bytes + call.input.len())
             }
             AssistantContent::Image(_) => self.per_attachment_tokens,
@@ -378,9 +378,7 @@ impl TokenCounter for HeuristicTokenCounter {
     fn count(&self, message: &Message) -> usize {
         let content_tokens: usize = match message {
             Message::User { content } => content.iter().map(|c| self.count_user(c)).sum(),
-            Message::Assistant(turn) => {
-                turn.content.iter().map(|c| self.count_assistant(c)).sum()
-            }
+            Message::Assistant(turn) => turn.content.iter().map(|c| self.count_assistant(c)).sum(),
             Message::System { content } => self.bytes_to_tokens(content.len()),
         };
         content_tokens.saturating_add(self.per_message_overhead)

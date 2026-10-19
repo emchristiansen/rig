@@ -825,10 +825,7 @@ async fn a_failing_credential_source_refuses_through_the_copilot_wrapper() {
 }
 
 // Endpoint intent survives the in-memory credential exchange independently of its value.
-fn recorded_copilot_exchange() -> (
-    RecordingHttpClient,
-    super::super::auth::Authenticator,
-) {
+fn recorded_copilot_exchange() -> (RecordingHttpClient, super::super::auth::Authenticator) {
     use super::super::auth::{AuthSource, Authenticator, DeviceCodeHandler};
 
     let http = RecordingHttpClient::new(
@@ -847,8 +844,14 @@ fn recorded_copilot_exchange() -> (
 fn assert_one_recorded_copilot_exchange(http: &RecordingHttpClient) {
     let requests = http.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].uri, "https://api.github.com/copilot_internal/v2/token");
-    assert_eq!(requests[0].headers[http::header::AUTHORIZATION], "token synthetic-bootstrap");
+    assert_eq!(
+        requests[0].uri,
+        "https://api.github.com/copilot_internal/v2/token"
+    );
+    assert_eq!(
+        requests[0].headers[http::header::AUTHORIZATION],
+        "token synthetic-bootstrap"
+    );
     assert!(requests[0].body.is_empty());
 }
 
@@ -858,10 +861,20 @@ async fn an_explicit_default_copilot_root_survives_the_recorded_exchange() {
     let config = CopilotConfig::new("synthetic-old-session")
         .with_base_url(super::super::GITHUB_COPILOT_API_BASE_URL);
     assert!(config.base_url_explicit);
-    let client = config.connect(http.clone()).authenticate(&auth).await.unwrap();
-    assert_eq!(client.config().base_url, super::super::GITHUB_COPILOT_API_BASE_URL);
+    let client = config
+        .connect(http.clone())
+        .authenticate(&auth)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.config().base_url,
+        super::super::GITHUB_COPILOT_API_BASE_URL
+    );
     assert!(client.config().base_url_explicit);
-    assert_eq!(client.config().api_key.expose(), "tid=synthetic-exchanged-session");
+    assert_eq!(
+        client.config().api_key.expose(),
+        "tid=synthetic-exchanged-session"
+    );
     assert_one_recorded_copilot_exchange(&http);
 }
 
@@ -876,7 +889,11 @@ async fn a_nondefault_copilot_root_keeps_the_legacy_inference_after_exchange() {
             config.base_url = "https://explicit.invalid/copilot".into();
         }
         assert_eq!(config.base_url_explicit, marked);
-        let client = config.connect(http.clone()).authenticate(&auth).await.unwrap();
+        let client = config
+            .connect(http.clone())
+            .authenticate(&auth)
+            .await
+            .unwrap();
         assert_eq!(client.config().base_url, "https://explicit.invalid/copilot");
         assert!(client.config().base_url_explicit);
         assert_one_recorded_copilot_exchange(&http);
@@ -892,8 +909,15 @@ async fn unpinned_default_and_token_derived_roots_take_the_exchanged_root() {
         let (http, auth) = recorded_copilot_exchange();
         let config = CopilotConfig::new(old_token);
         assert!(!config.base_url_explicit);
-        let client = config.connect(http.clone()).authenticate(&auth).await.unwrap();
-        assert_eq!(client.config().base_url, "https://api.enterprise.githubcopilot.com");
+        let client = config
+            .connect(http.clone())
+            .authenticate(&auth)
+            .await
+            .unwrap();
+        assert_eq!(
+            client.config().base_url,
+            "https://api.enterprise.githubcopilot.com"
+        );
         assert!(!client.config().base_url_explicit);
         assert_one_recorded_copilot_exchange(&http);
     }
@@ -913,7 +937,11 @@ async fn a_serialized_explicit_copilot_root_stays_pinned_after_exchange() {
         assert_eq!(serde_json::to_value(&restored).unwrap(), encoded);
         assert!(restored.base_url_explicit);
         assert_eq!(restored.base_url, root);
-        let client = restored.connect(http.clone()).authenticate(&auth).await.unwrap();
+        let client = restored
+            .connect(http.clone())
+            .authenticate(&auth)
+            .await
+            .unwrap();
         assert_eq!(client.config().base_url, root);
         assert!(client.config().base_url_explicit);
         assert_one_recorded_copilot_exchange(&http);
@@ -930,8 +958,15 @@ async fn legacy_two_field_equal_default_configs_have_no_explicitness_evidence() 
     assert_eq!(serde_json::to_value(&restored).unwrap(), legacy);
     assert!(!restored.base_url_explicit);
     let (http, auth) = recorded_copilot_exchange();
-    let client = restored.connect(http.clone()).authenticate(&auth).await.unwrap();
-    assert_eq!(client.config().base_url, "https://api.enterprise.githubcopilot.com");
+    let client = restored
+        .connect(http.clone())
+        .authenticate(&auth)
+        .await
+        .unwrap();
+    assert_eq!(
+        client.config().base_url,
+        "https://api.enterprise.githubcopilot.com"
+    );
     assert!(!client.config().base_url_explicit);
     assert_one_recorded_copilot_exchange(&http);
 }
@@ -945,5 +980,10 @@ fn a_context_derived_copilot_root_is_not_an_explicit_caller_pin() {
     let config = CopilotConfig::from_auth(&context);
     assert_eq!(config.base_url, "https://api.enterprise.githubcopilot.com");
     assert!(!config.base_url_explicit);
-    assert!(serde_json::to_value(config).unwrap().get("base_url_explicit").is_none());
+    assert!(
+        serde_json::to_value(config)
+            .unwrap()
+            .get("base_url_explicit")
+            .is_none()
+    );
 }

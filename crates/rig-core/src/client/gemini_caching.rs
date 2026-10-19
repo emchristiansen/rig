@@ -332,7 +332,11 @@ where
     fn send(&self, payload: Encoded, exchange: Exchange) -> Opening<WireFrame> {
         let this = self.clone();
         Opening::new(async move {
-            let Exchange { mode, observation, credential_stamp } = exchange;
+            let Exchange {
+                mode,
+                observation,
+                credential_stamp,
+            } = exchange;
             let path = payload.request.uri().path().to_owned();
             let bytes = match payload.request.body() {
                 Body::Bytes(bytes) => Some(bytes.clone()),
@@ -342,13 +346,27 @@ where
             let (Some(bytes), Some(model), Some(parsed)) = (bytes, model_of(&path), parsed) else {
                 return this
                     .inner
-                    .send(payload, Exchange { mode, observation, credential_stamp })
+                    .send(
+                        payload,
+                        Exchange {
+                            mode,
+                            observation,
+                            credential_stamp,
+                        },
+                    )
                     .await;
             };
             if parsed.has_cached_content {
                 return this
                     .inner
-                    .send(payload, Exchange { mode, observation, credential_stamp })
+                    .send(
+                        payload,
+                        Exchange {
+                            mode,
+                            observation,
+                            credential_stamp,
+                        },
+                    )
                     .await;
             }
 
@@ -419,7 +437,14 @@ where
                     read = None;
                     opened = this
                         .inner
-                        .send(with_body(&payload, bytes)?, Exchange { mode, observation, credential_stamp })
+                        .send(
+                            with_body(&payload, bytes)?,
+                            Exchange {
+                                mode,
+                                observation,
+                                credential_stamp,
+                            },
+                        )
                         .await?;
                 } else {
                     this.book.touched(&lease);

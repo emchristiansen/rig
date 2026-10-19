@@ -354,8 +354,9 @@ fn the_control_handshake_carries_the_call_headers() {
 /// dialect is refused by name.
 #[test]
 fn calls_need_the_codex_backend_and_the_callers_identity() {
-    let anonymous = LiveCalls::new(OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).client())
-        .expect("the ChatGPT dialect is the Codex backend");
+    let anonymous =
+        LiveCalls::new(OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN).client())
+            .expect("the ChatGPT dialect is the Codex backend");
     assert!(
         anonymous
             .call_request(OFFER, &SessionConfig::new("x"))

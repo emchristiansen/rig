@@ -86,7 +86,10 @@ fn arguments_are_always_an_object() {
     };
     assert_eq!(corrupt.event_type(), Some("chat.completion"));
     assert_eq!(corrupt.frame(), Some(frame.as_str()));
-    assert_eq!(reply(json!({"x": 1})).function.arguments_value(), json!({"x": 1}));
+    assert_eq!(
+        reply(json!({"x": 1})).function.arguments_value(),
+        json!({"x": 1})
+    );
     assert_eq!(reply(json!("null")).function.arguments_value(), json!({}));
     let turn = AssistantMessage {
         content: vec![AssistantContent::ToolCall(ToolCall::new(

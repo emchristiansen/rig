@@ -1,5 +1,6 @@
 //! Pure identity and credential-placement contracts; no provider response or environment mutation.
 
+use super::super::Quirks;
 use super::*;
 use crate::wire::{Credential, CredentialSourceError};
 

@@ -358,17 +358,23 @@ impl Transcript {
                             if self.parts.contains_key(&index) {
                                 return Err(SequenceError::ToolSlotTransition(position));
                             }
-                            self.parts.insert(index, (*kind, false, Some(ToolSlotState::PendingName)));
+                            self.parts
+                                .insert(index, (*kind, false, Some(ToolSlotState::PendingName)));
                         }
                         Some(ToolSlotState::Named) => {
                             if *kind != PartKind::ToolCall || name.is_none() {
                                 return Err(SequenceError::WrongKind(position));
                             }
                             match self.parts.get_mut(&index) {
-                                Some((PartKind::ToolCall, false, state @ Some(ToolSlotState::PendingName))) => {
+                                Some((
+                                    PartKind::ToolCall,
+                                    false,
+                                    state @ Some(ToolSlotState::PendingName),
+                                )) => {
                                     *state = Some(ToolSlotState::Named);
                                 }
-                                None | Some((_, _, None))
+                                None
+                                | Some((_, _, None))
                                 | Some((_, _, Some(ToolSlotState::Named)))
                                 | Some((_, _, Some(ToolSlotState::PendingName))) => {
                                     return Err(SequenceError::ToolSlotTransition(position));
@@ -384,9 +390,15 @@ impl Transcript {
                 StreamEvent::Arguments { .. } => Some(PartKind::ToolCall),
                 StreamEvent::Input { .. } => Some(PartKind::CustomToolCall),
                 StreamEvent::Discard { .. } => Some(PartKind::ToolCall),
-                StreamEvent::End { content, reasoning_authority, .. } => {
+                StreamEvent::End {
+                    content,
+                    reasoning_authority,
+                    ..
+                } => {
                     let kind = match content {
-                        AssistantContent::Text(_) | AssistantContent::CarriedText(_) => PartKind::Text,
+                        AssistantContent::Text(_) | AssistantContent::CarriedText(_) => {
+                            PartKind::Text
+                        }
                         AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_) => {
                             PartKind::Reasoning
                         }
@@ -398,7 +410,9 @@ impl Transcript {
                     };
                     match reasoning_authority {
                         None => {}
-                        Some(ReasoningAuthority::Partial | ReasoningAuthority::ProviderRestated) => {
+                        Some(
+                            ReasoningAuthority::Partial | ReasoningAuthority::ProviderRestated,
+                        ) => {
                             if kind != PartKind::Reasoning {
                                 return Err(SequenceError::WrongKind(position));
                             }
@@ -417,13 +431,17 @@ impl Transcript {
                     Some((_, ended, state)) => {
                         match state {
                             Some(ToolSlotState::PendingName) => {
-                                if matches!(event, StreamEvent::End { .. } | StreamEvent::Discard { .. }) {
+                                if matches!(
+                                    event,
+                                    StreamEvent::End { .. } | StreamEvent::Discard { .. }
+                                ) {
                                     return Err(SequenceError::ToolSlotTransition(position));
                                 }
                             }
                             None | Some(ToolSlotState::Named) => {}
                         }
-                        *ended = matches!(event, StreamEvent::End { .. } | StreamEvent::Discard { .. })
+                        *ended =
+                            matches!(event, StreamEvent::End { .. } | StreamEvent::Discard { .. })
                     }
                 }
             }

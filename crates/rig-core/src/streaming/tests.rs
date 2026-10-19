@@ -138,7 +138,10 @@ async fn a_stream_without_a_terminal_record_names_its_provider_and_refuses_to_fo
         .expect_err("a stream without a terminal record has no response to fold");
     // G160: typed truncation survives; only the former substring diagnostic is retired.
     assert!(matches!(&error, ProviderError::Truncated));
-    assert_eq!(error.to_string(), "ResponseError: the reply ended before the provider ended it");
+    assert_eq!(
+        error.to_string(),
+        "ResponseError: the reply ended before the provider ended it"
+    );
 }
 
 #[tokio::test]

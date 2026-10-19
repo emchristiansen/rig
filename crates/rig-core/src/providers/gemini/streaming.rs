@@ -19,13 +19,15 @@ use super::completion::{checked_usage_of, map_google_finish_reason};
 use crate::error::ProviderError;
 use crate::json_utils::Lenient;
 use crate::message::{CallId, DocumentSourceKind, Image, ImageMediaType, MimeType, ToolName};
-use crate::message::{CarriedPayload, CarriedPosition, CarriedText, CarriedTextContent, CarriedReasoning, CarriedReasoningPart,
-    GeminiSignedAnswer, GeminiThoughtSignature};
+use crate::message::{
+    CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart, CarriedText,
+    CarriedTextContent, GeminiSignedAnswer, GeminiThoughtSignature,
+};
 use crate::operation::{Block, Completion, Finish};
 use crate::providers::internal::wire;
 use crate::wire::{
-    AdapterVerdict, Decoder, Flow, IncompleteEof, Mode, ObservationSink, Out, WireCitation, WireEvent,
-    WireFrame,
+    AdapterVerdict, Decoder, Flow, IncompleteEof, Mode, ObservationSink, Out, WireCitation,
+    WireEvent, WireFrame,
 };
 
 /// The recognizability markers of a `streamGenerateContent` chunk: every
@@ -156,11 +158,17 @@ impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
     /// hosted-tool round can report one before more content arrives.
     fn eof(&mut self, mut out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
         let cut_short = self.normalized_finish().is_some_and(|reason| {
-            matches!(reason, crate::completion::FinishReason::Length | crate::completion::FinishReason::ContentFilter)
+            matches!(
+                reason,
+                crate::completion::FinishReason::Length
+                    | crate::completion::FinishReason::ContentFilter
+            )
         });
         if !self.streaming && !self.delivered && !cut_short {
             self.close(&mut out)?;
-            return Err(ProviderError::Response(crate::message::EMPTY_RESPONSE_ERROR.to_owned()));
+            return Err(ProviderError::Response(
+                crate::message::EMPTY_RESPONSE_ERROR.to_owned(),
+            ));
         }
         if self.finish.is_some() {
             return self.end(out);
@@ -174,7 +182,11 @@ impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
     }
 
     fn incomplete_eof(&self) -> IncompleteEof {
-        if self.streaming { IncompleteEof::KeepPartial } else { IncompleteEof::Refuse }
+        if self.streaming {
+            IncompleteEof::KeepPartial
+        } else {
+            IncompleteEof::Refuse
+        }
     }
 
     fn flush_before_terminal_error(
@@ -251,7 +263,10 @@ impl GenerateContentDecoder {
         // Last one wins: an intermediate `finishReason` is superseded by the
         // reason the turn actually ended on. Proto3 JSON spells an enum
         // value its schema does not know as its number.
-        if let Some(reason) = candidate.get("finishReason").and_then(reader::finish_reason) {
+        if let Some(reason) = candidate
+            .get("finishReason")
+            .and_then(reader::finish_reason)
+        {
             self.finish = Some(reason);
         }
         if let Some(error) = tool_protocol_finish_reason_error(candidate) {
@@ -271,7 +286,8 @@ impl GenerateContentDecoder {
                 for (part_index, part) in parts.iter().enumerate() {
                     // Empty unsigned text cannot settle an image awaiting its signature.
                     if self.pending_vertex_image.is_some()
-                        && part.as_object().and_then(reader::select) == Some(reader::SelectedKind::Text)
+                        && part.as_object().and_then(reader::select)
+                            == Some(reader::SelectedKind::Text)
                         && part.str("text") == Some("")
                         && part.str("thoughtSignature").is_none()
                     {
@@ -280,7 +296,8 @@ impl GenerateContentDecoder {
                         self.placed.push(self.placement.take());
                         continue;
                     }
-                    let text = part.as_object().and_then(reader::select) == Some(reader::SelectedKind::Text)
+                    let text = part.as_object().and_then(reader::select)
+                        == Some(reader::SelectedKind::Text)
                         && part.bool("thought") != Some(true);
                     if text && previous_text {
                         self.close(out)?;
@@ -336,7 +353,8 @@ impl GenerateContentDecoder {
     }
 
     fn normalized_finish(&self) -> Option<crate::completion::FinishReason> {
-        self.finish.as_deref()
+        self.finish
+            .as_deref()
             .filter(|reason| *reason != "FINISH_REASON_UNSPECIFIED")
             .map(map_google_finish_reason)
     }
@@ -355,7 +373,12 @@ impl GenerateContentDecoder {
         for (index, citation) in citations {
             out.cite(index, citation);
         }
-        let usage = self.usage.as_ref().map(checked_usage_of).transpose()?.unwrap_or_default();
+        let usage = self
+            .usage
+            .as_ref()
+            .map(checked_usage_of)
+            .transpose()?
+            .unwrap_or_default();
         let model = self.model_version.take();
         let response_id = self.response_id.take();
         Ok(out.end(Finish {
@@ -381,29 +404,40 @@ impl GenerateContentDecoder {
             let signature = item.str("thoughtSignature").map(str::to_owned);
             let payload = CarriedPayload::new(item, Some(self.carried_issuer.to_owned()))
                 .with_position(position);
-            return out.finish_carried_reasoning(index,
-                CarriedReasoning::new(vec![CarriedReasoningPart::Text { text, signature }], payload));
+            return out.finish_carried_reasoning(
+                index,
+                CarriedReasoning::new(
+                    vec![CarriedReasoningPart::Text { text, signature }],
+                    payload,
+                ),
+            );
         } else {
             let mut item = Value::Null;
             out.edit(index, |held| item = held.clone())?;
             if let Some(signature) = item.str("thoughtSignature") {
-                let answer = GeminiSignedAnswer::new(item.str("text").unwrap_or_default(),
-                    GeminiThoughtSignature::new(signature));
+                let answer = GeminiSignedAnswer::new(
+                    item.str("text").unwrap_or_default(),
+                    GeminiThoughtSignature::new(signature),
+                );
                 let payload = CarriedPayload::new(item, Some(self.carried_issuer.to_owned()))
                     .with_position(position);
-                return out.finish_carried_text(index, CarriedText::new(
-                    CarriedTextContent::GeminiSignedAnswer(answer), payload,
-                ));
+                return out.finish_carried_text(
+                    index,
+                    CarriedText::new(CarriedTextContent::GeminiSignedAnswer(answer), payload),
+                );
             }
-            if item.as_object().is_some_and(|fields| fields.keys().any(|key|
-                !matches!(key.as_str(), "text" | "thought" | "thoughtSignature")
-            )) {
+            if item.as_object().is_some_and(|fields| {
+                fields
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "text" | "thought" | "thoughtSignature"))
+            }) {
                 let text = item.str("text").unwrap_or_default().to_owned();
                 let payload = CarriedPayload::new(item, Some(self.carried_issuer.to_owned()))
                     .with_position(position);
-                return out.finish_carried_text(index, CarriedText::new(
-                    CarriedTextContent::InspectionOnlyText(text), payload,
-                ));
+                return out.finish_carried_text(
+                    index,
+                    CarriedText::new(CarriedTextContent::InspectionOnlyText(text), payload),
+                );
             }
         }
         out.finish(index)
@@ -419,14 +453,25 @@ impl GenerateContentDecoder {
         // Only this decoder owns the reserved fresh index. Nothing opened it,
         // and opening and finishing it here have no intervening writer call.
         if pending.fields.contains_key("thoughtSignature") {
-            let payload = CarriedPayload::new(Value::Object(pending.fields),
-                Some(self.carried_issuer.to_owned())).with_position(pending.position);
+            let payload = CarriedPayload::new(
+                Value::Object(pending.fields),
+                Some(self.carried_issuer.to_owned()),
+            )
+            .with_position(pending.position);
             out.open(pending.index, Block::Text, Value::Null)?;
-            out.finish_carried_text(pending.index, CarriedText::new(
-                CarriedTextContent::InspectionOnlyMedia(String::new()), payload,
-            ))
+            out.finish_carried_text(
+                pending.index,
+                CarriedText::new(
+                    CarriedTextContent::InspectionOnlyMedia(String::new()),
+                    payload,
+                ),
+            )
         } else {
-            out.open(pending.index, Block::Image(pending.image), Value::Object(pending.fields))?;
+            out.open(
+                pending.index,
+                Block::Image(pending.image),
+                Value::Object(pending.fields),
+            )?;
             out.finish(pending.index)
         }
     }
@@ -467,7 +512,10 @@ impl GenerateContentDecoder {
         out.open(index, block, item)?;
         out.push(index, text)?;
         self.open = run.map(|thought| (index, thought));
-        self.open_position = run.map(|_| CarriedPosition::MessageContent { item_index: 0, part_index: self.part_index });
+        self.open_position = run.map(|_| CarriedPosition::MessageContent {
+            item_index: 0,
+            part_index: self.part_index,
+        });
         self.open.map_or_else(|| out.finish(index), |_| Ok(()))
     }
 
@@ -486,7 +534,8 @@ impl GenerateContentDecoder {
         let signature = part.str("thoughtSignature");
         // An empty unsigned text part carries no content boundary.
         if selected == Some(reader::SelectedKind::Text)
-            && part.str("text") == Some("") && signature.is_none()
+            && part.str("text") == Some("")
+            && signature.is_none()
         {
             return Ok(());
         }
@@ -495,11 +544,16 @@ impl GenerateContentDecoder {
             && let Some(signature) = signature
             && let Some(pending) = self.pending_vertex_image.as_mut()
         {
-            pending.fields.insert("thoughtSignature".to_owned(), Value::from(signature));
+            pending
+                .fields
+                .insert("thoughtSignature".to_owned(), Value::from(signature));
             return Ok(());
         }
         self.flush_pending_vertex_image(out)?;
-        if let Some(text) = part.str("text").filter(|_| selected == Some(reader::SelectedKind::Text)) {
+        if let Some(text) = part
+            .str("text")
+            .filter(|_| selected == Some(reader::SelectedKind::Text))
+        {
             if !thought && signature.is_some() {
                 self.open(Block::Text, part.clone(), text, out)?;
                 return self.close(out);
@@ -524,25 +578,39 @@ impl GenerateContentDecoder {
                 _ => self.open(Block::Text, part.clone(), text, out),
             };
             result?;
-            if thought && signature.is_some() { return self.close(out); }
+            if thought && signature.is_some() {
+                return self.close(out);
+            }
             return Ok(());
         }
-        if let Some(call) = part.obj("functionCall").filter(|_| selected == Some(reader::SelectedKind::FunctionCall)) {
-            let name = ToolName::new(
-                call.get("name").and_then(Value::as_str).unwrap_or_default(),
-            ).map_err(ProviderError::request)?;
+        if let Some(call) = part
+            .obj("functionCall")
+            .filter(|_| selected == Some(reader::SelectedKind::FunctionCall))
+        {
+            let name = ToolName::new(call.get("name").and_then(Value::as_str).unwrap_or_default())
+                .map_err(ProviderError::request)?;
             // Proto3 JSON leaves out an empty `args` Struct.
             let args = call
                 .get("args")
                 .map_or_else(|| "{}".to_owned(), Value::to_string);
             let id = CallId::from_wire(call.get("id").and_then(Value::as_str).unwrap_or_default());
-            return self.open(Block::Call { id, name, namespace: None }, part.clone(), &args, out);
+            return self.open(
+                Block::Call {
+                    id,
+                    name,
+                    namespace: None,
+                },
+                part.clone(),
+                &args,
+                out,
+            );
         }
         if selected == Some(reader::SelectedKind::InlineData) {
             self.close(out)?;
             let mut fields = fields.clone();
             if let Some(signature) = self.signature.take() {
-                fields.entry("thoughtSignature".to_owned())
+                fields
+                    .entry("thoughtSignature".to_owned())
                     .or_insert(Value::String(signature));
             }
             self.delivered = true;
@@ -550,13 +618,25 @@ impl GenerateContentDecoder {
             self.last = Some(index);
             if self.vertex_inline_images
                 && matches!(fields.get("thought"), None | Some(Value::Bool(false)))
-                && fields.keys().all(|key| matches!(key.as_str(), "inlineData" | "thought"))
+                && fields
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "inlineData" | "thought"))
                 && let Some(inline) = fields.get("inlineData").and_then(Value::as_object)
-                && inline.keys().all(|key| matches!(key.as_str(), "mimeType" | "data"))
-                && let Some(media_type) = inline.get("mimeType").and_then(Value::as_str)
+                && inline
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "mimeType" | "data"))
+                && let Some(media_type) = inline
+                    .get("mimeType")
+                    .and_then(Value::as_str)
                     .and_then(ImageMediaType::from_mime_type)
-                && matches!(&media_type, ImageMediaType::JPEG | ImageMediaType::PNG
-                    | ImageMediaType::WEBP | ImageMediaType::HEIC | ImageMediaType::HEIF)
+                && matches!(
+                    &media_type,
+                    ImageMediaType::JPEG
+                        | ImageMediaType::PNG
+                        | ImageMediaType::WEBP
+                        | ImageMediaType::HEIC
+                        | ImageMediaType::HEIF
+                )
                 && let Some(data) = inline.get("data").and_then(Value::as_str)
             {
                 let image = Image {
@@ -566,9 +646,12 @@ impl GenerateContentDecoder {
                 };
                 if self.defer_vertex_inline_images {
                     self.pending_vertex_image = Some(PendingVertexImage {
-                        index, image, fields,
+                        index,
+                        image,
+                        fields,
                         position: CarriedPosition::MessageContent {
-                            item_index: 0, part_index: self.part_index,
+                            item_index: 0,
+                            part_index: self.part_index,
                         },
                     });
                     return Ok(());
@@ -576,20 +659,34 @@ impl GenerateContentDecoder {
                 out.open(index, Block::Image(image), Value::Object(fields))?;
                 return out.finish(index);
             }
-            let payload = CarriedPayload::new(Value::Object(fields), Some(self.carried_issuer.to_owned()))
-                .with_position(CarriedPosition::MessageContent { item_index: 0, part_index: self.part_index });
+            let payload =
+                CarriedPayload::new(Value::Object(fields), Some(self.carried_issuer.to_owned()))
+                    .with_position(CarriedPosition::MessageContent {
+                        item_index: 0,
+                        part_index: self.part_index,
+                    });
             out.open(index, Block::Text, Value::Null)?;
-            return out.finish_carried_text(index, CarriedText::new(
-                CarriedTextContent::InspectionOnlyMedia(String::new()), payload,
-            ));
+            return out.finish_carried_text(
+                index,
+                CarriedText::new(
+                    CarriedTextContent::InspectionOnlyMedia(String::new()),
+                    payload,
+                ),
+            );
         }
         match selected {
             Some(reader::SelectedKind::ExecutableCode) => {
-                tracing::warn!(kind = "executableCode", "Gemini delivered an unmodeled hosted-code part");
+                tracing::warn!(
+                    kind = "executableCode",
+                    "Gemini delivered an unmodeled hosted-code part"
+                );
                 return Ok(());
             }
             Some(reader::SelectedKind::CodeExecutionResult) => {
-                tracing::warn!(kind = "codeExecutionResult", "Gemini delivered an unmodeled hosted-code part");
+                tracing::warn!(
+                    kind = "codeExecutionResult",
+                    "Gemini delivered an unmodeled hosted-code part"
+                );
                 return Ok(());
             }
             Some(reader::SelectedKind::FunctionResponse | reader::SelectedKind::FileData) => {
@@ -602,8 +699,12 @@ impl GenerateContentDecoder {
                     "Gemini response part kind {kind} carries no assistant content rig can account for"
                 )));
             }
-            Some(reader::SelectedKind::Text | reader::SelectedKind::InlineData | reader::SelectedKind::FunctionCall)
-                | None => {}
+            Some(
+                reader::SelectedKind::Text
+                | reader::SelectedKind::InlineData
+                | reader::SelectedKind::FunctionCall,
+            )
+            | None => {}
         }
         let bare = ["thought", "thoughtSignature", "partMetadata"];
         let data = fields.keys().any(|key| !bare.contains(&key.as_str()));
@@ -668,7 +769,9 @@ fn tool_protocol_finish_reason_error(candidate: &Value) -> Option<ProviderError>
         "MALFORMED_RESPONSE" => "MalformedResponse",
         _ => return None,
     };
-    let message = candidate.str("finishMessage").unwrap_or("no finish message provided");
+    let message = candidate
+        .str("finishMessage")
+        .unwrap_or("no finish message provided");
     Some(ProviderError::Response(format!(
         "Gemini stopped with finish_reason={reason}: {message}"
     )))

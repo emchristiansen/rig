@@ -1,7 +1,7 @@
 use super::*;
 use rig_core::message::{
-    AssistantContent, AssistantMessage, CallId, CustomToolCall, ToolCall, ToolFunction,
-    ToolName, ToolResult, ToolResultContent, UserContent,
+    AssistantContent, AssistantMessage, CallId, CustomToolCall, ToolCall, ToolFunction, ToolName,
+    ToolResult, ToolResultContent, UserContent,
 };
 use rig_core::transcript::validate_canonical;
 use std::sync::Mutex;
@@ -15,10 +15,12 @@ fn assistant(text: &str) -> Message {
 }
 
 fn tool_call_msg() -> Message {
-    Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
-        CallId::from_wire("call_1"),
-        ToolFunction::new(ToolName::new("t").unwrap(), serde_json::json!({})),
-    ))]))
+    Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+        ToolCall::new(
+            CallId::from_wire("call_1"),
+            ToolFunction::new(ToolName::new("t").unwrap(), serde_json::json!({})),
+        ),
+    )]))
 }
 
 fn tool_result_msg() -> Message {
@@ -1931,20 +1933,31 @@ fn heuristic_counter_charges_a_custom_call_by_its_raw_input_bytes() {
 #[test]
 fn heuristic_counter_charges_retained_nonobject_arguments_as_serialized_values() {
     let counter = HeuristicTokenCounter::new(1.0, 0, 0);
-    let function = ToolFunction::new(ToolName::new("n").expect("tool name"), serde_json::json!(12345));
+    let function = ToolFunction::new(
+        ToolName::new("n").expect("tool name"),
+        serde_json::json!(12345),
+    );
     assert_eq!(function.invalid_arguments.as_deref(), Some("12345"));
     assert_eq!(1 + function.arguments_value().to_string().len(), 3);
-    let message = Message::Assistant(AssistantMessage::new(vec![
-        AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_1"), function)),
-    ]));
+    let message = Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+        ToolCall::new(CallId::from_wire("call_1"), function),
+    )]));
     assert_eq!(counter.count(&message), 6);
 
-    for (raw, expected) in [(" \n12345\t", 6), (" [1, 2] ", 6), (" false ", 6), (r#" "x" "#, 4)] {
-        let mut function = ToolFunction::new(ToolName::new("n").expect("tool name"), serde_json::json!({}));
+    for (raw, expected) in [
+        (" \n12345\t", 6),
+        (" [1, 2] ", 6),
+        (" false ", 6),
+        (r#" "x" "#, 4),
+    ] {
+        let mut function = ToolFunction::new(
+            ToolName::new("n").expect("tool name"),
+            serde_json::json!({}),
+        );
         function.invalid_arguments = Some(raw.to_owned());
-        let message = Message::Assistant(AssistantMessage::new(vec![
-            AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_1"), function)),
-        ]));
+        let message = Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+            ToolCall::new(CallId::from_wire("call_1"), function),
+        )]));
         let before = message.clone();
         assert_eq!(counter.count(&message), expected, "retained {raw:?}");
         assert_eq!(message, before);
@@ -1954,33 +1967,48 @@ fn heuristic_counter_charges_retained_nonobject_arguments_as_serialized_values()
 #[test]
 fn heuristic_counter_charges_retained_null_without_reconstructing_discarded_null() {
     let counter = HeuristicTokenCounter::new(1.0, 0, 0);
-    let mut retained = ToolFunction::new(ToolName::new("n").expect("tool name"), serde_json::json!({}));
+    let mut retained = ToolFunction::new(
+        ToolName::new("n").expect("tool name"),
+        serde_json::json!({}),
+    );
     retained.invalid_arguments = Some(" \nnull\t".to_owned());
     assert_eq!(1 + retained.arguments_value().to_string().len(), 3);
-    let message = Message::Assistant(AssistantMessage::new(vec![
-        AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_1"), retained)),
-    ]));
+    let message = Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+        ToolCall::new(CallId::from_wire("call_1"), retained),
+    )]));
     let before = message.clone();
     assert_eq!(counter.count(&message), 5);
     assert_eq!(message, before);
 
-    let discarded = ToolFunction::new(ToolName::new("n").expect("tool name"), serde_json::Value::Null);
+    let discarded = ToolFunction::new(
+        ToolName::new("n").expect("tool name"),
+        serde_json::Value::Null,
+    );
     assert_eq!(discarded.invalid_arguments, None);
-    let message = Message::Assistant(AssistantMessage::new(vec![
-        AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_2"), discarded)),
-    ]));
+    let message = Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+        ToolCall::new(CallId::from_wire("call_2"), discarded),
+    )]));
     assert_eq!(counter.count(&message), 3);
 }
 
 #[test]
 fn heuristic_counter_keeps_canonical_arguments_for_malformed_blank_and_object_raw() {
     let counter = HeuristicTokenCounter::new(1.0, 0, 0);
-    for raw in [None, Some(r#"{"x":1,"#), Some(""), Some(" \n\t"), Some(r#"{"other":12345}"#)] {
-        let mut function = ToolFunction::new(ToolName::new("n").expect("tool name"), serde_json::json!({"x": 1}));
+    for raw in [
+        None,
+        Some(r#"{"x":1,"#),
+        Some(""),
+        Some(" \n\t"),
+        Some(r#"{"other":12345}"#),
+    ] {
+        let mut function = ToolFunction::new(
+            ToolName::new("n").expect("tool name"),
+            serde_json::json!({"x": 1}),
+        );
         function.invalid_arguments = raw.map(str::to_owned);
-        let message = Message::Assistant(AssistantMessage::new(vec![
-            AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_1"), function)),
-        ]));
+        let message = Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+            ToolCall::new(CallId::from_wire("call_1"), function),
+        )]));
         let before = message.clone();
         assert_eq!(counter.count(&message), 8, "retained {raw:?}");
         assert_eq!(message, before);
@@ -1994,7 +2022,8 @@ fn heuristic_counter_counts_namespaces_and_verbatim_custom_input() {
         CallId::from_wire("call_1"),
         ToolName::new("abc").unwrap(),
         "0123456789abc",
-    ).with_namespace(Some("é".into()));
+    )
+    .with_namespace(Some("é".into()));
     let message = Message::Assistant(AssistantMessage::new(vec![
         AssistantContent::CustomToolCall(custom),
     ]));
@@ -2002,20 +2031,20 @@ fn heuristic_counter_counts_namespaces_and_verbatim_custom_input() {
 
     let mut function = ToolFunction::new(ToolName::new("abc").unwrap(), serde_json::json!({}));
     function.namespace = Some("é".into());
-    let message = Message::Assistant(AssistantMessage::new(vec![
-        AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_2"), function)),
-    ]));
+    let message = Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+        ToolCall::new(CallId::from_wire("call_2"), function),
+    )]));
     assert_eq!(counter.count(&message), 7);
 }
 
 #[test]
 fn heuristic_counter_charges_provider_item_json_without_provenance_envelope() {
-    let message = Message::Assistant(AssistantMessage::new(vec![
-        AssistantContent::ProviderItem(rig_core::message::ProviderItem::new(
+    let message = Message::Assistant(AssistantMessage::new(vec![AssistantContent::ProviderItem(
+        rig_core::message::ProviderItem::new(
             serde_json::json!({"a": "é\n"}),
             "provider/provenance-is-not-part-of-the-item",
-        )),
-    ]));
+        ),
+    )]));
     let counter = HeuristicTokenCounter::new(1.0, 0, 0);
     assert_eq!(counter.count(&message), "{\"a\":\"é\\n\"}".len());
 }
@@ -2025,7 +2054,10 @@ fn heuristic_counter_preserves_carried_visible_text_projection() {
     use rig_core::message::{CarriedPayload, CarriedReasoning, CarriedReasoningPart};
     let reasoning = CarriedReasoning::new(
         vec![
-            CarriedReasoningPart::Text { text: "ab".into(), signature: Some("signature".into()) },
+            CarriedReasoningPart::Text {
+                text: "ab".into(),
+                signature: Some("signature".into()),
+            },
             CarriedReasoningPart::Encrypted("encrypted payload".into()),
             CarriedReasoningPart::Summary("cd".into()),
             CarriedReasoningPart::Redacted { data: "é".into() },
@@ -2043,12 +2075,17 @@ fn template_compactor_preserves_custom_marker_and_carried_plaintext() {
     use rig_core::message::{CarriedPayload, CarriedText, CarriedTextContent};
     let message = Message::Assistant(AssistantMessage::new(vec![
         AssistantContent::CustomToolCall(CustomToolCall::new(
-            CallId::from_wire("call_1"), ToolName::new("abc").unwrap(), "raw input",
+            CallId::from_wire("call_1"),
+            ToolName::new("abc").unwrap(),
+            "raw input",
         )),
         AssistantContent::CarriedText(CarriedText::new(
             CarriedTextContent::Text("visible".into()),
             CarriedPayload::new(serde_json::json!({"text": "old raw text"}), None),
         )),
     ]));
-    assert_eq!(render_message_line(&message), "assistant: [custom tool call: abc] visible");
+    assert_eq!(
+        render_message_line(&message),
+        "assistant: [custom tool call: abc] visible"
+    );
 }

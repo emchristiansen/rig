@@ -278,11 +278,15 @@ fn every_content_kind_decodes() {
             ContentKind::Text => matches!(block, Some(AssistantContent::Text(_))),
             ContentKind::Image => matches!(block, Some(AssistantContent::CarriedText(text))
                 if text.known_text_projection() == Some("") && text.payload.item == *item),
-            ContentKind::Other => matches!(block, Some(AssistantContent::Opaque(opaque)) if opaque.replay && opaque.item == step),
+            ContentKind::Other => {
+                matches!(block, Some(AssistantContent::Opaque(opaque)) if opaque.replay && opaque.item == step)
+            }
         };
         assert!(expected, "{item} decoded to {block:?}");
         let expected_replay = match content_kind(item) {
-            ContentKind::Image => json!({"type":"model_output", "content":[{"type":"text", "text":""}]}),
+            ContentKind::Image => {
+                json!({"type":"model_output", "content":[{"type":"text", "text":""}]})
+            }
             ContentKind::Text | ContentKind::Other => step,
         };
         assert_eq!(replayed(&response), [expected_replay]);

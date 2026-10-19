@@ -2,7 +2,6 @@
 //!
 //! The response types also read recorded Chat Completions documents.
 
-
 /// GPT-6 Astra, API ID `gpt-6-astra`: a reasoning model that cannot turn
 /// reasoning off. Its catalog entry holds the rules the encoders check,
 /// through `on_unsupported`, for a request that sets generation options:
@@ -237,8 +236,6 @@ impl Message {
         }
     }
 }
-
-
 
 /// Structured reasoning blocks attached to assistant messages by
 /// OpenAI-compatible providers such as OpenRouter (`reasoning_details`).
@@ -547,6 +544,7 @@ pub struct CompletionResponse {
 
 /// Return a nonempty top-level refusal only when every content part is empty.
 /// Applies to whole messages; streaming fallback is evaluated per delta.
+#[cfg(test)]
 pub(crate) fn assistant_refusal_fallback<'a>(
     content: &[AssistantContent],
     refusal: Option<&'a str>,
@@ -610,7 +608,6 @@ pub struct Choice {
     pub finish_reason: String,
 }
 
-
 fn serialize_assistant_content_vec<S>(
     value: &[AssistantContent],
     serializer: S,
@@ -628,8 +625,8 @@ where
 // The retained response reader uses F's exact length-only repair gate.
 // This private reader does not change the live Chat decoder's vocabulary.
 mod recorded_choices {
-    use serde::{Deserialize, Deserializer};
     use crate::completion::FinishReason;
+    use serde::{Deserialize, Deserializer};
 
     pub(crate) fn map_openai_finish_reason(reason: &str) -> FinishReason {
         match reason {
@@ -656,7 +653,9 @@ mod recorded_choices {
             choice
                 .get("finish_reason")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|reason| matches!(map_openai_finish_reason(reason), FinishReason::Length))
+                .is_some_and(|reason| {
+                    matches!(map_openai_finish_reason(reason), FinishReason::Length)
+                })
         })
     }
 
@@ -715,7 +714,9 @@ mod recorded_choices {
             })
     }
 
-    fn message_tool_calls_mut(choice: &mut serde_json::Value) -> Option<&mut Vec<serde_json::Value>> {
+    fn message_tool_calls_mut(
+        choice: &mut serde_json::Value,
+    ) -> Option<&mut Vec<serde_json::Value>> {
         choice
             .get_mut("message")
             .and_then(|message| message.get_mut("tool_calls"))

@@ -163,21 +163,22 @@ fn response_modalities_reach_generation_config() {
     let wire = GenerateContent::new("gemini-2.5-flash");
     let request = rig_core::operation::Completion::prepare(request, &wire.describe())
         .expect("the original request prepares");
-    let error = wire.encode(request, Mode::Unary)
+    let error = wire
+        .encode(request, Mode::Unary)
         .expect_err("the original Audio request is refused before transport");
     let error = rig_core::error::ProviderError::from(error);
     let rig_core::error::ProviderError::Request(source) = &error else {
         panic!("Audio must have the typed Request refusal");
     };
-    assert_eq!(source.to_string(),
-        "responseModalities AUDIO is unsupported because Rig cannot represent assistant audio responses");
+    assert_eq!(
+        source.to_string(),
+        "responseModalities AUDIO is unsupported because Rig cannot represent assistant audio responses"
+    );
 }
 
 #[test]
 fn text_only_response_modality_reaches_generation_config() {
-    let config = config(
-        GenerationConfig::new().response_modalities([ResponseModality::Text]),
-    );
+    let config = config(GenerationConfig::new().response_modalities([ResponseModality::Text]));
     let names: Vec<_> = config
         .response_modalities
         .iter()

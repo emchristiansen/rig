@@ -24,16 +24,27 @@ fn decode(frames: &[Value]) -> (CompletionResponse, Vec<StreamEvent>) {
         ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()),
         document::Response::with_strict_reader(false),
         "openai",
-        frames.iter().map(|frame| WireFrame::Text(frame.to_string()))
+        frames
+            .iter()
+            .map(|frame| WireFrame::Text(frame.to_string()))
     );
-    let events = decoded.items.iter().filter_map(|item| {
-        if let Item::Event(event) = item.as_ref().expect("the actual decoder emits no error") {
-            Some(event.clone())
-        } else {
-            None
-        }
-    }).collect();
-    (decoded.outcome.expect("the actual response decoder finishes"), events)
+    let events = decoded
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Event(event) = item.as_ref().expect("the actual decoder emits no error") {
+                Some(event.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    (
+        decoded
+            .outcome
+            .expect("the actual response decoder finishes"),
+        events,
+    )
 }
 
 fn only_carried(response: &CompletionResponse) -> &CarriedText {
@@ -45,13 +56,19 @@ fn only_carried(response: &CompletionResponse) -> &CarriedText {
 
 fn encoded_messages(turn: Message) -> Vec<Value> {
     let wire = OpenAIConfig::new("test-key").responses("different-model");
-    let request = CompletionRequest::from(vec![Message::user("question"), turn, Message::user("next")]);
+    let request =
+        CompletionRequest::from(vec![Message::user("question"), turn, Message::user("next")]);
     let request = Completion::prepare(request, &wire.describe()).expect("prepare actual history");
-    let encoded = wire.encode(request, Mode::Unary).expect("actual Responses encoder");
-    crate::test_utils::json_body(&encoded.request)["input"].as_array()
-        .expect("input array").iter()
+    let encoded = wire
+        .encode(request, Mode::Unary)
+        .expect("actual Responses encoder");
+    crate::test_utils::json_body(&encoded.request)["input"]
+        .as_array()
+        .expect("input array")
+        .iter()
         .filter(|item| item["role"] == "assistant")
-        .cloned().collect()
+        .cloned()
+        .collect()
 }
 
 #[test]
@@ -75,10 +92,13 @@ fn unknown_parent_field_forces_carried_history_but_never_reaches_the_request() {
     assert_eq!(stored["content"][0]["unknown_message_fields"], expected);
     let restored: Message = serde_json::from_value(stored).expect("restore raw history");
     assert_eq!(restored, history);
-    assert_eq!(encoded_messages(restored), [json!({
-        "type":"message", "role":"assistant", "status":"completed", "id":"msg_2",
-        "content":[{"type":"output_text", "text":"answer"}]
-    })]);
+    assert_eq!(
+        encoded_messages(restored),
+        [json!({
+            "type":"message", "role":"assistant", "status":"completed", "id":"msg_2",
+            "content":[{"type":"output_text", "text":"answer"}]
+        })]
+    );
 }
 
 #[test]
@@ -93,23 +113,41 @@ fn streamed_parent_metadata_reaches_the_actual_end_and_folded_history() {
         completed,
     ]);
     let text = only_carried(&decoded);
-    let ends: Vec<_> = events.iter().filter_map(|event| {
-        if let StreamEvent::End { part, content: AssistantContent::CarriedText(ended), .. } = event {
-            Some((part, ended))
-        } else {
-            None
-        }
-    }).collect();
+    let ends: Vec<_> = events
+        .iter()
+        .filter_map(|event| {
+            if let StreamEvent::End {
+                part,
+                content: AssistantContent::CarriedText(ended),
+                ..
+            } = event
+            {
+                Some((part, ended))
+            } else {
+                None
+            }
+        })
+        .collect();
     assert_eq!(ends.len(), 1);
-    assert_eq!(ends[0].1.unknown_message_fields(), text.unknown_message_fields());
+    assert_eq!(
+        ends[0].1.unknown_message_fields(),
+        text.unknown_message_fields()
+    );
     assert_eq!(ends[0].1.item_id, text.item_id);
     assert_eq!(ends[0].1.content, text.content);
     assert_eq!(ends[0].1.payload.item, text.payload.item);
     assert_eq!(ends[0].1.payload.position, text.payload.position);
     assert!(events.iter().all(|event| event.part() == *ends[0].0));
-    let fragments: String = events.iter().filter_map(|event| {
-        if let StreamEvent::Text { text, .. } = event { Some(text.as_str()) } else { None }
-    }).collect();
+    let fragments: String = events
+        .iter()
+        .filter_map(|event| {
+            if let StreamEvent::Text { text, .. } = event {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
     assert_eq!(fragments, "answer");
     let sent = encoded_messages(decoded.message().expect("decoded turn"));
     assert_eq!(sent[0]["id"], "msg_2");
@@ -126,7 +164,10 @@ fn recognized_parent_fields_and_text_edits_keep_their_own_authority() {
     let AssistantContent::CarriedText(text) = &mut decoded.choice[0] else {
         panic!("carried text");
     };
-    let metadata = text.unknown_message_fields().expect("retained unknown parent fields").clone();
+    let metadata = text
+        .unknown_message_fields()
+        .expect("retained unknown parent fields")
+        .clone();
     assert_eq!(text.item_id.as_deref(), Some("msg_2"));
     assert_eq!(text.phase.as_deref(), Some("final_answer"));
     for recognized in ["type", "id", "role", "status", "content", "phase"] {
@@ -141,13 +182,20 @@ fn recognized_parent_fields_and_text_edits_keep_their_own_authority() {
     assert_eq!(text.payload.item["text"], "answer");
     assert!(matches!(&text.content, CarriedTextContent::Text(value) if value == "edited answer"));
 
-    let stored = serde_json::to_value(decoded.message().expect("edited decoded turn")).expect("history");
+    let stored =
+        serde_json::to_value(decoded.message().expect("edited decoded turn")).expect("history");
     let restored: Message = serde_json::from_value(stored.clone()).expect("restore edited history");
-    assert_eq!(stored["content"][0]["unknown_message_fields"], Value::Object(metadata));
-    assert_eq!(encoded_messages(restored), [json!({
-        "type":"message", "role":"assistant", "status":"completed", "id":"msg_edited",
-        "phase":"analysis", "content":[{"type":"output_text", "text":"edited answer"}]
-    })]);
+    assert_eq!(
+        stored["content"][0]["unknown_message_fields"],
+        Value::Object(metadata)
+    );
+    assert_eq!(
+        encoded_messages(restored),
+        [json!({
+            "type":"message", "role":"assistant", "status":"completed", "id":"msg_edited",
+            "phase":"analysis", "content":[{"type":"output_text", "text":"edited answer"}]
+        })]
+    );
 }
 
 #[test]
@@ -155,13 +203,22 @@ fn absent_parent_metadata_preserves_the_existing_history_bytes() {
     let legacy = br#"{"content":{"type":"text","text":"answer"},"payload":{"item":{"type":"output_text","text":"answer"}}}"#;
     let text: CarriedText = serde_json::from_slice(legacy).expect("existing carried text history");
     assert_eq!(text.unknown_message_fields(), None);
-    assert_eq!(serde_json::to_vec(&text).expect("unchanged history bytes"), legacy.to_vec());
+    assert_eq!(
+        serde_json::to_vec(&text).expect("unchanged history bytes"),
+        legacy.to_vec()
+    );
     let constructed = CarriedText::new(
         CarriedTextContent::Text("answer".to_owned()),
         CarriedPayload::new(json!({"type":"output_text", "text":"answer"}), None),
     );
-    assert_eq!(serde_json::to_vec(&constructed).expect("default constructor bytes"), legacy.to_vec());
+    assert_eq!(
+        serde_json::to_vec(&constructed).expect("default constructor bytes"),
+        legacy.to_vec()
+    );
     let cleared = text.with_unknown_message_fields(serde_json::Map::new());
     assert_eq!(cleared.unknown_message_fields(), None);
-    assert_eq!(serde_json::to_vec(&cleared).expect("empty metadata omitted"), legacy.to_vec());
+    assert_eq!(
+        serde_json::to_vec(&cleared).expect("empty metadata omitted"),
+        legacy.to_vec()
+    );
 }

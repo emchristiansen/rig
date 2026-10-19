@@ -25,11 +25,11 @@ use crate::cassettes::recorded_statuses_and_bodies;
 
 use super::super::cassette_support::*;
 const NO_THINK: &str = "/no_think ";
+use crate::cassettes::{recorded_json_request, recorded_sse_json_frames};
+use crate::support::collect_stream_final_response;
 use rig::completion::CompletionRequest;
 use rig::message::{Message, UserContent};
 use serde_json::json;
-use crate::cassettes::{recorded_json_request, recorded_sse_json_frames};
-use crate::support::collect_stream_final_response;
 
 /// A turn whose whole answer is eaten by a stop sequence is an empty turn:
 /// llama.cpp answers `200` with `finish_reason: "stop"` and `content: ""`,
@@ -94,7 +94,8 @@ async fn consecutive_same_role_messages_are_sent_as_sent() {
         |client| async move {
             let model = client.completion(CASSETTE_MODEL);
             let response = model
-                .call(CompletionRequest::new(format!("{NO_THINK}What was the second word I said?"))
+                .call(
+                    CompletionRequest::new(format!("{NO_THINK}What was the second word I said?"))
                         .messages(vec![
                             Message::User {
                                 content: vec![UserContent::text("First word: heliotrope.")],
@@ -103,8 +104,7 @@ async fn consecutive_same_role_messages_are_sent_as_sent() {
                                 content: vec![UserContent::text("Second word: quicksilver.")],
                             },
                         ])
-                        .max_tokens(256)
-                        ,
+                        .max_tokens(256),
                 )
                 .await
                 .expect("consecutive same-role messages are accepted");
@@ -206,4 +206,3 @@ async fn unicode_split_across_stream_chunks_reassembles() {
          would be passing on mostly-ASCII output"
     );
 }
-

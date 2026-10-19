@@ -215,8 +215,11 @@ impl LocalCallId {
     /// Repeated normalization is stable; every position has a distinct local
     /// identity. It makes no claim that the daemon issued an identifier.
     /// The UUID's v8 namespace is disjoint from the default v4 constructor.
+    #[cfg(test)]
     pub(crate) fn for_ollama_response_position(position: u64) -> Self {
-        let mut bytes = [0x72, 0x69, 0x67, 0x2d, 0x6f, 0x6c, 0x80, 0, 0x80, 0, 0, 0, 0, 0, 0, 0];
+        let mut bytes = [
+            0x72, 0x69, 0x67, 0x2d, 0x6f, 0x6c, 0x80, 0, 0x80, 0, 0, 0, 0, 0, 0, 0,
+        ];
         // Preserve all 64 position bits around UUID version/variant bits.
         bytes[7] = (position >> 62) as u8;
         bytes[8] |= ((position >> 56) & 0x3f) as u8;

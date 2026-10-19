@@ -834,10 +834,13 @@ fn test_tool_definition_cache_control_serialization() {
             additional_params: Some(json!({"tools": [tool]})),
             ..CompletionRequest::new("test")
         };
-        let encoded = wire.encode(request, Mode::Unary)
+        let encoded = wire
+            .encode(request, Mode::Unary)
             .expect("the exact original raw tool encodes on native Anthropic");
         let body = json_body(&encoded.request);
-        let tools = body["tools"].as_array().expect("the actual encoded tools array");
+        let tools = body["tools"]
+            .as_array()
+            .expect("the actual encoded tools array");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0], original);
         tools[0].clone()
@@ -3162,9 +3165,12 @@ fn request_reserves_raw_server_tool_handles_without_rewriting_them() {
         .expect_err("G152: the original empty Local result is refused");
         let error = ProviderError::from(error);
         assert!(matches!(&error, ProviderError::Request(_)));
-        assert!(error.to_string().contains(
-            "tool result for `local` at index 0 of the user message at index 1 has no content"
-        ), "{error}");
+        assert!(
+            error.to_string().contains(
+                "tool result for `local` at index 0 of the user message at index 1 has no content"
+            ),
+            "{error}"
+        );
     }
 }
 
@@ -4452,9 +4458,12 @@ fn sonnet_5_5_defers_a_system_message_past_tool_results() {
     );
     // G153: the held system now occupies the valid slot after the tool results.
     assert!(value.get("system").is_none());
-    assert_eq!(value["messages"][3], json!({
-        "role":"system", "content":[{"type":"text","text":"Answer in Spanish."}]
-    }));
+    assert_eq!(
+        value["messages"][3],
+        json!({
+            "role":"system", "content":[{"type":"text","text":"Answer in Spanish."}]
+        })
+    );
     let roles: Vec<_> = value["messages"]
         .as_array()
         .unwrap()
@@ -4532,7 +4541,9 @@ fn nonempty_results_preserve_raw_server_tool_handle_reservations() {
         let history = vec![
             message::Message::Assistant(turn),
             message::Message::User {
-                content: vec![message::UserContent::ToolResult(local.result(vec![message::ToolResultContent::text("ok")]))],
+                content: vec![message::UserContent::ToolResult(
+                    local.result(vec![message::ToolResultContent::text("ok")]),
+                )],
             },
         ];
         let mut request = completion_request_with_history(history, None);
@@ -4569,16 +4580,27 @@ fn foreign_signed_answer_projects_only_its_known_text() {
             "content":{"parts":[{"text":"the answer","thoughtSignature":"c2lnbmVkLWFuc3dlcg=="}],"role":"model"},
             "finishReason":"STOP"
         }]}).to_string())], Value::Null).expect("genuine signed answer");
-    let request = CompletionRequest::from(vec![message::Message::user("q"),
+    let request = CompletionRequest::from(vec![
+        message::Message::user("q"),
         message::Message::Assistant(message::AssistantMessage::new(response.choice)),
-        message::Message::user("again")]).max_tokens(16);
+        message::Message::user("again"),
+    ])
+    .max_tokens(16);
     let target = AnthropicConfig::new("sk-test").completion("claude-haiku-4-5");
-    let encoded = target.encode(request.clone(), Mode::Unary).expect("direct known text");
+    let encoded = target
+        .encode(request.clone(), Mode::Unary)
+        .expect("direct known text");
     let direct = json_body(&encoded.request);
-    let prepared = Completion::prepare(request, &target.describe()).expect("original carried preflight");
-    let encoded = target.encode(prepared, Mode::Unary).expect("prepared known text");
+    let prepared =
+        Completion::prepare(request, &target.describe()).expect("original carried preflight");
+    let encoded = target
+        .encode(prepared, Mode::Unary)
+        .expect("prepared known text");
     for body in [direct, json_body(&encoded.request)] {
-        assert_eq!(body["messages"][1]["content"], json!([{"type":"text","text":"the answer"}]));
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([{"type":"text","text":"the answer"}])
+        );
         assert!(!body.to_string().contains("thoughtSignature"));
         assert!(!body.to_string().contains("c2lnbmVkLWFuc3dlcg"));
     }
@@ -4591,25 +4613,45 @@ fn foreign_inspection_text_edits_do_not_replay_payload_siblings() {
         .completion("gemini-3-flash-preview");
     let raw: Value = serde_json::from_str(BODY).expect("exact original fixture");
     for mode in [Mode::Unary, Mode::Streaming] {
-        let response = crate::test_utils::history::decode(&source, mode,
-            [WireFrame::Text(BODY.to_owned())]).expect("known inspection text");
+        let response =
+            crate::test_utils::history::decode(&source, mode, [WireFrame::Text(BODY.to_owned())])
+                .expect("known inspection text");
         assert_eq!(response.raw, raw);
         let received = response.message().expect("genuine turn");
         for edited in [false, true] {
             let mut received = received.clone();
-            let message::Message::Assistant(turn) = &mut received else { panic!("assistant"); };
-            let message::AssistantContent::CarriedText(part) = &mut turn.content[0] else { panic!("carried"); };
-            if edited { *part.text_mut() = "edited".to_owned(); }
-            assert_eq!(part.payload.item, raw["candidates"][0]["content"]["parts"][0]);
+            let message::Message::Assistant(turn) = &mut received else {
+                panic!("assistant");
+            };
+            let message::AssistantContent::CarriedText(part) = &mut turn.content[0] else {
+                panic!("carried");
+            };
+            if edited {
+                *part.text_mut() = "edited".to_owned();
+            }
+            assert_eq!(
+                part.payload.item,
+                raw["candidates"][0]["content"]["parts"][0]
+            );
             let target = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
-            let request = CompletionRequest::from(vec![message::Message::user("before"),
-                received, message::Message::user("continue")]).max_tokens(64);
-            let prepared = Completion::prepare(request, &target.describe()).expect("original known text prepares");
-            let encoded = target.encode(prepared, Mode::Unary).expect("known text encodes");
+            let request = CompletionRequest::from(vec![
+                message::Message::user("before"),
+                received,
+                message::Message::user("continue"),
+            ])
+            .max_tokens(64);
+            let prepared = Completion::prepare(request, &target.describe())
+                .expect("original known text prepares");
+            let encoded = target
+                .encode(prepared, Mode::Unary)
+                .expect("known text encodes");
             let body = json_body(&encoded.request);
-            assert_eq!(body["messages"][1]["content"], json!([{
-                "type":"text","text":if edited { "edited" } else { "answer" }
-            }]));
+            assert_eq!(
+                body["messages"][1]["content"],
+                json!([{
+                    "type":"text","text":if edited { "edited" } else { "answer" }
+                }])
+            );
             assert!(!body.to_string().contains("executableCode"));
             assert!(!body.to_string().contains("arbitrary"));
         }
@@ -4619,13 +4661,17 @@ fn foreign_inspection_text_edits_do_not_replay_payload_siblings() {
 #[test]
 fn foreign_opaque_carried_content_still_refuses_before_lowering() {
     use crate::completion::ReplayTarget;
-    let part = message::CarriedText::new(message::CarriedTextContent::Opaque(String::new()),
-        message::CarriedPayload::new(json!({"unknown":"opaque"}), Some(crate::providers::gemini::completion::PROVIDER_NAME.to_owned())));
+    let part = message::CarriedText::new(
+        message::CarriedTextContent::Opaque(String::new()),
+        message::CarriedPayload::new(
+            json!({"unknown":"opaque"}),
+            Some(crate::providers::gemini::completion::PROVIDER_NAME.to_owned()),
+        ),
+    );
     let target = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
     assert!(target.check_carried_text(&part).is_err());
     assert!(assistant_parts(&message::AssistantContent::CarriedText(part), &target, None).is_err());
 }
-
 
 /// A real signed Gemini thought and a real Responses ciphertext item.
 fn g226_received_carried_reasoning() -> Vec<(message::Message, &'static str, Value)> {
@@ -4635,56 +4681,95 @@ fn g226_received_carried_reasoning() -> Vec<(message::Message, &'static str, Val
     }]});
     let gemini = crate::providers::gemini::GeminiConfig::new("test-key")
         .completion("gemini-3-flash-preview");
-    let signed = crate::test_utils::history::decode(&gemini, Mode::Unary,
-        [WireFrame::Text(signed_raw.to_string())]).expect("real signed thought decoder");
+    let signed = crate::test_utils::history::decode(
+        &gemini,
+        Mode::Unary,
+        [WireFrame::Text(signed_raw.to_string())],
+    )
+    .expect("real signed thought decoder");
     assert_eq!(signed.raw, signed_raw);
-    let [message::AssistantContent::CarriedReasoning(reasoning)] = signed.choice.as_slice()
-        else { panic!("one received carried signed thought"); };
+    let [message::AssistantContent::CarriedReasoning(reasoning)] = signed.choice.as_slice() else {
+        panic!("one received carried signed thought");
+    };
     assert_eq!(reasoning.payload.item, signed_part);
-    assert_eq!(reasoning.provider(), Some(crate::providers::gemini::completion::PROVIDER_NAME));
-    assert_eq!(reasoning.content, vec![message::CarriedReasoningPart::Text {
-        text:"signed thought".to_owned(), signature:Some("c2ln".to_owned()),
-    }]);
+    assert_eq!(
+        reasoning.provider(),
+        Some(crate::providers::gemini::completion::PROVIDER_NAME)
+    );
+    assert_eq!(
+        reasoning.content,
+        vec![message::CarriedReasoningPart::Text {
+            text: "signed thought".to_owned(),
+            signature: Some("c2ln".to_owned()),
+        }]
+    );
 
     let cipher_item = json!({"type":"reasoning","id":"rs_g226","summary":[],
         "encrypted_content":"ciphertext","status":"completed"});
     let cipher_raw = json!({"id":"resp_g226","object":"response","created_at":0,
         "status":"completed","model":"gpt-5.4","output":[cipher_item],"tools":[]});
     let responses = crate::providers::openai::OpenAIConfig::new("test-key").responses("gpt-5.4");
-    let cipher = crate::test_utils::history::decode(&responses, Mode::Unary,
-        [WireFrame::Text(cipher_raw.to_string())]).expect("real ciphertext decoder");
+    let cipher = crate::test_utils::history::decode(
+        &responses,
+        Mode::Unary,
+        [WireFrame::Text(cipher_raw.to_string())],
+    )
+    .expect("real ciphertext decoder");
     assert_eq!(cipher.raw, cipher_raw);
-    let [message::AssistantContent::CarriedReasoning(reasoning)] = cipher.choice.as_slice()
-        else { panic!("one received carried ciphertext"); };
+    let [message::AssistantContent::CarriedReasoning(reasoning)] = cipher.choice.as_slice() else {
+        panic!("one received carried ciphertext");
+    };
     assert_eq!(reasoning.payload.item, cipher_item);
     assert_eq!(reasoning.provider(), Some("openai"));
     assert_eq!(reasoning.id.as_deref(), Some("rs_g226"));
-    assert_eq!(reasoning.content, vec![message::CarriedReasoningPart::Encrypted("ciphertext".to_owned())]);
+    assert_eq!(
+        reasoning.content,
+        vec![message::CarriedReasoningPart::Encrypted(
+            "ciphertext".to_owned()
+        )]
+    );
     vec![
-        (signed.message().expect("genuine signed turn"), crate::providers::gemini::completion::PROVIDER_NAME,
-            json!([{"type":"thinking","thinking":"signed thought","signature":"c2ln"}])),
-        (cipher.message().expect("genuine ciphertext turn"), "openai",
-            json!([{"type":"redacted_thinking","data":"ciphertext"}])),
+        (
+            signed.message().expect("genuine signed turn"),
+            crate::providers::gemini::completion::PROVIDER_NAME,
+            json!([{"type":"thinking","thinking":"signed thought","signature":"c2ln"}]),
+        ),
+        (
+            cipher.message().expect("genuine ciphertext turn"),
+            "openai",
+            json!([{"type":"redacted_thinking","data":"ciphertext"}]),
+        ),
     ]
 }
 
 fn g226_messages_target(issuer: &'static str) -> Messages {
-    let dialect = super::super::wire::compatible(
-        issuer, "https://messages.invalid", "G226_TEST_KEY", None,
-    );
+    let dialect =
+        super::super::wire::compatible(issuer, "https://messages.invalid", "G226_TEST_KEY", None);
     AnthropicConfig::with_key(&dialect, "test-key").completion("fixture-model")
 }
 
 fn g226_request(turn: message::Message) -> CompletionRequest {
-    CompletionRequest::from(vec![message::Message::user("before"), turn,
-        message::Message::user("again")]).max_tokens(64)
+    CompletionRequest::from(vec![
+        message::Message::user("before"),
+        turn,
+        message::Message::user("again"),
+    ])
+    .max_tokens(64)
 }
 
 fn g226_encode(target: &Messages, request: CompletionRequest, prepared: bool) -> Value {
     let request = if prepared {
-        Completion::prepare(request, &target.describe()).expect("real carried preflight and adaptation")
-    } else { request };
-    json_body(&target.encode(request, Mode::Unary).expect("real Messages encoding").request)
+        Completion::prepare(request, &target.describe())
+            .expect("real carried preflight and adaptation")
+    } else {
+        request
+    };
+    json_body(
+        &target
+            .encode(request, Mode::Unary)
+            .expect("real Messages encoding")
+            .request,
+    )
 }
 
 #[test]
@@ -4695,16 +4780,22 @@ fn g226_known_received_reasoning_is_scoped_to_the_actual_messages_dialect() {
         let foreign = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
         for prepared in [false, true] {
             let accepted = g226_encode(&matching, g226_request(received.clone()), prepared);
-            assert_eq!(accepted["messages"], json!([
-                {"role":"user","content":[{"type":"text","text":"before"}]},
-                {"role":"assistant","content":parts},
-                {"role":"user","content":[{"type":"text","text":"again"}]},
-            ]));
+            assert_eq!(
+                accepted["messages"],
+                json!([
+                    {"role":"user","content":[{"type":"text","text":"before"}]},
+                    {"role":"assistant","content":parts},
+                    {"role":"user","content":[{"type":"text","text":"again"}]},
+                ])
+            );
             let omitted = g226_encode(&foreign, g226_request(received.clone()), prepared);
-            assert_eq!(omitted["messages"], json!([
-                {"role":"user","content":[{"type":"text","text":"before"}]},
-                {"role":"user","content":[{"type":"text","text":"again"}]},
-            ]));
+            assert_eq!(
+                omitted["messages"],
+                json!([
+                    {"role":"user","content":[{"type":"text","text":"before"}]},
+                    {"role":"user","content":[{"type":"text","text":"again"}]},
+                ])
+            );
         }
         assert_eq!(received, before, "encoding never edits received evidence");
     }
@@ -4714,9 +4805,12 @@ fn g226_known_received_reasoning_is_scoped_to_the_actual_messages_dialect() {
 fn g226_unknown_issuer_keeps_signed_and_ciphertext_parts() {
     let target = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
     for (received, _, parts) in g226_received_carried_reasoning() {
-        let message::Message::Assistant(mut turn) = received else { panic!("assistant"); };
-        let message::AssistantContent::CarriedReasoning(reasoning) = &mut turn.content[0]
-            else { panic!("carried"); };
+        let message::Message::Assistant(mut turn) = received else {
+            panic!("assistant");
+        };
+        let message::AssistantContent::CarriedReasoning(reasoning) = &mut turn.content[0] else {
+            panic!("carried");
+        };
         let raw = reasoning.payload.item.clone();
         // This is the explicit unknown-provenance input, not a fabricated issuer.
         reasoning.payload.provider = None;
@@ -4726,9 +4820,12 @@ fn g226_unknown_issuer_keeps_signed_and_ciphertext_parts() {
             let body = g226_encode(&target, g226_request(unknown.clone()), prepared);
             assert_eq!(body["messages"][1]["content"], parts);
         }
-        let message::Message::Assistant(turn) = &unknown else { panic!("assistant"); };
-        let message::AssistantContent::CarriedReasoning(reasoning) = &turn.content[0]
-            else { panic!("carried"); };
+        let message::Message::Assistant(turn) = &unknown else {
+            panic!("assistant");
+        };
+        let message::AssistantContent::CarriedReasoning(reasoning) = &turn.content[0] else {
+            panic!("carried");
+        };
         assert_eq!(reasoning.payload.item, raw);
         assert_eq!(unknown, before);
     }
@@ -4738,35 +4835,55 @@ fn g226_unknown_issuer_keeps_signed_and_ciphertext_parts() {
 fn g226_foreign_reasoning_keeps_other_blocks_and_original_tool_coordinates() {
     let target = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
     for (received, _, _) in g226_received_carried_reasoning() {
-        let message::Message::Assistant(mut turn) = received else { panic!("assistant"); };
+        let message::Message::Assistant(mut turn) = received else {
+            panic!("assistant");
+        };
         let id: message::CallId = message::LocalCallId::new().into();
         let name = message::ToolName::new("lookup").expect("tool name");
-        turn.content.push(message::AssistantContent::ToolCall(message::ToolCall::new(
-            id.clone(), message::ToolFunction::new(name.clone(), json!({"q":"x"})),
-        )));
+        turn.content
+            .push(message::AssistantContent::ToolCall(message::ToolCall::new(
+                id.clone(),
+                message::ToolFunction::new(name.clone(), json!({"q":"x"})),
+            )));
         turn.content.push(message::AssistantContent::text("kept"));
         let request = CompletionRequest::from(vec![
-            message::Message::user("before"), message::Message::Assistant(turn),
-            message::Message::User {content:vec![message::UserContent::tool_result(
-                id, name, vec![message::ToolResultContent::text("done")],
-            )]},
-        ]).tools(vec![crate::completion::ToolDefinition::new(
+            message::Message::user("before"),
+            message::Message::Assistant(turn),
+            message::Message::User {
+                content: vec![message::UserContent::tool_result(
+                    id,
+                    name,
+                    vec![message::ToolResultContent::text("done")],
+                )],
+            },
+        ])
+        .tools(vec![crate::completion::ToolDefinition::new(
             message::ToolName::new("lookup").expect("declared tool name"),
             "lookup",
             json!({"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}),
-        )]).max_tokens(64);
+        )])
+        .max_tokens(64);
         for prepared in [false, true] {
             let request = if prepared {
-                Completion::prepare(request.clone(), &target.describe()).expect("prepared mixed turn")
-            } else { request.clone() };
+                Completion::prepare(request.clone(), &target.describe())
+                    .expect("prepared mixed turn")
+            } else {
+                request.clone()
+            };
             let ids = WireIds::for_target(&request.chat_history, &target, CLAUDE_SONNET_4_6)
                 .expect("original coordinate plan");
-            let planned = ids.of(1, 1).expect("call remains at original content index one").to_owned();
+            let planned = ids
+                .of(1, 1)
+                .expect("call remains at original content index one")
+                .to_owned();
             let body = g226_encode(&target, request, false);
-            assert_eq!(body["messages"][1]["content"], json!([
-                {"type":"tool_use","id":planned,"name":"lookup","input":{"q":"x"}},
-                {"type":"text","text":"kept"},
-            ]));
+            assert_eq!(
+                body["messages"][1]["content"],
+                json!([
+                    {"type":"tool_use","id":planned,"name":"lookup","input":{"q":"x"}},
+                    {"type":"text","text":"kept"},
+                ])
+            );
             assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], planned);
         }
     }
@@ -4780,7 +4897,10 @@ fn g226_ordinary_reasoning_and_genuine_native_anthropic_parts_stay_unchanged() {
     ]));
     for prepared in [false, true] {
         let body = g226_encode(&target, g226_request(ordinary.clone()), prepared);
-        assert_eq!(body["messages"][1]["content"], json!([{"type":"text","text":"ordinary"}]));
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([{"type":"text","text":"ordinary"}])
+        );
     }
     let content = json!([
         {"type":"thinking","thinking":"native thought","signature":"native-signature"},
@@ -4789,10 +4909,19 @@ fn g226_ordinary_reasoning_and_genuine_native_anthropic_parts_stay_unchanged() {
     let raw = json!({"type":"message","id":"msg_g226","role":"assistant",
         "model":CLAUDE_SONNET_4_6,"content":content,"stop_reason":"end_turn",
         "stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":2}});
-    let response = crate::test_utils::history::decode(&target, Mode::Unary,
-        [WireFrame::Text(raw.to_string())]).expect("real Anthropic decoder");
+    let response = crate::test_utils::history::decode(
+        &target,
+        Mode::Unary,
+        [WireFrame::Text(raw.to_string())],
+    )
+    .expect("real Anthropic decoder");
     assert_eq!(response.raw, raw);
-    assert!(response.choice.iter().all(|part| matches!(part, message::AssistantContent::Reasoning(_))));
+    assert!(
+        response
+            .choice
+            .iter()
+            .all(|part| matches!(part, message::AssistantContent::Reasoning(_)))
+    );
     assert_eq!(response.choice[0].native_item(), Some(&content[0]));
     assert_eq!(response.choice[1].native_item(), Some(&content[1]));
     let received = response.message().expect("genuine native turn");
@@ -4813,20 +4942,32 @@ fn g226_opaque_reasoning_is_refused_before_foreign_omission() {
             let payload = message::CarriedPayload::new(raw.clone(), issuer.map(str::to_owned));
             let part = if summary {
                 message::CarriedReasoningPart::OpaqueSummary(payload)
-            } else { message::CarriedReasoningPart::OpaqueContent(payload) };
-            let reasoning = message::CarriedReasoning::new(vec![part],
-                message::CarriedPayload::new(json!({"type":"reasoning","content":[raw]}),
-                    issuer.map(str::to_owned)));
-            let request = g226_request(message::Message::Assistant(message::AssistantMessage::new(
-                vec![message::AssistantContent::CarriedReasoning(reasoning)],
-            )));
+            } else {
+                message::CarriedReasoningPart::OpaqueContent(payload)
+            };
+            let reasoning = message::CarriedReasoning::new(
+                vec![part],
+                message::CarriedPayload::new(
+                    json!({"type":"reasoning","content":[raw]}),
+                    issuer.map(str::to_owned),
+                ),
+            );
+            let request =
+                g226_request(message::Message::Assistant(message::AssistantMessage::new(
+                    vec![message::AssistantContent::CarriedReasoning(reasoning)],
+                )));
             let prepared = Completion::prepare(request.clone(), &target.describe())
                 .expect_err("opaque preflight still refuses");
-            let direct: ProviderError = target.encode(request, Mode::Unary)
-                .expect_err("direct opaque lowering still refuses").into();
+            let direct: ProviderError = target
+                .encode(request, Mode::Unary)
+                .expect_err("direct opaque lowering still refuses")
+                .into();
             for error in [prepared, direct] {
-                let ProviderError::Request(source) = error else {panic!("typed Request");};
-                let source = source.downcast_ref::<message::UnrepresentableOpaqueContent>()
+                let ProviderError::Request(source) = error else {
+                    panic!("typed Request");
+                };
+                let source = source
+                    .downcast_ref::<message::UnrepresentableOpaqueContent>()
                     .expect("existing typed opaque source");
                 assert_eq!(source.wire, "Anthropic Messages");
             }

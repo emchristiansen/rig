@@ -295,7 +295,8 @@ fn re_emitted_namespaced_and_custom_calls_fold_back_unchanged() {
             crate::message::ToolFunction::new(
                 crate::message::ToolName::new("add").expect("a nonempty tool name"),
                 serde_json::json!({"x": 1}),
-            ).with_namespace(Some("math".to_owned())),
+            )
+            .with_namespace(Some("math".to_owned())),
         )),
         AssistantContent::custom_tool_call(
             "call_2",

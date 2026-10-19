@@ -566,9 +566,7 @@ pub(super) fn repair(data: &str) -> Option<String> {
         | "response.output_text.done"
         | "response.refusal.delta"
         | "response.refusal.done"
-        | "response.reasoning_text.done" => {
-            &["sequence_number", "output_index", "content_index"]
-        }
+        | "response.reasoning_text.done" => &["sequence_number", "output_index", "content_index"],
         "response.reasoning_summary_part.added"
         | "response.reasoning_summary_part.done"
         | "response.reasoning_summary_text.delta"

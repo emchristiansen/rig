@@ -14,8 +14,9 @@ use serde_json::{Value, json};
 
 use crate::completion::CompletionRequest;
 use crate::driver::Model;
-use crate::message::{AssistantContent, AssistantMessage, CallId, Message, ToolName,
-    ToolResultContent, UserContent};
+use crate::message::{
+    AssistantContent, AssistantMessage, CallId, Message, ToolName, ToolResultContent, UserContent,
+};
 use crate::providers::openai;
 use crate::providers::openai::wire::OpenAIConfig;
 use crate::streaming::{Item, StreamEvent};
@@ -82,31 +83,56 @@ fn expected_text(shape: Shape) -> &'static str {
 fn history(shape: Shape) -> Vec<Message> {
     match shape {
         Shape::Text => vec![
-            Message::User { content: vec![UserContent::text(
-                "Unicode context: café 東京. The marker is exactly: lantern-42.",
-            )] },
-            Message::Assistant(AssistantMessage::new(vec![AssistantContent::text("lantern-42")])),
+            Message::User {
+                content: vec![UserContent::text(
+                    "Unicode context: café 東京. The marker is exactly: lantern-42.",
+                )],
+            },
+            Message::Assistant(AssistantMessage::new(vec![AssistantContent::text(
+                "lantern-42",
+            )])),
         ],
         Shape::SingleTool => vec![
             Message::Assistant(AssistantMessage::new(vec![AssistantContent::tool_call(
-                "call_history_single", ToolName::new("lookup_marker").expect("tool name"),
+                "call_history_single",
+                ToolName::new("lookup_marker").expect("tool name"),
                 json!({ "key": "harbor" }),
             )])),
-            Message::User { content: vec![UserContent::tool_result(
-                CallId::from_wire("call_history_single"),
-                ToolName::new("lookup_marker").expect("tool name"),
-                vec![ToolResultContent::text("azimuth-47")],
-            )] },
+            Message::User {
+                content: vec![UserContent::tool_result(
+                    CallId::from_wire("call_history_single"),
+                    ToolName::new("lookup_marker").expect("tool name"),
+                    vec![ToolResultContent::text("azimuth-47")],
+                )],
+            },
         ],
         Shape::ParallelTool => vec![
             Message::Assistant(AssistantMessage::new(vec![
-                AssistantContent::tool_call("call_history_alpha", ToolName::new("alpha").expect("tool name"), json!({ "slot": 1 })),
-                AssistantContent::tool_call("call_history_beta", ToolName::new("beta").expect("tool name"), json!({ "slot": 2 })),
+                AssistantContent::tool_call(
+                    "call_history_alpha",
+                    ToolName::new("alpha").expect("tool name"),
+                    json!({ "slot": 1 }),
+                ),
+                AssistantContent::tool_call(
+                    "call_history_beta",
+                    ToolName::new("beta").expect("tool name"),
+                    json!({ "slot": 2 }),
+                ),
             ])),
-            Message::User { content: vec![
-                UserContent::tool_result(CallId::from_wire("call_history_alpha"), ToolName::new("alpha").expect("tool name"), vec![ToolResultContent::text("red")]),
-                UserContent::tool_result(CallId::from_wire("call_history_beta"), ToolName::new("beta").expect("tool name"), vec![ToolResultContent::text("blue")]),
-            ] },
+            Message::User {
+                content: vec![
+                    UserContent::tool_result(
+                        CallId::from_wire("call_history_alpha"),
+                        ToolName::new("alpha").expect("tool name"),
+                        vec![ToolResultContent::text("red")],
+                    ),
+                    UserContent::tool_result(
+                        CallId::from_wire("call_history_beta"),
+                        ToolName::new("beta").expect("tool name"),
+                        vec![ToolResultContent::text("blue")],
+                    ),
+                ],
+            },
         ],
     }
 }
@@ -169,16 +195,29 @@ async fn run_cell(scenario: &str, cell: Cell) -> Result<()> {
     let observation = match (cell.transport, cell.surface) {
         (Transport::Blocking, Surface::Raw) => {
             let response = Model::new(wire, RecordingHttpClient::new(response_body))
-                .call(request).await?;
-            Observation { text: provider_text(&response.raw)?, saw_terminal: true }
+                .call(request)
+                .await?;
+            Observation {
+                text: provider_text(&response.raw)?,
+                saw_terminal: true,
+            }
         }
         (Transport::Blocking, Surface::Normalized) => {
             let response = Model::new(wire, RecordingHttpClient::new(response_body))
-                .call(request).await?;
-            Observation { text: normalized_text(&response.choice), saw_terminal: true }
+                .call(request)
+                .await?;
+            Observation {
+                text: normalized_text(&response.choice),
+                saw_terminal: true,
+            }
         }
         (Transport::Streaming, surface) => {
-            let model = Model::new(wire, MockStreamingClient { sse_bytes: Bytes::from(response_body) });
+            let model = Model::new(
+                wire,
+                MockStreamingClient {
+                    sse_bytes: Bytes::from(response_body),
+                },
+            );
             let mut stream = model.stream(request)?;
             let mut text = String::new();
             while let Some(item) = stream.next().await {
@@ -193,7 +232,10 @@ async fn run_cell(scenario: &str, cell: Cell) -> Result<()> {
                 let native_text = provider_text(&response.raw)?;
                 assert_eq!(native_text, text, "{scenario}: native whole-document text");
             }
-            Observation { text, saw_terminal: true }
+            Observation {
+                text,
+                saw_terminal: true,
+            }
         }
     };
     // Keep the original recording premises and independently test real encoding.
@@ -242,10 +284,13 @@ fn recorded_response(scenario: &str) -> Value {
 fn recorded_stream_chunks(scenario: &str) -> Vec<Value> {
     let body = recorded("then", &fixture(scenario));
     // Existing transport framing and existing JSON parser; no fixture parser.
-    Framing::Sse.split(body.as_bytes()).into_iter()
+    Framing::Sse
+        .split(body.as_bytes())
+        .into_iter()
         .filter(|frame| frame.as_str().trim() != "[DONE]")
-        .map(|frame| serde_json::from_str(&frame.as_str())
-            .expect("recorded SSE frame should be JSON"))
+        .map(|frame| {
+            serde_json::from_str(&frame.as_str()).expect("recorded SSE frame should be JSON")
+        })
         .collect()
 }
 
@@ -368,122 +413,338 @@ fn cell(transport: Transport, model: ModelVariant, surface: Surface, shape: Shap
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_raw_text() -> Result<()> {
-    run_cell("blocking_gpt_4o_mini_raw_text", cell(Transport::Blocking, ModelVariant::Gpt4oMini, Surface::Raw, Shape::Text)).await
+    run_cell(
+        "blocking_gpt_4o_mini_raw_text",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt4oMini,
+            Surface::Raw,
+            Shape::Text,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_raw_single_tool() -> Result<()> {
-    run_cell("blocking_gpt_4o_mini_raw_single_tool", cell(Transport::Blocking, ModelVariant::Gpt4oMini, Surface::Raw, Shape::SingleTool)).await
+    run_cell(
+        "blocking_gpt_4o_mini_raw_single_tool",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt4oMini,
+            Surface::Raw,
+            Shape::SingleTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_raw_parallel_tool() -> Result<()> {
-    run_cell("blocking_gpt_4o_mini_raw_parallel_tool", cell(Transport::Blocking, ModelVariant::Gpt4oMini, Surface::Raw, Shape::ParallelTool)).await
+    run_cell(
+        "blocking_gpt_4o_mini_raw_parallel_tool",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt4oMini,
+            Surface::Raw,
+            Shape::ParallelTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_normalized_single_tool() -> Result<()> {
-    run_cell("blocking_gpt_4o_mini_normalized_single_tool", cell(Transport::Blocking, ModelVariant::Gpt4oMini, Surface::Normalized, Shape::SingleTool)).await
+    run_cell(
+        "blocking_gpt_4o_mini_normalized_single_tool",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt4oMini,
+            Surface::Normalized,
+            Shape::SingleTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_normalized_parallel_tool() -> Result<()> {
-    run_cell("blocking_gpt_4o_mini_normalized_parallel_tool", cell(Transport::Blocking, ModelVariant::Gpt4oMini, Surface::Normalized, Shape::ParallelTool)).await
+    run_cell(
+        "blocking_gpt_4o_mini_normalized_parallel_tool",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt4oMini,
+            Surface::Normalized,
+            Shape::ParallelTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_raw_text() -> Result<()> {
-    run_cell("blocking_gpt_4_1_mini_raw_text", cell(Transport::Blocking, ModelVariant::Gpt41Mini, Surface::Raw, Shape::Text)).await
+    run_cell(
+        "blocking_gpt_4_1_mini_raw_text",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt41Mini,
+            Surface::Raw,
+            Shape::Text,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_raw_single_tool() -> Result<()> {
-    run_cell("blocking_gpt_4_1_mini_raw_single_tool", cell(Transport::Blocking, ModelVariant::Gpt41Mini, Surface::Raw, Shape::SingleTool)).await
+    run_cell(
+        "blocking_gpt_4_1_mini_raw_single_tool",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt41Mini,
+            Surface::Raw,
+            Shape::SingleTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_raw_parallel_tool() -> Result<()> {
-    run_cell("blocking_gpt_4_1_mini_raw_parallel_tool", cell(Transport::Blocking, ModelVariant::Gpt41Mini, Surface::Raw, Shape::ParallelTool)).await
+    run_cell(
+        "blocking_gpt_4_1_mini_raw_parallel_tool",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt41Mini,
+            Surface::Raw,
+            Shape::ParallelTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_normalized_single_tool() -> Result<()> {
-    run_cell("blocking_gpt_4_1_mini_normalized_single_tool", cell(Transport::Blocking, ModelVariant::Gpt41Mini, Surface::Normalized, Shape::SingleTool)).await
+    run_cell(
+        "blocking_gpt_4_1_mini_normalized_single_tool",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt41Mini,
+            Surface::Normalized,
+            Shape::SingleTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_normalized_parallel_tool() -> Result<()> {
-    run_cell("blocking_gpt_4_1_mini_normalized_parallel_tool", cell(Transport::Blocking, ModelVariant::Gpt41Mini, Surface::Normalized, Shape::ParallelTool)).await
+    run_cell(
+        "blocking_gpt_4_1_mini_normalized_parallel_tool",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt41Mini,
+            Surface::Normalized,
+            Shape::ParallelTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_raw_text() -> Result<()> {
-    run_cell("streaming_gpt_4o_mini_raw_text", cell(Transport::Streaming, ModelVariant::Gpt4oMini, Surface::Raw, Shape::Text)).await
+    run_cell(
+        "streaming_gpt_4o_mini_raw_text",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt4oMini,
+            Surface::Raw,
+            Shape::Text,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_raw_single_tool() -> Result<()> {
-    run_cell("streaming_gpt_4o_mini_raw_single_tool", cell(Transport::Streaming, ModelVariant::Gpt4oMini, Surface::Raw, Shape::SingleTool)).await
+    run_cell(
+        "streaming_gpt_4o_mini_raw_single_tool",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt4oMini,
+            Surface::Raw,
+            Shape::SingleTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_raw_parallel_tool() -> Result<()> {
-    run_cell("streaming_gpt_4o_mini_raw_parallel_tool", cell(Transport::Streaming, ModelVariant::Gpt4oMini, Surface::Raw, Shape::ParallelTool)).await
+    run_cell(
+        "streaming_gpt_4o_mini_raw_parallel_tool",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt4oMini,
+            Surface::Raw,
+            Shape::ParallelTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_normalized_single_tool() -> Result<()> {
-    run_cell("streaming_gpt_4o_mini_normalized_single_tool", cell(Transport::Streaming, ModelVariant::Gpt4oMini, Surface::Normalized, Shape::SingleTool)).await
+    run_cell(
+        "streaming_gpt_4o_mini_normalized_single_tool",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt4oMini,
+            Surface::Normalized,
+            Shape::SingleTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_normalized_parallel_tool() -> Result<()> {
-    run_cell("streaming_gpt_4o_mini_normalized_parallel_tool", cell(Transport::Streaming, ModelVariant::Gpt4oMini, Surface::Normalized, Shape::ParallelTool)).await
+    run_cell(
+        "streaming_gpt_4o_mini_normalized_parallel_tool",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt4oMini,
+            Surface::Normalized,
+            Shape::ParallelTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_raw_text() -> Result<()> {
-    run_cell("streaming_gpt_4_1_mini_raw_text", cell(Transport::Streaming, ModelVariant::Gpt41Mini, Surface::Raw, Shape::Text)).await
+    run_cell(
+        "streaming_gpt_4_1_mini_raw_text",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt41Mini,
+            Surface::Raw,
+            Shape::Text,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_raw_single_tool() -> Result<()> {
-    run_cell("streaming_gpt_4_1_mini_raw_single_tool", cell(Transport::Streaming, ModelVariant::Gpt41Mini, Surface::Raw, Shape::SingleTool)).await
+    run_cell(
+        "streaming_gpt_4_1_mini_raw_single_tool",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt41Mini,
+            Surface::Raw,
+            Shape::SingleTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_raw_parallel_tool() -> Result<()> {
-    run_cell("streaming_gpt_4_1_mini_raw_parallel_tool", cell(Transport::Streaming, ModelVariant::Gpt41Mini, Surface::Raw, Shape::ParallelTool)).await
+    run_cell(
+        "streaming_gpt_4_1_mini_raw_parallel_tool",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt41Mini,
+            Surface::Raw,
+            Shape::ParallelTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_normalized_single_tool() -> Result<()> {
-    run_cell("streaming_gpt_4_1_mini_normalized_single_tool", cell(Transport::Streaming, ModelVariant::Gpt41Mini, Surface::Normalized, Shape::SingleTool)).await
+    run_cell(
+        "streaming_gpt_4_1_mini_normalized_single_tool",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt41Mini,
+            Surface::Normalized,
+            Shape::SingleTool,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_normalized_parallel_tool() -> Result<()> {
-    run_cell("streaming_gpt_4_1_mini_normalized_parallel_tool", cell(Transport::Streaming, ModelVariant::Gpt41Mini, Surface::Normalized, Shape::ParallelTool)).await
+    run_cell(
+        "streaming_gpt_4_1_mini_normalized_parallel_tool",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt41Mini,
+            Surface::Normalized,
+            Shape::ParallelTool,
+        ),
+    )
+    .await
 }
 
 // Four original normalized Text subjects under coord-a-rig-g235-shape-1.
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_normalized_text() -> Result<()> {
-    run_cell("blocking_gpt_4o_mini_normalized_text", cell(Transport::Blocking, ModelVariant::Gpt4oMini, Surface::Normalized, Shape::Text)).await
+    run_cell(
+        "blocking_gpt_4o_mini_normalized_text",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt4oMini,
+            Surface::Normalized,
+            Shape::Text,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_normalized_text() -> Result<()> {
-    run_cell("blocking_gpt_4_1_mini_normalized_text", cell(Transport::Blocking, ModelVariant::Gpt41Mini, Surface::Normalized, Shape::Text)).await
+    run_cell(
+        "blocking_gpt_4_1_mini_normalized_text",
+        cell(
+            Transport::Blocking,
+            ModelVariant::Gpt41Mini,
+            Surface::Normalized,
+            Shape::Text,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_normalized_text() -> Result<()> {
-    run_cell("streaming_gpt_4o_mini_normalized_text", cell(Transport::Streaming, ModelVariant::Gpt4oMini, Surface::Normalized, Shape::Text)).await
+    run_cell(
+        "streaming_gpt_4o_mini_normalized_text",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt4oMini,
+            Surface::Normalized,
+            Shape::Text,
+        ),
+    )
+    .await
 }
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_normalized_text() -> Result<()> {
-    run_cell("streaming_gpt_4_1_mini_normalized_text", cell(Transport::Streaming, ModelVariant::Gpt41Mini, Surface::Normalized, Shape::Text)).await
+    run_cell(
+        "streaming_gpt_4_1_mini_normalized_text",
+        cell(
+            Transport::Streaming,
+            ModelVariant::Gpt41Mini,
+            Surface::Normalized,
+            Shape::Text,
+        ),
+    )
+    .await
 }

@@ -20,7 +20,8 @@ fn response(reasoning: Value) -> CompletionResponse {
         &OpenAIConfig::new("test-key").responses("gpt-5.4"),
         Mode::Unary,
         [WireFrame::Text(body.to_string())],
-    ).expect("the genuine reply fixture decodes")
+    )
+    .expect("the genuine reply fixture decodes")
 }
 
 fn known(ciphertext: Option<&str>) -> Value {
@@ -34,23 +35,31 @@ fn known(ciphertext: Option<&str>) -> Value {
 
 fn input(response: &CompletionResponse, stateless: bool) -> Result<Vec<Value>, ProviderError> {
     let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
-    let results = response.tool_calls().map(|call| {
-        UserContent::ToolResult(call.result(vec![ToolResultContent::text("ok")]))
-    }).collect();
+    let results = response
+        .tool_calls()
+        .map(|call| UserContent::ToolResult(call.result(vec![ToolResultContent::text("ok")])))
+        .collect();
     let mut request = CompletionRequest::from(vec![
         Message::user("q"),
-        response.message().expect("the decoded reply is an assistant"),
+        response
+            .message()
+            .expect("the decoded reply is an assistant"),
         Message::User { content: results },
-    ]).tools(vec![ToolDefinition {
+    ])
+    .tools(vec![ToolDefinition {
         name: ToolName::new("f").expect("tool name"),
         description: "A tool".to_owned(),
         parameters: json!({"type":"object"}),
     }]);
     request.additional_params = Some(json!({"store":!stateless}));
     let prepared = Completion::prepare(request, &wire.describe())?;
-    let encoded = wire.encode(prepared, Mode::Unary).map_err(ProviderError::from)?;
+    let encoded = wire
+        .encode(prepared, Mode::Unary)
+        .map_err(ProviderError::from)?;
     Ok(crate::test_utils::json_body(&encoded.request)["input"]
-        .as_array().expect("encoded input array").clone())
+        .as_array()
+        .expect("encoded input array")
+        .clone())
 }
 
 #[test]
@@ -58,11 +67,14 @@ fn stateless_known_carried_without_ciphertext_omits_reasoning_and_rebuilds_its_p
     for ciphertext in [None, Some("")] {
         let response = response(known(ciphertext));
         let input = input(&response, true).expect("stateless request encodes");
-        assert_eq!(input, vec![
-            json!({"type":"message", "role":"user", "content":[{"type":"input_text","text":"q"}]}),
-            json!({"type":"function_call", "call_id":"call_1", "name":"f", "arguments":"{}"}),
-            json!({"type":"function_call_output", "call_id":"call_1", "output":"ok", "status":"completed"}),
-        ]);
+        assert_eq!(
+            input,
+            vec![
+                json!({"type":"message", "role":"user", "content":[{"type":"input_text","text":"q"}]}),
+                json!({"type":"function_call", "call_id":"call_1", "name":"f", "arguments":"{}"}),
+                json!({"type":"function_call_output", "call_id":"call_1", "output":"ok", "status":"completed"}),
+            ]
+        );
     }
 }
 
@@ -110,5 +122,9 @@ fn stateless_foreign_opaque_carried_keeps_its_existing_typed_refusal() {
     let ProviderError::Request(source) = error else {
         panic!("the existing refusal is Request: {error:?}");
     };
-    assert!(source.downcast_ref::<crate::message::UnrepresentableOpaqueContent>().is_some());
+    assert!(
+        source
+            .downcast_ref::<crate::message::UnrepresentableOpaqueContent>()
+            .is_some()
+    );
 }

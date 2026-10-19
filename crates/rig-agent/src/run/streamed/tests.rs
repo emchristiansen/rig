@@ -855,8 +855,13 @@ fn resumed_text_passes_through_once_without_reopening_or_duplicating_text() {
     let mut asm = assembler();
     ingest_all(&mut asm, &stream[..5]);
     assert_eq!(asm.aggregated_text(), "firstother");
-    let emitted = asm.ingest(&stream[5]).expect("the existing text Part resumes");
-    assert!(matches!(emitted.as_slice(), [StreamedTurnEvent::EmitIngested]));
+    let emitted = asm
+        .ingest(&stream[5])
+        .expect("the existing text Part resumes");
+    assert!(matches!(
+        emitted.as_slice(),
+        [StreamedTurnEvent::EmitIngested]
+    ));
     assert_eq!(asm.aggregated_text(), "firstother");
     asm.ingest(&stream[6]).expect("the resumed text continues");
     assert_eq!(asm.aggregated_text(), "firstotherlast");

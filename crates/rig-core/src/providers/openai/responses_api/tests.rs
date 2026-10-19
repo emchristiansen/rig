@@ -1806,7 +1806,10 @@ fn a_nonempty_known_reasoning_tag_keeps_its_category_and_exact_raw() {
         panic!("the nonempty known tag remains reasoning");
     };
     assert_eq!(reasoning.id.as_deref(), Some("r1"));
-    assert_eq!(reasoning.content, [Part::Summary("synthetic category control".to_owned())]);
+    assert_eq!(
+        reasoning.content,
+        [Part::Summary("synthetic category control".to_owned())]
+    );
     assert_eq!(response.raw["output"][0], item);
 }
 
@@ -2125,15 +2128,26 @@ async fn delta_only_stream_minted_output_ids_are_not_serialized_upstream() {
     let drained = stream.finish().await.expect("stream should complete");
     // G141: only the old plain-Reasoning/minted-id view is lost. The actual
     // carried text and absent provider item ID still cannot go upstream.
-    let thought = drained.choice.iter().find_map(|content| match content {
-        CoreContent::CarriedReasoning(reasoning) => Some(reasoning),
-        _ => None,
-    }).expect("the actual carried thought");
+    let thought = drained
+        .choice
+        .iter()
+        .find_map(|content| match content {
+            CoreContent::CarriedReasoning(reasoning) => Some(reasoning),
+            _ => None,
+        })
+        .expect("the actual carried thought");
     assert_eq!(thought.display_text(), "unattributed thought");
-    assert_eq!(thought.content, vec![Part::Text {
-        text: "unattributed thought".to_owned(), signature: None,
-    }]);
-    assert!(thought.id.is_none(), "no provider reasoning item ID was received");
+    assert_eq!(
+        thought.content,
+        vec![Part::Text {
+            text: "unattributed thought".to_owned(),
+            signature: None,
+        }]
+    );
+    assert!(
+        thought.id.is_none(),
+        "no provider reasoning item ID was received"
+    );
     let items = input_items(assistant(drained.choice)).expect("history converts");
     assert!(reasoning_inputs(&items).is_empty());
 }

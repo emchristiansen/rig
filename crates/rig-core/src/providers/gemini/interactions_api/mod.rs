@@ -436,7 +436,11 @@ pub(crate) fn create_request_body(
 /// Project the original generation fields and omit absent original parameters.
 fn with_original_omissions(request: &CompletionRequest) -> Result<CompletionRequest, EncodeError> {
     let mut input = request.clone();
-    if let Some(params) = input.additional_params.as_mut().and_then(Value::as_object_mut) {
+    if let Some(params) = input
+        .additional_params
+        .as_mut()
+        .and_then(Value::as_object_mut)
+    {
         for field in ["store", "background"] {
             if params.get(field).is_some_and(Value::is_null) {
                 params.shift_remove(field);
@@ -444,8 +448,12 @@ fn with_original_omissions(request: &CompletionRequest) -> Result<CompletionRequ
         }
         if let Some(config) = params.get("generation_config") {
             match project_original_generation_config(config)? {
-                Some(projected) => { params.insert("generation_config".to_owned(), projected); }
-                None => { params.shift_remove("generation_config"); }
+                Some(projected) => {
+                    params.insert("generation_config".to_owned(), projected);
+                }
+                None => {
+                    params.shift_remove("generation_config");
+                }
             }
         }
         let agent = params.get("agent").is_some_and(|value| !value.is_null());
@@ -496,7 +504,15 @@ fn project_original_tool_choice(value: &Value) -> Result<Option<Value>, EncodeEr
             }
             match field {
                 "mode" => selected_mode = Some(mode(value)?),
-                "tools" => selected_tools = Some(Value::Array(Vec::<String>::deserialize(value).ok()?.into_iter().map(Value::String).collect())),
+                "tools" => {
+                    selected_tools = Some(Value::Array(
+                        Vec::<String>::deserialize(value)
+                            .ok()?
+                            .into_iter()
+                            .map(Value::String)
+                            .collect(),
+                    ))
+                }
                 _ => {}
             }
             Some(())
@@ -515,8 +531,12 @@ fn project_original_tool_choice(value: &Value) -> Result<Option<Value>, EncodeEr
             _ => return None,
         }
         let mut fields = Map::new();
-        if let Some(value) = selected_mode { fields.insert("mode".to_owned(), value); }
-        if let Some(value) = selected_tools { fields.insert("tools".to_owned(), value); }
+        if let Some(value) = selected_mode {
+            fields.insert("mode".to_owned(), value);
+        }
+        if let Some(value) = selected_tools {
+            fields.insert("tools".to_owned(), value);
+        }
         Some(Value::Object(fields))
     };
     if let Some(allowed) = allowed.and_then(read_allowed) {
@@ -525,12 +545,21 @@ fn project_original_tool_choice(value: &Value) -> Result<Option<Value>, EncodeEr
     let error = <serde_json::Error as serde::de::Error>::custom(
         "data did not match any variant of untagged enum ToolChoice",
     );
-    Err(EncodeError::request(crate::error::ProviderError::from(error)))
+    Err(EncodeError::request(crate::error::ProviderError::from(
+        error,
+    )))
 }
 
 const ORIGINAL_GENERATION_FIELDS: [&str; 9] = [
-    "temperature", "top_p", "seed", "stop_sequences", "tool_choice",
-    "thinking_level", "thinking_summaries", "max_output_tokens", "speech_config",
+    "temperature",
+    "top_p",
+    "seed",
+    "stop_sequences",
+    "tool_choice",
+    "thinking_level",
+    "thinking_summaries",
+    "max_output_tokens",
+    "speech_config",
 ];
 
 /// Project only the nine declared original generation members.
@@ -568,7 +597,8 @@ fn project_original_generation_config(value: &Value) -> Result<Option<Value>, En
             for (position, field) in ORIGINAL_GENERATION_FIELDS.into_iter().enumerate() {
                 let Some(value) = fields.get(position) else {
                     return Err(json_error(serde_json::Error::invalid_length(
-                        position, &"struct GenerationConfig with 9 elements",
+                        position,
+                        &"struct GenerationConfig with 9 elements",
                     )));
                 };
                 if let Some(value) = project_original_generation_field(field, value)? {
@@ -577,7 +607,8 @@ fn project_original_generation_config(value: &Value) -> Result<Option<Value>, En
             }
             if fields.len() > ORIGINAL_GENERATION_FIELDS.len() {
                 return Err(json_error(serde_json::Error::invalid_length(
-                    fields.len(), &"fewer elements in array",
+                    fields.len(),
+                    &"fewer elements in array",
                 )));
             }
         }
@@ -590,7 +621,12 @@ fn project_original_generation_config(value: &Value) -> Result<Option<Value>, En
                     formatter.write_str("struct GenerationConfig")
                 }
             }
-            value.deserialize_struct("GenerationConfig", &ORIGINAL_GENERATION_FIELDS, GenerationShape)
+            value
+                .deserialize_struct(
+                    "GenerationConfig",
+                    &ORIGINAL_GENERATION_FIELDS,
+                    GenerationShape,
+                )
                 .map_err(json_error)?;
         }
     }
@@ -598,7 +634,10 @@ fn project_original_generation_config(value: &Value) -> Result<Option<Value>, En
 }
 
 /// Project one declared generation member using its original leaf codec.
-fn project_original_generation_field(field: &str, value: &Value) -> Result<Option<Value>, EncodeError> {
+fn project_original_generation_field(
+    field: &str,
+    value: &Value,
+) -> Result<Option<Value>, EncodeError> {
     use serde::Deserialize as _;
     if value.is_null() {
         return Ok(None);
@@ -609,7 +648,10 @@ fn project_original_generation_field(field: &str, value: &Value) -> Result<Optio
     if field == "speech_config" {
         let values = Vec::<Value>::deserialize(value)
             .map_err(|error| EncodeError::request(ProviderError::from(error)))?;
-        let projected = values.iter().map(project_original_speech_config).collect::<Result<Vec<_>, _>>()?;
+        let projected = values
+            .iter()
+            .map(project_original_speech_config)
+            .collect::<Result<Vec<_>, _>>()?;
         return Ok(Some(Value::Array(projected)));
     }
     let projected = match field {
@@ -620,7 +662,9 @@ fn project_original_generation_field(field: &str, value: &Value) -> Result<Optio
         "thinking_summaries" => project_original_thinking_summaries(value),
         _ => return Ok(None),
     };
-    projected.map(Some).map_err(|error| EncodeError::request(ProviderError::from(error)))
+    projected
+        .map(Some)
+        .map_err(|error| EncodeError::request(ProviderError::from(error)))
 }
 
 /// Project the original thinking-level unit enum without changing its accepted forms.
@@ -633,18 +677,29 @@ fn project_original_thinking_level(value: &Value) -> Result<Value, serde_json::E
             formatter.write_str("enum ThinkingLevel")
         }
         fn visit_enum<A>(self, data: A) -> Result<Value, A::Error>
-        where A: serde::de::EnumAccess<'de> {
+        where
+            A: serde::de::EnumAccess<'de>,
+        {
             use serde::de::{Error as _, VariantAccess as _};
             let (variant, payload) = data.variant::<String>()?;
             match variant.as_str() {
                 "minimal" | "low" | "medium" | "high" => {}
-                _ => return Err(A::Error::unknown_variant(&variant, &["minimal", "low", "medium", "high"])),
+                _ => {
+                    return Err(A::Error::unknown_variant(
+                        &variant,
+                        &["minimal", "low", "medium", "high"],
+                    ));
+                }
             }
             payload.unit_variant()?;
             Ok(Value::String(variant))
         }
     }
-    value.deserialize_enum("ThinkingLevel", &["minimal", "low", "medium", "high"], ThinkingLevelProjection)
+    value.deserialize_enum(
+        "ThinkingLevel",
+        &["minimal", "low", "medium", "high"],
+        ThinkingLevelProjection,
+    )
 }
 
 /// Project the original thinking-summary unit enum, including the set `none` variant.
@@ -657,7 +712,9 @@ fn project_original_thinking_summaries(value: &Value) -> Result<Value, serde_jso
             formatter.write_str("enum ThinkingSummaries")
         }
         fn visit_enum<A>(self, data: A) -> Result<Value, A::Error>
-        where A: serde::de::EnumAccess<'de> {
+        where
+            A: serde::de::EnumAccess<'de>,
+        {
             use serde::de::{Error as _, VariantAccess as _};
             let (variant, payload) = data.variant::<String>()?;
             match variant.as_str() {
@@ -668,7 +725,11 @@ fn project_original_thinking_summaries(value: &Value) -> Result<Value, serde_jso
             Ok(Value::String(variant))
         }
     }
-    value.deserialize_enum("ThinkingSummaries", &["auto", "none"], ThinkingSummariesProjection)
+    value.deserialize_enum(
+        "ThinkingSummaries",
+        &["auto", "none"],
+        ThinkingSummariesProjection,
+    )
 }
 
 /// Project only the three declared original speech members.
@@ -696,7 +757,8 @@ fn project_original_speech_config(value: &Value) -> Result<Value, EncodeError> {
             for (position, field) in FIELDS.into_iter().enumerate() {
                 let Some(value) = fields.get(position) else {
                     return Err(json_error(serde_json::Error::invalid_length(
-                        position, &"struct SpeechConfig with 3 elements",
+                        position,
+                        &"struct SpeechConfig with 3 elements",
                     )));
                 };
                 if !value.is_null() {
@@ -706,7 +768,8 @@ fn project_original_speech_config(value: &Value) -> Result<Value, EncodeError> {
             }
             if fields.len() > FIELDS.len() {
                 return Err(json_error(serde_json::Error::invalid_length(
-                    fields.len(), &"fewer elements in array",
+                    fields.len(),
+                    &"fewer elements in array",
                 )));
             }
         }
@@ -719,7 +782,9 @@ fn project_original_speech_config(value: &Value) -> Result<Value, EncodeError> {
                     formatter.write_str("struct SpeechConfig")
                 }
             }
-            value.deserialize_struct("SpeechConfig", &FIELDS, SpeechShape).map_err(json_error)?;
+            value
+                .deserialize_struct("SpeechConfig", &FIELDS, SpeechShape)
+                .map_err(json_error)?;
         }
     }
     Ok(Value::Object(projected))
@@ -728,7 +793,11 @@ fn project_original_speech_config(value: &Value) -> Result<Value, EncodeError> {
 /// Check the named original fields before merging explicit controls.
 fn check_original_fields(request: &CompletionRequest) -> Result<(), EncodeError> {
     use serde::Deserialize as _;
-    let Some(params) = request.additional_params.as_ref().and_then(Value::as_object) else {
+    let Some(params) = request
+        .additional_params
+        .as_ref()
+        .and_then(Value::as_object)
+    else {
         return Ok(());
     };
     for (field, value) in params {
@@ -860,7 +929,8 @@ fn steps(
                         return Err(crate::message::UnrepresentableToolCall::CustomCall {
                             wire: "Gemini Interactions",
                             name: result.name.clone(),
-                        }.into());
+                        }
+                        .into());
                     }
                     let mut contents = result.content;
                     let value = match (contents.len(), contents.pop()) {
@@ -902,7 +972,11 @@ fn steps(
             }
             Message::Assistant(turn) => {
                 for (content_index, block) in turn.content.iter().enumerate() {
-                    steps.extend(assistant_step(block, target, ids.of(message_index, content_index))?);
+                    steps.extend(assistant_step(
+                        block,
+                        target,
+                        ids.of(message_index, content_index),
+                    )?);
                 }
             }
         }
@@ -936,25 +1010,34 @@ fn user_content(part: UserContent) -> Result<Value, EncodeError> {
 
 fn document_content(document: &crate::message::Document) -> Result<Value, EncodeError> {
     use base64::Engine;
-    let media_type = document.media_type.as_ref().ok_or_else(|| {
-        EncodeError::request("Media type for document is required for Gemini")
-    })?;
+    let media_type = document
+        .media_type
+        .as_ref()
+        .ok_or_else(|| EncodeError::request("Media type for document is required for Gemini"))?;
     if *media_type == DocumentMediaType::TXT {
         let bytes = match &document.data {
             DocumentData::Text(text) => return Ok(json!({"type": "text", "text": text})),
-            DocumentData::File(Source::Base64(data)) => {
-                base64::engine::general_purpose::STANDARD.decode(data).map_err(|error| {
-                    EncodeError::request(format!("Failed to decode text document base64 data: {error}"))
-                })?
-            }
+            DocumentData::File(Source::Base64(data)) => base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|error| {
+                    EncodeError::request(format!(
+                        "Failed to decode text document base64 data: {error}"
+                    ))
+                })?,
             DocumentData::File(Source::Raw(data)) => data.clone(),
-            DocumentData::File(Source::Url(_)) => return Err(EncodeError::request(
-                "Text document URLs are not supported for Gemini Interactions inputs"
-            )),
-            DocumentData::File(Source::FileId(_)) => return Err(EncodeError::request(
-                "Provider file IDs are not supported for Gemini Interactions inputs"
-            )),
-            DocumentData::File(Source::Unknown) => return Err(EncodeError::request("Unknown content source")),
+            DocumentData::File(Source::Url(_)) => {
+                return Err(EncodeError::request(
+                    "Text document URLs are not supported for Gemini Interactions inputs",
+                ));
+            }
+            DocumentData::File(Source::FileId(_)) => {
+                return Err(EncodeError::request(
+                    "Provider file IDs are not supported for Gemini Interactions inputs",
+                ));
+            }
+            DocumentData::File(Source::Unknown) => {
+                return Err(EncodeError::request("Unknown content source"));
+            }
         };
         let text = String::from_utf8(bytes).map_err(|error| {
             EncodeError::request(format!("Text document data must be UTF-8: {error}"))
@@ -978,7 +1061,7 @@ fn document_content(document: &crate::message::Document) -> Result<Value, Encode
             "type": "document", "mime_type": mime_type, "uri": uri
         })),
         DocumentData::File(Source::FileId(_)) => Err(EncodeError::request(
-            "Provider file IDs are not supported for Gemini Interactions inputs"
+            "Provider file IDs are not supported for Gemini Interactions inputs",
         )),
         DocumentData::File(Source::Unknown) => Err(EncodeError::request("Unknown content source")),
     }
@@ -1020,44 +1103,66 @@ fn assistant_step(
             return Err(call.refused_by_json_only_wire("Gemini Interactions").into());
         }
         AssistantContent::ProviderItem(item) => {
-            return Err(crate::message::UnreplayableProviderItem::new("Gemini Interactions", item).into());
+            return Err(
+                crate::message::UnreplayableProviderItem::new("Gemini Interactions", item).into(),
+            );
         }
         AssistantContent::CarriedText(part) => {
             return match part.known_text_projection() {
-                Some(text) => Ok(Some(json!({"type": "model_output", "content": [{"type": "text", "text": text}]}))),
-                None => Err(crate::message::UnrepresentableOpaqueContent::new("Gemini Interactions").into()),
+                Some(text) => Ok(Some(
+                    json!({"type": "model_output", "content": [{"type": "text", "text": text}]}),
+                )),
+                None => Err(crate::message::UnrepresentableOpaqueContent::new(
+                    "Gemini Interactions",
+                )
+                .into()),
             };
         }
         AssistantContent::CarriedReasoning(reasoning) => {
             if reasoning.has_opaque_parts() {
-                return Err(crate::message::UnrepresentableOpaqueContent::new("Gemini Interactions").into());
+                return Err(crate::message::UnrepresentableOpaqueContent::new(
+                    "Gemini Interactions",
+                )
+                .into());
             }
             let signature = reasoning.content.iter().find_map(|part| match part {
-                crate::message::CarriedReasoningPart::Text { signature, .. } => signature.as_deref(),
+                crate::message::CarriedReasoningPart::Text { signature, .. } => {
+                    signature.as_deref()
+                }
                 crate::message::CarriedReasoningPart::Summary(_)
                 | crate::message::CarriedReasoningPart::Encrypted(_)
                 | crate::message::CarriedReasoningPart::Redacted { .. }
                 | crate::message::CarriedReasoningPart::OpaqueSummary(_)
                 | crate::message::CarriedReasoningPart::OpaqueContent(_) => None,
             });
-            let summary: Vec<Value> = reasoning.content.iter().filter_map(|part| {
-                let text = match part {
-                    crate::message::CarriedReasoningPart::Text { text, .. }
-                    | crate::message::CarriedReasoningPart::Summary(text)
-                    | crate::message::CarriedReasoningPart::Encrypted(text) => text,
-                    crate::message::CarriedReasoningPart::Redacted { data } => data,
-                    crate::message::CarriedReasoningPart::OpaqueSummary(_)
-                    | crate::message::CarriedReasoningPart::OpaqueContent(_) => return None,
-                };
-                (!text.is_empty()).then(|| json!({"type":"text", "text":text}))
-            }).collect();
+            let summary: Vec<Value> = reasoning
+                .content
+                .iter()
+                .filter_map(|part| {
+                    let text = match part {
+                        crate::message::CarriedReasoningPart::Text { text, .. }
+                        | crate::message::CarriedReasoningPart::Summary(text)
+                        | crate::message::CarriedReasoningPart::Encrypted(text) => text,
+                        crate::message::CarriedReasoningPart::Redacted { data } => data,
+                        crate::message::CarriedReasoningPart::OpaqueSummary(_)
+                        | crate::message::CarriedReasoningPart::OpaqueContent(_) => return None,
+                    };
+                    (!text.is_empty()).then(|| json!({"type":"text", "text":text}))
+                })
+                .collect();
             let mut step = json!({"type":"thought"});
-            if !summary.is_empty() { step["summary"] = json!(summary); }
-            if let Some(signature) = signature { step["signature"] = json!(signature); }
+            if !summary.is_empty() {
+                step["summary"] = json!(summary);
+            }
+            if let Some(signature) = signature {
+                step["signature"] = json!(signature);
+            }
             return Ok(Some(step));
         }
-        AssistantContent::Text(_) | AssistantContent::Reasoning(_)
-        | AssistantContent::Image(_) | AssistantContent::Opaque(_) => {}
+        AssistantContent::Text(_)
+        | AssistantContent::Reasoning(_)
+        | AssistantContent::Image(_)
+        | AssistantContent::Opaque(_) => {}
     }
     let identity = match block.replay(target, wire_id) {
         Replay::Item(item) => return Ok(Some(item.into_owned())),
@@ -1086,21 +1191,29 @@ fn assistant_step(
             image.data.clone(),
         )?),
         AssistantContent::Opaque(opaque) => return Ok(Some(opaque.item.clone())),
-        AssistantContent::CarriedText(_) | AssistantContent::CarriedReasoning(_)
-        => {
-            return Err(crate::message::UnrepresentableOpaqueContent::new("Gemini Interactions").into());
+        AssistantContent::CarriedText(_) | AssistantContent::CarriedReasoning(_) => {
+            return Err(
+                crate::message::UnrepresentableOpaqueContent::new("Gemini Interactions").into(),
+            );
         }
         AssistantContent::CustomToolCall(call) => {
             return Err(call.refused_by_json_only_wire("Gemini Interactions").into());
         }
         AssistantContent::ProviderItem(item) => {
-            return Err(crate::message::UnreplayableProviderItem::new("Gemini Interactions", item).into());
+            return Err(
+                crate::message::UnreplayableProviderItem::new("Gemini Interactions", item).into(),
+            );
         }
     };
     if let Some(fields) = step.as_object_mut() {
         fields.extend(identity);
         if let AssistantContent::ToolCall(_) = block {
-            fields.insert("id".to_owned(), json!(wire_id.ok_or_else(|| EncodeError::request("a function-call occurrence has no planned wire ID"))?));
+            fields.insert(
+                "id".to_owned(),
+                json!(wire_id.ok_or_else(|| EncodeError::request(
+                    "a function-call occurrence has no planned wire ID"
+                ))?),
+            );
         }
     }
     Ok(Some(step))

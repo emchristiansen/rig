@@ -5,8 +5,10 @@ use std::borrow::Cow;
 use serde_json::{Map, Value, json};
 
 use super::{Accepts, OptionalCallId, Replay, ReplayTarget};
-use crate::message::{Api, AssistantContent, CallId, LocalCallId, Opaque, Origin,
-    ProviderCallId, ToolCall, ToolFunction, ToolName};
+use crate::message::{
+    Api, AssistantContent, CallId, LocalCallId, Opaque, Origin, ProviderCallId, ToolCall,
+    ToolFunction, ToolName,
+};
 
 #[derive(Debug)]
 struct Target(&'static str);
@@ -41,7 +43,9 @@ impl ReplayTarget for Target {
     }
 
     fn identity(&self, item: &Value) -> Map<String, Value> {
-        item.as_object().into_iter().flatten()
+        item.as_object()
+            .into_iter()
+            .flatten()
             .filter(|(key, _)| matches!(key.as_str(), "id" | "call_id" | "output_id" | "routing"))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
@@ -60,9 +64,14 @@ fn local() -> CallId {
 }
 
 fn call(id: CallId, native: Value) -> AssistantContent {
-    AssistantContent::ToolCall(ToolCall::new(id,
-        ToolFunction::new(ToolName::new("lookup").expect("fixture name"), json!({"x":1}))))
-        .with_native(native)
+    AssistantContent::ToolCall(ToolCall::new(
+        id,
+        ToolFunction::new(
+            ToolName::new("lookup").expect("fixture name"),
+            json!({"x":1}),
+        ),
+    ))
+    .with_native(native)
 }
 
 fn call_id(block: &AssistantContent) -> &CallId {
@@ -79,14 +88,23 @@ fn current_native_without_a_handle_stays_whole_under_explicit_local_omission() {
     let block = call(local(), native.clone());
     let fingerprint = block.fingerprint();
     assert_eq!(block.native_item(), Some(&native));
-    assert_eq!(block.replay_optional_call_id(&Target("/id"), optional_id(call_id(&block))),
-        Replay::Item(Cow::Owned(native.clone())));
-    assert_eq!(block.native_item(), Some(&native), "replay never edits the stored Native");
+    assert_eq!(
+        block.replay_optional_call_id(&Target("/id"), optional_id(call_id(&block))),
+        Replay::Item(Cow::Owned(native.clone()))
+    );
+    assert_eq!(
+        block.native_item(),
+        Some(&native),
+        "replay never edits the stored Native"
+    );
     assert_eq!(block.fingerprint(), fingerprint);
     let mut required = native;
     required["id"] = json!("tool-0");
-    assert_eq!(block.replay(&Target("/id"), Some("tool-0")),
-        Replay::Item(Cow::Owned(required)), "required-ID replay still fills its planned spelling");
+    assert_eq!(
+        block.replay(&Target("/id"), Some("tool-0")),
+        Replay::Item(Cow::Owned(required)),
+        "required-ID replay still fills its planned spelling"
+    );
 }
 
 #[test]
@@ -103,44 +121,76 @@ fn a_local_current_native_omits_only_the_optional_handle_and_keeps_every_sibling
     let Replay::Item(item) = replay else {
         panic!("the current Native remains a whole item");
     };
-    assert_eq!(serde_json::to_vec(item.as_ref()).expect("serialize optional replay"),
-        serde_json::to_vec(&expected).expect("serialize literal expected item"));
+    assert_eq!(
+        serde_json::to_vec(item.as_ref()).expect("serialize optional replay"),
+        serde_json::to_vec(&expected).expect("serialize literal expected item")
+    );
     assert_eq!(block.native_item(), Some(&native));
-    assert_eq!(block.replay(&Target("/id"), None), Replay::Item(Cow::Owned(native)));
+    assert_eq!(
+        block.replay(&Target("/id"), None),
+        Replay::Item(Cow::Owned(native))
+    );
 }
 
 #[test]
 fn local_stale_identity_loses_only_the_optional_slot_and_never_prunes_siblings() {
     for (slot, native, expected) in [
-        ("/id", json!({"id":"old-handle","output_id":"item-only","call_id":"other-slot",
+        (
+            "/id",
+            json!({"id":"old-handle","output_id":"item-only","call_id":"other-slot",
             "function":{"name":"lookup","arguments":{"x":1}}}),
-            json!({"output_id":"item-only","call_id":"other-slot"})),
-        ("/routing/call_id", json!({"id":"output-id","routing":{"call_id":"old-handle",
+            json!({"output_id":"item-only","call_id":"other-slot"}),
+        ),
+        (
+            "/routing/call_id",
+            json!({"id":"output-id","routing":{"call_id":"old-handle",
             "other":{"id":"nested-output","exact":[true,null]}}}),
-            json!({"id":"output-id","routing":{"other":{"id":"nested-output","exact":[true,null]}}})),
-        ("/routing/id", json!({"routing":{"id":"old-handle"}}),
-            json!({"routing":{}})),
+            json!({"id":"output-id","routing":{"other":{"id":"nested-output","exact":[true,null]}}}),
+        ),
+        (
+            "/routing/id",
+            json!({"routing":{"id":"old-handle"}}),
+            json!({"routing":{}}),
+        ),
     ] {
         let mut block = call(local(), native.clone());
         let AssistantContent::ToolCall(call) = &mut block else {
             panic!("function fixture");
         };
         call.function.arguments.insert("x".to_owned(), json!(2));
-        assert!(block.native_item().is_none(), "canonical edit stales the original Native");
+        assert!(
+            block.native_item().is_none(),
+            "canonical edit stales the original Native"
+        );
         assert_eq!(block.stale_item(), Some(&native));
         let target = Target(slot);
-        let expected_identity = expected.as_object().expect("literal identity object").clone();
-        assert_eq!(block.replay_optional_call_id(&target, optional_id(call_id(&block))),
-            Replay::Identity(expected_identity));
-        assert_eq!(block.replay(&target, None), Replay::Identity(target.identity(&native)),
-            "required stale identity retains all original keys");
+        let expected_identity = expected
+            .as_object()
+            .expect("literal identity object")
+            .clone();
+        assert_eq!(
+            block.replay_optional_call_id(&target, optional_id(call_id(&block))),
+            Replay::Identity(expected_identity)
+        );
+        assert_eq!(
+            block.replay(&target, None),
+            Replay::Identity(target.identity(&native)),
+            "required stale identity retains all original keys"
+        );
         assert_eq!(block.stale_item(), Some(&native));
     }
     let mut block = call(local(), json!({"id":"only-identity"}));
-    let AssistantContent::ToolCall(call) = &mut block else { panic!("function fixture"); };
-    call.function.arguments.insert("edited".to_owned(), json!(true));
-    assert_eq!(block.replay_optional_call_id(&Target("/id"), optional_id(call_id(&block))),
-        Replay::Rebuild, "removing the sole stale identity leaves canonical rebuild");
+    let AssistantContent::ToolCall(call) = &mut block else {
+        panic!("function fixture");
+    };
+    call.function
+        .arguments
+        .insert("edited".to_owned(), json!(true));
+    assert_eq!(
+        block.replay_optional_call_id(&Target("/id"), optional_id(call_id(&block))),
+        Replay::Rebuild,
+        "removing the sole stale identity leaves canonical rebuild"
+    );
 }
 
 #[test]
@@ -152,15 +202,21 @@ fn a_provider_handle_replays_verbatim_without_rewriting_output_item_identity() {
     let mut expected = native.clone();
     expected["call_id"] = json!(handle.as_str());
     let target = Target("/call_id");
-    assert_eq!(block.replay_optional_call_id(&target, optional_id(call_id(&block))),
-        Replay::Item(Cow::Owned(expected)));
+    assert_eq!(
+        block.replay_optional_call_id(&target, optional_id(call_id(&block))),
+        Replay::Item(Cow::Owned(expected))
+    );
     assert_eq!(block.native_item(), Some(&native));
     let mut edited = block;
-    let AssistantContent::ToolCall(call) = &mut edited else { panic!("function fixture"); };
+    let AssistantContent::ToolCall(call) = &mut edited else {
+        panic!("function fixture");
+    };
     call.function.arguments.insert("x".to_owned(), json!(2));
-    assert_eq!(edited.replay_optional_call_id(&target, optional_id(call_id(&edited))),
+    assert_eq!(
+        edited.replay_optional_call_id(&target, optional_id(call_id(&edited))),
         edited.replay(&target, Some(handle.as_str())),
-        "provider stale identity behavior is exactly the required replay behavior");
+        "provider stale identity behavior is exactly the required replay behavior"
+    );
 }
 
 #[test]
@@ -168,16 +224,21 @@ fn optional_omission_does_not_reclassify_text_opaque_or_origin() {
     let native = json!({"id":"text-item","text":"answer","future":[null,true]});
     let text = AssistantContent::text("answer").with_native(native.clone());
     let opaque = AssistantContent::Opaque(Opaque {
-        item: json!({"id":"opaque-item","type":"future_item"}), replay: true,
+        item: json!({"id":"opaque-item","type":"future_item"}),
+        replay: true,
     });
     let origin = Origin::new("optional.calls", "optional-provider", "model");
     let history = crate::message::AssistantMessage::new(vec![text.clone(), opaque.clone()])
         .with_origin(origin.clone());
-    assert_eq!(text.replay_optional_call_id(&Target("/id"), OptionalCallId::OmitLocal),
-        text.replay(&Target("/id"), None));
+    assert_eq!(
+        text.replay_optional_call_id(&Target("/id"), OptionalCallId::OmitLocal),
+        text.replay(&Target("/id"), None)
+    );
     assert_eq!(text.native_item(), Some(&native));
-    assert_eq!(opaque.replay_optional_call_id(&Target("/id"), OptionalCallId::OmitLocal),
-        Replay::Rebuild);
+    assert_eq!(
+        opaque.replay_optional_call_id(&Target("/id"), OptionalCallId::OmitLocal),
+        Replay::Rebuild
+    );
     assert_eq!(history.origin.as_ref(), Some(&origin));
     assert_eq!(history.content, [text, opaque]);
 }

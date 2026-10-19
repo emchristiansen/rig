@@ -71,7 +71,7 @@ struct Usage {
 }
 
 #[derive(Deserialize)]
-struct TerminalUsage {
+pub(super) struct TerminalUsage {
     #[serde(rename = "output_tokens")]
     _output_tokens: u64,
     #[serde(rename = "input_tokens")]
@@ -101,7 +101,7 @@ struct OutputTokensDetails {
 }
 
 #[derive(Deserialize)]
-struct Terminal {
+pub(super) struct Terminal {
     #[serde(rename = "stop_reason")]
     _stop_reason: Option<String>,
     #[serde(rename = "stop_sequence")]
@@ -190,7 +190,7 @@ pub(super) enum Content {
 }
 
 #[derive(Deserialize)]
-struct CacheControl {
+pub(super) struct CacheControl {
     #[serde(rename = "type")]
     _kind: String,
     #[serde(rename = "ttl")]
@@ -198,14 +198,14 @@ struct CacheControl {
 }
 
 #[derive(Deserialize)]
-struct CitationsConfig {
+pub(super) struct CitationsConfig {
     #[serde(rename = "enabled")]
     _enabled: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ImageSource {
+pub(super) enum ImageSource {
     Base64 {
         #[serde(rename = "data")]
         _data: String,
@@ -223,7 +223,7 @@ enum ImageSource {
 }
 
 #[derive(Deserialize)]
-enum ImageMediaType {
+pub(super) enum ImageMediaType {
     #[serde(rename = "image/jpeg")]
     Jpeg,
     #[serde(rename = "image/png")]
@@ -236,7 +236,7 @@ enum ImageMediaType {
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum DocumentSource {
+pub(super) enum DocumentSource {
     Base64 {
         #[serde(rename = "data")]
         _data: String,
@@ -260,13 +260,13 @@ enum DocumentSource {
 }
 
 #[derive(Deserialize)]
-enum Pdf {
+pub(super) enum Pdf {
     #[serde(rename = "application/pdf")]
     Pdf,
 }
 
 #[derive(Deserialize)]
-enum PlainText {
+pub(super) enum PlainText {
     #[serde(rename = "text/plain")]
     Plain,
 }
@@ -277,14 +277,14 @@ enum PlainText {
     dead_code,
     reason = "Validated payloads stay in MessagesEvent's original fields."
 )]
-enum ToolResultBody {
+pub(super) enum ToolResultBody {
     Text(String),
     Parts(Vec<ToolResultPart>),
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ToolResultPart {
+pub(super) enum ToolResultPart {
     Text {
         #[serde(rename = "text")]
         _text: String,
@@ -297,7 +297,7 @@ enum ToolResultPart {
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Delta {
+pub(super) enum Delta {
     TextDelta {
         #[serde(rename = "text")]
         _text: String,
@@ -322,7 +322,7 @@ enum Delta {
     Other,
 }
 
-struct Citation;
+pub(super) struct Citation;
 
 impl<'de> Deserialize<'de> for Citation {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

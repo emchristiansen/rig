@@ -110,7 +110,10 @@ fn known_text_and_refusal_edits_update_only_their_actual_wire_field() {
         assert_eq!(part.text(), " \nchanged\t ");
         let mut expected = raw.clone();
         expected[field] = json!(" \nchanged\t ");
-        assert_eq!(part.replay_item().expect("replay known edit"), CarriedTextReplay::ProviderPart(expected.clone()));
+        assert_eq!(
+            part.replay_item().expect("replay known edit"),
+            CarriedTextReplay::ProviderPart(expected.clone())
+        );
         assert_eq!(
             part.payload.item, raw,
             "the original payload remains evidence"
@@ -127,7 +130,10 @@ fn known_text_and_refusal_edits_update_only_their_actual_wire_field() {
         assert_eq!(encoded["phase"], " \tfinal_answer ");
         let decoded = serde_json::from_value::<CarriedText>(encoded).expect("read edited part");
         assert_eq!(decoded, part);
-        assert_eq!(decoded.replay_item().expect("replay after serde"), CarriedTextReplay::ProviderPart(expected.clone()));
+        assert_eq!(
+            decoded.replay_item().expect("replay after serde"),
+            CarriedTextReplay::ProviderPart(expected.clone())
+        );
     }
 }
 
@@ -147,7 +153,10 @@ fn opaque_raw_only_edits_replay_exactly_and_canonical_text_edits_refuse() {
     assert_eq!(part.text(), "");
     part.payload.item["payload"] = json!([7, {"text": "raw-only edit"}]);
     let expected = part.payload.item.clone();
-    assert_eq!(part.replay_item().expect("raw-only edit replays"), CarriedTextReplay::ProviderPart(expected.clone()));
+    assert_eq!(
+        part.replay_item().expect("raw-only edit replays"),
+        CarriedTextReplay::ProviderPart(expected.clone())
+    );
     let decoded = serde_json::from_value::<CarriedText>(
         serde_json::to_value(&part).expect("serialize opaque part"),
     )
@@ -175,7 +184,10 @@ fn opaque_raw_only_edits_replay_exactly_and_canonical_text_edits_refuse() {
     );
     for raw in [json!(null), json!(["unknown", 2]), json!("scalar")] {
         part.payload.item = raw.clone();
-        assert_eq!(part.replay_item().expect("unknown raw shape retained"), CarriedTextReplay::ProviderPart(raw.clone()));
+        assert_eq!(
+            part.replay_item().expect("unknown raw shape retained"),
+            CarriedTextReplay::ProviderPart(raw.clone())
+        );
     }
 }
 
@@ -248,7 +260,8 @@ fn ordered_message_parts_keep_known_edits_opaque_siblings_and_item_metadata() {
             raw[1].clone(),
             json!({"type": "refusal", "refusal": "edited No", "future": [3]}),
             raw[3].clone(),
-        ].map(CarriedTextReplay::ProviderPart)
+        ]
+        .map(CarriedTextReplay::ProviderPart)
     );
     for (at, part) in decoded.iter().enumerate() {
         assert_eq!(part.payload.item, raw[at]);

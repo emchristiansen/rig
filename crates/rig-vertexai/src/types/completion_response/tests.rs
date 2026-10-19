@@ -139,9 +139,13 @@ fn unselected_inline_parts_keep_exact_inspection_evidence() {
         Some(&serde_json::to_value(&parts).expect("the received parts serialize")),
     );
 
-    let [AssistantContent::Text(before), AssistantContent::CarriedText(thought_image),
-        AssistantContent::CarriedText(audio), AssistantContent::CarriedText(signed_image),
-        AssistantContent::Text(after)] = response.choice.as_slice()
+    let [
+        AssistantContent::Text(before),
+        AssistantContent::CarriedText(thought_image),
+        AssistantContent::CarriedText(audio),
+        AssistantContent::CarriedText(signed_image),
+        AssistantContent::Text(after),
+    ] = response.choice.as_slice()
     else {
         panic!("the received five parts must stay text/inspection/inspection/inspection/text");
     };
@@ -155,23 +159,40 @@ fn unselected_inline_parts_keep_exact_inspection_evidence() {
         assert!(matches!(&carried.content,
             CarriedTextContent::InspectionOnlyMedia(text) if text.is_empty()));
         assert_eq!(carried.payload.provider.as_deref(), Some(PROVIDER_NAME));
-        assert_eq!(carried.payload.position,
-            CarriedPosition::MessageContent { item_index: 0, part_index: index as u64 });
-        assert_eq!(carried.payload.item,
-            serde_json::to_value(&parts[index]).expect("the received part serializes"));
+        assert_eq!(
+            carried.payload.position,
+            CarriedPosition::MessageContent {
+                item_index: 0,
+                part_index: index as u64
+            }
+        );
+        assert_eq!(
+            carried.payload.item,
+            serde_json::to_value(&parts[index]).expect("the received part serializes")
+        );
         assert_eq!(response.choice[index].native_item(), None);
         assert_eq!(carried.payload.item["inlineData"]["mimeType"], json!(mime));
         let data = carried.payload.item["inlineData"]["data"]
-            .as_str().expect("the received inline bytes remain base64");
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(data)
-            .expect("the SDK bytes retain valid base64"), bytes);
+            .as_str()
+            .expect("the received inline bytes remain base64");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .expect("the SDK bytes retain valid base64"),
+            bytes
+        );
     }
     assert_eq!(thought_image.payload.item["thought"], json!(true));
     let signature = signed_image.payload.item["thoughtSignature"]
-        .as_str().expect("the received signature is retained");
+        .as_str()
+        .expect("the received signature is retained");
     assert_eq!(signature, "AQID");
-    assert_eq!(base64::engine::general_purpose::STANDARD.decode(signature)
-        .expect("the SDK signature retains valid base64"), vec![1, 2, 3]);
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(signature)
+            .expect("the SDK signature retains valid base64"),
+        vec![1, 2, 3]
+    );
 }
 
 /// G94: completed history projects these three inspection carriers to empty
@@ -197,12 +218,17 @@ fn prepared_history_omits_inspection_media_and_keeps_surrounding_text() {
     let request = rig_core::operation::Completion::prepare(
         CompletionRequest::from(vec![
             Message::user("hello"),
-            response.message().expect("the completed reply supplies its own history message"),
+            response
+                .message()
+                .expect("the completed reply supplies its own history message"),
             Message::user("next"),
         ]),
         &wire.describe(),
-    ).expect("the completed history prepares");
-    let encoded = wire.encode(request, Mode::Unary).expect("the prepared history encodes");
+    )
+    .expect("the completed history prepares");
+    let encoded = wire
+        .encode(request, Mode::Unary)
+        .expect("the prepared history encodes");
     assert_eq!(encoded.contents.len(), 3);
     assert_eq!(encoded.contents[0].role, "user");
     assert_eq!(encoded.contents[2].role, "user");
@@ -210,7 +236,16 @@ fn prepared_history_omits_inspection_media_and_keeps_surrounding_text() {
     assert_eq!(model.role, "model");
     // These are empty known-text projections, not replayed media payloads.
     let empty = || vertexai::model::Part::new().set_text("").set_thought(false);
-    assert_eq!(model.parts, [parts[0].clone(), empty(), empty(), empty(), parts[4].clone()]);
+    assert_eq!(
+        model.parts,
+        [
+            parts[0].clone(),
+            empty(),
+            empty(),
+            empty(),
+            parts[4].clone()
+        ]
+    );
     assert_eq!(model.parts[0].text(), Some(&"before".to_owned()));
     assert_eq!(model.parts[4].text(), Some(&"after".to_owned()));
     for part in &model.parts[1..4] {

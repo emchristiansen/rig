@@ -1102,13 +1102,21 @@ fn namespaced_and_custom_calls_are_refused_before_any_tool_step() {
     let namespaced = AssistantContent::ToolCall(
         ToolCall::from_wire(
             "call_1",
-            ToolFunction::new(rig_core::message::ToolName::new("add").expect("tool name"), json!({"x": 1})),
+            ToolFunction::new(
+                rig_core::message::ToolName::new("add").expect("tool name"),
+                json!({"x": 1}),
+            ),
         )
         .with_namespace(Some("math".to_owned())),
     );
     // Custom input that parses as JSON — and would be valid `add` arguments —
     // is refused all the same.
-    let custom = AssistantContent::custom_tool_call("call_2", rig_core::message::ToolName::new("add").expect("tool name"), None, r#"{"x": 1}"#);
+    let custom = AssistantContent::custom_tool_call(
+        "call_2",
+        rig_core::message::ToolName::new("add").expect("tool name"),
+        None,
+        r#"{"x": 1}"#,
+    );
     for (content, streamed) in [
         (namespaced.clone(), false),
         (custom.clone(), false),
@@ -1492,7 +1500,9 @@ fn a_format_2_run_is_refused_by_name() {
 async fn a_length_terminal_never_dispatches_a_call_the_writer_did_not_finish() {
     use rig_core::providers::anthropic::{Anthropic, completion::CLAUDE_SONNET_4_6};
     use rig_core::wire::{Mode, WireFrame};
-    let wire = Anthropic::new("test-key").completion(CLAUDE_SONNET_4_6).wire;
+    let wire = Anthropic::new("test-key")
+        .completion(CLAUDE_SONNET_4_6)
+        .wire;
     for finished in [false, true] {
         let mut frames = vec![
             json!({"type":"message_start","message":{
@@ -1514,7 +1524,9 @@ async fn a_length_terminal_never_dispatches_a_call_the_writer_did_not_finish() {
         let response = rig_core::test_utils::history::decode(
             &wire,
             Mode::Streaming,
-            frames.into_iter().map(|frame| WireFrame::Text(frame.to_string())),
+            frames
+                .into_iter()
+                .map(|frame| WireFrame::Text(frame.to_string())),
         )
         .expect("the genuine provider terminal arrives");
         assert_eq!(response.finish_reason(), Some(FinishReason::Length));
@@ -1585,15 +1597,16 @@ async fn an_open_call_at_eof_has_no_genuine_terminal_and_is_truncated() {
     assert!(matches!(error, ProviderError::Truncated), "{error}");
 }
 
-
 /// G194/G48b synthetic Responses admission: required root/envelope fields and
 /// actual in_progress status are explicit; no output_item.done is invented.
 #[tokio::test]
 async fn a_responses_length_terminal_never_dispatches_a_parseable_call_without_done() {
-    use rig_core::providers::openai::responses_api::streaming::IncompleteTerminal;
     use rig_core::providers::openai::OpenAI;
+    use rig_core::providers::openai::responses_api::streaming::IncompleteTerminal;
     use rig_core::wire::{Mode, WireFrame};
-    let wire = OpenAI::new("test-key").responses("gpt-5.4").wire
+    let wire = OpenAI::new("test-key")
+        .responses("gpt-5.4")
+        .wire
         .with_streamed_incomplete(IncompleteTerminal::Accept);
     let frames = [
         json!({"type":"response.output_item.added","sequence_number":0,"output_index":0,
@@ -1606,31 +1619,53 @@ async fn a_responses_length_terminal_never_dispatches_a_parseable_call_without_d
             "model":"gpt-5.4","output":[],"tools":[],
             "incomplete_details":{"reason":"max_output_tokens"}}}),
     ];
-    let response = rig_core::test_utils::history::decode(&wire, Mode::Streaming,
-        frames.into_iter().map(|frame| WireFrame::Text(frame.to_string())))
-        .expect("the actual accepted incomplete provider terminal arrives");
+    let response = rig_core::test_utils::history::decode(
+        &wire,
+        Mode::Streaming,
+        frames
+            .into_iter()
+            .map(|frame| WireFrame::Text(frame.to_string())),
+    )
+    .expect("the actual accepted incomplete provider terminal arrives");
     assert_eq!(response.finish_reason(), Some(FinishReason::Length));
     let reason = "the provider ended the reply with a tool call it never finished";
     assert_eq!(response.error.as_deref(), Some(reason));
-    assert_eq!(response.head().stop, Some(StopReason::Error(reason.to_owned())));
+    assert_eq!(
+        response.head().stop,
+        Some(StopReason::Error(reason.to_owned()))
+    );
     let calls = response.tool_calls().collect::<Vec<_>>();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].id.provider().unwrap().as_str(), "call_1");
     assert_eq!(calls[0].function.name.as_str(), "add");
     assert_eq!(calls[0].function.arguments_value(), json!({"x":1,"y":2}));
     assert_eq!(calls[0].function.invalid_arguments, None);
-    assert!(calls[0].native.is_none(), "the unfinished call has no Native");
-    let turn = ModelTurn::new(response.head(), response.choice.clone(),
-        response.usage.clone(), policy(&["add"]), response.raw.clone())
-        .with_finish_reason(response.finish_reason());
+    assert!(
+        calls[0].native.is_none(),
+        "the unfinished call has no Native"
+    );
+    let turn = ModelTurn::new(
+        response.head(),
+        response.choice.clone(),
+        response.usage.clone(),
+        policy(&["add"]),
+        response.raw.clone(),
+    )
+    .with_finish_reason(response.finish_reason());
     let mut run = AgentRun::new("add things").max_turns(2);
     expect_call_model(&mut run);
-    expect_continue(run.model_response(turn).expect("the received turn is retained"));
-    let error = run.next_step().expect_err("no tool dispatch step may be issued");
-    assert!(matches!(error, PromptError::Provider(ProviderError::Response(ref message))
-        if message.contains("none of its tool calls ran") && message.contains(reason)));
+    expect_continue(
+        run.model_response(turn)
+            .expect("the received turn is retained"),
+    );
+    let error = run
+        .next_step()
+        .expect_err("no tool dispatch step may be issued");
+    assert!(
+        matches!(error, PromptError::Provider(ProviderError::Response(ref message))
+        if message.contains("none of its tool calls ran") && message.contains(reason))
+    );
 }
-
 
 /// The zero-retry policy is an added input: this control proves refusal before
 /// CallTools under that policy, rather than the default engine execution policy.
@@ -1639,7 +1674,9 @@ fn anthropic_first_fragment_overflow_is_refused_with_zero_malformed_retries() {
     use rig_core::providers::anthropic::{Anthropic, completion::CLAUDE_SONNET_4_6};
     use rig_core::wire::{Decoder, Mode, Wire, WireEvent, WireFrame};
 
-    let wire = Anthropic::new("test-key").completion(CLAUDE_SONNET_4_6).wire;
+    let wire = Anthropic::new("test-key")
+        .completion(CLAUDE_SONNET_4_6)
+        .wire;
     let oversized = "x".repeat(32 * 1024 * 1024 + 1);
     let block = json!({"type":"tool_use","id":"call_1","name":"add","input":{}});
     let delta = json!({"type":"content_block_delta","index":0,
@@ -1662,32 +1699,47 @@ fn anthropic_first_fragment_overflow_is_refused_with_zero_malformed_retries() {
             "id":"msg_g217","type":"message","role":"assistant",
             "model":CLAUDE_SONNET_4_6,"content":[],"stop_reason":null,
             "stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}
-        }}).to_string(),
+        }})
+        .to_string(),
         json!({"type":"content_block_start","index":0,"content_block":block}).to_string(),
         raw_delta,
         json!({"type":"content_block_stop","index":0}).to_string(),
         json!({"type":"message_delta",
             "delta":{"stop_reason":"tool_use","stop_sequence":null},
-            "usage":{"output_tokens":0}}).to_string(),
+            "usage":{"output_tokens":0}})
+        .to_string(),
     ];
     let response = rig_core::test_utils::history::decode(
         &wire,
         Mode::Streaming,
         frames.into_iter().map(WireFrame::Text),
-    ).expect("the explicit block stop and tool_use terminal complete the provider turn");
+    )
+    .expect("the explicit block stop and tool_use terminal complete the provider turn");
     assert_eq!(response.finish_reason(), Some(FinishReason::ToolCalls));
     assert_eq!(response.error, None);
     assert_eq!(response.stop(), StopReason::ToolUse);
-    assert_eq!(response.origin.provider, rig_core::providers::anthropic::PROVIDER_NAME);
+    assert_eq!(
+        response.origin.provider,
+        rig_core::providers::anthropic::PROVIDER_NAME
+    );
     let calls = response.tool_calls().collect::<Vec<_>>();
     assert_eq!(calls.len(), 1);
     let call = calls[0];
-    assert_eq!(call.id.provider().expect("the received call ID survives").as_str(), "call_1");
+    assert_eq!(
+        call.id
+            .provider()
+            .expect("the received call ID survives")
+            .as_str(),
+        "call_1"
+    );
     assert_eq!(call.function.name.as_str(), "add");
     assert_eq!(call.function.namespace, None);
     assert_eq!(call.function.arguments_value(), json!({}));
     assert_eq!(call.function.invalid_arguments.as_deref(), Some(""));
-    assert!(call.native.is_none(), "the actual malformed-block stop clears Native evidence");
+    assert!(
+        call.native.is_none(),
+        "the actual malformed-block stop clears Native evidence"
+    );
     // This is the assembled unary document, not the original delta envelope:
     // unparseable input leaves the exact received opening block unchanged.
     assert_eq!(response.raw["content"], json!([block]));
@@ -1698,13 +1750,19 @@ fn anthropic_first_fragment_overflow_is_refused_with_zero_malformed_retries() {
         response.usage.clone(),
         policy(&["add"]),
         response.raw.clone(),
-    ).with_finish_reason(response.finish_reason());
+    )
+    .with_finish_reason(response.finish_reason());
     let mut run = AgentRun::new("add things")
         .max_turns(2)
         .max_consecutive_malformed_tool_calls(0);
     expect_call_model(&mut run);
-    expect_continue(run.model_response(turn).expect("the actual completed turn is retained"));
-    let error = run.next_step().expect_err("zero malformed retries refuse before CallTools");
+    expect_continue(
+        run.model_response(turn)
+            .expect("the actual completed turn is retained"),
+    );
+    let error = run
+        .next_step()
+        .expect_err("zero malformed retries refuse before CallTools");
     let expected = format!(
         "tool `add` was called with arguments that are not a JSON object on 1 consecutive \
          turns, more than the 0 retries allowed: {}",
@@ -1744,54 +1802,100 @@ fn native_cohere_call_end_controls_real_folded_turn_dispatch() {
             }
             frames.push(json!({"type":"message-end","delta":{"finish_reason":finish}}));
             let response = rig_core::test_utils::history::decode(
-                &wire, Mode::Streaming,
-                frames.into_iter().map(|frame| WireFrame::Text(frame.to_string())),
-            ).expect("the actual native Cohere terminal folds");
+                &wire,
+                Mode::Streaming,
+                frames
+                    .into_iter()
+                    .map(|frame| WireFrame::Text(frame.to_string())),
+            )
+            .expect("the actual native Cohere terminal folds");
             assert_eq!(response.finish_reason(), Some(expected_finish.clone()));
             let calls = response.tool_calls().collect::<Vec<_>>();
             assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].id.provider().expect("received provider ID").as_str(), "call_1");
+            assert_eq!(
+                calls[0]
+                    .id
+                    .provider()
+                    .expect("received provider ID")
+                    .as_str(),
+                "call_1"
+            );
             assert_eq!(calls[0].function.name.as_str(), "add");
             assert_eq!(calls[0].function.arguments_value(), json!({"x":1}));
             assert_eq!(calls[0].function.invalid_arguments, None);
             let failure = rig_core::completion::message::turn_failure(
-                &response.choice, response.head().stop.as_ref(), response.finish_reason().as_ref(),
+                &response.choice,
+                response.head().stop.as_ref(),
+                response.finish_reason().as_ref(),
             );
             if finished {
                 assert_eq!(response.error, None);
                 assert_eq!(failure, None);
-                assert!(calls[0].native.is_some(), "explicit native tool-call-end seals its real item");
+                assert!(
+                    calls[0].native.is_some(),
+                    "explicit native tool-call-end seals its real item"
+                );
             } else {
                 assert_eq!(response.error.as_deref(), Some(reason));
-                assert_eq!(response.head().stop, Some(StopReason::Error(reason.to_owned())));
+                assert_eq!(
+                    response.head().stop,
+                    Some(StopReason::Error(reason.to_owned()))
+                );
                 assert!(calls[0].native.is_none());
-                assert_eq!(failure, Some(format!("the turn failed, so none of its tool calls ran: {reason}")));
+                assert_eq!(
+                    failure,
+                    Some(format!(
+                        "the turn failed, so none of its tool calls ran: {reason}"
+                    ))
+                );
             }
             let turn = ModelTurn::from_policy(&response, policy(&["add"]));
             let mut run = AgentRun::new("add things").max_turns(2);
             expect_call_model(&mut run);
-            expect_continue(run.model_response(turn).expect("retain the actual folded turn"));
+            expect_continue(
+                run.model_response(turn)
+                    .expect("retain the actual folded turn"),
+            );
             if finished {
                 let calls = expect_call_tools(&mut run);
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].tool_call.function.name.as_str(), "add");
-                assert_eq!(calls[0].tool_call.function.arguments_value(), json!({"x":1}));
+                assert_eq!(
+                    calls[0].tool_call.function.arguments_value(),
+                    json!({"x":1})
+                );
                 assert!(calls[0].preresolved_result.is_none());
-                let result = calls[0].tool_call.result(vec![ToolResultContent::text("1")]);
+                let result = calls[0]
+                    .tool_call
+                    .result(vec![ToolResultContent::text("1")]);
                 run.tool_results(vec![UserContent::ToolResult(result)])
                     .expect("the host's result answers the genuinely dispatched call");
                 let (prompt, _, next_turn) = expect_call_model(&mut run);
                 assert_eq!(next_turn, 2);
-                let Message::User { content } = prompt else { panic!("the actual result becomes the next prompt"); };
-                let [UserContent::ToolResult(result)] = content.as_slice() else { panic!("one matching actual tool result"); };
-                assert_eq!(result.call.provider().expect("received call ID").as_str(), "call_1");
+                let Message::User { content } = prompt else {
+                    panic!("the actual result becomes the next prompt");
+                };
+                let [UserContent::ToolResult(result)] = content.as_slice() else {
+                    panic!("one matching actual tool result");
+                };
+                assert_eq!(
+                    result.call.provider().expect("received call ID").as_str(),
+                    "call_1"
+                );
                 assert_eq!(result.name.as_str(), "add");
                 assert_eq!(result.content, vec![ToolResultContent::text("1")]);
             } else {
-                let error = run.next_step().expect_err("no tool dispatch step can be issued");
-                assert!(matches!(error, PromptError::Provider(ProviderError::Response(ref message))
-                    if message == &format!("the turn failed, so none of its tool calls ran: {reason}")));
-                let kept = run.messages().last().expect("the failed actual turn remains inspectable");
+                let error = run
+                    .next_step()
+                    .expect_err("no tool dispatch step can be issued");
+                assert!(
+                    matches!(error, PromptError::Provider(ProviderError::Response(ref message))
+                    if message == &format!("the turn failed, so none of its tool calls ran: {reason}"))
+                );
+                let kept = run
+                    .messages()
+                    .last()
+                    .expect("the failed actual turn remains inspectable");
                 assert!(matches!(kept, Message::Assistant(turn)
                     if turn.stop == Some(StopReason::Error(reason.to_owned()))
                         && turn.tool_calls().count() == 1));
@@ -1799,7 +1903,6 @@ fn native_cohere_call_end_controls_real_folded_turn_dispatch() {
         }
     }
 }
-
 
 #[tokio::test]
 async fn a_decoded_carried_json_answer_satisfies_the_existing_output_schema() {
@@ -1815,39 +1918,54 @@ async fn a_decoded_carried_json_answer_satisfies_the_existing_output_schema() {
     });
     let http = RecordingHttpClient::new(body.to_string().into_bytes());
     let model = rig_core::Model::new(
-        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"), http.clone(),
+        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"),
+        http.clone(),
     );
     let schema = json!({"type":"object", "properties":{"x":{"type":"integer"}},
         "required":["x"]});
-    let request = rig_core::completion::CompletionRequest::new("answer")
-        .tool(rig_core::completion::ToolDefinition {
+    let request = rig_core::completion::CompletionRequest::new("answer").tool(
+        rig_core::completion::ToolDefinition {
             name: rig_core::message::ToolName::new("final_result").expect("output-tool name"),
             description: "Return the structured answer.".to_owned(),
             parameters: schema.clone(),
-        });
-    let response = model.call(request)
-        .await.expect("the real Responses decoder returns the carried JSON answer");
-    assert!(matches!(response.choice.as_slice(), [AssistantContent::CarriedText(text)]
-        if text.text() == answer && text.phase.as_deref() == Some("final_answer")));
+        },
+    );
+    let response = model
+        .call(request)
+        .await
+        .expect("the real Responses decoder returns the carried JSON answer");
+    assert!(
+        matches!(response.choice.as_slice(), [AssistantContent::CarriedText(text)]
+        if text.text() == answer && text.phase.as_deref() == Some("final_answer"))
+    );
     assert_eq!(response.raw, body);
     let turn = ModelTurn::new(
-        response.head(), response.choice.clone(), response.usage.clone(),
+        response.head(),
+        response.choice.clone(),
+        response.usage.clone(),
         TurnPolicy::new(tool_names(&[]), None, Some("final_result".to_owned())).expect("policy"),
         response.raw.clone(),
-    ).with_finish_reason(response.finish_reason());
-    let mut run = AgentRun::new("answer").max_turns(2)
+    )
+    .with_finish_reason(response.finish_reason());
+    let mut run = AgentRun::new("answer")
+        .max_turns(2)
         .with_output_tool_name("final_result")
         .with_output_validation(Some(schema), 1);
     expect_call_model(&mut run);
-    expect_continue(run.model_response(turn).expect("the actual decoded turn is ingested"));
-    let AgentRunStep::Done(output) = run.next_step().expect("schema-compatible carried JSON completes") else {
+    expect_continue(
+        run.model_response(turn)
+            .expect("the actual decoded turn is ingested"),
+    );
+    let AgentRunStep::Done(output) = run
+        .next_step()
+        .expect("schema-compatible carried JSON completes")
+    else {
         panic!("the schema accepts actual canonical JSON without a retry");
     };
     assert_eq!(output.output(), answer);
     assert_eq!(output.requests(), 1);
     assert_eq!(http.requests().len(), 1);
 }
-
 
 /// Caller-owned controls have no provider issuance or native evidence.
 fn caller_owned_output_tool_call() -> AssistantContent {

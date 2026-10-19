@@ -75,10 +75,8 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() {
     use message::{AssistantContent, ToolCall, ToolFunction, ToolResultContent};
 
     let call = |call_id: &str, name: &str| {
-        let function = ToolFunction::new(
-            message::ToolName::new(name).expect("tool name"),
-            json!({}),
-        );
+        let function =
+            ToolFunction::new(message::ToolName::new(name).expect("tool name"), json!({}));
         let tool_call = ToolCall::new(message::CallId::from_wire(call_id), function);
         Message::Assistant(message::AssistantMessage::new(vec![
             AssistantContent::ToolCall(tool_call),
@@ -173,7 +171,8 @@ fn test_tool_result_without_provider_id_sends_minted_call_id() {
         &history,
         &wire,
         "gemini-2.5-flash",
-    ).expect("the standalone result has a planned spelling");
+    )
+    .expect("the standalone result has a planned spelling");
     let body = body_of(CompletionRequest::from(history));
 
     let result = function_result(&body);
@@ -518,7 +517,11 @@ fn shape(response: &crate::completion::CompletionResponse) -> (Vec<&'static str>
             message::AssistantContent::ProviderItem(_) => "provider_item",
             message::AssistantContent::Opaque(_) => "opaque",
             message::AssistantContent::CarriedText(text) => {
-                if text.known_text_projection().is_some() { "text" } else { "carried_text" }
+                if text.known_text_projection().is_some() {
+                    "text"
+                } else {
+                    "carried_text"
+                }
             }
             message::AssistantContent::CarriedReasoning(reasoning) => {
                 if !reasoning.content.is_empty() && !reasoning.has_opaque_parts() {
@@ -824,7 +827,8 @@ fn interactions_refuses_namespaced_and_custom_calls() {
                 ToolCall::from_wire(
                     "call_1",
                     ToolFunction::new(ToolName::new("add").expect("tool name"), json!({"x": 1})),
-                ).with_namespace(Some("math".to_owned())),
+                )
+                .with_namespace(Some("math".to_owned())),
             )),
             "namespace",
         ),
@@ -855,7 +859,11 @@ fn interactions_refuses_namespaced_and_custom_calls() {
             match (kind, refusal) {
                 (
                     "namespace",
-                    UnrepresentableToolCall::Namespace { wire, name, namespace },
+                    UnrepresentableToolCall::Namespace {
+                        wire,
+                        name,
+                        namespace,
+                    },
                 ) => {
                     assert_eq!(
                         (*wire, name.as_str(), namespace.as_str()),
@@ -863,7 +871,10 @@ fn interactions_refuses_namespaced_and_custom_calls() {
                     );
                 }
                 ("custom", UnrepresentableToolCall::CustomCall { wire, name }) => {
-                    assert_eq!((*wire, name.as_str()), ("Gemini Interactions", "apply_patch"));
+                    assert_eq!(
+                        (*wire, name.as_str()),
+                        ("Gemini Interactions", "apply_patch")
+                    );
                 }
                 _ => panic!("expected the {kind} refusal on Gemini Interactions, got {refusal:?}"),
             }

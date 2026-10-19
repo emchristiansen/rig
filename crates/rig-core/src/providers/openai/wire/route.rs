@@ -18,7 +18,9 @@ use crate::providers::openai::responses_api::{
     ResponsesToolDefinition, SystemInstructionsPlacement,
 };
 use crate::wire::document::Reassemble;
-use crate::wire::{Decoder, Descriptor, Encoded, Flow, IncompleteEof, Mode, Out, Wire, WireEvent, WireFrame};
+use crate::wire::{
+    Decoder, Descriptor, Encoded, Flow, IncompleteEof, Mode, Out, Wire, WireEvent, WireFrame,
+};
 
 use super::OpenAIConfig;
 use super::chat::{Chat, ChatDecoder, ChatEvent};

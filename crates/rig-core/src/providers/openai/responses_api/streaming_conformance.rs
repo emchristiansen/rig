@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 
 use super::openapi_schema::{self, Schema};
 use super::streaming::{ResponsesEvent, classify_responses_frame};
-use crate::wire::WireEvent;
 use crate::test_utils::streaming_conformance::{WireInput, fixtures};
+use crate::wire::WireEvent;
 
 fn event(frame: &WireInput) -> Value {
     let bytes = frame

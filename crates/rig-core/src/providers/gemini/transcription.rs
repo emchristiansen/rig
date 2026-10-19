@@ -165,7 +165,11 @@ pub fn transcript_of(reply: &Value) -> Result<transcription::TranscriptionRespon
     Ok(transcription::TranscriptionResponse {
         model: reply.str("modelVersion").map(str::to_owned),
         response_id: Some(reply.str("responseId").unwrap_or_default().to_owned()),
-        usage: reply.get("usageMetadata").map(checked_usage_of).transpose()?.unwrap_or_default(),
+        usage: reply
+            .get("usageMetadata")
+            .map(checked_usage_of)
+            .transpose()?
+            .unwrap_or_default(),
         ..transcription::TranscriptionResponse::new(parts.concat())
     })
 }

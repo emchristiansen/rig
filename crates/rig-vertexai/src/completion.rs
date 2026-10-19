@@ -98,9 +98,10 @@ impl Wire for GenerateContent {
         })?;
         let encoded: vertexai::model::GenerateContentRequest = body.deserialize()?;
         if let Some(config) = &encoded.generation_config {
-            if config.response_modalities.contains(
-                &vertexai::model::generation_config::Modality::Audio,
-            ) {
+            if config
+                .response_modalities
+                .contains(&vertexai::model::generation_config::Modality::Audio)
+            {
                 return Err(EncodeError::request(
                     "responseModalities AUDIO is unsupported because Rig cannot represent assistant audio responses",
                 ));
@@ -145,15 +146,22 @@ fn check_assistant_image(image: &rig_core::message::Image) -> Result<(), EncodeE
     let media_type = image.media_type.as_ref().ok_or_else(|| {
         EncodeError::request("Media type for assistant image is required for Vertex AI")
     })?;
-    if !matches!(media_type, ImageMediaType::JPEG | ImageMediaType::PNG
-        | ImageMediaType::WEBP | ImageMediaType::HEIC | ImageMediaType::HEIF)
-    {
+    if !matches!(
+        media_type,
+        ImageMediaType::JPEG
+            | ImageMediaType::PNG
+            | ImageMediaType::WEBP
+            | ImageMediaType::HEIC
+            | ImageMediaType::HEIF
+    ) {
         return Err(EncodeError::request(format!(
             "Unsupported Vertex AI assistant image media type {media_type:?}"
         )));
     }
     let DocumentSourceKind::Base64(data) = &image.data else {
-        return Err(EncodeError::request("Vertex AI assistant images must use base64 data"));
+        return Err(EncodeError::request(
+            "Vertex AI assistant images must use base64 data",
+        ));
     };
     BASE64.decode(data).map(|_| ()).map_err(|error| {
         EncodeError::request(format!("Invalid base64 assistant image data: {error}"))
@@ -169,7 +177,8 @@ fn standard_signatures(content: &mut serde_json::Value) {
         .get_mut("parts")
         .and_then(serde_json::Value::as_array_mut);
     for part in parts.into_iter().flatten() {
-        let invalid = part.get("thoughtSignature")
+        let invalid = part
+            .get("thoughtSignature")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|text| BASE64.decode(text).is_err() && URL_SAFE.decode(text).is_err());
         if invalid {

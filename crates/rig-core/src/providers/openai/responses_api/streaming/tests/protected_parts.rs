@@ -53,16 +53,32 @@ fn a_done_only_refusal_never_reopens_an_id_less_refusal() {
         ])),
     ]);
     assert_eq!(folded_texts(&choice), ["no", "other"]);
-    let starts: Vec<_> = items.iter().filter_map(|item| match item {
-        Item::Event(StreamEvent::Start { part, kind: PartKind::Text, .. }) => Some(*part),
-        _ => None,
-    }).collect();
-    let ends: Vec<_> = items.iter().filter_map(|item| match item {
-        Item::Event(StreamEvent::End { part, content: AssistantContent::CarriedText(text), .. })
-            if matches!(&text.content, CarriedTextContent::Refusal(_)) => Some(*part),
-        _ => None,
-    }).collect();
-    assert_eq!(starts, ends, "each distinct refusal starts and ends as its own actual part");
+    let starts: Vec<_> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Event(StreamEvent::Start {
+                part,
+                kind: PartKind::Text,
+                ..
+            }) => Some(*part),
+            _ => None,
+        })
+        .collect();
+    let ends: Vec<_> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Event(StreamEvent::End {
+                part,
+                content: AssistantContent::CarriedText(text),
+                ..
+            }) if matches!(&text.content, CarriedTextContent::Refusal(_)) => Some(*part),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts, ends,
+        "each distinct refusal starts and ends as its own actual part"
+    );
 }
 
 // F streaming/tests.rs:5407
@@ -76,8 +92,10 @@ fn a_done_part_cannot_move_an_anonymous_message_away_from_a_terminal_conflict() 
             message_item("msg_1", json!([{"type":"output_text","text":"Hello"}]))
         ])),
     ]);
-    assert!(matches!(driven.errors.as_slice(), [crate::error::ProviderError::Response(message)]
-        if message == "conflicting Responses parent kind at output 0: reasoning in a message"));
+    assert!(
+        matches!(driven.errors.as_slice(), [crate::error::ProviderError::Response(message)]
+        if message == "conflicting Responses parent kind at output 0: reasoning in a message")
+    );
     assert!(!driven.errors[0].is_retryable());
     assert!(driven.response.response_id().is_none());
     assert_eq!(folded_texts(&driven.response.choice), ["Hello", "Hello"]);
@@ -131,17 +149,35 @@ fn an_empty_signature_is_no_more_content_than_empty_ciphertext() {
     let signature = done_with("signature");
     let ciphertext = done_with("encrypted_content");
     assert!(signature.1.is_empty() && ciphertext.1.is_empty());
-    let projection = |items: &[Item<StreamEvent>]| items.iter().filter_map(|item| match item {
-        Item::Event(StreamEvent::Reasoning { text, .. }) => Some(text.clone()),
-        Item::Event(StreamEvent::End { content: AssistantContent::CarriedReasoning(reasoning), .. })
-            => Some(reasoning.display_text()),
-        _ => None,
-    }).collect::<Vec<_>>();
+    let projection = |items: &[Item<StreamEvent>]| {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::Reasoning { text, .. }) => Some(text.clone()),
+                Item::Event(StreamEvent::End {
+                    content: AssistantContent::CarriedReasoning(reasoning),
+                    ..
+                }) => Some(reasoning.display_text()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(projection(&signature.0), projection(&ciphertext.0));
     for items in [&signature.0, &ciphertext.0] {
-        assert_eq!(items.iter().filter(|item| matches!(item,
-            Item::Event(StreamEvent::End { content: AssistantContent::CarriedReasoning(_), .. })
-        )).count(), 1, "empty metadata adds no second reasoning part");
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    Item::Event(StreamEvent::End {
+                        content: AssistantContent::CarriedReasoning(_),
+                        ..
+                    })
+                ))
+                .count(),
+            1,
+            "empty metadata adds no second reasoning part"
+        );
     }
 }
 
@@ -221,10 +257,9 @@ fn reasoning_text_added_text_stays_off_the_live_deltas() {
         json!({"type":"response.content_part.added","item_id":"rs_x","output_index":0,"content_index":0,"sequence_number":1,"part":{"type":"reasoning_text","text":"x"}}),
     ]);
     assert!(
-        !events.iter().any(|event| matches!(
-            event,
-            Item::Event(StreamEvent::Reasoning { .. })
-        )),
+        !events
+            .iter()
+            .any(|event| matches!(event, Item::Event(StreamEvent::Reasoning { .. }))),
         "{events:?}"
     );
 }
@@ -319,7 +354,10 @@ fn a_reasoning_items_waiting_part_moves_to_its_own_slot() {
     assert_eq!(reasoning[0].id.as_deref(), Some("rs_1"));
     assert_eq!(
         reasoning[0].content,
-        vec![CarriedReasoningPart::OpaqueContent(crate::message::CarriedPayload::new(unknown.clone(), Some("openai".into())).with_position(crate::message::CarriedPosition::ReasoningContent { part_index: 0 }))]
+        vec![CarriedReasoningPart::OpaqueContent(
+            crate::message::CarriedPayload::new(unknown.clone(), Some("openai".into()))
+                .with_position(crate::message::CarriedPosition::ReasoningContent { part_index: 0 })
+        )]
     );
     assert!(unknown_payloads(&events).is_empty(), "{events:?}");
 }
@@ -393,8 +431,10 @@ fn an_added_position_with_anonymous_text_refuses_a_conflicting_terminal() {
             message_item("msg_1", json!([{"type":"output_text","text":"Hello"}]))
         ])),
     ]);
-    assert!(matches!(driven.errors.as_slice(), [crate::error::ProviderError::Response(message)]
-        if message == "conflicting Responses parent kind at output 0: reasoning in a message"));
+    assert!(
+        matches!(driven.errors.as_slice(), [crate::error::ProviderError::Response(message)]
+        if message == "conflicting Responses parent kind at output 0: reasoning in a message")
+    );
     assert!(!driven.errors[0].is_retryable());
     assert!(driven.response.response_id().is_none());
     assert_eq!(folded_texts(&driven.response.choice), ["Hello"]);
@@ -411,11 +451,19 @@ fn a_terminal_refusal_still_starts_and_closes_terminal_only_reasoning() {
         ])),
     ]);
     assert_eq!(errors.len(), 1, "{errors:?}");
-    let closed = events.iter().find_map(|item| match item {
-        Item::Event(StreamEvent::End { part, content: AssistantContent::CarriedReasoning(reasoning), .. })
-            if reasoning.id.as_deref() == Some("rs_t") && reasoning.display_text() == "t" => Some(*part),
-        _ => None,
-    }).expect("terminal-only reasoning closes after the earlier text refusal");
+    let closed = events
+        .iter()
+        .find_map(|item| match item {
+            Item::Event(StreamEvent::End {
+                part,
+                content: AssistantContent::CarriedReasoning(reasoning),
+                ..
+            }) if reasoning.id.as_deref() == Some("rs_t") && reasoning.display_text() == "t" => {
+                Some(*part)
+            }
+            _ => None,
+        })
+        .expect("terminal-only reasoning closes after the earlier text refusal");
     assert!(events.iter().any(|item| matches!(item,
         Item::Event(StreamEvent::Start { part, kind: PartKind::Reasoning, .. }) if *part == closed
     )), "{events:?}");
