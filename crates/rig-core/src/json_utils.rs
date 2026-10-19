@@ -190,7 +190,7 @@ pub fn parse_partial_object(text: &str) -> Option<serde_json::Map<String, serde_
                 save_cut(at + 1, stack, false);
             }
             b'}' | b']' => {
-                stack = stack.and_then(|node| nodes[node].1);
+                stack = stack.and_then(|node| nodes.get(node).and_then(|(_, parent)| *parent));
                 save_cut(at + 1, stack, false);
             }
             b if b.is_ascii_alphanumeric() || *b == b'.' || *b == b'-' || *b == b'+' => {
@@ -218,9 +218,9 @@ pub fn parse_partial_object(text: &str) -> Option<serde_json::Map<String, serde_
             }
             let mut open = *open;
             while let Some(node) = open {
-                let (container, parent) = nodes[node];
-                candidate.push(if container == b'{' { '}' } else { ']' });
-                open = parent;
+                let (container, parent) = nodes.get(node)?;
+                candidate.push(if *container == b'{' { '}' } else { ']' });
+                open = *parent;
             }
             match serde_json::from_str(&candidate) {
                 Ok(serde_json::Value::Object(object)) => Some(object),

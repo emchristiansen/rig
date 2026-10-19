@@ -1150,14 +1150,14 @@ fn assistant_step(
                     (!text.is_empty()).then(|| json!({"type":"text", "text":text}))
                 })
                 .collect();
-            let mut step = json!({"type":"thought"});
+            let mut step = Map::from_iter([("type".to_owned(), json!("thought"))]);
             if !summary.is_empty() {
-                step["summary"] = json!(summary);
+                step.insert("summary".to_owned(), json!(summary));
             }
             if let Some(signature) = signature {
-                step["signature"] = json!(signature);
+                step.insert("signature".to_owned(), json!(signature));
             }
-            return Ok(Some(step));
+            return Ok(Some(Value::Object(step)));
         }
         AssistantContent::Text(_)
         | AssistantContent::Reasoning(_)

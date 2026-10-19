@@ -2237,17 +2237,18 @@ impl ChatDecoder {
                 waiting.push(call);
                 continue;
             }
-            if named && input.is_none() {
-                if let Some((raw, error)) = malformed {
-                    let provider =
-                        call.id
-                            .and_then(crate::message::ProviderCallId::new)
-                            .map(|call_id| crate::error::ProviderCallEvidence {
-                                call_id,
-                                item_id: None,
-                            });
-                    return Err(out.malformed_call_error(call.at, raw, error, provider));
-                }
+            if named
+                && input.is_none()
+                && let Some((raw, error)) = malformed
+            {
+                let provider =
+                    call.id
+                        .and_then(crate::message::ProviderCallId::new)
+                        .map(|call_id| crate::error::ProviderCallEvidence {
+                            call_id,
+                            item_id: None,
+                        });
+                return Err(out.malformed_call_error(call.at, raw, error, provider));
             }
             if let Some(input) = input {
                 out.announce(call.at, json!({ "input": input }))?;
@@ -2564,9 +2565,7 @@ impl<'id> Decoder<'id, Completion> for ChatDecoder {
             return WireEvent::Known(ChatEvent::BareText(text));
         }
         let classified = classify_chat_completions_frame::<Value>(&data).map(|mut frame| {
-            if let Err(error) = carried::check_choice_list(&frame, &data) {
-                return Err(error);
-            }
+            carried::check_choice_list(&frame, &data)?;
             // Reassembled unary documents retain the stream's object tag.
             // On a stream, the tag still distinguishes cumulative messages
             // from deltas so their text is not repeated.
@@ -2580,9 +2579,7 @@ impl<'id> Decoder<'id, Completion> for ChatDecoder {
                     None => has_message,
                 };
             if whole {
-                if let Err(error) = carried::prepare_whole_calls(&mut frame, &data, &self.quirks) {
-                    return Err(error);
-                }
+                carried::prepare_whole_calls(&mut frame, &data, &self.quirks)?;
                 Ok(ChatEvent::Whole(frame))
             } else {
                 Ok(ChatEvent::Chunk(frame))

@@ -116,10 +116,7 @@ fn test_unknown_block_reason_deserializes_verbatim() {
 #[test]
 fn test_finish_reason_wire_spelling_matches_serde() {
     for (reason, wire) in [
-        (
-            FinishReason::FinishReasonUnspecified,
-            "FINISH_REASON_UNSPECIFIED",
-        ),
+        (FinishReason::Unspecified, "FINISH_REASON_UNSPECIFIED"),
         (FinishReason::Stop, "STOP"),
         (FinishReason::MaxTokens, "MAX_TOKENS"),
         (FinishReason::Safety, "SAFETY"),

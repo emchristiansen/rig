@@ -144,7 +144,10 @@ impl WireIds {
                         let id = &result.call;
                         used.extend(id.provider().map(|id| id.as_str().to_owned()));
                         if let Some(index) = outstanding.remove(id) {
-                            occurrences[index].result = Some((message, content));
+                            occurrences
+                                .get_mut(index)
+                                .ok_or(WireIdError::MissingOccurrence { message, content })?
+                                .result = Some((message, content));
                         } else if answered.contains(id) {
                             return Err(WireIdError::DuplicateResult { message, content });
                         } else if let Some(provider) = id.provider() {

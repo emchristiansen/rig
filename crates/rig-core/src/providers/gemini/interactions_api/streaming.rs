@@ -462,7 +462,12 @@ impl InteractionsDecoder {
                         &Map::from_iter([("summary".to_owned(), json!([content]))]),
                     );
                 } else if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
-                    active.item["signature"] = json!(signature);
+                    let fields = active.item.as_object_mut().ok_or_else(|| {
+                        ProviderError::Response(format!(
+                            "interactions: thought at index {index} has no object payload"
+                        ))
+                    })?;
+                    fields.insert("signature".to_owned(), json!(signature));
                     if let Some(active) = thought.take() {
                         finish_thought(active, out)?;
                     }

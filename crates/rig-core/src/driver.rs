@@ -673,7 +673,7 @@ where
 /// Feed frames already in hand through `reassembler` and `decoder` into
 /// `reply`, as [`read`] does: the reply ends at the provider's end, or the
 /// decoder decides at EOF, and what the reassembler rebuilt is recorded.
-#[cfg(any(test, feature = "websocket", feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn feed<'id, Op, F, D, R>(
     decoder: &mut D,
     mut reassembler: Option<R>,
@@ -691,7 +691,7 @@ where
     fed
 }
 
-#[cfg(any(test, feature = "websocket", feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils"))]
 fn feed_until_end<'id, Op, F, D, R>(
     decoder: &mut D,
     mut reassembler: Option<&mut R>,

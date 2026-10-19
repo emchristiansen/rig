@@ -231,10 +231,10 @@ pub(super) fn prepare_whole_calls(
             // keep the malformed reply loud, too.
             let mut probe = calls.clone();
             for call in &mut probe {
-                if incomplete(call) {
-                    if let Some(arguments) = call.pointer_mut("/function/arguments") {
-                        *arguments = Value::String("{}".to_owned());
-                    }
+                if incomplete(call)
+                    && let Some(arguments) = call.pointer_mut("/function/arguments")
+                {
+                    *arguments = Value::String("{}".to_owned());
                 }
             }
             if let Err(error) =
@@ -322,14 +322,13 @@ pub(super) fn check_choice_list(
     if frame
         .get("choices")
         .is_some_and(|choices| !choices.is_null() && !choices.is_array())
+        && let Err(error) = serde_json::from_str::<Choices>(source)
     {
-        if let Err(error) = serde_json::from_str::<Choices>(source) {
-            return Err(crate::error::CorruptFrame::text(
-                frame.str("object").map(str::to_owned),
-                source,
-                error,
-            ));
-        }
+        return Err(crate::error::CorruptFrame::text(
+            frame.str("object").map(str::to_owned),
+            source,
+            error,
+        ));
     }
     Ok(())
 }

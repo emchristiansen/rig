@@ -1418,10 +1418,12 @@ impl ResponsesDecoder {
             .unwrap_or(index);
         let part = frame.u64("content_index").unwrap_or(0);
         match kind {
-            "response.output_item.added" => self.output(index, &frame["item"], false, out),
+            "response.output_item.added" => {
+                self.output(index, frame.get("item").unwrap_or(&Value::Null), false, out)
+            }
             "response.output_item.done" => {
                 self.active_message_part = None;
-                self.output(index, &frame["item"], true, out)
+                self.output(index, frame.get("item").unwrap_or(&Value::Null), true, out)
             }
             "response.output_text.delta" | "response.refusal.delta" => self.message_delta(
                 index,
@@ -1432,7 +1434,7 @@ impl ResponsesDecoder {
                 out,
             ),
             "response.content_part.added" | "response.content_part.done" => {
-                let raw = frame["part"].clone();
+                let raw = frame.get("part").unwrap_or(&Value::Null).clone();
                 match raw.str("type") {
                     Some("output_text" | "refusal") => {
                         let index = self.message_slot(index, id, None);
@@ -1474,7 +1476,7 @@ impl ResponsesDecoder {
                     reader::fields::<reader::SummaryEnvelope>(&frame)?.summary_index,
                     true,
                     id,
-                    frame["part"].clone(),
+                    frame.get("part").unwrap_or(&Value::Null).clone(),
                     false,
                     out,
                 )
@@ -1544,7 +1546,10 @@ impl ResponsesDecoder {
                         || json!({"type":if part.refusal {"refusal"} else {"output_text"}}),
                     );
                     if !part.opaque {
-                        raw[if part.refusal { "refusal" } else { "text" }] = json!(part.text);
+                        let mut fields: Map<String, Value> = serde_json::from_value(raw)?;
+                        let key = if part.refusal { "refusal" } else { "text" };
+                        fields.insert(key.to_owned(), json!(part.text));
+                        raw = Value::Object(fields);
                     }
                     let item = json!({"content":[raw], "id":message.id, "phase":message.phase});
                     let mut text = super::carried_message_parts(&item, index, None)?.remove(0);
@@ -1830,10 +1835,10 @@ impl ResponsesDecoder {
             }
             // Other streamed terminal calls retain their existing route; only
             // whole-body decoding supplies new or unannounced whole calls.
-            if whole || !matches!(item.str("type"), Some("function_call" | "custom_tool_call")) {
-                if let Err(error) = self.output(index as u64, item, true, &mut out) {
-                    first_error.get_or_insert(error);
-                }
+            if (whole || !matches!(item.str("type"), Some("function_call" | "custom_tool_call")))
+                && let Err(error) = self.output(index as u64, item, true, &mut out)
+            {
+                first_error.get_or_insert(error);
             }
         }
         if let Some(error) = first_error {
@@ -2026,16 +2031,23 @@ impl<'id> Decoder<'id, Completion> for ResponsesDecoder {
         }
         match event {
             ResponsesEvent::Frame { kind, frame, raw } => match kind.as_str() {
-                "response.completed" => self.terminal(frame["response"].clone(), false, out),
+                "response.completed" => self.terminal(
+                    frame.get("response").unwrap_or(&Value::Null).clone(),
+                    false,
+                    out,
+                ),
                 "response.incomplete" if self.options.incomplete == IncompleteTerminal::Accept => {
-                    let mut response = frame["response"].clone();
-                    response["status"] = json!("incomplete");
-                    self.terminal(response, false, out)
+                    let mut response: Map<String, Value> =
+                        reader::fields(frame.get("response").unwrap_or(&Value::Null))?;
+                    response.insert("status".to_owned(), json!("incomplete"));
+                    self.terminal(Value::Object(response), false, out)
                 }
                 "response.incomplete" | "response.failed" => {
                     // Refused terminals retain only already observed content,
                     // complete calls and their final reasoning authority.
-                    if let Err(error) = self.merge_reasoning(&frame["response"], &mut out) {
+                    if let Err(error) = self
+                        .merge_reasoning(frame.get("response").unwrap_or(&Value::Null), &mut out)
+                    {
                         self.pending_flush_error = Some(error);
                     }
                     if let Err(error) = self.flush(FlushBoundary::Partial, &mut out) {

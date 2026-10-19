@@ -493,16 +493,19 @@ impl MessagesDecoder {
             let mut item = self.hosted.remove(&index).ok_or_else(|| {
                 ProviderError::Response(format!("Anthropic carried block {index} has no payload"))
             })?;
-            if item.str("type") == Some("server_tool_use") {
+            if let Value::Object(fields) = &mut item
+                && fields.get("type").and_then(Value::as_str) == Some("server_tool_use")
+            {
                 let input = if json.is_empty() {
-                    item.get("input")
+                    fields
+                        .get("input")
                         .filter(|input| !input.is_null())
                         .cloned()
                         .unwrap_or(json!({}))
                 } else {
                     serde_json::from_str(&json)?
                 };
-                item["input"] = input;
+                fields.insert("input".to_owned(), input);
             }
             let payload =
                 crate::message::CarriedPayload::new(item, Some(super::PROVIDER_NAME.to_owned()))

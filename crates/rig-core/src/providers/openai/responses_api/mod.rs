@@ -309,7 +309,13 @@ fn input(
                                 .iter()
                                 .find(|group| group.contains(item_index, text));
                             if let Some(group) = group {
-                                let content = items[group.input_index]
+                                let item = items.get_mut(group.input_index).ok_or_else(|| {
+                                    EncodeError::request(format!(
+                                        "internal Responses carried-message group refers to missing input item at index {}",
+                                        group.input_index
+                                    ))
+                                })?;
+                                let content = item
                                     .get_mut("content")
                                     .and_then(Value::as_array_mut)
                                     .ok_or_else(|| {
