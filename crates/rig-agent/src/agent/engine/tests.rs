@@ -1465,6 +1465,10 @@ mod structured_tool_results {
 /// streaming side is already pinned by `assert_stream_usage_recorded_on_chat_spans`.
 mod span_safety_net {
 
+    use super::{BoundedResponseRetry, TestRetryMode};
+    use crate::agent::MultiTurnStreamItem;
+    use crate::test_utils::MockStreamEvent;
+    use futures::StreamExt;
     use serde_json::Value;
 
     use crate::agent::{AgentBuilder, HookContext, OutcomeAction, OutcomeEvent};
@@ -1622,6 +1626,183 @@ mod span_safety_net {
                 .any(|value| value.contains("RAW_EXECUTION_OUTPUT_42")),
             "a Stop must not leak raw execution telemetry; captured: {captured:?}"
         );
+    }
+    /// Values recorded after span creation, matching the original capture stage.
+    fn recorded_strings<'a>(
+        span: &'a rig_core::test_utils::CapturedSpan,
+        field: &str,
+    ) -> Vec<&'a str> {
+        span.recorded
+            .iter()
+            .filter(|(name, _)| name == field)
+            .map(|(_, value)| value.as_str().expect("the original observed field is text"))
+            .collect()
+    }
+
+    async fn run_blocking_response_retry_with_content_telemetry() {
+        AgentBuilder::new(MockCompletionModel::from_turns([
+            MockTurn::text("rejected"),
+            MockTurn::text("accepted"),
+        ]))
+        .record_content_telemetry(true)
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Repeat,
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .run()
+        .await
+        .expect("blocking retry should succeed");
+    }
+
+    async fn run_streaming_response_retry_with_content_telemetry() {
+        let mut stream = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+            [
+                MockStreamEvent::text("rejected"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            [
+                MockStreamEvent::text("accepted"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]))
+        .record_content_telemetry(true)
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Repeat,
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .stream();
+
+        let mut saw_final = false;
+        while let Some(item) = stream.next().await {
+            if let MultiTurnStreamItem::FinalResponse(response) =
+                item.expect("streaming retry item")
+            {
+                saw_final = true;
+                assert_eq!(response.output(), "accepted");
+            }
+        }
+        assert!(saw_final, "streaming retry should produce a final response");
+    }
+
+    #[tokio::test]
+    async fn response_retry_records_only_accepted_content_on_both_surfaces() {
+        let _isolation = crate::test_utils::scoped_tracing_subscriber_guard().await;
+        let captured = TraceCapture::default();
+        let _default = tracing::subscriber::set_default(captured.subscriber());
+
+        // Register both transport callsites under this subscriber before
+        // inspecting field recordings.
+        run_blocking_response_retry_with_content_telemetry().await;
+        run_streaming_response_retry_with_content_telemetry().await;
+        tracing::callsite::rebuild_interest_cache();
+        captured.clear();
+
+        run_blocking_response_retry_with_content_telemetry().await;
+        let blocking = captured.spans();
+        let blocking_chats = blocking
+            .iter()
+            .filter(|span| span.name == "chat")
+            .collect::<Vec<_>>();
+        assert_eq!(blocking_chats.len(), 2);
+        assert!(
+            blocking_chats
+                .iter()
+                .all(|span| span.target == "rig::agent_chat")
+        );
+        assert!(
+            !blocking_chats[0]
+                .recorded
+                .iter()
+                .any(|(name, _)| name == "gen_ai.output.messages"),
+            "rejected blocking content must not be recorded as model output"
+        );
+        assert!(
+            blocking_chats[1]
+                .recorded
+                .iter()
+                .any(|(name, _)| name == "gen_ai.output.messages"),
+            "accepted blocking content must be recorded as model output"
+        );
+        let blocking_output = recorded_strings(blocking_chats[1], "gen_ai.output.messages");
+        assert!(
+            !blocking_output.is_empty(),
+            "accepted blocking output value"
+        );
+        assert!(
+            blocking_output
+                .iter()
+                .any(|value| value.contains("accepted"))
+        );
+        assert!(
+            blocking_output
+                .iter()
+                .all(|value| !value.contains("rejected"))
+        );
+        let blocking_completion = blocking
+            .iter()
+            .find(|span| span.name == "invoke_agent")
+            .map(|span| recorded_strings(span, "gen_ai.completion"))
+            .expect("accepted blocking run-level completion");
+        assert_eq!(blocking_completion, &["accepted"]);
+
+        captured.clear();
+        run_streaming_response_retry_with_content_telemetry().await;
+        let streaming = captured.spans();
+        // Both delivery modes use the current chat operation name. This
+        // checks accepted-content recording, not the retired chat_streaming label.
+        let streaming_chats = streaming
+            .iter()
+            .filter(|span| span.name == "chat")
+            .collect::<Vec<_>>();
+        assert_eq!(streaming_chats.len(), 2);
+        assert!(
+            streaming_chats
+                .iter()
+                .all(|span| span.target == "rig::agent_chat")
+        );
+        assert!(
+            !streaming_chats[0]
+                .recorded
+                .iter()
+                .any(|(name, _)| name == "gen_ai.output.messages"),
+            "rejected streaming content must not be recorded as model output"
+        );
+        assert!(
+            streaming_chats[1]
+                .recorded
+                .iter()
+                .any(|(name, _)| name == "gen_ai.output.messages"),
+            "accepted streaming content must be recorded as model output"
+        );
+        let streaming_output = recorded_strings(streaming_chats[1], "gen_ai.output.messages");
+        assert!(
+            !streaming_output.is_empty(),
+            "accepted streaming output value"
+        );
+        assert!(
+            streaming_output
+                .iter()
+                .any(|value| value.contains("accepted"))
+        );
+        assert!(
+            streaming_output
+                .iter()
+                .all(|value| !value.contains("rejected"))
+        );
+        let streaming_completion = streaming
+            .iter()
+            .find(|span| span.name == "invoke_agent")
+            .map(|span| recorded_strings(span, "gen_ai.completion"))
+            .expect("accepted streaming run-level completion");
+        assert_eq!(streaming_completion, &["accepted"]);
     }
 }
 
@@ -6434,5 +6615,102 @@ async fn retried_turn_records_the_retried_attempts_own_raw_blocking() {
         call_raws(&response.completion_calls),
         [first, second],
         "the retried attempt's record carries the retried attempt's payload"
+    );
+}
+
+#[tokio::test]
+async fn response_retry_preserves_model_turn_hook_order_across_surfaces() {
+    let blocking_events = RecordingHook::default();
+    AgentBuilder::new(MockCompletionModel::from_turns([
+        MockTurn::text("rejected"),
+        MockTurn::text("accepted"),
+    ]))
+    .add_hook(blocking_events.clone())
+    .add_hook(BoundedResponseRetry::new(
+        "rejected",
+        1,
+        TestRetryMode::Repeat,
+    ))
+    .build()
+    .prompt("question")
+    .max_turns(2)
+    .run()
+    .await
+    .expect("blocking retry");
+
+    let streaming_events = RecordingHook::default();
+    let mut stream = AgentBuilder::new(MockCompletionModel::from_stream_turns([
+        [
+            MockStreamEvent::text("rejected"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        [
+            MockStreamEvent::text("accepted"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]))
+    .add_hook(streaming_events.clone())
+    .add_hook(BoundedResponseRetry::new(
+        "rejected",
+        1,
+        TestRetryMode::Repeat,
+    ))
+    .build()
+    .prompt("question")
+    .max_turns(2)
+    .stream();
+    while let Some(item) = stream.next().await {
+        item.expect("streaming retry item");
+    }
+
+    let shared_order = |events: &RecordingHook| {
+        events
+            .events
+            .lock()
+            .expect("events")
+            .iter()
+            .copied()
+            .filter(|event| {
+                matches!(
+                    event,
+                    StepEventKind::CompletionCall | StepEventKind::ModelTurnFinished
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = vec![
+        StepEventKind::CompletionCall,
+        StepEventKind::ModelTurnFinished,
+        StepEventKind::CompletionCall,
+        StepEventKind::ModelTurnFinished,
+    ];
+    assert_eq!(shared_order(&blocking_events), expected);
+    assert_eq!(shared_order(&streaming_events), expected);
+
+    let blocking_order = blocking_events.events.lock().expect("events").clone();
+    assert_eq!(
+        blocking_order,
+        vec![
+            StepEventKind::CompletionCall,
+            StepEventKind::CompletionDispatch,
+            StepEventKind::ModelTurnFinished,
+            StepEventKind::CompletionCall,
+            StepEventKind::CompletionDispatch,
+            StepEventKind::ModelTurnFinished,
+        ]
+    );
+    let streaming_order = streaming_events.events.lock().expect("events").clone();
+    assert_eq!(
+        streaming_order,
+        vec![
+            StepEventKind::CompletionCall,
+            StepEventKind::TextDelta,
+            StepEventKind::CompletionDispatch,
+            StepEventKind::ModelTurnFinished,
+            StepEventKind::CompletionCall,
+            StepEventKind::TextDelta,
+            StepEventKind::CompletionDispatch,
+            StepEventKind::ModelTurnFinished,
+        ]
     );
 }

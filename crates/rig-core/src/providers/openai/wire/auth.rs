@@ -16,7 +16,7 @@ use crate::wire::{
     TokenPlacement,
 };
 
-use super::{Dialect, OpenAIConfig, Quirks};
+use super::{Dialect, OpenAIConfig};
 
 /// Credential header policy, including omission of empty optional tokens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -376,7 +376,7 @@ impl OpenAIConfig {
     ///
     /// The one source of caller identity for every transport: the HTTP
     /// requests and the websocket handshakes all stamp it here. A dialect
-    /// that requires the caller's exact identity ([`Quirks::identity`])
+    /// that requires the caller's exact identity ([`Quirks::identity`](super::Quirks::identity))
     /// refuses here, before anything is sent, when there is none or only an
     /// originator.
     pub(crate) fn identify(
@@ -483,7 +483,7 @@ impl OpenAIConfig {
     ///
     /// A dialect whose gateway asks for no caller identity gains one, so
     /// both headers are sent. A dialect that requires the caller's exact
-    /// identity ([`Quirks::identity`]) refuses every request with
+    /// identity ([`Quirks::identity`](super::Quirks::identity)) refuses every request with
     /// [`MissingCallerIdentity::OriginatorOnly`] instead: use
     /// [`Self::with_caller_identity`] there.
     pub fn with_originator(mut self, originator: impl Into<String>) -> Self {
@@ -502,7 +502,7 @@ impl OpenAIConfig {
     /// Replaces any identity the dialect's environment variables or
     /// [`Self::with_originator`] configured. A dialect whose gateway asks for
     /// no caller identity gains this one; a dialect that requires one
-    /// ([`Quirks::identity`]) sends nothing without it.
+    /// ([`Quirks::identity`](super::Quirks::identity)) sends nothing without it.
     /// [`CallerIdentity::new`] has already refused any value a request could
     /// not carry.
     #[must_use]

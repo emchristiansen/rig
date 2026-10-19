@@ -1457,10 +1457,6 @@ impl ResponsesRequestTool {
             }
         }
     }
-
-    pub(crate) fn normalize(self) -> Self {
-        self.with_strict()
-    }
 }
 
 impl From<ResponsesToolDefinition> for ResponsesRequestTool {

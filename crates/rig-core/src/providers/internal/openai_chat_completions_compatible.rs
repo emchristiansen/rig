@@ -3,6 +3,7 @@
 
 use crate::completion::FinishReason;
 use crate::error::ProviderError;
+#[cfg(test)]
 use crate::providers::openai::wire::Quirks;
 
 /// The wire's in-band provider error envelope, when this frame is one.
@@ -33,6 +34,7 @@ pub(crate) fn provider_error_envelope(data: &str) -> Option<ProviderError> {
 /// `function_call`, and the spellings compatible servers use for the same
 /// endings (`end`, `eos`, `end_turn`, `stop_sequence`, `max_tokens`,
 /// Mistral's `model_length`).
+#[cfg(test)]
 pub(crate) const CHAT_FINISHES: &[(&str, FinishReason)] = &[
     ("stop", FinishReason::Stop),
     ("end", FinishReason::Stop),
@@ -50,6 +52,7 @@ pub(crate) const CHAT_FINISHES: &[(&str, FinishReason)] = &[
 /// `reason` in the dialect's documented vocabulary
 /// ([`Quirks::finishes`]) and the shared one; anything else is
 /// [`FinishReason::Other`], which fails the turn.
+#[cfg(test)]
 pub(crate) fn finish_reason(reason: &str, quirks: &Quirks) -> FinishReason {
     quirks
         .finishes

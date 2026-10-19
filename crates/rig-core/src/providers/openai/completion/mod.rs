@@ -547,6 +547,7 @@ pub struct CompletionResponse {
 
 /// Return a nonempty top-level refusal only when every content part is empty.
 /// Applies to whole messages; streaming fallback is evaluated per delta.
+#[cfg(test)]
 pub(crate) fn assistant_refusal_fallback<'a>(
     content: &[AssistantContent],
     refusal: Option<&'a str>,
