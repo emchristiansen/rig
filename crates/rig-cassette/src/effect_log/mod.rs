@@ -21,7 +21,7 @@ mod replay;
 
 pub use log::{
     CHECKPOINT_FORMAT, Checkpoint, EffectLog, LogHeader, ProgramIdentity, RecordedStreamError,
-    canonical_local_ids, stable_hash,
+    RecordedStreamDone, canonical_local_ids, stable_hash,
 };
 pub use recorder::EffectLogRecorder;
 pub use replay::{EffectLogReplayer, ReplayRefusals, RequestCheck};

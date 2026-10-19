@@ -71,6 +71,7 @@ pub struct EffectLogReplayer {
     descriptor: HandlerDescriptor,
     records: Mutex<Records>,
     stream_errors: BTreeMap<EffectId, Vec<super::RecordedStreamError>>,
+    stream_done: BTreeMap<EffectId, Vec<super::RecordedStreamDone>>,
     check: RequestCheck,
     refusals: Option<ReplayRefusals>,
 }
@@ -174,6 +175,17 @@ impl EffectLogReplayer {
                 })
                 .map(|(id, errors)| (*id, errors.clone()))
                 .collect(),
+            stream_done: log
+                .header
+                .stream_done
+                .iter()
+                .filter(|(id, _)| {
+                    log.records
+                        .iter()
+                        .any(|record| record.id == **id && &record.key == key)
+                })
+                .map(|(id, done)| (*id, done.clone()))
+                .collect(),
             check: RequestCheck::Payload,
             refusals: None,
         })
@@ -249,33 +261,60 @@ impl EffectLogReplayer {
         keys
     }
 
-    /// Validate stream error positions, consistent key families and descriptors,
+    /// Validate kept stream positions, consistent key families and descriptors,
     /// and descriptor coverage for scoped programs. Returns an error for invalid
     /// or conflicting metadata.
     pub fn check_header(log: &EffectLog) -> Result<(), ErrorReport> {
-        for (id, errors) in &log.header.stream_errors {
+        let stream_ids: std::collections::BTreeSet<_> = log
+            .header
+            .stream_errors
+            .keys()
+            .chain(log.header.stream_done.keys())
+            .copied()
+            .collect();
+        for id in stream_ids {
+            let errors = log
+                .header
+                .stream_errors
+                .get(&id)
+                .map_or(&[][..], Vec::as_slice);
+            let done = log
+                .header
+                .stream_done
+                .get(&id)
+                .map_or(&[][..], Vec::as_slice);
             let events = log
                 .records
                 .iter()
-                .find(|record| record.id == *id && record.kind.streams())
+                .find(|record| record.id == id && record.kind.streams())
                 .and_then(|record| record.events.as_ref())
                 .ok_or_else(|| {
                     ErrorReport::new(
                         ErrorKind::Divergence,
-                        format!("stream errors for {id} require a kept stream record"),
+                        format!("stream items for {id} require a kept stream record"),
                     )
                 })?;
-            let total = events.len().checked_add(errors.len()).ok_or_else(|| {
-                ErrorReport::new(ErrorKind::Divergence, "stream item count overflow")
-            })?;
+            let total = events
+                .len()
+                .checked_add(errors.len())
+                .and_then(|total| total.checked_add(done.len()))
+                .ok_or_else(|| {
+                    ErrorReport::new(ErrorKind::Divergence, "stream item count overflow")
+                })?;
             if errors.iter().any(|error| error.item >= total)
                 || errors
                     .windows(2)
                     .any(|pair| matches!(pair, [first, second] if first.item >= second.item))
+                || done.iter().any(|response| response.item >= total)
+                || done.windows(2).any(|pair| pair[0].item >= pair[1].item)
+                || errors.iter().any(|error| {
+                    done.binary_search_by_key(&error.item, |response| response.item)
+                        .is_ok()
+                })
             {
                 return Err(ErrorReport::new(
                     ErrorKind::Divergence,
-                    format!("invalid stream error positions for {id}"),
+                    format!("invalid stream item positions for {id}"),
                 ));
             }
         }
@@ -648,6 +687,34 @@ impl Serve for EffectLogReplayer {
                                     .get(&record.id)
                                     .cloned()
                                     .unwrap_or_default();
+                                if let Some(done) = self.stream_done.get(&record.id) {
+                                    let total = events.len() + errors.len() + done.len();
+                                    let mut replayed = Vec::with_capacity(total + 1);
+                                    replayed.extend(record.stream_origin.map(|origin| {
+                                        Ok(rig_core::streaming::Relayed::Origin(origin))
+                                    }));
+                                    let mut errors = errors.into_iter().peekable();
+                                    let mut done = done.iter().peekable();
+                                    let mut items = events.into_items().into_iter();
+                                    for position in 0..total {
+                                        if errors.peek().is_some_and(|error| error.item == position) {
+                                            replayed
+                                                .extend(errors.next().map(|error| Err(error.error)));
+                                        } else if done.peek().is_some_and(|done| done.item == position)
+                                        {
+                                            replayed.extend(done.next().map(|done| {
+                                                Ok(rig_core::streaming::Relayed::Done(Box::new(
+                                                    done.response.clone(),
+                                                )))
+                                            }));
+                                        } else {
+                                            replayed.extend(items.next().map(|item| {
+                                                Ok(rig_core::streaming::Relayed::Item(item))
+                                            }));
+                                        }
+                                    }
+                                    return Reply::Stream(Box::pin(futures::stream::iter(replayed)));
+                                }
                                 // A reply that ended well ended before any error it
                                 // went on to carry: an earlier error would have been
                                 // its outcome.

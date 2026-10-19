@@ -100,8 +100,8 @@ pub struct PromptResponse {
     pub messages: Vec<Message>,
     /// How the run's conversation-memory append settled, when the run had a
     /// memory backend and conversation to append to; `None` when memory was
-    /// not configured for the run, bypassed by explicit history, disabled, or
-    /// the run was resumed (the driver that persisted it owns the append).
+    /// not configured for the run, bypassed by explicit history, or disabled.
+    /// Resumed runs report their append result under the same conditions.
     /// Set by the driver after the append dispatch resolved, so the
     /// protocol's own `Done` response never carries it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

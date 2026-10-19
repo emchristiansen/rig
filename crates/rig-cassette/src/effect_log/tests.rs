@@ -827,3 +827,235 @@ async fn typed_tool_namespaces_survive_log_roundtrip_and_replay() {
     assert_eq!(erase_tags(&mut legacy), 8);
     assert!(serde_json::from_value::<EffectLog>(legacy).is_err());
 }
+
+async fn replay_local_id_request(
+    recorded: EffectKind,
+    arriving: EffectKind,
+    check: RequestCheck,
+) -> TestResult<Result<Outcome, ErrorReport>> {
+    use rig_core::serve::{Dispatch, Serve};
+
+    let mut record = two_records().records.remove(0);
+    record.kind = recorded;
+    if matches!(record.kind, EffectKind::Completion { .. }) {
+        record.outcome = Ok(Outcome::Completion(CompletionResponse::new(
+            vec![AssistantContent::text("recorded answer")],
+            Usage::default(),
+            rig_core::message::Origin::new("test.api", "test", ""),
+            serde_json::json!({}),
+        )));
+    }
+    let id = record.id;
+    let key = record.key.clone();
+    let log = EffectLog::from_records(vec![record]);
+    let replay = EffectLogReplayer::for_key(&log, &key)?.checking(check);
+    Ok(replay
+        .serve(arriving, Dispatch::new(id, false))
+        .await
+        .into_outcome()
+        .await)
+}
+
+async fn check_custom_local_payloads(recorded: &str, arriving: &str) -> TestResult<()> {
+    let kind = |local| EffectKind::Custom {
+        kind: "opaque-local".into(),
+        payload: serde_json::json!({"local": local}),
+    };
+    let mut accepted = Vec::new();
+    for check in [RequestCheck::Payload, RequestCheck::Hash] {
+        let unchanged = replay_local_id_request(kind(recorded), kind(recorded), check).await?;
+        assert!(unchanged.is_ok(), "identical Custom payload refused");
+        let changed = replay_local_id_request(kind(recorded), kind(arriving), check).await?;
+        if !matches!(
+            changed,
+            Err(ErrorReport {
+                kind: ErrorKind::Divergence,
+                ..
+            })
+        ) {
+            accepted.push(check);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "different Custom local-looking payload accepted in {accepted:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn replay_refuses_distinct_custom_local_looking_payloads() -> TestResult<()> {
+    check_custom_local_payloads("red", "blue").await
+}
+
+#[tokio::test]
+async fn replay_refuses_distinct_custom_uuid_payloads() -> TestResult<()> {
+    check_custom_local_payloads(
+        "7ecaf57b-5bbb-4b9e-a440-63738a5939ec",
+        "36b6bfa7-840b-453c-85bf-cee0d417dc42",
+    )
+    .await
+}
+
+fn fresh_local_correlation_request()
+-> TestResult<(CompletionRequest, [rig_core::message::CallId; 2])> {
+    use rig_core::message::{
+        AssistantMessage, CallId, CustomToolCall, ToolCall, ToolFunction, ToolName,
+        ToolResultContent, UserContent,
+    };
+
+    let ids = [CallId::from_wire(""), CallId::from_wire("")];
+    assert!(
+        ids[0] != ids[1] && ids.iter().all(CallId::is_local),
+        "fixture needs two fresh local IDs"
+    );
+    let function = ToolCall::new(
+        ids[0].clone(),
+        ToolFunction::new(ToolName::new("function")?, serde_json::json!({"x": 1})),
+    );
+    let custom = CustomToolCall::new(ids[1].clone(), ToolName::new("custom")?, "raw input");
+    let request = CompletionRequest::from(vec![
+        Message::Assistant(AssistantMessage::new(vec![
+            AssistantContent::ToolCall(function.clone()),
+            AssistantContent::CustomToolCall(custom.clone()),
+        ])),
+        Message::User {
+            content: vec![
+                UserContent::ToolResult(
+                    custom.result(vec![ToolResultContent::text("custom done")]),
+                ),
+                UserContent::ToolResult(
+                    function.result(vec![ToolResultContent::text("function done")]),
+                ),
+            ],
+        },
+    ]);
+    Ok((request, ids))
+}
+
+#[tokio::test]
+async fn replay_accepts_fresh_local_correlation_graphs() -> TestResult<()> {
+    let (recorded, recorded_ids) = fresh_local_correlation_request()?;
+    let (arriving, arriving_ids) = fresh_local_correlation_request()?;
+    assert!(
+        recorded_ids.iter().all(|id| !arriving_ids.contains(id)),
+        "fixture did not replace local IDs"
+    );
+    for check in [RequestCheck::Payload, RequestCheck::Hash] {
+        let answer = replay_local_id_request(
+            EffectKind::Completion {
+                request: recorded.clone(),
+                stream: false,
+            },
+            EffectKind::Completion {
+                request: arriving.clone(),
+                stream: false,
+            },
+            check,
+        )
+        .await??;
+        let Outcome::Completion(response) = answer else {
+            panic!("fresh-ID replay changed the outcome family");
+        };
+        assert!(
+            response.choice == vec![AssistantContent::text("recorded answer")],
+            "fresh-ID replay changed the recorded completion"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn replay_refuses_wrong_fresh_local_result_edge() -> TestResult<()> {
+    use rig_core::message::UserContent;
+
+    let (recorded, _) = fresh_local_correlation_request()?;
+    let (mut arriving, ids) = fresh_local_correlation_request()?;
+    let Some(Message::User { content }) = arriving.chat_history.last_mut() else {
+        panic!("fixture has no tool results");
+    };
+    let Some(UserContent::ToolResult(result)) = content.first_mut() else {
+        panic!("fixture has no custom result");
+    };
+    result.call = ids[0].clone();
+    for check in [RequestCheck::Payload, RequestCheck::Hash] {
+        let answer = replay_local_id_request(
+            EffectKind::Completion {
+                request: recorded.clone(),
+                stream: false,
+            },
+            EffectKind::Completion {
+                request: arriving.clone(),
+                stream: false,
+            },
+            check,
+        )
+        .await?;
+        assert!(
+            matches!(
+                answer,
+                Err(ErrorReport {
+                    kind: ErrorKind::Divergence,
+                    ..
+                })
+            ),
+            "wrong fresh-local result edge accepted"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn replay_refuses_collapsed_fresh_local_identities() -> TestResult<()> {
+    use rig_core::message::UserContent;
+
+    let (recorded, _) = fresh_local_correlation_request()?;
+    let (mut arriving, ids) = fresh_local_correlation_request()?;
+    let Some(Message::Assistant(turn)) = arriving.chat_history.first_mut() else {
+        panic!("fixture has no assistant calls");
+    };
+    let Some(AssistantContent::CustomToolCall(call)) = turn.content.get_mut(1) else {
+        panic!("fixture has no custom call");
+    };
+    call.id = ids[0].clone();
+    let Some(Message::User { content }) = arriving.chat_history.last_mut() else {
+        panic!("fixture has no tool results");
+    };
+    let Some(UserContent::ToolResult(result)) = content.first_mut() else {
+        panic!("fixture has no custom result");
+    };
+    result.call = ids[0].clone();
+    for check in [RequestCheck::Payload, RequestCheck::Hash] {
+        let answer = replay_local_id_request(
+            EffectKind::Completion {
+                request: recorded.clone(),
+                stream: false,
+            },
+            EffectKind::Completion {
+                request: arriving.clone(),
+                stream: false,
+            },
+            check,
+        )
+        .await?;
+        assert!(
+            matches!(
+                answer,
+                Err(ErrorReport {
+                    kind: ErrorKind::Divergence,
+                    ..
+                })
+            ),
+            "distinct fresh-local identities collapsed without divergence"
+        );
+    }
+    Ok(())
+}
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+#[path = "log/canonical_local_ids_tests.rs"]
+mod canonical_local_ids_tests;
+
+#[path = "log/stream_done_tests.rs"]
+mod stream_done_tests;

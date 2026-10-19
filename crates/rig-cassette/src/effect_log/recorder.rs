@@ -125,6 +125,7 @@ impl EffectLogRecorder {
     /// the header. A dispatch still in flight is not in the log yet; it
     /// takes its place (ahead of everything served after it) when it
     /// resolves.
+    /// A kept stream snapshot includes only the items observed so far.
     #[must_use = "the log is a copy of the recorder's state"]
     pub fn log(&self) -> EffectLog {
         let slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
@@ -140,6 +141,8 @@ impl EffectLogRecorder {
 
     /// Take the resolved dispatches, leaving the recorder holding only the
     /// ones still in flight; the header stays (the signature keeps growing).
+    /// Drain a kept stream first to retain its complete sequence. Taking a
+    /// resolved stream removes its slot, so later items are not retained.
     #[must_use = "the taken log is the only copy"]
     pub fn take(&self) -> EffectLog {
         let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
@@ -156,6 +159,7 @@ impl EffectLogRecorder {
         let mut header = self.header.lock().unwrap_or_else(PoisonError::into_inner);
         let taken_header = header.clone();
         header.stream_errors.retain(|id, _| !taken_ids.contains(id));
+        header.stream_done.retain(|id, _| !taken_ids.contains(id));
         if let Some(deliveries) = &mut header.deliveries {
             deliveries.retain(|delivery| !taken_ids.contains(&delivery.id));
         }
@@ -226,11 +230,10 @@ impl EffectLogRecorder {
             return;
         };
         let key = slots.remove(position).key;
-        self.header
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .stream_errors
-            .remove(&id);
+        let mut header = self.header.lock().unwrap_or_else(PoisonError::into_inner);
+        header.stream_errors.remove(&id);
+        header.stream_done.remove(&id);
+        drop(header);
         if let Some(deliveries) = &mut self
             .header
             .lock()
@@ -306,10 +309,30 @@ impl Recorder for EffectLogRecorder {
             return;
         };
         let mut header = self.header.lock().unwrap_or_else(PoisonError::into_inner);
+        let done = header.stream_done.get(&id).map_or(0, Vec::len);
         let errors = header.stream_errors.entry(id).or_default();
         errors.push(super::RecordedStreamError {
-            item: events.len() + errors.len(),
+            item: events.len() + errors.len() + done,
             error: error.clone(),
+        });
+    }
+
+    fn stream_done(&self, id: EffectId, response: &rig_core::completion::CompletionResponse) {
+        let slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(events) = slots
+            .iter()
+            .rev()
+            .find(|slot| slot.id == id)
+            .and_then(|slot| slot.events.as_ref())
+        else {
+            return;
+        };
+        let mut header = self.header.lock().unwrap_or_else(PoisonError::into_inner);
+        let errors = header.stream_errors.get(&id).map_or(0, Vec::len);
+        let done = header.stream_done.entry(id).or_default();
+        done.push(super::RecordedStreamDone {
+            item: events.len() + errors + done.len(),
+            response: response.clone(),
         });
     }
 

@@ -7,10 +7,16 @@
 
 use std::collections::BTreeMap;
 
-use rig_core::effect::{EffectId, EffectRecord, EffectRow, HandlerDescriptor};
-use rig_core::error::{ErrorKind, ErrorReport};
+use rig_core::completion::CompletionResponse;
+use rig_core::effect::{
+    EffectId, EffectKind, EffectRecord, EffectRow, HandlerDescriptor, MemoryOp, MemoryOutcome,
+    Outcome,
+};
+use rig_core::error::{ErrorDetail, ErrorKind, ErrorReport};
 use rig_core::json_utils::to_canonical_string;
+use rig_core::message::{AssistantContent, CallId, LocalCallId, Message, UserContent};
 use rig_core::serve::ServingPolicy;
+use rig_core::streaming::{Item, StreamEvent};
 use serde::{Deserialize, Serialize};
 
 /// The checkpoint envelope format this crate writes and reads. This versions
@@ -36,6 +42,10 @@ pub struct LogHeader {
     /// positions among all stream items. Empty for streams without errors.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stream_errors: BTreeMap<EffectId, Vec<RecordedStreamError>>,
+    /// Complete response items omitted from `EffectRecord::events`, at their
+    /// original positions among events, errors and responses.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stream_done: BTreeMap<EffectId, Vec<RecordedStreamDone>>,
     /// A hash of the run spec the run was recorded under, when an agent
     /// recorded it (`None` for a bare-bus record). An agent that replays
     /// compares it with its own.
@@ -81,10 +91,19 @@ pub struct ProgramIdentity {
 /// An error's place in a kept stream, including errors after a terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedStreamError {
-    /// Zero-based position among successful events and error items together.
+    /// Zero-based position among events, errors and complete responses.
     pub item: usize,
     /// The original error item; it need not be the stream's folded outcome.
     pub error: ErrorReport,
+}
+
+/// A complete response's place in a kept stream, including later responses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordedStreamDone {
+    /// Zero-based position among events, errors and complete responses.
+    pub item: usize,
+    /// The complete response item, independently of the folded outcome.
+    pub response: CompletionResponse,
 }
 
 impl Default for LogHeader {
@@ -93,6 +112,7 @@ impl Default for LogHeader {
             deliveries: None,
             delivery_limitations: Vec::new(),
             stream_errors: BTreeMap::new(),
+            stream_done: BTreeMap::new(),
             run_spec: None,
             handlers: Vec::new(),
             signature: EffectRow::new(),
@@ -145,6 +165,7 @@ impl EffectLog {
         let ids: std::collections::BTreeSet<_> =
             self.records.iter().map(|record| record.id).collect();
         self.header.stream_errors.retain(|id, _| ids.contains(id));
+        self.header.stream_done.retain(|id, _| ids.contains(id));
         if let Some(deliveries) = &mut self.header.deliveries {
             deliveries.retain(|delivery| ids.contains(&delivery.id));
         }
@@ -272,67 +293,149 @@ pub fn stable_hash<T: Serialize>(value: &T) -> Result<u64, serde_json::Error> {
     Ok(hash)
 }
 
-/// `log` with each rig-issued call id (a random uuid) renamed, in order of
-/// first appearance, to a fixed one. Rig issues its ids afresh on every run,
-/// so two runs that differ only in them record and replay the same log.
+/// Rename rig-issued call identities in a serialized `EffectKind`, `EffectLog`,
+/// or `Vec<EffectRecord>` to fixed UUIDs in order of first typed appearance.
+/// Only local call identity fields change; provider identities, arbitrary data
+/// and values outside these typed roots remain unchanged.
 ///
 /// ```
-/// let issued = serde_json::json!({"local": "7ecaf57b-5bbb-4b9e-a440-63738a5939ec"});
+/// let data = serde_json::json!({"local": "7ecaf57b-5bbb-4b9e-a440-63738a5939ec"});
 /// assert_eq!(
-///     rig_cassette::effect_log::canonical_local_ids(issued),
-///     serde_json::json!({"local": "00000000-0000-4000-8000-000000000000"}),
+///     rig_cassette::effect_log::canonical_local_ids(data.clone()),
+///     data,
 /// );
 /// ```
 pub fn canonical_local_ids(mut log: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-    fn issued(value: &Value, ids: &mut Vec<String>) {
-        match value {
-            Value::Object(object) => {
-                if let (1, Some(Value::String(id))) = (object.len(), object.get("local"))
-                    && !ids.contains(id)
-                {
-                    ids.push(id.clone());
-                }
-                object.values().for_each(|value| issued(value, ids));
+    let mut locations = LocalCallIdLocations::default();
+    if let Ok(kind) = serde_json::from_value::<EffectKind>(log.clone()) {
+        locations.kind(&kind, "");
+    } else if let Ok(typed) = serde_json::from_value::<EffectLog>(log.clone()) {
+        for (effect, errors) in &typed.header.stream_errors {
+            for (index, error) in errors.iter().enumerate() {
+                locations.error(
+                    &error.error,
+                    &format!("/header/stream_errors/{}/{index}/error", effect.as_u64()),
+                );
             }
-            Value::Array(values) => values.iter().for_each(|value| issued(value, ids)),
-            _ => {}
         }
-    }
-    fn rename(value: &mut Value, ids: &[String], order: &mut Vec<String>) {
-        match value {
-            Value::String(text) => {
-                // Mark every id first, so a fixed id that is also an issued
-                // one is never renamed twice.
-                let mut marked = text.clone();
-                for id in ids.iter().filter(|id| text.contains(id.as_str())) {
-                    let index = order.iter().position(|seen| seen == id).unwrap_or_else(|| {
-                        order.push(id.clone());
-                        order.len() - 1
-                    });
-                    marked = marked.replace(id.as_str(), &format!("\u{0}{index}\u{0}"));
-                }
-                for index in 0..order.len() {
-                    marked = marked.replace(
-                        &format!("\u{0}{index}\u{0}"),
-                        &format!("00000000-0000-4000-8000-{index:012}"),
-                    );
-                }
-                *text = marked;
+        for (effect, responses) in &typed.header.stream_done {
+            for (index, done) in responses.iter().enumerate() {
+                locations.choice(
+                    &done.response.choice,
+                    &format!(
+                        "/header/stream_done/{}/{index}/response/choice",
+                        effect.as_u64()
+                    ),
+                );
             }
-            Value::Object(object) => object
-                .values_mut()
-                .for_each(|value| rename(value, ids, order)),
-            Value::Array(values) => values
-                .iter_mut()
-                .for_each(|value| rename(value, ids, order)),
-            _ => {}
         }
+        locations.records(&typed.records, "/records");
+    } else if let Ok(records) = serde_json::from_value::<Vec<EffectRecord>>(log.clone()) {
+        locations.records(&records, "");
     }
+
     let mut ids = Vec::new();
-    issued(&log, &mut ids);
-    rename(&mut log, &ids, &mut Vec::new());
+    for (path, id) in locations.0 {
+        if let Some(value) = log.pointer_mut(&path) {
+            let index = ids.iter().position(|seen| *seen == id).unwrap_or_else(|| {
+                ids.push(id);
+                ids.len() - 1
+            });
+            *value = serde_json::Value::String(format!("00000000-0000-4000-8000-{index:012}"));
+        }
+    }
     log
+}
+
+#[derive(Default)]
+struct LocalCallIdLocations(Vec<(String, LocalCallId)>);
+
+impl LocalCallIdLocations {
+    fn id(&mut self, id: &CallId, path: &str) {
+        if let CallId::Local(id) = id {
+            self.0.push((format!("{path}/local"), *id));
+        }
+    }
+
+    fn content(&mut self, content: &AssistantContent, path: &str) {
+        match content {
+            AssistantContent::ToolCall(call) => self.id(&call.id, &format!("{path}/id")),
+            AssistantContent::CustomToolCall(call) => self.id(&call.id, &format!("{path}/id")),
+            _ => {}
+        }
+    }
+
+    fn choice(&mut self, choice: &[AssistantContent], path: &str) {
+        for (index, content) in choice.iter().enumerate() {
+            self.content(content, &format!("{path}/{index}"));
+        }
+    }
+
+    fn messages(&mut self, messages: &[Message], path: &str) {
+        for (index, message) in messages.iter().enumerate() {
+            let path = format!("{path}/{index}/content");
+            match message {
+                Message::Assistant(turn) => {
+                    for (index, content) in turn.content.iter().enumerate() {
+                        self.content(content, &format!("{path}/{index}"));
+                    }
+                }
+                Message::User { content } => {
+                    for (index, content) in content.iter().enumerate() {
+                        if let UserContent::ToolResult(result) = content {
+                            self.id(&result.call, &format!("{path}/{index}/call"));
+                        }
+                    }
+                }
+                Message::System { .. } => {}
+            }
+        }
+    }
+
+    fn kind(&mut self, kind: &EffectKind, path: &str) {
+        match kind {
+            EffectKind::Completion { request, .. } => {
+                self.messages(
+                    &request.chat_history,
+                    &format!("{path}/request/chat_history"),
+                );
+            }
+            EffectKind::Memory {
+                op: MemoryOp::Append { messages, .. },
+            } => self.messages(messages, &format!("{path}/op/messages")),
+            _ => {}
+        }
+    }
+
+    fn error(&mut self, error: &ErrorReport, path: &str) {
+        if let Some(ErrorDetail::MalformedToolInput(detail)) = &error.detail {
+            self.id(&detail.id, &format!("{path}/detail/id"));
+        }
+    }
+
+    fn records(&mut self, records: &[EffectRecord], path: &str) {
+        for (index, record) in records.iter().enumerate() {
+            let path = format!("{path}/{index}");
+            self.kind(&record.kind, &format!("{path}/kind"));
+            match &record.outcome {
+                Ok(Outcome::Completion(response)) => {
+                    self.choice(&response.choice, &format!("{path}/outcome/Ok/choice"));
+                }
+                Ok(Outcome::Memory(MemoryOutcome::Loaded { messages })) => {
+                    self.messages(messages, &format!("{path}/outcome/Ok/messages"));
+                }
+                Err(error) => self.error(error, &format!("{path}/outcome/Err")),
+                _ => {}
+            }
+            if let Some(events) = &record.events {
+                for (index, item) in events.items().iter().enumerate() {
+                    if let Item::Event(StreamEvent::End { content, .. }) = item {
+                        self.content(content, &format!("{path}/events/{index}/value/content"));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// A tool call's JSON arguments with object keys sorted, or the text as is

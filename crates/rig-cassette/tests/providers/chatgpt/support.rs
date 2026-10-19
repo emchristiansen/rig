@@ -63,11 +63,9 @@ where
 
 /// The `include` every Codex request in these cassettes was recorded with.
 ///
-/// The Codex contract no longer forces `reasoning.encrypted_content` into
-/// `include`: it follows the rule every dialect shares, which requests it only
-/// alongside `reasoning`. These recordings were made while the Codex request
-/// always carried it, so a test that sets no `reasoning` states the include
-/// itself, and the request it sends is the one that was recorded.
+/// Responses requests include `reasoning.encrypted_content` for non-null
+/// reasoning or `store:false`, unless the selected model is known not to reason.
+/// These tests state the recorded include explicitly to pin their request bytes.
 pub(super) fn recorded_include() -> serde_json::Value {
     serde_json::json!({ "include": ["reasoning.encrypted_content"] })
 }
