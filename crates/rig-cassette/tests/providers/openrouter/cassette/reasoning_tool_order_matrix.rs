@@ -322,22 +322,37 @@ fn assert_normalized_order(scenario: &str, cell: Cell, observed: SharedChoice) {
         .take()
         .expect("test body should record a normalized choice");
     assert!(
-        matches!(choice.first(), Some(AssistantContent::Reasoning(_))),
+        matches!(
+            choice.first(),
+            Some(AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_))
+        ),
         "{scenario}: reasoning must be the first normalized block: {choice:#?}"
     );
     assert!(
-        choice.iter().any(|content| matches!(
-            content,
-            AssistantContent::Reasoning(reasoning)
-                if reasoning
-                    .native
-                    .as_ref()
-                    .and_then(|native| native.item.get("reasoning_details"))
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|details| details.iter().any(|detail| {
-                        detail["signature"].as_str().is_some_and(|signature| !signature.is_empty())
-                    }))
-        )),
+        choice.iter().any(|content| match content {
+            AssistantContent::Reasoning(reasoning) => reasoning
+                .native
+                .as_ref()
+                .and_then(|native| native.item.get("reasoning_details"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|details| details.iter().any(|detail| {
+                    detail["signature"]
+                        .as_str()
+                        .is_some_and(|signature| !signature.is_empty())
+                })),
+            AssistantContent::CarriedReasoning(reasoning) => {
+                reasoning.content.iter().any(|part| {
+                    matches!(
+                        part,
+                        rig::message::CarriedReasoningPart::Text {
+                            signature: Some(signature),
+                            ..
+                        } if !signature.is_empty()
+                    )
+                })
+            }
+            _ => false,
+        }),
         "{scenario}: live reasoning signature must survive normalization: {choice:#?}"
     );
     let names = choice
@@ -353,9 +368,10 @@ fn assert_normalized_order(scenario: &str, cell: Cell, observed: SharedChoice) {
         .position(|content| matches!(content, AssistantContent::ToolCall(_)))
         .expect("normalized tool call");
     assert!(
-        choice[..first_tool]
-            .iter()
-            .any(|content| matches!(content, AssistantContent::Reasoning(_))),
+        choice[..first_tool].iter().any(|content| matches!(
+            content,
+            AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)
+        )),
         "{scenario}: every tool-call sequence must follow reasoning"
     );
 }

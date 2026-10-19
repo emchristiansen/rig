@@ -49,12 +49,13 @@ async fn observe_stream(
         match item {
             Ok(Item::Event(StreamEvent::Text { text, .. })) => observation.text.push_str(&text),
             Ok(Item::Event(StreamEvent::End {
-                content: AssistantContent::Reasoning(reasoning),
+                content:
+                    content @ (AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)),
                 ..
             })) => {
                 observation
                     .streamed_encrypted
-                    .extend(encrypted_blocks_of(&reasoning));
+                    .extend(encrypted_blocks_of(&content));
             }
             Ok(Item::Event(StreamEvent::End {
                 content: AssistantContent::ToolCall(tool_call),
@@ -70,16 +71,24 @@ async fn observe_stream(
     observation
 }
 
-/// The encrypted `reasoning_details` entries a reasoning block holds in its
-/// provider item, as `(id, data)`.
-fn encrypted_blocks_of(reasoning: &rig::message::Reasoning) -> Vec<(Option<String>, String)> {
-    reasoning
-        .native
-        .as_ref()
-        .and_then(|native| native.item.get("reasoning_details"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
+/// The encrypted `reasoning_details` entries held in an ordinary provider item
+/// or carried as individual details, as exact received `(id, data)` values.
+fn encrypted_blocks_of(content: &AssistantContent) -> Vec<(Option<String>, String)> {
+    let details = match content {
+        AssistantContent::Reasoning(reasoning) => reasoning
+            .native
+            .as_ref()
+            .and_then(|native| native.item.get("reasoning_details"))
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        AssistantContent::CarriedReasoning(reasoning) => {
+            std::slice::from_ref(&reasoning.payload.item)
+        }
+        _ => return Vec::new(),
+    };
+    details
+        .iter()
         .filter(|detail| detail["type"] == "reasoning.encrypted")
         .filter_map(|detail| {
             Some((
@@ -91,14 +100,7 @@ fn encrypted_blocks_of(reasoning: &rig::message::Reasoning) -> Vec<(Option<Strin
 }
 
 fn encrypted_blocks_in_choice(choice: &[AssistantContent]) -> Vec<(Option<String>, String)> {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Reasoning(reasoning) => Some(encrypted_blocks_of(reasoning)),
-            _ => None,
-        })
-        .flatten()
-        .collect()
+    choice.iter().flat_map(encrypted_blocks_of).collect()
 }
 
 /// The round trip: an encrypted reasoning block that reaches the choice is

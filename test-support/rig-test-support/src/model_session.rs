@@ -437,10 +437,10 @@ fn last_text(history: &[Message]) -> String {
 fn has_reasoning(history: &[Message], from: usize) -> bool {
     history[from..].iter().any(|message| {
         matches!(message, Message::Assistant(rig_core::message::AssistantMessage { content, .. })
-            if content.iter().any(|part| matches!(
-                part,
-                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)
-            )))
+        if content.iter().any(|part| matches!(
+            part,
+            AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)
+        )))
     })
 }
 
