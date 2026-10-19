@@ -68,7 +68,7 @@ fn assert_query_direction(
              order by distance {order} LIMIT $limit"
         );
         let query = store
-            .search_query(with_document)
+            .search_query(with_document, Some(0.5))
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
@@ -100,12 +100,59 @@ fn explicit_distance_queries_use_maximum_threshold_and_ascending_order() {
     }
 }
 
+/// An absent distance threshold leaves both projections free of a score cutoff.
+#[test]
+fn absent_distance_threshold_keeps_positive_distance_candidates() {
+    for (function, sql_function) in [
+        (SurrealDistanceFunction::Knn, "vector::distance::knn"),
+        (
+            SurrealDistanceFunction::Hamming,
+            "vector::distance::hamming",
+        ),
+        (
+            SurrealDistanceFunction::Euclidean,
+            "vector::distance::euclidean",
+        ),
+    ] {
+        let store = SurrealVectorStore::new(
+            MockEmbeddingModel::model(),
+            Surreal::<Db>::init(),
+            None,
+            function,
+        );
+        for with_document in [false, true] {
+            let projection = if with_document {
+                "id , document , embedded_text,"
+            } else {
+                "id ,"
+            };
+            let expected = format!(
+                "SELECT {projection} {sql_function}($vec, embedding) as distance \
+                 from type::table($tablename) where $filter \
+                 order by distance asc LIMIT $limit"
+            );
+            let query = store
+                .search_query(with_document, None)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(query, expected);
+        }
+    }
+}
+
 /// Checks the default similarity query without a database or embedding provider.
 #[test]
 fn default_cosine_query_keeps_minimum_threshold_and_descending_order() {
     let store =
         SurrealVectorStore::with_defaults(MockEmbeddingModel::model(), Surreal::<Db>::init());
     assert_query_direction(&store, "vector::similarity::cosine", ">=", "desc");
+    for with_document in [false, true] {
+        assert_eq!(
+            store.search_query(with_document, None),
+            store.search_query(with_document, Some(0.0))
+        );
+    }
 }
 
 /// Checks the other admitted similarity measure without contacting a database.
@@ -118,6 +165,12 @@ fn jaccard_query_keeps_minimum_threshold_and_descending_order() {
         SurrealDistanceFunction::Jaccard,
     );
     assert_query_direction(&store, "vector::similarity::jaccard", ">=", "desc");
+    for with_document in [false, true] {
+        assert_eq!(
+            store.search_query(with_document, None),
+            store.search_query(with_document, Some(0.0))
+        );
+    }
 }
 
 #[allow(clippy::panic)]
