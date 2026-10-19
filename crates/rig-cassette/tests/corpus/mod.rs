@@ -2323,14 +2323,7 @@ pub fn golden_answer(log: &EffectLog) -> String {
                     _ => None,
                 });
                 Some(output_call.unwrap_or_else(|| {
-                    response
-                        .choice
-                        .iter()
-                        .filter_map(|content| match content {
-                            AssistantContent::Text(text) => Some(text.text.clone()),
-                            _ => None,
-                        })
-                        .collect::<String>()
+                    rig_core::transcript::assistant_text_from_choice(&response.choice)
                 }))
             }
             _ => None,
