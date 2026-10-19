@@ -85,7 +85,9 @@ const KNOWN_MACROS: [&str; 4] = [
 /// Whether a constant named `name` in `module` holds something other than a
 /// model id. In an `extension` module, `PROVIDER` is a `ProviderExtension`'s
 /// provider key and a `_BETA` constant is a beta header value; elsewhere
-/// those names are read like any other.
+/// those names are read like any other. The exact protocol names below are
+/// headers, metadata keys, routes, negotiation values or a data-channel label;
+/// model constants in those same modules remain checked.
 fn names_no_model(module: &[String], name: &str) -> bool {
     let extension = module.last().is_some_and(|last| last == "extension");
     name.ends_with("_URL")
@@ -93,7 +95,27 @@ fn names_no_model(module: &[String], name: &str) -> bool {
         || name.starts_with("ANTHROPIC_VERSION")
         || matches!(
             name,
-            "PROVIDER_NAME" | "AZURE_DEFAULT_API_VERSION" | "DEFAULT_LOCATION"
+            "PROVIDER_NAME"
+                | "AZURE_DEFAULT_API_VERSION"
+                | "DEFAULT_LOCATION"
+                | "CHATGPT_ACCOUNT_ID_HEADER"
+                | "EVENTS_DATA_CHANNEL"
+                | "LIVE_SESSIONS_PATH"
+                | "OPENAI_ALPHA_HEADER"
+                | "OPENAI_BETA_HEADER"
+                | "QUICKSILVER_V2"
+                | "REALTIME_CALLS_PATH"
+                | "REALTIME_CALLS_QUERY"
+                | "RESPONSES_WEBSOCKETS_BETA_VALUE"
+                | "SESSION_ID_HEADER"
+                | "SESSION_ID_METADATA_KEY"
+                | "THREAD_ID_HEADER"
+                | "THREAD_ID_METADATA_KEY"
+                | "TURN_STATE_METADATA_KEY"
+                | "VERSION_HEADER"
+                | "WS_STREAM_REQUEST_START_MS_METADATA_KEY"
+                | "X_CLIENT_REQUEST_ID_HEADER"
+                | "X_SESSION_ID_HEADER"
         )
         || (extension && (name == "PROVIDER" || name.ends_with("_BETA")))
 }

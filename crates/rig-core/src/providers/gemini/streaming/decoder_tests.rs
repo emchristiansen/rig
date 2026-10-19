@@ -271,6 +271,7 @@ fn a_signed_answer_text_round_trips_and_replays_edits_on_another_model() {
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[path = "decoder_tests/terminal_emission_tests.rs"]
 mod terminal_emission;
 
 #[test]

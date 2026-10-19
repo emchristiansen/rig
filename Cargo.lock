@@ -10490,6 +10490,7 @@ dependencies = [
 name = "rig-cassette-minimal"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "futures",
  "proptest",
  "rig-agent",

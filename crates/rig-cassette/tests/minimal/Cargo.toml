@@ -12,6 +12,7 @@ workspace = true
 # Only the cassette effect log and the classic-agent adapter: no native HTTP
 # engine, facade or provider helpers.
 [dev-dependencies]
+anyhow = { workspace = true }
 rig-core = { path = "../../../rig-core", features = ["test-utils"] }
 rig-agent = { path = "../../../rig-agent" }
 rig-cassette = { path = "../..", default-features = false, features = ["agent"] }
