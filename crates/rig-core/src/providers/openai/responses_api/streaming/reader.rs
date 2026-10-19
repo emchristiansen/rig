@@ -339,20 +339,26 @@ struct Arguments {
     arguments: String,
 }
 
-struct Known(Value);
+struct Known {
+    kind: String,
+    frame: Value,
+}
 
 impl<'de> Deserialize<'de> for Known {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
         let value = Value::deserialize(deserializer)?;
-        event(&value).map_err(serde::de::Error::custom)?;
-        Ok(Self(value))
+        let kind = event(&value).map_err(serde::de::Error::custom)?;
+        Ok(Self { kind, frame: value })
     }
 }
 
 #[cfg(any(feature = "websocket", test))]
-struct WebSocketKnown(Value);
+struct WebSocketKnown {
+    kind: String,
+    frame: Value,
+}
 
 #[cfg(any(feature = "websocket", test))]
 #[derive(Deserialize)]
@@ -379,11 +385,14 @@ impl<'de> Deserialize<'de> for WebSocketKnown {
         } else {
             event(&value).map_err(serde::de::Error::custom)?;
         }
-        Ok(Self(value))
+        Ok(Self {
+            kind: envelope.kind,
+            frame: value,
+        })
     }
 }
 
-fn event(value: &Value) -> Result<()> {
+fn event(value: &Value) -> Result<String> {
     let envelope: Envelope = fields(value)?;
     let required = |key: &str| {
         value
@@ -392,7 +401,8 @@ fn event(value: &Value) -> Result<()> {
     };
     let kind = envelope.kind.as_str();
     if super::is_lifecycle_event(kind) {
-        return whole(required("response")?);
+        whole(required("response")?)?;
+        return Ok(envelope.kind);
     }
     let _: ItemEnvelope = fields(value)?;
     match kind {
@@ -444,7 +454,8 @@ fn event(value: &Value) -> Result<()> {
             Ok(())
         }
         _ => Err(invalid(format!("unmodeled known Responses event `{kind}`"))),
-    }
+    }?;
+    Ok(envelope.kind)
 }
 
 struct Whole(Value);
@@ -480,8 +491,8 @@ struct ErrorEnvelope {
 
 pub(super) fn tagged(data: &str) -> WireEvent<ResponsesEvent> {
     wire::classify_tagged_frame::<Known>(data, "type", is_known_responses_event_type).map(
-        |Known(frame)| ResponsesEvent::Frame {
-            kind: frame["type"].as_str().expect("strict known tag").to_owned(),
+        |Known { kind, frame }| ResponsesEvent::Frame {
+            kind,
             frame,
             raw: data.to_owned(),
         },
@@ -536,8 +547,8 @@ pub(super) fn classify_websocket(data: &str) -> WireEvent<ResponsesEvent> {
                 "type",
                 is_known_responses_event_type,
             )
-            .map(|WebSocketKnown(frame)| ResponsesEvent::Frame {
-                kind: frame["type"].as_str().expect("strict known tag").to_owned(),
+            .map(|WebSocketKnown { kind, frame }| ResponsesEvent::Frame {
+                kind,
                 frame,
                 raw: data.to_owned(),
             })
