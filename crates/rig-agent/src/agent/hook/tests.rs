@@ -1029,3 +1029,294 @@ fn a_hook_names_itself_or_is_named_by_its_type() {
     stack.push(Threshold(2));
     assert_eq!(stack.names(), ["Plain", "Threshold(2)"]);
 }
+
+struct ToolRecorder {
+    label: u32,
+    log: Arc<Mutex<Vec<u32>>>,
+    stop: bool,
+}
+impl AgentHook for ToolRecorder {
+    async fn on_dispatch(&self, _ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
+        if event.tool_name().is_none() {
+            return DispatchAction::proceed();
+        }
+        self.log.lock().expect("log").push(self.label);
+        if self.stop {
+            DispatchAction::stop("stop")
+        } else {
+            DispatchAction::proceed()
+        }
+    }
+}
+
+struct ObservationRecorder {
+    label: u32,
+    log: Arc<Mutex<Vec<u32>>>,
+    stop: bool,
+}
+impl AgentHook for ObservationRecorder {
+    async fn on_text_delta(&self, _ctx: &HookContext, _event: TextDelta<'_>) -> ObservationAction {
+        self.log.lock().expect("log").push(self.label);
+        if self.stop {
+            ObservationAction::stop("stop")
+        } else {
+            ObservationAction::continue_run()
+        }
+    }
+
+    async fn on_reasoning_delta(
+        &self,
+        _ctx: &HookContext,
+        _event: ReasoningDelta<'_>,
+    ) -> ObservationAction {
+        self.log.lock().expect("log").push(self.label);
+        if self.stop {
+            ObservationAction::stop("stop")
+        } else {
+            ObservationAction::continue_run()
+        }
+    }
+}
+
+struct ObservesOnly(StepEventKind);
+impl AgentHook for ObservesOnly {
+    fn observes(&self, kind: StepEventKind) -> bool {
+        kind == self.0
+    }
+}
+
+struct Patcher {
+    label: u32,
+    log: Arc<Mutex<Vec<u32>>>,
+    patch: RequestPatch,
+    stop: bool,
+}
+impl AgentHook for Patcher {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        _event: CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
+        self.log.lock().expect("log").push(self.label);
+        if self.stop {
+            CompletionCallAction::stop("stop")
+        } else {
+            CompletionCallAction::patch(self.patch.clone())
+        }
+    }
+}
+
+fn completion_call_event() -> CompletionCallEvent<'static> {
+    static PROMPT: std::sync::OnceLock<rig_core::message::Message> = std::sync::OnceLock::new();
+    CompletionCallEvent {
+        prompt: PROMPT.get_or_init(|| rig_core::message::Message::user("hi")),
+        history: &[],
+        turn: 1,
+    }
+}
+
+#[tokio::test]
+async fn runs_hooks_in_registration_order_and_consults_all_on_continue() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut stack = HookStack::with(ToolRecorder {
+        label: 1,
+        log: log.clone(),
+        stop: false,
+    });
+    stack.push(ToolRecorder {
+        label: 2,
+        log: log.clone(),
+        stop: false,
+    });
+    let kind = tool_call_kind();
+    assert!(matches!(
+        stack.on_dispatch(&ctx(), dispatch_event(&kind)).await,
+        DispatchAction::Proceed
+    ));
+    assert_eq!(*log.lock().unwrap(), vec![1, 2]);
+}
+
+#[tokio::test]
+async fn first_stop_short_circuits_on_chained_tool_dispatch() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut stack = HookStack::with(ToolRecorder {
+        label: 1,
+        log: log.clone(),
+        stop: true,
+    });
+    stack.push(ToolRecorder {
+        label: 2,
+        log: log.clone(),
+        stop: false,
+    });
+    let kind = tool_call_kind();
+    assert!(matches!(
+        stack.on_dispatch(&ctx(), dispatch_event(&kind)).await,
+        DispatchAction::Deny(ErrorReport {
+            kind: ErrorKind::Cancelled,
+            ..
+        })
+    ));
+    assert_eq!(*log.lock().unwrap(), vec![1]);
+}
+
+#[tokio::test]
+async fn first_stop_short_circuits_observation() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut stack = HookStack::with(ObservationRecorder {
+        label: 1,
+        log: log.clone(),
+        stop: true,
+    });
+    stack.push(ObservationRecorder {
+        label: 2,
+        log: log.clone(),
+        stop: false,
+    });
+    assert!(matches!(
+        stack
+            .on_text_delta(
+                &ctx(),
+                TextDelta {
+                    delta: "hi",
+                    aggregated: "hi"
+                }
+            )
+            .await,
+        ObservationAction::Stop(_)
+    ));
+    assert_eq!(*log.lock().unwrap(), vec![1]);
+}
+
+#[tokio::test]
+async fn explicit_fail_short_circuits_later_invalid_tool_hooks() {
+    let fail_calls = Arc::new(AtomicUsize::new(0));
+    let retry_calls = Arc::new(AtomicUsize::new(0));
+    let mut stack = HookStack::with(InvalidResponder {
+        action: InvalidToolCallAction::fail(),
+        calls: fail_calls.clone(),
+    });
+    stack.push(InvalidResponder {
+        action: InvalidToolCallAction::retry("try another tool"),
+        calls: retry_calls.clone(),
+    });
+
+    let action = stack
+        .on_invalid_tool_call(&ctx(), &invalid_tool_call_context())
+        .await;
+
+    assert_eq!(action, Some(InvalidToolCallAction::fail()));
+    assert_eq!(fail_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(retry_calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn completion_patches_accumulate_and_stop_discards_prior_patch() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut stack = HookStack::with(Patcher {
+        label: 1,
+        log: log.clone(),
+        patch: RequestPatch::new().temperature(0.1),
+        stop: false,
+    });
+    stack.push(Patcher {
+        label: 2,
+        log: log.clone(),
+        patch: RequestPatch::new().max_tokens(256),
+        stop: false,
+    });
+    match stack
+        .on_completion_call(&ctx(), completion_call_event())
+        .await
+    {
+        CompletionCallAction::Patch(p) => {
+            assert_eq!(p.temperature, Some(0.1));
+            assert_eq!(p.max_tokens, Some(256));
+        }
+        other => panic!("expected patch, got {other:?}"),
+    }
+    assert_eq!(*log.lock().unwrap(), vec![1, 2]);
+    let mut stopped = HookStack::with(Patcher {
+        label: 3,
+        log: log.clone(),
+        patch: RequestPatch::new(),
+        stop: true,
+    });
+    stopped.push(Patcher {
+        label: 4,
+        log: log.clone(),
+        patch: RequestPatch::new(),
+        stop: false,
+    });
+    assert!(matches!(
+        stopped
+            .on_completion_call(&ctx(), completion_call_event())
+            .await,
+        CompletionCallAction::Stop(_)
+    ));
+    assert_eq!(*log.lock().unwrap(), vec![1, 2, 3]);
+}
+
+#[tokio::test]
+async fn nested_stack_composes_patches() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut inner = HookStack::with(Patcher {
+        label: 1,
+        log: log.clone(),
+        patch: RequestPatch::new().temperature(0.2),
+        stop: false,
+    });
+    inner.push(Patcher {
+        label: 2,
+        log: log.clone(),
+        patch: RequestPatch::new().max_tokens(128),
+        stop: false,
+    });
+    let mut outer = HookStack::with(inner);
+    outer.push(Patcher {
+        label: 3,
+        log: log.clone(),
+        patch: RequestPatch::new().preamble("outer"),
+        stop: false,
+    });
+    match outer
+        .on_completion_call(&ctx(), completion_call_event())
+        .await
+    {
+        CompletionCallAction::Patch(p) => {
+            assert_eq!(p.temperature, Some(0.2));
+            assert_eq!(p.max_tokens, Some(128));
+            assert_eq!(p.preamble.as_deref(), Some("outer"));
+        }
+        other => panic!("expected patch, got {other:?}"),
+    }
+    assert_eq!(*log.lock().unwrap(), vec![1, 2, 3]);
+}
+
+#[test]
+fn stack_observes_is_the_or_of_members() {
+    let mut stack = HookStack::with(ObservesOnly(StepEventKind::ToolDispatch));
+    stack.push(ObservesOnly(StepEventKind::CompletionDispatch));
+    assert!(<HookStack as AgentHook>::observes(
+        &stack,
+        StepEventKind::ToolDispatch
+    ));
+    assert!(<HookStack as AgentHook>::observes(
+        &stack,
+        StepEventKind::CompletionDispatch
+    ));
+    assert!(!<HookStack as AgentHook>::observes(
+        &stack,
+        StepEventKind::TextDelta
+    ));
+}
+
+#[test]
+fn empty_stack_observes_nothing() {
+    let empty = HookStack::new();
+    assert!(empty.is_empty());
+    assert!(!<HookStack as AgentHook>::observes(
+        &empty,
+        StepEventKind::ToolDispatch
+    ));
+}
