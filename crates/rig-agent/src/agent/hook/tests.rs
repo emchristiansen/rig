@@ -869,3 +869,163 @@ async fn stop_outcome_short_circuits_later_hooks_and_surfaces_as_cancelled() {
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(seen_cancelled.load(Ordering::Relaxed), 0);
 }
+
+#[tokio::test]
+async fn erased_dispatch_uses_the_public_on_dispatch_method() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let stack = HookStack::with(OnDispatchOnly(calls.clone()));
+
+    let action = resolve(&stack).await;
+
+    assert_skipped(&action, "called");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn string_rewrite_is_json_encoded_for_later_hook_in_same_stack() {
+    let spy = ArgsSpy::default();
+    let replacement = Value::String("sanitized".into());
+    let mut stack = HookStack::new();
+    stack.push(RewriteHook(replacement.clone()));
+    stack.push(spy.clone());
+
+    let action = resolve(&stack).await;
+
+    assert_eq!(patched_args(&action), Some(replacement.clone()));
+    assert_eq!(
+        spy.0.lock().unwrap().as_slice(),
+        [serde_json::to_string(&replacement).unwrap()]
+    );
+}
+
+#[tokio::test]
+async fn string_rewrite_is_json_encoded_for_hook_in_nested_stack() {
+    let spy = ArgsSpy::default();
+    let replacement = Value::String("sanitized".into());
+    let inner = HookStack::with(spy.clone());
+    let mut outer = HookStack::new();
+    outer.push(RewriteHook(replacement.clone()));
+    outer.push(inner);
+
+    let action = resolve(&outer).await;
+
+    assert_eq!(patched_args(&action), Some(replacement.clone()));
+    assert_eq!(
+        spy.0.lock().unwrap().as_slice(),
+        [serde_json::to_string(&replacement).unwrap()]
+    );
+}
+
+#[tokio::test]
+async fn nested_proceeding_rewrite_surfaces_as_patch_action() {
+    let mut proceed = HookStack::new();
+    proceed.push(RewriteHook(json!({"x":5})));
+    let action = resolve(&proceed).await;
+    assert_eq!(patched_args(&action), Some(json!({"x":5})));
+}
+
+struct StopHook;
+impl AgentHook for StopHook {
+    async fn on_dispatch(&self, _: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
+        if event.tool_name().is_none() {
+            return DispatchAction::proceed();
+        }
+        DispatchAction::stop("halt")
+    }
+}
+
+#[tokio::test]
+async fn nested_rewrite_then_skip_preserves_rewrite() {
+    let mut inner = HookStack::new();
+    inner.push(RewriteHook(json!({"x":41})));
+    inner.push(SkipHook);
+    let mut outer = HookStack::new();
+    outer.push(inner);
+    let context = ctx();
+    let kind = tool_call_kind();
+    let event = dispatch_event(&kind);
+    let action = outer.on_dispatch(&context, event).await;
+    assert_skipped(&action, "denied");
+    assert_eq!(salvaged_args(&context, event.id), Some(json!({"x":41})));
+}
+
+#[tokio::test]
+async fn nested_rewrite_then_stop_preserves_rewrite() {
+    let mut inner = HookStack::new();
+    inner.push(RewriteHook(json!({"x":41})));
+    inner.push(StopHook);
+    let mut outer = HookStack::new();
+    outer.push(inner);
+    let context = ctx();
+    let kind = tool_call_kind();
+    let event = dispatch_event(&kind);
+    let action = outer.on_dispatch(&context, event).await;
+    assert!(
+        matches!(&action, DispatchAction::Deny(report) if report.kind == ErrorKind::Cancelled),
+        "{action:?}"
+    );
+    assert_eq!(salvaged_args(&context, event.id), Some(json!({"x":41})));
+}
+
+#[tokio::test]
+async fn deeply_nested_terminal_action_preserves_the_last_rewrite() {
+    let mut inner = HookStack::new();
+    inner.push(RewriteHook(json!({"x":3})));
+    inner.push(SkipHook);
+
+    let mut middle = HookStack::new();
+    middle.push(RewriteHook(json!({"x":2})));
+    middle.push(inner);
+
+    let mut outer = HookStack::new();
+    outer.push(RewriteHook(json!({"x":1})));
+    outer.push(middle);
+
+    let context = ctx();
+    let kind = tool_call_kind();
+    let event = dispatch_event(&kind);
+    let action = outer.on_dispatch(&context, event).await;
+    assert_skipped(&action, "denied");
+    assert_eq!(salvaged_args(&context, event.id), Some(json!({"x":3})));
+}
+
+#[test]
+fn action_types_are_event_specific() {
+    fn model_selection(_: ModelSelectionAction) {}
+    fn completion(_: CompletionCallAction) {}
+    fn model_turn(_: ModelTurnAction) {}
+    fn retry_request(_: RetryRequest) {}
+    fn dispatch(_: DispatchAction) {}
+    fn outcome(_: OutcomeAction) {}
+    fn invalid(_: InvalidToolCallAction) {}
+    fn observation(_: ObservationAction) {}
+    model_selection(ModelSelectionAction::continue_run());
+    completion(CompletionCallAction::continue_run());
+    model_turn(ModelTurnAction::retry_with_feedback("try again"));
+    retry_request(RetryRequest::Repeat);
+    dispatch(DispatchAction::proceed());
+    outcome(OutcomeAction::proceed());
+    invalid(InvalidToolCallAction::fail());
+    observation(ObservationAction::continue_run());
+    let calls = AtomicUsize::new(0);
+    calls.fetch_add(1, Ordering::Relaxed);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+/// A hook that names itself is recorded under that name; one that does
+/// not is recorded under its type name.
+#[test]
+fn a_hook_names_itself_or_is_named_by_its_type() {
+    struct Plain;
+    impl AgentHook for Plain {}
+    struct Threshold(usize);
+    impl AgentHook for Threshold {
+        fn name(&self) -> Option<String> {
+            Some(format!("Threshold({})", self.0))
+        }
+    }
+    let mut stack = HookStack::new();
+    stack.push(Plain);
+    stack.push(Threshold(2));
+    assert_eq!(stack.names(), ["Plain", "Threshold(2)"]);
+}
