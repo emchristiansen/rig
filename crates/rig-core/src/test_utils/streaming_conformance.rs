@@ -588,7 +588,12 @@ impl DrainedStream {
             .collect()
     }
 
-    /// Reasoning parts in the aggregated choice, in order.
+    /// Ordinary [`AssistantContent::Reasoning`] parts in the aggregated
+    /// choice, in order.
+    ///
+    /// This borrowed typed view excludes [`AssistantContent::CarriedReasoning`].
+    /// Inspect [`Self::choice`] for provider-carried reasoning and its preserved
+    /// payload; the conformance laws separately observe both forms' display text.
     pub fn choice_reasoning(&self) -> Vec<&crate::message::Reasoning> {
         self.choice
             .iter()
