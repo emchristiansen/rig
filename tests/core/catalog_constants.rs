@@ -1,4 +1,5 @@
-//! Every public model constant has a catalog entry.
+//! Public model constants have catalog entries, apart from the two named
+//! session frontend definitions whose complete catalog metadata is unavailable.
 //!
 //! The constants are public string items (`const`, `static`, associated
 //! `const` in an inherent impl, any `const` in a trait impl, a `pub` trait's
@@ -15,7 +16,11 @@
 //! or defining module. A value it cannot read or resolve fails the guard, and
 //! so does an item-level macro call it has not reviewed, whose expansion it
 //! cannot see. A constant that names no model (a base URL, an environment
-//! variable, a version) is told apart by its name.
+//! variable, a version) is told apart by its name. The two session frontends
+//! remain model ids: only their exact definition, vendor and value are exempt.
+//! Aliases, re-exports and other Live models retain the ordinary coverage.
+//! The guard also fails if either exact frontend gains a built-in catalog row.
+//! It does not inspect function bodies or prove consumer-call reachability.
 //!
 //! Known limit: a model id inside a constant of another type (an
 //! `Option<&str>`, an array, a struct) is not read.
@@ -731,10 +736,50 @@ fn model_constants(
     models
 }
 
+/// The two session frontend definitions exempted while complete metadata
+/// is unavailable. Re-exporting either value does not inherit its exemption.
+fn session_frontend_without_catalog(constant: &Constant, vendor: &str, model: &str) -> bool {
+    let module = constant.module.join("::");
+    matches!(
+        (
+            constant.file.as_str(),
+            module.as_str(),
+            constant.name.as_str(),
+            vendor,
+            model,
+        ),
+        (
+            "crates/rig-core/src/providers/openai/live/mod.rs",
+            "providers::openai::live",
+            "GPT_LIVE_1",
+            "openai",
+            "gpt-live-1",
+        ) | (
+            "crates/rig-core/src/providers/chatgpt/realtime.rs",
+            "providers::chatgpt::realtime",
+            "GPT_LIVE_1_CODEX",
+            "chatgpt",
+            "gpt-live-1-codex",
+        )
+    )
+}
+
+/// A built-in row changes the finite coverage boundary and requires
+/// revisiting this exemption.
+fn assert_session_frontends_have_no_catalog_rows(catalog: &Catalog) {
+    for reference in ["openai/gpt-live-1", "chatgpt/gpt-live-1-codex"] {
+        assert!(
+            catalog.resolve(reference).is_none(),
+            "{reference} has a catalog row; revisit its session-only coverage exemption"
+        );
+    }
+}
+
 #[test]
 fn every_public_model_constant_has_a_catalog_entry() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let catalog = Catalog::builtin();
+    assert_session_frontends_have_no_catalog_rows(catalog);
     let mut checked = 0;
     let mut missing = std::collections::BTreeSet::new();
     let (core_dir, _) = CRATES[0];
@@ -761,7 +806,9 @@ fn every_public_model_constant_has_a_catalog_entry() {
             let provider = ProviderId::catalog(&vendor)
                 .unwrap_or_else(|| panic!("`{vendor}` is no vendor the catalog knows"));
             checked += 1;
-            if catalog.get(provider, model).is_none() {
+            if catalog.get(provider, model).is_none()
+                && !session_frontend_without_catalog(&constant, &vendor, model)
+            {
                 missing.insert(format!(
                     "{}: {} ({model:?}) has no catalog entry under `{vendor}`",
                     constant.file, constant.name
@@ -777,4 +824,55 @@ fn every_public_model_constant_has_a_catalog_entry() {
         missing.len(),
         missing.into_iter().collect::<Vec<_>>().join("\n")
     );
+}
+
+#[test]
+fn session_frontend_exemptions_require_exact_definition_vendor_and_id() {
+    let constant = |file: &str, module: &str, name: &str, model: &str| Constant {
+        file: file.to_owned(),
+        module: module.split("::").map(str::to_owned).collect(),
+        name: name.to_owned(),
+        value: Value::Literal(model.to_owned()),
+        ty: Spelled::Str,
+    };
+    for (file, module, name, vendor, model) in [
+        (
+            "crates/rig-core/src/providers/openai/live/mod.rs",
+            "providers::openai::live",
+            "GPT_LIVE_1",
+            "openai",
+            "gpt-live-1",
+        ),
+        (
+            "crates/rig-core/src/providers/chatgpt/realtime.rs",
+            "providers::chatgpt::realtime",
+            "GPT_LIVE_1_CODEX",
+            "chatgpt",
+            "gpt-live-1-codex",
+        ),
+    ] {
+        let original = constant(file, module, name, model);
+        assert!(!names_no_model(&original.module, name));
+        assert!(session_frontend_without_catalog(&original, vendor, model));
+        for (file, module, name, vendor, model) in [
+            (
+                "crates/rig-core/src/providers/openai/completion/mod.rs",
+                module,
+                name,
+                vendor,
+                model,
+            ),
+            (file, "providers::openai::completion", name, vendor, model),
+            (file, module, "GPT_LIVE_ALIAS", vendor, model),
+            (file, module, name, "another-vendor", model),
+            (file, module, name, vendor, "gpt-live-2"),
+            (file, module, "GPT_LIVE_2", vendor, "gpt-live-2"),
+        ] {
+            let changed = constant(file, module, name, model);
+            assert!(
+                !session_frontend_without_catalog(&changed, vendor, model),
+                "an exemption widened to {file}: {module}::{name} under {vendor} for {model}"
+            );
+        }
+    }
 }

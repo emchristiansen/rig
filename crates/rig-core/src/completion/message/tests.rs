@@ -193,6 +193,104 @@ fn an_unanswered_turn_fails_its_run_only_when_cut_or_failed() {
     );
 }
 
+/// The STOP policy applies only to nonempty choices of exactly empty
+/// inspection-media carriers, independently of their preserved payloads.
+#[test]
+fn only_empty_inspection_media_with_matching_stop_fails_its_run() {
+    use super::{
+        AssistantContent, CarriedPayload, CarriedText, CarriedTextContent, DocumentSourceKind,
+        Image, ImageMediaType, StopReason, turn_failure,
+    };
+    use crate::completion::FinishReason;
+
+    let carried = |content| {
+        AssistantContent::CarriedText(CarriedText::new(
+            content,
+            CarriedPayload::new(
+                serde_json::json!({"thought": true}),
+                Some("vertexai".into()),
+            ),
+        ))
+    };
+    let media = carried(CarriedTextContent::InspectionOnlyMedia(String::new()));
+    let message = "the provider completed a turn containing only inspection media and no answer";
+    for choice in [vec![media.clone()], vec![media.clone(), media.clone()]] {
+        assert_eq!(
+            turn_failure(&choice, Some(&StopReason::Stop), Some(&FinishReason::Stop)),
+            Some(message.to_owned()),
+        );
+    }
+    let image = AssistantContent::Image(Image {
+        data: DocumentSourceKind::Base64("AQID".into()),
+        media_type: Some(ImageMediaType::PNG),
+        detail: None,
+        native: None,
+    });
+    for choice in [
+        vec![],
+        vec![AssistantContent::reasoning("thinking")],
+        vec![AssistantContent::text("")],
+        vec![carried(CarriedTextContent::InspectionOnlyText(
+            String::new(),
+        ))],
+        vec![carried(CarriedTextContent::Opaque(String::new()))],
+        vec![carried(CarriedTextContent::InspectionOnlyMedia(" ".into()))],
+        vec![carried(CarriedTextContent::InspectionOnlyMedia(
+            "edited".into(),
+        ))],
+        vec![media.clone(), AssistantContent::reasoning("thinking")],
+        vec![media.clone(), AssistantContent::text("answer")],
+        vec![media.clone(), image],
+    ] {
+        assert_eq!(
+            turn_failure(&choice, Some(&StopReason::Stop), Some(&FinishReason::Stop)),
+            None,
+            "{choice:?}",
+        );
+    }
+    for (stop, finish) in [
+        (None, None),
+        (Some(StopReason::Stop), None),
+        (None, Some(FinishReason::Stop)),
+        (Some(StopReason::Length), Some(FinishReason::Stop)),
+        (Some(StopReason::Stop), Some(FinishReason::ToolCalls)),
+        (Some(StopReason::ToolUse), Some(FinishReason::ToolCalls)),
+        (
+            Some(StopReason::Aborted("caller stopped".into())),
+            Some(FinishReason::Stop),
+        ),
+    ] {
+        assert_eq!(
+            turn_failure(&[media.clone()], stop.as_ref(), finish.as_ref()),
+            None
+        );
+    }
+    assert_eq!(
+        turn_failure(
+            &[media.clone()],
+            Some(&StopReason::Stop),
+            Some(&FinishReason::Length)
+        ),
+        Some(FinishReason::Length.no_answer_message()),
+    );
+    assert_eq!(
+        turn_failure(
+            &[media.clone()],
+            Some(&StopReason::Length),
+            Some(&FinishReason::Length)
+        ),
+        Some(FinishReason::Length.no_answer_message()),
+    );
+    assert_eq!(
+        turn_failure(
+            &[media],
+            Some(&StopReason::Error("failed".into())),
+            Some(&FinishReason::Stop)
+        ),
+        Some("the provider failed the turn without an answer: failed".to_owned()),
+    );
+}
+
 /// A turn the provider failed fails its run even when it holds an answer:
 /// replay leaves it out, so the caller must not take it as a success.
 #[test]

@@ -7,7 +7,7 @@ use rig_core::message::{AssistantContent, CarriedReasoningPart, Message};
 use rig_core::streaming::{Item, StreamEvent};
 use rig_core::wire::{Mode, Operation as _, Wire as _, WireFrame};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = anyhow::Result<()>;
 const THOUGHT_SIGNATURE: &[u8] = b"\x00\x01\x02thinking-text-sig\xff";
 const ANSWER_SIGNATURE: &[u8] = b"signature";
 
@@ -66,37 +66,63 @@ fn assert_carried(
         AssistantContent::CarriedText(answer),
     ] = response.choice.as_slice()
     else {
-        return Err("expected received reasoning and signed answer".into());
+        anyhow::bail!("expected received reasoning and signed answer");
     };
-    assert_eq!(reasoning.payload.provider.as_deref(), Some(issuer));
-    assert_eq!(
-        reasoning.content,
-        vec![CarriedReasoningPart::Text {
-            text: "thinking text".to_owned(),
-            signature: signed.then(|| base64::prelude::BASE64_STANDARD.encode(THOUGHT_SIGNATURE)),
-        }]
+    anyhow::ensure!(
+        reasoning.payload.provider.as_deref() == Some(issuer),
+        "reasoning issuer changed"
     );
-    assert_eq!(
-        reasoning.payload.item,
-        serde_json::to_value(parts.first().ok_or("thought missing")?)?
+    anyhow::ensure!(
+        reasoning.content
+            == vec![CarriedReasoningPart::Text {
+                text: "thinking text".to_owned(),
+                signature: signed
+                    .then(|| base64::prelude::BASE64_STANDARD.encode(THOUGHT_SIGNATURE)),
+            }],
+        "reasoning content changed"
     );
-    assert_eq!(answer.payload.provider.as_deref(), Some(issuer));
-    assert_eq!(
-        answer.payload.item,
-        serde_json::to_value(parts.get(1).ok_or("answer missing")?)?
+    anyhow::ensure!(
+        reasoning.payload.item
+            == serde_json::to_value(
+                parts
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("thought missing"))?
+            )?,
+        "reasoning payload changed"
     );
-    let known = answer.signed_answer().ok_or("signed answer lost")?;
-    assert_eq!(known.text, "4");
-    assert_eq!(
-        known.signature.as_str(),
-        base64::prelude::BASE64_STANDARD.encode(ANSWER_SIGNATURE)
+    anyhow::ensure!(
+        answer.payload.provider.as_deref() == Some(issuer),
+        "answer issuer changed"
     );
-    assert_eq!(response.text(), "4");
-    assert_eq!(response.model(), Some("gemini-2.5-flash-001"));
-    assert_eq!(response.response_id(), Some("resp-vertex-1"));
-    assert_eq!(
-        response.finish_reason(),
-        Some(rig_core::completion::FinishReason::Stop)
+    anyhow::ensure!(
+        answer.payload.item
+            == serde_json::to_value(
+                parts
+                    .get(1)
+                    .ok_or_else(|| anyhow::anyhow!("answer missing"))?
+            )?,
+        "answer payload changed"
+    );
+    let known = answer
+        .signed_answer()
+        .ok_or_else(|| anyhow::anyhow!("signed answer lost"))?;
+    anyhow::ensure!(known.text == "4", "signed answer text changed");
+    anyhow::ensure!(
+        known.signature.as_str() == base64::prelude::BASE64_STANDARD.encode(ANSWER_SIGNATURE),
+        "answer signature changed"
+    );
+    anyhow::ensure!(response.text() == "4", "response text changed");
+    anyhow::ensure!(
+        response.model() == Some("gemini-2.5-flash-001"),
+        "response model changed"
+    );
+    anyhow::ensure!(
+        response.response_id() == Some("resp-vertex-1"),
+        "response ID changed"
+    );
+    anyhow::ensure!(
+        response.finish_reason() == Some(rig_core::completion::FinishReason::Stop),
+        "response finish reason changed"
     );
     Ok(())
 }
@@ -105,13 +131,24 @@ fn assert_vertex_history_replays(
     response: &CompletionResponse,
     parts: &[vertexai::model::Part],
 ) -> TestResult {
-    assert_eq!(response.origin.provider, PROVIDER_NAME);
-    assert_eq!(response.origin.api.as_str(), "vertexai.generate_content");
-    assert_eq!(response.origin.model, crate::completion::GEMINI_2_5_FLASH);
+    anyhow::ensure!(
+        response.origin.provider == PROVIDER_NAME,
+        "origin provider changed"
+    );
+    anyhow::ensure!(
+        response.origin.api.as_str() == "vertexai.generate_content",
+        "origin API changed"
+    );
+    anyhow::ensure!(
+        response.origin.model == crate::completion::GEMINI_2_5_FLASH,
+        "origin model changed"
+    );
     let wire = crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH);
     let history = vec![
         Message::user("What is 2 + 2?"),
-        response.message().ok_or("received turn missing")?,
+        response
+            .message()
+            .ok_or_else(|| anyhow::anyhow!("received turn missing"))?,
         Message::user("And 3 + 3?"),
     ];
     let request = rig_core::operation::Completion::prepare(
@@ -122,9 +159,9 @@ fn assert_vertex_history_replays(
     let replayed = encoded
         .contents
         .get(1)
-        .ok_or("received assistant turn lost")?;
-    assert_eq!(replayed.role, "model");
-    assert_eq!(replayed.parts.as_slice(), parts);
+        .ok_or_else(|| anyhow::anyhow!("received assistant turn lost"))?;
+    anyhow::ensure!(replayed.role == "model", "replayed role changed");
+    anyhow::ensure!(replayed.parts.as_slice() == parts, "replayed parts changed");
     Ok(())
 }
 
@@ -160,7 +197,10 @@ async fn streamed_unary_vertex_carried_events_and_response_keep_their_actual_iss
             }
         }
         let response = stream.finish().await?;
-        assert_eq!(ends, response.choice);
+        anyhow::ensure!(
+            ends == response.choice,
+            "ended parts and response choices differ"
+        );
         assert_carried(&response, &parts, signed, PROVIDER_NAME)?;
         assert_vertex_history_replays(&response, &parts)?;
     }
@@ -188,9 +228,9 @@ fn ordinary_gemini_decoder_keeps_its_existing_carried_issuer() -> TestResult {
             signed,
             rig_core::providers::gemini::completion::PROVIDER_NAME,
         )?;
-        assert_eq!(
-            response.origin.provider,
-            rig_core::providers::gemini::completion::PROVIDER_NAME
+        anyhow::ensure!(
+            response.origin.provider == rig_core::providers::gemini::completion::PROVIDER_NAME,
+            "ordinary Gemini issuer changed"
         );
     }
     Ok(())

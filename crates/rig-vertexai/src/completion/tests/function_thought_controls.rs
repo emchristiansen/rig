@@ -144,8 +144,7 @@ fn actual_vertex_native_call_replays_true_signature_metadata_and_whole_part_unch
             request
         };
         let actual = serde_json::to_value(
-            &wire
-                .encode(request, Mode::Unary)
+            wire.encode(request, Mode::Unary)
                 .expect("real Vertex encode"),
         )
         .expect("encoded SDK request JSON");

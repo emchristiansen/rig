@@ -1,5 +1,4 @@
 use super::*;
-use base64::Engine as _;
 use rig_core::message::{
     AssistantContent, AssistantMessage, CallId, CarriedPayload, CarriedReasoning,
     CarriedReasoningPart, DocumentSourceKind, Image, ImageMediaType, Message, Text, ToolName,

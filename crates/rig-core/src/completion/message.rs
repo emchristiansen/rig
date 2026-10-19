@@ -141,6 +141,8 @@ pub fn turn_delivered_no_answer(choice: &[AssistantContent]) -> bool {
 /// output budget or a filter cut it (`finish` is truncating). A turn that
 /// ended at the token limit with an explicitly finished call may run it;
 /// a call the writer never finished makes the turn fail.
+/// A STOP-completed turn containing only empty inspection-media carriers
+/// fails instead of finalizing an empty answer.
 /// Every runtime reads this one rule.
 pub fn turn_failure(
     choice: &[AssistantContent],
@@ -164,6 +166,20 @@ pub fn turn_failure(
     let answered = !turn_delivered_no_answer(choice);
     if !answered && let Some(finish) = finish.filter(|finish| finish.truncated_output()) {
         return Some(finish.no_answer_message());
+    }
+    if matches!(stop, Some(StopReason::Stop))
+        && matches!(finish, Some(crate::completion::FinishReason::Stop))
+        && !choice.is_empty()
+        && choice.iter().all(|part| {
+            matches!(part, AssistantContent::CarriedText(carried)
+                if matches!(&carried.content, CarriedTextContent::InspectionOnlyMedia(text)
+                    if text.is_empty()))
+        })
+    {
+        return Some(
+            "the provider completed a turn containing only inspection media and no answer"
+                .to_owned(),
+        );
     }
     match failed {
         Some(StopReason::Error(reason)) if answered => {

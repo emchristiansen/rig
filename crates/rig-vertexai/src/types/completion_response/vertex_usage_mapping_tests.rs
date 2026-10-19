@@ -76,7 +76,7 @@ fn thinking_tokens_without_finish_fixture() -> vertexai::model::GenerateContentR
         .set_total_token_count(270)
         .set_cached_content_token_count(9);
 
-    let response = vertexai::model::GenerateContentResponse::new()
+    vertexai::model::GenerateContentResponse::new()
         .set_usage_metadata(usage_metadata)
         .set_candidates(vec![
             vertexai::model::Candidate::new().set_content(
@@ -84,9 +84,7 @@ fn thinking_tokens_without_finish_fixture() -> vertexai::model::GenerateContentR
                     .set_role("model")
                     .set_parts(vec![vertexai::model::Part::new().set_text("hi")]),
             ),
-        ]);
-
-    response
+        ])
 }
 
 /// Without a provider end, usage remains raw evidence and unary completion is truncated.

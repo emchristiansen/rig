@@ -438,3 +438,1791 @@ fn grounding_and_citations_cite_the_answer() {
 mod signature_media_controls;
 
 mod late_media_controls;
+
+/// The original call signature is observed on End Native; the failed partial strips it.
+#[test]
+fn gm9_current_signed_call_end_keeps_original_binary_signature() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    let raw = b"\x00\x01\x02thinking-sig\xff";
+    let function_call = vertexai::model::FunctionCall::new()
+        .set_name("add".to_string())
+        .set_args(serde_json::Map::new());
+    let part = vertexai::model::Part::new()
+        .set_function_call(function_call)
+        .set_thought_signature(raw.to_vec());
+    let content = vertexai::model::Content::new()
+        .set_role("model")
+        .set_parts([part]);
+    let candidate = vertexai::model::Candidate::new().set_content(content);
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+    let expected_raw =
+        Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+    assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+    let model = Model::new(
+        crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+        Reply(received.clone()),
+    );
+    futures::executor::block_on(async {
+        let mut stream = model
+            .stream(CompletionRequest::new("hello"))
+            .expect("the unchanged no-terminal SDK input opens");
+        let mut items = Vec::new();
+        let mut saw_truncated = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    assert!(!saw_truncated, "no content follows the terminal failure");
+                    items.push(item);
+                }
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                    assert!(!saw_truncated, "the original input fails once");
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "the original input has no provider end");
+        let partial = stream.partial();
+        assert_eq!(partial.finish_reason(), None);
+        assert!(matches!(partial.stop(), StopReason::Error(_)));
+        assert_eq!(partial.raw, expected_raw);
+        assert!(
+            items.iter().all(|item| matches!(item, Item::Event(_))),
+            "{items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+        );
+        let ended: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            (0..partial.choice.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(_, content)| content.canonical())
+                .collect::<Vec<_>>(),
+            partial.choice,
+        );
+        let starts: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::Start {
+                    part,
+                    kind: rig_core::streaming::PartKind::ToolCall,
+                    name,
+                    ..
+                }) => Some((*part, name.as_ref().map(|name| name.as_str()))),
+                _ => None,
+            })
+            .collect();
+        let arguments: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::Arguments { part, json }) => Some((*part, json)),
+                _ => None,
+            })
+            .collect();
+        let calls: Vec<_> = ended
+            .iter()
+            .filter_map(|(part, content)| match content {
+                AssistantContent::ToolCall(call) => Some((*part, call)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(
+            starts.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+            vec![Some("add")]
+        );
+        assert_eq!(arguments.len(), 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(_, call)| &call.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            1
+        );
+        let expected_arguments = [json!({})];
+        for (ordinal, ((start, _), ((argument_part, json), (end, call)))) in
+            starts.iter().zip(arguments.iter().zip(&calls)).enumerate()
+        {
+            assert_eq!(start, argument_part);
+            assert_eq!(start, end);
+            assert_eq!(*json, &expected_arguments[ordinal].to_string());
+            assert_eq!(
+                Value::Object(call.function.arguments.clone()),
+                expected_arguments[ordinal]
+            );
+            assert_eq!(Some(call.function.name.as_str()), starts[ordinal].1);
+            assert!(matches!(&call.id, rig_core::message::CallId::Local(_)));
+            assert_eq!(call.id.provider(), None);
+            let AssistantContent::ToolCall(partial_call) = &partial.choice[end.index()] else {
+                panic!(
+                    "the matching partial Part is a tool call: {:?}",
+                    partial.choice
+                );
+            };
+            assert_eq!(call.id, partial_call.id);
+            assert_eq!(call.function, partial_call.function);
+            assert!(partial_call.native.is_none());
+        }
+        assert_eq!(partial.choice.len(), 1);
+        let (part, content) = ended.first().expect("the signed call ends before EOF");
+        assert_eq!(part.index(), 0);
+        assert_eq!(
+            content.native_item(),
+            Some(&expected_raw["candidates"][0]["content"]["parts"][0])
+        );
+        let native = content
+            .native_item()
+            .expect("the actual End retains the call's Native");
+        let encoded = base64::Engine::encode(&base64::prelude::BASE64_STANDARD, raw);
+        assert_eq!(native["thoughtSignature"], json!(encoded));
+        assert_eq!(
+            expected_raw["candidates"][0]["content"]["parts"][0]["thoughtSignature"],
+            json!(encoded)
+        );
+        assert_eq!(
+            base64::Engine::decode(
+                &base64::prelude::BASE64_STANDARD,
+                native["thoughtSignature"]
+                    .as_str()
+                    .expect("the signature is a string")
+            )
+            .expect("the binary signature is base64"),
+            raw.to_vec(),
+        );
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model.call(CompletionRequest::new("hello")).await,
+            Err(ProviderError::Truncated)
+        ));
+    });
+}
+
+/// The original signed thought is observed as carried reasoning before EOF failure.
+#[test]
+fn gm9_current_signed_thought_partial_keeps_original_binary_signature() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    let raw = b"\x00\x01\x02thinking-text-sig\xff";
+    let part = vertexai::model::Part::new()
+        .set_text("thinking text".to_string())
+        .set_thought(true)
+        .set_thought_signature(raw.to_vec());
+    let content = vertexai::model::Content::new()
+        .set_role("model")
+        .set_parts([part]);
+    let candidate = vertexai::model::Candidate::new().set_content(content);
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+    let expected_raw =
+        Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+    assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+    let model = Model::new(
+        crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+        Reply(received.clone()),
+    );
+    futures::executor::block_on(async {
+        let mut stream = model
+            .stream(CompletionRequest::new("hello"))
+            .expect("the unchanged no-terminal SDK input opens");
+        let mut items = Vec::new();
+        let mut saw_truncated = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    assert!(!saw_truncated, "no content follows the terminal failure");
+                    items.push(item);
+                }
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                    assert!(!saw_truncated, "the original input fails once");
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "the original input has no provider end");
+        let partial = stream.partial();
+        assert_eq!(partial.finish_reason(), None);
+        assert!(matches!(partial.stop(), StopReason::Error(_)));
+        assert_eq!(partial.raw, expected_raw);
+        assert!(
+            items.iter().all(|item| matches!(item, Item::Event(_))),
+            "{items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+        );
+        let ended: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            (0..partial.choice.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(_, content)| content.canonical())
+                .collect::<Vec<_>>(),
+            partial.choice,
+        );
+        let [AssistantContent::CarriedReasoning(reasoning)] = partial.choice.as_slice() else {
+            panic!(
+                "the original signed thought is carried reasoning: {:?}",
+                partial.choice
+            );
+        };
+        let encoded = base64::Engine::encode(&base64::prelude::BASE64_STANDARD, raw);
+        assert_eq!(reasoning.display_text(), "thinking text");
+        assert_eq!(
+            reasoning.content,
+            vec![rig_core::message::CarriedReasoningPart::Text {
+                text: "thinking text".to_owned(),
+                signature: Some(encoded.clone()),
+            }]
+        );
+        assert_eq!(reasoning.payload.provider.as_deref(), Some(PROVIDER_NAME));
+        assert_eq!(
+            reasoning.payload.position,
+            rig_core::message::CarriedPosition::MessageContent {
+                item_index: 0,
+                part_index: 0
+            }
+        );
+        assert_eq!(
+            reasoning.payload.item,
+            expected_raw["candidates"][0]["content"]["parts"][0]
+        );
+        assert_eq!(reasoning.payload.item["thoughtSignature"], json!(encoded));
+        assert_eq!(reasoning.payload.item["thought"], json!(true));
+        assert_eq!(
+            base64::Engine::decode(&base64::prelude::BASE64_STANDARD, &encoded)
+                .expect("the original thought signature is base64"),
+            raw.to_vec(),
+        );
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model.call(CompletionRequest::new("hello")).await,
+            Err(ProviderError::Truncated)
+        ));
+    });
+}
+
+/// Received leaves of the original no-terminal SDK input, observed before failed finish.
+#[test]
+fn gm9_current_singleton_png_flushes_at_eof_before_truncation() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    let raw = vec![0, 1, 2, 255];
+    let parts = [inline_data_part("image/png", raw.clone())];
+    let content = vertexai::model::Content::new()
+        .set_role("model")
+        .set_parts(parts);
+    let candidate = vertexai::model::Candidate::new().set_content(content);
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+    let expected_raw =
+        Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+    assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+    let model = Model::new(
+        crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+        Reply(received.clone()),
+    );
+    let wire = crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH);
+    let (prefix, ended, prefix_items) = rig_core::test_utils::history_conformance::cut(
+        &wire,
+        rig_core::wire::Mode::Streaming,
+        [received.clone()],
+    );
+    assert!(!ended);
+    assert!(
+        prefix.choice.is_empty(),
+        "the singleton image remains pending before actual EOF"
+    );
+    assert!(!prefix_items.iter().any(|item| matches!(
+        item,
+        Item::Event(StreamEvent::End {
+            content: AssistantContent::Image(_),
+            ..
+        })
+    )));
+    futures::executor::block_on(async {
+        let mut stream = model
+            .stream(CompletionRequest::new("hello"))
+            .expect("the unchanged no-terminal SDK input opens");
+        let mut items = Vec::new();
+        let mut saw_truncated = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    assert!(!saw_truncated, "no content follows the terminal failure");
+                    items.push(item);
+                }
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                    assert!(!saw_truncated, "the original input fails once");
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "the original input has no provider end");
+        let partial = stream.partial();
+        assert_eq!(partial.finish_reason(), None);
+        assert!(matches!(partial.stop(), StopReason::Error(_)));
+        assert_eq!(partial.raw, expected_raw);
+        assert!(
+            items.iter().all(|item| matches!(item, Item::Event(_))),
+            "{items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+        );
+        let ended: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            (0..partial.choice.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(_, content)| content.canonical())
+                .collect::<Vec<_>>(),
+            partial.choice,
+        );
+        let [AssistantContent::Image(image)] = partial.choice.as_slice() else {
+            panic!(
+                "actual EOF flush must deliver the singleton PNG: {:?}",
+                partial.choice
+            );
+        };
+        assert_eq!(
+            image.data,
+            rig_core::message::DocumentSourceKind::Base64("AAEC/w==".to_owned())
+        );
+        assert_eq!(
+            image.media_type,
+            Some(rig_core::message::ImageMediaType::PNG)
+        );
+        // mec-rig-gm9-1 selects the current None; the original Some(Auto) is not restored.
+        assert_eq!(image.detail, None);
+        assert!(image.native.is_none());
+        let (_, content) = ended
+            .first()
+            .expect("EOF emits the pending image End before Truncated");
+        assert_eq!(
+            content.native_item(),
+            Some(&expected_raw["candidates"][0]["content"]["parts"][0])
+        );
+        assert_eq!(
+            base64::Engine::decode(&base64::prelude::BASE64_STANDARD, "AAEC/w==")
+                .expect("the actual image bytes are base64"),
+            raw
+        );
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model.call(CompletionRequest::new("hello")).await,
+            Err(ProviderError::Truncated)
+        ));
+    });
+}
+
+/// Received leaves of the original no-terminal SDK input, observed before failed finish.
+#[test]
+fn gm9_current_mixed_jpeg_partial_keeps_original_order() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    let raw = vec![1, 2, 3];
+    let parts = [
+        vertexai::model::Part::new().set_text("before"),
+        inline_data_part("image/jpeg", raw.clone()),
+        vertexai::model::Part::new().set_text("after"),
+    ];
+    let content = vertexai::model::Content::new()
+        .set_role("model")
+        .set_parts(parts);
+    let candidate = vertexai::model::Candidate::new().set_content(content);
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+    let expected_raw =
+        Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+    assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+    let model = Model::new(
+        crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+        Reply(received.clone()),
+    );
+    futures::executor::block_on(async {
+        let mut stream = model
+            .stream(CompletionRequest::new("hello"))
+            .expect("the unchanged no-terminal SDK input opens");
+        let mut items = Vec::new();
+        let mut saw_truncated = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    assert!(!saw_truncated, "no content follows the terminal failure");
+                    items.push(item);
+                }
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                    assert!(!saw_truncated, "the original input fails once");
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "the original input has no provider end");
+        let partial = stream.partial();
+        assert_eq!(partial.finish_reason(), None);
+        assert!(matches!(partial.stop(), StopReason::Error(_)));
+        assert_eq!(partial.raw, expected_raw);
+        assert!(
+            items.iter().all(|item| matches!(item, Item::Event(_))),
+            "{items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+        );
+        let ended: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            (0..partial.choice.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(_, content)| content.canonical())
+                .collect::<Vec<_>>(),
+            partial.choice,
+        );
+        let [
+            AssistantContent::Text(before),
+            AssistantContent::Image(image),
+            AssistantContent::Text(after),
+        ] = partial.choice.as_slice()
+        else {
+            panic!(
+                "the original text/JPEG/text order remains exact: {:?}",
+                partial.choice
+            );
+        };
+        assert_eq!(before.text, "before");
+        assert_eq!(after.text, "after");
+        assert_eq!(
+            image.data,
+            rig_core::message::DocumentSourceKind::Base64("AQID".to_owned())
+        );
+        assert_eq!(
+            image.media_type,
+            Some(rig_core::message::ImageMediaType::JPEG)
+        );
+        assert_eq!(
+            base64::Engine::decode(&base64::prelude::BASE64_STANDARD, "AQID")
+                .expect("the original JPEG bytes are base64"),
+            raw
+        );
+        assert_eq!(
+            ended[1].1.native_item(),
+            Some(&expected_raw["candidates"][0]["content"]["parts"][1])
+        );
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model.call(CompletionRequest::new("hello")).await,
+            Err(ProviderError::Truncated)
+        ));
+    });
+}
+
+/// Received leaves of the original no-terminal SDK input, observed before failed finish.
+#[test]
+fn gm9_current_thought_png_keeps_inspection_between_original_text() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    let parts = [
+        vertexai::model::Part::new().set_text("before"),
+        inline_data_part("image/png", vec![1, 2, 3]).set_thought(true),
+        vertexai::model::Part::new().set_text("after"),
+    ];
+    let content = vertexai::model::Content::new()
+        .set_role("model")
+        .set_parts(parts);
+    let candidate = vertexai::model::Candidate::new().set_content(content);
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+    let expected_raw =
+        Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+    assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+    let model = Model::new(
+        crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+        Reply(received.clone()),
+    );
+    futures::executor::block_on(async {
+        let mut stream = model
+            .stream(CompletionRequest::new("hello"))
+            .expect("the unchanged no-terminal SDK input opens");
+        let mut items = Vec::new();
+        let mut saw_truncated = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    assert!(!saw_truncated, "no content follows the terminal failure");
+                    items.push(item);
+                }
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                    assert!(!saw_truncated, "the original input fails once");
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "the original input has no provider end");
+        let partial = stream.partial();
+        assert_eq!(partial.finish_reason(), None);
+        assert!(matches!(partial.stop(), StopReason::Error(_)));
+        assert_eq!(partial.raw, expected_raw);
+        assert!(
+            items.iter().all(|item| matches!(item, Item::Event(_))),
+            "{items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+        );
+        let ended: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            (0..partial.choice.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(_, content)| content.canonical())
+                .collect::<Vec<_>>(),
+            partial.choice,
+        );
+        let [
+            AssistantContent::Text(before),
+            AssistantContent::CarriedText(media),
+            AssistantContent::Text(after),
+        ] = partial.choice.as_slice()
+        else {
+            panic!(
+                "original before/inspection/after order: {:?}",
+                partial.choice
+            );
+        };
+        assert_eq!(before.text, "before");
+        assert_eq!(after.text, "after");
+        assert_eq!(partial.text(), "beforeafter");
+        assert_eq!(
+            media.content,
+            rig_core::message::CarriedTextContent::InspectionOnlyMedia(String::new())
+        );
+        assert_eq!(media.known_text_projection(), Some(""));
+        assert!(media.signed_answer().is_none());
+        assert_eq!(media.payload.provider.as_deref(), Some(PROVIDER_NAME));
+        assert_eq!(
+            media.payload.position,
+            rig_core::message::CarriedPosition::MessageContent {
+                item_index: 0,
+                part_index: 1
+            }
+        );
+        assert_eq!(
+            media.payload.item,
+            expected_raw["candidates"][0]["content"]["parts"][1]
+        );
+        assert_eq!(
+            media.payload.item["inlineData"]["mimeType"],
+            json!("image/png")
+        );
+        assert_eq!(media.payload.item["inlineData"]["data"], json!("AQID"));
+        assert_eq!(partial.choice[1].native_item(), None);
+        assert!(
+            !partial
+                .choice
+                .iter()
+                .any(|part| matches!(part, AssistantContent::Image(_)))
+        );
+        assert_eq!(media.payload.item["thought"], json!(true));
+        assert_eq!(
+            base64::Engine::decode(
+                &base64::prelude::BASE64_STANDARD,
+                media.payload.item["inlineData"]["data"]
+                    .as_str()
+                    .expect("the received media is a string")
+            )
+            .expect("the received media is base64"),
+            vec![1, 2, 3],
+        );
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model.call(CompletionRequest::new("hello")).await,
+            Err(ProviderError::Truncated)
+        ));
+    });
+}
+
+/// Received leaves of the original no-terminal SDK input, observed before failed finish.
+#[test]
+fn gm9_current_thought_png_only_is_inspection_before_truncation() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    let parts = [inline_data_part("image/png", vec![1, 2, 3]).set_thought(true)];
+    let content = vertexai::model::Content::new()
+        .set_role("model")
+        .set_parts(parts);
+    let candidate = vertexai::model::Candidate::new().set_content(content);
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+    let expected_raw =
+        Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+    assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+    let model = Model::new(
+        crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+        Reply(received.clone()),
+    );
+    futures::executor::block_on(async {
+        let mut stream = model
+            .stream(CompletionRequest::new("hello"))
+            .expect("the unchanged no-terminal SDK input opens");
+        let mut items = Vec::new();
+        let mut saw_truncated = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    assert!(!saw_truncated, "no content follows the terminal failure");
+                    items.push(item);
+                }
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                    assert!(!saw_truncated, "the original input fails once");
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "the original input has no provider end");
+        let partial = stream.partial();
+        assert_eq!(partial.finish_reason(), None);
+        assert!(matches!(partial.stop(), StopReason::Error(_)));
+        assert_eq!(partial.raw, expected_raw);
+        assert!(
+            items.iter().all(|item| matches!(item, Item::Event(_))),
+            "{items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+        );
+        let ended: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            (0..partial.choice.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(_, content)| content.canonical())
+                .collect::<Vec<_>>(),
+            partial.choice,
+        );
+        let [AssistantContent::CarriedText(media)] = partial.choice.as_slice() else {
+            panic!("one exact inspection carrier: {:?}", partial.choice);
+        };
+        assert_eq!(partial.text(), "");
+        assert_eq!(
+            media.content,
+            rig_core::message::CarriedTextContent::InspectionOnlyMedia(String::new())
+        );
+        assert_eq!(media.known_text_projection(), Some(""));
+        assert!(media.signed_answer().is_none());
+        assert_eq!(media.payload.provider.as_deref(), Some(PROVIDER_NAME));
+        assert_eq!(
+            media.payload.position,
+            rig_core::message::CarriedPosition::MessageContent {
+                item_index: 0,
+                part_index: 0
+            }
+        );
+        assert_eq!(
+            media.payload.item,
+            expected_raw["candidates"][0]["content"]["parts"][0]
+        );
+        assert_eq!(
+            media.payload.item["inlineData"]["mimeType"],
+            json!("image/png")
+        );
+        assert_eq!(media.payload.item["inlineData"]["data"], json!("AQID"));
+        assert_eq!(partial.choice[0].native_item(), None);
+        assert!(
+            !partial
+                .choice
+                .iter()
+                .any(|part| matches!(part, AssistantContent::Image(_)))
+        );
+        assert_eq!(media.payload.item["thought"], json!(true));
+        assert_eq!(
+            base64::Engine::decode(
+                &base64::prelude::BASE64_STANDARD,
+                media.payload.item["inlineData"]["data"]
+                    .as_str()
+                    .expect("the received media is a string")
+            )
+            .expect("the received media is base64"),
+            vec![1, 2, 3],
+        );
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model.call(CompletionRequest::new("hello")).await,
+            Err(ProviderError::Truncated)
+        ));
+    });
+}
+
+/// Received leaves of the original no-terminal SDK input, observed before failed finish.
+#[test]
+fn gm9_current_audio_and_non_image_inputs_are_inspection_before_truncation() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    for mime_type in ["audio/wav", "application/pdf", "application/octet-stream"] {
+        let parts = [inline_data_part(mime_type, vec![0])];
+        let content = vertexai::model::Content::new()
+            .set_role("model")
+            .set_parts(parts);
+        let candidate = vertexai::model::Candidate::new().set_content(content);
+        let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+        let expected_raw =
+            Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+        assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+        let model = Model::new(
+            crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+            Reply(received.clone()),
+        );
+        futures::executor::block_on(async {
+            let mut stream = model
+                .stream(CompletionRequest::new("hello"))
+                .expect("the unchanged no-terminal SDK input opens");
+            let mut items = Vec::new();
+            let mut saw_truncated = false;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(item) => {
+                        assert!(!saw_truncated, "no content follows the terminal failure");
+                        items.push(item);
+                    }
+                    Err(error) => {
+                        assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                        assert!(!saw_truncated, "the original input fails once");
+                        saw_truncated = true;
+                    }
+                }
+            }
+            assert!(saw_truncated, "the original input has no provider end");
+            let partial = stream.partial();
+            assert_eq!(partial.finish_reason(), None);
+            assert!(matches!(partial.stop(), StopReason::Error(_)));
+            assert_eq!(partial.raw, expected_raw);
+            assert!(
+                items.iter().all(|item| matches!(item, Item::Event(_))),
+                "{items:?}"
+            );
+            assert!(
+                !items
+                    .iter()
+                    .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+            );
+            let ended: Vec<_> = items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                ended
+                    .iter()
+                    .map(|(part, _)| part.index())
+                    .collect::<Vec<_>>(),
+                (0..partial.choice.len()).collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                ended
+                    .iter()
+                    .map(|(_, content)| content.canonical())
+                    .collect::<Vec<_>>(),
+                partial.choice,
+            );
+            let [AssistantContent::CarriedText(media)] = partial.choice.as_slice() else {
+                panic!("one exact inspection carrier: {:?}", partial.choice);
+            };
+            assert_eq!(partial.text(), "");
+            assert_eq!(
+                media.content,
+                rig_core::message::CarriedTextContent::InspectionOnlyMedia(String::new())
+            );
+            assert_eq!(media.known_text_projection(), Some(""));
+            assert!(media.signed_answer().is_none());
+            assert_eq!(media.payload.provider.as_deref(), Some(PROVIDER_NAME));
+            assert_eq!(
+                media.payload.position,
+                rig_core::message::CarriedPosition::MessageContent {
+                    item_index: 0,
+                    part_index: 0
+                }
+            );
+            assert_eq!(
+                media.payload.item,
+                expected_raw["candidates"][0]["content"]["parts"][0]
+            );
+            assert_eq!(
+                media.payload.item["inlineData"]["mimeType"],
+                json!(mime_type)
+            );
+            assert_eq!(media.payload.item["inlineData"]["data"], json!("AA=="));
+            assert_eq!(partial.choice[0].native_item(), None);
+            assert!(
+                !partial
+                    .choice
+                    .iter()
+                    .any(|part| matches!(part, AssistantContent::Image(_)))
+            );
+            assert_eq!(
+                base64::Engine::decode(
+                    &base64::prelude::BASE64_STANDARD,
+                    media.payload.item["inlineData"]["data"]
+                        .as_str()
+                        .expect("the received media is a string")
+                )
+                .expect("the received media is base64"),
+                vec![0],
+            );
+            assert!(matches!(
+                stream.finish().await,
+                Err(ProviderError::Truncated)
+            ));
+            assert!(matches!(
+                model.call(CompletionRequest::new("hello")).await,
+                Err(ProviderError::Truncated)
+            ));
+        });
+    }
+}
+
+/// Received leaves of the original no-terminal SDK input, observed before failed finish.
+#[test]
+fn gm9_current_gif_and_svg_inputs_are_inspection_before_truncation() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    for mime_type in ["image/gif", "image/svg+xml"] {
+        let parts = [inline_data_part(mime_type, vec![0])];
+        let content = vertexai::model::Content::new()
+            .set_role("model")
+            .set_parts(parts);
+        let candidate = vertexai::model::Candidate::new().set_content(content);
+        let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+        let expected_raw =
+            Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+        assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+        let model = Model::new(
+            crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+            Reply(received.clone()),
+        );
+        futures::executor::block_on(async {
+            let mut stream = model
+                .stream(CompletionRequest::new("hello"))
+                .expect("the unchanged no-terminal SDK input opens");
+            let mut items = Vec::new();
+            let mut saw_truncated = false;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(item) => {
+                        assert!(!saw_truncated, "no content follows the terminal failure");
+                        items.push(item);
+                    }
+                    Err(error) => {
+                        assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                        assert!(!saw_truncated, "the original input fails once");
+                        saw_truncated = true;
+                    }
+                }
+            }
+            assert!(saw_truncated, "the original input has no provider end");
+            let partial = stream.partial();
+            assert_eq!(partial.finish_reason(), None);
+            assert!(matches!(partial.stop(), StopReason::Error(_)));
+            assert_eq!(partial.raw, expected_raw);
+            assert!(
+                items.iter().all(|item| matches!(item, Item::Event(_))),
+                "{items:?}"
+            );
+            assert!(
+                !items
+                    .iter()
+                    .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+            );
+            let ended: Vec<_> = items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                ended
+                    .iter()
+                    .map(|(part, _)| part.index())
+                    .collect::<Vec<_>>(),
+                (0..partial.choice.len()).collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                ended
+                    .iter()
+                    .map(|(_, content)| content.canonical())
+                    .collect::<Vec<_>>(),
+                partial.choice,
+            );
+            let [AssistantContent::CarriedText(media)] = partial.choice.as_slice() else {
+                panic!("one exact inspection carrier: {:?}", partial.choice);
+            };
+            assert_eq!(partial.text(), "");
+            assert_eq!(
+                media.content,
+                rig_core::message::CarriedTextContent::InspectionOnlyMedia(String::new())
+            );
+            assert_eq!(media.known_text_projection(), Some(""));
+            assert!(media.signed_answer().is_none());
+            assert_eq!(media.payload.provider.as_deref(), Some(PROVIDER_NAME));
+            assert_eq!(
+                media.payload.position,
+                rig_core::message::CarriedPosition::MessageContent {
+                    item_index: 0,
+                    part_index: 0
+                }
+            );
+            assert_eq!(
+                media.payload.item,
+                expected_raw["candidates"][0]["content"]["parts"][0]
+            );
+            assert_eq!(
+                media.payload.item["inlineData"]["mimeType"],
+                json!(mime_type)
+            );
+            assert_eq!(media.payload.item["inlineData"]["data"], json!("AA=="));
+            assert_eq!(partial.choice[0].native_item(), None);
+            assert!(
+                !partial
+                    .choice
+                    .iter()
+                    .any(|part| matches!(part, AssistantContent::Image(_)))
+            );
+            assert_eq!(
+                base64::Engine::decode(
+                    &base64::prelude::BASE64_STANDARD,
+                    media.payload.item["inlineData"]["data"]
+                        .as_str()
+                        .expect("the received media is a string")
+                )
+                .expect("the received media is base64"),
+                vec![0],
+            );
+            assert!(matches!(
+                stream.finish().await,
+                Err(ProviderError::Truncated)
+            ));
+            assert!(matches!(
+                model.call(CompletionRequest::new("hello")).await,
+                Err(ProviderError::Truncated)
+            ));
+        });
+    }
+}
+
+/// Received leaves of the original no-terminal SDK input, observed before failed finish.
+#[test]
+fn gm9_current_signed_png_retains_inspection_signature_before_truncation() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    let part = inline_data_part("image/png", vec![0]).set_thought_signature(vec![1, 2, 3]);
+    let content = vertexai::model::Content::new()
+        .set_role("model")
+        .set_parts([part]);
+    let candidate = vertexai::model::Candidate::new().set_content(content);
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+    let expected_raw =
+        Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+    assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+    let model = Model::new(
+        crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+        Reply(received.clone()),
+    );
+    futures::executor::block_on(async {
+        let mut stream = model
+            .stream(CompletionRequest::new("hello"))
+            .expect("the unchanged no-terminal SDK input opens");
+        let mut items = Vec::new();
+        let mut saw_truncated = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    assert!(!saw_truncated, "no content follows the terminal failure");
+                    items.push(item);
+                }
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                    assert!(!saw_truncated, "the original input fails once");
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "the original input has no provider end");
+        let partial = stream.partial();
+        assert_eq!(partial.finish_reason(), None);
+        assert!(matches!(partial.stop(), StopReason::Error(_)));
+        assert_eq!(partial.raw, expected_raw);
+        assert!(
+            items.iter().all(|item| matches!(item, Item::Event(_))),
+            "{items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+        );
+        let ended: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            (0..partial.choice.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(_, content)| content.canonical())
+                .collect::<Vec<_>>(),
+            partial.choice,
+        );
+        let [AssistantContent::CarriedText(media)] = partial.choice.as_slice() else {
+            panic!("one exact inspection carrier: {:?}", partial.choice);
+        };
+        assert_eq!(partial.text(), "");
+        assert_eq!(
+            media.content,
+            rig_core::message::CarriedTextContent::InspectionOnlyMedia(String::new())
+        );
+        assert_eq!(media.known_text_projection(), Some(""));
+        assert!(media.signed_answer().is_none());
+        assert_eq!(media.payload.provider.as_deref(), Some(PROVIDER_NAME));
+        assert_eq!(
+            media.payload.position,
+            rig_core::message::CarriedPosition::MessageContent {
+                item_index: 0,
+                part_index: 0
+            }
+        );
+        assert_eq!(
+            media.payload.item,
+            expected_raw["candidates"][0]["content"]["parts"][0]
+        );
+        assert_eq!(
+            media.payload.item["inlineData"]["mimeType"],
+            json!("image/png")
+        );
+        assert_eq!(media.payload.item["inlineData"]["data"], json!("AA=="));
+        assert_eq!(partial.choice[0].native_item(), None);
+        assert!(
+            !partial
+                .choice
+                .iter()
+                .any(|part| matches!(part, AssistantContent::Image(_)))
+        );
+        assert_eq!(media.payload.item["thoughtSignature"], json!("AQID"));
+        assert_eq!(
+            base64::Engine::decode(
+                &base64::prelude::BASE64_STANDARD,
+                media.payload.item["thoughtSignature"]
+                    .as_str()
+                    .expect("the received signature is a string")
+            )
+            .expect("the received signature is base64"),
+            vec![1, 2, 3],
+        );
+        assert_eq!(
+            base64::Engine::decode(
+                &base64::prelude::BASE64_STANDARD,
+                media.payload.item["inlineData"]["data"]
+                    .as_str()
+                    .expect("the received media is a string")
+            )
+            .expect("the received media is base64"),
+            vec![0],
+        );
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model.call(CompletionRequest::new("hello")).await,
+            Err(ProviderError::Truncated)
+        ));
+    });
+}
+
+/// Received leaves of the original no-terminal SDK input, observed before failed finish.
+#[test]
+fn gm9_current_missing_ids_are_distinct_local_calls_in_original_order() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    let parts = (0..3).map(|i| {
+        vertexai::model::Part::new().set_function_call(
+            vertexai::model::FunctionCall::new()
+                .set_name("same")
+                .set_args(
+                    serde_json::json!({"n": i})
+                        .as_object()
+                        .expect("the original argument literal is an object")
+                        .clone(),
+                ),
+        )
+    });
+    let content = vertexai::model::Content::new()
+        .set_role("model")
+        .set_parts(parts);
+    let candidate = vertexai::model::Candidate::new().set_content(content);
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+    let expected_raw =
+        Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+    assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+    let model = Model::new(
+        crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+        Reply(received.clone()),
+    );
+    futures::executor::block_on(async {
+        let mut stream = model
+            .stream(CompletionRequest::new("hello"))
+            .expect("the unchanged no-terminal SDK input opens");
+        let mut items = Vec::new();
+        let mut saw_truncated = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    assert!(!saw_truncated, "no content follows the terminal failure");
+                    items.push(item);
+                }
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                    assert!(!saw_truncated, "the original input fails once");
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "the original input has no provider end");
+        let partial = stream.partial();
+        assert_eq!(partial.finish_reason(), None);
+        assert!(matches!(partial.stop(), StopReason::Error(_)));
+        assert_eq!(partial.raw, expected_raw);
+        assert!(
+            items.iter().all(|item| matches!(item, Item::Event(_))),
+            "{items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+        );
+        let ended: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            (0..partial.choice.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(_, content)| content.canonical())
+                .collect::<Vec<_>>(),
+            partial.choice,
+        );
+        let [
+            AssistantContent::ToolCall(first),
+            AssistantContent::ToolCall(second),
+            AssistantContent::ToolCall(third),
+        ] = partial.choice.as_slice()
+        else {
+            panic!(
+                "three original calls, without discarded or extra parts: {:?}",
+                partial.choice
+            );
+        };
+        assert_eq!(
+            [
+                first.function.name.as_str(),
+                second.function.name.as_str(),
+                third.function.name.as_str()
+            ],
+            ["same", "same", "same"]
+        );
+        let starts: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::Start {
+                    part,
+                    kind: rig_core::streaming::PartKind::ToolCall,
+                    name,
+                    ..
+                }) => Some((*part, name.as_ref().map(|name| name.as_str()))),
+                _ => None,
+            })
+            .collect();
+        let arguments: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::Arguments { part, json }) => Some((*part, json)),
+                _ => None,
+            })
+            .collect();
+        let calls: Vec<_> = ended
+            .iter()
+            .filter_map(|(part, content)| match content {
+                AssistantContent::ToolCall(call) => Some((*part, call)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            starts.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+            vec![Some("same"), Some("same"), Some("same")]
+        );
+        assert_eq!(arguments.len(), 3);
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(_, call)| &call.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        let expected_arguments = [json!({"n": 0}), json!({"n": 1}), json!({"n": 2})];
+        for (ordinal, ((start, _), ((argument_part, json), (end, call)))) in
+            starts.iter().zip(arguments.iter().zip(&calls)).enumerate()
+        {
+            assert_eq!(start, argument_part);
+            assert_eq!(start, end);
+            assert_eq!(*json, &expected_arguments[ordinal].to_string());
+            assert_eq!(
+                Value::Object(call.function.arguments.clone()),
+                expected_arguments[ordinal]
+            );
+            assert_eq!(Some(call.function.name.as_str()), starts[ordinal].1);
+            assert!(matches!(&call.id, rig_core::message::CallId::Local(_)));
+            assert_eq!(call.id.provider(), None);
+            let AssistantContent::ToolCall(partial_call) = &partial.choice[end.index()] else {
+                panic!(
+                    "the matching partial Part is a tool call: {:?}",
+                    partial.choice
+                );
+            };
+            assert_eq!(call.id, partial_call.id);
+            assert_eq!(call.function, partial_call.function);
+            assert!(partial_call.native.is_none());
+        }
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model.call(CompletionRequest::new("hello")).await,
+            Err(ProviderError::Truncated)
+        ));
+    });
+}
+
+/// Received leaves of the original no-terminal SDK input, observed before failed finish.
+#[test]
+fn gm9_current_interleaved_calls_correlate_by_part_and_keep_local_ids() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+
+    let call = || {
+        let function_call = vertexai::model::FunctionCall::new()
+            .set_name("same".to_string())
+            .set_args(serde_json::Map::new());
+        vertexai::model::Part::new().set_function_call(function_call)
+    };
+    let content = vertexai::model::Content::new()
+        .set_role("model")
+        .set_parts([
+            call(),
+            vertexai::model::Part::new().set_text("between".to_string()),
+            call(),
+            call(),
+        ]);
+    let candidate = vertexai::model::Candidate::new().set_content(content);
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+    let expected_raw =
+        Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+    assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+    let model = Model::new(
+        crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+        Reply(received.clone()),
+    );
+    futures::executor::block_on(async {
+        let mut stream = model
+            .stream(CompletionRequest::new("hello"))
+            .expect("the unchanged no-terminal SDK input opens");
+        let mut items = Vec::new();
+        let mut saw_truncated = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    assert!(!saw_truncated, "no content follows the terminal failure");
+                    items.push(item);
+                }
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                    assert!(!saw_truncated, "the original input fails once");
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "the original input has no provider end");
+        let partial = stream.partial();
+        assert_eq!(partial.finish_reason(), None);
+        assert!(matches!(partial.stop(), StopReason::Error(_)));
+        assert_eq!(partial.raw, expected_raw);
+        assert!(
+            items.iter().all(|item| matches!(item, Item::Event(_))),
+            "{items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+        );
+        let ended: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            (0..partial.choice.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(_, content)| content.canonical())
+                .collect::<Vec<_>>(),
+            partial.choice,
+        );
+        let [
+            AssistantContent::ToolCall(first),
+            AssistantContent::Text(between),
+            AssistantContent::ToolCall(second),
+            AssistantContent::ToolCall(third),
+        ] = partial.choice.as_slice()
+        else {
+            panic!(
+                "the original call/text/call/call sequence is retained: {:?}",
+                partial.choice
+            );
+        };
+        assert_eq!(between.text, "between");
+        assert_eq!(
+            [
+                first.function.name.as_str(),
+                second.function.name.as_str(),
+                third.function.name.as_str()
+            ],
+            ["same", "same", "same"]
+        );
+        let starts: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::Start {
+                    part,
+                    kind: rig_core::streaming::PartKind::ToolCall,
+                    name,
+                    ..
+                }) => Some((*part, name.as_ref().map(|name| name.as_str()))),
+                _ => None,
+            })
+            .collect();
+        let arguments: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::Arguments { part, json }) => Some((*part, json)),
+                _ => None,
+            })
+            .collect();
+        let calls: Vec<_> = ended
+            .iter()
+            .filter_map(|(part, content)| match content {
+                AssistantContent::ToolCall(call) => Some((*part, call)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3]
+        );
+        assert_eq!(
+            starts.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+            vec![Some("same"), Some("same"), Some("same")]
+        );
+        assert_eq!(arguments.len(), 3);
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(_, call)| &call.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        let expected_arguments = [json!({}), json!({}), json!({})];
+        for (ordinal, ((start, _), ((argument_part, json), (end, call)))) in
+            starts.iter().zip(arguments.iter().zip(&calls)).enumerate()
+        {
+            assert_eq!(start, argument_part);
+            assert_eq!(start, end);
+            assert_eq!(*json, &expected_arguments[ordinal].to_string());
+            assert_eq!(
+                Value::Object(call.function.arguments.clone()),
+                expected_arguments[ordinal]
+            );
+            assert_eq!(Some(call.function.name.as_str()), starts[ordinal].1);
+            assert!(matches!(&call.id, rig_core::message::CallId::Local(_)));
+            assert_eq!(call.id.provider(), None);
+            let AssistantContent::ToolCall(partial_call) = &partial.choice[end.index()] else {
+                panic!(
+                    "the matching partial Part is a tool call: {:?}",
+                    partial.choice
+                );
+            };
+            assert_eq!(call.id, partial_call.id);
+            assert_eq!(call.function, partial_call.function);
+            assert!(partial_call.native.is_none());
+        }
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model.call(CompletionRequest::new("hello")).await,
+            Err(ProviderError::Truncated)
+        ));
+    });
+}
+
+/// The original signed answer replays from its actual failed partial with that failure intact.
+#[test]
+fn gm9_current_failed_signed_answer_message_prepares_and_replays_exact_part() {
+    use futures::StreamExt as _;
+    use rig_core::message::StopReason;
+    use rig_core::streaming::{Item, StreamEvent};
+    use rig_core::wire::{Mode, Operation as _, Wire as _};
+
+    let raw = b"\x00\x01answer-sig\xff";
+    let part = vertexai::model::Part::new()
+        .set_text("the answer".to_string())
+        .set_thought_signature(raw.to_vec());
+    let content = vertexai::model::Content::new()
+        .set_role("model")
+        .set_parts([part]);
+    let candidate = vertexai::model::Candidate::new().set_content(content);
+    let received = vertexai::model::GenerateContentResponse::new().set_candidates([candidate]);
+    let expected_raw =
+        Value::Object(rest_chunk(&received).expect("the original SDK frame transcodes"));
+    assert!(expected_raw.pointer("/candidates/0/finishReason").is_none());
+    let model = Model::new(
+        crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH),
+        Reply(received.clone()),
+    );
+    futures::executor::block_on(async {
+        let mut stream = model
+            .stream(CompletionRequest::new("hello"))
+            .expect("the unchanged no-terminal SDK input opens");
+        let mut items = Vec::new();
+        let mut saw_truncated = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(item) => {
+                    assert!(!saw_truncated, "no content follows the terminal failure");
+                    items.push(item);
+                }
+                Err(error) => {
+                    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
+                    assert!(!saw_truncated, "the original input fails once");
+                    saw_truncated = true;
+                }
+            }
+        }
+        assert!(saw_truncated, "the original input has no provider end");
+        let partial = stream.partial();
+        assert_eq!(partial.finish_reason(), None);
+        assert!(matches!(partial.stop(), StopReason::Error(_)));
+        assert_eq!(partial.raw, expected_raw);
+        assert!(
+            items.iter().all(|item| matches!(item, Item::Event(_))),
+            "{items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, Item::Event(StreamEvent::Discard { .. })))
+        );
+        let ended: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End { part, content, .. }) => Some((*part, content)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(part, _)| part.index())
+                .collect::<Vec<_>>(),
+            (0..partial.choice.len()).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            ended
+                .iter()
+                .map(|(_, content)| content.canonical())
+                .collect::<Vec<_>>(),
+            partial.choice,
+        );
+        let [AssistantContent::CarriedText(answer)] = partial.choice.as_slice() else {
+            panic!(
+                "the original signed answer stays carried: {:?}",
+                partial.choice
+            );
+        };
+        let signed = answer
+            .signed_answer()
+            .expect("the actual partial retains its signed-answer category");
+        assert_eq!(signed.text, "the answer");
+        assert_eq!(signed.signature.as_str(), "AAFhbnN3ZXItc2ln/w==");
+        assert_eq!(
+            base64::Engine::decode(&base64::prelude::BASE64_STANDARD, signed.signature.as_str())
+                .expect("the original answer signature is base64"),
+            raw.to_vec(),
+        );
+        assert_eq!(answer.payload.provider.as_deref(), Some(PROVIDER_NAME));
+        assert_eq!(
+            answer.payload.position,
+            rig_core::message::CarriedPosition::MessageContent {
+                item_index: 0,
+                part_index: 0
+            }
+        );
+        assert_eq!(
+            answer.payload.item,
+            expected_raw["candidates"][0]["content"]["parts"][0]
+        );
+        assert_eq!(partial.text(), "the answer");
+        let failed_stop = partial.stop();
+        let message = partial
+            .message()
+            .expect("the actual failed partial has its own history message");
+        let rig_core::message::Message::Assistant(turn) = &message else {
+            panic!("the partial's own message is assistant history");
+        };
+        assert_eq!(turn.stop.as_ref(), Some(&failed_stop));
+        assert_eq!(turn.content, partial.choice);
+        let wire = crate::completion::GenerateContent::new(crate::completion::GEMINI_2_5_FLASH);
+        let request = rig_core::operation::Completion::prepare(
+            CompletionRequest::from(vec![
+                rig_core::message::Message::user("hello"),
+                message,
+                rig_core::message::Message::user("next"),
+            ]),
+            &wire.describe(),
+        )
+        .expect("the actual failed-partial history prepares");
+        let [_, rig_core::message::Message::Assistant(prepared_turn), _] =
+            request.chat_history.as_slice()
+        else {
+            panic!(
+                "prepare retains the failed carried turn: {:?}",
+                request.chat_history
+            );
+        };
+        assert_eq!(prepared_turn.stop.as_ref(), Some(&failed_stop));
+        assert_eq!(prepared_turn.content, partial.choice);
+        let encoded = wire
+            .encode(request, Mode::Unary)
+            .expect("the actual prepared history encodes for Vertex");
+        assert_eq!(encoded.contents.len(), 3);
+        assert_eq!(encoded.contents[0].role, "user");
+        assert_eq!(encoded.contents[2].role, "user");
+        let model_content = &encoded.contents[1];
+        assert_eq!(model_content.role, "model");
+        let [replayed] = model_content.parts.as_slice() else {
+            panic!(
+                "exactly one original signed answer part: {:?}",
+                model_content.parts
+            );
+        };
+        assert_eq!(replayed.text().map(String::as_str), Some("the answer"));
+        assert_eq!(replayed.thought_signature.to_vec(), raw.to_vec());
+        assert!(!replayed.thought);
+        assert_eq!(
+            model_content.parts,
+            [vertexai::model::Part::new()
+                .set_text("the answer".to_string())
+                .set_thought_signature(raw.to_vec())
+                .set_thought(false)]
+        );
+        assert_eq!(partial.stop(), failed_stop);
+        assert_eq!(partial.raw, expected_raw);
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model.call(CompletionRequest::new("hello")).await,
+            Err(ProviderError::Truncated)
+        ));
+    });
+}
+
+mod inspection_only_stop_controls;

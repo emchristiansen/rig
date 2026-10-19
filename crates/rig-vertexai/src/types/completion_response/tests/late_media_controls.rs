@@ -14,7 +14,7 @@ use rig_core::streaming::{Item, PartKind, StreamEvent};
 use serde_json::{Value, json};
 
 type Frame = vertexai::model::GenerateContentResponse;
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = anyhow::Result<()>;
 
 fn media(mime: &str) -> Value {
     json!({"inlineData":{"mimeType":mime,"data":"AA=="}})
@@ -177,29 +177,38 @@ fn g237_sdk_same_chunk_late_signature_keeps_media_not_the_next_answer() -> TestR
         Some("STOP"),
     )?;
     let script = whole(received)?;
-    let raw = script.document.clone().ok_or("captured SDK document")?;
-    assert_eq!(
-        raw,
-        body(
+    let raw = script
+        .document
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("captured SDK document"))?;
+    anyhow::ensure!(
+        raw == body(
             vec![
                 media("image/png"),
                 signature("c2ln"),
                 json!({"text":"answer"})
             ],
             Some("STOP")
-        )
+        ),
+        "captured SDK document changed"
     );
     let unary =
         futures::executor::block_on(model(script.clone()).call(CompletionRequest::new("inspect")))?;
     let observed = read(script)?;
     assert_order(&observed, &[PartKind::Text, PartKind::Text]);
     let response = observed.outcome?;
-    assert_eq!(response.choice, unary.choice);
-    assert_eq!(response.raw, raw);
-    assert_eq!(unary.raw, raw);
+    anyhow::ensure!(
+        response.choice == unary.choice,
+        "stream and unary choices differ"
+    );
+    anyhow::ensure!(response.raw == raw, "stream raw document changed");
+    anyhow::ensure!(unary.raw == raw, "unary raw document changed");
     assert_inspection(&response.choice[0], "image/png", "c2ln", 0);
     assert_unsigned_answer(&response.choice[1], "answer");
-    assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+    anyhow::ensure!(
+        response.finish_reason() == Some(FinishReason::Stop),
+        "stop finish reason changed"
+    );
     Ok(())
 }
 
@@ -218,12 +227,21 @@ fn g237_sdk_split_chunks_retain_original_media_position_and_reconstructed_raw() 
     let observed = read(script)?;
     assert_order(&observed, &[PartKind::Text, PartKind::Text]);
     let response = observed.outcome?;
-    assert_eq!(response.choice, unary.choice);
+    anyhow::ensure!(
+        response.choice == unary.choice,
+        "stream and unary choices differ"
+    );
     let mut signed = media("image/png");
     signed["thoughtSignature"] = json!("c2ln");
     let expected = body(vec![signed, json!({"text":"answer"})], Some("STOP"));
-    assert_eq!(response.raw, expected);
-    assert_eq!(unary.raw, expected);
+    anyhow::ensure!(
+        response.raw == expected,
+        "stream reconstructed raw document changed"
+    );
+    anyhow::ensure!(
+        unary.raw == expected,
+        "unary reconstructed raw document changed"
+    );
     assert_inspection(&response.choice[0], "image/png", "c2ln", 0);
     assert_unsigned_answer(&response.choice[1], "answer");
     Ok(())
@@ -241,18 +259,22 @@ fn g237_adjacent_signature_metadata_keeps_the_last_signature_until_content() -> 
         Some("STOP"),
     )?;
     let script = whole(received)?;
-    let raw = script.document.clone().ok_or("captured document")?;
+    let raw = script
+        .document
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("captured document"))?;
     let observed = read(script)?;
     assert_order(&observed, &[PartKind::Text, PartKind::Text]);
     let response = observed.outcome?;
     assert_inspection(&response.choice[0], "image/png", "dGFpbA==", 0);
     assert_unsigned_answer(&response.choice[1], "answer");
-    assert_eq!(response.raw, raw);
-    assert_eq!(
-        response.raw["candidates"][0]["content"]["parts"],
-        json!([
-            media("image/png"),signature("c2ln"),signature("dGFpbA=="),{"text":"answer"}
-        ])
+    anyhow::ensure!(response.raw == raw, "stream raw document changed");
+    anyhow::ensure!(
+        response.raw["candidates"][0]["content"]["parts"]
+            == json!([
+                media("image/png"),signature("c2ln"),signature("dGFpbA=="),{"text":"answer"}
+            ]),
+        "captured SDK parts changed"
     );
     Ok(())
 }
@@ -272,7 +294,10 @@ fn g237_all_five_unsigned_sdk_mimes_flush_on_next_content_or_eof() -> TestResult
                 parts.push(json!({"text":"answer"}));
             }
             let script = whole(frame(parts, Some("STOP"))?)?;
-            let raw = script.document.clone().ok_or("captured document")?;
+            let raw = script
+                .document
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("captured document"))?;
             let observed = read(script)?;
             let mut kinds = vec![PartKind::Image];
             if with_answer {
@@ -280,13 +305,19 @@ fn g237_all_five_unsigned_sdk_mimes_flush_on_next_content_or_eof() -> TestResult
             }
             assert_order(&observed, &kinds);
             let response = observed.outcome?;
-            assert_eq!(response.choice.len(), if with_answer { 2 } else { 1 });
+            anyhow::ensure!(
+                response.choice.len() == if with_answer { 2 } else { 1 },
+                "choice count changed"
+            );
             assert_image(&response.choice[0], mime, kind.clone());
             if with_answer {
                 assert_unsigned_answer(&response.choice[1], "answer");
             }
-            assert_eq!(response.raw, raw);
-            assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+            anyhow::ensure!(response.raw == raw, "stream raw document changed");
+            anyhow::ensure!(
+                response.finish_reason() == Some(FinishReason::Stop),
+                "stop finish reason changed"
+            );
         }
     }
     Ok(())
@@ -302,14 +333,20 @@ fn g237_all_five_late_signed_sdk_mimes_flush_at_eof_as_exact_inspection() -> Tes
         "image/heif",
     ] {
         let script = whole(frame(vec![media(mime), signature("c2ln")], Some("STOP"))?)?;
-        let raw = script.document.clone().ok_or("captured document")?;
+        let raw = script
+            .document
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("captured document"))?;
         let observed = read(script)?;
         assert_order(&observed, &[PartKind::Text]);
         let response = observed.outcome?;
-        assert_eq!(response.choice.len(), 1);
+        anyhow::ensure!(response.choice.len() == 1, "expected one choice");
         assert_inspection(&response.choice[0], mime, "c2ln", 0);
-        assert_eq!(response.raw, raw);
-        assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+        anyhow::ensure!(response.raw == raw, "stream raw document changed");
+        anyhow::ensure!(
+            response.finish_reason() == Some(FinishReason::Stop),
+            "stop finish reason changed"
+        );
     }
     Ok(())
 }
@@ -327,7 +364,10 @@ fn g237_pending_media_preserves_real_part_order_between_surrounding_content() ->
         ],
         Some("STOP"),
     )?)?;
-    let raw = script.document.clone().ok_or("captured document")?;
+    let raw = script
+        .document
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("captured document"))?;
     let observed = read(script)?;
     assert_order(
         &observed,
@@ -340,13 +380,13 @@ fn g237_pending_media_preserves_real_part_order_between_surrounding_content() ->
         ],
     );
     let response = observed.outcome?;
-    assert_eq!(response.choice.len(), 5);
+    anyhow::ensure!(response.choice.len() == 5, "expected five choices");
     assert_unsigned_answer(&response.choice[0], "before");
     assert_inspection(&response.choice[1], "image/png", "c2ln", 1);
     assert_unsigned_answer(&response.choice[2], "answer");
     assert_image(&response.choice[3], "image/webp", ImageMediaType::WEBP);
     assert_unsigned_answer(&response.choice[4], "after");
-    assert_eq!(response.raw, raw);
+    anyhow::ensure!(response.raw == raw, "stream raw document changed");
     Ok(())
 }
 
@@ -373,25 +413,33 @@ fn g237_pending_media_flushes_before_original_transport_error() -> TestResult {
             }],
         );
         let parts = ends(&observed);
-        assert_eq!(parts.len(), 1);
+        anyhow::ensure!(parts.len() == 1, "expected one ended part");
         if signed {
             assert_inspection(parts[0], "image/png", "c2ln", 0);
         } else {
             assert_image(parts[0], "image/png", ImageMediaType::PNG);
         }
-        assert!(
+        anyhow::ensure!(
             matches!(observed.items.last(),Some(Err(ProviderError::Response(message)))
-            if message=="g218-late scripted transport failure")
+            if message=="g218-late scripted transport failure"),
+            "transport error changed"
         );
         let mut expected = media("image/png");
         if signed {
             expected["thoughtSignature"] = json!("c2ln");
         }
-        assert_eq!(observed.partial.raw, body(vec![expected], None));
-        assert_eq!(observed.partial.choice.len(), 1);
-        assert!(
+        anyhow::ensure!(
+            observed.partial.raw == body(vec![expected], None),
+            "partial raw document changed"
+        );
+        anyhow::ensure!(
+            observed.partial.choice.len() == 1,
+            "expected one partial choice"
+        );
+        anyhow::ensure!(
             matches!(&observed.outcome,Err(ProviderError::Response(message))
-            if message=="g218-late scripted transport failure")
+            if message=="g218-late scripted transport failure"),
+            "transport outcome error changed"
         );
     }
     Ok(())
@@ -417,23 +465,32 @@ fn g237_pending_media_flushes_before_eof_truncation_without_inventing_stop() -> 
             }],
         );
         let parts = ends(&observed);
-        assert_eq!(parts.len(), 1);
+        anyhow::ensure!(parts.len() == 1, "expected one ended part");
         if signed {
             assert_inspection(parts[0], "image/png", "c2ln", 0);
         } else {
             assert_image(parts[0], "image/png", ImageMediaType::PNG);
         }
-        assert!(matches!(
-            observed.items.last(),
-            Some(Err(ProviderError::Truncated))
-        ));
-        assert!(matches!(observed.outcome, Err(ProviderError::Truncated)));
-        assert_eq!(observed.partial.finish_reason(), None);
+        anyhow::ensure!(
+            matches!(observed.items.last(), Some(Err(ProviderError::Truncated))),
+            "expected final truncated error"
+        );
+        anyhow::ensure!(
+            matches!(observed.outcome, Err(ProviderError::Truncated)),
+            "expected truncated outcome"
+        );
+        anyhow::ensure!(
+            observed.partial.finish_reason().is_none(),
+            "partial finish reason changed"
+        );
         let mut expected = media("image/png");
         if signed {
             expected["thoughtSignature"] = json!("c2ln");
         }
-        assert_eq!(observed.partial.raw, body(vec![expected], None));
+        anyhow::ensure!(
+            observed.partial.raw == body(vec![expected], None),
+            "partial raw document changed"
+        );
     }
     Ok(())
 }
@@ -462,29 +519,32 @@ fn g237_pending_media_flushes_before_known_sdk_tool_protocol_error() -> TestResu
             }],
         );
         let parts = ends(&observed);
-        assert_eq!(parts.len(), 1);
+        anyhow::ensure!(parts.len() == 1, "expected one ended part");
         if signed {
             assert_inspection(parts[0], "image/png", "c2ln", 0);
         } else {
             assert_image(parts[0], "image/png", ImageMediaType::PNG);
         }
         let expected = "Gemini stopped with finish_reason=MalformedFunctionCall: bad call";
-        assert!(
-            matches!(observed.items.last(),Some(Err(ProviderError::Response(message))) if message==expected)
+        anyhow::ensure!(
+            matches!(observed.items.last(),Some(Err(ProviderError::Response(message))) if message==expected),
+            "response error changed"
         );
-        assert!(
-            matches!(&observed.outcome,Err(ProviderError::Response(message)) if message==expected)
+        anyhow::ensure!(
+            matches!(&observed.outcome,Err(ProviderError::Response(message)) if message==expected),
+            "response outcome error changed"
         );
         let mut part = media("image/png");
         if signed {
             part["thoughtSignature"] = json!("c2ln");
         }
-        assert_eq!(
-            observed.partial.raw,
-            json!({"candidates":[{
-                "content":{"role":"model","parts":[part]},
-                "finishReason":"MALFORMED_FUNCTION_CALL","finishMessage":"bad call"
-            }]})
+        anyhow::ensure!(
+            observed.partial.raw
+                == json!({"candidates":[{
+                    "content":{"role":"model","parts":[part]},
+                    "finishReason":"MALFORMED_FUNCTION_CALL","finishMessage":"bad call"
+                }]}),
+            "partial raw document changed"
         );
     }
     Ok(())
@@ -494,18 +554,28 @@ fn g237_pending_media_flushes_before_known_sdk_tool_protocol_error() -> TestResu
 fn g237_next_refused_file_content_cannot_discard_preceding_pending_media() -> TestResult {
     let file = json!({"fileData":{"mimeType":"image/png","fileUri":"gs://image"}});
     let script = whole(frame(vec![media("image/png"), file.clone()], Some("STOP"))?)?;
-    let raw = script.document.clone().ok_or("captured document")?;
+    let raw = script
+        .document
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("captured document"))?;
     let observed = read(script)?;
     assert_order(&observed, &[PartKind::Image]);
     assert_image(ends(&observed)[0], "image/png", ImageMediaType::PNG);
     let expected =
         "Gemini response part kind fileData carries no assistant content rig can account for";
-    assert!(
-        matches!(observed.items.last(),Some(Err(ProviderError::Response(message))) if message==expected)
+    anyhow::ensure!(
+        matches!(observed.items.last(),Some(Err(ProviderError::Response(message))) if message==expected),
+        "response error changed"
     );
-    assert!(matches!(observed.outcome,Err(ProviderError::Response(message)) if message==expected));
-    assert_eq!(observed.partial.raw, raw);
-    assert_eq!(raw["candidates"][0]["content"]["parts"][1], file);
+    anyhow::ensure!(
+        matches!(observed.outcome,Err(ProviderError::Response(message)) if message==expected),
+        "response error changed"
+    );
+    anyhow::ensure!(observed.partial.raw == raw, "partial raw document changed");
+    anyhow::ensure!(
+        raw["candidates"][0]["content"]["parts"][1] == file,
+        "refused file payload changed"
+    );
     Ok(())
 }
 
@@ -532,29 +602,39 @@ fn g237_unselected_sdk_inline_media_keeps_immediate_inspection_and_exact_fields(
             vec![part.clone(), json!({"text":"answer"})],
             Some("STOP"),
         )?)?;
-        let raw = script.document.clone().ok_or("captured document")?;
-        assert_eq!(raw["candidates"][0]["content"]["parts"][0], part);
+        let raw = script
+            .document
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("captured document"))?;
+        anyhow::ensure!(
+            raw["candidates"][0]["content"]["parts"][0] == part,
+            "inspection payload changed"
+        );
         let observed = read(script)?;
         assert_order(&observed, &[PartKind::Text, PartKind::Text]);
         let response = observed.outcome?;
         let AssistantContent::CarriedText(image) = &response.choice[0] else {
-            panic!("inspection path unchanged");
+            anyhow::bail!("inspection path unchanged");
         };
-        assert_eq!(
-            image.content,
-            CarriedTextContent::InspectionOnlyMedia(String::new())
+        anyhow::ensure!(
+            image.content == CarriedTextContent::InspectionOnlyMedia(String::new()),
+            "inspection content changed"
         );
-        assert_eq!(image.payload.item, part);
-        assert_eq!(image.payload.provider.as_deref(), Some(PROVIDER_NAME));
-        assert_eq!(
-            image.payload.position,
-            CarriedPosition::MessageContent {
-                item_index: 0,
-                part_index: 0
-            }
+        anyhow::ensure!(image.payload.item == part, "inspection payload changed");
+        anyhow::ensure!(
+            image.payload.provider.as_deref() == Some(PROVIDER_NAME),
+            "inspection issuer changed"
+        );
+        anyhow::ensure!(
+            image.payload.position
+                == CarriedPosition::MessageContent {
+                    item_index: 0,
+                    part_index: 0
+                },
+            "inspection position changed"
         );
         assert_unsigned_answer(&response.choice[1], "answer");
-        assert_eq!(response.raw, raw);
+        anyhow::ensure!(response.raw == raw, "stream raw document changed");
     }
     Ok(())
 }
@@ -586,19 +666,28 @@ fn g237_metadata_only_frames_do_not_publish_pending_media_before_content() -> Te
         received,
     )
     .stream(CompletionRequest::new("inspect"))?;
-    assert!(
+    anyhow::ensure!(
         stream.next().now_or_never().is_none(),
         "actual driver consumed metadata and awaits next content without an emitted item"
     );
-    assert!(stream.partial().choice.is_empty());
+    anyhow::ensure!(
+        stream.partial().choice.is_empty(),
+        "pending media was published"
+    );
     // Existing cancellation discards undelivered items. No parity with the
     // old immediate-image delivery is asserted for this deliberate delay.
     stream.cancel();
-    assert!(stream.partial().choice.is_empty());
-    assert!(matches!(
-        futures::executor::block_on(stream.finish()),
-        Err(ProviderError::Truncated)
-    ));
+    anyhow::ensure!(
+        stream.partial().choice.is_empty(),
+        "pending media was published"
+    );
+    anyhow::ensure!(
+        matches!(
+            futures::executor::block_on(stream.finish()),
+            Err(ProviderError::Truncated)
+        ),
+        "expected cancelled stream truncation"
+    );
     Ok(())
 }
 
@@ -612,31 +701,50 @@ fn gm1b_sdk_empty_texts_preserve_pending_signed_media_in_both_modes() -> TestRes
         json!({"text":"answer"}),
     ];
     let script = whole(frame(parts.clone(), Some("STOP"))?)?;
-    let raw = script.document.clone().ok_or("captured SDK document")?;
-    assert_eq!(raw, body(parts.clone(), Some("STOP")));
-    assert_eq!(raw["candidates"][0]["content"]["parts"], json!(parts));
+    let raw = script
+        .document
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("captured SDK document"))?;
+    anyhow::ensure!(
+        raw == body(parts.clone(), Some("STOP")),
+        "captured SDK document changed"
+    );
+    anyhow::ensure!(
+        raw["candidates"][0]["content"]["parts"] == json!(parts),
+        "captured SDK parts changed"
+    );
     let unary =
         futures::executor::block_on(model(script.clone()).call(CompletionRequest::new("inspect")))?;
     let observed = read(script)?;
-    assert!(observed.items.iter().all(Result::is_ok));
+    anyhow::ensure!(
+        observed.items.iter().all(Result::is_ok),
+        "stream emitted an error"
+    );
     assert_order(&observed, &[PartKind::Text, PartKind::Text]);
-    assert_eq!(ends(&observed).len(), 2);
+    anyhow::ensure!(ends(&observed).len() == 2, "expected two ended parts");
     assert_inspection(ends(&observed)[0], "image/png", "c2ln", 0);
     assert_unsigned_answer(ends(&observed)[1], "answer");
     let response = observed.outcome?;
-    assert_eq!(response.choice, unary.choice);
+    anyhow::ensure!(
+        response.choice == unary.choice,
+        "stream and unary choices differ"
+    );
     for response in [&unary, &response] {
-        assert_eq!(response.choice.len(), 2);
+        anyhow::ensure!(response.choice.len() == 2, "expected two choices");
         assert_inspection(&response.choice[0], "image/png", "c2ln", 0);
         assert_unsigned_answer(&response.choice[1], "answer");
-        assert_eq!(response.raw, raw);
-        assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
-        assert_eq!(response.text(), "answer");
-        assert!(
+        anyhow::ensure!(response.raw == raw, "stream raw document changed");
+        anyhow::ensure!(
+            response.finish_reason() == Some(FinishReason::Stop),
+            "stop finish reason changed"
+        );
+        anyhow::ensure!(response.text() == "answer", "answer text changed");
+        anyhow::ensure!(
             !response
                 .choice
                 .iter()
-                .any(|content| matches!(content, AssistantContent::Image(_)))
+                .any(|content| matches!(content, AssistantContent::Image(_))),
+            "signed media became an image"
         );
     }
     Ok(())
@@ -650,17 +758,17 @@ fn gm1b_synthetic_sdk_frames_keep_empty_texts_before_late_signature() -> TestRes
         let mut frames = vec![Ok(frame(vec![media("image/png")], None)?)];
         if grouped {
             let received = frame(empty_parts.clone(), None)?;
-            assert_eq!(
-                Value::Object(rest_chunk(&received)?),
-                body(empty_parts, None)
+            anyhow::ensure!(
+                Value::Object(rest_chunk(&received)?) == body(empty_parts, None),
+                "grouped empty SDK parts changed"
             );
             frames.push(Ok(received));
         } else {
             for part in empty_parts {
                 let received = frame(vec![part.clone()], None)?;
-                assert_eq!(
-                    Value::Object(rest_chunk(&received)?),
-                    body(vec![part], None)
+                anyhow::ensure!(
+                    Value::Object(rest_chunk(&received)?) == body(vec![part], None),
+                    "split empty SDK part changed"
                 );
                 frames.push(Ok(received));
             }
@@ -675,22 +783,31 @@ fn gm1b_synthetic_sdk_frames_keep_empty_texts_before_late_signature() -> TestRes
             model(script.clone()).call(CompletionRequest::new("inspect")),
         )?;
         let observed = read(script)?;
-        assert!(observed.items.iter().all(Result::is_ok));
+        anyhow::ensure!(
+            observed.items.iter().all(Result::is_ok),
+            "stream emitted an error"
+        );
         assert_order(&observed, &[PartKind::Text, PartKind::Text]);
         let response = observed.outcome?;
-        assert_eq!(response.choice, unary.choice);
+        anyhow::ensure!(
+            response.choice == unary.choice,
+            "stream and unary choices differ"
+        );
         let mut signed = media("image/png");
         signed["thoughtSignature"] = json!("c2ln");
         let expected = body(vec![signed, json!({"text":"answer"})], Some("STOP"));
         for response in [&unary, &response] {
-            assert_eq!(response.choice.len(), 2);
+            anyhow::ensure!(response.choice.len() == 2, "expected two choices");
             assert_inspection(&response.choice[0], "image/png", "c2ln", 0);
             assert_unsigned_answer(&response.choice[1], "answer");
-            assert_eq!(
-                response.raw, expected,
+            anyhow::ensure!(
+                response.raw == expected,
                 "the existing split-frame reassembler drops empty text and joins bare signature metadata"
             );
-            assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+            anyhow::ensure!(
+                response.finish_reason() == Some(FinishReason::Stop),
+                "stop finish reason changed"
+            );
         }
     }
     Ok(())
@@ -704,13 +821,22 @@ fn gm1b_unsigned_media_stays_typed_across_empty_texts_until_content_or_eof() -> 
             parts.push(json!({"text":"answer"}));
         }
         let script = whole(frame(parts.clone(), Some("STOP"))?)?;
-        let raw = script.document.clone().ok_or("captured SDK document")?;
-        assert_eq!(raw, body(parts, Some("STOP")));
+        let raw = script
+            .document
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("captured SDK document"))?;
+        anyhow::ensure!(
+            raw == body(parts, Some("STOP")),
+            "captured SDK document changed"
+        );
         let unary = futures::executor::block_on(
             model(script.clone()).call(CompletionRequest::new("inspect")),
         )?;
         let observed = read(script)?;
-        assert!(observed.items.iter().all(Result::is_ok));
+        anyhow::ensure!(
+            observed.items.iter().all(Result::is_ok),
+            "stream emitted an error"
+        );
         let kinds = if with_answer {
             vec![PartKind::Image, PartKind::Text]
         } else {
@@ -718,15 +844,24 @@ fn gm1b_unsigned_media_stays_typed_across_empty_texts_until_content_or_eof() -> 
         };
         assert_order(&observed, &kinds);
         let response = observed.outcome?;
-        assert_eq!(response.choice, unary.choice);
+        anyhow::ensure!(
+            response.choice == unary.choice,
+            "stream and unary choices differ"
+        );
         for response in [&unary, &response] {
-            assert_eq!(response.choice.len(), if with_answer { 2 } else { 1 });
+            anyhow::ensure!(
+                response.choice.len() == if with_answer { 2 } else { 1 },
+                "choice count changed"
+            );
             assert_image(&response.choice[0], "image/png", ImageMediaType::PNG);
             if with_answer {
                 assert_unsigned_answer(&response.choice[1], "answer");
             }
-            assert_eq!(response.raw, raw);
-            assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
+            anyhow::ensure!(response.raw == raw, "stream raw document changed");
+            anyhow::ensure!(
+                response.finish_reason() == Some(FinishReason::Stop),
+                "stop finish reason changed"
+            );
         }
     }
     // Synthetic pending SDK input proves empty parts do not publish the image.
@@ -739,17 +874,26 @@ fn gm1b_unsigned_media_stays_typed_across_empty_texts_until_content_or_eof() -> 
         received,
     )
     .stream(CompletionRequest::new("inspect"))?;
-    assert!(
+    anyhow::ensure!(
         stream.next().now_or_never().is_none(),
         "empty unsigned parts are not a content boundary"
     );
-    assert!(stream.partial().choice.is_empty());
+    anyhow::ensure!(
+        stream.partial().choice.is_empty(),
+        "pending media was published"
+    );
     stream.cancel();
-    assert!(stream.partial().choice.is_empty());
-    assert!(matches!(
-        futures::executor::block_on(stream.finish()),
-        Err(ProviderError::Truncated)
-    ));
+    anyhow::ensure!(
+        stream.partial().choice.is_empty(),
+        "pending media was published"
+    );
+    anyhow::ensure!(
+        matches!(
+            futures::executor::block_on(stream.finish()),
+            Err(ProviderError::Truncated)
+        ),
+        "expected cancelled stream truncation"
+    );
     Ok(())
 }
 
@@ -764,43 +908,71 @@ fn gm1b_signed_empty_text_remains_a_material_boundary_with_original_position() -
         json!({"text":"answer"}),
     ];
     let script = whole(frame(parts.clone(), Some("STOP"))?)?;
-    let raw = script.document.clone().ok_or("captured SDK document")?;
-    assert_eq!(raw, body(parts, Some("STOP")));
+    let raw = script
+        .document
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("captured SDK document"))?;
+    anyhow::ensure!(
+        raw == body(parts, Some("STOP")),
+        "captured SDK document changed"
+    );
     let unary =
         futures::executor::block_on(model(script.clone()).call(CompletionRequest::new("inspect")))?;
     let observed = read(script)?;
-    assert!(observed.items.iter().all(Result::is_ok));
+    anyhow::ensure!(
+        observed.items.iter().all(Result::is_ok),
+        "stream emitted an error"
+    );
     assert_order(
         &observed,
         &[PartKind::Image, PartKind::Text, PartKind::Text],
     );
     let response = observed.outcome?;
-    assert_eq!(response.choice, unary.choice);
+    anyhow::ensure!(
+        response.choice == unary.choice,
+        "stream and unary choices differ"
+    );
     for response in [&unary, &response] {
-        assert_eq!(response.choice.len(), 3);
+        anyhow::ensure!(response.choice.len() == 3, "expected three choices");
         assert_image(&response.choice[0], "image/png", ImageMediaType::PNG);
         let AssistantContent::CarriedText(empty) = &response.choice[1] else {
-            panic!("signed empty text is a real separate answer part");
+            anyhow::bail!("signed empty text is a real separate answer part");
         };
         let CarriedTextContent::GeminiSignedAnswer(answer) = &empty.content else {
-            panic!("the signed empty part keeps its known signed answer category");
+            anyhow::bail!("the signed empty part keeps its known signed answer category");
         };
-        assert_eq!(answer.text, "");
-        assert_eq!(answer.signature.as_str(), "c2ln");
-        assert_eq!(empty.payload.item, signed_empty);
-        assert_eq!(empty.payload.provider.as_deref(), Some(PROVIDER_NAME));
-        assert_eq!(
-            empty.payload.position,
-            CarriedPosition::MessageContent {
-                item_index: 0,
-                part_index: 3
-            }
+        anyhow::ensure!(answer.text.is_empty(), "signed empty answer text changed");
+        anyhow::ensure!(
+            answer.signature.as_str() == "c2ln",
+            "empty answer signature changed"
         );
-        assert!(response.choice[1].native_item().is_none());
+        anyhow::ensure!(
+            empty.payload.item == signed_empty,
+            "signed empty payload changed"
+        );
+        anyhow::ensure!(
+            empty.payload.provider.as_deref() == Some(PROVIDER_NAME),
+            "signed empty issuer changed"
+        );
+        anyhow::ensure!(
+            empty.payload.position
+                == CarriedPosition::MessageContent {
+                    item_index: 0,
+                    part_index: 3
+                },
+            "signed empty position changed"
+        );
+        anyhow::ensure!(
+            response.choice[1].native_item().is_none(),
+            "signed empty answer gained a native item"
+        );
         assert_unsigned_answer(&response.choice[2], "answer");
-        assert_eq!(response.raw, raw);
-        assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
-        assert_eq!(response.text(), "answer");
+        anyhow::ensure!(response.raw == raw, "stream raw document changed");
+        anyhow::ensure!(
+            response.finish_reason() == Some(FinishReason::Stop),
+            "stop finish reason changed"
+        );
+        anyhow::ensure!(response.text() == "answer", "answer text changed");
     }
     Ok(())
 }
