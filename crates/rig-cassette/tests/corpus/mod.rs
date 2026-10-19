@@ -1611,6 +1611,7 @@ impl Lookup {
                     .iter()
                     .filter_map(|content| match content {
                         AssistantContent::Text(text) => Some(text.text.trim().to_owned()),
+                        AssistantContent::CarriedText(text) => Some(text.text().trim().to_owned()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
