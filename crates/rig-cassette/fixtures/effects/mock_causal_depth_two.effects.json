@@ -165,6 +165,7 @@
               }
             ],
             "usage": {},
+            "message_id": null,
             "response_id": null,
             "provider_request_id": null,
             "finish_reason": null
@@ -360,6 +361,7 @@
               }
             ],
             "usage": {},
+            "message_id": null,
             "response_id": null,
             "provider_request_id": null,
             "finish_reason": null
