@@ -1320,3 +1320,158 @@ fn empty_stack_observes_nothing() {
         StepEventKind::ToolDispatch
     ));
 }
+
+/// Rewrites the run-start prompt by appending its tag; used to observe
+/// rewrite chaining across a stack.
+struct StartRewriter(&'static str);
+impl AgentHook for StartRewriter {
+    async fn on_run_start(&self, _ctx: &HookContext, event: RunStart<'_>) -> RunStartAction {
+        let current = match event.prompt {
+            Message::User { content } => match content.as_slice() {
+                [rig_core::message::UserContent::Text(text)] => text.text.as_str(),
+                _ => panic!("test prompts carry one text item"),
+            },
+            _ => panic!("run-start prompts are user messages"),
+        };
+        RunStartAction::rewrite(Message::user(format!("{current}{}", self.0)))
+    }
+}
+
+struct StartStopper;
+impl AgentHook for StartStopper {
+    async fn on_run_start(&self, _ctx: &HookContext, _event: RunStart<'_>) -> RunStartAction {
+        RunStartAction::stop("blocked at start")
+    }
+}
+
+#[tokio::test]
+async fn run_start_rewrites_chain_in_registration_order() {
+    let mut stack = HookStack::with(StartRewriter("-a"));
+    stack.push(StartRewriter("-b"));
+    let ctx = HookContext::new(false, None, None);
+    let prompt = Message::user("p");
+    let action = stack
+        .on_run_start(
+            &ctx,
+            RunStart {
+                prompt: &prompt,
+                history: &[],
+            },
+        )
+        .await;
+    match action {
+        RunStartAction::Rewrite(message) => {
+            // The second hook saw the first hook's rewrite.
+            assert_eq!(message, Message::user("p-a-b"));
+        }
+        other => panic!("expected a chained rewrite, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_start_first_stop_wins_and_short_circuits() {
+    let mut stack = HookStack::with(StartRewriter("-a"));
+    stack.push(StartStopper);
+    // This rewriter must never run.
+    struct Panicker;
+    impl AgentHook for Panicker {
+        async fn on_run_start(&self, _ctx: &HookContext, _event: RunStart<'_>) -> RunStartAction {
+            panic!("a stop must short-circuit later hooks");
+        }
+    }
+    stack.push(Panicker);
+    let ctx = HookContext::new(false, None, None);
+    let prompt = Message::user("p");
+    let action = stack
+        .on_run_start(
+            &ctx,
+            RunStart {
+                prompt: &prompt,
+                history: &[],
+            },
+        )
+        .await;
+    assert_eq!(action, RunStartAction::Stop("blocked at start".into()));
+}
+
+fn doc(id: &str) -> crate::completion::Document {
+    crate::completion::Document {
+        id: id.into(),
+        text: String::new(),
+        additional_props: Default::default(),
+    }
+}
+
+#[test]
+fn merge_appends_extra_context_in_order() {
+    let merged = RequestPatch::new()
+        .context(doc("a"))
+        .merge(RequestPatch::new().context(doc("b")));
+    assert_eq!(
+        merged
+            .extra_context
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b"]
+    );
+}
+
+#[test]
+fn merge_active_tools_empty_intersection_yields_empty() {
+    assert_eq!(
+        RequestPatch::new()
+            .active_tools(["a"])
+            .merge(RequestPatch::new().active_tools(["b"]))
+            .active_tools,
+        Some(vec![])
+    );
+}
+
+struct RetargetToolHook;
+impl AgentHook for RetargetToolHook {
+    async fn on_dispatch(&self, _: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
+        let EffectKind::ToolCall { args, .. } = event.kind else {
+            return DispatchAction::Proceed;
+        };
+        DispatchAction::Patch(EffectKind::ToolCall {
+            name: "other-target".into(),
+            args: args.clone(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn nested_tool_target_patch_preserves_last_valid_arguments_and_stops_policy() {
+    let spy = ArgsSpy::default();
+    let mut inner = HookStack::with(RewriteHook(json!({"x": 3})));
+    inner.push(RetargetToolHook);
+    inner.push(spy.clone());
+    let mut middle = HookStack::with(RewriteHook(json!({"x": 2})));
+    middle.push(inner);
+    middle.push(spy.clone());
+    let mut outer = HookStack::with(RewriteHook(json!({"x": 1})));
+    outer.push(middle);
+    outer.push(spy.clone());
+    let context = ctx();
+    let kind = tool_call_kind();
+    let event = dispatch_event(&kind);
+    let action = outer.on_dispatch(&context, event).await;
+    assert!(
+        matches!(action, DispatchAction::Deny(ref report) if report.message.contains("target"))
+    );
+    assert!(spy.0.lock().unwrap().is_empty());
+    let salvaged = context
+        .take_salvaged_patch(event.id)
+        .expect("valid patch retained");
+    match salvaged {
+        EffectKind::ToolCall { name, args } => {
+            assert_eq!(Some(name.as_str()), event.tool_name());
+            assert_eq!(
+                serde_json::from_str::<Value>(&args).unwrap(),
+                json!({"x": 3})
+            );
+        }
+        _ => panic!("tool call retained"),
+    }
+}
