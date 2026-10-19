@@ -181,7 +181,7 @@ pub mod openai_responses_websocket_suite {
     rig_core::streaming_conformance_suite! {
         provider: "openai_responses_websocket",
         fixture: fixture(),
-        manifest: [partial_tool_args, zero_usage_terminal, malformed_frame, unknown_event_frame, refusal],
+        manifest: [partial_tool_args, zero_usage_terminal, malformed_frame, unknown_event_frame, defective_known_frame, refusal],
     }
 }
 
