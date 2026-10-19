@@ -132,3 +132,39 @@ fn public_usage_helper_retains_its_raw_counter_and_signed_cast_behavior() {
     assert_eq!(cast.input_tokens, Some(u64::MAX));
     assert_eq!(cast.output_tokens, Some(u64::MAX));
 }
+
+#[test]
+fn test_partial_usage_token_calculation() {
+    let usage = json!({
+        "totalTokenCount": 100,
+        "cachedContentTokenCount": 20,
+        "candidatesTokenCount": 30,
+        "thoughtsTokenCount": 10,
+        "promptTokenCount": 40,
+        "toolUsePromptTokenCount": 12,
+    });
+
+    let token_usage = usage_of(&usage);
+    assert_eq!(token_usage.input_tokens, Some(40));
+    assert_eq!(token_usage.cached_input_tokens, Some(20));
+    assert_eq!(token_usage.output_tokens, Some(30));
+    assert_eq!(token_usage.reasoning_tokens, Some(10));
+    assert_eq!(token_usage.tool_use_prompt_tokens, Some(12));
+    assert_eq!(token_usage.total_tokens, Some(100));
+}
+
+#[test]
+fn test_partial_usage_with_missing_counts() {
+    let usage = json!({
+        "totalTokenCount": 50,
+        "candidatesTokenCount": 30,
+        "promptTokenCount": 20,
+    });
+
+    let token_usage = usage_of(&usage);
+    assert_eq!(token_usage.input_tokens, Some(20));
+    assert_eq!(token_usage.cached_input_tokens, None);
+    assert_eq!(token_usage.output_tokens, Some(30));
+    assert_eq!(token_usage.reasoning_tokens, None);
+    assert_eq!(token_usage.total_tokens, Some(50));
+}
