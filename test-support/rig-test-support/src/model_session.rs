@@ -437,7 +437,10 @@ fn last_text(history: &[Message]) -> String {
 fn has_reasoning(history: &[Message], from: usize) -> bool {
     history[from..].iter().any(|message| {
         matches!(message, Message::Assistant(rig_core::message::AssistantMessage { content, .. })
-            if content.iter().any(|part| matches!(part, AssistantContent::Reasoning(_))))
+            if content.iter().any(|part| matches!(
+                part,
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)
+            )))
     })
 }
 
@@ -769,6 +772,7 @@ pub async fn anthropic(
             Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 content.iter().any(|part| match part {
                     AssistantContent::Text(text) => !text.citations().is_empty(),
+                    AssistantContent::CarriedText(text) => !text.citations().is_empty(),
                     _ => false,
                 })
             }
@@ -1050,13 +1054,7 @@ pub async fn anthropic(
 }
 
 fn text_of(choice: &[AssistantContent]) -> String {
-    choice
-        .iter()
-        .filter_map(|part| match part {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
+    rig_core::transcript::assistant_text_from_choice(choice)
 }
 
 /// Native structured output through the agent's typed prompt.
