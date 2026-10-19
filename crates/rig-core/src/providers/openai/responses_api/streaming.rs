@@ -14,7 +14,7 @@ use crate::streaming::{DiscardReason, ReasoningAuthority, SourceOrder};
 use crate::wire::{Decoder, Flow, IncompleteEof, Out, WireCitation, WireEvent, WireFrame};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 
 mod reader;
 #[cfg(feature = "websocket")]
@@ -1047,30 +1047,41 @@ impl ResponsesDecoder {
         if let Some(id) = item.str("id").filter(|id| !id.is_empty()) {
             self.call_items.entry(id.to_owned()).or_insert(index);
         }
-        if let Some(call) = self.calls.get_mut(&index) {
-            if call.name.is_empty()
-                && let Some(name) = item.str("name").filter(|name| !name.is_empty())
-            {
-                name.clone_into(&mut call.name);
-                if let Some(id) = item.str("call_id").filter(|id| !id.is_empty()) {
-                    call.id = CallId::from_wire(id);
-                }
-                if call.item_id.is_none() {
-                    call.item_id = nonempty(item.str("id"));
-                }
-                call.namespace = item.str("namespace").map(str::to_owned);
-                out.qualify(call.at, call.namespace.clone())?;
-                out.fragment(
-                    Some(call.at),
-                    CallFragment {
-                        id: item.str("call_id").filter(|id| !id.is_empty()),
-                        name: Some(&call.name),
-                        arguments: None,
-                    },
-                )?;
+        let call = Self::call_state(self.calls.entry(index), item, out)?;
+        if call.name.is_empty()
+            && let Some(name) = item.str("name").filter(|name| !name.is_empty())
+        {
+            name.clone_into(&mut call.name);
+            if let Some(id) = item.str("call_id").filter(|id| !id.is_empty()) {
+                call.id = CallId::from_wire(id);
             }
-            return Ok(());
+            if call.item_id.is_none() {
+                call.item_id = nonempty(item.str("id"));
+            }
+            call.namespace = item.str("namespace").map(str::to_owned);
+            out.qualify(call.at, call.namespace.clone())?;
+            out.fragment(
+                Some(call.at),
+                CallFragment {
+                    id: item.str("call_id").filter(|id| !id.is_empty()),
+                    name: Some(&call.name),
+                    arguments: None,
+                },
+            )?;
         }
+        Ok(())
+    }
+
+    fn call_state<'a>(
+        entry: Entry<'a, u64, CallState>,
+        item: &Value,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<&'a mut CallState, ProviderError> {
+        let entry = match entry {
+            Entry::Occupied(entry) => return Ok(entry.into_mut()),
+            Entry::Vacant(entry) => entry,
+        };
+        let index = *entry.key();
         let at = out.fresh_index();
         let id = CallId::from_wire(item.str("call_id").unwrap_or_default());
         let name = item.str("name").unwrap_or_default().to_owned();
@@ -1096,21 +1107,17 @@ impl ResponsesDecoder {
                 ..CallFragment::default()
             },
         )?;
-        self.calls.insert(
-            index,
-            CallState {
-                at,
-                id,
-                item_id: nonempty(item.str("id")),
-                name,
-                namespace,
-                arguments: String::new(),
-                sent: String::new(),
-                overflowed: false,
-                ending: CallEnding::Pending,
-            },
-        );
-        Ok(())
+        Ok(entry.insert(CallState {
+            at,
+            id,
+            item_id: nonempty(item.str("id")),
+            name,
+            namespace,
+            arguments: String::new(),
+            sent: String::new(),
+            overflowed: false,
+            ending: CallEnding::Pending,
+        }))
     }
 
     fn call_delta(
@@ -1129,14 +1136,17 @@ impl ResponsesDecoder {
         {
             return Ok(());
         }
-        if !self.calls.contains_key(&index) {
-            self.call_added(
-                index,
-                &json!({"type":"function_call", "id":id.unwrap_or_default()}),
-                out,
-            )?;
+        let entry = self.calls.entry(index);
+        if matches!(&entry, Entry::Vacant(_))
+            && let Some(id) = id.filter(|id| !id.is_empty())
+        {
+            self.call_items.entry(id.to_owned()).or_insert(index);
         }
-        let call = self.calls.get_mut(&index).expect("call state");
+        let call = Self::call_state(
+            entry,
+            &json!({"type":"function_call", "id":id.unwrap_or_default()}),
+            out,
+        )?;
         // Mirror the accumulator's bounded fragment rule, including the
         // gateway's replaceable standalone null placeholder.
         if call.arguments.trim() == "null" && !delta.trim().is_empty() {
@@ -1188,7 +1198,8 @@ impl ResponsesDecoder {
             let name =
                 ToolName::new(name).map_err(|error| ProviderError::Response(error.to_string()))?;
             let namespace = item.str("namespace").map(str::to_owned);
-            let input = item.str("input").expect("strict custom input");
+            let custom: reader::CustomFields = reader::fields(item)?;
+            let input = custom.input.as_str();
             out.in_source_order(SourceOrder::new(index, 0), |out| {
                 out.open(
                     at,
@@ -1216,10 +1227,11 @@ impl ResponsesDecoder {
                 },
             );
         } else {
-            if !self.calls.contains_key(&index) {
-                self.call_added(index, item, out)?;
+            let entry = self.calls.entry(index);
+            if matches!(&entry, Entry::Vacant(_)) {
+                self.active_message_part = None;
             }
-            let call = self.calls.get_mut(&index).expect("call state");
+            let call = Self::call_state(entry, item, out)?;
             if call.name.is_empty() {
                 call.name = item.str("name").unwrap_or_default().to_owned();
             }
@@ -1239,7 +1251,8 @@ impl ResponsesDecoder {
                     arguments: None,
                 },
             )?;
-            let stated = item.str("arguments").expect("strict function arguments");
+            let function: reader::FunctionFields = reader::fields(item)?;
+            let stated = function.arguments.as_str();
             // Empty and whitespace arguments mean the parameterless object.
             let arguments = if stated.trim().is_empty() {
                 "{}"
@@ -1250,10 +1263,11 @@ impl ResponsesDecoder {
                 Ok(_) => FunctionInput::Parsed,
                 Err(error) => FunctionInput::Malformed {
                     error,
-                    confidence: match item.str("status") {
-                        Some("incomplete") => CallConfidence::Incomplete,
-                        Some("completed" | "in_progress") => CallConfidence::Asserted,
-                        _ => unreachable!("strict function-item status"),
+                    confidence: match function.status {
+                        reader::ToolStatus::Incomplete => CallConfidence::Incomplete,
+                        reader::ToolStatus::Completed | reader::ToolStatus::InProgress => {
+                            CallConfidence::Asserted
+                        }
                     },
                 },
             });
@@ -1396,7 +1410,7 @@ impl ResponsesDecoder {
         frame: Value,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
-        let index = frame.u64("output_index").expect("strict output index");
+        let index = reader::fields::<reader::ItemEnvelope>(&frame)?.output_index;
         let id = frame.str("item_id");
         let index = id
             .and_then(|id| self.message_ids.get(id))
@@ -1413,7 +1427,7 @@ impl ResponsesDecoder {
                 index,
                 part,
                 id,
-                frame.str("delta").expect("strict delta"),
+                &reader::fields::<reader::Delta>(&frame)?.delta,
                 kind == "response.refusal.delta",
                 out,
             ),
@@ -1457,7 +1471,7 @@ impl ResponsesDecoder {
                 self.bind(index, Parent::Reasoning, id, out)?;
                 self.reasoning_part(
                     index,
-                    frame.u64("summary_index").expect("strict summary index"),
+                    reader::fields::<reader::SummaryEnvelope>(&frame)?.summary_index,
                     true,
                     id,
                     frame["part"].clone(),
@@ -1472,20 +1486,22 @@ impl ResponsesDecoder {
                 let summary = kind.starts_with("response.reasoning_summary");
                 let append = kind.ends_with(".delta");
                 let part = if summary {
-                    frame.u64("summary_index").expect("strict summary index")
+                    reader::fields::<reader::SummaryEnvelope>(&frame)?.summary_index
                 } else {
                     part
                 };
-                let text = frame
-                    .str(if append { "delta" } else { "text" })
-                    .expect("strict reasoning text");
+                let text = if append {
+                    reader::fields::<reader::Delta>(&frame)?.delta
+                } else {
+                    reader::fields::<reader::Text>(&frame)?.text
+                };
                 self.bind(index, Parent::Reasoning, id, out)?;
                 self.reasoning_part(index, part, summary, id, json!({"type":if summary { "summary_text" } else { "reasoning_text" }, "text":text}), append, out)
             }
             "response.function_call_arguments.delta" => self.call_delta(
                 index,
                 id,
-                frame.str("delta").expect("strict arguments delta"),
+                &reader::fields::<reader::Delta>(&frame)?.delta,
                 out,
             ),
             // These done text/argument fields are typed observations but their

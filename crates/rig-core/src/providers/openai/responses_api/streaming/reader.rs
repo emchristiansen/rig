@@ -10,7 +10,7 @@ use crate::wire::WireEvent;
 
 type Result<T> = std::result::Result<T, serde_json::Error>;
 
-fn fields<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T> {
+pub(super) fn fields<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T> {
     serde_json::from_value(value.clone())
 }
 
@@ -122,19 +122,19 @@ enum Assistant {
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
-struct FunctionFields {
+pub(super) struct FunctionFields {
     #[serde(default)]
     id: String,
-    arguments: String,
+    pub(super) arguments: String,
     call_id: String,
     name: String,
     namespace: Option<String>,
-    status: ToolStatus,
+    pub(super) status: ToolStatus,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ToolStatus {
+pub(super) enum ToolStatus {
     InProgress,
     Completed,
     Incomplete,
@@ -142,13 +142,13 @@ enum ToolStatus {
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
-struct CustomFields {
+pub(super) struct CustomFields {
     #[serde(default)]
     id: String,
     call_id: String,
     name: String,
     namespace: Option<String>,
-    input: String,
+    pub(super) input: String,
     status: Option<String>,
 }
 
@@ -293,8 +293,8 @@ struct Envelope {
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
-struct ItemEnvelope {
-    output_index: u64,
+pub(super) struct ItemEnvelope {
+    pub(super) output_index: u64,
 }
 
 #[allow(dead_code)]
@@ -311,20 +311,20 @@ struct OptionalContentEnvelope {
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
-struct SummaryEnvelope {
-    summary_index: u64,
+pub(super) struct SummaryEnvelope {
+    pub(super) summary_index: u64,
 }
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
-struct Delta {
-    delta: String,
+pub(super) struct Delta {
+    pub(super) delta: String,
 }
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
-struct Text {
-    text: String,
+pub(super) struct Text {
+    pub(super) text: String,
 }
 
 #[allow(dead_code)]
