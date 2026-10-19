@@ -313,8 +313,11 @@ fn base(
     let strict = wire.strict_tools && wire.provider.dialect.quirks.strict_tool_schemas;
     let eager = wire.tool_input_streaming == super::wire::ToolInputStreaming::Eager;
     let mut tools = tools(request.tools.clone(), input.raw_tools()?, strict, eager);
-    let (mut system, history) =
-        split_system(&request.chat_history, takes_mid_conversation_system(model));
+    let (mut system, history) = split_system(
+        &request.chat_history,
+        takes_mid_conversation_system(model),
+        wire,
+    );
     let ids =
         WireIds::for_target(&request.chat_history, wire, model).map_err(EncodeError::request)?;
     let mut messages: Vec<Value> = Vec::new();
@@ -752,13 +755,17 @@ fn tools(
 
 /// Split systems from conversation turns while retaining their original indices.
 /// Invalid system positions are hoisted separately; valid neighbors stay in place.
-pub(super) fn split_system(history: &[Message], mid: bool) -> (Vec<Value>, Vec<(usize, &Message)>) {
+pub(super) fn split_system<'a>(
+    history: &'a [Message],
+    mid: bool,
+    target: &Messages,
+) -> (Vec<Value>, Vec<(usize, &'a Message)>) {
     let mut system = Vec::new();
     let mut remaining = Vec::new();
     for (index, message) in history.iter().enumerate() {
         match message {
             Message::System { content } if content.is_empty() => {}
-            Message::System { .. } if mid && valid_system_message(history, index) => {
+            Message::System { .. } if mid && valid_system_message(history, index, target) => {
                 remaining.push((index, message));
             }
             Message::System { content } => system.push(text(content)),
@@ -770,12 +777,13 @@ pub(super) fn split_system(history: &[Message], mid: bool) -> (Vec<Value>, Vec<(
 
 /// A system message follows one valid immediate turn and precedes an
 /// assistant turn or the end. Intervening system messages do not share a slot.
-fn valid_system_message(history: &[Message], index: usize) -> bool {
+fn valid_system_message(history: &[Message], index: usize, target: &Messages) -> bool {
     let follows = index
         .checked_sub(1)
         .and_then(|previous| history.get(previous))
         .is_some_and(|message| {
-            matches!(message, Message::User { .. }) || assistant_ends_in_server_tool_block(message)
+            matches!(message, Message::User { .. })
+                || assistant_ends_in_server_tool_block(message, target)
         });
     follows
         && history
@@ -783,7 +791,7 @@ fn valid_system_message(history: &[Message], index: usize) -> bool {
             .is_none_or(|message| matches!(message, Message::Assistant(_)))
 }
 
-fn assistant_ends_in_server_tool_block(message: &Message) -> bool {
+fn assistant_ends_in_server_tool_block(message: &Message, target: &Messages) -> bool {
     let Message::Assistant(turn) = message else {
         return false;
     };
@@ -791,16 +799,23 @@ fn assistant_ends_in_server_tool_block(message: &Message) -> bool {
         return false;
     };
     let raw = match block {
-        AssistantContent::Opaque(opaque) => Some(&opaque.item),
-        AssistantContent::CarriedText(part) if carried_hosted(part) => Some(&part.payload.item),
-        block => block.native_item(),
+        AssistantContent::Opaque(opaque) => Some(std::borrow::Cow::Borrowed(&opaque.item)),
+        AssistantContent::CarriedText(part) if carried_hosted(part) => {
+            Some(std::borrow::Cow::Borrowed(&part.payload.item))
+        }
+        block => match block.replay(target, None) {
+            Replay::Item(item) => Some(item),
+            Replay::Identity(_) | Replay::Rebuild => None,
+        },
     };
-    raw.and_then(|item| item.str("type")).is_some_and(|kind| {
-        matches!(
-            kind,
-            "server_tool_use" | "web_search_tool_result" | "code_execution_tool_result"
-        )
-    })
+    raw.as_deref()
+        .and_then(|item| item.str("type"))
+        .is_some_and(|kind| {
+            matches!(
+                kind,
+                "server_tool_use" | "web_search_tool_result" | "code_execution_tool_result"
+            )
+        })
 }
 
 /// The id of the container the last turn holding one ran in. Anthropic

@@ -668,8 +668,8 @@ struct Answer {
     answer: String,
 }
 
-/// Malformed arguments to the structured-output tool keep their own
-/// reprompt budget: the invalid-call hook is not consulted.
+/// Completed structured-output calls keep their own reprompt budget.
+/// The original fragmented malformed stream is refused before that policy runs.
 #[tokio::test]
 async fn the_structured_output_path_is_unchanged() {
     for surface in SURFACES {
@@ -710,6 +710,68 @@ async fn the_structured_output_path_is_unchanged() {
             .max_turns(3)
             .max_consecutive_malformed_tool_calls(0)
             .add_hook(hook.clone());
+        if matches!(surface, Surface::Streamed) {
+            use rig_core::error::{ErrorDetail, ErrorKind};
+            use rig_core::streaming::{Item, StreamEvent};
+            let mut stream = runner.stream();
+            let mut call_ends = 0;
+            let mut completed_calls = 0;
+            let mut final_answers = 0;
+            let mut refusal = None;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(
+                        StreamEvent::End {
+                            content: AssistantContent::ToolCall(_),
+                            ..
+                        },
+                    ))) => call_ends += 1,
+                    Ok(MultiTurnStreamItem::CompletionCall(_)) => completed_calls += 1,
+                    Ok(MultiTurnStreamItem::FinalResponse(_)) => final_answers += 1,
+                    Ok(_) => {}
+                    Err(error) => {
+                        refusal = Some(error);
+                        break;
+                    }
+                }
+            }
+            assert!(stream.next().await.is_none());
+            assert_eq!(call_ends, 0);
+            assert_eq!(completed_calls, 0);
+            assert_eq!(final_answers, 0);
+            let crate::run::PromptError::Report(report) =
+                refusal.expect("the original fragmented output input is refused")
+            else {
+                panic!("the structured-output fragment retains its typed malformed detail");
+            };
+            assert_eq!(report.kind, ErrorKind::Response);
+            assert_eq!(
+                report.message,
+                "tool call `final_result` arrived with malformed JSON input: EOF while parsing a value at line 1 column 10"
+            );
+            let Some(ErrorDetail::MalformedToolInput(input)) = report.detail else {
+                panic!("the actual malformed output input detail is retained");
+            };
+            assert_eq!(input.name.as_str(), "final_result");
+            assert_eq!(input.raw, output_raw);
+            assert_eq!(input.error, "EOF while parsing a value at line 1 column 10");
+            assert_eq!(
+                input
+                    .id
+                    .provider()
+                    .expect("actual received call ID")
+                    .as_str(),
+                "out1"
+            );
+            let provider = input
+                .provider
+                .expect("the received correlation is retained");
+            assert_eq!(provider.call_id.as_str(), "out1");
+            assert_eq!(provider.item_id, None);
+            assert_eq!(recorded.request_count(), 1, "no recovery request is made");
+            assert!(hook.seen().is_empty(), "the hook is not consulted");
+            continue;
+        }
         let output = drive(surface, runner)
             .await
             .unwrap_or_else(|error| panic!("{surface:?}: {error}"));
@@ -1636,4 +1698,98 @@ async fn completed_response_streaming_keeps_the_malformed_call_context_reports_t
         let choices: Vec<_> = hook.seen().into_iter().map(|c| c.tool_choice).collect();
         assert_eq!(choices, [Some(ToolChoice::Required)], "{surface:?}");
     }
+}
+
+/// A genuine completed malformed output call keeps its separate reprompt budget
+/// when delivered as MockFrame::Response in Streaming mode.
+#[tokio::test(flavor = "current_thread")]
+async fn completed_response_streaming_keeps_the_structured_output_reprompt_budget() {
+    let surface = Surface::Streamed;
+    let output_raw = "{\"answer\":";
+    let unary = MockCompletionModel::from_turns([
+        MockTurn::from_content(AssistantContent::ToolCall(ToolCall::from_wire(
+            "out1",
+            ToolFunction::parse(
+                ToolName::new("final_result").unwrap_or_else(|error| panic!("{error}")),
+                output_raw,
+            ),
+        ))),
+        MockTurn::tool_call("out2", "final_result", json!({"answer": "done"})),
+    ]);
+    let mut turns = std::collections::VecDeque::new();
+    for _ in 0..2 {
+        let response = unary
+            .call(CompletionRequest::new("answer"))
+            .await
+            .expect("the unary mock produces the actual completed output-tool fixture");
+        assert_eq!(
+            response.origin.provider,
+            rig_core::test_utils::MOCK_PROVIDER
+        );
+        if turns.is_empty() {
+            let calls = response.tool_calls().collect::<Vec<_>>();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                calls[0]
+                    .id
+                    .provider()
+                    .expect("actual received call ID")
+                    .as_str(),
+                "out1"
+            );
+            assert_eq!(calls[0].function.name.as_str(), "final_result");
+            assert_eq!(
+                calls[0].function.invalid_arguments.as_deref(),
+                Some(output_raw)
+            );
+            assert!(calls[0].native.is_none());
+        }
+        turns.push_back(response);
+    }
+    let transport = CompletedFrameTransport {
+        turns: Arc::new(Mutex::new(turns)),
+        requests: Arc::default(),
+    };
+    let recorded = transport.clone();
+    let completed = rig_core::driver::Model::new(unary.wire.clone(), transport);
+    let hook = Decide::new(Some(InvalidToolCallAction::fail()));
+    let agent = AgentBuilder::new(completed)
+        .tool(MockAddTool)
+        .output_schema::<Answer>()
+        .output_mode(OutputMode::Tool)
+        .build();
+    let runner = agent
+        .prompt("answer")
+        .max_turns(3)
+        .max_consecutive_malformed_tool_calls(0)
+        .add_hook(hook.clone());
+    let output = drive(surface, runner)
+        .await
+        .unwrap_or_else(|error| panic!("{surface:?}: {error}"));
+    assert!(output.contains("done"), "{surface:?}: {output}");
+    assert!(
+        hook.seen().is_empty(),
+        "{surface:?}: the hook is not consulted"
+    );
+    let captured = recorded
+        .requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert!(
+        captured
+            .iter()
+            .all(|(mode, _)| *mode == rig_core::wire::Mode::Streaming)
+    );
+    let requests = captured
+        .into_iter()
+        .map(|(_, request)| request)
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2, "{surface:?}");
+    let reprompt =
+        serde_json::to_string(&requests[1].chat_history).unwrap_or_else(|error| panic!("{error}"));
+    assert!(
+        reprompt.contains("not a JSON object"),
+        "{surface:?}: {reprompt}"
+    );
 }
