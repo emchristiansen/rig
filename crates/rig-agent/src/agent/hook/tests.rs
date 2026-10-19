@@ -1475,3 +1475,40 @@ async fn nested_tool_target_patch_preserves_last_valid_arguments_and_stops_polic
         _ => panic!("tool call retained"),
     }
 }
+
+#[tokio::test]
+async fn reasoning_delta_observation_preserves_nested_order_and_stop() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut inner = HookStack::with(ObservationRecorder {
+        label: 1,
+        log: log.clone(),
+        stop: false,
+    });
+    inner.push(ObservationRecorder {
+        label: 2,
+        log: log.clone(),
+        stop: true,
+    });
+    let mut outer = HookStack::with(inner);
+    outer.push(ObservationRecorder {
+        label: 3,
+        log: log.clone(),
+        stop: false,
+    });
+
+    assert!(matches!(
+        outer
+            .on_reasoning_delta(
+                &ctx(),
+                ReasoningDelta {
+                    part: serde_json::from_value(serde_json::json!(0))
+                        .expect("the current reasoning part position"),
+                    delta: "think",
+                    aggregated: "think",
+                },
+            )
+            .await,
+        ObservationAction::Stop(_)
+    ));
+    assert_eq!(*log.lock().expect("log"), vec![1, 2]);
+}
