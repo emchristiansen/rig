@@ -349,7 +349,8 @@ fn input(
                                 ));
                             }
                             let item = carried_reasoning_item(reasoning)?;
-                            let ciphertext = item.as_ref()
+                            let ciphertext = item
+                                .as_ref()
                                 .and_then(|item| item.get("encrypted_content"))
                                 .and_then(Value::as_str)
                                 .is_some_and(|cipher| !cipher.is_empty());

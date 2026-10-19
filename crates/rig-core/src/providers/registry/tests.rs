@@ -822,7 +822,6 @@ fn connect_takes_every_selector_spelling() {
     ));
 }
 
-
 /// The Anthropic version and beta options a configuration carries reach the
 /// request headers.
 #[test]
@@ -837,10 +836,7 @@ fn the_configured_version_and_betas_reach_the_request_headers() {
     };
     let encoded = config
         .completion(reference.model())
-        .encode(
-            CompletionRequest::new("hello"),
-            Mode::Unary,
-        )
+        .encode(CompletionRequest::new("hello"), Mode::Unary)
         .expect("the request encodes");
     let request = encoded.request;
     let header = |name: &str| {

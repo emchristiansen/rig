@@ -18,7 +18,10 @@ async fn completion_consumes_scripted_turns_and_records_requests() {
         .call(CompletionRequest::new("hello"))
         .await
         .expect("first scripted turn should succeed");
-    assert_eq!(first.message_id.as_ref().map(|id| id.as_str()), Some("msg_1"));
+    assert_eq!(
+        first.message_id.as_ref().map(|id| id.as_str()),
+        Some("msg_1")
+    );
     assert!(matches!(
         first.choice.first(),
         Some(AssistantContent::Text(text)) if text.text == "first"
@@ -178,7 +181,10 @@ async fn stream_yields_scripted_events_and_records_requests() {
         assert_eq!(call.function.arguments_value(), serde_json::json!({"x": 1}));
         let response = stream.finish().await.expect("the reply ended");
         assert_eq!(response.usage.total_tokens, Some(7));
-        assert_eq!(response.message_id.as_ref().map(|id| id.as_str()), Some("msg_stream"));
+        assert_eq!(
+            response.message_id.as_ref().map(|id| id.as_str()),
+            Some("msg_stream")
+        );
         assert_eq!(model.request_count(), 1);
     }
 }
@@ -258,16 +264,20 @@ async fn completion_keeps_the_headers_captured_by_opened() {
     let turn = MockTurn::text("answer").with_provider_response_headers(headers.clone());
     let expected_raw = turn.raw().expect("a scripted document");
     let model = MockCompletionModel::from_turns([turn]);
-    let response = model.call(CompletionRequest::new("hello")).await.expect("reply");
+    let response = model
+        .call(CompletionRequest::new("hello"))
+        .await
+        .expect("reply");
     assert_eq!(response.provider_response_headers, headers);
     assert_eq!(response.raw, expected_raw);
 }
 
-
 async fn collect_reasoning_script(
     model: MockCompletionModel,
 ) -> (Vec<Item<StreamEvent>>, CompletionResponse) {
-    let mut stream = model.stream(CompletionRequest::new("reasoning")).expect("stream");
+    let mut stream = model
+        .stream(CompletionRequest::new("reasoning"))
+        .expect("stream");
     let mut items = Vec::new();
     while let Some(item) = stream.next().await {
         items.push(item.expect("scripted item"));
@@ -288,32 +298,50 @@ async fn scripted_full_reasoning_block_supersedes_its_accumulated_deltas() {
         },
     };
     let raw = serde_json::to_value(&whole).expect("received script record");
-    let (items, response) = collect_reasoning_script(MockCompletionModel::from_stream_turns([
-        vec![MockStreamEvent::reasoning_delta_with_id("rs_1", "partial "), whole,
-            MockStreamEvent::final_response_with_total_tokens(2)],
-    ])).await;
-    let fragments: Vec<_> = items.iter().filter_map(|item| match item {
-        Item::Event(StreamEvent::Reasoning { part, text }) => Some((*part, text.as_str())),
-        _ => None,
-    }).collect();
+    let (items, response) =
+        collect_reasoning_script(MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::reasoning_delta_with_id("rs_1", "partial "),
+            whole,
+            MockStreamEvent::final_response_with_total_tokens(2),
+        ]]))
+        .await;
+    let fragments: Vec<_> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Event(StreamEvent::Reasoning { part, text }) => Some((*part, text.as_str())),
+            _ => None,
+        })
+        .collect();
     assert_eq!(fragments.len(), 1);
     assert_eq!(fragments[0].1, "partial ");
-    let ends: Vec<_> = items.iter().filter_map(|item| match item {
-        Item::Event(StreamEvent::End {
-            part, content: AssistantContent::CarriedReasoning(reasoning), reasoning_authority,
-        }) => Some((*part, reasoning, reasoning_authority)),
-        _ => None,
-    }).collect();
+    let ends: Vec<_> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Event(StreamEvent::End {
+                part,
+                content: AssistantContent::CarriedReasoning(reasoning),
+                reasoning_authority,
+            }) => Some((*part, reasoning, reasoning_authority)),
+            _ => None,
+        })
+        .collect();
     assert_eq!(ends.len(), 1);
     assert_eq!(ends[0].0, fragments[0].0);
     assert_eq!(ends[0].2, &None);
     let reasoning = ends[0].1;
     assert_eq!(response.choice.len(), 1);
-    assert_eq!(response.choice.first(), Some(&AssistantContent::CarriedReasoning(reasoning.clone())));
+    assert_eq!(
+        response.choice.first(),
+        Some(&AssistantContent::CarriedReasoning(reasoning.clone()))
+    );
     assert_eq!(reasoning.id.as_deref(), Some("rs_1"));
-    assert_eq!(reasoning.content, vec![CarriedReasoningPart::Text {
-        text: "the complete chain".to_owned(), signature: Some("sig_1".to_owned()),
-    }]);
+    assert_eq!(
+        reasoning.content,
+        vec![CarriedReasoningPart::Text {
+            text: "the complete chain".to_owned(),
+            signature: Some("sig_1".to_owned()),
+        }]
+    );
     assert_eq!(reasoning.payload.item, raw);
     assert_eq!(reasoning.payload.provider.as_deref(), Some("mock"));
     assert_eq!(reasoning.payload.position, CarriedPosition::Whole);
@@ -324,37 +352,67 @@ async fn scripted_full_reasoning_block_supersedes_its_accumulated_deltas() {
 async fn structured_reasoning_retains_every_part_and_nested_provenance() {
     use crate::message::{CarriedPayload, CarriedPosition, CarriedReasoningPart};
     let parts = [
-        CarriedReasoningPart::Text { text: "same".to_owned(), signature: Some("signed".to_owned()) },
+        CarriedReasoningPart::Text {
+            text: "same".to_owned(),
+            signature: Some("signed".to_owned()),
+        },
         CarriedReasoningPart::Summary("summary".to_owned()),
         CarriedReasoningPart::Encrypted("ciphertext".to_owned()),
-        CarriedReasoningPart::Redacted { data: "withheld".to_owned() },
-        CarriedReasoningPart::OpaqueSummary(CarriedPayload::new(
-            serde_json::json!({"type":"future_summary","future":7}), Some("gemini".to_owned()),
-        ).with_position(CarriedPosition::ReasoningSummary { part_index: 7 })),
-        CarriedReasoningPart::OpaqueContent(CarriedPayload::new(
-            serde_json::json!({"type":"future_content","future":9}), Some("anthropic".to_owned()),
-        ).with_position(CarriedPosition::ReasoningContent { part_index: 3 })),
+        CarriedReasoningPart::Redacted {
+            data: "withheld".to_owned(),
+        },
+        CarriedReasoningPart::OpaqueSummary(
+            CarriedPayload::new(
+                serde_json::json!({"type":"future_summary","future":7}),
+                Some("gemini".to_owned()),
+            )
+            .with_position(CarriedPosition::ReasoningSummary { part_index: 7 }),
+        ),
+        CarriedReasoningPart::OpaqueContent(
+            CarriedPayload::new(
+                serde_json::json!({"type":"future_content","future":9}),
+                Some("anthropic".to_owned()),
+            )
+            .with_position(CarriedPosition::ReasoningContent { part_index: 3 }),
+        ),
     ];
     for content in parts {
-        let event = MockStreamEvent::Reasoning { id: "rs_1".to_owned(), content: content.clone() };
+        let event = MockStreamEvent::Reasoning {
+            id: "rs_1".to_owned(),
+            content: content.clone(),
+        };
         let raw = serde_json::to_value(&event).expect("script record");
-        assert_eq!(serde_json::from_value::<MockStreamEvent>(raw.clone()).expect("script read"), event);
+        assert_eq!(
+            serde_json::from_value::<MockStreamEvent>(raw.clone()).expect("script read"),
+            event
+        );
         let (items, response) = collect_reasoning_script(MockCompletionModel::from_stream_turns([
             vec![event, MockStreamEvent::final_response_with_default_usage()],
-        ])).await;
+        ]))
+        .await;
         assert_eq!(response.choice.len(), 1);
         let Some(AssistantContent::CarriedReasoning(reasoning)) = response.choice.first() else {
-            panic!("the structured part must remain carried: {:?}", response.choice);
+            panic!(
+                "the structured part must remain carried: {:?}",
+                response.choice
+            );
         };
         assert_eq!(reasoning.id.as_deref(), Some("rs_1"));
         assert_eq!(reasoning.content, vec![content]);
         assert_eq!(reasoning.payload.item, raw);
         assert_eq!(reasoning.payload.provider.as_deref(), Some("mock"));
         assert_eq!(reasoning.payload.position, CarriedPosition::Whole);
-        let authorities: Vec<_> = items.iter().filter_map(|item| match item {
-            Item::Event(StreamEvent::End { content: AssistantContent::CarriedReasoning(_), reasoning_authority, .. }) => Some(reasoning_authority),
-            _ => None,
-        }).collect();
+        let authorities: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::End {
+                    content: AssistantContent::CarriedReasoning(_),
+                    reasoning_authority,
+                    ..
+                }) => Some(reasoning_authority),
+                _ => None,
+            })
+            .collect();
         assert_eq!(authorities, vec![&None]);
     }
 }
@@ -362,85 +420,135 @@ async fn structured_reasoning_retains_every_part_and_nested_provenance() {
 #[tokio::test]
 async fn same_text_signed_reasoning_closes_the_original_part() {
     use crate::message::CarriedReasoningPart;
-    let (items, response) = collect_reasoning_script(MockCompletionModel::from_stream_turns([
-        vec![
+    let (items, response) =
+        collect_reasoning_script(MockCompletionModel::from_stream_turns([vec![
             MockStreamEvent::reasoning_delta_with_id("rs_1", "same"),
-            MockStreamEvent::Reasoning { id: "rs_1".to_owned(), content: CarriedReasoningPart::Text {
-                text: "same".to_owned(), signature: Some("sig_1".to_owned()),
-            } },
+            MockStreamEvent::Reasoning {
+                id: "rs_1".to_owned(),
+                content: CarriedReasoningPart::Text {
+                    text: "same".to_owned(),
+                    signature: Some("sig_1".to_owned()),
+                },
+            },
             MockStreamEvent::final_response_with_default_usage(),
-        ],
-    ])).await;
-    let starts: Vec<_> = items.iter().filter_map(|item| match item {
-        Item::Event(StreamEvent::Start { part, kind: crate::streaming::PartKind::Reasoning, .. }) => Some(*part),
-        _ => None,
-    }).collect();
-    let ends: Vec<_> = items.iter().filter_map(|item| match item {
-        Item::Event(StreamEvent::End { part, content: AssistantContent::CarriedReasoning(_), reasoning_authority, .. }) => {
-            assert_eq!(reasoning_authority, &None);
-            Some(*part)
-        }
-        _ => None,
-    }).collect();
+        ]]))
+        .await;
+    let starts: Vec<_> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Event(StreamEvent::Start {
+                part,
+                kind: crate::streaming::PartKind::Reasoning,
+                ..
+            }) => Some(*part),
+            _ => None,
+        })
+        .collect();
+    let ends: Vec<_> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Event(StreamEvent::End {
+                part,
+                content: AssistantContent::CarriedReasoning(_),
+                reasoning_authority,
+                ..
+            }) => {
+                assert_eq!(reasoning_authority, &None);
+                Some(*part)
+            }
+            _ => None,
+        })
+        .collect();
     assert_eq!(starts.len(), 1);
     assert_eq!(ends, starts);
-    let Some(AssistantContent::CarriedReasoning(reasoning)) = response.choice.first() else { panic!("carried reasoning") };
+    let Some(AssistantContent::CarriedReasoning(reasoning)) = response.choice.first() else {
+        panic!("carried reasoning")
+    };
     assert_eq!(response.choice.len(), 1);
-    assert_eq!(reasoning.content, vec![CarriedReasoningPart::Text {
-        text: "same".to_owned(), signature: Some("sig_1".to_owned()),
-    }]);
+    assert_eq!(
+        reasoning.content,
+        vec![CarriedReasoningPart::Text {
+            text: "same".to_owned(),
+            signature: Some("sig_1".to_owned()),
+        }]
+    );
 }
 
 #[tokio::test]
 async fn signed_restatement_keeps_its_slot_across_an_interleaved_call() {
     use crate::message::CarriedReasoningPart;
-    let (items, response) = collect_reasoning_script(MockCompletionModel::from_stream_turns([
-        vec![
+    let (items, response) =
+        collect_reasoning_script(MockCompletionModel::from_stream_turns([vec![
             MockStreamEvent::reasoning_delta_with_id("rs_1", "partial "),
             MockStreamEvent::tool_call("call_1", "calculator", serde_json::json!({"x":1})),
-            MockStreamEvent::Reasoning { id: "rs_1".to_owned(), content: CarriedReasoningPart::Text {
-                text: "the complete chain".to_owned(), signature: Some("sig_1".to_owned()),
-            } },
+            MockStreamEvent::Reasoning {
+                id: "rs_1".to_owned(),
+                content: CarriedReasoningPart::Text {
+                    text: "the complete chain".to_owned(),
+                    signature: Some("sig_1".to_owned()),
+                },
+            },
             MockStreamEvent::final_response_with_default_usage(),
-        ],
-    ])).await;
+        ]]))
+        .await;
     assert_eq!(response.choice.len(), 2);
-    assert!(matches!(&response.choice[0], AssistantContent::CarriedReasoning(reasoning)
+    assert!(
+        matches!(&response.choice[0], AssistantContent::CarriedReasoning(reasoning)
         if reasoning.id.as_deref() == Some("rs_1") && reasoning.content == vec![CarriedReasoningPart::Text {
             text: "the complete chain".to_owned(), signature: Some("sig_1".to_owned()),
-        }]));
-    assert!(matches!(&response.choice[1], AssistantContent::ToolCall(call)
+        }])
+    );
+    assert!(
+        matches!(&response.choice[1], AssistantContent::ToolCall(call)
         if call.id.provider().map(|id| id.as_str()) == Some("call_1")
-            && call.function.name.as_str() == "calculator" && call.function.arguments_value() == serde_json::json!({"x":1})));
-    let starts: Vec<_> = items.iter().filter_map(|item| match item {
-        Item::Event(StreamEvent::Start { part, kind, .. }) => Some((*part, *kind)),
-        _ => None,
-    }).collect();
+            && call.function.name.as_str() == "calculator" && call.function.arguments_value() == serde_json::json!({"x":1}))
+    );
+    let starts: Vec<_> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Event(StreamEvent::Start { part, kind, .. }) => Some((*part, *kind)),
+            _ => None,
+        })
+        .collect();
     assert_eq!(starts.len(), 2);
     assert_eq!(starts[0].1, crate::streaming::PartKind::Reasoning);
     assert_eq!(starts[1].1, crate::streaming::PartKind::ToolCall);
-    let reasoning_ends: Vec<_> = items.iter().filter_map(|item| match item {
-        Item::Event(StreamEvent::End { part, content: AssistantContent::CarriedReasoning(_), reasoning_authority, .. }) => {
-            assert_eq!(reasoning_authority, &None);
-            Some(*part)
-        }
-        _ => None,
-    }).collect();
+    let reasoning_ends: Vec<_> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Event(StreamEvent::End {
+                part,
+                content: AssistantContent::CarriedReasoning(_),
+                reasoning_authority,
+                ..
+            }) => {
+                assert_eq!(reasoning_authority, &None);
+                Some(*part)
+            }
+            _ => None,
+        })
+        .collect();
     assert_eq!(reasoning_ends, vec![starts[0].0]);
 }
 
 #[tokio::test]
 async fn named_anthropic_routing_still_marks_reasoning_as_mock() {
     use crate::message::{CarriedPosition, CarriedReasoningPart};
-    let event = MockStreamEvent::Reasoning { id: "rs_1".to_owned(), content: CarriedReasoningPart::Summary("summary".to_owned()) };
+    let event = MockStreamEvent::Reasoning {
+        id: "rs_1".to_owned(),
+        content: CarriedReasoningPart::Summary("summary".to_owned()),
+    };
     let raw = serde_json::to_value(&event).expect("script record");
-    let mut model = MockCompletionModel::from_stream_turns([
-        vec![event, MockStreamEvent::final_response_with_default_usage()],
-    ]);
+    let mut model = MockCompletionModel::from_stream_turns([vec![
+        event,
+        MockStreamEvent::final_response_with_default_usage(),
+    ]]);
     model.wire = MockScript::new("anthropic");
     assert_eq!(model.wire.name, "anthropic");
     let (_, response) = collect_reasoning_script(model).await;
-    let Some(AssistantContent::CarriedReasoning(reasoning)) = response.choice.first() else { panic!("carried reasoning") };
+    let Some(AssistantContent::CarriedReasoning(reasoning)) = response.choice.first() else {
+        panic!("carried reasoning")
+    };
     assert_eq!(reasoning.payload.provider.as_deref(), Some("mock"));
     assert_eq!(reasoning.payload.position, CarriedPosition::Whole);
     assert_eq!(reasoning.payload.item, raw);
@@ -449,18 +557,26 @@ async fn named_anthropic_routing_still_marks_reasoning_as_mock() {
 #[tokio::test]
 async fn unsigned_reasoning_helpers_keep_the_upstream_delta_close() {
     let event = MockStreamEvent::reasoning("supplied whole").with_reasoning_id("rs_1");
-    let (_, response) = collect_reasoning_script(MockCompletionModel::from_stream_turns([
-        vec![MockStreamEvent::reasoning_delta_with_id("rs_1", "partial"), event,
-            MockStreamEvent::final_response_with_default_usage()],
-    ])).await;
+    let (_, response) = collect_reasoning_script(MockCompletionModel::from_stream_turns([vec![
+        MockStreamEvent::reasoning_delta_with_id("rs_1", "partial"),
+        event,
+        MockStreamEvent::final_response_with_default_usage(),
+    ]]))
+    .await;
     assert_eq!(response.choice.len(), 1);
-    assert!(matches!(response.choice.first(), Some(AssistantContent::Reasoning(reasoning))
-        if reasoning.text == "partial" && !reasoning.redacted));
-    let (_, response) = collect_reasoning_script(MockCompletionModel::from_stream_turns([
-        vec![MockStreamEvent::reasoning("standalone"), MockStreamEvent::final_response_with_default_usage()],
-    ])).await;
-    assert!(matches!(response.choice.first(), Some(AssistantContent::Reasoning(reasoning))
-        if reasoning.text == "standalone" && !reasoning.redacted));
+    assert!(
+        matches!(response.choice.first(), Some(AssistantContent::Reasoning(reasoning))
+        if reasoning.text == "partial" && !reasoning.redacted)
+    );
+    let (_, response) = collect_reasoning_script(MockCompletionModel::from_stream_turns([vec![
+        MockStreamEvent::reasoning("standalone"),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]]))
+    .await;
+    assert!(
+        matches!(response.choice.first(), Some(AssistantContent::Reasoning(reasoning))
+        if reasoning.text == "standalone" && !reasoning.redacted)
+    );
 }
 
 // MOCK-R1-004: F's absent mock message ID is an explicit JSON null.
@@ -471,11 +587,24 @@ fn absent_mock_message_id_keeps_its_explicit_null_in_raw_and_script() {
     let raw = turn.raw().expect("unscripted mock document");
     assert_eq!(raw.get("message_id"), Some(&serde_json::Value::Null));
     let script = serde_json::to_value(&turn).expect("turn serializes");
-    assert_eq!(script["response"]["Ok"].get("message_id"), Some(&serde_json::Value::Null));
-    let restored: MockTurn = serde_json::from_value(script.clone()).expect("explicit null ID decodes");
+    assert_eq!(
+        script["response"]["Ok"].get("message_id"),
+        Some(&serde_json::Value::Null)
+    );
+    let restored: MockTurn =
+        serde_json::from_value(script.clone()).expect("explicit null ID decodes");
     assert_eq!(restored, turn);
-    assert_eq!(restored.raw().expect("restored mock document").get("message_id"), Some(&serde_json::Value::Null));
-    assert_eq!(serde_json::to_value(&restored).expect("restored turn serializes"), script);
+    assert_eq!(
+        restored
+            .raw()
+            .expect("restored mock document")
+            .get("message_id"),
+        Some(&serde_json::Value::Null)
+    );
+    assert_eq!(
+        serde_json::to_value(&restored).expect("restored turn serializes"),
+        script
+    );
 }
 
 // CFMOCK-003 records the request after the real Model.call preparation.
@@ -490,18 +619,28 @@ async fn completion_records_prepared_merged_user_history_and_consumes_one_turn()
     assert_eq!(model.script(), original_script);
 
     let request = CompletionRequest::from(vec![
-        Message::User { content: vec![UserContent::text("A")] },
-        Message::User { content: vec![UserContent::text("B")] },
+        Message::User {
+            content: vec![UserContent::text("A")],
+        },
+        Message::User {
+            content: vec![UserContent::text("B")],
+        },
     ]);
-    model.call(request).await.expect("the prepared request should succeed");
+    model
+        .call(request)
+        .await
+        .expect("the prepared request should succeed");
 
     assert_eq!(model.request_count(), 1);
     let requests = model.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model.as_deref(), Some(MOCK_MODEL));
-    assert_eq!(requests[0].chat_history, vec![Message::User {
-        content: vec![UserContent::text("A"), UserContent::text("B")],
-    }]);
+    assert_eq!(
+        requests[0].chat_history,
+        vec![Message::User {
+            content: vec![UserContent::text("A"), UserContent::text("B")],
+        }]
+    );
     assert_eq!(model.script(), vec![original_script[1].clone()]);
 }
 
@@ -517,7 +656,10 @@ async fn completion_refuses_empty_user_before_recording_or_consuming_script() {
     assert_eq!(model.script(), original_script);
 
     let request = CompletionRequest::from(vec![Message::User { content: vec![] }]);
-    let error = model.call(request).await.expect_err("empty User content must be refused");
+    let error = model
+        .call(request)
+        .await
+        .expect_err("empty User content must be refused");
     assert!(matches!(error, ProviderError::Request(_)));
     assert!(matches!(model.requests().as_slice(), []));
     assert_eq!(model.request_count(), 0);
@@ -530,22 +672,45 @@ async fn whole_object_restates_the_original_call_part() {
     for fragmented in [false, true] {
         let mut events = Vec::new();
         if fragmented {
-            events.push(MockStreamEvent::tool_call_name_delta("call_1", "calculator"));
-            events.push(MockStreamEvent::tool_call_arguments_delta("call_1", "{\"x\":1}"));
+            events.push(MockStreamEvent::tool_call_name_delta(
+                "call_1",
+                "calculator",
+            ));
+            events.push(MockStreamEvent::tool_call_arguments_delta(
+                "call_1",
+                "{\"x\":1}",
+            ));
         }
-        events.push(MockStreamEvent::tool_call("call_1", "calculator", serde_json::json!({"x":2})));
+        events.push(MockStreamEvent::tool_call(
+            "call_1",
+            "calculator",
+            serde_json::json!({"x":2}),
+        ));
         events.push(MockStreamEvent::final_response_with_total_tokens(2));
         let model = MockCompletionModel::from_stream_turns([events]);
-        let mut stream = model.stream(CompletionRequest::new("object")).expect("stream opens");
+        let mut stream = model
+            .stream(CompletionRequest::new("object"))
+            .expect("stream opens");
         let mut started = None;
         let mut argument_parts = Vec::new();
         let mut delivered = Vec::new();
         let mut ended = None;
         while let Some(item) = stream.next().await {
             match item.expect("object stream succeeds") {
-                Item::Event(StreamEvent::Start { part, kind: crate::streaming::PartKind::ToolCall, .. }) => started = Some(part),
-                Item::Event(StreamEvent::Arguments { part, json }) => { argument_parts.push(part); delivered.push(json); }
-                Item::Event(StreamEvent::End { part, content: AssistantContent::ToolCall(call), .. }) => {
+                Item::Event(StreamEvent::Start {
+                    part,
+                    kind: crate::streaming::PartKind::ToolCall,
+                    ..
+                }) => started = Some(part),
+                Item::Event(StreamEvent::Arguments { part, json }) => {
+                    argument_parts.push(part);
+                    delivered.push(json);
+                }
+                Item::Event(StreamEvent::End {
+                    part,
+                    content: AssistantContent::ToolCall(call),
+                    ..
+                }) => {
                     ended = Some(part);
                     assert_eq!(call.function.arguments_value(), serde_json::json!({"x":2}));
                     assert!(call.function.invalid_arguments.is_none());
@@ -556,10 +721,15 @@ async fn whole_object_restates_the_original_call_part() {
         assert!(started.is_some());
         assert_eq!(ended, started);
         assert_eq!(argument_parts, vec![started.expect("actual call Part")]);
-        assert_eq!(delivered, vec![(if fragmented { "{\"x\":1}" } else { "{\"x\":2}" }).to_owned()]);
+        assert_eq!(
+            delivered,
+            vec![(if fragmented { "{\"x\":1}" } else { "{\"x\":2}" }).to_owned()]
+        );
         let response = stream.finish().await.expect("genuine terminal succeeds");
         assert_eq!(response.choice.len(), 1);
-        let AssistantContent::ToolCall(call) = &response.choice[0] else { panic!("completed call"); };
+        let AssistantContent::ToolCall(call) = &response.choice[0] else {
+            panic!("completed call");
+        };
         assert_eq!(call.function.arguments_value(), serde_json::json!({"x":2}));
         assert_eq!(response.usage.total_tokens, Some(2));
     }
@@ -575,22 +745,35 @@ async fn changing_tool_names_keep_the_first_nonempty_canonical_name() {
             MockStreamEvent::tool_call_end("call_1")
         };
         let mut events = vec![MockStreamEvent::tool_call_name_delta("call_1", "old")];
-        if !whole { events.push(MockStreamEvent::tool_call_name_delta("call_1", "new")); }
+        if !whole {
+            events.push(MockStreamEvent::tool_call_name_delta("call_1", "new"));
+        }
         events.push(close);
         events.push(MockStreamEvent::final_response_with_total_tokens(2));
         let model = MockCompletionModel::from_stream_turns([events]);
-        let mut stream = model.stream(CompletionRequest::new("names")).expect("stream opens");
+        let mut stream = model
+            .stream(CompletionRequest::new("names"))
+            .expect("stream opens");
         let mut names = Vec::new();
         while let Some(item) = stream.next().await {
             match item.expect("name stream succeeds") {
-                Item::Event(StreamEvent::Start { name: Some(name), kind: crate::streaming::PartKind::ToolCall, .. }) => names.push(name.as_str().to_owned()),
-                Item::Event(StreamEvent::End { content: AssistantContent::ToolCall(call), .. }) => assert_eq!(call.function.name.as_str(), "old"),
+                Item::Event(StreamEvent::Start {
+                    name: Some(name),
+                    kind: crate::streaming::PartKind::ToolCall,
+                    ..
+                }) => names.push(name.as_str().to_owned()),
+                Item::Event(StreamEvent::End {
+                    content: AssistantContent::ToolCall(call),
+                    ..
+                }) => assert_eq!(call.function.name.as_str(), "old"),
                 _ => {}
             }
         }
         assert_eq!(names, vec!["old"]);
         let response = stream.finish().await.expect("genuine terminal succeeds");
-        let AssistantContent::ToolCall(call) = &response.choice[0] else { panic!("completed call"); };
+        let AssistantContent::ToolCall(call) = &response.choice[0] else {
+            panic!("completed call");
+        };
         assert_eq!(call.function.name.as_str(), "old");
     }
 }
@@ -599,20 +782,34 @@ async fn changing_tool_names_keep_the_first_nonempty_canonical_name() {
 #[tokio::test]
 async fn payloadless_ends_without_an_open_call_preserve_terminal_success() {
     for (events, expected) in [
-        (vec![MockStreamEvent::tool_call("call_1", "calculator", serde_json::json!({"x":1})), MockStreamEvent::tool_call_end("call_1")], 1),
+        (
+            vec![
+                MockStreamEvent::tool_call("call_1", "calculator", serde_json::json!({"x":1})),
+                MockStreamEvent::tool_call_end("call_1"),
+            ],
+            1,
+        ),
         (vec![MockStreamEvent::tool_call_end("never_opened")], 0),
         (vec![MockStreamEvent::tool_call_end("")], 0),
     ] {
         let mut events = events;
         events.push(MockStreamEvent::final_response_with_total_tokens(2));
         let model = MockCompletionModel::from_stream_turns([events]);
-        let mut stream = model.stream(CompletionRequest::new("close")).expect("stream opens");
+        let mut stream = model
+            .stream(CompletionRequest::new("close"))
+            .expect("stream opens");
         let mut starts = 0;
         let mut calls = 0;
         while let Some(item) = stream.next().await {
             match item.expect("no-open close succeeds") {
-                Item::Event(StreamEvent::Start { kind: crate::streaming::PartKind::ToolCall, .. }) => starts += 1,
-                Item::Event(StreamEvent::End { content: AssistantContent::ToolCall(_), .. }) => calls += 1,
+                Item::Event(StreamEvent::Start {
+                    kind: crate::streaming::PartKind::ToolCall,
+                    ..
+                }) => starts += 1,
+                Item::Event(StreamEvent::End {
+                    content: AssistantContent::ToolCall(_),
+                    ..
+                }) => calls += 1,
                 _ => {}
             }
         }
@@ -628,7 +825,11 @@ async fn payloadless_ends_without_an_open_call_preserve_terminal_success() {
 #[tokio::test]
 async fn payloadless_close_keeps_reopened_calls_and_repeated_whole_calls() {
     for fragments in [false, true] {
-        let mut events = vec![MockStreamEvent::tool_call("call_1", "calculator", serde_json::json!({"x":1}))];
+        let mut events = vec![MockStreamEvent::tool_call(
+            "call_1",
+            "calculator",
+            serde_json::json!({"x":1}),
+        )];
         if fragments {
             events.extend([
                 MockStreamEvent::tool_call_name_delta("call_1", "probe"),
@@ -636,14 +837,24 @@ async fn payloadless_close_keeps_reopened_calls_and_repeated_whole_calls() {
                 MockStreamEvent::tool_call_end("call_1"),
             ]);
         } else {
-            events.push(MockStreamEvent::tool_call("call_1", "probe", serde_json::json!({})));
+            events.push(MockStreamEvent::tool_call(
+                "call_1",
+                "probe",
+                serde_json::json!({}),
+            ));
         }
         events.push(MockStreamEvent::final_response_with_total_tokens(2));
         let model = MockCompletionModel::from_stream_turns([events]);
-        let mut stream = model.stream(CompletionRequest::new("reopen")).expect("stream opens");
+        let mut stream = model
+            .stream(CompletionRequest::new("reopen"))
+            .expect("stream opens");
         let mut names = Vec::new();
         while let Some(item) = stream.next().await {
-            if let Item::Event(StreamEvent::End { content: AssistantContent::ToolCall(call), .. }) = item.expect("reopened calls succeed") {
+            if let Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(call),
+                ..
+            }) = item.expect("reopened calls succeed")
+            {
                 names.push(call.function.name.as_str().to_owned());
             }
         }
@@ -667,15 +878,25 @@ async fn empty_key_call_fragments_keep_one_part_across_keyed_interleaving() {
         MockStreamEvent::tool_call_end("call_2"),
         MockStreamEvent::final_response_with_total_tokens(2),
     ]]);
-    let mut stream = model.stream(CompletionRequest::new("empty key")).expect("stream opens");
+    let mut stream = model
+        .stream(CompletionRequest::new("empty key"))
+        .expect("stream opens");
     let mut starts = Vec::new();
     let mut argument_parts = Vec::new();
     let mut ends = Vec::new();
     while let Some(item) = stream.next().await {
         match item.expect("interleaving succeeds") {
-            Item::Event(StreamEvent::Start { part, kind: crate::streaming::PartKind::ToolCall, .. }) => starts.push(part),
+            Item::Event(StreamEvent::Start {
+                part,
+                kind: crate::streaming::PartKind::ToolCall,
+                ..
+            }) => starts.push(part),
             Item::Event(StreamEvent::Arguments { part, .. }) => argument_parts.push(part),
-            Item::Event(StreamEvent::End { part, content: AssistantContent::ToolCall(_), .. }) => ends.push(part),
+            Item::Event(StreamEvent::End {
+                part,
+                content: AssistantContent::ToolCall(_),
+                ..
+            }) => ends.push(part),
             _ => {}
         }
     }
@@ -684,11 +905,15 @@ async fn empty_key_call_fragments_keep_one_part_across_keyed_interleaving() {
     assert_eq!(argument_parts, vec![starts[0], starts[1], starts[0]]);
     let response = stream.finish().await.expect("terminal succeeds");
     assert_eq!(response.choice.len(), 2);
-    let AssistantContent::ToolCall(empty) = &response.choice[0] else { panic!("empty-key call"); };
+    let AssistantContent::ToolCall(empty) = &response.choice[0] else {
+        panic!("empty-key call");
+    };
     assert_eq!(empty.function.name.as_str(), "old");
     assert_eq!(empty.function.arguments_value(), serde_json::json!({"x":1}));
     assert!(empty.id.provider().is_none());
-    let AssistantContent::ToolCall(keyed) = &response.choice[1] else { panic!("keyed call"); };
+    let AssistantContent::ToolCall(keyed) = &response.choice[1] else {
+        panic!("keyed call");
+    };
     assert_eq!(keyed.id.provider().map(|id| id.as_str()), Some("call_2"));
 }
 
@@ -696,16 +921,36 @@ async fn empty_key_call_fragments_keep_one_part_across_keyed_interleaving() {
 #[tokio::test]
 async fn repeated_text_start_keys_keep_distinct_parts_in_content_order() {
     for interleaved in [false, true] {
-        let mut events = vec![MockStreamEvent::text_start("txt_1", None), MockStreamEvent::text("a")];
-        if interleaved { events.push(MockStreamEvent::tool_call("call_1", "probe", serde_json::json!({}))); }
-        events.extend([MockStreamEvent::text_start("txt_1", None), MockStreamEvent::text("b"), MockStreamEvent::final_response_with_total_tokens(2)]);
+        let mut events = vec![
+            MockStreamEvent::text_start("txt_1", None),
+            MockStreamEvent::text("a"),
+        ];
+        if interleaved {
+            events.push(MockStreamEvent::tool_call(
+                "call_1",
+                "probe",
+                serde_json::json!({}),
+            ));
+        }
+        events.extend([
+            MockStreamEvent::text_start("txt_1", None),
+            MockStreamEvent::text("b"),
+            MockStreamEvent::final_response_with_total_tokens(2),
+        ]);
         let model = MockCompletionModel::from_stream_turns([events]);
-        let mut stream = model.stream(CompletionRequest::new("starts")).expect("stream opens");
+        let mut stream = model
+            .stream(CompletionRequest::new("starts"))
+            .expect("stream opens");
         let mut text_parts = Vec::new();
         while let Some(item) = stream.next().await {
             match item.expect("text starts succeed") {
-                Item::Event(StreamEvent::Text { part, text }) => { text_parts.push(part); assert!(text == "a" || text == "b"); }
-                Item::Event(StreamEvent::Resume { .. }) => panic!("mock selects no Responses resume"),
+                Item::Event(StreamEvent::Text { part, text }) => {
+                    text_parts.push(part);
+                    assert!(text == "a" || text == "b");
+                }
+                Item::Event(StreamEvent::Resume { .. }) => {
+                    panic!("mock selects no Responses resume")
+                }
                 _ => {}
             }
         }
@@ -713,10 +958,16 @@ async fn repeated_text_start_keys_keep_distinct_parts_in_content_order() {
         assert_ne!(text_parts[0], text_parts[1]);
         let response = stream.finish().await.expect("terminal succeeds");
         assert_eq!(response.choice.len(), if interleaved { 3 } else { 2 });
-        let AssistantContent::Text(first) = &response.choice[0] else { panic!("first text"); };
+        let AssistantContent::Text(first) = &response.choice[0] else {
+            panic!("first text");
+        };
         assert_eq!(first.text, "a");
-        if interleaved { assert!(matches!(&response.choice[1], AssistantContent::ToolCall(_))); }
-        let AssistantContent::Text(second) = response.choice.last().expect("second text") else { panic!("second text"); };
+        if interleaved {
+            assert!(matches!(&response.choice[1], AssistantContent::ToolCall(_)));
+        }
+        let AssistantContent::Text(second) = response.choice.last().expect("second text") else {
+            panic!("second text");
+        };
         assert_eq!(second.text, "b");
     }
 }
@@ -732,28 +983,43 @@ async fn malformed_payloadless_close_keeps_raw_correlation_and_ends_the_stream()
         MockStreamEvent::text("after"),
         MockStreamEvent::final_response_with_total_tokens(2),
     ]]);
-    let mut stream = model.stream(CompletionRequest::new("malformed")).expect("stream opens");
+    let mut stream = model
+        .stream(CompletionRequest::new("malformed"))
+        .expect("stream opens");
     let mut calls = 0;
     let error = loop {
         match stream.next().await.expect("typed error must arrive") {
             Err(error) => break error,
-            Ok(Item::Event(StreamEvent::End { content: AssistantContent::ToolCall(_), .. })) => calls += 1,
+            Ok(Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(_),
+                ..
+            })) => calls += 1,
             Ok(_) => {}
         }
     };
     assert_eq!(calls, 0);
-    let ProviderError::Relayed(report) = error else { panic!("typed relayed report"); };
+    let ProviderError::Relayed(report) = error else {
+        panic!("typed relayed report");
+    };
     assert_eq!(report.kind, ErrorKind::Response);
-    let Some(crate::error::ErrorDetail::MalformedToolInput(input)) = &report.detail else { panic!("malformed detail"); };
+    let Some(crate::error::ErrorDetail::MalformedToolInput(input)) = &report.detail else {
+        panic!("malformed detail");
+    };
     assert_eq!(input.name, "calculator");
     assert_eq!(input.raw, RAW);
     assert_eq!(input.id.provider().map(|id| id.as_str()), Some("call_1"));
-    let provider = input.provider.as_ref().expect("received provider correlation");
+    let provider = input
+        .provider
+        .as_ref()
+        .expect("received provider correlation");
     assert_eq!(provider.call_id.as_str(), "call_1");
     assert!(provider.item_id.is_none());
     assert!(!input.error.is_empty());
     assert!(stream.next().await.is_none());
-    assert!(matches!(stream.finish().await, Err(ProviderError::Relayed(_))));
+    assert!(matches!(
+        stream.finish().await,
+        Err(ProviderError::Relayed(_))
+    ));
 }
 
 // MOCK-R1-001a/005: valid whole object before close wins over malformed fragments.
@@ -766,17 +1032,31 @@ async fn valid_whole_object_supersedes_malformed_fragments_before_close() {
         MockStreamEvent::tool_call_end("call_1"),
         MockStreamEvent::final_response_with_total_tokens(2),
     ]]);
-    let mut stream = model.stream(CompletionRequest::new("supersede")).expect("stream opens");
+    let mut stream = model
+        .stream(CompletionRequest::new("supersede"))
+        .expect("stream opens");
     let mut calls = 0;
     while let Some(item) = stream.next().await {
-        if let Item::Event(StreamEvent::End { content: AssistantContent::ToolCall(call), .. }) = item.expect("whole supersession succeeds") {
+        if let Item::Event(StreamEvent::End {
+            content: AssistantContent::ToolCall(call),
+            ..
+        }) = item.expect("whole supersession succeeds")
+        {
             calls += 1;
             assert_eq!(call.function.arguments_value(), serde_json::json!({"x":2}));
             assert!(call.function.invalid_arguments.is_none());
         }
     }
     assert_eq!(calls, 1);
-    assert_eq!(stream.finish().await.expect("terminal succeeds").choice.len(), 1);
+    assert_eq!(
+        stream
+            .finish()
+            .await
+            .expect("terminal succeeds")
+            .choice
+            .len(),
+        1
+    );
 }
 
 // MOCK-R1-005/five-2: source-only controls at the exact private F bound.
@@ -792,10 +1072,16 @@ async fn bounded_call_arguments_accept_under_and_exactly_at_the_f_bound() {
             MockStreamEvent::tool_call_end("call_1"),
             MockStreamEvent::final_response_with_total_tokens(2),
         ]]);
-        let mut stream = model.stream(CompletionRequest::new("bound")).expect("stream opens");
-        while let Some(item) = stream.next().await { item.expect("within-bound arguments succeed"); }
+        let mut stream = model
+            .stream(CompletionRequest::new("bound"))
+            .expect("stream opens");
+        while let Some(item) = stream.next().await {
+            item.expect("within-bound arguments succeed");
+        }
         let response = stream.finish().await.expect("terminal succeeds");
-        let AssistantContent::ToolCall(call) = &response.choice[0] else { panic!("completed call"); };
+        let AssistantContent::ToolCall(call) = &response.choice[0] else {
+            panic!("completed call");
+        };
         assert_eq!(call.function.arguments_value(), serde_json::json!({"x":1}));
         assert!(call.function.invalid_arguments.is_none());
     }
@@ -806,31 +1092,59 @@ async fn bounded_call_arguments_accept_under_and_exactly_at_the_f_bound() {
 async fn over_bound_close_reports_the_exact_retained_assembly_and_correlation() {
     const LIMIT: usize = 32 * 1024 * 1024;
     for prefix in [Some("{\"x\":1}"), None] {
-        let mut events = vec![MockStreamEvent::tool_call_name_delta("call_1", "calculator")];
-        if let Some(prefix) = prefix { events.push(MockStreamEvent::tool_call_arguments_delta("call_1", prefix)); }
+        let mut events = vec![MockStreamEvent::tool_call_name_delta(
+            "call_1",
+            "calculator",
+        )];
+        if let Some(prefix) = prefix {
+            events.push(MockStreamEvent::tool_call_arguments_delta("call_1", prefix));
+        }
         events.extend([
             MockStreamEvent::tool_call_arguments_delta("call_1", " ".repeat(LIMIT + 1)),
             MockStreamEvent::tool_call_end("call_1"),
             MockStreamEvent::final_response_with_total_tokens(2),
         ]);
         let model = MockCompletionModel::from_stream_turns([events]);
-        let mut stream = model.stream(CompletionRequest::new("overflow")).expect("stream opens");
+        let mut stream = model
+            .stream(CompletionRequest::new("overflow"))
+            .expect("stream opens");
         let error = loop {
             match stream.next().await.expect("typed overflow error arrives") {
                 Err(error) => break error,
-                Ok(Item::Event(StreamEvent::End { content: AssistantContent::ToolCall(_), .. })) => panic!("no completed overflow call"),
+                Ok(Item::Event(StreamEvent::End {
+                    content: AssistantContent::ToolCall(_),
+                    ..
+                })) => panic!("no completed overflow call"),
                 Ok(_) => {}
             }
         };
-        let ProviderError::Relayed(report) = error else { panic!("typed relayed report"); };
+        let ProviderError::Relayed(report) = error else {
+            panic!("typed relayed report");
+        };
         assert_eq!(report.kind, ErrorKind::Response);
-        let Some(crate::error::ErrorDetail::MalformedToolInput(input)) = &report.detail else { panic!("malformed detail"); };
+        let Some(crate::error::ErrorDetail::MalformedToolInput(input)) = &report.detail else {
+            panic!("malformed detail");
+        };
         assert_eq!(input.raw, prefix.unwrap_or(""));
         assert_eq!(input.id.provider().map(|id| id.as_str()), Some("call_1"));
-        assert_eq!(input.provider.as_ref().expect("received correlation").call_id.as_str(), "call_1");
-        assert_eq!(input.error, "tool-call input exceeded the accumulation bound");
+        assert_eq!(
+            input
+                .provider
+                .as_ref()
+                .expect("received correlation")
+                .call_id
+                .as_str(),
+            "call_1"
+        );
+        assert_eq!(
+            input.error,
+            "tool-call input exceeded the accumulation bound"
+        );
         assert!(stream.next().await.is_none());
-        assert!(matches!(stream.finish().await, Err(ProviderError::Relayed(_))));
+        assert!(matches!(
+            stream.finish().await,
+            Err(ProviderError::Relayed(_))
+        ));
     }
 }
 
@@ -844,14 +1158,22 @@ async fn null_placeholder_is_replaced_by_the_real_argument_assembly() {
         MockStreamEvent::tool_call_end("call_1"),
         MockStreamEvent::final_response_with_total_tokens(2),
     ]]);
-    let mut stream = model.stream(CompletionRequest::new("placeholder")).expect("stream opens");
+    let mut stream = model
+        .stream(CompletionRequest::new("placeholder"))
+        .expect("stream opens");
     let mut delivered = Vec::new();
     while let Some(item) = stream.next().await {
-        if let Item::Event(StreamEvent::Arguments { json, .. }) = item.expect("normalized assembly succeeds") { delivered.push(json); }
+        if let Item::Event(StreamEvent::Arguments { json, .. }) =
+            item.expect("normalized assembly succeeds")
+        {
+            delivered.push(json);
+        }
     }
     assert_eq!(delivered, vec!["{\"x\":1}"]);
     let response = stream.finish().await.expect("terminal succeeds");
-    let AssistantContent::ToolCall(call) = &response.choice[0] else { panic!("completed call"); };
+    let AssistantContent::ToolCall(call) = &response.choice[0] else {
+        panic!("completed call");
+    };
     assert_eq!(call.function.arguments_value(), serde_json::json!({"x":1}));
     assert!(call.function.invalid_arguments.is_none());
 }
@@ -876,17 +1198,32 @@ async fn text_metadata_composes_f_values_at_both_private_sites() {
     });
     for start in [false, true] {
         let mut events = if start {
-            vec![MockStreamEvent::text_start("txt_1", Some(first.clone())), MockStreamEvent::text("x")]
+            vec![
+                MockStreamEvent::text_start("txt_1", Some(first.clone())),
+                MockStreamEvent::text("x"),
+            ]
         } else {
-            vec![MockStreamEvent::text("x"), MockStreamEvent::text_additional_params(first.clone())]
+            vec![
+                MockStreamEvent::text("x"),
+                MockStreamEvent::text_additional_params(first.clone()),
+            ]
         };
-        events.extend([MockStreamEvent::text_additional_params(second.clone()), MockStreamEvent::final_response_with_total_tokens(2)]);
+        events.extend([
+            MockStreamEvent::text_additional_params(second.clone()),
+            MockStreamEvent::final_response_with_total_tokens(2),
+        ]);
         let model = MockCompletionModel::from_stream_turns([events]);
-        let mut stream = model.stream(CompletionRequest::new("metadata")).expect("stream opens");
-        while let Some(item) = stream.next().await { item.expect("metadata succeeds"); }
+        let mut stream = model
+            .stream(CompletionRequest::new("metadata"))
+            .expect("stream opens");
+        while let Some(item) = stream.next().await {
+            item.expect("metadata succeeds");
+        }
         let response = stream.finish().await.expect("terminal succeeds");
         assert_eq!(response.choice.len(), 1);
-        let AssistantContent::Text(text) = &response.choice[0] else { panic!("text"); };
+        let AssistantContent::Text(text) = &response.choice[0] else {
+            panic!("text");
+        };
         assert_eq!(text.text, "x");
         assert_eq!(response.choice[0].native_item(), Some(&expected));
     }
@@ -896,24 +1233,50 @@ async fn text_metadata_composes_f_values_at_both_private_sites() {
 #[tokio::test]
 async fn metadata_marker_controls_and_repeated_starts_keep_their_exact_scope() {
     for (incoming, expected) in [
-        (serde_json::json!({"kind":"refusal","value":{"new":2}}), serde_json::json!({"kind":"refusal","value":{"old":1,"new":2},"old_only":true})),
-        (serde_json::json!({"kind":"opaque","new_only":true}), serde_json::json!({"kind":"opaque","value":{"old":1},"old_only":true,"new_only":true})),
-        (serde_json::json!({"kind":"opaque","value":null}), serde_json::json!({"kind":"opaque","value":null})),
+        (
+            serde_json::json!({"kind":"refusal","value":{"new":2}}),
+            serde_json::json!({"kind":"refusal","value":{"old":1,"new":2},"old_only":true}),
+        ),
+        (
+            serde_json::json!({"kind":"opaque","new_only":true}),
+            serde_json::json!({"kind":"opaque","value":{"old":1},"old_only":true,"new_only":true}),
+        ),
+        (
+            serde_json::json!({"kind":"opaque","value":null}),
+            serde_json::json!({"kind":"opaque","value":null}),
+        ),
     ] {
         let model = MockCompletionModel::from_stream_turns([vec![
-            MockStreamEvent::text_start("txt_1", Some(serde_json::json!({"openai_responses_part":{"kind":"opaque","value":{"old":1},"old_only":true}}))),
+            MockStreamEvent::text_start(
+                "txt_1",
+                Some(
+                    serde_json::json!({"openai_responses_part":{"kind":"opaque","value":{"old":1},"old_only":true}}),
+                ),
+            ),
             MockStreamEvent::text("a"),
-            MockStreamEvent::text_additional_params(serde_json::json!({"openai_responses_part":incoming})),
+            MockStreamEvent::text_additional_params(
+                serde_json::json!({"openai_responses_part":incoming}),
+            ),
             MockStreamEvent::text_start("txt_1", Some(serde_json::json!({"only_second":true}))),
             MockStreamEvent::text("b"),
             MockStreamEvent::final_response_with_total_tokens(2),
         ]]);
-        let mut stream = model.stream(CompletionRequest::new("marker")).expect("stream opens");
-        while let Some(item) = stream.next().await { item.expect("marker controls succeed"); }
+        let mut stream = model
+            .stream(CompletionRequest::new("marker"))
+            .expect("stream opens");
+        while let Some(item) = stream.next().await {
+            item.expect("marker controls succeed");
+        }
         let response = stream.finish().await.expect("terminal succeeds");
         assert_eq!(response.choice.len(), 2);
-        assert_eq!(response.choice[0].native_item(), Some(&serde_json::json!({"openai_responses_part":expected})));
-        assert_eq!(response.choice[1].native_item(), Some(&serde_json::json!({"only_second":true})));
+        assert_eq!(
+            response.choice[0].native_item(),
+            Some(&serde_json::json!({"openai_responses_part":expected}))
+        );
+        assert_eq!(
+            response.choice[1].native_item(),
+            Some(&serde_json::json!({"only_second":true}))
+        );
     }
 }
 
@@ -927,20 +1290,34 @@ async fn genuine_id_takeover_restates_the_object_on_the_new_part() {
             .with_call_id("different_1"),
         MockStreamEvent::final_response_with_total_tokens(2),
     ]]);
-    let mut stream = model.stream(CompletionRequest::new("takeover")).expect("stream opens");
+    let mut stream = model
+        .stream(CompletionRequest::new("takeover"))
+        .expect("stream opens");
     let mut starts = Vec::new();
     let mut arguments = Vec::new();
     let mut ends = Vec::new();
     while let Some(item) = stream.next().await {
         match item.expect("the real takeover succeeds") {
-            Item::Event(StreamEvent::Start { part, kind: crate::streaming::PartKind::ToolCall, .. }) => {
+            Item::Event(StreamEvent::Start {
+                part,
+                kind: crate::streaming::PartKind::ToolCall,
+                ..
+            }) => {
                 if starts.len() == 1 {
-                    assert_eq!(ends.len(), 1, "the prior partial closes before the new Part starts");
+                    assert_eq!(
+                        ends.len(),
+                        1,
+                        "the prior partial closes before the new Part starts"
+                    );
                 }
                 starts.push(part);
             }
             Item::Event(StreamEvent::Arguments { part, json }) => arguments.push((part, json)),
-            Item::Event(StreamEvent::End { part, content: AssistantContent::ToolCall(call), .. }) => {
+            Item::Event(StreamEvent::End {
+                part,
+                content: AssistantContent::ToolCall(call),
+                ..
+            }) => {
                 ends.push((part, call));
             }
             Item::Event(StreamEvent::Discard { .. }) => {
@@ -955,19 +1332,34 @@ async fn genuine_id_takeover_restates_the_object_on_the_new_part() {
     assert_eq!(ends[0].0, starts[0]);
     assert_eq!(ends[1].0, starts[1]);
     assert_eq!(arguments, vec![(starts[0], "{\"x\":".to_owned())]);
-    assert_eq!(ends[0].1.id.provider().map(|id| id.as_str()), Some("assembly_1"));
+    assert_eq!(
+        ends[0].1.id.provider().map(|id| id.as_str()),
+        Some("assembly_1")
+    );
     assert_eq!(ends[0].1.function.name.as_str(), "calculator");
     assert_eq!(ends[0].1.function.arguments_value(), serde_json::json!({}));
-    assert_eq!(ends[0].1.function.invalid_arguments.as_deref(), Some("{\"x\":"));
-    assert_eq!(ends[1].1.id.provider().map(|id| id.as_str()), Some("different_1"));
+    assert_eq!(
+        ends[0].1.function.invalid_arguments.as_deref(),
+        Some("{\"x\":")
+    );
+    assert_eq!(
+        ends[1].1.id.provider().map(|id| id.as_str()),
+        Some("different_1")
+    );
     assert_eq!(ends[1].1.function.name.as_str(), "calculator");
-    assert_eq!(ends[1].1.function.arguments_value(), serde_json::json!({"x":2}));
+    assert_eq!(
+        ends[1].1.function.arguments_value(),
+        serde_json::json!({"x":2})
+    );
     assert!(ends[1].1.function.invalid_arguments.is_none());
     let response = stream.finish().await.expect("genuine terminal succeeds");
-    assert_eq!(response.choice, vec![
-        AssistantContent::ToolCall(ends[0].1.clone()),
-        AssistantContent::ToolCall(ends[1].1.clone()),
-    ]);
+    assert_eq!(
+        response.choice,
+        vec![
+            AssistantContent::ToolCall(ends[0].1.clone()),
+            AssistantContent::ToolCall(ends[1].1.clone()),
+        ]
+    );
     assert_eq!(response.usage.total_tokens, Some(2));
 }
 
@@ -982,16 +1374,28 @@ async fn whole_object_after_overflow_keeps_the_same_part_and_sticky_invalid_mark
         MockStreamEvent::tool_call("call_1", "calculator", serde_json::json!({"x":2})),
         MockStreamEvent::final_response_with_total_tokens(2),
     ]]);
-    let mut stream = model.stream(CompletionRequest::new("overflow then whole")).expect("stream opens");
+    let mut stream = model
+        .stream(CompletionRequest::new("overflow then whole"))
+        .expect("stream opens");
     let mut starts = Vec::new();
     let mut arguments = Vec::new();
     let mut ends = Vec::new();
     while let Some(item) = stream.next().await {
         match item.expect("the adopted whole-object restatement succeeds") {
-            Item::Event(StreamEvent::Start { part, kind: crate::streaming::PartKind::ToolCall, .. }) => starts.push(part),
+            Item::Event(StreamEvent::Start {
+                part,
+                kind: crate::streaming::PartKind::ToolCall,
+                ..
+            }) => starts.push(part),
             Item::Event(StreamEvent::Arguments { part, json }) => arguments.push((part, json)),
-            Item::Event(StreamEvent::End { part, content: AssistantContent::ToolCall(call), .. }) => ends.push((part, call)),
-            Item::Event(StreamEvent::Discard { .. }) => panic!("the authoritative object closes its original Part"),
+            Item::Event(StreamEvent::End {
+                part,
+                content: AssistantContent::ToolCall(call),
+                ..
+            }) => ends.push((part, call)),
+            Item::Event(StreamEvent::Discard { .. }) => {
+                panic!("the authoritative object closes its original Part")
+            }
             _ => {}
         }
     }
@@ -1004,8 +1408,14 @@ async fn whole_object_after_overflow_keeps_the_same_part_and_sticky_invalid_mark
     assert_eq!(call.function.name.as_str(), "calculator");
     assert_eq!(call.function.arguments_value(), serde_json::json!({"x":2}));
     let authoritative_raw = serde_json::json!({"x":2}).to_string();
-    assert_eq!(call.function.invalid_arguments.as_deref(), Some(authoritative_raw.as_str()));
+    assert_eq!(
+        call.function.invalid_arguments.as_deref(),
+        Some(authoritative_raw.as_str())
+    );
     let response = stream.finish().await.expect("genuine terminal succeeds");
-    assert_eq!(response.choice, vec![AssistantContent::ToolCall(call.clone())]);
+    assert_eq!(
+        response.choice,
+        vec![AssistantContent::ToolCall(call.clone())]
+    );
     assert_eq!(response.usage.total_tokens, Some(2));
 }

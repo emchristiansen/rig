@@ -1,7 +1,7 @@
 //! Protected complete/partial snapshots at canonical replay boundaries.
 
-use super::helpers::*;
 use super::super::ResponsesStreamOptions;
+use super::helpers::*;
 use crate::message::{AssistantContent, CarriedPayload, CarriedPosition, CarriedReasoningPart};
 use serde_json::json;
 
@@ -73,7 +73,10 @@ fn opaque_reasoning_part_events_survive_missing_done_and_truncation_with_known_f
             reasoning.content,
             vec![
                 CarriedReasoningPart::Summary("known".into()),
-                CarriedReasoningPart::OpaqueSummary(CarriedPayload::new(unknown.clone(), Some("openai".into())).with_position(CarriedPosition::ReasoningSummary { part_index: 1 }))
+                CarriedReasoningPart::OpaqueSummary(
+                    CarriedPayload::new(unknown.clone(), Some("openai".into()))
+                        .with_position(CarriedPosition::ReasoningSummary { part_index: 1 })
+                )
             ]
         );
         let replay = replay_opaque_choice(response.choice);
@@ -259,8 +262,6 @@ fn an_empty_ciphertext_at_done_does_not_block_the_terminal_ciphertext() {
         "real"
     );
 }
-
-
 
 /// G173: no terminal phase means no phase is invented after streamed deltas.
 #[test]

@@ -340,9 +340,7 @@ fn every_prompt_format_refuses_namespaced_and_custom_calls() {
         for (content, refusal) in unrepresentable_calls() {
             let request = request(vec![
                 Message::user("go"),
-                Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-                    content,
-                ])),
+                Message::Assistant(rig_core::message::AssistantMessage::new(vec![content])),
             ]);
             let error = render_prompt(&request, protocol).expect_err("refused, not dropped");
             assert!(
@@ -390,9 +388,9 @@ fn opaque_responses_parts_are_refused_before_request_content_is_discarded() {
             .with_id(Some("rs_1".to_owned())),
         ),
     ] {
-        let history = vec![Message::Assistant(rig_core::message::AssistantMessage::new(
-            vec![AssistantContent::text("known"), part],
-        ))];
+        let history = vec![Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![AssistantContent::text("known"), part]),
+        )];
         let request = request(history);
         for protocol in [
             ConversationProtocol::Llama3,

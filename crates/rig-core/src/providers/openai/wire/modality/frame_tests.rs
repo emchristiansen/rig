@@ -82,7 +82,9 @@ fn decoded_transcription_json_preserves_text() {
         &wire,
         &request,
         Mode::Unary,
-        [WireFrame::DecodedText("{\"text\":\"heard\u{fffd}\"}".to_owned())],
+        [WireFrame::DecodedText(
+            "{\"text\":\"heard\u{fffd}\"}".to_owned(),
+        )],
         Value::Null,
     )
     .expect("already-decoded transcription JSON still classifies and folds");
@@ -103,7 +105,11 @@ fn decoded_model_catalogue_preserves_the_reported_id_and_limits() {
         Value::Null,
     )
     .expect("already-decoded catalogue JSON still classifies and folds");
-    let model = response.models.iter().next().expect("the announced model remains");
+    let model = response
+        .models
+        .iter()
+        .next()
+        .expect("the announced model remains");
     assert_eq!(model.id, "m\u{fffd}");
     assert_eq!(model.context_length, Some(128));
     assert_eq!(model.max_output_tokens, Some(32));
@@ -131,7 +137,10 @@ fn decoded_rerank_json_preserves_score_alias_and_document() {
     assert_eq!(response.results.len(), 1);
     assert_eq!(response.results[0].index, 0);
     assert_eq!(response.results[0].relevance_score, 0.75);
-    assert_eq!(response.results[0].document.as_deref(), Some("echo\u{fffd}"));
+    assert_eq!(
+        response.results[0].document.as_deref(),
+        Some("echo\u{fffd}")
+    );
 }
 
 #[cfg(feature = "image")]
@@ -148,7 +157,9 @@ fn decoded_image_json_and_huggingface_text_keep_their_distinct_payloads() {
         &json_wire,
         &request,
         Mode::Unary,
-        [WireFrame::DecodedText("{\"data\":[{\"b64_json\":\"aGk=\"}]}".to_owned())],
+        [WireFrame::DecodedText(
+            "{\"data\":[{\"b64_json\":\"aGk=\"}]}".to_owned(),
+        )],
         Value::Null,
     )
     .expect("already-decoded image JSON still classifies and folds");
@@ -177,8 +188,8 @@ fn decoded_speech_envelope_and_raw_audio_keep_their_distinct_payloads() {
         speed: 1.0,
         additional_params: None,
     };
-    let json_wire = OpenAIConfig::with_key(&super::super::HYPERBOLIC, "test-key")
-        .audio_generation("EN");
+    let json_wire =
+        OpenAIConfig::with_key(&super::super::HYPERBOLIC, "test-key").audio_generation("EN");
     let audio = decode_reply(
         &json_wire,
         &request,

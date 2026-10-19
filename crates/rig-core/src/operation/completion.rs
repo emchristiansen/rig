@@ -23,11 +23,14 @@ use crate::completion::{CompletionRequest, CompletionResponse, FinishReason, Usa
 use crate::error::ProviderError;
 use crate::message::citation;
 use crate::message::{
-    Api, AssistantContent, CallId, CarriedPayload, CarriedReasoning, CarriedReasoningPart, CarriedText, CustomToolCall,
-    Image, LocalCallId, Opaque, Origin, ProviderItem, Reasoning, Text, ToolCall, ToolFunction,
-    ToolName,
+    Api, AssistantContent, CallId, CarriedPayload, CarriedReasoning, CarriedReasoningPart,
+    CarriedText, CustomToolCall, Image, LocalCallId, Opaque, Origin, ProviderItem, Reasoning, Text,
+    ToolCall, ToolFunction, ToolName,
 };
-use crate::streaming::{DiscardReason, Item, Part, PartKind, ReasoningAuthority, SourceOrder, StreamEvent, ToolSlotState};
+use crate::streaming::{
+    DiscardReason, Item, Part, PartKind, ReasoningAuthority, SourceOrder, StreamEvent,
+    ToolSlotState,
+};
 use crate::telemetry::{GenAiOperation, SpanBuilder, SpanCombinator};
 use crate::wire::{
     Assembled, Call, Descriptor, Emit, Fold, Mode, Operation, Out, Reply, Shared, WireCitation,
@@ -423,7 +426,8 @@ impl Arguments {
     /// The call to `name` these arguments make: the announced ones when no
     /// fragment arrived, else the text, read by [`ToolFunction::parse`].
     fn function(&self, name: ToolName) -> ToolFunction {
-        if !self.overflowed && self.text.is_empty()
+        if !self.overflowed
+            && self.text.is_empty()
             && let Some(announced) = &self.announced
         {
             return ToolFunction::new(name, announced.clone());
@@ -548,9 +552,13 @@ fn stream_call(items: &mut Items, draft: &mut Draft) {
     let start = match draft.tool_slot_state {
         None => {
             if !draft.started {
-                let Ok(name) = ToolName::new(name.clone()) else { return; };
+                let Ok(name) = ToolName::new(name.clone()) else {
+                    return;
+                };
                 Some((Some(name), None))
-            } else { None }
+            } else {
+                None
+            }
         }
         Some(ToolSlotState::PendingName) => {
             if let Ok(name) = ToolName::new(name.clone()) {
@@ -558,20 +566,25 @@ fn stream_call(items: &mut Items, draft: &mut Draft) {
                 Some((Some(name), Some(ToolSlotState::Named)))
             } else if !draft.started {
                 Some((None, Some(ToolSlotState::PendingName)))
-            } else { None }
+            } else {
+                None
+            }
         }
         Some(ToolSlotState::Named) => None,
     };
     if let Some((name, tool_slot_state)) = start {
         draft.started = true;
-        emit(items, StreamEvent::Start {
-            part: draft.part,
-            source_order: draft.source_order,
-            kind: PartKind::ToolCall,
-            name,
-            namespace: namespace.clone(),
-            tool_slot_state,
-        });
+        emit(
+            items,
+            StreamEvent::Start {
+                part: draft.part,
+                source_order: draft.source_order,
+                kind: PartKind::ToolCall,
+                name,
+                namespace: namespace.clone(),
+                tool_slot_state,
+            },
+        );
     }
     let json = match draft.tool_slot_state {
         None => arguments.unstreamed(),
@@ -836,7 +849,10 @@ impl Turn {
         reasoning_authority: Option<ReasoningAuthority>,
     ) -> Result<(), ProviderError> {
         if reasoning_authority.is_some()
-            && !matches!(self.open.get(&index).map(|draft| &draft.body), Some(Body::Reasoning { .. }))
+            && !matches!(
+                self.open.get(&index).map(|draft| &draft.body),
+                Some(Body::Reasoning { .. })
+            )
         {
             return Err(ProviderError::Response(format!(
                 "the reply assigned reasoning authority to item {index}, which is not reasoning"
@@ -922,7 +938,14 @@ impl Turn {
                 }
                 let call = CustomToolCall::new(id, name, input).with_namespace(namespace);
                 let content = with_item(AssistantContent::CustomToolCall(call), item);
-                emit(items, StreamEvent::End { part, content, reasoning_authority: None });
+                emit(
+                    items,
+                    StreamEvent::End {
+                        part,
+                        content,
+                        reasoning_authority: None,
+                    },
+                );
                 return Ok(());
             }
             Body::Call {
@@ -948,7 +971,14 @@ impl Turn {
                 }
                 let call = ToolCall::new(id, function);
                 let content = with_item(AssistantContent::ToolCall(call), item);
-                emit(items, StreamEvent::End { part, content, reasoning_authority: None });
+                emit(
+                    items,
+                    StreamEvent::End {
+                        part,
+                        content,
+                        reasoning_authority: None,
+                    },
+                );
                 return Ok(());
             }
         };
@@ -965,7 +995,14 @@ impl Turn {
                 },
             );
         }
-        emit(items, StreamEvent::End { part, content, reasoning_authority });
+        emit(
+            items,
+            StreamEvent::End {
+                part,
+                content,
+                reasoning_authority,
+            },
+        );
         Ok(())
     }
 
@@ -1049,14 +1086,20 @@ impl Turn {
                 citation::attach(text, kept, citations, provider, index);
             }
             Some(AssistantContent::CarriedText(text))
-                if matches!(&text.content,
+                if matches!(
+                    &text.content,
                     crate::message::CarriedTextContent::Text(_)
-                    | crate::message::CarriedTextContent::Refusal(_)
-                    | crate::message::CarriedTextContent::GeminiSignedAnswer(_)
-                    | crate::message::CarriedTextContent::InspectionOnlyText(_)
-                    | crate::message::CarriedTextContent::InspectionOnlyMedia(_)) =>
+                        | crate::message::CarriedTextContent::Refusal(_)
+                        | crate::message::CarriedTextContent::GeminiSignedAnswer(_)
+                        | crate::message::CarriedTextContent::InspectionOnlyText(_)
+                        | crate::message::CarriedTextContent::InspectionOnlyMedia(_)
+                ) =>
             {
-                let kept = if replace { Vec::new() } else { text.citations().to_vec() };
+                let kept = if replace {
+                    Vec::new()
+                } else {
+                    text.citations().to_vec()
+                };
                 citation::attach_carried(text, kept, citations, provider, index);
             }
             _ => tracing::warn!(
@@ -1207,7 +1250,14 @@ impl Turn {
             ),
             _ => {}
         }
-        emit(items, StreamEvent::End { part, content, reasoning_authority: None });
+        emit(
+            items,
+            StreamEvent::End {
+                part,
+                content,
+                reasoning_authority: None,
+            },
+        );
         Ok(())
     }
 
@@ -1294,9 +1344,11 @@ impl Turn {
         // it can then need a partner that never arrived.
         let unfinished = end.is_none()
             || !self.open.is_empty()
-            || self.choice.iter().enumerate().any(|(position, part)| {
-                part.is_none() && !self.discarded.contains(&position)
-            });
+            || self
+                .choice
+                .iter()
+                .enumerate()
+                .any(|(position, part)| part.is_none() && !self.discarded.contains(&position));
         let canonical_from = if unfinished {
             Some(0)
         } else {
@@ -1809,14 +1861,18 @@ impl<'id> Out<'id, Completion> {
         let Shared { fold, items, .. } = &mut *shared;
         if let Some(draft) = fold.open.get_mut(&index) {
             if let Some(fields) = draft.item.as_object_mut() {
-                fields.insert("thoughtSignature".to_owned(), serde_json::Value::from(signature));
+                fields.insert(
+                    "thoughtSignature".to_owned(),
+                    serde_json::Value::from(signature),
+                );
             }
             return Ok(());
         }
         let position = *fold.ended.get(&index).ok_or_else(|| not_open(index))?;
         let queued = items.iter_mut().find_map(|item| match item {
-            Ok(Item::Event(StreamEvent::End { part, content, .. }))
-                if part.index() == position => Some(content),
+            Ok(Item::Event(StreamEvent::End { part, content, .. })) if part.index() == position => {
+                Some(content)
+            }
             _ => None,
         });
         let content = queued.or_else(|| fold.choice.get_mut(position).and_then(Option::as_mut));
@@ -1827,29 +1883,48 @@ impl<'id> Out<'id, Completion> {
             AssistantContent::CarriedText(text) => {
                 if text.payload.provider.as_deref() == Some(selected_issuer)
                     && let Some(fields) = text.payload.item.as_object_mut()
-                    && fields.get("thoughtSignature").is_some_and(serde_json::Value::is_string)
-                    && let crate::message::CarriedTextContent::GeminiSignedAnswer(answer) = &mut text.content
+                    && fields
+                        .get("thoughtSignature")
+                        .is_some_and(serde_json::Value::is_string)
+                    && let crate::message::CarriedTextContent::GeminiSignedAnswer(answer) =
+                        &mut text.content
                 {
                     answer.signature = crate::message::GeminiThoughtSignature::new(signature);
-                    fields.insert("thoughtSignature".to_owned(), serde_json::Value::from(signature));
+                    fields.insert(
+                        "thoughtSignature".to_owned(),
+                        serde_json::Value::from(signature),
+                    );
                     return Ok(());
                 }
             }
             AssistantContent::CarriedReasoning(reasoning) => {
                 if reasoning.payload.provider.as_deref() == Some(selected_issuer)
-                    && let [CarriedReasoningPart::Text { signature: Some(held), .. }] = reasoning.content.as_mut_slice()
+                    && let [
+                        CarriedReasoningPart::Text {
+                            signature: Some(held),
+                            ..
+                        },
+                    ] = reasoning.content.as_mut_slice()
                     && let Some(fields) = reasoning.payload.item.as_object_mut()
-                    && fields.get("thoughtSignature").is_some_and(serde_json::Value::is_string)
+                    && fields
+                        .get("thoughtSignature")
+                        .is_some_and(serde_json::Value::is_string)
                 {
                     *held = signature.to_owned();
-                    fields.insert("thoughtSignature".to_owned(), serde_json::Value::from(signature));
+                    fields.insert(
+                        "thoughtSignature".to_owned(),
+                        serde_json::Value::from(signature),
+                    );
                     return Ok(());
                 }
             }
             _ => {}
         }
         if let Some(fields) = item_of(content).and_then(serde_json::Value::as_object_mut) {
-            fields.insert("thoughtSignature".to_owned(), serde_json::Value::from(signature));
+            fields.insert(
+                "thoughtSignature".to_owned(),
+                serde_json::Value::from(signature),
+            );
         }
         Ok(())
     }
@@ -1909,7 +1984,13 @@ impl<'id> Out<'id, Completion> {
             let mut shared = self.lock();
             let Shared { fold, items, .. } = &mut *shared;
             let draft = fold.draft(index)?;
-            let Body::Call { id: Some(id), name, arguments, .. } = &mut draft.body else {
+            let Body::Call {
+                id: Some(id),
+                name,
+                arguments,
+                ..
+            } = &mut draft.body
+            else {
                 return Err(ProviderError::Response(format!(
                     "the reply finalized item {index} at a provider terminal without a named function call and retained ID"
                 )));
@@ -1917,7 +1998,10 @@ impl<'id> Out<'id, Completion> {
             ToolName::new(name.clone())
                 .map_err(|error| ProviderError::Response(error.to_string()))?;
             let parsed = if !arguments.saw_fragments {
-                arguments.announced.clone().map(Ok)
+                arguments
+                    .announced
+                    .clone()
+                    .map(Ok)
                     .unwrap_or_else(|| crate::json_utils::parse_tool_arguments(&arguments.text))
             } else {
                 crate::json_utils::parse_tool_arguments(&arguments.text).and_then(|value| {
@@ -1925,15 +2009,19 @@ impl<'id> Out<'id, Completion> {
                         Err(<serde_json::Error as serde::de::Error>::custom(
                             "tool-call input exceeded the accumulation bound",
                         ))
-                    } else { Ok(value) }
+                    } else {
+                        Ok(value)
+                    }
                 })
             };
             match parsed {
                 Err(error) => {
-                    let provider = id.provider().map(|call_id| crate::error::ProviderCallEvidence {
-                        call_id: call_id.clone(),
-                        item_id: None,
-                    });
+                    let provider =
+                        id.provider()
+                            .map(|call_id| crate::error::ProviderCallEvidence {
+                                call_id: call_id.clone(),
+                                item_id: None,
+                            });
                     Some((arguments.text.clone(), error.to_string(), provider))
                 }
                 Ok(_) => {
@@ -1951,7 +2039,9 @@ impl<'id> Out<'id, Completion> {
             }
         };
         match malformed {
-            Some((raw, error, provider)) => Err(self.malformed_call_error(index, raw, error, provider)),
+            Some((raw, error, provider)) => {
+                Err(self.malformed_call_error(index, raw, error, provider))
+            }
             None => Ok(()),
         }
     }
@@ -2100,8 +2190,9 @@ impl<'id> Out<'id, Completion> {
         let position = *fold.ended.get(&index).ok_or_else(|| not_open(index))?;
         let order = fold.source_orders.get(&position).copied();
         let queued = items.iter_mut().find_map(|item| match item {
-            Ok(Item::Event(StreamEvent::End { part, content, .. }))
-                if part.index() == position => Some(content),
+            Ok(Item::Event(StreamEvent::End { part, content, .. })) if part.index() == position => {
+                Some(content)
+            }
             _ => None,
         });
         let content = queued.or_else(|| fold.choice.get_mut(position).and_then(Option::as_mut));
@@ -2110,8 +2201,12 @@ impl<'id> Out<'id, Completion> {
             return Ok(false);
         };
         if let AssistantContent::CarriedText(text) = content {
-            if matches!(&text.content, crate::message::CarriedTextContent::InspectionOnlyText(_)) {
-                let expected = anthropic_paused_text(text.text(), &text.payload.item, &issuer, order)?;
+            if matches!(
+                &text.content,
+                crate::message::CarriedTextContent::InspectionOnlyText(_)
+            ) {
+                let expected =
+                    anthropic_paused_text(text.text(), &text.payload.item, &issuer, order)?;
                 if text.payload == expected.payload {
                     return Ok(true);
                 }
@@ -2129,9 +2224,11 @@ impl<'id> Out<'id, Completion> {
             return Ok(false);
         }
         let native = AssistantContent::Text(text.clone());
-        let item = native.native_item().ok_or_else(|| ProviderError::Response(format!(
-            "paused item {index} has no current native text evidence"
-        )))?;
+        let item = native.native_item().ok_or_else(|| {
+            ProviderError::Response(format!(
+                "paused item {index} has no current native text evidence"
+            ))
+        })?;
         let carried = anthropic_paused_text(&text.text, item, &issuer, order)?
             .with_citations(text.citations().iter().cloned());
         *content = AssistantContent::CarriedText(carried);
@@ -2410,10 +2507,14 @@ impl<'id> Out<'id, Completion> {
         let Shared {
             fold: turn, items, ..
         } = &mut *shared;
-        if pending && (fragment.name.is_some_and(|name| !name.is_empty())
-            || index.and_then(|index| turn.open.get(&index)).is_some_and(|draft| {
-                draft.started || !matches!(&draft.body, Body::Call { name, .. } if name.is_empty())
-            }))
+        if pending
+            && (fragment.name.is_some_and(|name| !name.is_empty())
+                || index
+                    .and_then(|index| turn.open.get(&index))
+                    .is_some_and(|draft| {
+                        draft.started
+                            || !matches!(&draft.body, Body::Call { name, .. } if name.is_empty())
+                    }))
         {
             return Err(ProviderError::Response(
                 "the reply opened a pending tool slot after it was named or started".to_owned(),
@@ -2429,7 +2530,10 @@ impl<'id> Out<'id, Completion> {
                         arguments,
                         ..
                     } if new_id.is_some_and(|new| id.wire() != new)
-                        && draft.tool_slot_state != Some(ToolSlotState::PendingName) => Some(arguments.complete()),
+                        && draft.tool_slot_state != Some(ToolSlotState::PendingName) =>
+                    {
+                        Some(arguments.complete())
+                    }
                     _ => None,
                 });
                 if let Some(complete) = held.filter(|complete| *complete || names) {

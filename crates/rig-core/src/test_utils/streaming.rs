@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use crate::completion::{CompletionResponse, Usage};
-use crate::message::{CarriedPayload, CarriedReasoning, CarriedReasoningPart};
 use crate::error::ProviderError;
+use crate::message::{CarriedPayload, CarriedReasoning, CarriedReasoningPart};
 use crate::operation::{Block, CallFragment, Completion, Finish};
 use crate::wire::{Decoder, Flow, Out, WireEvent};
 
@@ -46,7 +46,9 @@ fn merge_fixture_metadata(
                 for (key, value) in incoming {
                     match existing.get_mut(&key) {
                         Some(existing) => merge_value(existing, value),
-                        None => { existing.insert(key, value); }
+                        None => {
+                            existing.insert(key, value);
+                        }
                     }
                 }
             }
@@ -59,7 +61,9 @@ fn merge_fixture_metadata(
     if !item.is_object() {
         *item = serde_json::Value::Object(serde_json::Map::new());
     }
-    let Some(item) = item.as_object_mut() else { return; };
+    let Some(item) = item.as_object_mut() else {
+        return;
+    };
     for (key, value) in fields {
         let atomic = key == "openai_responses_part"
             && value.get("kind").and_then(serde_json::Value::as_str) == Some("opaque")
@@ -69,7 +73,9 @@ fn merge_fixture_metadata(
         } else {
             match item.get_mut(&key) {
                 Some(existing) => merge_value(existing, value),
-                None => { item.insert(key, value); }
+                None => {
+                    item.insert(key, value);
+                }
             }
         }
     }
@@ -110,7 +116,10 @@ pub enum MockStreamEvent {
     /// what they carried, as a wire's step-stop does.
     ToolCallEnd { id: String },
     /// Complete reasoning event.
-    Reasoning { id: String, content: CarriedReasoningPart },
+    Reasoning {
+        id: String,
+        content: CarriedReasoningPart,
+    },
     /// Reasoning delta event.
     ReasoningDelta { id: String, reasoning: String },
     /// The genuine provider-issued assistant message ID, independent of the terminal.
@@ -479,7 +488,10 @@ impl<'id> MockDecoder<'id> {
             MockStreamEvent::ToolCallArgumentsDelta { id, arguments } => {
                 out.end_run()?;
                 let index = self.call_index(&mut out, &id);
-                self.call_inputs.entry(index).or_default().append(&arguments);
+                self.call_inputs
+                    .entry(index)
+                    .or_default()
+                    .append(&arguments);
                 out.fragment(
                     Some(index),
                     CallFragment {
@@ -495,11 +507,13 @@ impl<'id> MockDecoder<'id> {
                 } else {
                     self.calls.remove(&id)
                 };
-                let Some(index) = index else { return Ok(Flow::More); };
+                let Some(index) = index else {
+                    return Ok(Flow::More);
+                };
                 let input = self.call_inputs.remove(&index).unwrap_or_default();
                 if input.named {
-                    let parsed = crate::json_utils::parse_tool_arguments(&input.raw)
-                        .and_then(|arguments| {
+                    let parsed =
+                        crate::json_utils::parse_tool_arguments(&input.raw).and_then(|arguments| {
                             if input.overflowed {
                                 Err(<serde_json::Error as serde::de::Error>::custom(
                                     "tool-call input exceeded the accumulation bound",
@@ -516,18 +530,27 @@ impl<'id> MockDecoder<'id> {
                                 item_id: None,
                             });
                         return Err(out.malformed_call_error(
-                            index, input.raw, error.to_string(), provider,
+                            index,
+                            input.raw,
+                            error.to_string(),
+                            provider,
                         ));
                     }
                 }
                 out.finish(index)?;
             }
-            ref received @ MockStreamEvent::Reasoning { ref id, ref content } => {
+            ref received @ MockStreamEvent::Reasoning {
+                ref id,
+                ref content,
+            } => {
                 // Capture the received record before moving or converting its content.
                 let item = serde_json::to_value(received)?;
                 out.end_run()?;
                 match content {
-                    CarriedReasoningPart::Text { text, signature: None } => {
+                    CarriedReasoningPart::Text {
+                        text,
+                        signature: None,
+                    } => {
                         // The unsigned helper retains U's delta-close behavior.
                         match self.reasoning.iter().position(|(open, _)| open == id) {
                             Some(at) => {
@@ -545,7 +568,9 @@ impl<'id> MockDecoder<'id> {
                             }
                         }
                     }
-                    CarriedReasoningPart::Text { signature: Some(_), .. }
+                    CarriedReasoningPart::Text {
+                        signature: Some(_), ..
+                    }
                     | CarriedReasoningPart::Summary(_)
                     | CarriedReasoningPart::Encrypted(_)
                     | CarriedReasoningPart::Redacted { .. }
@@ -554,7 +579,8 @@ impl<'id> MockDecoder<'id> {
                         let reasoning = CarriedReasoning::new(
                             vec![content.clone()],
                             CarriedPayload::new(item, Some(MOCK_PROVIDER.to_owned())),
-                        ).with_id(fixture_provider_id(id).map(str::to_owned));
+                        )
+                        .with_id(fixture_provider_id(id).map(str::to_owned));
                         match self.reasoning.iter().position(|(open, _)| open == id) {
                             Some(at) => {
                                 let (_, index) = self.reasoning.remove(at);

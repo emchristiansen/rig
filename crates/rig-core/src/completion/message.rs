@@ -33,10 +33,10 @@ mod identity;
 pub use carried::{
     AnsweredToolCall, CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart,
     CarriedText, CarriedTextContent, CarriedTextReplay, CarriedTextReplayError, CustomToolCall,
-    GeminiSignedAnswer, GeminiThoughtSignature, ProviderItem,
-    UndispatchableToolCall, UnreplayableProviderItem, UnrepresentableOpaqueContent,
-    UnrepresentableToolCall, first_undispatchable_call, json_only_wire_tool_call,
-    name_dispatchable_call, retain_replayable_provider_items,
+    GeminiSignedAnswer, GeminiThoughtSignature, ProviderItem, UndispatchableToolCall,
+    UnreplayableProviderItem, UnrepresentableOpaqueContent, UnrepresentableToolCall,
+    first_undispatchable_call, json_only_wire_tool_call, name_dispatchable_call,
+    retain_replayable_provider_items,
 };
 mod native;
 
@@ -530,9 +530,7 @@ impl ToolResult {
                                     .map(|(index, _)| index)
                                     .collect();
                                 if candidates.len() > 1 {
-                                    candidates.retain(|index| {
-                                        pending[*index].name == &result.name
-                                    });
+                                    candidates.retain(|index| pending[*index].name == &result.name);
                                 }
                                 if let [index] = candidates.as_slice() {
                                     pending.remove(*index);

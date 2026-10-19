@@ -236,13 +236,7 @@ fn test_deserialize_message_user() {
         let function_call: FunctionCall =
             serde_json::from_value(parts[2]["functionCall"].clone()).expect("function call");
         assert_eq!(function_call.name, "test_function");
-        assert_eq!(
-            function_call
-                .args
-                .get("arg1")
-                .expect("arg1"),
-            "value1"
-        );
+        assert_eq!(function_call.args.get("arg1").expect("arg1"), "value1");
     } else {
         panic!("Expected function call part");
     }
@@ -341,13 +335,11 @@ fn future_metadata_labels_keep_their_exact_string_values() {
             "promptTokenCount": 3, "candidatesTokenCount": 2, "totalTokenCount": 5
         }
     });
-    let wire = crate::providers::gemini::GeminiConfig::new("test-key")
-        .completion("gemini-2.5-flash");
-    let response = crate::test_utils::history::decode(
-        &wire,
-        Mode::Unary,
-        [WireFrame::Text(body.to_string())],
-    ).expect("future metadata labels do not reject the real reply");
+    let wire =
+        crate::providers::gemini::GeminiConfig::new("test-key").completion("gemini-2.5-flash");
+    let response =
+        crate::test_utils::history::decode(&wire, Mode::Unary, [WireFrame::Text(body.to_string())])
+            .expect("future metadata labels do not reject the real reply");
     let raw_usage = &response.raw["usageMetadata"];
     assert_eq!(raw_usage["trafficType"], "ON_DEMAND_PRIORITY");
     assert_eq!(raw_usage["promptTokensDetails"][0]["modality"], "HOLOGRAM");
@@ -392,8 +384,14 @@ fn absent_function_args_default_but_explicit_nonobjects_refuse() {
     assert_eq!(call.args, Map::from_iter([("x".to_owned(), json!(1))]));
     for args in [json!(null), json!([]), json!("{}"), json!(1), json!(true)] {
         let call = json!({"name": "add", "args": args});
-        assert!(serde_json::from_value::<FunctionCall>(call.clone()).is_err(), "{call}");
+        assert!(
+            serde_json::from_value::<FunctionCall>(call.clone()).is_err(),
+            "{call}"
+        );
         let reply = json!({"candidates": [{"content": {"parts": [{"functionCall": call}]}}]});
-        assert!(read(reply.as_object().expect("a reply object")).is_err(), "{reply}");
+        assert!(
+            read(reply.as_object().expect("a reply object")).is_err(),
+            "{reply}"
+        );
     }
 }

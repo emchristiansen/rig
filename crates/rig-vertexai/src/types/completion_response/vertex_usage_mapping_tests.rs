@@ -46,7 +46,6 @@ fn tool_use_prompt_tokens_are_input_in_the_real_conversion() {
     assert_eq!(usage.total_tokens, Some(239));
 }
 
-
 /// Supply one actual SDK response with the same whole-document capture as the Vertex transport.
 #[derive(Clone)]
 struct SingleReply(vertexai::model::GenerateContentResponse);
@@ -60,8 +59,10 @@ impl rig_core::driver::Transport<crate::completion::GenerateContent> for SingleR
         let response = self.0.clone();
         rig_core::driver::Opening::new(async move {
             let document = serde_json::Value::Object(rest_chunk(&response)?);
-            Ok(rig_core::driver::Opened::new(futures::stream::iter([Ok(response)]))
-                .with_document(document))
+            Ok(
+                rig_core::driver::Opened::new(futures::stream::iter([Ok(response)]))
+                    .with_document(document),
+            )
         })
     }
 }
@@ -113,7 +114,10 @@ fn thinking_tokens_without_a_finish_remain_raw_and_unary_is_truncated() {
                 saw_truncated = true;
             }
         }
-        assert!(saw_truncated, "a reply without a finish reason is truncated");
+        assert!(
+            saw_truncated,
+            "a reply without a finish reason is truncated"
+        );
         let partial = stream.partial();
         assert_eq!(partial.text(), "hi");
         assert_eq!(partial.choice.len(), 1);
@@ -127,13 +131,24 @@ fn thinking_tokens_without_a_finish_remain_raw_and_unary_is_truncated() {
             ("totalTokenCount", 270),
             ("cachedContentTokenCount", 9),
         ] {
-            assert_eq!(partial.raw["usageMetadata"][field], serde_json::json!(count));
+            assert_eq!(
+                partial.raw["usageMetadata"][field],
+                serde_json::json!(count)
+            );
         }
-        assert_eq!(partial.raw["candidates"][0]["content"]["parts"], serde_json::json!([{ "text": "hi" }]));
+        assert_eq!(
+            partial.raw["candidates"][0]["content"]["parts"],
+            serde_json::json!([{ "text": "hi" }])
+        );
         assert!(partial.raw["candidates"][0].get("finishReason").is_none());
-        assert!(matches!(stream.finish().await, Err(ProviderError::Truncated)));
         assert!(matches!(
-            model.call(rig_core::completion::CompletionRequest::new("hello")).await,
+            stream.finish().await,
+            Err(ProviderError::Truncated)
+        ));
+        assert!(matches!(
+            model
+                .call(rig_core::completion::CompletionRequest::new("hello"))
+                .await,
             Err(ProviderError::Truncated)
         ));
     });
@@ -153,12 +168,19 @@ fn completed_thinking_tokens_include_candidate_and_reasoning_output() {
     );
     let converted = futures::executor::block_on(
         model.call(rig_core::completion::CompletionRequest::new("hello")),
-    ).expect("the original response with only STOP added completes");
+    )
+    .expect("the original response with only STOP added completes");
     assert_eq!(converted.text(), "hi");
     assert_eq!(converted.choice.len(), 1);
-    assert_eq!(converted.finish_reason(), Some(rig_core::completion::FinishReason::Stop));
+    assert_eq!(
+        converted.finish_reason(),
+        Some(rig_core::completion::FinishReason::Stop)
+    );
     assert_eq!(converted.raw, expected_raw);
-    assert_eq!(converted.raw["candidates"][0]["finishReason"], serde_json::json!("STOP"));
+    assert_eq!(
+        converted.raw["candidates"][0]["finishReason"],
+        serde_json::json!("STOP")
+    );
     assert_eq!(converted.usage.reasoning_tokens, Some(222));
     assert_eq!(converted.usage.cached_input_tokens, Some(9));
     assert_eq!(converted.usage.input_tokens, Some(14));

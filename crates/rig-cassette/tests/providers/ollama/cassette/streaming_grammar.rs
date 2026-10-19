@@ -157,4 +157,3 @@ async fn thinking_and_tool_call_in_one_stream() {
     )
     .await;
 }
-

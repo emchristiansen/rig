@@ -21,9 +21,11 @@ fn decoded(reply: &Value, mode: Mode) -> Result<CompletionResponse, ProviderErro
 
 #[test]
 fn rest_unary_and_streamed_finish_include_tool_input_and_reasoning_output() {
-    let raw = reply(Some(json!({"promptTokenCount": 100, "toolUsePromptTokenCount": 75,
+    let raw = reply(Some(
+        json!({"promptTokenCount": 100, "toolUsePromptTokenCount": 75,
         "cachedContentTokenCount": 40, "candidatesTokenCount": 30,
-        "thoughtsTokenCount": 34, "totalTokenCount": 239})));
+        "thoughtsTokenCount": 34, "totalTokenCount": 239}),
+    ));
     for mode in [Mode::Unary, Mode::Streaming] {
         let response = decoded(&raw, mode).expect("the real REST decoder completes");
         assert_eq!(response.usage.input_tokens, Some(175));
@@ -56,8 +58,10 @@ fn rest_missing_candidate_and_base_counts_preserve_their_existing_limits() {
         assert_eq!(response.usage.reasoning_tokens, Some(34));
         assert_eq!(response.raw, raw);
 
-        let raw = reply(Some(json!({"candidatesTokenCount": 30, "thoughtsTokenCount": 34,
-            "totalTokenCount": 7})));
+        let raw = reply(Some(
+            json!({"candidatesTokenCount": 30, "thoughtsTokenCount": 34,
+            "totalTokenCount": 7}),
+        ));
         let response = decoded(&raw, mode).expect("reported total is retained");
         assert_eq!(response.usage.input_tokens, Some(0));
         assert_eq!(response.usage.output_tokens, Some(64));
@@ -87,10 +91,14 @@ fn rest_missing_candidate_and_base_counts_preserve_their_existing_limits() {
 fn rest_negative_cast_addition_overflows_are_typed_response_errors() {
     for mode in [Mode::Unary, Mode::Streaming] {
         for (usage, message) in [
-            (json!({"promptTokenCount": -1, "toolUsePromptTokenCount": 1}),
-                "Gemini input token count overflow"),
-            (json!({"candidatesTokenCount": -1, "thoughtsTokenCount": 1}),
-                "Gemini output token count overflow"),
+            (
+                json!({"promptTokenCount": -1, "toolUsePromptTokenCount": 1}),
+                "Gemini input token count overflow",
+            ),
+            (
+                json!({"candidatesTokenCount": -1, "thoughtsTokenCount": 1}),
+                "Gemini output token count overflow",
+            ),
         ] {
             let raw = reply(Some(usage));
             let error = decoded(&raw, mode).expect_err("the existing signed cast reaches overflow");
@@ -109,7 +117,10 @@ fn public_usage_helper_retains_its_raw_counter_and_signed_cast_behavior() {
     let raw = json!({"promptTokenCount": 100, "toolUsePromptTokenCount": 75,
         "cachedContentTokenCount": 40, "candidatesTokenCount": 30,
         "thoughtsTokenCount": 34, "totalTokenCount": 239});
-    assert_eq!(checked_usage_of(&raw).expect("canonical counts fit").cost, None);
+    assert_eq!(
+        checked_usage_of(&raw).expect("canonical counts fit").cost,
+        None
+    );
     let usage = usage_of(&raw);
     assert_eq!(usage.input_tokens, Some(100));
     assert_eq!(usage.output_tokens, Some(30));

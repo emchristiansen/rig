@@ -293,23 +293,43 @@ fn raw_reasoning_text_is_not_written_into_the_item_as_a_summary() {
     assert_eq!(reasoning.display_text(), "raw chain");
     assert_eq!(reasoning.payload.item["summary"], json!([]));
     let response = decoded.outcome.expect("genuine completed reply");
-    assert_eq!(response.raw["output"][0], done, "the provider's done item remains exact raw evidence");
+    assert_eq!(
+        response.raw["output"][0], done,
+        "the provider's done item remains exact raw evidence"
+    );
     // G204: replayed_input is the complete q/assistant/next request.
     let input = replayed_input(&response);
     assert_eq!(input.len(), 3);
-    assert_eq!(input[0], json!({"type":"message","role":"user",
-        "content":[{"type":"input_text","text":"q"}]}));
-    assert_eq!(input[2], json!({"type":"message","role":"user",
-        "content":[{"type":"input_text","text":"next"}]}));
-    assert_eq!(input.iter().map(|item| (item["type"].clone(), item["id"].clone()))
-        .collect::<Vec<_>>(), [
+    assert_eq!(
+        input[0],
+        json!({"type":"message","role":"user",
+        "content":[{"type":"input_text","text":"q"}]})
+    );
+    assert_eq!(
+        input[2],
+        json!({"type":"message","role":"user",
+        "content":[{"type":"input_text","text":"next"}]})
+    );
+    assert_eq!(
+        input
+            .iter()
+            .map(|item| (item["type"].clone(), item["id"].clone()))
+            .collect::<Vec<_>>(),
+        [
             (json!("message"), serde_json::Value::Null),
             (json!("reasoning"), json!("rs_1")),
             (json!("message"), serde_json::Value::Null),
-        ]);
-    let replayed = input.iter().find(|item| item["id"] == "rs_1" && item["type"] == "reasoning")
+        ]
+    );
+    let replayed = input
+        .iter()
+        .find(|item| item["id"] == "rs_1" && item["type"] == "reasoning")
         .expect("the actual received reasoning item replays inside the full ordered input");
-    assert_eq!(replayed["summary"], json!([]), "raw reasoning never becomes a fabricated summary");
+    assert_eq!(
+        replayed["summary"],
+        json!([]),
+        "raw reasoning never becomes a fabricated summary"
+    );
 }
 
 /// A `response.failed` after a fully-delivered tool call: the call ended
@@ -451,12 +471,17 @@ async fn refusal_content_part_frames_are_no_ops_and_refusal_text_streams() {
     let mut stream = responses_stream_of(&events).await;
     let mut delivered = String::new();
     while let Some(item) = stream.next().await {
-        if let Item::Event(StreamEvent::Text { text, .. }) = item.expect("refusal part frames never yield an error") {
+        if let Item::Event(StreamEvent::Text { text, .. }) =
+            item.expect("refusal part frames never yield an error")
+        {
             delivered.push_str(&text);
         }
     }
     assert_eq!(delivered, "I can't help with that.");
-    assert!(stream.finish().await.is_ok(), "the real public stream retains its genuine terminal");
+    assert!(
+        stream.finish().await.is_ok(),
+        "the real public stream retains its genuine terminal"
+    );
 }
 
 /// The `max_output_tokens`-mid-tool-call shape: `arguments_delta` frames
@@ -498,13 +523,28 @@ fn a_cut_off_call_keeps_what_its_arguments_state() {
                 _ => None,
             })
             .collect();
-        assert!(calls.is_empty(), "A17 preserves the protected incomplete verdict: {:?}", decoded.events());
-        assert!(decoded.items.iter().any(|item| matches!(item,
-            Ok(Item::Event(StreamEvent::Discard { reason: crate::streaming::DiscardReason::Incomplete, .. }))
-        )), "the actual part closes explicitly as incomplete: {:?}", decoded.events());
-        assert!(decoded.items.iter().all(|item| !matches!(item,
-            Err(error) if !matches!(error, crate::error::ProviderError::Truncated)
-        )), "dropping an incomplete call is not an error");
+        assert!(
+            calls.is_empty(),
+            "A17 preserves the protected incomplete verdict: {:?}",
+            decoded.events()
+        );
+        assert!(
+            decoded.items.iter().any(|item| matches!(
+                item,
+                Ok(Item::Event(StreamEvent::Discard {
+                    reason: crate::streaming::DiscardReason::Incomplete,
+                    ..
+                }))
+            )),
+            "the actual part closes explicitly as incomplete: {:?}",
+            decoded.events()
+        );
+        assert!(
+            decoded.items.iter().all(|item| !matches!(item,
+                Err(error) if !matches!(error, crate::error::ProviderError::Truncated)
+            )),
+            "dropping an incomplete call is not an error"
+        );
     }
 }
 
@@ -640,8 +680,14 @@ async fn a_malformed_frame_ends_the_reply() {
     assert_eq!(text, "hello");
     let error = error.expect("malformed frame should surface an error item");
     assert_eq!(error.kind(), ErrorKind::Json, "{error:?}");
-    assert!(matches!(error.report().detail, Some(crate::error::ErrorDetail::CorruptFrame(_))));
-    let response = stream.finish().await.expect("the drained typed corruption does not suppress the genuine terminal");
+    assert!(matches!(
+        error.report().detail,
+        Some(crate::error::ErrorDetail::CorruptFrame(_))
+    ));
+    let response = stream
+        .finish()
+        .await
+        .expect("the drained typed corruption does not suppress the genuine terminal");
     assert_eq!(response.response_id(), Some("resp_123"));
 }
 
@@ -675,19 +721,38 @@ fn empty_item_ids_identify_nothing_and_do_not_panic() {
     let decoded = decoded_body(&body_of(&events));
     assert_eq!(texts_of(&decoded.events()), ["still text"]);
     let driven = super::helpers::drive(&events);
-    assert!(driven.errors.is_empty(), "empty IDs remain harmless through the public stream");
-    assert_eq!(super::helpers::folded_texts(&driven.response.choice), ["still text"]);
-    assert!(driven.response.message_id.is_none(), "an empty provider message ID names nothing");
-    assert!(driven.response.choice.iter().all(|content| match content {
-        AssistantContent::CarriedText(text) => text.item_id.as_deref().is_none_or(|id| !id.is_empty()),
-        _ => true,
-    }), "the delivered partial history never contains an empty message identity");
-    assert!(decoded.ended().iter().all(|content| match content {
-        AssistantContent::CarriedText(text) => text.item_id.as_deref().is_none_or(|id| !id.is_empty()),
-        AssistantContent::ToolCall(call) => call.id.provider().is_none_or(|id| !id.as_str().is_empty()),
-        AssistantContent::CustomToolCall(call) => call.id.provider().is_none_or(|id| !id.as_str().is_empty()),
-        _ => true,
-    }), "no canonical content is keyed by an empty provider identity");
+    assert!(
+        driven.errors.is_empty(),
+        "empty IDs remain harmless through the public stream"
+    );
+    assert_eq!(
+        super::helpers::folded_texts(&driven.response.choice),
+        ["still text"]
+    );
+    assert!(
+        driven.response.message_id.is_none(),
+        "an empty provider message ID names nothing"
+    );
+    assert!(
+        driven.response.choice.iter().all(|content| match content {
+            AssistantContent::CarriedText(text) =>
+                text.item_id.as_deref().is_none_or(|id| !id.is_empty()),
+            _ => true,
+        }),
+        "the delivered partial history never contains an empty message identity"
+    );
+    assert!(
+        decoded.ended().iter().all(|content| match content {
+            AssistantContent::CarriedText(text) =>
+                text.item_id.as_deref().is_none_or(|id| !id.is_empty()),
+            AssistantContent::ToolCall(call) =>
+                call.id.provider().is_none_or(|id| !id.as_str().is_empty()),
+            AssistantContent::CustomToolCall(call) =>
+                call.id.provider().is_none_or(|id| !id.as_str().is_empty()),
+            _ => true,
+        }),
+        "no canonical content is keyed by an empty provider identity"
+    );
 }
 
 /// The `output_item.done` restating `item` at `output_index`.
@@ -940,15 +1005,22 @@ fn natives(response: &crate::completion::CompletionResponse) -> Vec<serde_json::
             AssistantContent::CarriedText(text) => {
                 if previous_message.as_ref() == Some(&text.item_id) {
                     items.last_mut().expect("preceding containing message")["content"]
-                        .as_array_mut().expect("message content array")
+                        .as_array_mut()
+                        .expect("message content array")
                         .push(text.payload.item.clone());
                 } else {
                     let mut message = json!({"type":"message","role":"assistant",
                         "status":"completed","content":[text.payload.item]});
-                    if let Some(id) = &text.item_id { message["id"] = json!(id); }
-                    if let Some(phase) = &text.phase { message["phase"] = json!(phase); }
+                    if let Some(id) = &text.item_id {
+                        message["id"] = json!(id);
+                    }
+                    if let Some(phase) = &text.phase {
+                        message["phase"] = json!(phase);
+                    }
                     if let Some(fields) = text.unknown_message_fields() {
-                        message.as_object_mut().expect("history inspection object")
+                        message
+                            .as_object_mut()
+                            .expect("history inspection object")
                             .extend(fields.clone());
                     }
                     previous_message = Some(text.item_id.clone());
@@ -960,7 +1032,12 @@ fn natives(response: &crate::completion::CompletionResponse) -> Vec<serde_json::
                 items.push(match other {
                     AssistantContent::CarriedReasoning(reasoning) => reasoning.payload.item.clone(),
                     AssistantContent::ProviderItem(item) => item.payload.item.clone(),
-                    AssistantContent::CustomToolCall(call) => call.native.as_ref().expect("exact custom item").item.clone(),
+                    AssistantContent::CustomToolCall(call) => call
+                        .native
+                        .as_ref()
+                        .expect("exact custom item")
+                        .item
+                        .clone(),
                     AssistantContent::Opaque(opaque) => opaque.item.clone(),
                     block => block.native_item().cloned().unwrap_or_default(),
                 });
@@ -982,21 +1059,48 @@ fn a_whole_reply_and_its_restatement_as_a_stream_agree() {
         ],
     ];
     for output in replies {
-        for response in [decode(Mode::Unary, whole(&output)), decode(Mode::Streaming, frames(&restated(&output)))] {
-            let carrying = response.choice.iter().filter_map(|part| match part {
-                AssistantContent::CarriedText(text) if text.item_id.as_deref() == Some("msg_2") => Some(text),
-                _ => None,
-            }).collect::<Vec<_>>();
+        for response in [
+            decode(Mode::Unary, whole(&output)),
+            decode(Mode::Streaming, frames(&restated(&output))),
+        ] {
+            let carrying = response
+                .choice
+                .iter()
+                .filter_map(|part| match part {
+                    AssistantContent::CarriedText(text)
+                        if text.item_id.as_deref() == Some("msg_2") =>
+                    {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
             if output.iter().any(|item| item.get("future_field").is_some()) {
-                assert_eq!(carrying.len(), 2, "both ordered parts retain containing-message evidence");
+                assert_eq!(
+                    carrying.len(),
+                    2,
+                    "both ordered parts retain containing-message evidence"
+                );
                 for text in carrying {
-                    let fields = text.unknown_message_fields().expect("A27 exact history evidence");
-                    assert_eq!(fields.len(), 1, "known container fields are separate owners");
+                    let fields = text
+                        .unknown_message_fields()
+                        .expect("A27 exact history evidence");
+                    assert_eq!(
+                        fields.len(),
+                        1,
+                        "known container fields are separate owners"
+                    );
                     assert_eq!(fields["future_field"], json!({"nested":[1,2]}));
-                    let roundtrip: crate::message::CarriedText = serde_json::from_value(serde_json::to_value(text).unwrap()).unwrap();
+                    let roundtrip: crate::message::CarriedText =
+                        serde_json::from_value(serde_json::to_value(text).unwrap()).unwrap();
                     assert_eq!(roundtrip.unknown_message_fields(), Some(fields));
                 }
-                assert!(replayed_input(&response).iter().all(|item| item.get("future_field").is_none()), "A27 inspection fields never become request fields");
+                assert!(
+                    replayed_input(&response)
+                        .iter()
+                        .all(|item| item.get("future_field").is_none()),
+                    "A27 inspection fields never become request fields"
+                );
             }
         }
         crate::test_utils::history::assert_restated_agrees(
@@ -1102,14 +1206,27 @@ fn recorded_whole_replies(provider: &str) -> Vec<serde_json::Value> {
                 continue;
             };
             for document in serde_yaml::Deserializer::from_str(&text) {
-                let Ok(cassette) = <serde_yaml::Value as serde::Deserialize>::deserialize(document) else { continue; };
-                let Some(body) = cassette.get("then").and_then(|reply| reply.get("body")).and_then(serde_yaml::Value::as_str) else { continue; };
-                let documents: Vec<serde_json::Value> = if let Ok(body) = serde_json::from_str(body) {
+                let Ok(cassette) = <serde_yaml::Value as serde::Deserialize>::deserialize(document)
+                else {
+                    continue;
+                };
+                let Some(body) = cassette
+                    .get("then")
+                    .and_then(|reply| reply.get("body"))
+                    .and_then(serde_yaml::Value::as_str)
+                else {
+                    continue;
+                };
+                let documents: Vec<serde_json::Value> = if let Ok(body) = serde_json::from_str(body)
+                {
                     vec![body]
                 } else {
                     let mut framer = rig_http::http_client::framing::SseFramer::new();
-                    let documents = framer.push(body.as_bytes())
-                        .filter_map(|frame| serde_json::from_str::<serde_json::Value>(&frame.data).ok())
+                    let documents = framer
+                        .push(body.as_bytes())
+                        .filter_map(|frame| {
+                            serde_json::from_str::<serde_json::Value>(&frame.data).ok()
+                        })
                         .filter(|event| event["type"] == "response.completed")
                         .map(|event| event["response"].clone())
                         .collect();
@@ -1194,9 +1311,9 @@ fn unknown_nested_parts_survive_and_invalid_known_function_status_is_corrupt() {
     // The inherited helper emits known-text deltas even for unknown raw parts.
     // A35 uses genuine snapshots here, keeping kind-change refusals separate.
     let snapshots = [
-        item_done(0,1,output[0].clone()),
-        item_done(1,2,output[1].clone()),
-        completed_with(3,json!(output)),
+        item_done(0, 1, output[0].clone()),
+        item_done(1, 2, output[1].clone()),
+        completed_with(3, json!(output)),
     ];
     for response in [
         decode(Mode::Streaming, frames(&snapshots)),
@@ -1204,8 +1321,20 @@ fn unknown_nested_parts_survive_and_invalid_known_function_status_is_corrupt() {
     ] {
         assert_eq!(natives(&response), output);
         let input = replayed_input(&response);
-        assert_eq!(input.iter().find(|item| item["id"] == "rs_1").expect("reasoning replays")["summary"], output[0]["summary"]);
-        assert_eq!(input.iter().find(|item| item["id"] == "msg_1").expect("message replays")["content"], output[1]["content"]);
+        assert_eq!(
+            input
+                .iter()
+                .find(|item| item["id"] == "rs_1")
+                .expect("reasoning replays")["summary"],
+            output[0]["summary"]
+        );
+        assert_eq!(
+            input
+                .iter()
+                .find(|item| item["id"] == "msg_1")
+                .expect("message replays")["content"],
+            output[1]["content"]
+        );
     }
     let function = json!({"type":"function_call","id":"fc_1","call_id":"call_1",
         "name":"lookup","arguments":"{}","status":"searching"});
@@ -1213,12 +1342,26 @@ fn unknown_nested_parts_survive_and_invalid_known_function_status_is_corrupt() {
     body["output"] = json!([function]);
     for (mode, frame, event_type) in [
         (Mode::Unary, body, None),
-        (Mode::Streaming, json!({"type":"response.output_item.added","output_index":0,"sequence_number":1,"item":function}), Some("response.output_item.added")),
-        (Mode::Streaming, json!({"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":function}), Some("response.output_item.done")),
+        (
+            Mode::Streaming,
+            json!({"type":"response.output_item.added","output_index":0,"sequence_number":1,"item":function}),
+            Some("response.output_item.added"),
+        ),
+        (
+            Mode::Streaming,
+            json!({"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":function}),
+            Some("response.output_item.done"),
+        ),
     ] {
         let raw = frame.to_string();
-        let error = crate::test_utils::decode_reply(&wire(), &CompletionRequest::new("hello"), mode,
-            [WireFrame::Text(raw.clone())], serde_json::Value::Null).expect_err("searching is invalid on a known function item");
+        let error = crate::test_utils::decode_reply(
+            &wire(),
+            &CompletionRequest::new("hello"),
+            mode,
+            [WireFrame::Text(raw.clone())],
+            serde_json::Value::Null,
+        )
+        .expect_err("searching is invalid on a known function item");
         assert_eq!(error.kind(), ErrorKind::Json);
         let report = error.report();
         let Some(crate::error::ErrorDetail::CorruptFrame(detail)) = report.detail else {
@@ -1312,11 +1455,24 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
         let mut body = status.clone();
         body["output"] = json!([message("msg_1", "Done.")]);
         let sparse = body.to_string();
-        let error = crate::test_utils::decode_reply(&wire(), &CompletionRequest::new("hello"), Mode::Unary,
-            [WireFrame::Text(sparse.clone())], serde_json::Value::Null).expect_err("a sparse original body is not a valid Whole");
+        let error = crate::test_utils::decode_reply(
+            &wire(),
+            &CompletionRequest::new("hello"),
+            Mode::Unary,
+            [WireFrame::Text(sparse.clone())],
+            serde_json::Value::Null,
+        )
+        .expect_err("a sparse original body is not a valid Whole");
         if status.get("error").is_some() {
-            assert_eq!(error.kind(), ErrorKind::ProviderResponse, "the fork's ErrorEnvelope fallback retains priority");
-            assert_eq!(error.report().provider_response_body(), Some(sparse.as_str()));
+            assert_eq!(
+                error.kind(),
+                ErrorKind::ProviderResponse,
+                "the fork's ErrorEnvelope fallback retains priority"
+            );
+            assert_eq!(
+                error.report().provider_response_body(),
+                Some(sparse.as_str())
+            );
         } else {
             assert_eq!(error.kind(), ErrorKind::Json);
             let report = error.report();
@@ -1326,19 +1482,34 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
             assert_eq!(detail.event_type, None);
             assert_eq!(detail.evidence, crate::error::FrameEvidence::Text(sparse));
             assert!(detail.error.contains("missing field"));
-            assert!(!error.is_retryable(), "typed shape corruption cannot become a retry policy");
+            assert!(
+                !error.is_retryable(),
+                "typed shape corruption cannot become a retry policy"
+            );
         }
         if status.get("status").is_none() {
             let mut missing_status = sample_response("completed");
             missing_status.as_object_mut().unwrap().remove("status");
             missing_status["output"] = body["output"].clone();
-            let error = crate::test_utils::decode_reply(&wire(), &CompletionRequest::new("hello"), Mode::Unary,
-                [WireFrame::Text(missing_status.to_string())], serde_json::Value::Null).expect_err("status remains required even when every other Whole field exists");
-            assert!(matches!(error, crate::error::ProviderError::CorruptFrame(_)));
+            let error = crate::test_utils::decode_reply(
+                &wire(),
+                &CompletionRequest::new("hello"),
+                Mode::Unary,
+                [WireFrame::Text(missing_status.to_string())],
+                serde_json::Value::Null,
+            )
+            .expect_err("status remains required even when every other Whole field exists");
+            assert!(matches!(
+                error,
+                crate::error::ProviderError::CorruptFrame(_)
+            ));
             continue;
         }
         let mut valid = sample_response(status["status"].as_str().unwrap());
-        valid.as_object_mut().unwrap().extend(status.as_object().unwrap().clone());
+        valid
+            .as_object_mut()
+            .unwrap()
+            .extend(status.as_object().unwrap().clone());
         valid["output"] = body["output"].clone();
         let response = decode(Mode::Unary, vec![WireFrame::Text(valid.to_string())]);
         assert_eq!(response.finish_reason(), reason, "{status}");
@@ -1351,7 +1522,10 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
         if status.get("error").is_some() {
             assert_eq!(
                 response.stop(),
-                StopReason::Error(format!("Provider finish_reason: {}", status["status"].as_str().unwrap())),
+                StopReason::Error(format!(
+                    "Provider finish_reason: {}",
+                    status["status"].as_str().unwrap()
+                )),
                 "Whole status is a finish reason; its raw error is not an invented canonical failure"
             );
             assert_eq!(response.raw["error"], status["error"]);
@@ -1359,50 +1533,89 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
         // G187: queued/in_progress lack genuine finish proof; their old
         // error-none observations are replaced by the exact terminal guard.
         if matches!(status["status"].as_str(), Some("queued" | "in_progress")) {
-            assert_eq!(response.error.as_deref(),
-                Some("the provider ended the reply without a finish reason"), "{status}");
+            assert_eq!(
+                response.error.as_deref(),
+                Some("the provider ended the reply without a finish reason"),
+                "{status}"
+            );
         } else {
-            assert!(response.error.is_none(), "a well-shaped Whole does not synthesize response.error: {status}");
+            assert!(
+                response.error.is_none(),
+                "a well-shaped Whole does not synthesize response.error: {status}"
+            );
         }
         assert_eq!(response.text(), "Done.");
     }
     for (status, reason) in [
-        (json!({"status":"throttled"}), Some(FinishReason::Other("throttled".into()))),
+        (
+            json!({"status":"throttled"}),
+            Some(FinishReason::Other("throttled".into())),
+        ),
         (json!({"status":""}), None),
-        (incomplete("MAX_TOOL_CALLS"), Some(FinishReason::Other("MAX_TOOL_CALLS".into()))),
-        (incomplete(""), Some(FinishReason::Other("incomplete".into()))),
+        (
+            incomplete("MAX_TOOL_CALLS"),
+            Some(FinishReason::Other("MAX_TOOL_CALLS".into())),
+        ),
+        (
+            incomplete(""),
+            Some(FinishReason::Other("incomplete".into())),
+        ),
     ] {
         let mut body = sample_response(status["status"].as_str().unwrap());
-        body.as_object_mut().unwrap().extend(status.as_object().unwrap().clone());
+        body.as_object_mut()
+            .unwrap()
+            .extend(status.as_object().unwrap().clone());
         let response = decode(Mode::Unary, vec![WireFrame::Text(body.to_string())]);
         assert_eq!(response.finish_reason(), reason);
         // G187: the empty status also has no finish reason. Only that row's
         // old error-none observation is replaced; every other row stays exact.
         if status["status"].as_str() == Some("") {
-            assert_eq!(response.error.as_deref(),
-                Some("the provider ended the reply without a finish reason"));
+            assert_eq!(
+                response.error.as_deref(),
+                Some("the provider ended the reply without a finish reason")
+            );
         } else {
             assert!(response.error.is_none());
         }
         assert_eq!(response.raw["status"], status["status"]);
     }
-    for required in ["id","object","created_at","status","model"] {
+    for required in ["id", "object", "created_at", "status", "model"] {
         let mut body = sample_response("completed");
         body.as_object_mut().unwrap().remove(required);
         let raw = body.to_string();
-        let error = crate::test_utils::decode_reply(&wire(), &CompletionRequest::new("hello"), Mode::Unary,
-            [WireFrame::Text(raw.clone())], serde_json::Value::Null).expect_err("every required Whole field is enforced by the real reader");
+        let error = crate::test_utils::decode_reply(
+            &wire(),
+            &CompletionRequest::new("hello"),
+            Mode::Unary,
+            [WireFrame::Text(raw.clone())],
+            serde_json::Value::Null,
+        )
+        .expect_err("every required Whole field is enforced by the real reader");
         let report = error.report();
-        let Some(crate::error::ErrorDetail::CorruptFrame(detail)) = report.detail else {panic!("{required}: typed Whole shape refusal")};
-        assert_eq!(detail.evidence,crate::error::FrameEvidence::Text(raw));
-        assert!(detail.error.contains(&format!("missing field `{required}`")),"{required}: {}",detail.error);
+        let Some(crate::error::ErrorDetail::CorruptFrame(detail)) = report.detail else {
+            panic!("{required}: typed Whole shape refusal")
+        };
+        assert_eq!(detail.evidence, crate::error::FrameEvidence::Text(raw));
+        assert!(
+            detail
+                .error
+                .contains(&format!("missing field `{required}`")),
+            "{required}: {}",
+            detail.error
+        );
     }
     let mut failed = sample_response("failed");
     failed["error"] = json!({"code":"server_error","message":"boom"});
     let event = json!({"type":"response.failed","sequence_number":1,"response":failed});
     let raw = event.to_string();
-    let error = crate::test_utils::decode_reply(&wire(), &CompletionRequest::new("hello"), Mode::Streaming,
-        [WireFrame::Text(raw.clone())], serde_json::Value::Null).expect_err("response.failed EVENT retains the provider's actual failure");
+    let error = crate::test_utils::decode_reply(
+        &wire(),
+        &CompletionRequest::new("hello"),
+        Mode::Streaming,
+        [WireFrame::Text(raw.clone())],
+        serde_json::Value::Null,
+    )
+    .expect_err("response.failed EVENT retains the provider's actual failure");
     assert_eq!(error.kind(), ErrorKind::ProviderResponse);
     assert_eq!(error.report().provider_response_body(), Some(raw.as_str()));
 }
@@ -1424,29 +1637,71 @@ fn accepted_incomplete_keeps_partial_reasoning_and_text_without_added_hosted_ite
                "item": {"type": "web_search_call", "id": "ws_1", "status": "in_progress"}}),
         json!({"type": "response.incomplete","sequence_number":5, "response": incomplete}),
     ];
-    let refused = crate::test_utils::decode_reply(&wire(), &CompletionRequest::new("hello"), Mode::Streaming,
-        frames(&events), serde_json::Value::Null).expect_err("streamed incomplete is refused by default");
+    let refused = crate::test_utils::decode_reply(
+        &wire(),
+        &CompletionRequest::new("hello"),
+        Mode::Streaming,
+        frames(&events),
+        serde_json::Value::Null,
+    )
+    .expect_err("streamed incomplete is refused by default");
     assert_eq!(refused.kind(), ErrorKind::ProviderResponse);
-    assert_eq!(refused.report().provider_response_body(), Some(events[5].to_string().as_str()));
+    assert_eq!(
+        refused.report().provider_response_body(),
+        Some(events[5].to_string().as_str())
+    );
     let accepted = crate::driver::feed_frames!(
-        ResponsesDecoder::new("openai", super::super::ResponsesStreamOptions::strict()
-            .with_incomplete(super::super::IncompleteTerminal::Accept)),
-        super::super::document::Response::with_strict_reader(false), "openai", frames(&events));
-    let reasoning_ends = accepted.events().into_iter().filter_map(|event| match event {
-        StreamEvent::End {content:AssistantContent::CarriedReasoning(reasoning),reasoning_authority,..} => Some((reasoning,reasoning_authority)),
-        _ => None,
-    }).collect::<Vec<_>>();
-    assert_eq!(reasoning_ends.len(),1);
-    assert_eq!(reasoning_ends[0].0.display_text(),"Thinking");
-    assert_eq!(*reasoning_ends[0].1,Some(crate::streaming::ReasoningAuthority::Partial));
+        ResponsesDecoder::new(
+            "openai",
+            super::super::ResponsesStreamOptions::strict()
+                .with_incomplete(super::super::IncompleteTerminal::Accept)
+        ),
+        super::super::document::Response::with_strict_reader(false),
+        "openai",
+        frames(&events)
+    );
+    let reasoning_ends = accepted
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::End {
+                content: AssistantContent::CarriedReasoning(reasoning),
+                reasoning_authority,
+                ..
+            } => Some((reasoning, reasoning_authority)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reasoning_ends.len(), 1);
+    assert_eq!(reasoning_ends[0].0.display_text(), "Thinking");
+    assert_eq!(
+        *reasoning_ends[0].1,
+        Some(crate::streaming::ReasoningAuthority::Partial)
+    );
     let accepted_wire = wire().with_streamed_incomplete(super::super::IncompleteTerminal::Accept);
-    let response = crate::test_utils::decode_reply(&accepted_wire, &CompletionRequest::new("hello"), Mode::Streaming,
-        frames(&events), serde_json::Value::Null).expect("the real Wire selects explicit Accept for the genuine incomplete terminal");
-    assert_eq!(accepted.outcome.as_ref().expect("branded writer reaches its genuine terminal").choice,response.choice);
+    let response = crate::test_utils::decode_reply(
+        &accepted_wire,
+        &CompletionRequest::new("hello"),
+        Mode::Streaming,
+        frames(&events),
+        serde_json::Value::Null,
+    )
+    .expect("the real Wire selects explicit Accept for the genuine incomplete terminal");
+    assert_eq!(
+        accepted
+            .outcome
+            .as_ref()
+            .expect("branded writer reaches its genuine terminal")
+            .choice,
+        response.choice
+    );
     assert_eq!(response.stop(), crate::message::StopReason::Length);
-    assert_eq!(response.finish_reason(), Some(crate::completion::FinishReason::Length));
-    assert_eq!(response.reasoning(),"Thinking");
-    assert_eq!(response.text(),"Hello there");
+    assert_eq!(
+        response.finish_reason(),
+        Some(crate::completion::FinishReason::Length)
+    );
+    assert_eq!(response.reasoning(), "Thinking");
+    assert_eq!(response.text(), "Hello there");
     assert!(response.error.is_none());
     assert!(
         response
@@ -1461,13 +1716,32 @@ fn accepted_incomplete_keeps_partial_reasoning_and_text_without_added_hosted_ite
         .iter()
         .filter(|item| item.get("role").and_then(serde_json::Value::as_str) != Some("user"))
         .collect();
-    assert_eq!(assistant.len(), 2, "observed reasoning and text both go back: {input:?}");
-    let reasoning = assistant.iter().find(|item| item["type"] == "reasoning").expect("partial reasoning replays");
-    assert_eq!(reasoning["id"],"rs_1");
-    assert_eq!(reasoning["summary"],json!([{"type":"summary_text","text":"Thinking"}]));
-    let text = assistant.iter().find(|item| item["type"] == "message").expect("partial text replays");
+    assert_eq!(
+        assistant.len(),
+        2,
+        "observed reasoning and text both go back: {input:?}"
+    );
+    let reasoning = assistant
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("partial reasoning replays");
+    assert_eq!(reasoning["id"], "rs_1");
+    assert_eq!(
+        reasoning["summary"],
+        json!([{"type":"summary_text","text":"Thinking"}])
+    );
+    let text = assistant
+        .iter()
+        .find(|item| item["type"] == "message")
+        .expect("partial text replays");
     assert_eq!(text["content"][0]["text"], "Hello there");
-    assert!(!response.choice.iter().any(|part| matches!(part,AssistantContent::ProviderItem(_))), "added-only hosted data is not a completed item");
+    assert!(
+        !response
+            .choice
+            .iter()
+            .any(|part| matches!(part, AssistantContent::ProviderItem(_))),
+        "added-only hosted data is not a completed item"
+    );
     assert!(
         !json!(input).to_string().contains("ws_1"),
         "an unfinished hosted item stays home"
@@ -1499,10 +1773,15 @@ fn a_call_added_but_never_done_fails_the_turn() {
         let raw = subject[0].to_string();
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
-             panic!("the exact held fixture must remain a typed strict refusal");
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(raw.clone()))
+        else {
+            panic!("the exact held fixture must remain a typed strict refusal");
         };
-        assert_eq!(refused.error().to_string(), "missing field `sequence_number`");
+        assert_eq!(
+            refused.error().to_string(),
+            "missing field `sequence_number`"
+        );
         assert_eq!(refused.event_type(), Some("response.output_item.added"));
         assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
         let mut scaffolded = subject[0].clone();
@@ -1510,8 +1789,10 @@ fn a_call_added_but_never_done_fails_the_turn() {
         let raw = scaffolded.to_string();
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
-             panic!("the exact held fixture must remain a typed strict refusal");
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(raw.clone()))
+        else {
+            panic!("the exact held fixture must remain a typed strict refusal");
         };
         assert_eq!(refused.error().to_string(), "missing field `status`");
         assert_eq!(refused.event_type(), Some("response.output_item.added"));
@@ -1538,9 +1819,12 @@ fn reasoning_message_and_call_ids_survive_an_edit_of_each_one() {
         let mut response = decode(Mode::Unary, whole(&output));
         match response.choice.get_mut(edited) {
             Some(AssistantContent::CarriedReasoning(reasoning)) => {
-                let crate::message::CarriedReasoningPart::Summary(text) = &mut reasoning.content[0] else { panic!("known summary"); };
+                let crate::message::CarriedReasoningPart::Summary(text) = &mut reasoning.content[0]
+                else {
+                    panic!("known summary");
+                };
                 text.push_str(" (edited)");
-            },
+            }
             Some(AssistantContent::CarriedText(text)) => text.text_mut().push_str(" (edited)"),
             Some(AssistantContent::ToolCall(call)) => {
                 call.function
@@ -1615,8 +1899,10 @@ fn a_stream_without_output_indices_agrees_with_its_whole_reply() {
         let raw = original[1].to_string();
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
-             panic!("the exact held fixture must remain a typed strict refusal");
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(raw.clone()))
+        else {
+            panic!("the exact held fixture must remain a typed strict refusal");
         };
         assert_eq!(refused.error().to_string(), "missing field `output_index`");
         assert_eq!(refused.event_type(), Some("response.output_item.added"));
@@ -1638,7 +1924,8 @@ fn reasoning_done_without_ciphertext_keeps_its_item_in_a_stream_without_indices(
     let raw = original[1].to_string();
     let configured = wire();
     let decoder = configured.decoder_in(Mode::Streaming);
-    let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+    let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone()))
+    else {
         panic!("the exact held fixture must remain a typed strict refusal");
     };
     assert_eq!(refused.error().to_string(), "missing field `output_index`");
@@ -1663,10 +1950,15 @@ fn a_terminal_only_item_does_not_repeat_text_streamed_without_indices() {
         let raw = events[at].to_string();
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
-             panic!("the exact held fixture must remain a typed strict refusal");
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(raw.clone()))
+        else {
+            panic!("the exact held fixture must remain a typed strict refusal");
         };
-        assert_eq!(refused.error().to_string(), "missing field `sequence_number`");
+        assert_eq!(
+            refused.error().to_string(),
+            "missing field `sequence_number`"
+        );
         assert_eq!(refused.event_type(), Some("response.output_text.delta"));
         assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
         let mut scaffolded = events[at].clone();
@@ -1674,8 +1966,10 @@ fn a_terminal_only_item_does_not_repeat_text_streamed_without_indices() {
         let raw = scaffolded.to_string();
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
-             panic!("the exact held fixture must remain a typed strict refusal");
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(raw.clone()))
+        else {
+            panic!("the exact held fixture must remain a typed strict refusal");
         };
         assert_eq!(refused.error().to_string(), "missing field `output_index`");
         assert_eq!(refused.event_type(), Some("response.output_text.delta"));
@@ -1697,30 +1991,75 @@ fn contradictory_done_keeps_delivered_text_and_restates_structured_reasoning() {
         }
     }
     let decoded = crate::driver::feed_frames!(
-        ResponsesDecoder::new("openai",super::super::ResponsesStreamOptions::strict()),
-        super::super::document::Response::with_strict_reader(false),"openai",frames(&events));
-    assert_eq!(texts_of(&decoded.events()),["Bye","Bye"],"both original text deltas remain observable");
-    let reasoning_deltas = decoded.events().into_iter().filter_map(|event| match event {
-        StreamEvent::Reasoning {text,..} => Some(text.as_str()), _ => None,
-    }).collect::<Vec<_>>();
-    assert_eq!(reasoning_deltas,["Plan A","Plan A"],"both original reasoning deltas remain observable");
-    let closes = decoded.events().into_iter().filter_map(|event| match event {
-        StreamEvent::End {content:AssistantContent::CarriedReasoning(reasoning),reasoning_authority,..} => Some((reasoning,reasoning_authority)),
-        _ => None,
-    }).collect::<Vec<_>>();
-    assert_eq!(closes.len(),1);
-    assert_eq!(closes[0].0.display_text(),"Plan B.");
-    assert_eq!(*closes[0].1,Some(crate::streaming::ReasoningAuthority::ProviderRestated));
-    let response = decoded.outcome.expect("well-shaped known-text contradictions retain the delivered answer");
+        ResponsesDecoder::new("openai", super::super::ResponsesStreamOptions::strict()),
+        super::super::document::Response::with_strict_reader(false),
+        "openai",
+        frames(&events)
+    );
+    assert_eq!(
+        texts_of(&decoded.events()),
+        ["Bye", "Bye"],
+        "both original text deltas remain observable"
+    );
+    let reasoning_deltas = decoded
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::Reasoning { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reasoning_deltas,
+        ["Plan A", "Plan A"],
+        "both original reasoning deltas remain observable"
+    );
+    let closes = decoded
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            StreamEvent::End {
+                content: AssistantContent::CarriedReasoning(reasoning),
+                reasoning_authority,
+                ..
+            } => Some((reasoning, reasoning_authority)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(closes.len(), 1);
+    assert_eq!(closes[0].0.display_text(), "Plan B.");
+    assert_eq!(
+        *closes[0].1,
+        Some(crate::streaming::ReasoningAuthority::ProviderRestated)
+    );
+    let response = decoded
+        .outcome
+        .expect("well-shaped known-text contradictions retain the delivered answer");
     assert_eq!(response.text(), "ByeBye");
     assert_eq!(response.reasoning(), "Plan B.");
     let mut retained = output.clone();
     retained[1]["content"][0]["text"] = json!("ByeBye");
     assert_eq!(natives(&response), retained);
-    assert_eq!(response.raw["output"],json!(output),"the contradictory provider restatement remains exact diagnostic raw");
+    assert_eq!(
+        response.raw["output"],
+        json!(output),
+        "the contradictory provider restatement remains exact diagnostic raw"
+    );
     let replay = replayed_input(&response);
-    assert_eq!(replay.iter().find(|item| item["id"]=="rs_1").expect("reasoning replay")["summary"],output[0]["summary"]);
-    assert_eq!(replay.iter().find(|item| item["id"]=="msg_1").expect("text replay")["content"][0]["text"],"ByeBye");
+    assert_eq!(
+        replay
+            .iter()
+            .find(|item| item["id"] == "rs_1")
+            .expect("reasoning replay")["summary"],
+        output[0]["summary"]
+    );
+    assert_eq!(
+        replay
+            .iter()
+            .find(|item| item["id"] == "msg_1")
+            .expect("text replay")["content"][0]["text"],
+        "ByeBye"
+    );
 }
 
 /// G172 keeps the untyped ProviderItem and its genuine issuer for replay.
@@ -1737,25 +2076,41 @@ fn an_item_without_a_type_replays_its_received_provider_payload() {
     ] {
         // G172: the genuine untyped item is a ProviderItem with its real issuer.
         let Some(AssistantContent::ProviderItem(item)) = response.choice.first() else {
-            panic!("the untyped received item is carried whole: {:?}", response.choice);
+            panic!(
+                "the untyped received item is carried whole: {:?}",
+                response.choice
+            );
         };
         assert_eq!(item.payload.item, output[0]);
         assert_eq!(item.payload.provider.as_deref(), Some("openai"));
         assert_eq!(response.raw["output"][0], output[0]);
         let input = replayed_input(&response);
         assert_eq!(input.len(), 4);
-        assert_eq!(input[0], json!({"type":"message","role":"user",
-            "content":[{"type":"input_text","text":"q"}]}));
-        assert_eq!(input[3], json!({"type":"message","role":"user",
-            "content":[{"type":"input_text","text":"next"}]}));
-        assert_eq!(input.iter().map(|item| (item["type"].clone(), item["id"].clone()))
-            .collect::<Vec<_>>(), [
+        assert_eq!(
+            input[0],
+            json!({"type":"message","role":"user",
+            "content":[{"type":"input_text","text":"q"}]})
+        );
+        assert_eq!(
+            input[3],
+            json!({"type":"message","role":"user",
+            "content":[{"type":"input_text","text":"next"}]})
+        );
+        assert_eq!(
+            input
+                .iter()
+                .map(|item| (item["type"].clone(), item["id"].clone()))
+                .collect::<Vec<_>>(),
+            [
                 (json!("message"), serde_json::Value::Null),
                 (serde_json::Value::Null, json!("x_1")),
                 (json!("message"), json!("msg_1")),
                 (json!("message"), serde_json::Value::Null),
-            ]);
-        let replayed = input.iter().find(|item| item["id"] == "x_1" && item.get("type").is_none())
+            ]
+        );
+        let replayed = input
+            .iter()
+            .find(|item| item["id"] == "x_1" && item.get("type").is_none())
             .expect("the actual untyped item replays inside the full ordered input");
         assert_eq!(replayed, &output[0]);
         assert_eq!(replayed_ids(&response), [json!("x_1"), json!("msg_1")]);
@@ -1799,19 +2154,39 @@ fn response_incomplete_is_incomplete_whatever_its_status_says() {
         let decoder = configured.decoder_in(Mode::Streaming);
         let classified = decoder.classify(WireFrame::Text(received.clone()));
         if status.is_none() {
-            let crate::wire::WireEvent::Corrupt(refused) = classified else { panic!("original absent status strictly refuses"); };
+            let crate::wire::WireEvent::Corrupt(refused) = classified else {
+                panic!("original absent status strictly refuses");
+            };
             assert_eq!(refused.error().to_string(), "missing field `status`");
             assert_eq!(refused.event_type(), Some("response.incomplete"));
-            assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(received));
+            assert_eq!(
+                refused.evidence(),
+                &crate::error::FrameEvidence::Text(received)
+            );
         } else {
-            let crate::wire::WireEvent::Known(super::super::ResponsesEvent::Frame { frame, raw, .. }) = classified else { panic!("present completed status is reader-valid"); };
+            let crate::wire::WireEvent::Known(super::super::ResponsesEvent::Frame {
+                frame,
+                raw,
+                ..
+            }) = classified
+            else {
+                panic!("present completed status is reader-valid");
+            };
             assert_eq!(frame, events[1]);
             assert_eq!(raw, received);
-            let error = crate::test_utils::decode_reply(&configured, &CompletionRequest::new("hello"),
-                Mode::Streaming, frames(&events), serde_json::Value::Null)
-                .expect_err("G193 retains the default incomplete Refuse option");
+            let error = crate::test_utils::decode_reply(
+                &configured,
+                &CompletionRequest::new("hello"),
+                Mode::Streaming,
+                frames(&events),
+                serde_json::Value::Null,
+            )
+            .expect_err("G193 retains the default incomplete Refuse option");
             assert_eq!(error.kind(), ErrorKind::ProviderResponse);
-            assert_eq!(error.report().provider_response_body(), Some(received.as_str()));
+            assert_eq!(
+                error.report().provider_response_body(),
+                Some(received.as_str())
+            );
         }
     }
 }
@@ -1885,10 +2260,15 @@ fn argument_deltas_stream_before_the_done_item() {
         let raw = events[at].to_string();
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(raw.clone()))
+        else {
             panic!("the exact held fixture must remain a typed strict refusal");
         };
-        assert_eq!(refused.error().to_string(), "missing field `sequence_number`");
+        assert_eq!(
+            refused.error().to_string(),
+            "missing field `sequence_number`"
+        );
         assert_eq!(refused.event_type(), Some("response.output_item.added"));
         assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
         let mut scaffolded = events[at].clone();
@@ -1896,7 +2276,9 @@ fn argument_deltas_stream_before_the_done_item() {
         let raw = scaffolded.to_string();
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(raw.clone()))
+        else {
             panic!("the exact held fixture must remain a typed strict refusal");
         };
         assert_eq!(refused.error().to_string(), "missing field `status`");
@@ -1926,10 +2308,15 @@ fn a_done_item_sends_the_rest_or_restates_the_arguments() {
         let raw = subject[0].to_string();
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(raw.clone()))
+        else {
             panic!("the exact held fixture must remain a typed strict refusal");
         };
-        assert_eq!(refused.error().to_string(), "missing field `sequence_number`");
+        assert_eq!(
+            refused.error().to_string(),
+            "missing field `sequence_number`"
+        );
         assert_eq!(refused.event_type(), Some("response.output_item.added"));
         assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
         let mut scaffolded = subject[0].clone();
@@ -1937,7 +2324,9 @@ fn a_done_item_sends_the_rest_or_restates_the_arguments() {
         let raw = scaffolded.to_string();
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(raw.clone()))
+        else {
             panic!("the exact held fixture must remain a typed strict refusal");
         };
         assert_eq!(refused.error().to_string(), "missing field `status`");
@@ -1951,7 +2340,7 @@ fn a_done_item_sends_the_rest_or_restates_the_arguments() {
 #[test]
 fn custom_tags_stay_unknown_and_completed_items_deliver_raw_input() {
     let input = "echo \"hi\"\nls";
-    for namespace in [None,Some(""),Some("functions")] {
+    for namespace in [None, Some(""), Some("functions")] {
         let mut added = json!({"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"shell","input":""});
         let mut done = json!({"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"shell","input":input,"status":"completed"});
         if let Some(namespace) = namespace {
@@ -1959,51 +2348,113 @@ fn custom_tags_stay_unknown_and_completed_items_deliver_raw_input() {
             done["namespace"] = json!(namespace);
         }
         let events = [
-        json!({"type": "response.output_item.added", "output_index": 0,"sequence_number":0,
+            json!({"type": "response.output_item.added", "output_index": 0,"sequence_number":0,
                "item": added}),
-        json!({"type": "response.custom_tool_call_input.delta", "output_index": 0, "delta": "echo \"hi"}),
-        json!({"type": "response.custom_tool_call_input.delta", "output_index": 0, "delta": "\"\nls"}),
-        json!({"type":"response.custom_tool_call_input.done","output_index":0,"input":input}),
-        json!({"type": "response.output_item.done", "output_index": 0,"sequence_number":4,"item":done}),
-        json!({"type": "response.completed","sequence_number":5, "response": sample_response("completed")}),
-    ];
-    let decoded = decoded_body(&body_of(&events));
-    let unknown = decoded.items.iter().filter_map(|item| match item {
-        Ok(Item::Unknown(payload)) => Some(payload.value().clone()), _ => None,
-    }).collect::<Vec<_>>();
-    assert_eq!(unknown,events[1..4],"both original deltas and the custom done tag pass through without wrapping");
-    assert!(!decoded.events().iter().any(|event|matches!(event,StreamEvent::Arguments {..})),"custom input is never function argument JSON");
-    let starts = decoded.events().into_iter().filter_map(|event|match event {
-        StreamEvent::Start {part,kind:PartKind::CustomToolCall,name,namespace,..} => Some((part,name,namespace)),_=>None,
-    }).collect::<Vec<_>>();
-    assert_eq!(starts.len(),1);
-    assert_eq!(starts[0].1.as_ref().map(|name|name.as_str()),Some("shell"));
-    assert_eq!(starts[0].2.as_deref(),namespace);
-    let fragments: Vec<_> = decoded
-        .events()
-        .into_iter()
-        .filter_map(|event| match event {
-            StreamEvent::Input { part,input } => Some((*part,input.as_str())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(fragments,[(*starts[0].0,input)],"the completed whole custom input reaches its real Part once");
-    let closes = decoded.events().into_iter().filter_map(|event|match event {
-        StreamEvent::End {part,content:AssistantContent::CustomToolCall(call),..} => Some((part,call)),_=>None,
-    }).collect::<Vec<_>>();
-    assert_eq!(closes.len(),1);
-    assert_eq!(closes[0].0,starts[0].0);
-    assert_eq!(closes[0].1.input,input);
-    assert_eq!(closes[0].1.namespace.as_deref(),namespace);
-    assert_eq!(closes[0].1.id.provider().expect("call correlator retained").as_str(),"call_1");
-    assert_eq!(closes[0].1.native.as_ref().expect("item identity retained").item,done);
-    assert_eq!(closes[0].1.native.as_ref().unwrap().item["id"],"ctc_1");
-    let response = decoded.outcome.expect("the custom item reaches its genuine terminal");
-    let [AssistantContent::CustomToolCall(call)] = response.choice.as_slice() else {panic!("one distinct custom call")};
-    assert_eq!(call.input,input);
-    assert_eq!(call.namespace.as_deref(),namespace);
-    assert_eq!(call.id.provider().unwrap().as_str(),"call_1");
-    assert_eq!(call.native.as_ref().unwrap().item,done);
+            json!({"type": "response.custom_tool_call_input.delta", "output_index": 0, "delta": "echo \"hi"}),
+            json!({"type": "response.custom_tool_call_input.delta", "output_index": 0, "delta": "\"\nls"}),
+            json!({"type":"response.custom_tool_call_input.done","output_index":0,"input":input}),
+            json!({"type": "response.output_item.done", "output_index": 0,"sequence_number":4,"item":done}),
+            json!({"type": "response.completed","sequence_number":5, "response": sample_response("completed")}),
+        ];
+        let decoded = decoded_body(&body_of(&events));
+        let unknown = decoded
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Ok(Item::Unknown(payload)) => Some(payload.value().clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unknown,
+            events[1..4],
+            "both original deltas and the custom done tag pass through without wrapping"
+        );
+        assert!(
+            !decoded
+                .events()
+                .iter()
+                .any(|event| matches!(event, StreamEvent::Arguments { .. })),
+            "custom input is never function argument JSON"
+        );
+        let starts = decoded
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                StreamEvent::Start {
+                    part,
+                    kind: PartKind::CustomToolCall,
+                    name,
+                    namespace,
+                    ..
+                } => Some((part, name, namespace)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(
+            starts[0].1.as_ref().map(|name| name.as_str()),
+            Some("shell")
+        );
+        assert_eq!(starts[0].2.as_deref(), namespace);
+        let fragments: Vec<_> = decoded
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                StreamEvent::Input { part, input } => Some((*part, input.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fragments,
+            [(*starts[0].0, input)],
+            "the completed whole custom input reaches its real Part once"
+        );
+        let closes = decoded
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                StreamEvent::End {
+                    part,
+                    content: AssistantContent::CustomToolCall(call),
+                    ..
+                } => Some((part, call)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0].0, starts[0].0);
+        assert_eq!(closes[0].1.input, input);
+        assert_eq!(closes[0].1.namespace.as_deref(), namespace);
+        assert_eq!(
+            closes[0]
+                .1
+                .id
+                .provider()
+                .expect("call correlator retained")
+                .as_str(),
+            "call_1"
+        );
+        assert_eq!(
+            closes[0]
+                .1
+                .native
+                .as_ref()
+                .expect("item identity retained")
+                .item,
+            done
+        );
+        assert_eq!(closes[0].1.native.as_ref().unwrap().item["id"], "ctc_1");
+        let response = decoded
+            .outcome
+            .expect("the custom item reaches its genuine terminal");
+        let [AssistantContent::CustomToolCall(call)] = response.choice.as_slice() else {
+            panic!("one distinct custom call")
+        };
+        assert_eq!(call.input, input);
+        assert_eq!(call.namespace.as_deref(), namespace);
+        assert_eq!(call.id.provider().unwrap().as_str(), "call_1");
+        assert_eq!(call.native.as_ref().unwrap().item, done);
     }
 }
 
@@ -2022,18 +2473,18 @@ fn added_arguments_do_not_stream_and_done_restates_without_extra_fragments() {
     ];
     assert_eq!(
         call_events(&decoded_body(&body_of(&events))),
-        [
-            "0:start:add",
-            "0:args:1}",
-            "0:end:{\"x\":1}"
-        ]
+        ["0:start:add", "0:args:1}", "0:end:{\"x\":1}"]
     );
     let decoded = decoded_body(&body_of(&events));
-    let response = decoded.outcome.expect("well-shaped done supplies authoritative valid arguments");
-    let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else {panic!("one completed function call")};
-    assert_eq!(call.function.arguments_value(),json!({"x":1}));
-    assert_eq!(call.id.provider().unwrap().as_str(),"call_1");
-    assert_eq!(call.native.as_ref().unwrap().item["id"],"fc_1");
+    let response = decoded
+        .outcome
+        .expect("well-shaped done supplies authoritative valid arguments");
+    let [AssistantContent::ToolCall(call)] = response.choice.as_slice() else {
+        panic!("one completed function call")
+    };
+    assert_eq!(call.function.arguments_value(), json!({"x":1}));
+    assert_eq!(call.id.provider().unwrap().as_str(), "call_1");
+    assert_eq!(call.native.as_ref().unwrap().item["id"], "fc_1");
 }
 
 /// A message whose two `output_text` parts state every annotation type the
@@ -2128,9 +2579,14 @@ fn every_annotation_type_cites_the_whole_block_on_both_routes() {
     );
     for response in [&unary, &streamed] {
         let input = replayed_input(response);
-        let replayed = input.iter().find(|item| item["type"] == "message" && item["role"] == "assistant")
+        let replayed = input
+            .iter()
+            .find(|item| item["type"] == "message" && item["role"] == "assistant")
             .expect("the real next request contains the cited assistant message");
-        assert_eq!(replayed["content"], output[0]["content"], "real request replay retains every annotation and its original offsets");
+        assert_eq!(
+            replayed["content"], output[0]["content"],
+            "real request replay retains every annotation and its original offsets"
+        );
     }
 }
 
@@ -2177,29 +2633,37 @@ fn a_reported_cost_is_its_total_in_usd() {
     assert_eq!(usage(json!({})), None);
 }
 
-
 // G191 NEW fixtures supply required sequence and absent call-stage status only.
 // Existing values, names, IDs and argument literals are never overwritten.
 fn admitted_call_stage_events(events: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    events.iter().enumerate().map(|(sequence, original)| {
-        let mut event = original.clone();
-        event.as_object_mut().expect("fixture envelope")
-            .entry("sequence_number").or_insert_with(|| json!(sequence));
-        let stage = match event["type"].as_str() {
-            Some("response.output_item.added") => Some("in_progress"),
-            Some("response.output_item.done") => Some("completed"),
-            _ => None,
-        };
-        if event["item"]["type"] == "function_call" {
-            if let Some(stage) = stage {
-                event["item"].as_object_mut().expect("fixture function item")
-                    .entry("status").or_insert_with(|| json!(stage));
+    events
+        .iter()
+        .enumerate()
+        .map(|(sequence, original)| {
+            let mut event = original.clone();
+            event
+                .as_object_mut()
+                .expect("fixture envelope")
+                .entry("sequence_number")
+                .or_insert_with(|| json!(sequence));
+            let stage = match event["type"].as_str() {
+                Some("response.output_item.added") => Some("in_progress"),
+                Some("response.output_item.done") => Some("completed"),
+                _ => None,
+            };
+            if event["item"]["type"] == "function_call" {
+                if let Some(stage) = stage {
+                    event["item"]
+                        .as_object_mut()
+                        .expect("fixture function item")
+                        .entry("status")
+                        .or_insert_with(|| json!(stage));
+                }
             }
-        }
-        event
-    }).collect()
+            event
+        })
+        .collect()
 }
-
 
 #[test]
 fn admitted_argument_deltas_stream_before_the_done_item() {
@@ -2231,7 +2695,6 @@ fn admitted_argument_deltas_stream_before_the_done_item() {
     );
 }
 
-
 #[test]
 fn admitted_done_item_restates_arguments_without_fabricating_a_suffix_delta() {
     // G192 names only the old extra Arguments "1}" loss; prior fragment and full Ends stay exact.
@@ -2244,11 +2707,7 @@ fn admitted_done_item_restates_arguments_without_fabricating_a_suffix_delta() {
     let extended = admitted_call_stage_events(&extended);
     assert_eq!(
         call_events(&decoded_body(&body_of(&extended))),
-        [
-            "0:start:add",
-            "0:args:{\"x\":",
-            "0:end:{\"x\":1}"
-        ]
+        ["0:start:add", "0:args:{\"x\":", "0:end:{\"x\":1}"]
     );
     let restated = [
         added_call(0, "fc_1", "call_1", "add"),
@@ -2262,7 +2721,6 @@ fn admitted_done_item_restates_arguments_without_fabricating_a_suffix_delta() {
         ["0:start:add", "0:args:{\"x\":", "0:end:{\"y\":2}"]
     );
 }
-
 
 #[test]
 fn admitted_never_done_call_fails_and_real_terminal_completed_call_keeps_its_item() {
@@ -2300,7 +2758,6 @@ fn admitted_never_done_call_fails_and_real_terminal_completed_call_keeps_its_ite
     );
 }
 
-
 #[test]
 fn retained_index_stream_agrees_with_its_whole_reply() {
     let replies = [
@@ -2321,7 +2778,6 @@ fn retained_index_stream_agrees_with_its_whole_reply() {
     }
 }
 
-
 #[test]
 fn retained_index_reasoning_without_ciphertext_keeps_item_and_replayed_ids() {
     let mut thought = reasoning("rs_1", &["Plan."]);
@@ -2333,7 +2789,6 @@ fn retained_index_reasoning_without_ciphertext_keeps_item_and_replayed_ids() {
     assert_eq!(natives(&response), output);
     assert_eq!(replayed_ids(&response), [json!("rs_1"), json!("msg_1")]);
 }
-
 
 #[test]
 fn required_coordinate_text_and_terminal_reasoning_keep_one_hello_and_exact_items() {
@@ -2360,7 +2815,6 @@ fn required_coordinate_text_and_terminal_reasoning_keep_one_hello_and_exact_item
     );
 }
 
-
 #[test]
 fn explicit_accept_keeps_original_completed_status_inputs_and_exact_incomplete_outcomes() {
     use crate::message::StopReason;
@@ -2375,7 +2829,9 @@ fn explicit_accept_keeps_original_completed_status_inputs_and_exact_incomplete_o
         (Some("completed"), None, None),
         (None, Some("content_filter"), None),
     ] {
-        if status.is_none() { continue; } // All three absent-status cases stay in original strict control.
+        if status.is_none() {
+            continue;
+        } // All three absent-status cases stay in original strict control.
         let mut response = sample_response("incomplete");
         match status {
             Some(status) => response["status"] = json!(status),
@@ -2395,12 +2851,22 @@ fn explicit_accept_keeps_original_completed_status_inputs_and_exact_incomplete_o
         let configured = wire().with_streamed_incomplete(super::super::IncompleteTerminal::Accept);
         let received = events[1].to_string();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Known(super::super::ResponsesEvent::Frame { frame, raw, .. }) =
-            decoder.classify(WireFrame::Text(received.clone())) else { panic!("received full root strictly classifies"); };
+        let crate::wire::WireEvent::Known(super::super::ResponsesEvent::Frame {
+            frame, raw, ..
+        }) = decoder.classify(WireFrame::Text(received.clone()))
+        else {
+            panic!("received full root strictly classifies");
+        };
         assert_eq!(frame, events[1]);
         assert_eq!(raw, received); // Full received completed-status evidence is unedited.
-        let response = crate::test_utils::decode_reply(&configured, &CompletionRequest::new("hello"),
-            Mode::Streaming, frames(&events), serde_json::Value::Null).expect("explicit Accept reaches its genuine terminal");
+        let response = crate::test_utils::decode_reply(
+            &configured,
+            &CompletionRequest::new("hello"),
+            Mode::Streaming,
+            frames(&events),
+            serde_json::Value::Null,
+        )
+        .expect("explicit Accept reaches its genuine terminal");
         match stop {
             Some(stop) => assert_eq!(response.stop(), stop, "{status:?} {reason:?}"),
             None => assert!(
@@ -2413,8 +2879,19 @@ fn explicit_accept_keeps_original_completed_status_inputs_and_exact_incomplete_o
         assert_eq!(response.text(), "partial");
         // Existing reassembly is event-authoritative; tests never edit received status.
         assert_eq!(response.raw["status"], json!("incomplete"));
-        for key in ["id", "object", "created_at", "model", "output", "tools", "incomplete_details"] {
-            assert_eq!(response.raw[key], events[1]["response"][key], "unchanged raw root member {key}");
+        for key in [
+            "id",
+            "object",
+            "created_at",
+            "model",
+            "output",
+            "tools",
+            "incomplete_details",
+        ] {
+            assert_eq!(
+                response.raw[key], events[1]["response"][key],
+                "unchanged raw root member {key}"
+            );
         }
         assert_eq!(events[1]["response"]["status"], json!("completed"));
     }

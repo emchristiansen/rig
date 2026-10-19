@@ -132,11 +132,20 @@ fn test_deserialize_stream_response_with_multiple_text_parts() {
     });
 
     let response = decoded(json_data).expect("the reply decodes");
-    let texts: Vec<_> = response.choice.iter().map(|part| {
-        let AssistantContent::Text(text) = part else { panic!("text part: {part:?}"); };
-        assert_eq!(text.native.as_ref().map(|native| &native.item), Some(&json!({"text":text.text})));
-        text.text.as_str()
-    }).collect();
+    let texts: Vec<_> = response
+        .choice
+        .iter()
+        .map(|part| {
+            let AssistantContent::Text(text) = part else {
+                panic!("text part: {part:?}");
+            };
+            assert_eq!(
+                text.native.as_ref().map(|native| &native.item),
+                Some(&json!({"text":text.text}))
+            );
+            text.text.as_str()
+        })
+        .collect();
     assert_eq!(texts, ["Hello, ", "world!", " How are you?"]);
 }
 
@@ -269,8 +278,11 @@ fn test_deserialize_stream_response_with_empty_parts() {
         }
     });
 
-    let error = decoded(json_data).expect_err("an empty successful whole reply is a protected response error");
-    assert!(matches!(error, ProviderError::Response(message) if message == crate::message::EMPTY_RESPONSE_ERROR));
+    let error = decoded(json_data)
+        .expect_err("an empty successful whole reply is a protected response error");
+    assert!(
+        matches!(error, ProviderError::Response(message) if message == crate::message::EMPTY_RESPONSE_ERROR)
+    );
 }
 
 /// Open a `streamGenerateContent` stream over the given SSE frames and
@@ -616,14 +628,18 @@ fn two_signed_thought_parts_keep_both_signatures() {
         .choice
         .iter()
         .filter_map(|block| match block {
-            AssistantContent::CarriedReasoning(reasoning) => reasoning.content.iter().find_map(|part| match part {
-                crate::message::CarriedReasoningPart::Text { signature, .. } => signature.as_deref(),
-                crate::message::CarriedReasoningPart::Summary(_)
-                | crate::message::CarriedReasoningPart::Encrypted(_)
-                | crate::message::CarriedReasoningPart::Redacted { .. }
-                | crate::message::CarriedReasoningPart::OpaqueSummary(_)
-                | crate::message::CarriedReasoningPart::OpaqueContent(_) => None,
-            }),
+            AssistantContent::CarriedReasoning(reasoning) => {
+                reasoning.content.iter().find_map(|part| match part {
+                    crate::message::CarriedReasoningPart::Text { signature, .. } => {
+                        signature.as_deref()
+                    }
+                    crate::message::CarriedReasoningPart::Summary(_)
+                    | crate::message::CarriedReasoningPart::Encrypted(_)
+                    | crate::message::CarriedReasoningPart::Redacted { .. }
+                    | crate::message::CarriedReasoningPart::OpaqueSummary(_)
+                    | crate::message::CarriedReasoningPart::OpaqueContent(_) => None,
+                })
+            }
             _ => None,
         })
         .collect();

@@ -115,7 +115,10 @@ async fn kept_stream_replay_preserves_every_error_item_and_its_position() {
                 .collect::<Vec<_>>(),
         )
         .await;
-        assert_eq!(replay, live, "every drained item keeps its original position");
+        assert_eq!(
+            replay, live,
+            "every drained item keeps its original position"
+        );
     }
 }
 

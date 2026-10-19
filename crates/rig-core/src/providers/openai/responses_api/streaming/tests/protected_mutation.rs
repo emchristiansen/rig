@@ -17,7 +17,21 @@ fn repeated_reasoning_snapshots_publish_exactly_one_close() {
         json!({"type":"response.output_item.done","output_index":0,"sequence_number":2,"item":item}),
         completed_with_output(json!([item])),
     ]);
-    assert!(driven.errors.is_empty()); assert_eq!(driven.items.iter().filter(|item|matches!(item,Item::Event(StreamEvent::End {content:AssistantContent::CarriedReasoning(_),..}))).count(),1);
+    assert!(driven.errors.is_empty());
+    assert_eq!(
+        driven
+            .items
+            .iter()
+            .filter(|item| matches!(
+                item,
+                Item::Event(StreamEvent::End {
+                    content: AssistantContent::CarriedReasoning(_),
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
 }
 
 // F streaming/tests.rs:4911
@@ -28,7 +42,17 @@ fn a_terminal_restating_known_text_as_opaque_is_refused() {
         json!({"type":"response.output_text.delta","item_id":"msg_opaque","output_index":0,"content_index":0,"sequence_number":0,"delta":"A"}),
         completed_with_output(json!([opaque_message_fixture(json!([unknown]))])),
     ]);
-    assert_eq!(driven.errors.len(),1); assert!(driven.errors[0].to_string().contains("conflicting Responses content part kind")); assert!(driven.response.response_id().is_none()); assert!(opaque_texts(&driven.response.choice).is_empty(),"known text gains no opaque marker");
+    assert_eq!(driven.errors.len(), 1);
+    assert!(
+        driven.errors[0]
+            .to_string()
+            .contains("conflicting Responses content part kind")
+    );
+    assert!(driven.response.response_id().is_none());
+    assert!(
+        opaque_texts(&driven.response.choice).is_empty(),
+        "known text gains no opaque marker"
+    );
 }
 
 // F streaming/tests.rs:4936
@@ -42,7 +66,11 @@ fn an_empty_done_after_reasoning_deltas_keeps_the_streamed_reasoning() {
         json!({"type":"response.output_item.done","output_index":0,"sequence_number":1,"item":empty}),
         completed_with_output(json!([empty])),
     ]);
-    assert!(driven.errors.is_empty()); let [AssistantContent::CarriedReasoning(reasoning)]=driven.response.choice.as_slice() else {panic!("one reasoning item")}; assert_eq!(reasoning.display_text(),"known");
+    assert!(driven.errors.is_empty());
+    let [AssistantContent::CarriedReasoning(reasoning)] = driven.response.choice.as_slice() else {
+        panic!("one reasoning item")
+    };
+    assert_eq!(reasoning.display_text(), "known");
 }
 
 // F streaming/tests.rs:5069
@@ -58,7 +86,8 @@ fn an_added_position_owns_its_id_against_later_repaired_deltas() {
             message
         ])),
     ]);
-    assert!(driven.errors.is_empty()); assert_eq!(folded_texts(&driven.response.choice),["Hello"]);
+    assert!(driven.errors.is_empty());
+    assert_eq!(folded_texts(&driven.response.choice), ["Hello"]);
 }
 
 // F streaming/tests.rs:5091
@@ -102,8 +131,10 @@ fn an_opaque_terminal_part_elsewhere_never_marks_repaired_streamed_text() {
             message_item("msg_2", json!([unknown]))
         ])),
     ]);
-    assert!(matches!(driven.errors.as_slice(), [ProviderError::Response(message)]
-        if message == "conflicting Responses parent kind at output 0: reasoning in a message"));
+    assert!(
+        matches!(driven.errors.as_slice(), [ProviderError::Response(message)]
+        if message == "conflicting Responses parent kind at output 0: reasoning in a message")
+    );
     assert!(!driven.errors[0].is_retryable());
     assert!(driven.response.response_id().is_none());
     assert_eq!(folded_texts(&driven.response.choice), ["Hello"]);
@@ -120,7 +151,17 @@ fn known_text_over_a_waiting_opaque_part_is_refused_before_binding() {
         json!({"type":"response.content_part.added","item_id":"msg_w","output_index":0,"content_index":0,"sequence_number":0,"part":unknown}),
         json!({"type":"response.output_text.delta","item_id":"msg_w","output_index":0,"content_index":0,"sequence_number":1,"delta":"late"}),
     ]);
-    assert_eq!(driven.errors.len(),1); assert!(driven.errors[0].to_string().contains("conflicting Responses content part kind")); assert!(!driven.items.iter().any(|item|matches!(item,Item::Event(StreamEvent::Text {..}|StreamEvent::Start {..})))); assert_eq!(unknown_payloads(&driven.items),[unknown]);
+    assert_eq!(driven.errors.len(), 1);
+    assert!(
+        driven.errors[0]
+            .to_string()
+            .contains("conflicting Responses content part kind")
+    );
+    assert!(!driven.items.iter().any(|item| matches!(
+        item,
+        Item::Event(StreamEvent::Text { .. } | StreamEvent::Start { .. })
+    )));
+    assert_eq!(unknown_payloads(&driven.items), [unknown]);
 }
 
 // F streaming/tests.rs:5232
@@ -129,7 +170,10 @@ fn a_content_part_without_a_type_tag_is_a_malformed_frame() {
     let driven = drive(&[
         json!({"type":"response.content_part.added","item_id":"msg_t","output_index":0,"content_index":0,"sequence_number":0,"part":{"text":"x"}}),
     ]);
-    assert!(matches!(driven.errors.as_slice(),[ProviderError::CorruptFrame(corrupt)] if corrupt.event_type()==Some("response.content_part.added"))); assert!(unknown_payloads(&driven.items).is_empty());
+    assert!(
+        matches!(driven.errors.as_slice(),[ProviderError::CorruptFrame(corrupt)] if corrupt.event_type()==Some("response.content_part.added"))
+    );
+    assert!(unknown_payloads(&driven.items).is_empty());
 }
 
 // F streaming/tests.rs:5306
@@ -139,6 +183,17 @@ fn a_reasoning_text_part_inside_a_message_is_refused() {
         json!({"type":"response.output_item.added","output_index":0,"sequence_number":0,"item":message_item("msg_r", json!([]))}),
         json!({"type":"response.content_part.added","item_id":"msg_r","output_index":0,"content_index":0,"sequence_number":1,"part":{"type":"reasoning_text","text":"think"}}),
     ]);
-    assert_eq!(driven.errors.len(),1); assert!(driven.errors[0].to_string().contains("conflicting Responses parent kind")); assert!(!driven.items.iter().any(|item|matches!(item,Item::Event(StreamEvent::Start {kind:PartKind::Reasoning,..}))));
+    assert_eq!(driven.errors.len(), 1);
+    assert!(
+        driven.errors[0]
+            .to_string()
+            .contains("conflicting Responses parent kind")
+    );
+    assert!(!driven.items.iter().any(|item| matches!(
+        item,
+        Item::Event(StreamEvent::Start {
+            kind: PartKind::Reasoning,
+            ..
+        })
+    )));
 }
-

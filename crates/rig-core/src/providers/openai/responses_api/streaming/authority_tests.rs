@@ -30,17 +30,25 @@ fn terminal(output: Value) -> Value {
 }
 
 fn decoded(frames: &[Value]) -> Decoded<Completion> {
-    crate::driver::feed_frames!(ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()), "openai",
-        frames.iter().map(|frame| WireFrame::Text(frame.to_string())))
+    crate::driver::feed_frames!(
+        ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()),
+        "openai",
+        frames
+            .iter()
+            .map(|frame| WireFrame::Text(frame.to_string()))
+    )
 }
 
 fn transport_flush(restated: bool) -> Decoded<Completion> {
     decode_with(Turn::relayed("openai"), "openai", |reply| {
         let mut decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict());
         let mut frames = vec![delta()];
-        if restated { frames.push(done()); }
+        if restated {
+            frames.push(done());
+        }
         for frame in frames {
-            let WireEvent::Known(event) = decoder.classify(WireFrame::Text(frame.to_string())) else {
+            let WireEvent::Known(event) = decoder.classify(WireFrame::Text(frame.to_string()))
+            else {
                 panic!("valid provider fixture");
             };
             assert!(matches!(decoder.decode(event, reply.out())?, Flow::More));
@@ -51,17 +59,50 @@ fn transport_flush(restated: bool) -> Decoded<Completion> {
 }
 
 fn events(decoded: &Decoded<Completion>) -> Transcript {
-    let items = decoded.items.iter().filter_map(|item| item.as_ref().ok().cloned()).collect::<Vec<_>>();
-    Transcript::parse(serde_json::to_value(items).expect("actual decoder events")).expect("all real parts close once")
+    let items = decoded
+        .items
+        .iter()
+        .filter_map(|item| item.as_ref().ok().cloned())
+        .collect::<Vec<_>>();
+    Transcript::parse(serde_json::to_value(items).expect("actual decoder events"))
+        .expect("all real parts close once")
 }
 
-fn authority(decoded: &Decoded<Completion>, expected: Option<ReasoningAuthority>) -> AssistantContent {
+fn authority(
+    decoded: &Decoded<Completion>,
+    expected: Option<ReasoningAuthority>,
+) -> AssistantContent {
     let transcript = events(decoded);
-    let start = transcript.events().find(|event| matches!(event, StreamEvent::Start { kind: PartKind::Reasoning, .. })).expect("actual reasoning start");
-    let ends = transcript.events().filter(|event| matches!(event, StreamEvent::End { .. })).collect::<Vec<_>>();
+    let start = transcript
+        .events()
+        .find(|event| {
+            matches!(
+                event,
+                StreamEvent::Start {
+                    kind: PartKind::Reasoning,
+                    ..
+                }
+            )
+        })
+        .expect("actual reasoning start");
+    let ends = transcript
+        .events()
+        .filter(|event| matches!(event, StreamEvent::End { .. }))
+        .collect::<Vec<_>>();
     assert_eq!(ends.len(), 1);
-    assert!(transcript.events().all(|event| event.part() == start.part()));
-    let StreamEvent::End { content, reasoning_authority, .. } = ends[0] else { panic!("actual end"); };
+    assert!(
+        transcript
+            .events()
+            .all(|event| event.part() == start.part())
+    );
+    let StreamEvent::End {
+        content,
+        reasoning_authority,
+        ..
+    } = ends[0]
+    else {
+        panic!("actual end");
+    };
     assert_eq!(*reasoning_authority, expected);
     content.clone()
 }
@@ -69,22 +110,40 @@ fn authority(decoded: &Decoded<Completion>, expected: Option<ReasoningAuthority>
 #[test]
 fn fragment_only_eof_generic_failure_and_transport_flush_keep_partial_authority() {
     let failure = json!({"type":"error","code":"failure","message":"exact failure"});
-    for result in [decoded(&[delta()]), decoded(&[delta(), failure]), transport_flush(false)] {
-        assert!(result.outcome.is_err(), "a partial close is not a provider terminal");
+    for result in [
+        decoded(&[delta()]),
+        decoded(&[delta(), failure]),
+        transport_flush(false),
+    ] {
+        assert!(
+            result.outcome.is_err(),
+            "a partial close is not a provider terminal"
+        );
         let content = authority(&result, Some(ReasoningAuthority::Partial));
-        let AssistantContent::CarriedReasoning(reasoning) = content else { panic!("preserved fragment reasoning"); };
+        let AssistantContent::CarriedReasoning(reasoning) = content else {
+            panic!("preserved fragment reasoning");
+        };
         assert_eq!(reasoning.display_text(), "thought");
-        assert_eq!(reasoning.payload.item["summary"], json!([{"type":"summary_text","text":"thought"}]));
+        assert_eq!(
+            reasoning.payload.item["summary"],
+            json!([{"type":"summary_text","text":"thought"}])
+        );
     }
 }
 
 #[test]
 fn a_done_item_retains_provider_authority_through_eof_failure_and_transport_flush() {
     let failure = json!({"type":"error","code":"failure","message":"exact failure"});
-    for result in [decoded(&[delta(), done()]), decoded(&[delta(), done(), failure]), transport_flush(true)] {
+    for result in [
+        decoded(&[delta(), done()]),
+        decoded(&[delta(), done(), failure]),
+        transport_flush(true),
+    ] {
         assert!(result.outcome.is_err());
         let content = authority(&result, Some(ReasoningAuthority::ProviderRestated));
-        let AssistantContent::CarriedReasoning(carried) = content else { panic!("carried restatement"); };
+        let AssistantContent::CarriedReasoning(carried) = content else {
+            panic!("carried restatement");
+        };
         assert_eq!(carried.payload.item, reasoning());
         assert_eq!(carried.id.as_deref(), Some("rs_1"));
     }
@@ -92,20 +151,36 @@ fn a_done_item_retains_provider_authority_through_eof_failure_and_transport_flus
 
 #[test]
 fn whole_and_terminal_reasoning_restatements_keep_provider_authority_without_canonical_changes() {
-    for frames in [vec![response(json!([reasoning()]))], vec![delta(), terminal(json!([reasoning()]))]] {
+    for frames in [
+        vec![response(json!([reasoning()]))],
+        vec![delta(), terminal(json!([reasoning()]))],
+    ] {
         let result = decoded(&frames);
         let ended = authority(&result, Some(ReasoningAuthority::ProviderRestated));
-        let AssistantContent::CarriedReasoning(ended) = ended else { panic!("carried reasoning"); };
+        let AssistantContent::CarriedReasoning(ended) = ended else {
+            panic!("carried reasoning");
+        };
         assert_eq!(ended.payload.item, reasoning());
         let response = result.outcome.expect("genuine provider terminal");
-        let [AssistantContent::CarriedReasoning(folded)] = response.choice.as_slice() else { panic!("same canonical content"); };
+        let [AssistantContent::CarriedReasoning(folded)] = response.choice.as_slice() else {
+            panic!("same canonical content");
+        };
         assert_eq!(folded.payload.item, ended.payload.item);
         // Delivered parts retain unknown issuer; the fold stamps its actual issuer.
         use crate::message::CarriedReasoningPart as Part;
         let (
-            [Part::Summary(ended_summary), Part::OpaqueContent(ended_opaque), Part::Encrypted(ended_cipher)],
-            [Part::Summary(folded_summary), Part::OpaqueContent(folded_opaque), Part::Encrypted(folded_cipher)],
-        ) = (ended.content.as_slice(), folded.content.as_slice()) else {
+            [
+                Part::Summary(ended_summary),
+                Part::OpaqueContent(ended_opaque),
+                Part::Encrypted(ended_cipher),
+            ],
+            [
+                Part::Summary(folded_summary),
+                Part::OpaqueContent(folded_opaque),
+                Part::Encrypted(folded_cipher),
+            ],
+        ) = (ended.content.as_slice(), folded.content.as_slice())
+        else {
             panic!("exact received summary, opaque content, encrypted ordering");
         };
         assert_eq!(ended_summary, "thought");
@@ -114,7 +189,10 @@ fn whole_and_terminal_reasoning_restatements_keep_provider_authority_without_can
         assert_eq!(folded_cipher, ended_cipher);
         assert_eq!(ended_opaque.item, reasoning()["content"][0]);
         assert_eq!(folded_opaque.item, ended_opaque.item);
-        assert_eq!(ended_opaque.position, crate::message::CarriedPosition::ReasoningContent { part_index: 0 });
+        assert_eq!(
+            ended_opaque.position,
+            crate::message::CarriedPosition::ReasoningContent { part_index: 0 }
+        );
         assert_eq!(folded_opaque.position, ended_opaque.position);
         assert_eq!(ended_opaque.provider, None);
         assert_eq!(folded_opaque.provider.as_deref(), Some("openai"));
@@ -122,7 +200,9 @@ fn whole_and_terminal_reasoning_restatements_keep_provider_authority_without_can
         assert_eq!(ended.id.as_deref(), Some("rs_1"));
         assert_eq!(folded.id, ended.id);
         assert_eq!(folded.payload.provider.as_deref(), Some("openai"));
-        assert!(matches!(response.message(), Some(crate::message::Message::Assistant(turn)) if turn.content == response.choice));
+        assert!(
+            matches!(response.message(), Some(crate::message::Message::Assistant(turn)) if turn.content == response.choice)
+        );
     }
 }
 
@@ -134,10 +214,17 @@ fn refused_failed_terminal_reasoning_restatement_is_authoritative_without_a_resp
     let frame = json!({"type":"response.failed","sequence_number":2,"response":failed});
     let result = decoded(&[delta(), frame.clone()]);
     let ended = authority(&result, Some(ReasoningAuthority::ProviderRestated));
-    let AssistantContent::CarriedReasoning(ended) = ended else { panic!("retained reasoning"); };
+    let AssistantContent::CarriedReasoning(ended) = ended else {
+        panic!("retained reasoning");
+    };
     assert_eq!(ended.payload.item, reasoning());
-    let error = result.outcome.expect_err("failed provider terminal remains refused");
-    assert_eq!(error.provider_response_body(), Some(frame.to_string().as_str()));
+    let error = result
+        .outcome
+        .expect_err("failed provider terminal remains refused");
+    assert_eq!(
+        error.provider_response_body(),
+        Some(frame.to_string().as_str())
+    );
 }
 
 #[test]

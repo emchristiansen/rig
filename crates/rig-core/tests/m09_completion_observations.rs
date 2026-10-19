@@ -827,7 +827,11 @@ async fn malformed_tool_with_only_an_item_id_keeps_local_identity_and_original_i
     .to_string();
     let (handle, mut stream) = open(ScriptedHttp::frames(vec![original.clone()])).await;
     let failure = loop {
-        if let Err(failure) = stream.next().await.expect("malformed item-only tool failure") {
+        if let Err(failure) = stream
+            .next()
+            .await
+            .expect("malformed item-only tool failure")
+        {
             break failure;
         }
     };
@@ -878,7 +882,9 @@ async fn malformed_tool_with_only_an_item_id_keeps_local_identity_and_original_i
         ));
     });
     assert!(stream.next().await.is_none());
-    let retained = stream.finish().expect_err("retained same item-only failure");
+    let retained = stream
+        .finish()
+        .expect_err("retained same item-only failure");
     assert_eq!(retained.kind, ObservedFailureKind::Stream);
     assert!(handle.same_operation(&retained.observation));
     assert!(matches!(
@@ -941,11 +947,19 @@ async fn missing_terminal_is_provider_failure_but_completed_malformed_tool_is_st
                 assert_eq!(detail.name, "broken");
                 assert_eq!(detail.raw, "{");
                 assert_eq!(
-                    detail.id.provider().map(rig_core::message::ProviderCallId::as_str),
+                    detail
+                        .id
+                        .provider()
+                        .map(rig_core::message::ProviderCallId::as_str),
                     Some("call_fixture")
                 );
                 assert_eq!(
-                    detail.provider.as_ref().expect("provider identity").call_id.as_str(),
+                    detail
+                        .provider
+                        .as_ref()
+                        .expect("provider identity")
+                        .call_id
+                        .as_str(),
                     "call_fixture"
                 );
                 assert_eq!(

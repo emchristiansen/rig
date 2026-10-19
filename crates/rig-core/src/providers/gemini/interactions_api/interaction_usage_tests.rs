@@ -16,8 +16,11 @@ fn thinking_tokens_survive_the_interactions_mapping() {
     assert_eq!(usage.output_tokens, Some(34));
     assert_eq!(usage.total_tokens, Some(270));
     assert_eq!(usage.reasoning_tokens, Some(222));
-    assert_eq!(usage.total_tokens, Some(14 + 34 + 222),
-        "the components should account for the provider's total");
+    assert_eq!(
+        usage.total_tokens,
+        Some(14 + 34 + 222),
+        "the components should account for the provider's total"
+    );
 }
 
 #[test]
@@ -37,14 +40,17 @@ fn tool_use_tokens_survive_the_interactions_mapping() {
 #[test]
 fn the_total_fallback_counts_thinking_and_tool_use() {
     let mut wire = recorded();
-    wire.as_object_mut().expect("usage object").remove("total_tokens");
+    wire.as_object_mut()
+        .expect("usage object")
+        .remove("total_tokens");
     wire["total_tool_use_tokens"] = json!(5);
     assert_eq!(usage_of(&wire).total_tokens, Some(14 + 34 + 222 + 5));
 }
 
 #[test]
 fn the_older_three_field_shape_still_maps() {
-    let usage = usage_of(&json!({"total_input_tokens": 3, "total_output_tokens": 4, "total_tokens": 7}));
+    let usage =
+        usage_of(&json!({"total_input_tokens": 3, "total_output_tokens": 4, "total_tokens": 7}));
     assert_eq!(usage.total_tokens, Some(7));
     assert_eq!(usage.reasoning_tokens, None);
     assert_eq!(usage.cached_input_tokens, None);

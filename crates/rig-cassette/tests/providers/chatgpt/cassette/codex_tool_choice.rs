@@ -37,8 +37,7 @@ async fn required_forces_a_tool_call() {
                 .preamble(TOOLS_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&Adder))
                 .tool_choice(ToolChoice::Required)
-                .additional_params(recorded_include())
-                ;
+                .additional_params(recorded_include());
 
             let response = model
                 .call(request)
@@ -70,8 +69,7 @@ async fn none_suppresses_tool_calls() {
                 .preamble(TOOLS_PREAMBLE.to_string())
                 .tool(rig::tool::tool_definition(&Adder))
                 .tool_choice(ToolChoice::None)
-                .additional_params(recorded_include())
-                ;
+                .additional_params(recorded_include());
 
             let response = model
                 .call(request)
@@ -104,10 +102,11 @@ async fn specific_single_function_targets_named_tool() {
                 .tool(rig::tool::tool_definition(&Adder))
                 .tool(rig::tool::tool_definition(&Subtract))
                 .tool_choice(ToolChoice::Specific {
-                    function_names: vec![rig_core::message::ToolName::new(Subtract::NAME).expect("tool name")],
+                    function_names: vec![
+                        rig_core::message::ToolName::new(Subtract::NAME).expect("tool name"),
+                    ],
                 })
-                .additional_params(recorded_include())
-                ;
+                .additional_params(recorded_include());
 
             let response = model
                 .call(request)
@@ -164,10 +163,12 @@ async fn specific_multiple_functions_use_allowed_tools() {
                 .tool(rig::tool::tool_definition(&Subtract))
                 .tool(rig::tool::tool_definition(&AlphaSignal))
                 .tool_choice(ToolChoice::Specific {
-                    function_names: vec![rig_core::message::ToolName::new(Adder::NAME).expect("tool name"), rig_core::message::ToolName::new(Subtract::NAME).expect("tool name")],
+                    function_names: vec![
+                        rig_core::message::ToolName::new(Adder::NAME).expect("tool name"),
+                        rig_core::message::ToolName::new(Subtract::NAME).expect("tool name"),
+                    ],
                 })
-                .additional_params(recorded_include())
-                ;
+                .additional_params(recorded_include());
 
             let response = model
                 .call(request)

@@ -317,7 +317,7 @@ impl MessagesDecoder {
             "text" => {
                 self.text_indices.insert(index);
                 (Block::Text, Kind::Text, block.str("text"))
-            },
+            }
             "thinking" => (
                 Block::Reasoning { redacted: false },
                 Kind::Thinking,

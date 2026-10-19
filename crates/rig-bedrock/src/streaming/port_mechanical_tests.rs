@@ -122,6 +122,9 @@ fn aws_converse_output_to_completion_response() -> Result<(), Box<dyn std::error
     let completion = decoded(vec![json!({"text": "txt"})], None);
     assert!(completion.is_ok());
     let completion = completion?;
-    assert_eq!(completion.choice, vec![AssistantContent::Text("txt".into())]);
+    assert_eq!(
+        completion.choice,
+        vec![AssistantContent::Text("txt".into())]
+    );
     Ok(())
 }

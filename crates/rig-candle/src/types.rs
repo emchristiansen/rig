@@ -233,9 +233,7 @@ impl From<CandleError> for ProviderError {
         match error {
             // A request the local prompt format cannot express, refused
             // before any inference: a request failure, as on every other wire.
-            CandleError::UnrepresentableOpaqueContent(refusal) => {
-                ProviderError::request(refusal)
-            }
+            CandleError::UnrepresentableOpaqueContent(refusal) => ProviderError::request(refusal),
             CandleError::UnrepresentableToolCall(refusal) => ProviderError::request(refusal),
             error => ProviderError::Provider(error.to_string()),
         }

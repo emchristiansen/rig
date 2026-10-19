@@ -261,15 +261,19 @@ async fn original_chatgpt_parity_fixture_is_refused_by_strict_root_reader() {
     let wire = OpenAIConfig::with_key(&CHATGPT, "test-token")
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .responses("gpt-5.4");
-    let error = raw_pair(wire, stream.clone(), stream).await
+    let error = raw_pair(wire, stream.clone(), stream)
+        .await
         .expect_err("the original root has no required created_at");
     let Some(crate::error::ErrorDetail::CorruptFrame(detail)) = error.report().detail else {
         panic!("strict refusal retains typed frame evidence");
     };
     assert_eq!(detail.event_type.as_deref(), Some("response.created"));
-    assert_eq!(detail.evidence, crate::error::FrameEvidence::Text(
-        lifecycle("response.created", envelope("in_progress", json!([]))).to_string()
-    ));
+    assert_eq!(
+        detail.evidence,
+        crate::error::FrameEvidence::Text(
+            lifecycle("response.created", envelope("in_progress", json!([]))).to_string()
+        )
+    );
 }
 
 /// Explicit admission fields let the real unary and streamed Model routes

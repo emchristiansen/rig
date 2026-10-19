@@ -103,10 +103,7 @@ impl StreamView {
                             return;
                         };
                         call.tool = Some(name.as_str().to_owned());
-                        println!(
-                            "{stamp} part {} name   tool call `{name}`",
-                            part.index(),
-                        );
+                        println!("{stamp} part {} name   tool call `{name}`", part.index(),);
                     }
                 }
             }
@@ -257,7 +254,10 @@ mod carried_tests {
     fn late_name_preserves_pending_fragments_and_arrivals_on_the_same_part() {
         let call = ToolCall::new(
             CallId::from_wire("call_1"),
-            ToolFunction::new(ToolName::new("lookup").expect("actual name"), json!({"q": 1})),
+            ToolFunction::new(
+                ToolName::new("lookup").expect("actual name"),
+                json!({"q": 1}),
+            ),
         );
         let ended = serde_json::to_value(AssistantContent::ToolCall(call))
             .expect("actual canonical tool call");
@@ -269,7 +269,8 @@ mod carried_tests {
                 "kind":"tool_call", "tool_slot_state":"named", "name":"lookup"}},
             {"item":"event", "value":{"event":"arguments", "part":0, "json":"1}"}},
             {"item":"event", "value":{"event":"end", "part":0, "content":ended}}
-        ])).expect("checked pending-name transcript closes its one call");
+        ]))
+        .expect("checked pending-name transcript closes its one call");
         let events: Vec<_> = transcript.events().collect();
         let mut view = StreamView::new();
         for event in &events[..2] {
@@ -297,7 +298,10 @@ mod carried_tests {
         assert_eq!(completed.fragments, 2);
         assert_eq!(completed.arrivals.len(), 2);
         assert_eq!(completed.arrivals[..1], arrivals);
-        assert_eq!(completed.ended, Some(("call_1".to_owned(), json!({"q": 1}))));
+        assert_eq!(
+            completed.ended,
+            Some(("call_1".to_owned(), json!({"q": 1})))
+        );
         assert!(view.summary());
     }
 
@@ -307,7 +311,8 @@ mod carried_tests {
             {"item":"event", "value":{"event":"start", "part":0,
                 "kind":"tool_call", "name":"lookup"}},
             {"item":"event", "value":{"event":"arguments", "part":0, "json":"{}"}}
-        ])).expect("checked default open call");
+        ]))
+        .expect("checked default open call");
         let mut view = StreamView::new();
         for event in transcript.events() {
             view.event(event);
@@ -346,6 +351,9 @@ mod carried_tests {
         let kept = view.calls.get(&1).expect("other call remains open");
         assert_eq!(kept.arguments, " { \"kept\": true } ");
         assert_eq!(kept.fragments, 1);
-        assert!(kept.ended.is_none(), "discard does not complete another call");
+        assert!(
+            kept.ended.is_none(),
+            "discard does not complete another call"
+        );
     }
 }

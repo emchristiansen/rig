@@ -64,7 +64,10 @@ struct MockTurnResponse {
     message_id: Option<crate::completion::ProviderMessageId>,
     response_id: Option<String>,
     provider_request_id: Option<String>,
-    #[serde(default, skip_serializing_if = "crate::completion::ProviderResponseHeaders::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::completion::ProviderResponseHeaders::is_empty"
+    )]
     provider_response_headers: crate::completion::ProviderResponseHeaders,
     finish_reason: Option<crate::completion::FinishReason>,
     /// A scripted provider document, when the test supplies one; otherwise

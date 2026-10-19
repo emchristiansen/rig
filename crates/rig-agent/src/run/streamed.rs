@@ -428,9 +428,7 @@ impl StreamedTurnAssembler {
             StreamEvent::Start { .. }
             | StreamEvent::Resume { .. }
             | StreamEvent::End { .. }
-            | StreamEvent::Input { .. } => {
-                Ok(vec![StreamedTurnEvent::EmitIngested])
-            }
+            | StreamEvent::Input { .. } => Ok(vec![StreamedTurnEvent::EmitIngested]),
         }
     }
 

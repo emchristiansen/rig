@@ -1073,8 +1073,7 @@ fn novel_nested_delta_type_is_a_known_noop() {
     let frame = WireFrame::Text(
         r#"{"type":"content_block_delta","index":0,"delta":{"type":"banana_delta","x":1}}"#.into(),
     );
-    let crate::wire::WireEvent::Known(event) = classifier.classify(frame)
-    else {
+    let crate::wire::WireEvent::Known(event) = classifier.classify(frame) else {
         panic!("a novel nested delta type must stay a Known event");
     };
 
@@ -1187,8 +1186,7 @@ fn top_level_error_event_surfaces_as_a_provider_error() {
 fn message_start_with_null_message_is_a_known_noop() {
     let classifier = adapter();
     let frame = WireFrame::Text(r#"{"type":"message_start","message":null}"#.into());
-    let crate::wire::WireEvent::Known(event) = classifier.classify(frame)
-    else {
+    let crate::wire::WireEvent::Known(event) = classifier.classify(frame) else {
         panic!("null-message message_start must stay a known event");
     };
 
@@ -1661,9 +1659,12 @@ fn a_stop_reason_states_every_open_block_complete() {
 
     let cut = streamed(&without_stops("max_tokens", "{\"x\":")).expect("the reply folds");
     // G157: unfinished Length calls remain a failure under G48b/G137.
-    assert_eq!(cut.stop(), StopReason::Error(
-        "the provider ended the reply with a tool call it never finished".to_owned()
-    ));
+    assert_eq!(
+        cut.stop(),
+        StopReason::Error(
+            "the provider ended the reply with a tool call it never finished".to_owned()
+        )
+    );
     assert!(item(&cut.choice[0]).is_some(), "{:?}", cut.choice);
     assert!(item(&cut.choice[1]).is_none(), "{:?}", cut.choice);
     let unfinished = streamed(&without_stops("tool_use", "{\"x\":")).expect("the reply folds");
@@ -2085,7 +2086,10 @@ fn a_length_terminal_keeps_a_valid_open_call_unfinished() {
     let error = "the provider ended the reply with a tool call it never finished";
     assert_eq!(response.error.as_deref(), Some(error));
     assert_eq!(response.stop(), StopReason::Error(error.to_owned()));
-    let call = response.tool_calls().next().expect("the incomplete call is kept");
+    let call = response
+        .tool_calls()
+        .next()
+        .expect("the incomplete call is kept");
     assert_eq!(call.function.arguments_value(), json!({"x":1,"y":2}));
     assert!(call.native.is_none());
 }
@@ -2104,7 +2108,10 @@ fn a_length_terminal_retains_an_explicitly_finished_valid_call() {
     assert_eq!(response.finish_reason(), Some(FinishReason::Length));
     assert_eq!(response.error, None);
     assert_eq!(response.stop(), StopReason::Length);
-    let call = response.tool_calls().next().expect("the completed call is kept");
+    let call = response
+        .tool_calls()
+        .next()
+        .expect("the completed call is kept");
     assert_eq!(call.function.arguments_value(), json!({"x":1,"y":2}));
     assert!(call.native.is_some());
 }

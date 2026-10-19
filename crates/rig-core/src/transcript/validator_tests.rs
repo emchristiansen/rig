@@ -191,7 +191,6 @@ fn stored_results_require_the_kind_of_call_they_answer() {
     }
 }
 
-
 #[test]
 fn canonical_text_includes_every_carried_category_in_choice_order() {
     use crate::message::{
@@ -208,20 +207,23 @@ fn canonical_text_includes_every_carried_category_in_choice_order() {
         CarriedTextContent::Refusal("refusal|".to_owned()),
         CarriedTextContent::Opaque("opaque-edit|".to_owned()),
         CarriedTextContent::GeminiSignedAnswer(GeminiSignedAnswer::new(
-            "signed|", GeminiThoughtSignature::new("sig-exact"),
+            "signed|",
+            GeminiThoughtSignature::new("sig-exact"),
         )),
         CarriedTextContent::InspectionOnlyText("inspection|".to_owned()),
         CarriedTextContent::InspectionOnlyMedia("media|".to_owned()),
     ] {
         content.push(AssistantContent::CarriedText(CarriedText::new(
-            text, CarriedPayload::new(raw.clone(), None),
+            text,
+            CarriedPayload::new(raw.clone(), None),
         )));
     }
     content.extend([
         AssistantContent::reasoning("REASONING_ONLY"),
         AssistantContent::provider_item(serde_json::json!({"text":"PROVIDER_RAW_ONLY"}), "test"),
         AssistantContent::Opaque(Opaque {
-            item: serde_json::json!({"text":"OPAQUE_RAW_ONLY"}), replay: false,
+            item: serde_json::json!({"text":"OPAQUE_RAW_ONLY"}),
+            replay: false,
         }),
         call("ignored-call"),
         AssistantContent::text("z"),
@@ -245,7 +247,8 @@ fn empty_canonical_carried_text_never_promotes_raw_siblings() {
     use crate::message::{CarriedPayload, CarriedText, CarriedTextContent};
     let raw = serde_json::json!({"text":"RAW_ONLY","sibling":{"text":"RAW_SIBLING_ONLY"}});
     let text = CarriedText::new(
-        CarriedTextContent::Opaque(String::new()), CarriedPayload::new(raw.clone(), None),
+        CarriedTextContent::Opaque(String::new()),
+        CarriedPayload::new(raw.clone(), None),
     );
     let mut content = vec![AssistantContent::CarriedText(text)];
     assert_eq!(assistant_text_from_choice(&content), "");
@@ -254,5 +257,8 @@ fn empty_canonical_carried_text_never_promotes_raw_siblings() {
     };
     *text.text_mut() = "edited canonical answer".to_owned();
     assert_eq!(text.payload.item, raw);
-    assert_eq!(assistant_text_from_choice(&content), "edited canonical answer");
+    assert_eq!(
+        assistant_text_from_choice(&content),
+        "edited canonical answer"
+    );
 }

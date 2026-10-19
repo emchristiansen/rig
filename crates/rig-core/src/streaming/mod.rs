@@ -32,7 +32,8 @@ use crate::operation::{Completion, Turn};
 use crate::wasm_compat::WasmBoxedStream;
 use crate::wire::{Operation, Shared};
 pub use event::{
-    DiscardReason, Item, Part, PartKind, ReasoningAuthority, SequenceError, SourceOrder, StreamEvent, ToolSlotState, Transcript,
+    DiscardReason, Item, Part, PartKind, ReasoningAuthority, SequenceError, SourceOrder,
+    StreamEvent, ToolSlotState, Transcript,
 };
 
 /// Unmodeled JSON payload with content-redacted `Debug` output.

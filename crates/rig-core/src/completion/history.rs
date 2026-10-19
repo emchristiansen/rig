@@ -64,9 +64,9 @@ use base64::prelude::{BASE64_STANDARD, BASE64_STANDARD_NO_PAD};
 
 use crate::message::{
     AnsweredToolCall, Api, AssistantContent, AssistantMessage, CallId, CarriedReasoning,
-    CarriedText, CarriedTextContent, CustomToolCall, DocumentData, DocumentMediaType, DocumentSourceKind,
-    ImageMediaType, Message, Origin, ProviderItem, Text, ToolCall, ToolResult, ToolResultContent,
-    UnreplayableProviderItem, UnrepresentableOpaqueContent, UserContent,
+    CarriedText, CarriedTextContent, CustomToolCall, DocumentData, DocumentMediaType,
+    DocumentSourceKind, ImageMediaType, Message, Origin, ProviderItem, Text, ToolCall, ToolResult,
+    ToolResultContent, UnreplayableProviderItem, UnrepresentableOpaqueContent, UserContent,
 };
 use crate::wasm_compat::WasmCompatSync;
 
@@ -204,11 +204,11 @@ pub trait ReplayTarget: std::fmt::Debug + WasmCompatSync {
     /// authority. Responses parts require a destination's explicit replay policy.
     fn check_carried_text(&self, part: &CarriedText) -> Result<(), UnrepresentableOpaqueContent> {
         match &part.content {
-            CarriedTextContent::GeminiSignedAnswer(_) | CarriedTextContent::InspectionOnlyText(_)
-            | CarriedTextContent::InspectionOnlyMedia(_) => {
-                Ok(())
-            }
-            CarriedTextContent::Text(_) | CarriedTextContent::Refusal(_)
+            CarriedTextContent::GeminiSignedAnswer(_)
+            | CarriedTextContent::InspectionOnlyText(_)
+            | CarriedTextContent::InspectionOnlyMedia(_) => Ok(()),
+            CarriedTextContent::Text(_)
+            | CarriedTextContent::Refusal(_)
             | CarriedTextContent::Opaque(_) => {
                 Err(UnrepresentableOpaqueContent::new(self.provider()))
             }
@@ -531,11 +531,7 @@ impl AssistantContent {
     /// spelling planned for this exact call occurrence; a standalone
     /// classification that does not encode a call passes `None`.
     /// Encoders read provider items only through this.
-    pub fn replay(
-        &self,
-        target: &dyn ReplayTarget,
-        wire_id: Option<&str>,
-    ) -> Replay<'_> {
+    pub fn replay(&self, target: &dyn ReplayTarget, wire_id: Option<&str>) -> Replay<'_> {
         if let Some(item) = self.native_item() {
             return match (self, target.call_id_slot()) {
                 (AssistantContent::ToolCall(_), Some(slot)) => {
@@ -582,7 +578,10 @@ impl AssistantContent {
             }
             OptionalCallId::OmitLocal => self.replay(target, None),
         };
-        if !matches!(self, AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_)) {
+        if !matches!(
+            self,
+            AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_)
+        ) {
             return replay;
         }
         let Some(slot) = target.call_id_slot() else {
@@ -616,7 +615,10 @@ fn remove_pointer(item: &mut serde_json::Value, pointer: &str) {
     let Some((parent, key)) = pointer.rsplit_once('/') else {
         return;
     };
-    let Some(fields) = item.pointer_mut(parent).and_then(serde_json::Value::as_object_mut) else {
+    let Some(fields) = item
+        .pointer_mut(parent)
+        .and_then(serde_json::Value::as_object_mut)
+    else {
         return;
     };
     let key = key.replace("~1", "/").replace("~0", "~");

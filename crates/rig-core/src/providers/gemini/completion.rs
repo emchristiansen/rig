@@ -46,6 +46,7 @@ mod schema;
 pub use super::cached_content::with_cached_content;
 #[doc(hidden)]
 pub use super::options::{Route, generate_content_options};
+use crate::completion::history::OptionalCallId;
 use crate::completion::options::{BaseInput, FinalBody, RawAt, Rewrite, request_params};
 use crate::completion::{Accepts, CompletionRequest, Media, Place, Replay, ReplayTarget};
 use crate::error::{EncodeError, ProviderError};
@@ -55,7 +56,6 @@ use crate::message::{
     MimeType, ToolChoice, ToolResultContent, UserContent,
 };
 use crate::operation::Completion;
-use crate::completion::history::OptionalCallId;
 use crate::telemetry::GenAiOperation;
 use crate::wire::{Descriptor, Encoded, Framing, Mode, Wire};
 
@@ -440,7 +440,20 @@ pub fn request_body(
     request_params(
         target,
         request,
-        |input| adjusted_base(request, target, model, input, RequestEncoding { declaration, reasoning_scope: ReasoningScope::GenerateContent, tool_results: ToolResultStyle::GenerateContent }, adjust),
+        |input| {
+            adjusted_base(
+                request,
+                target,
+                model,
+                input,
+                RequestEncoding {
+                    declaration,
+                    reasoning_scope: ReasoningScope::GenerateContent,
+                    tool_results: ToolResultStyle::GenerateContent,
+                },
+                adjust,
+            )
+        },
         RawAt::Top,
         &[
             Rewrite::GeminiCachedContent(cached_content.map(str::to_owned)),
@@ -471,7 +484,20 @@ pub fn request_body_for_vertex(
     request_params(
         target,
         request,
-        |input| adjusted_base(request, target, model, input, RequestEncoding { declaration: vertex_declaration, reasoning_scope: ReasoningScope::TargetIssuer, tool_results: ToolResultStyle::Vertex }, adjust),
+        |input| {
+            adjusted_base(
+                request,
+                target,
+                model,
+                input,
+                RequestEncoding {
+                    declaration: vertex_declaration,
+                    reasoning_scope: ReasoningScope::TargetIssuer,
+                    tool_results: ToolResultStyle::Vertex,
+                },
+                adjust,
+            )
+        },
         RawAt::Top,
         &[
             Rewrite::GeminiCachedContent(cached_content.map(str::to_owned)),
@@ -524,10 +550,24 @@ fn adjusted_base(
     encoding: RequestEncoding,
     adjust: impl FnOnce(&mut Map<String, Value>),
 ) -> Result<Map<String, Value>, EncodeError> {
-    let RequestEncoding { declaration, reasoning_scope, tool_results } = encoding;
+    let RequestEncoding {
+        declaration,
+        reasoning_scope,
+        tool_results,
+    } = encoding;
     let mut body = match tool_results {
-        ToolResultStyle::GenerateContent => base(request, target, model, input, declaration, reasoning_scope)?,
-        ToolResultStyle::Vertex => base_in(request, target, model, input, declaration, reasoning_scope, tool_results)?,
+        ToolResultStyle::GenerateContent => {
+            base(request, target, model, input, declaration, reasoning_scope)?
+        }
+        ToolResultStyle::Vertex => base_in(
+            request,
+            target,
+            model,
+            input,
+            declaration,
+            reasoning_scope,
+            tool_results,
+        )?,
     };
     adjust(&mut body);
     Ok(body)
@@ -543,7 +583,15 @@ fn base(
     declaration: fn(crate::completion::ToolDefinition) -> Result<Value, EncodeError>,
     reasoning_scope: ReasoningScope,
 ) -> Result<Map<String, Value>, EncodeError> {
-    base_in(request, target, model, input, declaration, reasoning_scope, ToolResultStyle::GenerateContent)
+    base_in(
+        request,
+        target,
+        model,
+        input,
+        declaration,
+        reasoning_scope,
+        ToolResultStyle::GenerateContent,
+    )
 }
 
 fn base_in(
@@ -646,7 +694,8 @@ fn declaration(tool: crate::completion::ToolDefinition) -> Result<Value, EncodeE
         let reason = std::error::Error::source(&error)
             .map_or_else(|| error.to_string(), ToString::to_string);
         EncodeError::request(format!(
-            "Tool '{}' could not be converted to a schema: {reason}", tool.name
+            "Tool '{}' could not be converted to a schema: {reason}",
+            tool.name
         ))
     })?;
     Ok(Value::Object(object([
@@ -712,7 +761,13 @@ fn contents(
     target: &dyn ReplayTarget,
     model: &str,
 ) -> Result<Vec<Value>, EncodeError> {
-    contents_in(history, target, model, ToolResultStyle::GenerateContent, PROVIDER_NAME)
+    contents_in(
+        history,
+        target,
+        model,
+        ToolResultStyle::GenerateContent,
+        PROVIDER_NAME,
+    )
 }
 
 fn contents_in(
@@ -831,18 +886,24 @@ pub(super) fn document_part(document: &crate::message::Document) -> Result<Value
     match source {
         Source::Base64(data) if *media_type != DocumentMediaType::PDF => {
             use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(|error| {
-                EncodeError::request(format!("Failed to decode base64: {error}"))
-            })?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|error| {
+                    EncodeError::request(format!("Failed to decode base64: {error}"))
+                })?;
             let text = String::from_utf8(bytes).map_err(|error| {
                 EncodeError::request(format!("Invalid UTF-8 in document: {error}"))
             })?;
             Ok(text_part(text))
         }
-        Source::Base64(_) | Source::Url(_) => {
-            media(Some(media_type.to_mime_type().to_owned()), source.clone(), true)
-        }
-        Source::Raw(_) => Err(EncodeError::request("Raw files not supported, encode as base64 first")),
+        Source::Base64(_) | Source::Url(_) => media(
+            Some(media_type.to_mime_type().to_owned()),
+            source.clone(),
+            true,
+        ),
+        Source::Raw(_) => Err(EncodeError::request(
+            "Raw files not supported, encode as base64 first",
+        )),
         Source::FileId(_) => Err(EncodeError::request(
             "Provider file IDs are not supported for Gemini documents",
         )),
@@ -875,7 +936,9 @@ fn check_original_tool_result_images(history: &[Message]) -> Result<(), EncodeEr
 fn tool_result_image_part(image: &crate::message::Image) -> Result<Value, EncodeError> {
     let Source::Base64(data) = &image.data else {
         let reason = match &image.data {
-            Source::Url(_) => "Gemini tool result images must use base64 inline data; URL-backed images are not supported",
+            Source::Url(_) => {
+                "Gemini tool result images must use base64 inline data; URL-backed images are not supported"
+            }
             _ => "Unsupported image source kind for tool results",
         };
         return Err(crate::message::MessageError::ConversionError(reason.to_owned()).into());
@@ -885,10 +948,11 @@ fn tool_result_image_part(image: &crate::message::Image) -> Result<Value, Encode
             "Image media type is required for Gemini tool results".to_owned(),
         )
     })?;
-    if !matches!(media_type,
+    if !matches!(
+        media_type,
         crate::message::ImageMediaType::JPEG
-        | crate::message::ImageMediaType::PNG
-        | crate::message::ImageMediaType::WEBP
+            | crate::message::ImageMediaType::PNG
+            | crate::message::ImageMediaType::WEBP
     ) {
         return Err(crate::message::MessageError::ConversionError(format!(
             "Unsupported image media type {media_type:?} for Gemini tool results; supported types are JPEG, PNG, and WEBP"
@@ -908,8 +972,10 @@ fn vertex_tool_result(
     }
     if result.answers == crate::message::AnsweredToolCall::Custom {
         return Err(crate::message::UnrepresentableToolCall::CustomCall {
-            wire: "Gemini GenerateContent", name: result.name.clone(),
-        }.into());
+            wire: "Gemini GenerateContent",
+            name: result.name.clone(),
+        }
+        .into());
     }
     let mut reserved = std::collections::HashSet::new();
     for item in &result.content {
@@ -917,7 +983,10 @@ fn vertex_tool_result(
             collect_vertex_ref_names(value, &mut reserved);
         }
     }
-    let has_values = result.content.iter().any(|item| !matches!(item, ToolResultContent::Image(_)));
+    let has_values = result
+        .content
+        .iter()
+        .any(|item| !matches!(item, ToolResultContent::Image(_)));
     let mut image_index = 0;
     let (mut values, mut parts) = (Vec::new(), Vec::new());
     for item in result.content {
@@ -928,7 +997,9 @@ fn vertex_tool_result(
                 let name = loop {
                     let name = format!("rig_tool_result_image_{image_index}");
                     image_index += 1;
-                    if reserved.insert(name.clone()) { break name; }
+                    if reserved.insert(name.clone()) {
+                        break name;
+                    }
                 };
                 parts.push(vertex_tool_result_image(&image, &name)?);
                 values.push(json!({"$ref": name}));
@@ -943,7 +1014,10 @@ fn vertex_tool_result(
         ("name", Some(json!(result.name))),
         ("id", id.map(Value::from)),
         // Image-only successes keep the existing callback's request-wide names.
-        ("response", (has_values || parts.is_empty()).then(|| json!({"output": output}))),
+        (
+            "response",
+            (has_values || parts.is_empty()).then(|| json!({"output": output})),
+        ),
         ("parts", (!parts.is_empty()).then_some(Value::Array(parts))),
     ]);
     Ok(json!({"functionResponse": response, "thought": false}))
@@ -952,40 +1026,58 @@ fn vertex_tool_result(
 fn collect_vertex_ref_names(value: &Value, names: &mut std::collections::HashSet<String>) {
     match value {
         Value::Object(object) => {
-            if let Some(Value::String(name)) = object.get("$ref") { names.insert(name.clone()); }
-            for value in object.values() { collect_vertex_ref_names(value, names); }
+            if let Some(Value::String(name)) = object.get("$ref") {
+                names.insert(name.clone());
+            }
+            for value in object.values() {
+                collect_vertex_ref_names(value, names);
+            }
         }
         Value::Array(values) => {
-            for value in values { collect_vertex_ref_names(value, names); }
+            for value in values {
+                collect_vertex_ref_names(value, names);
+            }
         }
         _ => {}
     }
 }
 
 /// MIME-first validation and native Vertex response-media forms.
-fn vertex_tool_result_image(image: &crate::message::Image, name: &str) -> Result<Value, EncodeError> {
-    use base64::Engine as _;
+fn vertex_tool_result_image(
+    image: &crate::message::Image,
+    name: &str,
+) -> Result<Value, EncodeError> {
     use crate::message::ImageMediaType;
+    use base64::Engine as _;
     let media_type = image.media_type.as_ref().ok_or_else(|| {
         EncodeError::request("Media type for tool-result image is required for Vertex AI")
     })?;
-    if !matches!(media_type, ImageMediaType::JPEG | ImageMediaType::PNG | ImageMediaType::WEBP) {
+    if !matches!(
+        media_type,
+        ImageMediaType::JPEG | ImageMediaType::PNG | ImageMediaType::WEBP
+    ) {
         return Err(EncodeError::request(format!(
             "Unsupported Vertex AI tool-result image media type {media_type:?}; expected JPEG, PNG, or WEBP"
         )));
     }
     let mime = media_type.to_mime_type();
     let bytes = match &image.data {
-        Source::Base64(data) => base64::engine::general_purpose::STANDARD.decode(data).map_err(|error| {
-            EncodeError::request(format!("Invalid base64 tool-result image data: {error}"))
-        })?,
+        Source::Base64(data) => base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|error| {
+                EncodeError::request(format!("Invalid base64 tool-result image data: {error}"))
+            })?,
         Source::Raw(bytes) => bytes.clone(),
-        Source::Url(uri) => return Ok(json!({"fileData": {
-            "mimeType": mime, "fileUri": uri, "displayName": name,
-        }})),
-        data => return Err(EncodeError::request(format!(
-            "Unsupported Vertex AI tool-result image source: {data}"
-        ))),
+        Source::Url(uri) => {
+            return Ok(json!({"fileData": {
+                "mimeType": mime, "fileUri": uri, "displayName": name,
+            }}));
+        }
+        data => {
+            return Err(EncodeError::request(format!(
+                "Unsupported Vertex AI tool-result image source: {data}"
+            )));
+        }
     };
     Ok(json!({"inlineData": {
         "mimeType": mime, "data": base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -1004,8 +1096,10 @@ fn user_part(part: UserContent, id: Option<&str>) -> Result<Value, EncodeError> 
         UserContent::ToolResult(result) => {
             if result.answers == crate::message::AnsweredToolCall::Custom {
                 return Err(crate::message::UnrepresentableToolCall::CustomCall {
-                    wire: "Gemini GenerateContent", name: result.name.clone(),
-                }.into());
+                    wire: "Gemini GenerateContent",
+                    name: result.name.clone(),
+                }
+                .into());
             }
             let (mut values, mut parts) = (Vec::new(), Vec::new());
             for item in result.content {
@@ -1070,14 +1164,31 @@ fn assistant_part_in(
     crate::message::json_only_wire_tool_call("Gemini generateContent", block)?;
     let replay = match block {
         AssistantContent::ToolCall(call) => match &call.id {
-            crate::message::CallId::Provider(id) => block.replay_optional_call_id(target, OptionalCallId::ProviderHandle(id)),
-            crate::message::CallId::Local(_) => block.replay_optional_call_id(target, OptionalCallId::OmitLocal),
+            crate::message::CallId::Provider(id) => {
+                block.replay_optional_call_id(target, OptionalCallId::ProviderHandle(id))
+            }
+            crate::message::CallId::Local(_) => {
+                block.replay_optional_call_id(target, OptionalCallId::OmitLocal)
+            }
         },
-        AssistantContent::CustomToolCall(call) => return Err(call.refused_by_json_only_wire("Gemini generateContent").into()),
-        AssistantContent::ProviderItem(item) => return Err(crate::message::UnreplayableProviderItem::new("Gemini GenerateContent", item).into()),
-        AssistantContent::Text(_) | AssistantContent::Reasoning(_)
-        | AssistantContent::Image(_) | AssistantContent::Opaque(_)
-        | AssistantContent::CarriedText(_) | AssistantContent::CarriedReasoning(_) => block.replay(target, None),
+        AssistantContent::CustomToolCall(call) => {
+            return Err(call
+                .refused_by_json_only_wire("Gemini generateContent")
+                .into());
+        }
+        AssistantContent::ProviderItem(item) => {
+            return Err(crate::message::UnreplayableProviderItem::new(
+                "Gemini GenerateContent",
+                item,
+            )
+            .into());
+        }
+        AssistantContent::Text(_)
+        | AssistantContent::Reasoning(_)
+        | AssistantContent::Image(_)
+        | AssistantContent::Opaque(_)
+        | AssistantContent::CarriedText(_)
+        | AssistantContent::CarriedReasoning(_) => block.replay(target, None),
     };
     if let Replay::Item(item) = replay {
         let mut item = item.into_owned();
@@ -1125,20 +1236,31 @@ fn assistant_part_in(
         }
         AssistantContent::Opaque(opaque) => opaque.item.clone(),
         AssistantContent::CarriedText(part) => {
-            if let Some(answer) = part.signed_answer().filter(|_| part.payload.replayable_to(issuer)) {
+            if let Some(answer) = part
+                .signed_answer()
+                .filter(|_| part.payload.replayable_to(issuer))
+            {
                 json!({"text": answer.text, "thought": false, "thoughtSignature": answer.signature.as_str()})
             } else if let Some(text) = part.known_text_projection() {
                 text_part(text.to_owned())
             } else {
-                return Err(crate::message::UnrepresentableOpaqueContent::new("Gemini GenerateContent").into());
+                return Err(crate::message::UnrepresentableOpaqueContent::new(
+                    "Gemini GenerateContent",
+                )
+                .into());
             }
         }
         AssistantContent::CarriedReasoning(reasoning) => {
             if reasoning.has_opaque_parts() {
-                return Err(crate::message::UnrepresentableOpaqueContent::new("Gemini GenerateContent").into());
+                return Err(crate::message::UnrepresentableOpaqueContent::new(
+                    "Gemini GenerateContent",
+                )
+                .into());
             }
             let signature = reasoning.content.iter().find_map(|part| match part {
-                crate::message::CarriedReasoningPart::Text { signature, .. } => signature.as_deref(),
+                crate::message::CarriedReasoningPart::Text { signature, .. } => {
+                    signature.as_deref()
+                }
                 crate::message::CarriedReasoningPart::Summary(_)
                 | crate::message::CarriedReasoningPart::Encrypted(_)
                 | crate::message::CarriedReasoningPart::Redacted { .. }
@@ -1148,11 +1270,24 @@ fn assistant_part_in(
             Value::Object(object([
                 ("thought", Some(json!(true))),
                 ("text", Some(json!(reasoning.display_text()))),
-                ("thoughtSignature", signature.map(|signature| json!(signature))),
+                (
+                    "thoughtSignature",
+                    signature.map(|signature| json!(signature)),
+                ),
             ]))
         }
-        AssistantContent::CustomToolCall(call) => return Err(call.refused_by_json_only_wire("Gemini generateContent").into()),
-        AssistantContent::ProviderItem(item) => return Err(crate::message::UnreplayableProviderItem::new("Gemini GenerateContent", item).into()),
+        AssistantContent::CustomToolCall(call) => {
+            return Err(call
+                .refused_by_json_only_wire("Gemini generateContent")
+                .into());
+        }
+        AssistantContent::ProviderItem(item) => {
+            return Err(crate::message::UnreplayableProviderItem::new(
+                "Gemini GenerateContent",
+                item,
+            )
+            .into());
+        }
     }))
 }
 
@@ -1188,9 +1323,13 @@ pub(crate) fn blocked_prompt_error(feedback: &Value) -> Option<ProviderError> {
     let ratings = ratings.map(|rating| {
         format!(
             "{}={}",
-            rating.get("category").and_then(super::streaming::reader::harm_category)
+            rating
+                .get("category")
+                .and_then(super::streaming::reader::harm_category)
                 .unwrap_or_else(|| spelled(rating.get("category"))),
-            rating.get("probability").and_then(super::streaming::reader::harm_probability)
+            rating
+                .get("probability")
+                .and_then(super::streaming::reader::harm_probability)
                 .unwrap_or_else(|| spelled(rating.get("probability")))
         )
     });
@@ -1236,7 +1375,12 @@ pub fn map_google_finish_reason(wire_name: &str) -> crate::completion::FinishRea
 /// total counts retain the provider's reported values; thought and tool-use
 /// counts remain separate. Omitted prompt and total counts are zero.
 pub fn usage_of(usage: &Value) -> crate::completion::Usage {
-    let count = |key: &str| usage.get(key).and_then(Value::as_i64).map(|count| count as u64);
+    let count = |key: &str| {
+        usage
+            .get(key)
+            .and_then(Value::as_i64)
+            .map(|count| count as u64)
+    };
     crate::completion::Usage {
         input_tokens: Some(count("promptTokenCount").unwrap_or(0)),
         output_tokens: count("candidatesTokenCount"),
@@ -1254,14 +1398,24 @@ pub fn usage_of(usage: &Value) -> crate::completion::Usage {
 pub(super) fn checked_usage_of(usage: &Value) -> Result<crate::completion::Usage, ProviderError> {
     let mut normalized = usage_of(usage);
     normalized.input_tokens = Some(
-        normalized.input_tokens.unwrap_or(0)
+        normalized
+            .input_tokens
+            .unwrap_or(0)
             .checked_add(normalized.tool_use_prompt_tokens.unwrap_or(0))
-            .ok_or_else(|| ProviderError::Response("Gemini input token count overflow".to_owned()))?,
+            .ok_or_else(|| {
+                ProviderError::Response("Gemini input token count overflow".to_owned())
+            })?,
     );
-    normalized.output_tokens = normalized.output_tokens.map(|candidates| {
-        candidates.checked_add(normalized.reasoning_tokens.unwrap_or(0))
-            .ok_or_else(|| ProviderError::Response("Gemini output token count overflow".to_owned()))
-    }).transpose()?;
+    normalized.output_tokens = normalized
+        .output_tokens
+        .map(|candidates| {
+            candidates
+                .checked_add(normalized.reasoning_tokens.unwrap_or(0))
+                .ok_or_else(|| {
+                    ProviderError::Response("Gemini output token count overflow".to_owned())
+                })
+        })
+        .transpose()?;
     Ok(normalized)
 }
 

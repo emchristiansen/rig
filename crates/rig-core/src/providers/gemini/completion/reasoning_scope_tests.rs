@@ -1,9 +1,9 @@
 use super::*;
-use base64::Engine as _;
 use crate::message::{
     AssistantContent, AssistantMessage, CarriedPayload, CarriedReasoning, CarriedReasoningPart,
     Message,
 };
+use base64::Engine as _;
 use serde_json::{Value, json};
 
 fn reasoning(text: &str, bytes: &[u8], issuer: Option<&str>) -> AssistantContent {

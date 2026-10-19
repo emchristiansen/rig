@@ -15,7 +15,7 @@
 
 use super::*;
 use crate::message;
-use crate::providers::openai::wire::{Chat, OpenAIConfig, Quirks, OPENAI};
+use crate::providers::openai::wire::{Chat, OPENAI, OpenAIConfig, Quirks};
 use crate::wire::{Mode, Wire};
 
 fn params(
@@ -73,8 +73,8 @@ fn an_image_tool_result_is_refused_when_the_provider_cannot_carry_it() {
 /// The same request is built when the provider does carry it.
 #[test]
 fn an_image_tool_result_is_sent_when_the_provider_supports_it() {
-    let request = encode(params(true, vec![image()]))
-        .expect("a capable provider should accept the image");
+    let request =
+        encode(params(true, vec![image()])).expect("a capable provider should accept the image");
     let wire = crate::test_utils::json_body(&request.request)["messages"].clone();
     let content = &wire[0]["content"];
     assert_eq!(content[0]["type"], "image_url", "{wire}");

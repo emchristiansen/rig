@@ -37,10 +37,14 @@ fn frames(events: &[Value]) -> Vec<WireFrame> {
         .map(|(sequence, event)| {
             let mut event = event.clone();
             if let Some(fields) = event.as_object_mut() {
-                fields.entry("sequence_number").or_insert_with(|| json!(sequence));
+                fields
+                    .entry("sequence_number")
+                    .or_insert_with(|| json!(sequence));
                 if let Some(response) = fields.get_mut("response").and_then(Value::as_object_mut) {
                     response.entry("created_at").or_insert_with(|| json!(0));
-                    response.entry("object").or_insert_with(|| json!("response"));
+                    response
+                        .entry("object")
+                        .or_insert_with(|| json!("response"));
                     response.entry("model").or_insert_with(|| json!("gpt-5.4"));
                 }
             }
@@ -134,21 +138,37 @@ fn a_done_call_keeps_what_was_announced_and_streamed() {
         if let Some(item) = events[6]["item"].as_object_mut() {
             item.shift_remove(missing);
         }
-        let WireFrame::Text(announced) = frames(&events[3..4]).remove(0) else { panic!("text fixture"); };
+        let WireFrame::Text(announced) = frames(&events[3..4]).remove(0) else {
+            panic!("text fixture");
+        };
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(announced.clone())) else { panic!("the original added status is absent"); };
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(announced.clone()))
+        else {
+            panic!("the original added status is absent");
+        };
         assert_eq!(refused.error().to_string(), "missing field `status`");
         assert_eq!(refused.event_type(), Some("response.output_item.added"));
-        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(announced));
-        let WireFrame::Text(scaffolded) = frames(&events[6..7]).remove(0) else { panic!("text fixture"); };
+        assert_eq!(
+            refused.evidence(),
+            &crate::error::FrameEvidence::Text(announced)
+        );
+        let WireFrame::Text(scaffolded) = frames(&events[6..7]).remove(0) else {
+            panic!("text fixture");
+        };
         let raw = scaffolded;
         let configured = wire();
         let decoder = configured.decoder_in(Mode::Streaming);
-        let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+        let crate::wire::WireEvent::Corrupt(refused) =
+            decoder.classify(WireFrame::Text(raw.clone()))
+        else {
             panic!("the exact held fixture must remain a typed strict refusal");
         };
-        assert_eq!(refused.error().to_string(), format!("missing field `{missing}`"));
+        assert_eq!(
+            refused.error().to_string(),
+            format!("missing field `{missing}`")
+        );
         assert_eq!(refused.event_type(), Some("response.output_item.done"));
         assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
     }
@@ -165,14 +185,21 @@ fn a_reply_cut_before_its_terminal_keeps_no_item_and_the_terminal_takes_the_ciph
     // G191 cuts5/7 reach the bad announcement; cut3 is its own behavior.
     for cut in [5, 7] {
         let encoded = frames(&events[..cut]);
-        let WireFrame::Text(expected) = &encoded[3] else { panic!("text fixture"); };
+        let WireFrame::Text(expected) = &encoded[3] else {
+            panic!("text fixture");
+        };
         let expected = expected.clone();
         let error = crate::test_utils::history::decode(&wire(), Mode::Streaming, encoded)
             .expect_err("the original added call has no required status");
-        let crate::error::ProviderError::CorruptFrame(refused) = error else { panic!("strict shape refusal"); };
+        let crate::error::ProviderError::CorruptFrame(refused) = error else {
+            panic!("strict shape refusal");
+        };
         assert_eq!(refused.error().to_string(), "missing field `status`");
         assert_eq!(refused.event_type(), Some("response.output_item.added"));
-        assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(expected));
+        assert_eq!(
+            refused.evidence(),
+            &crate::error::FrameEvidence::Text(expected)
+        );
     }
 }
 
@@ -204,7 +231,10 @@ fn a_call_cut_off_after_a_missing_output_index_goes_back_without_its_item() {
         "{:?}",
         response.choice
     );
-    assert!(response.choice.is_empty(), "the default cut has no published call");
+    assert!(
+        response.choice.is_empty(),
+        "the default cut has no published call"
+    );
     let turn = response.continued(response.choice.clone());
     let results = turn
         .tool_calls()
@@ -305,12 +335,11 @@ fn the_same_missing_output_zero_cut_replays_with_explicit_immediate_call_publica
     ];
     let configured = wire();
     assert_eq!(configured.describe().name, "openai");
-    let (response, ended) =
-        crate::test_utils::history_conformance::partial(
-            &ImmediateCompletedCalls(configured),
-            Mode::Streaming,
-            frames(&events),
-        );
+    let (response, ended) = crate::test_utils::history_conformance::partial(
+        &ImmediateCompletedCalls(configured),
+        Mode::Streaming,
+        frames(&events),
+    );
     assert!(!ended, "no terminal arrived");
     assert!(
         response
@@ -320,7 +349,11 @@ fn the_same_missing_output_zero_cut_replays_with_explicit_immediate_call_publica
         "{:?}",
         response.choice
     );
-    assert_eq!(response.choice.len(), 1, "the item-done call is already published");
+    assert_eq!(
+        response.choice.len(),
+        1,
+        "the item-done call is already published"
+    );
     let turn = response.continued(response.choice.clone());
     let results = turn
         .tool_calls()
@@ -561,11 +594,14 @@ fn raw_reasoning_deltas_under_a_summary_fold_as_the_whole_reply() {
         json!({"type": "response.output_item.done", "output_index": 1, "item": message("msg_1", "hi")}),
         json!({"type": "response.completed", "response": body(output.clone())}),
     ];
-    let WireFrame::Text(scaffolded) = frames(&events[4..5]).remove(0) else { panic!("text fixture"); };
+    let WireFrame::Text(scaffolded) = frames(&events[4..5]).remove(0) else {
+        panic!("text fixture");
+    };
     let raw = scaffolded;
     let configured = wire();
     let decoder = configured.decoder_in(Mode::Streaming);
-    let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+    let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone()))
+    else {
         panic!("the exact held fixture must remain a typed strict refusal");
     };
     assert_eq!(refused.error().to_string(), "missing field `status`");
@@ -581,18 +617,21 @@ fn reasoning_before_a_dropped_call_does_not_go_back() {
     let nameless = json!({"type": "function_call", "id": "fc_1", "call_id": "call_1",
                           "arguments": "{}", "status": "completed"});
     let raw = body(json!([
-        reasoning("rs_1", Some("enc")), nameless, message("msg_1", "hi")
-    ])).to_string();
+        reasoning("rs_1", Some("enc")),
+        nameless,
+        message("msg_1", "hi")
+    ]))
+    .to_string();
     let configured = wire();
     let decoder = configured.decoder_in(Mode::Unary);
-    let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone())) else {
+    let crate::wire::WireEvent::Corrupt(refused) = decoder.classify(WireFrame::Text(raw.clone()))
+    else {
         panic!("a deliberately nameless call must remain a typed strict refusal");
     };
     assert_eq!(refused.error().to_string(), "missing field `name`");
     assert_eq!(refused.event_type(), None);
     assert_eq!(refused.evidence(), &crate::error::FrameEvidence::Text(raw));
 }
-
 
 #[test]
 fn admitted_raw_reasoning_deltas_under_a_summary_fold_as_the_whole_reply() {
@@ -618,7 +657,6 @@ fn admitted_raw_reasoning_deltas_under_a_summary_fold_as_the_whole_reply() {
     assert_eq!(streamed.raw["output"], output);
 }
 
-
 // G191 NEW variant supplies only the absent added-call status. Original helper
 // and deliberately missing done fields remain unchanged in negative subjects.
 fn admitted_streamed_call() -> Vec<Value> {
@@ -627,7 +665,6 @@ fn admitted_streamed_call() -> Vec<Value> {
     events
 }
 
-
 #[test]
 fn the_original_three_frame_reasoning_prefix_keeps_no_native_item() {
     let mut events = streamed_call();
@@ -635,12 +672,20 @@ fn the_original_three_frame_reasoning_prefix_keeps_no_native_item() {
         item.shift_remove("encrypted_content");
     }
     let (cut_off, ended) = crate::test_utils::history_conformance::partial(
-        &wire(), Mode::Streaming, frames(&events[..3]));
+        &wire(),
+        Mode::Streaming,
+        frames(&events[..3]),
+    );
     assert!(!ended, "no original terminal arrived");
-    assert!(cut_off.choice.iter().all(|block| block.native_item().is_none()),
-        "cut3: {:?}", cut_off.choice);
+    assert!(
+        cut_off
+            .choice
+            .iter()
+            .all(|block| block.native_item().is_none()),
+        "cut3: {:?}",
+        cut_off.choice
+    );
 }
-
 
 #[test]
 fn admitted_reply_cuts_keep_no_native_item_and_terminal_keeps_ciphertext() {
@@ -674,20 +719,32 @@ fn admitted_reply_cuts_keep_no_native_item_and_terminal_keeps_ciphertext() {
     ]);
     let response = streamed(&events);
     // G196: terminal reasoning is actual carried data; completed call stays Native.
-    let [AssistantContent::CarriedReasoning(reasoning), AssistantContent::ToolCall(call)] =
-        response.choice.as_slice() else { panic!("ordered reasoning and call: {:?}", response.choice); };
+    let [
+        AssistantContent::CarriedReasoning(reasoning),
+        AssistantContent::ToolCall(call),
+    ] = response.choice.as_slice()
+    else {
+        panic!("ordered reasoning and call: {:?}", response.choice);
+    };
     assert_eq!(reasoning.id.as_deref(), Some("rs_1"));
     assert_eq!(reasoning.display_text(), "plan");
-    assert_eq!(reasoning.content, vec![crate::message::CarriedReasoningPart::Summary("plan".to_owned()),
-        crate::message::CarriedReasoningPart::Encrypted("enc".to_owned())]);
-    assert_eq!(reasoning.payload.item, events[last]["response"]["output"][0]);
+    assert_eq!(
+        reasoning.content,
+        vec![
+            crate::message::CarriedReasoningPart::Summary("plan".to_owned()),
+            crate::message::CarriedReasoningPart::Encrypted("enc".to_owned())
+        ]
+    );
+    assert_eq!(
+        reasoning.payload.item,
+        events[last]["response"]["output"][0]
+    );
     assert_eq!(reasoning.payload.item["encrypted_content"], json!("enc"));
     assert_eq!(response.choice[1].native_item(), Some(&events[6]["item"]));
     assert_eq!(call.function.arguments_value(), json!({"a":1}));
     assert_eq!(call.id.wire(), "call_1");
     assert_eq!(response.raw["output"], events[last]["response"]["output"]);
 }
-
 
 #[test]
 fn an_admitted_intact_done_call_preserves_announced_arguments_identity_and_pairing() {

@@ -44,25 +44,24 @@ fn minted_tool_ids_replay_as_a_consistent_pair() {
     // into the result; F's explicit-local-handle/provider-absent distinction
     // is lost. Each leg below encodes separately, as the original subjects did.
     let tool_result = message::Message::User {
-        content: vec![message::UserContent::ToolResult(call.result(vec![
-            message::ToolResultContent::text("22C"),
-        ]))],
+        content: vec![message::UserContent::ToolResult(
+            call.result(vec![message::ToolResultContent::text("22C")]),
+        )],
     };
     let assistant = message::Message::Assistant(message::AssistantMessage::new(vec![
         message::AssistantContent::ToolCall(call),
     ]));
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let assistant_encoded = target.encode(
-        CoreCompletionRequest::from(vec![assistant]), Mode::Unary,
-    ).expect("assistant-only request encodes");
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let assistant_encoded = target
+        .encode(CoreCompletionRequest::from(vec![assistant]), Mode::Unary)
+        .expect("assistant-only request encodes");
     let assistant_body = crate::test_utils::json_body(&assistant_encoded.request);
     let assistant_wire: Vec<Message> = serde_json::from_value(assistant_body["messages"].clone())
         .expect("actual assistant messages deserialize through the retained Chat view");
-    let result_encoded = target.encode(
-        CoreCompletionRequest::from(vec![tool_result]), Mode::Unary,
-    ).expect("result-only request encodes through the provider-orphan route");
+    let result_encoded = target
+        .encode(CoreCompletionRequest::from(vec![tool_result]), Mode::Unary)
+        .expect("result-only request encodes through the provider-orphan route");
     let result_body = crate::test_utils::json_body(&result_encoded.request);
     let result_wire: Vec<Message> = serde_json::from_value(result_body["messages"].clone())
         .expect("actual result messages deserialize through the retained Chat view");
@@ -109,8 +108,10 @@ fn test_document(id: &str, text: &str) -> crate::completion::Document {
 
 fn request_with_multi_block_tool_result() -> CoreCompletionRequest {
     let call = message::ToolCall::from_wire(
-        "call-id", message::ToolFunction::new(
-            message::ToolName::new("tool").expect("original nonempty name"), json!({}),
+        "call-id",
+        message::ToolFunction::new(
+            message::ToolName::new("tool").expect("original nonempty name"),
+            json!({}),
         ),
     );
     let tool_result = call.result(vec![
@@ -139,9 +140,9 @@ fn mixed_user_content_preserves_order_around_tool_results() {
 
     let request = CoreCompletionRequest::from(vec![message::Message::User { content }]);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
@@ -164,11 +165,13 @@ fn video_url_with_unrecognized_mime_stays_a_url_on_the_wire() {
     let original = "data:video/quicktime;base64,AAAA";
     let rig_content = message::UserContent::video_url(original.to_string(), None);
 
-    let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![rig_content] }]);
+    let request = CoreCompletionRequest::from(vec![message::Message::User {
+        content: vec![rig_content],
+    }]);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let converted: Vec<Message> = serde_json::from_value(body["messages"].clone())
@@ -203,7 +206,8 @@ fn sanitize_plain_text_history_strips_tool_exchange_and_keeps_alternation() {
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
         body.as_object_mut().expect("body object"),
-    ).expect("existing Perplexity rewrite");
+    )
+    .expect("existing Perplexity rewrite");
     let messages = body["messages"].as_array().expect("same messages array");
 
     let roles = messages
@@ -236,7 +240,8 @@ fn sanitize_plain_text_history_merges_consecutive_user_messages() {
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
         body.as_object_mut().expect("body object"),
-    ).expect("existing Perplexity rewrite");
+    )
+    .expect("existing Perplexity rewrite");
     let messages = body["messages"].as_array().expect("same messages array");
 
     assert_eq!(messages.len(), 1);
@@ -256,7 +261,8 @@ fn flatten_text_content_parts_treats_refusals_as_text() {
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
         body.as_object_mut().expect("body object"),
-    ).expect("existing Perplexity rewrite");
+    )
+    .expect("existing Perplexity rewrite");
     let content = &body["messages"][0]["content"];
 
     assert_eq!(content, "Partly:\nI cannot help with that.");
@@ -274,7 +280,8 @@ fn sanitize_plain_text_history_merges_consecutive_assistant_messages() {
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
         body.as_object_mut().expect("body object"),
-    ).expect("existing Perplexity rewrite");
+    )
+    .expect("existing Perplexity rewrite");
     let messages = body["messages"].as_array().expect("same messages array");
 
     assert_eq!(messages.len(), 1);
@@ -286,8 +293,10 @@ fn tool_result_array_content_preserves_multiple_text_blocks() {
     let request = request_with_multi_block_tool_result();
     use crate::wire::{Mode, Wire};
     let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini").with_tool_result_array_content();
-    let encoded = target.encode(request, Mode::Unary)
+        .chat("gpt-4o-mini")
+        .with_tool_result_array_content();
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let wire = body["messages"].clone();
@@ -317,9 +326,9 @@ fn tool_result_array_content_preserves_multiple_text_blocks() {
 fn tool_result_string_content_flattens_multiple_text_blocks() {
     let request = request_with_multi_block_tool_result();
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let wire = body["messages"].clone();
@@ -355,8 +364,10 @@ fn multiple_tool_result_blocks_convert_to_distinct_content_parts() {
     let request = CoreCompletionRequest::from(vec![message::Message::tool_results(vec![result])]);
     use crate::wire::{Mode, Wire};
     let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini").with_tool_result_array_content();
-    let encoded = target.encode(request, Mode::Unary)
+        .chat("gpt-4o-mini")
+        .with_tool_result_array_content();
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
@@ -380,9 +391,9 @@ fn multiple_tool_result_blocks_convert_to_distinct_content_parts() {
 fn test_openai_request_uses_request_model_override() {
     let request = CoreCompletionRequest::new("Hello").model::<String>(Some("gpt-4.1".to_owned()));
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let serialized = crate::test_utils::json_body(&encoded.request);
 
@@ -400,12 +411,13 @@ fn tool_choice_is_dropped_when_no_tool_is_advertised() {
         request
     };
     let convert = |request| {
-    use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
-        .expect("the original request encodes");
-    let body = crate::test_utils::json_body(&encoded.request);
+        use crate::wire::{Mode, Wire};
+        let target =
+            crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+        let encoded = target
+            .encode(request, Mode::Unary)
+            .expect("the original request encodes");
+        let body = crate::test_utils::json_body(&encoded.request);
         body
     };
 
@@ -417,7 +429,8 @@ fn tool_choice_is_dropped_when_no_tool_is_advertised() {
 
     let with_tool = convert(request(vec![crate::completion::ToolDefinition::new(
         message::ToolName::new("add").expect("original nonempty name"),
-        "add two numbers", json!({"type": "object", "properties": {}}),
+        "add two numbers",
+        json!({"type": "object", "properties": {}}),
     )]));
     assert_eq!(with_tool["tool_choice"], json!("none"), "{with_tool}");
 }
@@ -426,9 +439,9 @@ fn tool_choice_is_dropped_when_no_tool_is_advertised() {
 fn test_openai_request_uses_default_model_when_override_unset() {
     let request = CoreCompletionRequest::new("Hello");
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let serialized = crate::test_utils::json_body(&encoded.request);
 
@@ -446,30 +459,33 @@ fn openai_chat_request_keeps_documents_after_system_messages() {
             "Earlier assistant turn",
         ))
         .document(test_document("doc1", "Document text."));
-    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
     let request = crate::operation::Completion::prepare(request, &wire.describe())
         .expect("the original request prepares");
-    let encoded = wire.encode(request, Mode::Unary)
+    let encoded = wire
+        .encode(request, Mode::Unary)
         .expect("the prepared request encodes");
     let serialized = crate::test_utils::json_body(&encoded.request);
 
     // The document joins the first existing user, before its earlier text.
     // This whole request pins every role, content part, field and order.
-    assert_eq!(serialized, json!({
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": [
-                {"type": "text", "text": "System prompt"}
-            ]},
-            {"role": "user", "content": [
-                {"type": "text", "text": "<file id: doc1>\nDocument text.\n</file>\n"},
-                {"type": "text", "text": "Earlier user turn"}
-            ]},
-            {"role": "assistant", "content": "Earlier assistant turn"},
-            {"role": "user", "content": "Prompt"}
-        ]
-    }));
+    assert_eq!(
+        serialized,
+        json!({
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": [
+                    {"type": "text", "text": "System prompt"}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "<file id: doc1>\nDocument text.\n</file>\n"},
+                    {"type": "text", "text": "Earlier user turn"}
+                ]},
+                {"role": "assistant", "content": "Earlier assistant turn"},
+                {"role": "user", "content": "Prompt"}
+            ]
+        })
+    );
 }
 
 #[test]
@@ -479,16 +495,19 @@ fn openai_chat_direct_request_keeps_documents_after_system_messages() {
         crate::completion::Message::assistant("Earlier assistant turn"),
         crate::completion::Message::system("Mid-conversation instruction"),
         crate::completion::Message::user("Prompt"),
-    ]).document(test_document("doc1", "Document text."));
-    use crate::wire::{Mode, Wire, Operation};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
+    ])
+    .document(test_document("doc1", "Document text."));
+    use crate::wire::{Mode, Operation, Wire};
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
     let request = crate::operation::Completion::prepare(request, &target.describe())
         .expect("the original request prepares");
-    let encoded = target.encode(request, Mode::Unary)
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let serialized = crate::test_utils::json_body(&encoded.request);
-    let messages = serialized["messages"].as_array().expect("messages should be an array");
+    let messages = serialized["messages"]
+        .as_array()
+        .expect("messages should be an array");
 
     assert_eq!(messages.len(), 5);
     assert_eq!(messages[0]["role"], "system");
@@ -513,8 +532,7 @@ fn openai_chat_direct_request_keeps_documents_after_system_messages() {
 #[test]
 fn assistant_reasoning_alone_is_dropped() {
     use crate::message::{
-        AssistantMessage, CarriedPayload, CarriedPosition, CarriedReasoning,
-        CarriedReasoningPart,
+        AssistantMessage, CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart,
     };
     use crate::providers::openai::completion::Message;
     use crate::wire::{Mode, Wire};
@@ -541,23 +559,27 @@ fn assistant_reasoning_alone_is_dropped() {
         crate::completion::Message::Assistant(AssistantMessage::new(assistant_content)),
         crate::completion::Message::user("probe"),
     ]);
-    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = wire.encode(request, Mode::Unary)
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = wire
+        .encode(request, Mode::Unary)
         .expect("the adapted request with its probe user encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
         .expect("the actual wire messages read through the retained Chat view");
-    let converted: Vec<Message> = messages.into_iter()
+    let converted: Vec<Message> = messages
+        .into_iter()
         .filter(|message| matches!(message, Message::Assistant { .. }))
         .collect();
 
     assert!(converted.is_empty());
     // These are new pins for the admitted probe adaptation, not old parity claims.
-    assert_eq!(body, serde_json::json!({
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": "probe"}]
-    }));
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "probe"}]
+        })
+    );
 }
 
 // Regression test: providers that serve thinking models over the OpenAI
@@ -567,8 +589,8 @@ fn assistant_reasoning_alone_is_dropped() {
 #[test]
 fn assistant_reasoning_is_attached_to_tool_call_message() {
     use crate::message::{
-        AssistantMessage, CarriedPayload, CarriedPosition, CarriedReasoning,
-        CarriedReasoningPart, ToolName,
+        AssistantMessage, CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart,
+        ToolName,
     };
     use crate::providers::openai::completion::{AssistantContent, Message};
     use crate::wire::{Mode, Wire};
@@ -595,12 +617,13 @@ fn assistant_reasoning_is_attached_to_tool_call_message() {
             serde_json::json!({"x": 2, "y": 1}),
         ),
     ];
-    let request = crate::completion::CompletionRequest::from(vec![
-        crate::completion::Message::Assistant(AssistantMessage::new(assistant_content)),
-    ]);
-    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = wire.encode(request, Mode::Unary)
+    let request =
+        crate::completion::CompletionRequest::from(vec![crate::completion::Message::Assistant(
+            AssistantMessage::new(assistant_content),
+        )]);
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = wire
+        .encode(request, Mode::Unary)
         .expect("the original mixed assistant turn encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     // The existing retained Chat view reads the actual emitted content string
@@ -889,9 +912,9 @@ fn refusal_content_part_suppresses_the_sibling_fallback() {
 fn test_max_tokens_is_forwarded_to_request() {
     let request = capped_request(Some(4096), None);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let serialized = crate::test_utils::json_body(&encoded.request);
 
@@ -899,7 +922,10 @@ fn test_max_tokens_is_forwarded_to_request() {
 }
 
 /// A chat-completions request whose only interesting property is the cap.
-fn capped_request(max_tokens: Option<u64>, additional_params: Option<Value>) -> CoreCompletionRequest {
+fn capped_request(
+    max_tokens: Option<u64>,
+    additional_params: Option<Value>,
+) -> CoreCompletionRequest {
     let mut request = CoreCompletionRequest::new("Hello");
     request.max_tokens = max_tokens;
     request.additional_params = additional_params;
@@ -910,9 +936,9 @@ fn capped_request(max_tokens: Option<u64>, additional_params: Option<Value>) -> 
 fn request_body_keeps_the_legacy_cap_when_the_endpoint_wants_it() {
     let request = capped_request(Some(4096), None);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
 
@@ -924,9 +950,9 @@ fn request_body_keeps_the_legacy_cap_when_the_endpoint_wants_it() {
 fn request_body_renames_the_cap_for_the_modern_endpoint() {
     let request = capped_request(Some(4096), None);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-5");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-5");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
 
@@ -941,9 +967,9 @@ fn request_body_renames_the_cap_for_the_modern_endpoint() {
 fn request_body_without_a_cap_carries_neither_spelling() {
     let request = capped_request(None, None);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
 
@@ -955,9 +981,9 @@ fn request_body_without_a_cap_carries_neither_spelling() {
 fn request_body_keeps_a_caller_supplied_modern_cap() {
     let request = capped_request(Some(4096), Some(json!({ "max_completion_tokens": 48 })));
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-5");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-5");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
 
@@ -969,9 +995,9 @@ fn request_body_keeps_a_caller_supplied_modern_cap() {
 fn request_body_upgrades_a_caller_supplied_legacy_cap() {
     let request = capped_request(None, Some(json!({ "max_tokens": 48 })));
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-5");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-5");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
 
@@ -983,15 +1009,15 @@ fn request_body_upgrades_a_caller_supplied_legacy_cap() {
 fn request_body_moves_nothing_but_the_cap() {
     let request = capped_request(Some(4096), Some(json!({ "top_p": 0.5 })));
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let plain = crate::test_utils::json_body(&encoded.request);
     let request = capped_request(Some(4096), Some(json!({ "top_p": 0.5 })));
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-5");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-5");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let renamed = crate::test_utils::json_body(&encoded.request);
     let mut renamed = renamed;
@@ -1011,12 +1037,15 @@ fn request_body_moves_nothing_but_the_cap() {
     renamed["model"] = plain["model"].clone();
 
     assert_eq!(renamed, plain);
-    assert_eq!(plain, json!({
-        "model": "gpt-4o-mini",
-        "messages": [{"role": "user", "content": "Hello"}],
-        "max_tokens": 4096,
-        "top_p": 0.5,
-    }));
+    assert_eq!(
+        plain,
+        json!({
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 4096,
+            "top_p": 0.5,
+        })
+    );
 }
 
 /// The gate itself, over every family whose behavior was measured against
@@ -1086,9 +1115,9 @@ fn modern_output_cap_covers_exactly_the_reasoning_families() {
 fn test_max_tokens_omitted_when_none() {
     let request = capped_request(None, None);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let serialized = crate::test_utils::json_body(&encoded.request);
 
@@ -1124,69 +1153,71 @@ fn additional_params_function_tools_merge_and_native_tools_stay() {
                 {"type": "browser_search"}
             ]
         }));
-    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = wire.encode(request, Mode::Unary)
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = wire
+        .encode(request, Mode::Unary)
         .expect("the original mixed-tools request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
 
-    assert_eq!(body, serde_json::json!({
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "user", "content": "Hello"}
-        ],
-        "tools": [
-            {
-                "type": "function",
-                "function": {
-                    "name": "builder_tool",
-                    "description": "from the builder",
-                    "parameters": {"type": "object", "properties": {}}
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "params_tool",
-                    "description": "from additional_params",
-                    "parameters": {"type": "object", "properties": {}}
-                }
-            },
-            {"type": "browser_search"}
-        ]
-    }));
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "builder_tool",
+                        "description": "from the builder",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "params_tool",
+                        "description": "from additional_params",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                },
+                {"type": "browser_search"}
+            ]
+        })
+    );
 }
 
 #[test]
 fn request_conversion_errors_when_all_messages_are_filtered() {
     use crate::error::ProviderError;
     use crate::message::{
-        AssistantMessage, CarriedPayload, CarriedPosition, CarriedReasoning,
-        CarriedReasoningPart,
+        AssistantMessage, CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart,
     };
     use crate::wire::{Mode, Wire};
 
     // The original sole reasoning-only Assistant is retained; there is no probe.
     // Its known legacy text uses the admitted neutral raw {} at Whole, with no
     // item ID/issuer, provider raw, Native or Origin claim.
-    let request = crate::completion::CompletionRequest::from(vec![
-        crate::completion::Message::Assistant(AssistantMessage::new(vec![
-            crate::message::AssistantContent::CarriedReasoning(CarriedReasoning {
-                id: None,
-                content: vec![CarriedReasoningPart::Text {
-                    text: "hidden".to_string(),
-                    signature: None,
-                }],
-                payload: CarriedPayload {
-                    item: serde_json::json!({}),
-                    provider: None,
-                    position: CarriedPosition::Whole,
+    let request =
+        crate::completion::CompletionRequest::from(vec![crate::completion::Message::Assistant(
+            AssistantMessage::new(vec![crate::message::AssistantContent::CarriedReasoning(
+                CarriedReasoning {
+                    id: None,
+                    content: vec![CarriedReasoningPart::Text {
+                        text: "hidden".to_string(),
+                        signature: None,
+                    }],
+                    payload: CarriedPayload {
+                        item: serde_json::json!({}),
+                        provider: None,
+                        position: CarriedPosition::Whole,
+                    },
                 },
-            }),
-        ])),
-    ]);
-    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
+            )]),
+        )]);
+    let wire = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
     let result = wire.encode(request, Mode::Unary);
 
     assert!(matches!(
@@ -1198,35 +1229,35 @@ fn request_conversion_errors_when_all_messages_are_filtered() {
 #[test]
 fn request_conversion_omits_response_format_on_initial_tool_turn() {
     let mut request = CoreCompletionRequest::from(vec![message::Message::user(
-            "Hello, whats the weather in London?",
-        )]);
+        "Hello, whats the weather in London?",
+    )]);
     request.tools = vec![completion::ToolDefinition {
-            name: message::ToolName::new("weather").expect("original nonempty name"),
-            description: "Get the weather".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" }
-                },
-                "required": ["city"]
-            }),
-        }];
+        name: message::ToolName::new("weather").expect("original nonempty name"),
+        description: "Get the weather".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        }),
+    }];
     request.output_schema = Some(
-            serde_json::from_value(serde_json::json!({
-                "title": "WeatherResponse",
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" },
-                    "weather": { "type": "string" }
-                },
-                "required": ["city", "weather"]
-            }))
-            .expect("schema should deserialize"),
-        );
+        serde_json::from_value(serde_json::json!({
+            "title": "WeatherResponse",
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" },
+                "weather": { "type": "string" }
+            },
+            "required": ["city", "weather"]
+        }))
+        .expect("schema should deserialize"),
+    );
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let serialized = crate::test_utils::json_body(&encoded.request);
 
@@ -1242,46 +1273,47 @@ fn request_conversion_restores_response_format_after_tool_result() {
     // identity for the result. F's separate explicit handle with provider None
     // is lost; every original history value, schema and predicate remains exact.
     let mut request = CoreCompletionRequest::from(vec![
-            message::Message::user("Hello, whats the weather in London?"),
-            message::Message::Assistant(message::AssistantMessage::new(vec![message::AssistantContent::tool_call(
-                    "call_1",
-                    message::ToolName::new("weather").expect("original nonempty name"),
-                    serde_json::json!({ "city": "London" }),
-                )],
-            )),
-            message::Message::tool_result(
-                message::CallId::from_wire("call_1"),
+        message::Message::user("Hello, whats the weather in London?"),
+        message::Message::Assistant(message::AssistantMessage::new(vec![
+            message::AssistantContent::tool_call(
+                "call_1",
                 message::ToolName::new("weather").expect("original nonempty name"),
-                "The weather in London is all fire and brimstone",
+                serde_json::json!({ "city": "London" }),
             ),
-        ]);
+        ])),
+        message::Message::tool_result(
+            message::CallId::from_wire("call_1"),
+            message::ToolName::new("weather").expect("original nonempty name"),
+            "The weather in London is all fire and brimstone",
+        ),
+    ]);
     request.tools = vec![completion::ToolDefinition {
-            name: message::ToolName::new("weather").expect("original nonempty name"),
-            description: "Get the weather".to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" }
-                },
-                "required": ["city"]
-            }),
-        }];
+        name: message::ToolName::new("weather").expect("original nonempty name"),
+        description: "Get the weather".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"]
+        }),
+    }];
     request.output_schema = Some(
-            serde_json::from_value(serde_json::json!({
-                "title": "WeatherResponse",
-                "type": "object",
-                "properties": {
-                    "city": { "type": "string" },
-                    "weather": { "type": "string" }
-                },
-                "required": ["city", "weather"]
-            }))
-            .expect("schema should deserialize"),
-        );
+        serde_json::from_value(serde_json::json!({
+            "title": "WeatherResponse",
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" },
+                "weather": { "type": "string" }
+            },
+            "required": ["city", "weather"]
+        }))
+        .expect("schema should deserialize"),
+    );
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let serialized = crate::test_utils::json_body(&encoded.request);
 
@@ -1633,9 +1665,9 @@ fn pdf_base64_document_serializes_as_file_content_part() {
     });
     let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![doc] }]);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
@@ -1664,9 +1696,9 @@ fn file_id_document_serializes_as_file_content_part() {
     });
     let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![doc] }]);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
@@ -1690,11 +1722,13 @@ fn base64_image_without_detail_defaults_to_auto() {
         detail: None,
         native: None,
     });
-    let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![image] }]);
+    let request = CoreCompletionRequest::from(vec![message::Message::User {
+        content: vec![image],
+    }]);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
@@ -1722,9 +1756,9 @@ fn non_pdf_document_still_serializes_as_text() {
     });
     let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![doc] }]);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
@@ -1742,19 +1776,28 @@ fn non_pdf_document_still_serializes_as_text() {
 #[test]
 fn pdf_url_document_returns_conversion_error() {
     let doc = message::UserContent::Document(message::Document {
-        data: message::DocumentData::File(DocumentSourceKind::Url("https://example.com/x.pdf".into())),
+        data: message::DocumentData::File(DocumentSourceKind::Url(
+            "https://example.com/x.pdf".into(),
+        )),
         media_type: Some(message::DocumentMediaType::PDF),
         additional_params: None,
     });
     use crate::wire::{Mode, Wire};
     let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![doc] }]);
     let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
-    let error = target.encode(request, Mode::Unary).err().expect("conversion refused");
+    let error = target
+        .encode(request, Mode::Unary)
+        .err()
+        .expect("conversion refused");
     let error = ProviderError::from(error);
     let ProviderError::Request(cause) = error else {
         panic!("expected Request category");
     };
-    let res = Err::<(), _>(cause.downcast_ref::<message::MessageError>().expect("concrete MessageError cause"));
+    let res = Err::<(), _>(
+        cause
+            .downcast_ref::<message::MessageError>()
+            .expect("concrete MessageError cause"),
+    );
     assert!(matches!(
         res,
         Err(message::MessageError::ConversionError(_))
@@ -1771,12 +1814,19 @@ fn pdf_raw_document_returns_conversion_error() {
     use crate::wire::{Mode, Wire};
     let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![doc] }]);
     let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
-    let error = target.encode(request, Mode::Unary).err().expect("conversion refused");
+    let error = target
+        .encode(request, Mode::Unary)
+        .err()
+        .expect("conversion refused");
     let error = ProviderError::from(error);
     let ProviderError::Request(cause) = error else {
         panic!("expected Request category");
     };
-    let res = Err::<(), _>(cause.downcast_ref::<message::MessageError>().expect("concrete MessageError cause"));
+    let res = Err::<(), _>(
+        cause
+            .downcast_ref::<message::MessageError>()
+            .expect("concrete MessageError cause"),
+    );
     assert!(matches!(
         res,
         Err(message::MessageError::ConversionError(_))
@@ -1806,11 +1856,13 @@ fn document_file_id_serializes_as_a_file_part() {
         additional_params: None,
     };
 
-    let request = CoreCompletionRequest::from(vec![message::Message::User { content: vec![message::UserContent::Document(doc)] }]);
+    let request = CoreCompletionRequest::from(vec![message::Message::User {
+        content: vec![message::UserContent::Document(doc)],
+    }]);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let messages: Vec<Message> = serde_json::from_value(body["messages"].clone())
@@ -1842,9 +1894,9 @@ fn mixed_text_and_pdf_user_message_produces_two_content_parts() {
     };
     let request = CoreCompletionRequest::from(vec![user]);
     use crate::wire::{Mode, Wire};
-    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini");
-    let encoded = target.encode(request, Mode::Unary)
+    let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     let converted: Vec<Message> = serde_json::from_value(body["messages"].clone())
@@ -1863,13 +1915,19 @@ fn mixed_text_and_pdf_user_message_produces_two_content_parts() {
 /// reliably elicited from a live provider; assertions inspect the request wire.
 #[test]
 fn request_plans_tool_ids_across_namespaces_turns_and_split_user_content() {
-    use crate::message::{AssistantContent, AssistantMessage, CallId, LocalCallId, ToolFunction, ToolName, UserContent};
+    use crate::message::{
+        AssistantContent, AssistantMessage, CallId, LocalCallId, ToolFunction, ToolName,
+        UserContent,
+    };
     // F's deterministic minted(0) BlockId becomes one fresh Local UUID here.
     // Cloning reuses that UUID across both completed occurrences and results;
     // the original ordinal/assembly identity is lost, not asserted as preserved.
     let generated = message::ToolCall::new(
         CallId::Local(LocalCallId::new()),
-        ToolFunction::new(ToolName::new("test").expect("original nonempty name"), json!({})),
+        ToolFunction::new(
+            ToolName::new("test").expect("original nonempty name"),
+            json!({}),
+        ),
     );
     // F BlockId::Display made minted(0)'s original hint exactly tool-0.
     // That genuine from_wire fixture input is independent of this local UUID.
@@ -1887,9 +1945,9 @@ fn request_plans_tool_ids_across_namespaces_turns_and_split_user_content() {
                 UserContent::ToolResult(generated.result(vec![])),
             ],
         },
-        message::Message::Assistant(AssistantMessage::new(vec![
-            AssistantContent::ToolCall(generated.clone()),
-        ])),
+        message::Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+            generated.clone(),
+        )])),
         message::Message::User {
             content: vec![UserContent::ToolResult(generated.result(vec![]))],
         },
@@ -1897,8 +1955,10 @@ fn request_plans_tool_ids_across_namespaces_turns_and_split_user_content() {
     let request = CoreCompletionRequest::from(history);
     use crate::wire::{Mode, Wire};
     let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("test").with_tool_result_array_content();
-    let encoded = target.encode(request, Mode::Unary)
+        .chat("test")
+        .with_tool_result_array_content();
+    let encoded = target
+        .encode(request, Mode::Unary)
         .expect("the original request encodes");
     let wire = crate::test_utils::json_body(&encoded.request);
     let messages = wire["messages"].as_array().unwrap();
@@ -1925,8 +1985,10 @@ fn additional_params_override_typed_fields_on_the_wire() {
         .additional_params(serde_json::json!({"temperature": 0.9, "top_p": 0.5}));
     use crate::wire::{Mode, Wire};
     let target = crate::providers::openai::wire::OpenAIConfig::new("test-key")
-        .chat("gpt-4o-mini").with_tool_result_array_content();
-    let encoded = target.encode(rig_request, Mode::Unary)
+        .chat("gpt-4o-mini")
+        .with_tool_result_array_content();
+    let encoded = target
+        .encode(rig_request, Mode::Unary)
         .expect("the original request encodes");
     let body = crate::test_utils::json_body(&encoded.request);
     assert_eq!(body["temperature"], 0.9, "{body}");
@@ -1938,34 +2000,67 @@ fn additional_params_override_typed_fields_on_the_wire() {
 // This preserves refusal inputs and predicates, without item-ID parity.
 #[test]
 fn chat_completions_refuses_namespaced_and_custom_calls() {
-    use crate::message::{AssistantMessage, CustomToolCall, CallId, ToolFunction, ToolName, UnrepresentableToolCall};
+    use crate::message::{
+        AssistantMessage, CallId, CustomToolCall, ToolFunction, ToolName, UnrepresentableToolCall,
+    };
     use crate::wire::{Mode, Wire};
     let namespaced = message::ToolCall::from_wire(
-        "call_1", ToolFunction::new(ToolName::new("add").expect("original nonempty name"), json!({"x": 1})),
-    ).with_namespace(Some("math".to_owned()));
+        "call_1",
+        ToolFunction::new(
+            ToolName::new("add").expect("original nonempty name"),
+            json!({"x": 1}),
+        ),
+    )
+    .with_namespace(Some("math".to_owned()));
     let custom = CustomToolCall::new(
-        CallId::from_wire("call_2"), ToolName::new("apply_patch").expect("original nonempty name"), r#"{"x": 1}"#,
+        CallId::from_wire("call_2"),
+        ToolName::new("apply_patch").expect("original nonempty name"),
+        r#"{"x": 1}"#,
     );
     let turns = [
-        (message::Message::Assistant(AssistantMessage::new(vec![message::AssistantContent::ToolCall(namespaced)])), "namespace"),
-        (message::Message::Assistant(AssistantMessage::new(vec![message::AssistantContent::CustomToolCall(custom)])), "custom"),
+        (
+            message::Message::Assistant(AssistantMessage::new(vec![
+                message::AssistantContent::ToolCall(namespaced),
+            ])),
+            "namespace",
+        ),
+        (
+            message::Message::Assistant(AssistantMessage::new(vec![
+                message::AssistantContent::CustomToolCall(custom),
+            ])),
+            "custom",
+        ),
     ];
     for (turn, kind) in turns {
-        let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
-        let error = target.encode(CoreCompletionRequest::from(vec![turn]), Mode::Unary)
-            .err().expect("refused, not dropped");
+        let target =
+            crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
+        let error = target
+            .encode(CoreCompletionRequest::from(vec![turn]), Mode::Unary)
+            .err()
+            .expect("refused, not dropped");
         // New pin: the actual direct Chat encode refusal has Request category.
         let ProviderError::Request(source) = ProviderError::from(error) else {
             panic!("expected concrete Request refusal");
         };
         // F's removed MessageError::UnrepresentableToolCall wrapper is inapplicable,
         // not passed. Inspect the existing concrete leaf at the actual Request source.
-        let refusal = source.downcast_ref::<UnrepresentableToolCall>()
+        let refusal = source
+            .downcast_ref::<UnrepresentableToolCall>()
             .expect("concrete UnrepresentableToolCall cause");
         let wire = "OpenAI-compatible Chat Completions";
         match (kind, refusal) {
-            ("namespace", UnrepresentableToolCall::Namespace { wire: got, name, namespace }) => {
-                assert_eq!((*got, name.as_str(), namespace.as_str()), (wire, "add", "math"));
+            (
+                "namespace",
+                UnrepresentableToolCall::Namespace {
+                    wire: got,
+                    name,
+                    namespace,
+                },
+            ) => {
+                assert_eq!(
+                    (*got, name.as_str(), namespace.as_str()),
+                    (wire, "add", "math")
+                );
             }
             ("custom", UnrepresentableToolCall::CustomCall { wire: got, name }) => {
                 assert_eq!((*got, name.as_str()), (wire, "apply_patch"));

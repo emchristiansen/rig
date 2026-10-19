@@ -137,7 +137,10 @@ async fn a_unary_body_and_the_stream_of_the_same_turn_fold_alike() {
     assert_eq!(buffered.usage, streamed.usage);
     assert_eq!(buffered.finish_reason(), streamed.finish_reason());
     assert_eq!(buffered.model(), streamed.model());
-    assert_eq!(buffered.identity().message_id, streamed.identity().message_id);
+    assert_eq!(
+        buffered.identity().message_id,
+        streamed.identity().message_id
+    );
     assert_eq!(buffered.response_id(), streamed.response_id());
     assert_eq!(
         text_of(&buffered),
@@ -316,7 +319,10 @@ fn the_chatgpt_dialect_requests_stateless_ciphertext_and_keeps_controls_unset() 
     assert_eq!(body.get("max_output_tokens"), None);
     assert_eq!(body.get("top_p"), None);
     assert_eq!(body.get("store"), Some(&serde_json::Value::Bool(false)));
-    assert_eq!(body.get("include"), Some(&serde_json::json!(["reasoning.encrypted_content"])));
+    assert_eq!(
+        body.get("include"),
+        Some(&serde_json::json!(["reasoning.encrypted_content"]))
+    );
     assert_eq!(
         body.get("instructions").and_then(serde_json::Value::as_str),
         Some("You are ChatGPT, a helpful AI assistant.")
@@ -330,7 +336,7 @@ fn the_chatgpt_dialect_requests_stateless_ciphertext_and_keeps_controls_unset() 
 /// system message.
 fn muninn_shaped_codex_request() -> CompletionRequest {
     use crate::providers::openai::responses_api::{
-        RawParameterProjection, RawInclude, RawReasoning, RawReasoningEffort,
+        RawInclude, RawParameterProjection, RawReasoning, RawReasoningEffort,
     };
     let params = RawParameterProjection {
         prompt_cache_key: Some("thread-7".to_string()),
@@ -401,10 +407,10 @@ fn the_codex_lane_sends_the_fork_request_values_when_sampling_is_unset() {
             muninn_shaped_codex_request(),
             mode,
         );
-        let actual: serde_json::Value = serde_json::from_str(&bytes)
-            .expect("actual encoded request JSON");
-        let expected: serde_json::Value = serde_json::from_str(&expected)
-            .expect("original fork request JSON");
+        let actual: serde_json::Value =
+            serde_json::from_str(&bytes).expect("actual encoded request JSON");
+        let expected: serde_json::Value =
+            serde_json::from_str(&expected).expect("original fork request JSON");
         assert_eq!(actual, expected, "{mode:?}");
     }
 }
@@ -642,8 +648,7 @@ async fn a_chatgpt_reply_captures_the_terminal_response_object_as_raw() {
         let received: serde_json::Value = serde_json::from_str(&terminal_response_body(body))
             .expect("the received terminal response is JSON");
         assert_eq!(
-            response.raw,
-            received,
+            response.raw, received,
             "{case}: the capture must be exactly the received terminal response object"
         );
         assert_eq!(response.raw["service_tier"], "default", "{case}");
@@ -653,20 +658,27 @@ async fn a_chatgpt_reply_captures_the_terminal_response_object_as_raw() {
             let [message::AssistantContent::CarriedText(text)] = response.choice.as_slice() else {
                 panic!("assembled output keeps one genuine carried text part");
             };
-            assert_eq!(text.content, message::CarriedTextContent::Text("hi".to_owned()));
+            assert_eq!(
+                text.content,
+                message::CarriedTextContent::Text("hi".to_owned())
+            );
             assert_eq!(text.payload.item, received["output"][0]["content"][0]);
             assert_eq!(text.item_id.as_deref(), Some("msg_chatgpt_raw"));
             assert_eq!(text.payload.provider.as_deref(), Some("chatgpt"));
-            assert_eq!(text.payload.position, message::CarriedPosition::MessageContent {
-                item_index: 0, part_index: 0,
-            });
+            assert_eq!(
+                text.payload.position,
+                message::CarriedPosition::MessageContent {
+                    item_index: 0,
+                    part_index: 0,
+                }
+            );
             assert_eq!(response.choice.len(), 1);
         } else {
-        assert_eq!(
-            response.choice,
-            vec![message::AssistantContent::text("hi")],
-            "{case}: the deltas are the content"
-        );
+            assert_eq!(
+                response.choice,
+                vec![message::AssistantContent::text("hi")],
+                "{case}: the deltas are the content"
+            );
         }
         assert_eq!(response.usage.total_tokens, Some(2), "{case}");
         assert_eq!(
@@ -715,10 +727,7 @@ fn the_xai_dialect_keeps_every_system_message_in_input() {
     let encoded = wire
         .encode(prompt(), Mode::Unary)
         .expect("the request encodes");
-    assert_eq!(
-        encoded.request.uri(),
-        "https://api.x.ai/v1/responses"
-    );
+    assert_eq!(encoded.request.uri(), "https://api.x.ai/v1/responses");
 
     let body = prepared_body_of(
         &wire,
@@ -896,7 +905,8 @@ fn declared_function() -> serde_json::Value {
 
 fn lookup_tool() -> completion::ToolDefinition {
     completion::ToolDefinition {
-        name: message::ToolName::new("lookup").unwrap_or_else(|error| panic!("fixture name: {error}")),
+        name: message::ToolName::new("lookup")
+            .unwrap_or_else(|error| panic!("fixture name: {error}")),
         description: "Look something up".to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -994,7 +1004,9 @@ fn derived_identity() -> super::super::codex_identity::CodexIdentity {
 }
 
 fn encoded_request(wire: &Responses, mode: Mode) -> http::Request<Body> {
-    wire.encode(prompt(), mode).expect("the request encodes").request
+    wire.encode(prompt(), mode)
+        .expect("the request encodes")
+        .request
 }
 
 fn header_names(request: &http::Request<Body>) -> Vec<&str> {
@@ -1175,7 +1187,9 @@ fn responses_lite_http_uses_the_stable_identity_and_http_only_marker() {
     }
 }
 
-fn lite_refusal(error: &crate::error::ProviderError) -> &super::super::responses_lite::ResponsesLiteError {
+fn lite_refusal(
+    error: &crate::error::ProviderError,
+) -> &super::super::responses_lite::ResponsesLiteError {
     let crate::error::ProviderError::Request(reason) = error else {
         panic!("a Lite encode refusal is a request error");
     };
@@ -1201,33 +1215,38 @@ fn responses_lite_selection_is_revalidated_at_encode_time() {
     serialized["codex_request_shape"] = serde_json::json!("responses_lite");
     let by_serde: Responses = serde_json::from_value(serialized).expect("the wire deserializes");
     for wire in [by_field, by_serde] {
-        let error = crate::error::ProviderError::from(wire
-            .encode(prompt(), Mode::Unary)
-            .expect_err("a non-Codex Lite wire is refused"));
+        let error = crate::error::ProviderError::from(
+            wire.encode(prompt(), Mode::Unary)
+                .expect_err("a non-Codex Lite wire is refused"),
+        );
         assert!(matches!(
             lite_refusal(&error),
             ResponsesLiteError::ResponsesLiteRequiresCodex { dialect: "openai" }
         ));
     }
 
-    let missing_identity = crate::error::ProviderError::from(chatgpt()
-        .with_responses_lite()
-        .expect("the ChatGPT dialect supports Lite")
-        .encode(prompt(), Mode::Unary)
-        .expect_err("HTTP Lite needs a stable identity"));
+    let missing_identity = crate::error::ProviderError::from(
+        chatgpt()
+            .with_responses_lite()
+            .expect("the ChatGPT dialect supports Lite")
+            .encode(prompt(), Mode::Unary)
+            .expect_err("HTTP Lite needs a stable identity"),
+    );
     assert!(matches!(
         lite_refusal(&missing_identity),
         ResponsesLiteError::ResponsesLiteRequiresIdentity
     ));
 
-    let input_system = crate::error::ProviderError::from(chatgpt()
-        .with_system_instructions_as_messages()
-        .with_responses_lite()
-        .expect("the ChatGPT dialect supports Lite")
-        .with_codex_identity(derived_identity())
-        .expect("the ChatGPT dialect speaks the Codex contract")
-        .encode(prompt(), Mode::Unary)
-        .expect_err("Lite refuses InputSystemMessages"));
+    let input_system = crate::error::ProviderError::from(
+        chatgpt()
+            .with_system_instructions_as_messages()
+            .with_responses_lite()
+            .expect("the ChatGPT dialect supports Lite")
+            .with_codex_identity(derived_identity())
+            .expect("the ChatGPT dialect speaks the Codex contract")
+            .encode(prompt(), Mode::Unary)
+            .expect_err("Lite refuses InputSystemMessages"),
+    );
     assert!(matches!(
         lite_refusal(&input_system),
         ResponsesLiteError::InputSystemMessages

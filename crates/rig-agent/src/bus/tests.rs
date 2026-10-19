@@ -1776,9 +1776,9 @@ fn full_consumer_queue_stops_pulls_and_ancestor_cancellation_keeps_its_terminal(
                 let _guard = &guard;
                 polls.fetch_add(1, Ordering::SeqCst);
                 Poll::Ready(Some(Ok(rig_core::streaming::Relayed::Item(
-                    rig_core::streaming::Item::Unknown(
-                        rig_core::streaming::UnknownPayload::new(json!(null)),
-                    ),
+                    rig_core::streaming::Item::Unknown(rig_core::streaming::UnknownPayload::new(
+                        json!(null),
+                    )),
                 ))))
             })))
         }
@@ -1840,4 +1840,3 @@ fn full_consumer_queue_stops_pulls_and_ancestor_cancellation_keeps_its_terminal(
     assert!(matches!(stream.poll_next_unpin(&mut cx), Poll::Ready(None)));
     assert_eq!(driver.in_flight(), 0);
 }
-

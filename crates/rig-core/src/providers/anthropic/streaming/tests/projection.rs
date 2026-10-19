@@ -209,7 +209,10 @@ async fn payload_usage_prefers_top_level_and_precedes_provider_error() {
     assert!(usage_at < error_at);
     // G156: the default empty Provider verdict is suppressed.
     assert_eq!(error_at, usage_at + 1);
-    assert!(matches!(events[usage_at + 1], AdapterEvent::ErrorEnvelope { .. }));
+    assert!(matches!(
+        events[usage_at + 1],
+        AdapterEvent::ErrorEnvelope { .. }
+    ));
 }
 
 #[tokio::test]

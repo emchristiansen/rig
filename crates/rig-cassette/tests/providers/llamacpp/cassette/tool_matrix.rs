@@ -43,8 +43,8 @@ use rig::providers::openai::wire::{LLAMACPP, OpenAIConfig};
 use crate::support::{Adder, OperationArgs, Subtract};
 
 use super::super::cassette_support::*;
-use rig::completion::CompletionRequest;
 use crate::cassettes::recorded_statuses_and_bodies;
+use rig::completion::CompletionRequest;
 
 const NO_THINK: &str = "/no_think ";
 
@@ -96,7 +96,6 @@ async fn tool_choice_specific_is_refused_on_the_streaming_path_too() {
 // ---------------------------------------------------------------------------
 // Tool result payloads
 // ---------------------------------------------------------------------------
-
 
 /// A tool result carrying plain text.
 

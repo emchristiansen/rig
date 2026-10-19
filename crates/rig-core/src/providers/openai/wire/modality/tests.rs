@@ -767,9 +767,11 @@ fn a_transcription_reply_that_is_not_utf8_is_a_corrupt_frame_with_its_bytes() {
     let received = b"{\"text\":\"\xff\"}".to_vec();
     use crate::wire::Decoder;
     let wire = OpenAIConfig::new("sk-test").transcription("whisper-1");
-    let error = crate::driver::triage(wire.decoder()
-        .classify(crate::wire::WireFrame::Bytes(received.clone())))
-        .expect_err("the reply cannot decode");
+    let error = crate::driver::triage(
+        wire.decoder()
+            .classify(crate::wire::WireFrame::Bytes(received.clone())),
+    )
+    .expect_err("the reply cannot decode");
     let ProviderError::CorruptFrame(corrupt) = &error else {
         panic!("expected a corrupt frame, got {error:?}");
     };

@@ -327,7 +327,8 @@ impl CarriedText {
             text: self.text().to_owned(),
             citations: self.citations.take(),
             native: None,
-        }.checked();
+        }
+        .checked();
         self.citations = text.citations;
         self
     }

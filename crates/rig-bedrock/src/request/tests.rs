@@ -254,14 +254,34 @@ fn documents_are_named_by_content_and_land_in_the_first_user_message() {
     assert_eq!(names.len(), 4, "{body}");
     assert!(names[2].starts_with("document-"));
     assert_eq!(names[3], format!("{}-2", names[2]));
-    let documents: Vec<&Value> = content.iter().filter_map(|block| block.get("document")).collect();
+    let documents: Vec<&Value> = content
+        .iter()
+        .filter_map(|block| block.get("document"))
+        .collect();
     assert_eq!(documents[1]["format"], "txt");
     assert_eq!(documents[1]["source"], json!({ "bytes": "cGxhaW4=" }));
-    assert!(documents[1]["name"].as_str().is_some_and(|name| name.starts_with("document-")));
-    let static_text = BASE64_STANDARD.decode(documents[0]["source"]["bytes"].as_str().expect("UTF-8 document bytes"))
+    assert!(
+        documents[1]["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("document-"))
+    );
+    let static_text = BASE64_STANDARD
+        .decode(
+            documents[0]["source"]["bytes"]
+                .as_str()
+                .expect("UTF-8 document bytes"),
+        )
         .expect("base64 source");
-    assert!(String::from_utf8(static_text).expect("UTF-8 static document").contains("the sky is green"));
-    assert!(documents[0]["name"].as_str().is_some_and(|name| name.starts_with("document-")));
+    assert!(
+        String::from_utf8(static_text)
+            .expect("UTF-8 static document")
+            .contains("the sky is green")
+    );
+    assert!(
+        documents[0]["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("document-"))
+    );
     assert_eq!(body["messages"].as_array().map(Vec::len), Some(1));
 }
 
@@ -331,9 +351,16 @@ fn unprepared_content_is_encoded_or_refused() {
         })],
     }])
     .expect("a text document carries its UTF-8 bytes");
-    assert_eq!(text.pointer("/messages/0/content/1/document/source"), Some(&json!({ "bytes": "cGxhaW4=" })));
-    assert!(text.pointer("/messages/0/content/1/document/name").and_then(Value::as_str)
-        .is_some_and(|name| name.starts_with("document-")), "{text}");
+    assert_eq!(
+        text.pointer("/messages/0/content/1/document/source"),
+        Some(&json!({ "bytes": "cGxhaW4=" }))
+    );
+    assert!(
+        text.pointer("/messages/0/content/1/document/name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name.starts_with("document-")),
+        "{text}"
+    );
 }
 
 /// A failed result states it with `status: error` to Nova and Claude, which

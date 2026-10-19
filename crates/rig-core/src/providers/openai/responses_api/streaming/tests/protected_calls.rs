@@ -1,7 +1,7 @@
 //! Protected raw custom input, namespaces and authoritative argument verdicts.
 
-use super::helpers::*;
 use super::super::ResponsesStreamOptions;
+use super::helpers::*;
 use crate::message::AssistantContent;
 use serde_json::json;
 
@@ -41,8 +41,20 @@ fn a_custom_tool_call_item_folds_into_a_custom_call_with_raw_input() {
         assert_eq!(call.name.as_str(), "apply_patch");
         assert_eq!(call.namespace.as_deref(), Some("editor"));
         assert_eq!(call.input, "{\"looks\":\"like json\"}");
-        assert_eq!(call.id.provider().expect("provider correlation ID").as_str(), "call_custom");
-        assert_eq!(call.native.as_ref().expect("whole custom item is native").item["id"], "ctc_1");
+        assert_eq!(
+            call.id
+                .provider()
+                .expect("provider correlation ID")
+                .as_str(),
+            "call_custom"
+        );
+        assert_eq!(
+            call.native
+                .as_ref()
+                .expect("whole custom item is native")
+                .item["id"],
+            "ctc_1"
+        );
     }
 }
 
@@ -103,7 +115,11 @@ fn a_namespaced_function_call_keeps_its_namespace_streamed_and_drained() {
         };
         assert_eq!(call.function.name.as_str(), "search", "{case}");
         assert_eq!(call.function.namespace.as_deref(), Some("web"), "{case}");
-        assert_eq!(call.function.arguments_value(), json!({"q": "rig"}), "{case}");
+        assert_eq!(
+            call.function.arguments_value(),
+            json!({"q": "rig"}),
+            "{case}"
+        );
     }
 }
 
@@ -224,9 +240,14 @@ async fn streaming_and_unary_refuse_an_asserted_malformed_call_alike() {
         super::super::ResponsesDecoder::new("openai", ResponsesStreamOptions::strict()),
         "openai",
         [crate::wire::WireFrame::Text(response.to_string())]
-    ).outcome.expect_err("the same real decoder refuses the unary malformed call");
+    )
+    .outcome
+    .expect_err("the same real decoder refuses the unary malformed call");
     assert_eq!(streamed.message, unary.report().message);
-    assert!(matches!(unary.report().detail, Some(crate::error::ErrorDetail::MalformedToolInput(_))));
+    assert!(matches!(
+        unary.report().detail,
+        Some(crate::error::ErrorDetail::MalformedToolInput(_))
+    ));
 }
 
 // F streaming/tests.rs:3996
@@ -265,5 +286,3 @@ fn dropped_ordered_call_leaves_no_placeholder() {
         .choice;
     assert_eq!(response_choice_labels(&choice), ["provider"]);
 }
-
-

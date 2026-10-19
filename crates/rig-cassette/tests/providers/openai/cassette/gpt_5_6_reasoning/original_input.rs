@@ -1,7 +1,9 @@
 //! Sparse caller-authored history for the original five-turn request literals.
 
 use super::StoredStreamingTurn;
-use rig::message::{AssistantContent, CarriedPayload, CarriedPosition, CarriedText, CarriedTextContent, Message};
+use rig::message::{
+    AssistantContent, CarriedPayload, CarriedPosition, CarriedText, CarriedTextContent, Message,
+};
 use serde_json::json;
 
 pub(super) fn assistant(turn: &StoredStreamingTurn) -> Message {
@@ -9,7 +11,10 @@ pub(super) fn assistant(turn: &StoredStreamingTurn) -> Message {
         panic!("the stored turn must hold its genuine assistant head");
     };
     assert_eq!(head.content, turn.final_response.choice);
-    assert!(!head.content.is_empty(), "the received answer must contain known text");
+    assert!(
+        !head.content.is_empty(),
+        "the received answer must contain known text"
+    );
     let content = head.content.iter().map(|block| {
         let AssistantContent::CarriedText(source) = block else {
             panic!("the received answer must be a carried known-text part");

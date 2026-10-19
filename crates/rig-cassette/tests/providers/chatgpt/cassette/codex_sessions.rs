@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::StreamExt;
+use rig::agent::MultiTurnStreamItem;
 use rig::completion::Message;
 use rig::message::{AssistantContent, UserContent};
-use rig::agent::MultiTurnStreamItem;
 use rig::providers::chatgpt;
 use rig::tool::Tool;
 
@@ -352,7 +352,7 @@ async fn long_history_replay_nonstreaming() {
             )))
             .message(Message::assistant("The harbor label is crimson-harbor."))
             .tool(rig::tool::tool_definition(&AlphaSignal))
-                .additional_params(recorded_include());
+            .additional_params(recorded_include());
 
             let response = model
                 .call(request)

@@ -1548,16 +1548,10 @@ impl ObservedAssembler {
                     None => ot::FinishReason::Other("incomplete".to_owned()),
                 },
             ),
-            ResponseStatus::Failed => {
-                Some(ot::FinishReason::Other("failed".to_owned()))
-            }
-            ResponseStatus::Cancelled => {
-                Some(ot::FinishReason::Other("cancelled".to_owned()))
-            }
+            ResponseStatus::Failed => Some(ot::FinishReason::Other("failed".to_owned())),
+            ResponseStatus::Cancelled => Some(ot::FinishReason::Other("cancelled".to_owned())),
             ResponseStatus::Other(status) if status.is_empty() => None,
-            ResponseStatus::Other(status) => {
-                Some(ot::FinishReason::Other(status.clone()))
-            }
+            ResponseStatus::Other(status) => Some(ot::FinishReason::Other(status.clone())),
             ResponseStatus::InProgress | ResponseStatus::Queued => None,
         };
         self.prefix.extend(self.completed.into_values());

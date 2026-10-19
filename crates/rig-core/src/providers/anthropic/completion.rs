@@ -409,10 +409,12 @@ fn message_json(
                 .enumerate()
                 // Keep original coordinates for the tool-ID plan while omitting
                 // known reasoning whose issuer is foreign to this dialect.
-                .filter(|(_, block)| !matches!(block,
+                .filter(|(_, block)| {
+                    !matches!(block,
                     AssistantContent::CarriedReasoning(reasoning)
                         if !reasoning.has_opaque_parts()
-                            && !reasoning.replayable_to(target.provider.dialect.name)))
+                            && !reasoning.replayable_to(target.provider.dialect.name))
+                })
                 .map(|(content_index, block)| {
                     assistant_parts(block, target, ids.of(message_index, content_index))
                 })
@@ -541,7 +543,10 @@ pub(super) fn assistant_parts(
     if let AssistantContent::CarriedText(part) = block
         && let Some(known) = part.known_text_projection()
     {
-        return Ok((!known.is_empty()).then(|| text(known)).into_iter().collect());
+        return Ok((!known.is_empty())
+            .then(|| text(known))
+            .into_iter()
+            .collect());
     }
     let identity = match block.replay(target, wire_id) {
         Replay::Item(item) => {

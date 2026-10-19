@@ -187,20 +187,31 @@ fn capped_streamed_recorded_default_selector_keeps_the_original_input() {
     assert!(cell.program.streamed);
     assert_eq!(cell.program.preamble, Some(cells::BASIC_PREAMBLE));
     assert_eq!(cell.program.prompt, cells::BASIC_PROMPT);
-    assert_eq!(cell.program.hooks, &[crate::corpus_matrix::corpus::Hook::RecordSettled]);
+    assert_eq!(
+        cell.program.hooks,
+        &[crate::corpus_matrix::corpus::Hook::RecordSettled]
+    );
     assert!(matches!(
         cell.program.ending,
         crate::corpus_matrix::corpus::Ending::Failed(rig::error::ErrorKind::Response)
     ));
 
     let selected = reasoning_wire_accepting_incomplete(&client);
-    assert!(matches!(selected.thinking, cells::ThinkingWire::OpenAiResponsesRecordedDefault));
+    assert!(matches!(
+        selected.thinking,
+        cells::ThinkingWire::OpenAiResponsesRecordedDefault
+    ));
     let program = selected.program(&cell);
     let original = serde_json::json!({
         "reasoning": {"effort": "low", "summary": "auto"},
         "include": ["reasoning.encrypted_content"]
     });
-    assert_eq!(program.additional_params.expect("recorded caller parameters")(), original);
+    assert_eq!(
+        program
+            .additional_params
+            .expect("recorded caller parameters")(),
+        original
+    );
     assert_eq!(program.max_tokens, Some(16));
     assert!(program.streamed);
     assert_eq!(program.preamble, cell.program.preamble);
@@ -212,15 +223,24 @@ fn capped_streamed_recorded_default_selector_keeps_the_original_input() {
     ));
 
     let current = reasoning_wire(&client);
-    assert!(matches!(current.thinking, cells::ThinkingWire::OpenAiResponses));
+    assert!(matches!(
+        current.thinking,
+        cells::ThinkingWire::OpenAiResponses
+    ));
     assert_eq!(
-        current.program(&cell).additional_params.expect("normal caller parameters")(),
+        current
+            .program(&cell)
+            .additional_params
+            .expect("normal caller parameters")(),
         serde_json::json!({
             "reasoning": {"effort": "low", "summary": "auto"},
             "include": ["reasoning.encrypted_content"], "store": false
         })
     );
-    assert!(matches!(wire(&client).thinking, cells::ThinkingWire::OpenAiResponses));
+    assert!(matches!(
+        wire(&client).thinking,
+        cells::ThinkingWire::OpenAiResponses
+    ));
     assert_eq!(
         cells::ThinkingWire::OpenAiResponses.params(false)(),
         serde_json::json!({"reasoning": {"effort": "minimal"}, "store": false})

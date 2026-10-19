@@ -696,8 +696,12 @@ fn the_fork_observed_payload_shape_gates_every_projection() {
             .into_iter()
             .filter_map(|fact| match fact.action {
                 Action::Adapter { observation }
-                    if matches!(observation.event, AdapterEvent::Usage { .. }
-                        | AdapterEvent::Provider { .. } | AdapterEvent::ErrorEnvelope { .. }) =>
+                    if matches!(
+                        observation.event,
+                        AdapterEvent::Usage { .. }
+                            | AdapterEvent::Provider { .. }
+                            | AdapterEvent::ErrorEnvelope { .. }
+                    ) =>
                 {
                     Some(observation.event)
                 }
@@ -715,8 +719,14 @@ fn the_fork_observed_payload_shape_gates_every_projection() {
         ("id", json!({})),
         ("model", json!(false)),
         ("usage", json!("five")),
-        ("usage", json!({"prompt_tokens":5,"prompt_tokens_details":7})),
-        ("usage", json!({"prompt_tokens":5,"completion_tokens_details":"details"})),
+        (
+            "usage",
+            json!({"prompt_tokens":5,"prompt_tokens_details":7}),
+        ),
+        (
+            "usage",
+            json!({"prompt_tokens":5,"completion_tokens_details":"details"}),
+        ),
         ("error", json!("retry")),
         ("error", json!({"message":false})),
         ("error", json!({"type":[]})),
@@ -725,7 +735,10 @@ fn the_fork_observed_payload_shape_gates_every_projection() {
     ] {
         let mut payload = valid.clone();
         payload[field] = malformed;
-        assert!(events(payload.clone()).is_empty(), "whole projection is gated: {payload}");
+        assert!(
+            events(payload.clone()).is_empty(),
+            "whole projection is gated: {payload}"
+        );
     }
     for choices in [None, Some(json!([]))] {
         let mut payload = json!({"usage":{"prompt_tokens":5}});
@@ -733,28 +746,42 @@ fn the_fork_observed_payload_shape_gates_every_projection() {
             payload["choices"] = choices;
         }
         let observed = events(payload);
-        assert!(matches!(observed.as_slice(), [AdapterEvent::Usage { usage }] if usage.input_tokens == Some(5)));
+        assert!(
+            matches!(observed.as_slice(), [AdapterEvent::Usage { usage }] if usage.input_tokens == Some(5))
+        );
     }
     let observed = events(json!({"usage":{"prompt_tokens":"5","completion_tokens":-1,
         "total_tokens":0,"prompt_tokens_details":{"cached_tokens":{}},
         "completion_tokens_details":{"reasoning_tokens":null}}}));
-    assert!(matches!(observed.as_slice(), [AdapterEvent::Usage { usage }]
+    assert!(
+        matches!(observed.as_slice(), [AdapterEvent::Usage { usage }]
         if usage.input_tokens.is_none() && usage.output_tokens.is_none()
         && usage.total_tokens == Some(0) && usage.cached_input_tokens.is_none()
-        && usage.reasoning_tokens.is_none()));
+        && usage.reasoning_tokens.is_none())
+    );
     let observed = events(json!({"choices":[
         {"index":1,"usage":{"prompt_tokens":99}},
         {"index":0,"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9}}
     ]}));
-    assert!(matches!(observed.as_slice(), [AdapterEvent::Usage { usage }]
+    assert!(
+        matches!(observed.as_slice(), [AdapterEvent::Usage { usage }]
         if usage.input_tokens == Some(7) && usage.output_tokens == Some(2)
-        && usage.total_tokens == Some(9)));
+        && usage.total_tokens == Some(9))
+    );
     let observed = events(json!({"usage":{"prompt_tokens":5},
         "choices":[{"usage":{"prompt_tokens":99}}]}));
-    assert!(matches!(observed.as_slice(), [AdapterEvent::Usage { usage }] if usage.input_tokens == Some(5)));
+    assert!(
+        matches!(observed.as_slice(), [AdapterEvent::Usage { usage }] if usage.input_tokens == Some(5))
+    );
     let observed = events(valid);
-    assert!(matches!(observed.as_slice(), [AdapterEvent::Usage { .. },
-        AdapterEvent::Provider { .. }, AdapterEvent::ErrorEnvelope { .. }]));
+    assert!(matches!(
+        observed.as_slice(),
+        [
+            AdapterEvent::Usage { .. },
+            AdapterEvent::Provider { .. },
+            AdapterEvent::ErrorEnvelope { .. }
+        ]
+    ));
 }
 
 #[tokio::test]
@@ -829,7 +856,10 @@ async fn a_single_chunk_probe_closes_only_the_call_in_that_fragment() {
             other => panic!("a whole call closes before EOF: {other:?}"),
         }
     };
-    assert_eq!(first_closed.id.provider().map(|id| id.as_str()), Some("whole"));
+    assert_eq!(
+        first_closed.id.provider().map(|id| id.as_str()),
+        Some("whole")
+    );
     assert!(
         stream.finish().await.is_err(),
         "EOF is not a provider terminal"
@@ -1476,7 +1506,9 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
     // A document with inline bytes becomes `document_url`, carrying its name
     // in Mistral's own optional field.
     let body = encode(vec![UserContent::Document(Document {
-        data: DocumentData::File(crate::message::DocumentSourceKind::Base64("ZGF0YQ==".to_owned())),
+        data: DocumentData::File(crate::message::DocumentSourceKind::Base64(
+            "ZGF0YQ==".to_owned(),
+        )),
         media_type: Some(DocumentMediaType::PDF),
         ..Default::default()
     })])
@@ -1513,8 +1545,10 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
         body["messages"][0]["content"][0]["image_url"]["url"].is_string(),
         "OpenAI keeps its own nesting: {body}"
     );
-    assert_eq!(body["messages"][0]["content"][0]["image_url"]["detail"],"auto",
-        "the carried OpenRouter detail rewrite does not change OpenAI");
+    assert_eq!(
+        body["messages"][0]["content"][0]["image_url"]["detail"], "auto",
+        "the carried OpenRouter detail rewrite does not change OpenAI"
+    );
 }
 
 #[test]
@@ -1830,7 +1864,6 @@ async fn a_source_credential_is_kept_out_of_observed_diagnostics_as_a_static_key
     );
 }
 
-
 #[test]
 fn presealed_groq_native_tools_keep_the_full_merged_body_in_both_modes() {
     let chat = OpenAIConfig::with_key(&GROQ, "k").chat("compound");
@@ -1870,10 +1903,13 @@ fn presealed_groq_native_tools_keep_the_full_merged_body_in_both_modes() {
             expected["stream"] = json!(true);
         }
         assert_eq!(json_body(&encoded.request), expected, "{mode:?}");
-        assert_eq!(encoded.framing, match mode {
-            Mode::Unary => Framing::Whole,
-            Mode::Streaming => Framing::Sse,
-        });
+        assert_eq!(
+            encoded.framing,
+            match mode {
+                Mode::Unary => Framing::Whole,
+                Mode::Streaming => Framing::Sse,
+            }
+        );
         assert_eq!(encoded.route, Some("/chat/completions"));
     }
 }
@@ -1885,8 +1921,10 @@ fn presealed_groq_native_tools_keep_absent_empty_and_null_distinct() {
         for (raw, compound) in [
             (json!({}), None),
             (json!({"tools":[]}), Some(json!({"enabled_tools":[]}))),
-            (json!({"tools":[{"type":"browser_search"}]}),
-                Some(json!({"enabled_tools":[{"type":"browser_search"}]}))),
+            (
+                json!({"tools":[{"type":"browser_search"}]}),
+                Some(json!({"enabled_tools":[{"type":"browser_search"}]})),
+            ),
         ] {
             let mut request = CompletionRequest::new("search");
             request.additional_params = Some(raw);
@@ -1904,34 +1942,46 @@ fn presealed_groq_native_tools_keep_absent_empty_and_null_distinct() {
         }
         let mut request = CompletionRequest::new("search");
         request.additional_params = Some(json!({"tools":null}));
-        let error = chat.encode(request, mode).expect_err("explicit null is refused");
-        assert_eq!(error.to_string(),
-            "RequestError: Groq `additional_params.tools` must be an array of native tool objects");
+        let error = chat
+            .encode(request, mode)
+            .expect_err("explicit null is refused");
+        assert_eq!(
+            error.to_string(),
+            "RequestError: Groq `additional_params.tools` must be an array of native tool objects"
+        );
         assert!(error.unsupported_option().is_none());
     }
 }
 
 #[test]
 fn presealed_openrouter_cache_marks_the_raw_system_override_in_both_modes() {
-    let chat = OpenAIConfig::with_key(&super::super::OPENROUTER, "k")
-        .chat("openai/gpt-4o");
+    let chat = OpenAIConfig::with_key(&super::super::OPENROUTER, "k").chat("openai/gpt-4o");
     for (system, cached_system) in [
-        (json!("raw rules"), json!([{"type":"text","text":"raw rules",
-            "cache_control":{"type":"ephemeral"}}])),
-        (json!([
-            {"type":"text","text":"first","cache_control":{"type":"preserved"}},
-            {"type":"text","text":"last","cache_control":{"type":"long","ttl":"1h"}}
-        ]), json!([
-            {"type":"text","text":"first","cache_control":{"type":"preserved"}},
-            {"type":"text","text":"last","cache_control":{"type":"ephemeral"}}
-        ])),
+        (
+            json!("raw rules"),
+            json!([{"type":"text","text":"raw rules",
+            "cache_control":{"type":"ephemeral"}}]),
+        ),
+        (
+            json!([
+                {"type":"text","text":"first","cache_control":{"type":"preserved"}},
+                {"type":"text","text":"last","cache_control":{"type":"long","ttl":"1h"}}
+            ]),
+            json!([
+                {"type":"text","text":"first","cache_control":{"type":"preserved"}},
+                {"type":"text","text":"last","cache_control":{"type":"ephemeral"}}
+            ]),
+        ),
     ] {
         for caching in [false, true] {
             for mode in [Mode::Unary, Mode::Streaming] {
                 let mut request = CompletionRequest::new("canonical prompt");
-                request.chat_history.insert(0, Message::System {
-                    content: "canonical rules".to_owned(),
-                });
+                request.chat_history.insert(
+                    0,
+                    Message::System {
+                        content: "canonical rules".to_owned(),
+                    },
+                );
                 let raw_messages = json!([
                     {"role":"system","content":system},
                     {"role":"system","content":"second system"},
@@ -1942,8 +1992,11 @@ fn presealed_openrouter_cache_marks_the_raw_system_override_in_both_modes() {
                 ]);
                 request.additional_params = Some(json!({"messages":raw_messages,
                     "raw_marker":"kept"}));
-                let selected = if caching { chat.clone().with_prompt_caching() }
-                    else { chat.clone() };
+                let selected = if caching {
+                    chat.clone().with_prompt_caching()
+                } else {
+                    chat.clone()
+                };
                 let encoded = selected.encode(request, mode).expect("encodes");
                 let mut expected = json!({"model":"openai/gpt-4o", "messages":[
                     {"role":"system","content":if caching { &cached_system } else { &system }},
@@ -1956,10 +2009,13 @@ fn presealed_openrouter_cache_marks_the_raw_system_override_in_both_modes() {
                     expected["stream"] = json!(true);
                 }
                 assert_eq!(json_body(&encoded.request), expected, "{caching}/{mode:?}");
-                assert_eq!(encoded.framing, match mode {
-                    Mode::Unary => Framing::Whole,
-                    Mode::Streaming => Framing::Sse,
-                });
+                assert_eq!(
+                    encoded.framing,
+                    match mode {
+                        Mode::Unary => Framing::Whole,
+                        Mode::Streaming => Framing::Sse,
+                    }
+                );
             }
         }
     }
@@ -1968,16 +2024,29 @@ fn presealed_openrouter_cache_marks_the_raw_system_override_in_both_modes() {
 #[test]
 fn presealed_openrouter_cache_flag_is_limited_to_its_dialect_and_system_content() {
     let router = OpenAIConfig::with_key(&super::super::OPENROUTER, "k")
-        .chat("openai/gpt-4o").with_prompt_caching();
+        .chat("openai/gpt-4o")
+        .with_prompt_caching();
     let openai = OpenAIConfig::new("k").chat("gpt-4o").with_prompt_caching();
     for (chat, messages) in [
-        (router.clone(), json!([{"role":"user","content":"no system"}])),
-        (router.clone(), json!([{"role":"system","content":null},
-            {"role":"user","content":"null system"}])),
-        (router, json!([{"role":"system","content":[]},
-            {"role":"user","content":"empty system"}])),
-        (openai, json!([{"role":"system","content":"plain rules"},
-            {"role":"user","content":"openai"}])),
+        (
+            router.clone(),
+            json!([{"role":"user","content":"no system"}]),
+        ),
+        (
+            router.clone(),
+            json!([{"role":"system","content":null},
+            {"role":"user","content":"null system"}]),
+        ),
+        (
+            router,
+            json!([{"role":"system","content":[]},
+            {"role":"user","content":"empty system"}]),
+        ),
+        (
+            openai,
+            json!([{"role":"system","content":"plain rules"},
+            {"role":"user","content":"openai"}]),
+        ),
     ] {
         for mode in [Mode::Unary, Mode::Streaming] {
             let mut request = CompletionRequest::new("canonical prompt");
@@ -2000,7 +2069,8 @@ fn presealed_chat_direct_headers_are_built_once_and_keep_the_same_final_body() {
     for chat in [
         OpenAIConfig::with_key(&GROQ, "k").chat("compound"),
         OpenAIConfig::with_key(&super::super::OPENROUTER, "k")
-            .chat("openai/gpt-4o").with_prompt_caching(),
+            .chat("openai/gpt-4o")
+            .with_prompt_caching(),
     ] {
         let raw = json!({"messages":[{"role":"system","content":"rules"},
             {"role":"user","content":"search"}],
@@ -2010,26 +2080,40 @@ fn presealed_chat_direct_headers_are_built_once_and_keep_the_same_final_body() {
         request.additional_params = Some(raw.clone());
         for mode in [Mode::Unary, Mode::Streaming] {
             let calls = std::cell::Cell::new(0);
-            let direct = chat.encode_with_headers(request.clone(), mode,
-                |provider, original, builder| {
+            let direct = chat
+                .encode_with_headers(request.clone(), mode, |provider, original, builder| {
                     calls.set(calls.get() + 1);
                     assert_eq!(provider, &chat.provider);
                     assert_eq!(original.additional_params.as_ref(), Some(&raw));
-                    Ok(provider.completion_headers(original, builder)?
+                    Ok(provider
+                        .completion_headers(original, builder)?
                         .header("x-g233-stage", "direct"))
-                }).expect("direct headers encode");
+                })
+                .expect("direct headers encode");
             let ordinary = chat.encode(request.clone(), mode).expect("ordinary encode");
             assert_eq!(calls.get(), 1);
-            assert_eq!(header(direct.request.headers(), "x-g233-stage"), Some("direct"));
+            assert_eq!(
+                header(direct.request.headers(), "x-g233-stage"),
+                Some("direct")
+            );
             assert_eq!(header(ordinary.request.headers(), "x-g233-stage"), None);
-            assert_eq!(header(direct.request.headers(), "authorization"), Some("Bearer k"));
-            assert_eq!(header(direct.request.headers(), "content-type"), Some("application/json"));
+            assert_eq!(
+                header(direct.request.headers(), "authorization"),
+                Some("Bearer k")
+            );
+            assert_eq!(
+                header(direct.request.headers(), "content-type"),
+                Some("application/json")
+            );
             assert_eq!(direct.request.method(), ordinary.request.method());
             assert_eq!(direct.request.uri(), ordinary.request.uri());
             assert_eq!(direct.route, ordinary.route);
             assert_eq!(direct.framing, ordinary.framing);
             assert_eq!(direct.request_id_header, ordinary.request_id_header);
-            assert_eq!(direct.response_header_prefix, ordinary.response_header_prefix);
+            assert_eq!(
+                direct.response_header_prefix,
+                ordinary.response_header_prefix
+            );
             assert_eq!(json_body(&direct.request), json_body(&ordinary.request));
         }
     }
@@ -2044,7 +2128,8 @@ fn presealed_chat_catalog_policy_checks_the_effective_model_and_keeps_raw_overri
     for chat in [
         OpenAIConfig::with_key(&GROQ, "k").chat("compound"),
         OpenAIConfig::with_key(&super::super::OPENROUTER, "k")
-            .chat("openai/gpt-4o").with_prompt_caching(),
+            .chat("openai/gpt-4o")
+            .with_prompt_caching(),
     ] {
         for mode in [Mode::Unary, Mode::Streaming] {
             for raw_top_p in [false, true] {
@@ -2056,11 +2141,13 @@ fn presealed_chat_catalog_policy_checks_the_effective_model_and_keeps_raw_overri
                 }
                 let mut request = CompletionRequest::new("canonical prompt").top_p(0.9);
                 request.additional_params = Some(raw);
-                let error = chat.encode(request.clone().on_unsupported(OnUnsupported::Error), mode)
+                let error = chat
+                    .encode(request.clone().on_unsupported(OnUnsupported::Error), mode)
                     .expect_err("the effective model refuses sampling");
                 let refusal = error.unsupported_option().expect("typed catalog refusal");
                 assert_eq!(refusal.option, "top_p");
-                let encoded = chat.encode(request.on_unsupported(OnUnsupported::Ignore), mode)
+                let encoded = chat
+                    .encode(request.on_unsupported(OnUnsupported::Ignore), mode)
                     .expect("Ignore encodes");
                 let mut expected = json!({"model":model,"messages":rules,
                     "compound_custom":{"limit":3}});
@@ -2082,7 +2169,11 @@ fn presealed_chat_catalog_policy_checks_the_effective_model_and_keeps_raw_overri
                         expected["stream_options"] = json!({"include_usage":true});
                     }
                 }
-                assert_eq!(json_body(&encoded.request), expected, "{raw_top_p}/{mode:?}");
+                assert_eq!(
+                    json_body(&encoded.request),
+                    expected,
+                    "{raw_top_p}/{mode:?}"
+                );
             }
         }
     }
@@ -2093,13 +2184,18 @@ fn presealed_groq_null_tools_refuse_before_an_independent_catalog_defect() {
     use crate::completion::OnUnsupported;
     let chat = OpenAIConfig::with_key(&GROQ, "k").chat("compound");
     for mode in [Mode::Unary, Mode::Streaming] {
-        let mut request = CompletionRequest::new("search").top_p(0.9)
+        let mut request = CompletionRequest::new("search")
+            .top_p(0.9)
             .on_unsupported(OnUnsupported::Error);
         request.additional_params = Some(json!({"model":crate::providers::openai::GPT_6_SOL,
             "tools":null}));
-        let error = chat.encode(request, mode).expect_err("null tools are refused preseal");
-        assert_eq!(error.to_string(),
-            "RequestError: Groq `additional_params.tools` must be an array of native tool objects");
+        let error = chat
+            .encode(request, mode)
+            .expect_err("null tools are refused preseal");
+        assert_eq!(
+            error.to_string(),
+            "RequestError: Groq `additional_params.tools` must be an array of native tool objects"
+        );
         assert!(error.unsupported_option().is_none());
     }
 }

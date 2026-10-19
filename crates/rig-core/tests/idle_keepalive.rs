@@ -25,9 +25,9 @@ use rig_core::providers::openai::responses_api::websocket::codex::{
 };
 use rig_core::providers::openai::responses_api::wire::Responses;
 use rig_core::test_utils::RecordingHttpClient;
+use rig_tungstenite::tokio_tungstenite;
 use std::sync::mpsc;
 use std::time::Duration;
-use rig_tungstenite::tokio_tungstenite;
 use tokio_tungstenite::tungstenite::Message;
 
 fn completed(response_id: &str) -> String {

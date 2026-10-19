@@ -12,17 +12,21 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
+use super::PROVIDER_NAME;
 use crate::completion::{FinishReason, Usage};
 use crate::error::ProviderError;
 use crate::json_utils::Lenient;
 use crate::message::{
-    CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart, CarriedText, CarriedTextContent, DocumentRange, DocumentSourceKind, Image, ImageMediaType, Source, SourceLocation,
+    CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart, CarriedText,
+    CarriedTextContent, DocumentRange, DocumentSourceKind, Image, ImageMediaType, Source,
+    SourceLocation,
 };
 use crate::operation::completion::merge;
 use crate::operation::{Block, CallFragment, Completion, Finish};
 use crate::providers::internal::wire;
-use super::PROVIDER_NAME;
-use crate::wire::{Decoder, Flow, IncompleteEof, Mode, Out, SpanUnit, WireCitation, WireEvent, WireFrame, WireSpan};
+use crate::wire::{
+    Decoder, Flow, IncompleteEof, Mode, Out, SpanUnit, WireCitation, WireEvent, WireFrame, WireSpan,
+};
 
 /// Recognized Interactions SSE tags; unlisted tags classify as unknown.
 const KNOWN_EVENT_TYPES: &[&str] = &[
@@ -85,7 +89,10 @@ enum Open {
     /// its block's writer index.
     Output(Value, Vec<(usize, Value)>),
     /// A function call, with the argument JSON streamed so far.
-    Call { block: usize, arguments: Option<String> },
+    Call {
+        block: usize,
+        arguments: Option<String>,
+    },
     Opaque(usize),
 }
 
@@ -97,16 +104,23 @@ struct Thought {
 }
 
 fn thought_text(item: &Value) -> String {
-    item.arr("summary").iter()
+    item.arr("summary")
+        .iter()
         .filter(|part| part.str("type") == Some("text"))
         .filter_map(|part| part.str("text"))
         .collect()
 }
 
-fn open_thought(index: usize, item: Value, out: &mut Out<'_, Completion>) -> Result<Thought, ProviderError> {
+fn open_thought(
+    index: usize,
+    item: Value,
+    out: &mut Out<'_, Completion>,
+) -> Result<Thought, ProviderError> {
     let text = thought_text(&item);
     out.open(index, Block::Reasoning { redacted: false }, Value::Null)?;
-    if !text.is_empty() { out.push(index, &text)?; }
+    if !text.is_empty() {
+        out.push(index, &text)?;
+    }
     Ok(Thought { index, text, item })
 }
 
@@ -116,7 +130,10 @@ fn finish_thought(thought: Thought, out: &mut Out<'_, Completion>) -> Result<(),
         return out.finish(thought.index);
     }
     let reasoning = CarriedReasoning::new(
-        vec![CarriedReasoningPart::Text { text: thought.text, signature }],
+        vec![CarriedReasoningPart::Text {
+            text: thought.text,
+            signature,
+        }],
         CarriedPayload::new(thought.item, Some(PROVIDER_NAME.to_owned())),
     );
     out.finish_carried_reasoning(thought.index, reasoning)
@@ -130,9 +147,9 @@ pub fn usage_of(usage: &Value) -> Usage {
     let output_tokens = usage.u64("total_output_tokens");
     let tool_use = usage.u64("total_tool_use_tokens");
     let thoughts = usage.u64("total_thought_tokens");
-    let derived_total = input_tokens.zip(output_tokens).map(|(input, output)| {
-        input + output + thoughts.unwrap_or(0) + tool_use.unwrap_or(0)
-    });
+    let derived_total = input_tokens
+        .zip(output_tokens)
+        .map(|(input, output)| input + output + thoughts.unwrap_or(0) + tool_use.unwrap_or(0));
     Usage {
         input_tokens,
         output_tokens,
@@ -150,7 +167,9 @@ fn closed_png_data(content: &Value) -> Option<&str> {
     let fields = content.as_object()?;
     if content.str("type") != Some("image")
         || content.str("mime_type") != Some("image/png")
-        || !fields.keys().all(|key| matches!(key.as_str(), "type" | "data" | "mime_type"))
+        || !fields
+            .keys()
+            .all(|key| matches!(key.as_str(), "type" | "data" | "mime_type"))
     {
         return None;
     }
@@ -188,8 +207,17 @@ fn open_content(
         }
         out.open(index, Block::Text, Value::Null)?;
         let payload = CarriedPayload::new(content.clone(), Some(PROVIDER_NAME.to_owned()))
-            .with_position(CarriedPosition::MessageContent { item_index: step_index as u64, part_index: content_index as u64 });
-        out.finish_carried_text(index, CarriedText::new(CarriedTextContent::InspectionOnlyMedia(String::new()), payload))?;
+            .with_position(CarriedPosition::MessageContent {
+                item_index: step_index as u64,
+                part_index: content_index as u64,
+            });
+        out.finish_carried_text(
+            index,
+            CarriedText::new(
+                CarriedTextContent::InspectionOnlyMedia(String::new()),
+                payload,
+            ),
+        )?;
         return Ok((index, content));
     }
     let block = match content.str("type") {
@@ -244,7 +272,9 @@ impl InteractionsDecoder {
             }
             Some("model_output") => {
                 let items = step.arr("content").iter();
-                let items = items.enumerate().map(|(content_index, content)| open_content(content.clone(), index, content_index, out));
+                let items = items.enumerate().map(|(content_index, content)| {
+                    open_content(content.clone(), index, content_index, out)
+                });
                 let items = items.collect::<Result<_, _>>()?;
                 let mut step = step;
                 if let Some(step) = step.as_object_mut() {
@@ -260,7 +290,10 @@ impl InteractionsDecoder {
                 }
                 out.edit(block, |slot| *slot = step)?;
                 self.call_order.push(index);
-                Open::Call { block, arguments: None }
+                Open::Call {
+                    block,
+                    arguments: None,
+                }
             }
             // Input a reply restates is kept and never sent back; a
             // hosted-tool step, or one rig does not know, replays.
@@ -290,7 +323,9 @@ impl InteractionsDecoder {
             .unwrap_or_default()
             .to_owned();
         if kind == "arguments_delta"
-            && self.call_ids_by_step.get(&index)
+            && self
+                .call_ids_by_step
+                .get(&index)
                 .is_some_and(|id| self.closed_full_calls.contains(id))
         {
             return Ok(());
@@ -298,21 +333,27 @@ impl InteractionsDecoder {
         // CLOSED-STEP-REFUSAL-TEXT-TYPED-FORM-LOSS differs from F:
         // Response retains the exact received delta only as compact JSON text.
         if kind == "function_call"
-            && let Some(id) = delta.get("id").and_then(Value::as_str)
+            && let Some(id) = delta
+                .get("id")
+                .and_then(Value::as_str)
                 .and_then(crate::message::ProviderCallId::new)
             && self.closed_full_calls.contains(&id)
         {
             return Err(ProviderError::Response(format!(
                 "interactions: second full function call for closed call {}; received {}",
-                id.as_str(), Value::Object(delta),
+                id.as_str(),
+                Value::Object(delta),
             )));
         }
-        if let Some(id) = self.call_ids_by_step.get(&index)
+        if let Some(id) = self
+            .call_ids_by_step
+            .get(&index)
             .filter(|id| self.closed_full_calls.contains(*id))
         {
             return Err(ProviderError::Response(format!(
                 "interactions: {kind} fragment at index {index} belongs to closed call {}; received {}",
-                id.as_str(), Value::Object(delta),
+                id.as_str(),
+                Value::Object(delta),
             )));
         }
         if kind == "arguments_delta"
@@ -325,7 +366,9 @@ impl InteractionsDecoder {
             )));
         }
         if kind == "function_call"
-            && let Some(id) = delta.get("id").and_then(Value::as_str)
+            && let Some(id) = delta
+                .get("id")
+                .and_then(Value::as_str)
                 .and_then(crate::message::ProviderCallId::new)
             && !self.closed_full_calls.contains(&id)
             && let Some(arguments) = delta.get("arguments").filter(|value| !value.is_object())
@@ -336,9 +379,13 @@ impl InteractionsDecoder {
             )));
         }
         let full_known_call = kind == "function_call"
-            && delta.get("name").and_then(Value::as_str)
+            && delta
+                .get("name")
+                .and_then(Value::as_str)
                 .is_some_and(|name| crate::message::ToolName::new(name.to_owned()).is_ok())
-            && delta.get("id").and_then(Value::as_str)
+            && delta
+                .get("id")
+                .and_then(Value::as_str)
                 .is_some_and(|id| !id.trim().is_empty())
             && delta.get("arguments").is_some_and(Value::is_object);
         if full_known_call && !self.steps.contains_key(&index) {
@@ -392,16 +439,28 @@ impl InteractionsDecoder {
             },
             (Open::Thought(thought), "thought_summary" | "thought_signature") => {
                 if thought.is_none() {
-                    *thought = Some(open_thought(out.fresh_index(), json!({"type":"thought"}), out)?);
+                    *thought = Some(open_thought(
+                        out.fresh_index(),
+                        json!({"type":"thought"}),
+                        out,
+                    )?);
                 }
-                let Some(active) = thought.as_mut() else { return Ok(()); };
+                let Some(active) = thought.as_mut() else {
+                    return Ok(());
+                };
                 if kind == "thought_summary" {
                     let content = delta.get("content").cloned().unwrap_or_default();
-                    if let Some(text) = content.str("text").filter(|_| content.str("type") == Some("text")) {
+                    if let Some(text) = content
+                        .str("text")
+                        .filter(|_| content.str("type") == Some("text"))
+                    {
                         active.text.push_str(text);
                         out.push(active.index, text)?;
                     }
-                    merge(&mut active.item, &Map::from_iter([("summary".to_owned(), json!([content]))]));
+                    merge(
+                        &mut active.item,
+                        &Map::from_iter([("summary".to_owned(), json!([content]))]),
+                    );
                 } else if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
                     active.item["signature"] = json!(signature);
                     if let Some(active) = thought.take() {
@@ -416,7 +475,9 @@ impl InteractionsDecoder {
                     Some(Value::Null) | None => return Ok(()),
                     Some(other) => other.to_string(),
                 };
-                arguments.get_or_insert_with(String::new).push_str(&fragment);
+                arguments
+                    .get_or_insert_with(String::new)
+                    .push_str(&fragment);
                 let fragment = CallFragment {
                     arguments: Some(&fragment),
                     ..CallFragment::default()
@@ -424,12 +485,20 @@ impl InteractionsDecoder {
                 out.fragment(Some(*block), fragment)
             }
             (Open::Thought(thought), _) => {
-                if let Some(thought) = thought { merge(&mut thought.item, &delta); }
+                if let Some(thought) = thought {
+                    merge(&mut thought.item, &delta);
+                }
                 Ok(())
             }
             (Open::Call { block, .. }, _) => {
-                let full_id = full_known_call.then(|| delta.get("id").and_then(Value::as_str)
-                    .and_then(crate::message::ProviderCallId::new)).flatten();
+                let full_id = full_known_call
+                    .then(|| {
+                        delta
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .and_then(crate::message::ProviderCallId::new)
+                    })
+                    .flatten();
                 if kind == "function_call" {
                     call_fields(*block, &Value::Object(delta.clone()), out)?;
                 }
@@ -466,9 +535,15 @@ impl InteractionsDecoder {
                 // Streamed fragments supersede the arguments the start
                 // announced.
                 if let Some(arguments) = arguments {
-                    let arguments = crate::json_utils::parse_tool_arguments(&arguments).map_err(|error| {
-                        out.malformed_call_error(block, arguments.clone(), error.to_string(), None)
-                    })?;
+                    let arguments =
+                        crate::json_utils::parse_tool_arguments(&arguments).map_err(|error| {
+                            out.malformed_call_error(
+                                block,
+                                arguments.clone(),
+                                error.to_string(),
+                                None,
+                            )
+                        })?;
                     out.announce(block, arguments.clone())?;
                     out.edit(block, |item| {
                         if let Some(item) = item.as_object_mut() {
@@ -492,7 +567,8 @@ impl InteractionsDecoder {
                 for (block, item) in items {
                     if (item.str("type") == Some("function_call") && item.str("name").is_some())
                         || item.str("type") == Some("thought")
-                        || (item.str("type") == Some("image") && closed_png_data(&item).is_none()) {
+                        || (item.str("type") == Some("image") && closed_png_data(&item).is_none())
+                    {
                         continue;
                     }
                     for annotation in item.arr("annotations") {
@@ -517,7 +593,9 @@ impl InteractionsDecoder {
 
     fn flush_thoughts(&mut self, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
         for open in self.steps.values_mut() {
-            if let Open::Thought(thought) = open && let Some(thought) = thought.take() {
+            if let Open::Thought(thought) = open
+                && let Some(thought) = thought.take()
+            {
                 finish_thought(thought, out)?;
             }
         }
@@ -527,7 +605,10 @@ impl InteractionsDecoder {
     /// End the reply with the interaction resource it completed with.
     fn complete(&mut self, interaction: Map<String, Value>, out: Out<'_, Completion>) -> Flow {
         let interaction = Value::Object(interaction);
-        let status = interaction.str("status").map(str::to_owned).or_else(|| self.status.take());
+        let status = interaction
+            .str("status")
+            .map(str::to_owned)
+            .or_else(|| self.status.take());
         let (reason, error) = ending(status.as_deref(), interaction.arr("errors"));
         self.end_resource(interaction, reason, error, out)
     }
@@ -667,15 +748,26 @@ impl<'id> Decoder<'id, Completion> for InteractionsDecoder {
     }
 
     fn incomplete_eof(&self) -> IncompleteEof {
-        if self.streaming { IncompleteEof::KeepPartial } else { IncompleteEof::Refuse }
+        if self.streaming {
+            IncompleteEof::KeepPartial
+        } else {
+            IncompleteEof::Refuse
+        }
     }
 
     fn eof(&mut self, mut out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
         self.flush_thoughts(&mut out)?;
-        if self.streaming { Ok(Flow::More) } else { Err(ProviderError::Truncated) }
+        if self.streaming {
+            Ok(Flow::More)
+        } else {
+            Err(ProviderError::Truncated)
+        }
     }
 
-    fn flush_before_terminal_error(&mut self, mut out: Out<'id, Completion>) -> Result<(), ProviderError> {
+    fn flush_before_terminal_error(
+        &mut self,
+        mut out: Out<'id, Completion>,
+    ) -> Result<(), ProviderError> {
         self.flush_thoughts(&mut out)
     }
 

@@ -173,8 +173,11 @@ impl CarriedTextContent {
     /// The exact canonical text, including an edit beside an opaque value.
     pub fn text(&self) -> &str {
         match self {
-            Self::Text(text) | Self::Refusal(text) | Self::Opaque(text)
-            | Self::InspectionOnlyText(text) | Self::InspectionOnlyMedia(text) => text,
+            Self::Text(text)
+            | Self::Refusal(text)
+            | Self::Opaque(text)
+            | Self::InspectionOnlyText(text)
+            | Self::InspectionOnlyMedia(text) => text,
             Self::GeminiSignedAnswer(answer) => &answer.text,
         }
     }
@@ -182,8 +185,11 @@ impl CarriedTextContent {
     /// Edit canonical text independently of the preserved JSON value.
     pub fn text_mut(&mut self) -> &mut String {
         match self {
-            Self::Text(text) | Self::Refusal(text) | Self::Opaque(text)
-            | Self::InspectionOnlyText(text) | Self::InspectionOnlyMedia(text) => text,
+            Self::Text(text)
+            | Self::Refusal(text)
+            | Self::Opaque(text)
+            | Self::InspectionOnlyText(text)
+            | Self::InspectionOnlyMedia(text) => text,
             Self::GeminiSignedAnswer(answer) => &mut answer.text,
         }
     }
@@ -237,7 +243,8 @@ impl From<CarriedTextRepr> for CarriedText {
             phase: repr.phase,
             unknown_message_fields: repr.unknown_message_fields,
             citations: repr.citations,
-        }.checked()
+        }
+        .checked()
     }
 }
 
@@ -286,7 +293,8 @@ impl CarriedText {
             CarriedTextContent::GeminiSignedAnswer(answer) => Some(&answer.text),
             CarriedTextContent::InspectionOnlyText(text)
             | CarriedTextContent::InspectionOnlyMedia(text) => Some(text),
-            CarriedTextContent::Text(_) | CarriedTextContent::Refusal(_)
+            CarriedTextContent::Text(_)
+            | CarriedTextContent::Refusal(_)
             | CarriedTextContent::Opaque(_) => None,
         }
     }
@@ -295,8 +303,10 @@ impl CarriedText {
     pub fn signed_answer(&self) -> Option<&GeminiSignedAnswer> {
         match &self.content {
             CarriedTextContent::GeminiSignedAnswer(answer) => Some(answer),
-            CarriedTextContent::Text(_) | CarriedTextContent::Refusal(_)
-            | CarriedTextContent::Opaque(_) | CarriedTextContent::InspectionOnlyText(_)
+            CarriedTextContent::Text(_)
+            | CarriedTextContent::Refusal(_)
+            | CarriedTextContent::Opaque(_)
+            | CarriedTextContent::InspectionOnlyText(_)
             | CarriedTextContent::InspectionOnlyMedia(_) => None,
         }
     }

@@ -337,9 +337,12 @@ fn nonempty_tagged_reasoning_keeps_its_known_category_and_exact_raw() {
         panic!("the nonempty known control remains reasoning");
     };
     assert_eq!(reasoning.id.as_deref(), Some("rs_1"));
-    assert_eq!(reasoning.content, [CarriedReasoningPart::Summary(
-        "synthetic category control".to_owned(),
-    )]);
+    assert_eq!(
+        reasoning.content,
+        [CarriedReasoningPart::Summary(
+            "synthetic category control".to_owned(),
+        )]
+    );
     assert_eq!(response.raw["output"][0], item);
 }
 
