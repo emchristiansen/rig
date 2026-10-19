@@ -206,7 +206,6 @@ pub enum AssistantContent {
     /// A tool call requested by the assistant.
     ToolCall(ToolCall),
     /// A custom call with verbatim text input.
-    #[serde(rename = "custom_tool_call")]
     CustomToolCall(CustomToolCall),
     /// A carried item with its own issuer, independent of turn Origin.
     #[serde(rename = "provider_item")]

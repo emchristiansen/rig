@@ -1,5 +1,6 @@
 use super::*;
 use crate::proto;
+use anyhow::{Context, bail, ensure};
 use message::{DocumentSourceKind, Image, ImageMediaType, UserContent};
 
 fn image_request(data: &str) -> CompletionRequest {
@@ -14,59 +15,89 @@ fn image_request(data: &str) -> CompletionRequest {
     request
 }
 
-fn encoded_image(data: &str) -> Vec<u8> {
+fn encoded_image(data: &str) -> anyhow::Result<Vec<u8>> {
     let request = GenerateContent::new(GEMINI_2_5_FLASH)
         .encode(image_request(data), Mode::Unary)
-        .expect("the source image encodes");
-    let part = &request.contents[0].parts[0];
+        .context("the source image encodes")?;
+    let content = request
+        .contents
+        .first()
+        .with_context(|| format!("encoded image has no content: {request:?}"))?;
+    let part = content
+        .parts
+        .first()
+        .with_context(|| format!("encoded image content has no part: {content:?}"))?;
     match &part.data {
-        Some(proto::part::Data::InlineData(blob)) => blob.data.clone(),
-        other => panic!("expected inline image bytes, got {other:?}"),
+        Some(proto::part::Data::InlineData(blob)) => Ok(blob.data.clone()),
+        other => bail!("expected inline image bytes, got {other:?}"),
     }
 }
 
 #[test]
-fn test_decode_base64_bytes_accepts_url_safe_with_padding() {
-    assert_eq!(
-        encoded_image("_-wgVQA="),
-        vec![0xFF, 0xEC, 0x20, 0x55, 0x00]
+fn test_decode_base64_bytes_accepts_url_safe_with_padding() -> anyhow::Result<()> {
+    let actual = encoded_image("_-wgVQA=")?;
+    let expected = vec![0xFF, 0xEC, 0x20, 0x55, 0x00];
+    ensure!(
+        actual == expected,
+        "image bytes differ: actual {actual:?}, expected {expected:?}"
     );
+    Ok(())
 }
 
 #[test]
-fn test_decode_base64_bytes_accepts_url_safe_no_pad() {
-    assert_eq!(encoded_image("_-wgVQA"), vec![0xFF, 0xEC, 0x20, 0x55, 0x00]);
-}
-
-#[test]
-fn test_decode_base64_bytes_accepts_standard_no_pad() {
-    assert_eq!(encoded_image("Zg"), b"f".to_vec());
-}
-
-#[test]
-fn test_decode_base64_bytes_accepts_data_uri_prefix() {
-    assert_eq!(
-        encoded_image("data:text/plain;base64,Zm9v"),
-        b"foo".to_vec()
+fn test_decode_base64_bytes_accepts_url_safe_no_pad() -> anyhow::Result<()> {
+    let actual = encoded_image("_-wgVQA")?;
+    let expected = vec![0xFF, 0xEC, 0x20, 0x55, 0x00];
+    ensure!(
+        actual == expected,
+        "image bytes differ: actual {actual:?}, expected {expected:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn test_decode_base64_bytes_accepts_standard_no_pad() -> anyhow::Result<()> {
+    let actual = encoded_image("Zg")?;
+    let expected = b"f".to_vec();
+    ensure!(
+        actual == expected,
+        "image bytes differ: actual {actual:?}, expected {expected:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_decode_base64_bytes_accepts_data_uri_prefix() -> anyhow::Result<()> {
+    let actual = encoded_image("data:text/plain;base64,Zm9v")?;
+    let expected = b"foo".to_vec();
+    ensure!(
+        actual == expected,
+        "image bytes differ: actual {actual:?}, expected {expected:?}"
+    );
+    Ok(())
 }
 
 // Raw parameters merge after the source-derived strip and keep their value.
 #[test]
-fn raw_data_uri_image_is_not_normalized() {
+fn raw_data_uri_image_is_not_normalized() -> anyhow::Result<()> {
     let mut request = image_request("data:text/plain;base64,Zm9v");
     request.additional_params = Some(serde_json::json!({
         "contents": [{"role":"user","parts":[{"inlineData":{
             "mimeType":"image/png","data":"data:text/plain;base64,Zm9v"
         }}]}]
     }));
-    let error = GenerateContent::new(GEMINI_2_5_FLASH)
-        .encode(request, Mode::Unary)
-        .expect_err("the raw data URI remains invalid protobuf bytes");
-    assert!(matches!(
-        ProviderError::from(error),
-        ProviderError::Request(_)
-    ));
+    let error = match GenerateContent::new(GEMINI_2_5_FLASH).encode(request, Mode::Unary) {
+        Err(error) => error,
+        Ok(request) => bail!(
+            "the raw data URI remains invalid protobuf bytes, got encoded request {request:?}"
+        ),
+    };
+    let error = ProviderError::from(error);
+    ensure!(
+        matches!(&error, ProviderError::Request(_)),
+        "expected Request error, got {error:?}"
+    );
+    Ok(())
 }
 
 #[test]
@@ -83,7 +114,7 @@ fn rpc_error_preserves_status_text_without_http_status() {
 }
 
 #[test]
-fn rpc_codes_classify_retryability_and_keep_the_code() {
+fn rpc_codes_classify_retryability_and_keep_the_code() -> anyhow::Result<()> {
     use rig_core::error::ErrorKind;
     let cells = [
         (tonic::Code::Unavailable, true, "UNAVAILABLE"),
@@ -106,27 +137,68 @@ fn rpc_codes_classify_retryability_and_keep_the_code() {
     ];
     for (code, retryable, name) in cells {
         let err = rpc_error(&tonic::Status::new(code, "boom"));
-        assert_eq!(err.is_retryable(), retryable, "{name}");
-        assert_eq!(err.provider_response_status(), None, "{name}");
+        ensure!(
+            err.is_retryable() == retryable,
+            "{name}: retryability differs: actual {:?}, expected {retryable:?}",
+            err.is_retryable()
+        );
+        ensure!(
+            err.provider_response_status().is_none(),
+            "{name}: expected no HTTP status, got {:?}",
+            err.provider_response_status()
+        );
         let report = err.report();
-        assert_eq!(report.kind, ErrorKind::ProviderResponse, "{name}");
-        assert_eq!(report.retryable, retryable, "{name}");
-        assert_eq!(report.http_status, None, "{name}");
-        assert_eq!(report.code.as_deref(), Some(name), "{name}");
+        ensure!(
+            report.kind == ErrorKind::ProviderResponse,
+            "{name}: report kind differs: actual {:?}, expected {:?}",
+            report.kind,
+            ErrorKind::ProviderResponse
+        );
+        ensure!(
+            report.retryable == retryable,
+            "{name}: report retryability differs: actual {:?}, expected {retryable:?}",
+            report.retryable
+        );
+        ensure!(
+            report.http_status.is_none(),
+            "{name}: expected no report HTTP status, got {:?}",
+            report.http_status
+        );
+        ensure!(
+            report.code.as_deref() == Some(name),
+            "{name}: report code differs: actual {:?}, expected {:?}",
+            report.code.as_deref(),
+            Some(name)
+        );
         let response = report
             .provider_response
-            .expect("the reply rides on the report");
-        assert_eq!(response.code.as_deref(), Some(name));
-        assert_eq!(response.transient, None);
+            .as_ref()
+            .with_context(|| format!("the reply rides on the report: {report:?}"))?;
+        ensure!(
+            response.code.as_deref() == Some(name),
+            "response code differs: actual {:?}, expected {:?}",
+            response.code.as_deref(),
+            Some(name)
+        );
+        ensure!(
+            response.transient.is_none(),
+            "expected no transient flag, got {:?}",
+            response.transient
+        );
     }
+    Ok(())
 }
 
 #[test]
-fn source_order_keeps_a_video_override_out_of_the_image_strip() {
+fn source_order_keeps_a_video_override_out_of_the_image_strip() -> anyhow::Result<()> {
     let data = "data:text/plain;base64,Zm9v";
     let mut request = image_request(data);
-    let message::Message::User { content } = &mut request.chat_history[0] else {
-        panic!("image fixture has a user message");
+    let message = request
+        .chat_history
+        .first_mut()
+        .context("image fixture has no first message")?;
+    let message::Message::User { content } = message else {
+        bail!("image fixture has a user message, got {message:?}");
     };
     content.insert(
         0,
@@ -138,11 +210,16 @@ fn source_order_keeps_a_video_override_out_of_the_image_strip() {
             }})),
         }),
     );
-    let error = GenerateContent::new(GEMINI_2_5_FLASH)
-        .encode(request, Mode::Unary)
-        .expect_err("the video override retains its invalid protobuf data URI");
-    assert!(matches!(
-        ProviderError::from(error),
-        ProviderError::Request(_)
-    ));
+    let error = match GenerateContent::new(GEMINI_2_5_FLASH).encode(request, Mode::Unary) {
+        Err(error) => error,
+        Ok(request) => bail!(
+            "the video override retains its invalid protobuf data URI, got encoded request {request:?}"
+        ),
+    };
+    let error = ProviderError::from(error);
+    ensure!(
+        matches!(&error, ProviderError::Request(_)),
+        "expected Request error, got {error:?}"
+    );
+    Ok(())
 }

@@ -23,7 +23,7 @@ mod merge;
 
 pub use mapping::{Mapping, OptionFields, OptionMap};
 pub use merge::{BaseInput, FinalBody, RawAt, Rewrite, check, param, request_params};
-pub(crate) use merge::{CatalogRefusal, catalog_refusals};
+pub(crate) use merge::{CatalogRefusal, catalog_refusals, check_anthropic_cache_control};
 
 /// Provider-neutral generation knobs for one request. An unset field leaves
 /// the provider's default. A field the wire or model cannot honour is

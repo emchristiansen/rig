@@ -1554,7 +1554,7 @@ async fn a_length_terminal_never_dispatches_a_call_the_writer_did_not_finish() {
         let turn = ModelTurn::new(
             response.head(),
             response.choice.clone(),
-            response.usage.clone(),
+            response.usage,
             policy(&["add"]),
             response.raw.clone(),
         )
@@ -1647,7 +1647,7 @@ async fn a_responses_length_terminal_never_dispatches_a_parseable_call_without_d
     let turn = ModelTurn::new(
         response.head(),
         response.choice.clone(),
-        response.usage.clone(),
+        response.usage,
         policy(&["add"]),
         response.raw.clone(),
     )
@@ -1747,7 +1747,7 @@ fn anthropic_first_fragment_overflow_is_refused_with_zero_malformed_retries() {
     let turn = ModelTurn::new(
         response.head(),
         response.choice.clone(),
-        response.usage.clone(),
+        response.usage,
         policy(&["add"]),
         response.raw.clone(),
     )
@@ -1942,7 +1942,7 @@ async fn a_decoded_carried_json_answer_satisfies_the_existing_output_schema() {
     let turn = ModelTurn::new(
         response.head(),
         response.choice.clone(),
-        response.usage.clone(),
+        response.usage,
         TurnPolicy::new(tool_names(&[]), None, Some("final_result".to_owned())).expect("policy"),
         response.raw.clone(),
     )
@@ -2127,7 +2127,7 @@ async fn a_decoded_phased_preface_stays_in_history_but_not_output_tool_answer() 
     let turn = ModelTurn::new(
         decoded.head(),
         decoded.choice.clone(),
-        decoded.usage.clone(),
+        decoded.usage,
         TurnPolicy::new(tool_names(&[]), None, Some("final_result".to_owned())).expect("policy"),
         decoded.raw.clone(),
     )
@@ -2220,7 +2220,7 @@ async fn a_context_window_terminal_never_dispatches_a_call_the_writer_did_not_fi
         let turn = ModelTurn::new(
             response.head(),
             response.choice.clone(),
-            response.usage.clone(),
+            response.usage,
             policy(&["add"]),
             response.raw.clone(),
         )
@@ -2290,7 +2290,7 @@ fn a_context_limit_reasoning_only_turn_gets_conditional_output_budget_advice() {
     let turn = ModelTurn::new(
         response.head(),
         response.choice.clone(),
-        response.usage.clone(),
+        response.usage,
         policy(&["add"]),
         response.raw.clone(),
     )

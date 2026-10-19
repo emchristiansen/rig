@@ -664,6 +664,25 @@ fn unserialized(request: &CompletionRequest) -> Result<(), EncodeError> {
     }
 }
 
+/// Check the original typed retention against the literal raw Anthropic marker.
+/// The wire calls this before selecting its output cap, preserving refusal order.
+pub(crate) fn check_anthropic_cache_control(
+    request: &CompletionRequest,
+) -> Result<(), EncodeError> {
+    if request.options.cache == Some(CacheRetention::Long)
+        && let Some(raw) = request
+            .additional_params
+            .as_ref()
+            .and_then(|params| params.get("cache_control"))
+        && raw.get("ttl").and_then(Value::as_str) != Some("1h")
+    {
+        return Err(EncodeError::request(
+            "Raw top-level cache_control conflicts with the typed automatic caching TTL",
+        ));
+    }
+    Ok(())
+}
+
 /// `additional_params` as an object, or empty.
 fn raw_layer(request: &CompletionRequest) -> Result<Map<String, Value>, EncodeError> {
     match &request.additional_params {
@@ -792,6 +811,19 @@ pub fn request_params(
     raw_at: RawAt,
     rewrites: &[Rewrite],
 ) -> Result<FinalBody, EncodeError> {
+    let projected_request = if rewrites.contains(&Rewrite::GeminiInteractionsTypedControls) {
+        let additional_params =
+            crate::providers::gemini::interactions_api::project_original_parameters(
+                request.additional_params.as_ref(),
+            )?;
+        Some(CompletionRequest {
+            additional_params,
+            ..request.clone()
+        })
+    } else {
+        None
+    };
+    let request = projected_request.as_ref().unwrap_or(request);
     #[cfg(feature = "websocket")]
     if let [rewrite @ Rewrite::ResponsesWebSocketCreate(create)] = rewrites
         && let crate::providers::openai::responses_api::websocket::WebSocketCreateInput::Delta {

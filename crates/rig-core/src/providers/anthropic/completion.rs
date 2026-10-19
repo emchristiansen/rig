@@ -202,17 +202,7 @@ pub(super) fn body(
         }
     }
     check_aborted_hosted_replay(wire, &request.chat_history)?;
-    if request.options.cache == Some(completion::CacheRetention::Long)
-        && let Some(raw) = request
-            .additional_params
-            .as_ref()
-            .and_then(|params| params.get("cache_control"))
-        && raw.str("ttl") != Some("1h")
-    {
-        return Err(EncodeError::request(
-            "Raw top-level cache_control conflicts with the typed automatic caching TTL",
-        ));
-    }
+    crate::completion::options::check_anthropic_cache_control(request)?;
     let model = request.model.clone().unwrap_or_else(|| wire.model.clone());
     // A request that addresses another model gets that model's default; the
     // wire's own model keeps the one it was built with.

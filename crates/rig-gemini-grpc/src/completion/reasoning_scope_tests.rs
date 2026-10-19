@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::{Context, ensure};
 use base64::Engine as _;
 use message::{
     AssistantContent, AssistantMessage, CarriedPayload, CarriedReasoning, CarriedReasoningPart,
@@ -46,72 +47,114 @@ fn thoughts(request: &GenerateContentRequest) -> Vec<(&str, Vec<u8>)> {
 }
 
 #[test]
-fn only_gemini_reasoning_is_replayed() {
+fn only_gemini_reasoning_is_replayed() -> anyhow::Result<()> {
     let req = encoded(request(vec![
         reasoning("grpc thought", b"grpc", Some(REASONING_ISSUER)),
         reasoning("rest thought", b"rest", Some(REASONING_ISSUER)),
         reasoning("anthropic thought", b"anthropic", Some("anthropic")),
         AssistantContent::text("4"),
     ]))
-    .expect("request build");
-    assert_eq!(
-        thoughts(&req),
-        vec![
-            ("grpc thought", b"grpc".to_vec()),
-            ("rest thought", b"rest".to_vec())
-        ]
+    .context("request build")?;
+    ensure!(
+        thoughts(&req)
+            == vec![
+                ("grpc thought", b"grpc".to_vec()),
+                ("rest thought", b"rest".to_vec())
+            ],
+        "replayed reasoning differs: {req:?}"
     );
-    assert_eq!(req.contents[1].parts.len(), 3);
-    assert!(
-        matches!(&req.contents[1].parts[2].data, Some(proto::part::Data::Text(text)) if text == "4")
+    let content = req
+        .contents
+        .get(1)
+        .with_context(|| format!("second content is missing: {req:?}"))?;
+    ensure!(
+        content.parts.len() == 3,
+        "expected three parts: {content:?}"
     );
+    let part = content
+        .parts
+        .get(2)
+        .with_context(|| format!("third part is missing: {req:?}"))?;
+    ensure!(
+        matches!(&part.data, Some(proto::part::Data::Text(text)) if text == "4"),
+        "the answer part differs: {part:?}"
+    );
+    Ok(())
 }
 
 #[test]
-fn genuine_gemini_reasoning_keeps_its_signature() {
+fn genuine_gemini_reasoning_keeps_its_signature() -> anyhow::Result<()> {
     let req = encoded(request(vec![reasoning(
         "grpc thought",
         b"grpc",
         Some(REASONING_ISSUER),
     )]))
-    .expect("request build");
-    assert_eq!(thoughts(&req), vec![("grpc thought", b"grpc".to_vec())]);
+    .context("request build")?;
+    ensure!(
+        thoughts(&req) == vec![("grpc thought", b"grpc".to_vec())],
+        "genuine reasoning signature differs: {req:?}"
+    );
+    Ok(())
 }
 
 #[test]
-fn unknown_provenance_reasoning_keeps_its_signature() {
-    let req =
-        encoded(request(vec![reasoning("grpc thought", b"grpc", None)])).expect("request build");
-    assert_eq!(thoughts(&req), vec![("grpc thought", b"grpc".to_vec())]);
+fn unknown_provenance_reasoning_keeps_its_signature() -> anyhow::Result<()> {
+    let req = encoded(request(vec![reasoning("grpc thought", b"grpc", None)]))
+        .context("request build")?;
+    ensure!(
+        thoughts(&req) == vec![("grpc thought", b"grpc".to_vec())],
+        "unscoped reasoning signature differs: {req:?}"
+    );
+    Ok(())
 }
 
 #[test]
-fn a_turn_emptied_only_by_foreign_reasoning_is_omitted() {
+fn a_turn_emptied_only_by_foreign_reasoning_is_omitted() -> anyhow::Result<()> {
     let req = encoded(request(vec![reasoning(
         "anthropic thought",
         b"anthropic",
         Some("anthropic"),
     )]))
-    .expect("request build");
-    assert_eq!(req.contents.len(), 2);
-    assert!(req.contents.iter().all(|content| content.role == "user"));
-    assert!(
-        matches!(&req.contents[0].parts[0].data, Some(proto::part::Data::Text(text)) if text == "What is 2 + 2?")
+    .context("request build")?;
+    ensure!(req.contents.len() == 2, "expected two contents: {req:?}");
+    ensure!(
+        req.contents.iter().all(|content| content.role == "user"),
+        "only user contents should remain: {req:?}"
     );
-    assert!(
-        matches!(&req.contents[1].parts[0].data, Some(proto::part::Data::Text(text)) if text == "And 3 + 3?")
+    let first = req
+        .contents
+        .first()
+        .and_then(|content| content.parts.first())
+        .with_context(|| format!("first user part is missing: {req:?}"))?;
+    ensure!(
+        matches!(&first.data, Some(proto::part::Data::Text(text)) if text == "What is 2 + 2?"),
+        "first user part differs: {first:?}"
     );
+    let second = req
+        .contents
+        .get(1)
+        .and_then(|content| content.parts.first())
+        .with_context(|| format!("second user part is missing: {req:?}"))?;
+    ensure!(
+        matches!(&second.data, Some(proto::part::Data::Text(text)) if text == "And 3 + 3?"),
+        "second user part differs: {second:?}"
+    );
+    Ok(())
 }
 
 #[test]
-fn ordinary_canonical_reasoning_remains_unscoped() {
+fn ordinary_canonical_reasoning_remains_unscoped() -> anyhow::Result<()> {
     let req =
-        encoded(request(vec![AssistantContent::reasoning("ordinary")])).expect("request build");
-    assert_eq!(thoughts(&req), vec![("ordinary", Vec::new())]);
+        encoded(request(vec![AssistantContent::reasoning("ordinary")])).context("request build")?;
+    ensure!(
+        thoughts(&req) == vec![("ordinary", Vec::new())],
+        "ordinary canonical reasoning differs: {req:?}"
+    );
+    Ok(())
 }
 
 #[test]
-fn foreign_opaque_reasoning_is_refused_and_not_filtered_out() {
+fn foreign_opaque_reasoning_is_refused_and_not_filtered_out() -> anyhow::Result<()> {
     let part = AssistantContent::CarriedReasoning(CarriedReasoning::new(
         vec![CarriedReasoningPart::OpaqueSummary(CarriedPayload::new(
             json!({"type":"future_part","payload":{"list":[1,2]}}),
@@ -119,10 +162,11 @@ fn foreign_opaque_reasoning_is_refused_and_not_filtered_out() {
         ))],
         CarriedPayload::new(Value::Null, Some("anthropic".to_owned())),
     ));
-    let error = ProviderError::from(
-        encoded(request(vec![AssistantContent::text("known"), part]))
-            .expect_err("opaque is refused"),
-    );
-    assert!(matches!(error, ProviderError::Request(_)));
-    assert!(error.to_string().contains("opaque"), "{error}");
+    let error = match encoded(request(vec![AssistantContent::text("known"), part])) {
+        Ok(request) => anyhow::bail!("opaque is refused, got successful request: {request:?}"),
+        Err(error) => ProviderError::from(error),
+    };
+    ensure!(matches!(error, ProviderError::Request(_)), "{error:?}");
+    ensure!(error.to_string().contains("opaque"), "{error}");
+    Ok(())
 }

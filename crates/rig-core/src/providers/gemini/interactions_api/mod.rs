@@ -417,8 +417,6 @@ pub(crate) fn create_request_body(
     request: &CompletionRequest,
     stream: Option<bool>,
 ) -> Result<crate::completion::options::FinalBody, EncodeError> {
-    check_original_fields(request)?;
-    let request = with_original_omissions(request)?;
     let mut rewrites: Vec<_> = stream
         .map(crate::completion::options::Rewrite::Stream)
         .into_iter()
@@ -426,21 +424,20 @@ pub(crate) fn create_request_body(
     rewrites.push(crate::completion::options::Rewrite::GeminiInteractionsTypedControls);
     crate::completion::options::request_params(
         wire,
-        &request,
-        |input| create_base(wire, &request, input),
+        request,
+        |input| create_base(wire, request, input),
         crate::completion::options::RawAt::Top,
         &rewrites,
     )
 }
 
 /// Project the original generation fields and omit absent original parameters.
-fn with_original_omissions(request: &CompletionRequest) -> Result<CompletionRequest, EncodeError> {
-    let mut input = request.clone();
-    if let Some(params) = input
-        .additional_params
-        .as_mut()
-        .and_then(Value::as_object_mut)
-    {
+pub(crate) fn project_original_parameters(
+    original: Option<&Value>,
+) -> Result<Option<Value>, EncodeError> {
+    check_original_fields(original)?;
+    let mut projected = original.cloned();
+    if let Some(params) = projected.as_mut().and_then(Value::as_object_mut) {
         for field in ["store", "background"] {
             if params.get(field).is_some_and(Value::is_null) {
                 params.shift_remove(field);
@@ -461,7 +458,7 @@ fn with_original_omissions(request: &CompletionRequest) -> Result<CompletionRequ
             params.shift_remove("agent_config");
         }
     }
-    Ok(input)
+    Ok(projected)
 }
 
 /// Read only the original tool-choice union and its allowed-tools configuration.
@@ -791,13 +788,9 @@ fn project_original_speech_config(value: &Value) -> Result<Value, EncodeError> {
 }
 
 /// Check the named original fields before merging explicit controls.
-fn check_original_fields(request: &CompletionRequest) -> Result<(), EncodeError> {
+fn check_original_fields(original: Option<&Value>) -> Result<(), EncodeError> {
     use serde::Deserialize as _;
-    let Some(params) = request
-        .additional_params
-        .as_ref()
-        .and_then(Value::as_object)
-    else {
+    let Some(params) = original.and_then(Value::as_object) else {
         return Ok(());
     };
     for (field, value) in params {

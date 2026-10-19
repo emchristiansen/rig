@@ -1955,16 +1955,24 @@ fn a_signature_only_reasoning_item_round_trips_without_text() {
         vec![],
         vec![json!({"type":"summary_text","text":"a summary"})],
     ] {
-        let raw = json!({"type":"reasoning","id":"rs_1","summary":summary,"content":[],"encrypted_content":null,"signature":"signed"});
-        let reasoning =
-            carried_reasoning(&raw, None).expect("existing carried reader keeps signature");
-        assert!(reasoning.content.iter().any(|part|matches!(part,Part::Text{text,signature:Some(signature)} if text.is_empty()&&signature=="signed")));
-        let item = carried_reasoning_item(&reasoning)
-            .expect("identified reasoning encodes")
-            .expect("reasoning item");
-        assert_eq!(item["signature"], "signed");
-        assert_eq!(item["summary"], Value::Array(summary));
-        assert!(item.get("content").is_none(), "{item}");
+        for received_content in [None, Some(json!([]))] {
+            let mut raw = json!({"type":"reasoning","id":"rs_1","summary":summary,"encrypted_content":null,"signature":"signed"});
+            if let Some(content) = &received_content {
+                raw.as_object_mut()
+                    .expect("reasoning fixture is an object")
+                    .insert("content".to_owned(), content.clone());
+            }
+            let reasoning =
+                carried_reasoning(&raw, None).expect("existing carried reader keeps signature");
+            assert!(reasoning.content.iter().any(|part|matches!(part,Part::Text{text,signature:Some(signature)} if text.is_empty()&&signature=="signed")));
+            let item = carried_reasoning_item(&reasoning)
+                .expect("identified reasoning encodes")
+                .expect("reasoning item");
+            assert_eq!(item["signature"], "signed");
+            assert_eq!(item["summary"], Value::Array(summary.clone()));
+            // A signature does not invent text or change received member presence.
+            assert_eq!(item.get("content"), received_content.as_ref(), "{item}");
+        }
     }
 }
 

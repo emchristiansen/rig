@@ -16,7 +16,7 @@ use crate::operation::Completion;
 use crate::providers::openai::wire::OpenAIConfig;
 pub(crate) use crate::providers::openai::wire::ResponsesContract;
 use crate::wire::{
-    AdapterUsage, AdapterVerdict, Body, Capabilities, Descriptor, Encoded, Framing, Mode,
+    AdapterUsage, AdapterVerdict, Capabilities, Descriptor, Encoded, Framing, Mode,
     ObservationSink, UsageObservation, Wire,
 };
 use serde::{Deserialize, Serialize};
@@ -123,12 +123,10 @@ impl Responses {
             "Responses completion request",
             &body,
         );
-        let (builder, body) = self
-            .request_compression
-            .apply(builder, serde_json::to_vec(&body)?)?;
+        let (builder, body) = self.request_compression.apply(builder, body)?;
         let request = builder
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::Bytes(body))?;
+            .body(body.into_body())?;
 
         let framing = if streaming {
             Framing::Sse

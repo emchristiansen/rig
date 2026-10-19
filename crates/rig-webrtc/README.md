@@ -34,7 +34,7 @@ The test `tests/tls_provider.rs` runs this setup and the composition below again
 use std::time::Duration;
 
 use rig_core::providers::chatgpt::{self, realtime};
-use rig_core::providers::openai::{OpenAI, wire::CallerIdentity};
+use rig_core::providers::openai::{OpenAIConfig, wire::CallerIdentity};
 use rig_webrtc::{LivePeer, OpusPacket, PeerEvent};
 
 async fn call(identity: CallerIdentity) -> Result<(), Box<dyn std::error::Error>> {
@@ -42,9 +42,10 @@ async fn call(identity: CallerIdentity) -> Result<(), Box<dyn std::error::Error>
         .install_default()
         .map_err(|_| "another rustls provider is already installed")?;
 
-    let provider = OpenAI::with_key(&chatgpt::DIALECT, "access-token")
+    let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "access-token")
         .with_account_id("account-id")
-        .with_caller_identity(identity);
+        .with_caller_identity(identity)
+        .connect(rig_reqwest::ReqwestClient::default());
     let calls = realtime::LiveCalls::new(provider)?;
     let peer = LivePeer::builder().build().await?;
     let offer_sdp = peer.offer().await?;
