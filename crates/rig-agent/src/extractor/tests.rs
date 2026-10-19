@@ -551,3 +551,76 @@ async fn single_successful_attempt_reports_its_own_usage() {
 
     assert_eq!(response.usage.total_tokens, Some(7));
 }
+
+type ExtractorResponseSnapshot = (Message, Vec<AssistantContent>, Usage, Option<String>);
+
+#[derive(Clone, Default)]
+struct ExtractorResponseCapture {
+    prompt: Arc<Mutex<Option<Message>>>,
+    snapshot: Arc<Mutex<Option<ExtractorResponseSnapshot>>>,
+}
+
+impl AgentHook for ExtractorResponseCapture {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        event: crate::agent::CompletionCallEvent<'_>,
+    ) -> crate::agent::CompletionCallAction {
+        *self.prompt.lock().expect("extractor prompt") = Some(event.prompt.clone());
+        crate::agent::CompletionCallAction::continue_run()
+    }
+
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        let Some(response) = event.completion() else {
+            return OutcomeAction::proceed();
+        };
+        let prompt = self
+            .prompt
+            .lock()
+            .expect("extractor prompt")
+            .clone()
+            .expect("the completion call precedes its outcome");
+        *self.snapshot.lock().expect("extractor response snapshot") = Some((
+            prompt,
+            response.choice.clone(),
+            response.usage,
+            response
+                .message_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned()),
+        ));
+        OutcomeAction::proceed()
+    }
+}
+
+#[tokio::test]
+async fn extractor_hook_receives_canonical_response_fields() {
+    let capture = ExtractorResponseCapture::default();
+    let expected_usage = usage(23);
+    let response =
+        ExtractorBuilder::<Person>::new(MockCompletionModel::from_turns([submit_turn("John")
+            .with_usage(expected_usage)
+            .with_message_id("extractor-message")]))
+        .add_hook(capture.clone())
+        .build()
+        .extract("John")
+        .await
+        .expect("extraction should succeed");
+    assert_eq!(response.output.name, "John");
+
+    let (prompt, content, observed_usage, message_id) = capture
+        .snapshot
+        .lock()
+        .expect("extractor response snapshot")
+        .clone()
+        .expect("extractor response hook should fire");
+    assert_eq!(prompt, Message::user("John"));
+    assert_eq!(observed_usage, expected_usage);
+    assert_eq!(message_id.as_deref(), Some("extractor-message"));
+    assert!(matches!(
+        content.as_slice(),
+        [AssistantContent::ToolCall(tool_call)]
+            if tool_call.function.name.as_str() == SUBMIT_TOOL_NAME
+                && tool_call.function.arguments_value() == json!({"name": "John"})
+    ));
+}
