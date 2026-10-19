@@ -754,11 +754,10 @@ impl Agent {
     /// run-side value still shows through: the output tool the run pinned
     /// stays pinned even though the schema and mode advertising it are the
     /// runner's.
-    /// Conversation memory is neither
-    /// loaded nor appended: the history is already in the run, and the driver
-    /// that persisted it owns memory persistence and appends the finished run's
-    /// `messages` itself, since a suspended run never reached the `Done`
-    /// append, so the response's `memory_append` is `None`. Pending tool
+    /// Conversation memory is not loaded: the history is already in the run.
+    /// With memory and a conversation configured, the newly produced messages
+    /// are appended once when the resumed run finishes, on either medium. The
+    /// response's `memory_append` reports the actual append result. Pending tool
     /// calls re-execute on resume: a tool that ran before the suspension and
     /// answered nothing runs again. Drive it like any runner: `.await`,
     /// [`stream`](AgentRunner::stream) or

@@ -203,6 +203,9 @@ pub trait Observe: Send + Sync {
     fn event(&mut self, item: &Item<StreamEvent>);
     /// An error item in a kept stream.
     fn stream_error(&mut self, _error: &ErrorReport) {}
+    /// A complete response item in a kept stream, including responses after an
+    /// earlier terminal item.
+    fn stream_done(&mut self, _response: &crate::completion::CompletionResponse) {}
     /// Who a streamed reply is from, before its first item. Required, so a
     /// recording observer cannot drop it: a replayed stream cut short needs
     /// it to know its origin.
@@ -219,7 +222,7 @@ pub trait Observe: Send + Sync {
             match item {
                 Ok(Relayed::Origin(origin)) => self.origin(origin),
                 Ok(Relayed::Item(item)) => self.event(item),
-                Ok(Relayed::Done(_)) => {}
+                Ok(Relayed::Done(response)) => self.stream_done(response),
                 Err(error) => self.stream_error(error),
             }
         }

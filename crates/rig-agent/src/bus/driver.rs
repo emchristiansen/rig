@@ -80,6 +80,9 @@ impl Observe for Recorded {
     fn stream_error(&mut self, error: &ErrorReport) {
         self.recorder.stream_error(self.id, error);
     }
+    fn stream_done(&mut self, response: &rig_core::completion::CompletionResponse) {
+        self.recorder.stream_done(self.id, response);
+    }
 
     fn discard(&mut self, _: &str) {
         self.recorder.discard(self.id);

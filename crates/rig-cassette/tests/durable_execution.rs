@@ -515,12 +515,9 @@ async fn a_hooks_decision_is_program_not_record() {
     );
 }
 
-/// A resumed run brought its history with it: it loads nothing from
-/// memory and saves nothing to it — no `Memory` dispatch, no memory record
-/// — so a resumed log is exactly the reference log's tail even when the
-/// program has a memory backend, and a backend that is down cannot fail a
-/// resume. (Before this held, the resume performed the load and threw the
-/// result away: a `Memory{Load}` record led every resumed log.)
+/// A resumed run uses its persisted history without loading memory. With
+/// memory and a conversation configured, it appends its newly produced
+/// messages once; the resumed log contains that append and no memory load.
 #[tokio::test]
 async fn a_resumed_run_loads_nothing_and_saves_once() {
     use rig_core::memory::InMemoryConversationMemory;

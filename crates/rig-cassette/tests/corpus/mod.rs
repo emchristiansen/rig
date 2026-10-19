@@ -2198,7 +2198,14 @@ pub fn golden(fixture: &str) -> EffectLog {
 
 /// A record as data: its kind, outcome, published tool output and events.
 pub fn as_data(record: &EffectRecord) -> serde_json::Value {
-    let mut kind = serde_json::to_value(&record.kind).expect("an effect kind serializes");
+    record_data(&serde_json::to_value(record).expect("an effect record serializes"))
+}
+
+fn record_data(record: &serde_json::Value) -> serde_json::Value {
+    let mut kind = record
+        .get("kind")
+        .cloned()
+        .expect("an effect record has a kind");
     // A tool call's arguments are a JSON string whose key order depends on
     // whether `serde_json`'s `preserve_order` is unified into the build;
     // compare them as JSON so the golden holds in every feature set.
@@ -2210,11 +2217,11 @@ pub fn as_data(record: &EffectRecord) -> serde_json::Value {
         *args = parsed;
     }
     serde_json::json!({
-        "key": record.key,
+        "key": record.get("key"),
         "kind": kind,
-        "outcome": record.outcome,
-        "tool_output": record.tool_output,
-        "events": record.events,
+        "outcome": record.get("outcome"),
+        "tool_output": record.get("tool_output"),
+        "events": record.get("events"),
     })
 }
 
@@ -2260,9 +2267,14 @@ pub fn assert_same_records(replayed: &EffectLog, log: &EffectLog, interpreter: &
     let replayed_parents = parent_positions(replayed, "the replay");
     // The ids rig issued afresh are compared by where they appear.
     let as_log = |which: &EffectLog| -> Vec<serde_json::Value> {
-        let records = serde_json::Value::Array(which.iter().map(as_data).collect());
+        let records = serde_json::to_value(&which.records).expect("effect records serialize");
         let canonical = rig_cassette::effect_log::canonical_local_ids(records);
-        canonical.as_array().cloned().unwrap_or_default()
+        canonical
+            .as_array()
+            .expect("canonical effect records remain an array")
+            .iter()
+            .map(record_data)
+            .collect()
     };
     let replayed = as_log(replayed);
     let recorded = as_log(log);
@@ -3323,9 +3335,9 @@ pub async fn checkpoint_reproduces(
 /// the bus engine resumes it on the same replay bus — whose replayers have
 /// answered the head and hold the tail — to the golden's ending. The
 /// recorded log is the whole golden: the head by hand, the tail by the
-/// engine, one record sequence. A resumed run loads no memory and saves
-/// none (the runner skips both on `resume`), so the head loads and the
-/// driver appends; the resumed engine fires the settled hooks itself.
+/// engine, one record sequence. The head loads memory; the resumed engine
+/// loads none and appends its newly produced messages once. The hand driver
+/// does not append them again; the resumed engine fires its settled hooks.
 pub async fn resume_reproduces(program: &Program) {
     hand_drive(program, Resume::AfterFirstToolTurn).await;
 }

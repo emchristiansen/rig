@@ -872,3 +872,148 @@ fn interactions_refuses_namespaced_and_custom_calls() {
 }
 
 mod g89_pair_request_tests;
+
+#[tokio::test]
+async fn test_response_function_call_mapping() {
+    let interaction = json!({
+        "id": "interaction-1",
+        "steps": [{
+            "type": "function_call",
+            "name": "get_weather",
+            "arguments": {"location": "Paris"},
+            "id": "call-123"
+        }],
+        "usage": {
+            "total_input_tokens": 5,
+            "total_output_tokens": 7,
+            "total_tokens": 12
+        }
+    });
+    let wire = Interactions::new(
+        crate::providers::gemini::GeminiConfig::new("test-key"),
+        "gemini-3-flash-preview",
+    );
+    let response = crate::Model::new(wire, RecordingHttpClient::new(interaction.to_string()))
+        .call(CompletionRequest::new("probe"))
+        .await
+        .expect("the status-absent interaction resource decodes");
+
+    let choice = response.choice.first();
+    match choice {
+        Some(message::AssistantContent::ToolCall(tool_call)) => {
+            assert_eq!(tool_call.function.name.as_str(), "get_weather");
+            assert!(matches!(&tool_call.id, message::CallId::Provider(_)));
+            assert_eq!(
+                tool_call.id.provider().expect("wire id").as_str(),
+                "call-123"
+            );
+            assert_eq!(
+                tool_call.function.arguments_value(),
+                json!({"location": "Paris"})
+            );
+        }
+        other => panic!("unexpected content: {other:?}"),
+    }
+
+    assert_eq!(response.usage.input_tokens, Some(5));
+    assert_eq!(response.usage.output_tokens, Some(7));
+    assert_eq!(response.usage.total_tokens, Some(12));
+    assert_eq!(response.response_id(), Some("interaction-1"));
+    assert_eq!(response.message_id, None);
+    assert_eq!(response.finish_reason(), None);
+    assert_eq!(
+        response.error.as_deref(),
+        Some("the provider ended the reply without a finish reason")
+    );
+    assert_eq!(response.raw, interaction);
+    assert_eq!(response.raw.get("status"), None);
+}
+
+#[tokio::test]
+async fn test_completion_response_carries_normalized_metadata() {
+    let interaction = json!({
+        "id": "interaction-meta",
+        "model": "gemini-2.5-pro",
+        "status": "budget_exceeded",
+        "steps": [{"type": "model_output", "content": [{"type": "text", "text": "partial answer"}]}]
+    });
+    let wire = Interactions::new(
+        crate::providers::gemini::GeminiConfig::new("test-key"),
+        "gemini-3-flash-preview",
+    );
+    let response = crate::Model::new(wire, RecordingHttpClient::new(interaction.to_string()))
+        .call(CompletionRequest::new("probe"))
+        .await
+        .expect("the recorded interaction resource decodes");
+
+    assert_eq!(response.provider(), PROVIDER_NAME);
+    assert_eq!(response.model(), Some("gemini-2.5-pro"));
+    assert_eq!(response.response_id(), Some("interaction-meta"));
+    assert_eq!(response.message_id, None);
+    assert_eq!(
+        response.finish_reason(),
+        Some(crate::completion::FinishReason::Length)
+    );
+}
+
+#[tokio::test]
+async fn test_completion_response_upgrades_completed_to_tool_calls() {
+    // A `completed` interaction whose outputs are function calls is a tool
+    // turn; the normalized response must say so.
+    let interaction = json!({
+        "id": "interaction-tool",
+        "status": "completed",
+        "steps": [{"type": "function_call", "name": "get_weather", "arguments": {"location": "Paris"}, "id": "call-123"}]
+    });
+    let wire = Interactions::new(
+        crate::providers::gemini::GeminiConfig::new("test-key"),
+        "gemini-3-flash-preview",
+    );
+    let response = crate::Model::new(wire, RecordingHttpClient::new(interaction.to_string()))
+        .call(CompletionRequest::new("probe"))
+        .await
+        .expect("the recorded interaction resource decodes");
+
+    assert_eq!(
+        response.finish_reason(),
+        Some(crate::completion::FinishReason::ToolCalls)
+    );
+    assert_eq!(response.model(), None);
+}
+#[test]
+fn a_thought_summary_round_trips_with_its_type() {
+    let reasoning = message::AssistantContent::CarriedReasoning(message::CarriedReasoning::new(
+        vec![message::CarriedReasoningPart::Text {
+            text: "add them".to_owned(),
+            signature: Some("sig".to_owned()),
+        }],
+        message::CarriedPayload::new(Value::Null, None),
+    ));
+    let target =
+        crate::providers::gemini::GeminiConfig::new("test-key").interactions("gemini-2.5-flash");
+    let wire = assistant_step(&reasoning, &target, None)
+        .expect("reasoning converts")
+        .expect("thought step");
+    assert_eq!(
+        wire,
+        json!({
+            "type": "thought",
+            "signature": "sig",
+            "summary": [{ "type": "text", "text": "add them" }]
+        })
+    );
+    let response = crate::test_utils::decode_reply(
+        &target,
+        &probe(),
+        Mode::Unary,
+        [crate::wire::WireFrame::Text(
+            json!({"status":"completed", "steps":[wire.clone()]}).to_string(),
+        )],
+        Value::Null,
+    )
+    .expect("decodes");
+    assert!(
+        matches!(response.choice.as_slice(), [message::AssistantContent::CarriedReasoning(part)]
+        if part.payload.item == wire && part.payload.item["type"] == "thought")
+    );
+}

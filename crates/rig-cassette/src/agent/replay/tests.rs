@@ -86,6 +86,26 @@ async fn kept_stream_replay_preserves_every_error_item_and_its_position() {
         let log: EffectLog =
             serde_json::from_str(&serde_json::to_string(&recorder.log()).unwrap()).unwrap();
         assert_eq!(log.header.stream_errors.values().next().unwrap().len(), 2);
+        let record = &log.records[0];
+        let errors = &log.header.stream_errors[&record.id];
+        assert_eq!(
+            errors.iter().map(|error| error.item).collect::<Vec<_>>(),
+            if error_first { vec![0, 2] } else { vec![1, 2] }
+        );
+        let done = &log.header.stream_done[&record.id];
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].item, usize::from(error_first));
+        if error_first {
+            assert_eq!(
+                record.outcome.as_ref().err(),
+                Some(&ErrorReport::new(ErrorKind::Response, "first error"))
+            );
+        } else {
+            let Ok(Outcome::Completion(response)) = &record.outcome else {
+                panic!("the first response remains the folded outcome");
+            };
+            assert_eq!(response, &done[0].response);
+        }
         let (dispatcher, _, mut driver) = Bus::channel();
         super::register_all(&log, &mut driver).unwrap();
         let _replay = spawn(driver);
@@ -95,16 +115,7 @@ async fn kept_stream_replay_preserves_every_error_item_and_its_position() {
                 .collect::<Vec<_>>(),
         )
         .await;
-        // What a consumer reads: the items up to the first that ends the
-        // stream, a response or an error.
-        let read = |items: Vec<Result<Relayed, ErrorReport>>| {
-            let end = items
-                .iter()
-                .position(|item| !matches!(item, Ok(Relayed::Item(_))))
-                .map_or(items.len(), |at| at + 1);
-            items.into_iter().take(end).collect::<Vec<_>>()
-        };
-        assert_eq!(read(replay), read(live));
+        assert_eq!(replay, live, "every drained item keeps its original position");
     }
 }
 
@@ -1018,6 +1029,8 @@ async fn a_streamed_error_record_replays_its_events_and_then_its_error() {
     let events = log.records[0].events.as_mut().expect("events kept");
     let first = events.items()[0].clone();
     *events = Transcript::from_items(vec![first.clone()]).expect("a prefix");
+    // The modeled cut excludes the original stream's terminal response.
+    log.header.stream_done.remove(&log.records[0].id);
     log.records[0].outcome = Err(ErrorReport::new(ErrorKind::Cancelled, "dropped mid-stream"));
 
     let (dispatcher, _registrar, mut driver) = Bus::channel();

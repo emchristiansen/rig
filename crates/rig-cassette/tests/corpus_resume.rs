@@ -67,11 +67,9 @@
 //!
 //! # What the matrix found
 //!
-//! - A resumed run never appends to memory: `resume` skips the history
-//!   and memory resolution, so the runner holds no memory handle and the
-//!   `Done` append is not dispatched. The driver that suspended the run
-//!   appends what the run produced; pinned, not changed (a driver that
-//!   persists a run between steps owns its memory).
+//! - A resumed run uses its persisted history without loading memory. With
+//!   memory and a conversation configured, the resumed engine appends its
+//!   newly produced messages once; the hand driver does not append them again.
 //! - A resumed run forgot the model the head asked: routing state lived
 //!   in the driver only ("live routing state stays in the driver, not the
 //!   serde `AgentRun`"), so a resumed engine's model-selection hook saw
