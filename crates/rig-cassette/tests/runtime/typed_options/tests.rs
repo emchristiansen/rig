@@ -543,11 +543,14 @@ mod option_matrix {
     }
 
     fn responses(dialect: &'static Dialect, model: &'static str) -> Encode {
-        Box::new(move |r| {
-            encode(
-                &Responses::new(OpenAIConfig::with_key(dialect, KEY), model),
-                r,
-            )
+        Box::new(move |mut request| {
+            let mut config = OpenAIConfig::with_key(dialect, KEY);
+            if dialect.name == chatgpt::DIALECT.name {
+                config = config.with_caller_identity(rig::test_utils::test_caller_identity());
+                // This matrix varies generation options, not the refused output cap.
+                request.max_tokens = None;
+            }
+            encode(&Responses::new(config, model), request)
         })
     }
 
@@ -1265,9 +1268,24 @@ mod precedence {
     #[test]
     fn codex_still_omits_the_typed_fields_the_backend_refuses() {
         let wire = Responses::new(
-            OpenAIConfig::with_key(&chatgpt::DIALECT, KEY),
+            OpenAIConfig::with_key(&chatgpt::DIALECT, KEY)
+                .with_caller_identity(rig::test_utils::test_caller_identity()),
             chatgpt::GPT_5_4,
         );
+        for max_tokens in [16, 6000, 1024] {
+            let error = encode(
+                &wire,
+                CompletionRequest::new("Reply with the single word: pong").max_tokens(max_tokens),
+            )
+            .expect_err("Codex refuses an explicit output cap");
+            assert!(error.to_string().contains("max_output_tokens"), "{error}");
+        }
+        let error = encode(
+            &wire,
+            CompletionRequest::new("Reply with the single word: pong").temperature(0.5),
+        )
+        .expect_err("Codex refuses an explicit temperature");
+        assert!(error.to_string().contains("temperature"), "{error}");
         let schema = schemars::json_schema!({
             "type": "object",
             "properties": {"word": {"type": "string"}},
@@ -1275,8 +1293,6 @@ mod precedence {
         let sent = encode(
             &wire,
             CompletionRequest::new("Reply with the single word: pong")
-                .max_tokens(6000)
-                .temperature(0.5)
                 .output_schema(schema)
                 .parallel_tool_calls(false)
                 .service_tier(ServiceTier::Flex)
@@ -1285,12 +1301,28 @@ mod precedence {
         )
         .expect("the request encodes");
 
-        // Today's strip, kept for typed fields: the recorded ChatGPT bodies
-        // do not move.
+        // Unset caps and temperature stay absent; explicit values are refused
+        // by the controls above. The schema keeps its current sanitized shape.
         for key in ["max_output_tokens", "temperature"] {
             assert!(sent.get(key).is_none(), "{key} reached ChatGPT: {sent}");
         }
-        assert!(sent.pointer("/text/format").is_none(), "{sent}");
+        // mec-rig-cc007-schema-1 accepts losing the old format-absence
+        // equality. This pins current encoding, not backend acceptance.
+        assert_eq!(
+            sent.pointer("/text/format"),
+            Some(&json!({
+                "type": "json_schema",
+                "name": "response_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {"word": {"type": "string"}},
+                    "required": ["word"],
+                    "additionalProperties": false,
+                },
+                "strict": true,
+            })),
+            "{sent}"
+        );
         assert_eq!(sent.get("store"), Some(&json!(false)), "{sent}");
 
         // Mapped options and raw keys are no longer stripped.

@@ -603,3 +603,20 @@ async fn under_shape_matching_a_new_field_or_model_is_refused() {
             .expect_err("replay refused the request");
     }
 }
+
+#[test]
+fn a_splice_with_an_overflowing_end_is_refused_without_changing_the_recording() {
+    let recorded = json!(["kept"]);
+    let mut value = recorded.clone();
+    let change = Change {
+        path: String::new(),
+        splice: Some(usize::MAX),
+        recorded: Some(json!(["removed"])),
+        sent: Some(json!(["inserted"])),
+    };
+    assert_eq!(
+        apply_change(&mut value, &change),
+        Err("the recording holds other items here")
+    );
+    assert_eq!(value, recorded);
+}

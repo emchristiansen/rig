@@ -1802,12 +1802,14 @@ unsupported; cache `Short`, `None` unsupported, `Long` omit (the backend
 echoes `24h`); `Flex` `"service_tier":"flex"`, `Priority`
 `"service_tier":"priority"`, `Auto`, `Default` unsupported; `verbosity`
 `"text":{"verbosity":..}`; `parallel_tool_calls` `bool`; `top_p`, `seed`,
-`stop` unsupported. Today the Codex contract silently deletes
-`parallel_tool_calls`, `service_tier` and `text` (`responses_api/mod.rs:483`),
-which Codex itself sends. The Codex base builder still leaves out the typed
-`max_tokens`, `temperature` and `output_schema`, which the backend does not
-accept. They are request fields, not options, so guarantee 1 does not
-cover them; P2's Migration line says so (section 12.0).
+`stop` unsupported. The older Codex strip removed `parallel_tool_calls`,
+`service_tier` and `text`; the current shape preserves these mapped values.
+Explicit typed `max_tokens` and `temperature` are refused locally. An
+`output_schema` becomes a sanitized `text.format` JSON schema, which the Codex
+shape preserves. The former `text.format` absence expectation is lost; this
+encoding assertion establishes no backend acceptance or full wire parity.
+These are request fields, not options, so guarantee 1 does not cover them;
+P2's Migration line says so (section 12.0).
 
 **Copilot Responses** (`"copilot"`, `*codex*` models): no public doc;
 evidence `crates/rig-cassette/fixtures/cassettes/copilot/reasoning_roundtrip/streaming.yaml`.
@@ -2198,17 +2200,14 @@ second way to set the same thing.
 ### 12.0 Wire-body changes for callers who set no option
 
 These change what an existing caller sends without touching
-`GenerationOptions`. Each is a wire-body change: its phase lists it under
-Migration and names every cassette, golden or snapshot that moves (none is
-expected; the corpus sets none of these keys in the affected shapes, and the
-phase's `--check` runs prove it). The ChatGPT cassettes that set
-`max_tokens`, `temperature` or `output_schema` (under
-`crates/rig-cassette/tests/providers/chatgpt/`: `cassette/codex_sessions.rs:125`,
-`cassette/raw_completion_parity_matrix.rs:75`, `:81`,
-`cassette/raw_capture_matrix.rs:53`, `reasoning_tool_roundtrip.rs:17`,
-`streaming.rs:28`, and the extractor tests) keep their recorded
-bodies, because the Codex base builder still omits those fields (the Codex
-row below).
+`GenerationOptions`. The migration table identifies the request-layer
+changes. ChatGPT requests that explicitly set typed `max_tokens` or
+`temperature` are refused locally; they do not silently omit those values
+and send an unchanged recording. Typed `output_schema` becomes a sanitized
+`text.format` that the Codex shape preserves. Existing cassettes and
+consumers using those fields therefore cannot assume byte-identical bodies;
+fixture adoption remains separate from these encoding controls. No backend
+acceptance or unchanged-recording result follows from the schema assertion.
 
 The P3 rows change only what is sent for a model the catalog lists, by its
 exact id or a dated snapshot of it (`-YYYYMMDD`, `-YYYY-MM-DD`; Anthropic's
@@ -2232,7 +2231,7 @@ until it is listed here and the golden is regenerated.
 | P2 | OpenAI Responses flips from base-wins to raw-wins (`crates/rig-core/src/providers/openai/responses_api/mod.rs:464-468`): `additional_params.temperature`, `tool_choice`, `text` and any other key now override the typed field. The same loop skips a raw `null` today (`!value.is_null()`, `:465`); it is now sent as `null`, as on every other wire | Responses callers whose `additional_params` repeat a typed field or hold a `null` | "On OpenAI Responses, `additional_params` now overrides typed request fields, and a `null` in it is sent as `null`, as on every other wire. Remove a key to send nothing." |
 | P2 | Shallow `extend` becomes a deep merge on Anthropic (`completion.rs:256`), Chat (`chat.rs:384`), Cohere native (`cohere/chat.rs:146-151`) and Bedrock (`crates/rig-bedrock/src/request.rs:133`): an object in `additional_params` such as `output_config`, `thinking`, `tool_choice` or `generationConfig` now merges into the wire's object instead of replacing it | callers who relied on an object in `additional_params` replacing the wire's whole object (for example to drop `output_config.format`) | "`additional_params` objects now merge key by key into the request body. A `null` is still sent as `null` (Gemini GenerateContent still ignores a top-level `generationConfig: null`, as before). To drop a key the wire writes from a typed field, leave the field unset (for `output_config.format`, set no `output_schema`)." |
 | P2 | Ollama `/v1`: the `think` to `reasoning_effort` rewrite is deleted (`crates/rig-core/src/providers/openai/wire/chat.rs:688-722`), so an existing `additional_params.think` is sent raw | `/v1` callers using `think` | "On Ollama's OpenAI-compatible route, set `GenerationOptions::reasoning` instead of `additional_params.think`, which is now sent as written." |
-| P2 | OpenAI Responses, Codex: the `UNACCEPTED` strip (`responses_api/mod.rs:479-490`) is deleted, but not what it does to typed fields. The Codex base builder keeps omitting the typed fields the backend does not accept, `max_output_tokens` (from `max_tokens`), `temperature` and `text.format` (from `output_schema`), so a request with no `additional_params` sends today's body. Two things change: the mapped `parallel_tool_calls`, `service_tier` and `text.verbosity` are sent when the option is set (section 6.3), and raw `additional_params` keys (`temperature`, `max_output_tokens`, `top_p`, `metadata`, `user`, `background`, `parallel_tool_calls`, `service_tier`, `text`) reach the backend instead of being stripped | ChatGPT callers who put those keys in `additional_params` | "The ChatGPT backend no longer strips `additional_params` keys; remove `temperature`, `top_p`, `metadata`, `user`, `background` and `max_output_tokens` from them or expect the backend's error. Typed `max_tokens`, `temperature` and `output_schema` are still not sent to ChatGPT." |
+| P2 | OpenAI Responses, Codex: recognized raw fields are projected before the option layers merge. Raw `additional_params.max_output_tokens` and `temperature` are unrecognized and ignored; they do not reach final Codex shaping or the backend. Typed `max_tokens` and `temperature` are refused locally. Recognized raw `top_p` and `store` retain decode validation; a non-null `top_p` or `store: true` is then refused locally. Typed `output_schema` emits a sanitized `text.format` that the Codex shape preserves. The old schema-absence equality is lost. Mapped `parallel_tool_calls`, `service_tier` and `text.verbosity` and recognized raw `metadata` retain their current paths | ChatGPT callers who set these typed fields or recognized raw keys | "Leave typed output caps and temperature unset for this adapter. Raw cap and temperature keys are ignored; recognized raw top-p is locally refused. Typed `output_schema` is sent as sanitized `text.format`. These local encoding rules establish no backend acceptance or full wire parity." |
 | P2 | Anthropic: `with_automatic_caching()` and `with_automatic_caching_1h()` are deleted (section 12.1). `with_prompt_caching()` and `with_static_prefix_cache_ttl(..)` are unchanged; their markers take a 1 h TTL from `cache(Long)` | callers of the two deleted methods | "Replace `Messages::with_automatic_caching()` with `GenerationOptions::cache(CacheRetention::Short)` on the request, and `with_automatic_caching_1h()` with `CacheRetention::Long`." |
 | P2 | rig-vertexai: the `contents` rewrites and the `model` key, written after the body is built today (`crates/rig-vertexai/src/completion.rs:66-76`), move into the base builder, so a raw `additional_params.model` or `contents` now overrides them | Vertex callers who put `model` or `contents` in `additional_params` | "On Vertex AI, `additional_params.model` and `additional_params.contents` now override the request's own values, as raw params do on every wire." |
 | P2 | rig-gemini-grpc: the `model: models/{model}` key, inserted after `request_body` merged `additional_params` today (`crates/rig-gemini-grpc/src/completion.rs:70-71`), moves into the base builder's adjustments, so a raw `additional_params.model` now overrides it | gRPC callers who put `model` in `additional_params` | "On Gemini gRPC, `additional_params.model` now overrides the request's model, as raw params do on every wire." |
@@ -2275,7 +2274,7 @@ until it is listed here and the golden is regenerated.
 | Chat `body.extend(params)` | `crates/rig-core/src/providers/openai/wire/chat.rs:384` | `request_params` |
 | Responses `additional_params` merged only where absent (inverted precedence) | `crates/rig-core/src/providers/openai/responses_api/mod.rs:464-468` | `request_params` |
 | Responses `additional_params.text` replacing structured output | `crates/rig-core/src/providers/openai/responses_api/mod.rs:469-478` | deep merge of `text` |
-| Responses Codex `UNACCEPTED` strip list | `crates/rig-core/src/providers/openai/responses_api/mod.rs:479-490` | the Codex base builder omits `max_output_tokens`, `temperature` and `text.format`, as the strip does today; options answer per field (section 6.3: `parallel_tool_calls`, `service_tier`, `verbosity` sent, `top_p` `UnsupportedOption`); raw keys are sent (section 12.0) |
+| Responses Codex `UNACCEPTED` strip list | `crates/rig-core/src/providers/openai/responses_api/mod.rs:479-490` | typed output caps and temperature are refused locally; typed `output_schema` becomes sanitized `text.format` and is preserved. Raw cap and temperature keys are ignored before merging; recognized raw `top_p` and `store` are decoded, then non-null `top_p` and `store: true` are refused locally. Mapped `parallel_tool_calls`, `service_tier` and `text.verbosity` and recognized raw `metadata` retain their current paths (sections 6.3 and 12.0). The old schema-absence equality is lost; these local controls establish no backend acceptance or full wire parity |
 | Responses `include` added from raw `reasoning` | `crates/rig-core/src/providers/openai/responses_api/mod.rs:330-337`, `:491-494` | `Rewrite::ReasoningCiphertext`, reading the merged body's `reasoning`, as today: a mapped or a raw `reasoning` both add the ciphertext |
 | Gemini typed fields overriding `generationConfig`; `body.extend(params)` | `crates/rig-core/src/providers/gemini/completion.rs:417-437`, `:484` | `request_params` (behaviour change in Migration) |
 | Interactions body built over `additional_params` | `crates/rig-core/src/providers/gemini/interactions_api/mod.rs:336-370` | `request_params` |
@@ -2407,7 +2406,7 @@ phase removed the gate.
 | `precedence::raw_tools_are_appended_to_rig_tools` | P2 | a function tool plus a raw server tool in `additional_params.tools` both reach the Anthropic body, rig's first; a raw function tool joins rig's on OpenRouter Chat. The merge never replaces rig's tools |
 | `precedence::null_is_sent` | P2 | a `null` in `additional_params` over a mapped `top_p` is sent as `"top_p": null`, as `body.extend` sends it today; on OpenAI Responses a raw `"user": null`, skipped today, is sent (section 12.0) |
 | `precedence::interactions_refuses_raw_tools_that_are_not_an_array` | P2 | a raw `tools` object on Gemini Interactions, discarded today, is an encode error that names no option (section 12.0) |
-| `precedence::codex_still_omits_the_typed_fields_the_backend_refuses` | P2 | ChatGPT with `max_tokens`, `temperature` and `output_schema` sends no `max_output_tokens`, `temperature` or `text.format`, as today, so its recordings keep their bodies; set `parallel_tool_calls`, `service_tier(Flex)` and `verbosity(Low)` and a raw `metadata` are sent |
+| `precedence::codex_still_omits_the_typed_fields_the_backend_refuses` | P2 | With an explicit ChatGPT caller identity, typed caps 16, 6000 and 1024 and temperature 0.5 are locally refused. The valid uncapped request keeps cap and temperature absent, sends the complete sanitized `text.format` for the original object with `word: string`, and retains `parallel_tool_calls: false`, `service_tier: "flex"`, `text.verbosity: "low"`, raw metadata and `store: false`. The former schema-absence equality is lost; this establishes neither backend acceptance nor full wire parity |
 | `precedence::post_merge_rewrites_read_raw_keys` | P2 | a raw `additional_params.reasoning` still adds `include: ["reasoning.encrypted_content"]` on Responses, and a raw `thinking: {"type": "disabled"}` still keeps a forced `tool_choice: "required"` on DeepSeek: the post-merge rewrites read the merged body, as today |
 | `usage_cost_sum::cost_sums_only_when_every_turn_has_one` | P1 | the table in section 2.3: two priced turns sum each part, a priced and an unpriced turn give no cost, a fold from `Usage::default()` keeps the first turn's cost; token counters sum as today |
 | `catalog_validation::validate_rejects_a_reasoning_level_the_model_lacks` | P3 | Gemini 3.8 Flash rejects `Minimal` and takes `High`; Claude Haiku 4.5 rejects any effort and takes a budget inside 1024 and up |

@@ -464,3 +464,47 @@ async fn nested_wrong_family_patch_preserves_valid_tool_and_stops_later_hooks() 
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert_eq!(salvaged_args(&context, event.id), Some(json!({"x": 3})));
 }
+
+/// Rewrites the arguments to the dispatch's own id, yielding first so two
+/// concurrent resolutions interleave.
+struct YieldingRewriteFromId;
+impl AgentHook for YieldingRewriteFromId {
+    async fn on_dispatch(&self, _: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
+        tokio::task::yield_now().await;
+        DispatchAction::rewrite_tool_args(event.kind, json!({"id": event.id.as_u64()}))
+    }
+}
+
+struct YieldingSkip;
+impl AgentHook for YieldingSkip {
+    async fn on_dispatch(&self, _: &HookContext, _: DispatchEvent<'_>) -> DispatchAction {
+        tokio::task::yield_now().await;
+        DispatchAction::skip("denied")
+    }
+}
+
+#[tokio::test]
+async fn concurrent_nested_resolutions_keep_rewrites_isolated_by_dispatch() {
+    let mut inner = HookStack::new();
+    inner.push(YieldingRewriteFromId);
+    inner.push(YieldingSkip);
+    let outer = HookStack::with(inner);
+    let context = ctx();
+    let kind = tool_call_kind();
+    let first = DispatchEvent {
+        id: EffectId::from_raw(7),
+        ..dispatch_event(&kind)
+    };
+    let second = DispatchEvent {
+        id: EffectId::from_raw(8),
+        ..dispatch_event(&kind)
+    };
+    let (first_action, second_action) = tokio::join!(
+        outer.on_dispatch(&context, first),
+        outer.on_dispatch(&context, second)
+    );
+    assert_skipped(&first_action, "denied");
+    assert_skipped(&second_action, "denied");
+    assert_eq!(salvaged_args(&context, first.id), Some(json!({"id": 7})));
+    assert_eq!(salvaged_args(&context, second.id), Some(json!({"id": 8})));
+}

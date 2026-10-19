@@ -455,7 +455,9 @@ fn replaying_model(
         Route::Responses(dialect) => {
             let mut config = OpenAIConfig::with_key(dialect, "census");
             if dialect.name == rig::providers::chatgpt::DIALECT.name {
-                config = config.with_account_id("census");
+                config = config
+                    .with_account_id("census")
+                    .with_caller_identity(rig::test_utils::test_caller_identity());
             }
             config
                 .connect(recorded_http(headers, body))
@@ -491,10 +493,14 @@ fn replaying_model(
 }
 
 /// Decode one recorded reply the way rig read it.
-async fn decode(model: DynModel<Completion>, streamed: bool) -> Result<Usage, String> {
+async fn decode(model: DynModel<Completion>, route: Route, streamed: bool) -> Result<Usage, String> {
     let mut request = CompletionRequest::from("census");
-    // A wire that cannot default `max_tokens` for an unknown model still encodes.
-    request.max_tokens = Some(1024);
+    // Unknown models on other wires may require a cap; Codex refuses an explicit one.
+    if !matches!(route, Route::Responses(dialect)
+        if dialect.name == rig::providers::chatgpt::DIALECT.name)
+    {
+        request.max_tokens = Some(1024);
+    }
     if !streamed {
         return model
             .call(request)
@@ -639,7 +645,7 @@ async fn take_census() -> Census {
                     &interaction.then.header,
                     body,
                 );
-                let decoded = decode(model, streamed).await;
+                let decoded = decode(model, route, streamed).await;
                 calls.push(Call {
                     key,
                     provider: provider.clone(),
@@ -777,4 +783,33 @@ async fn every_recorded_call_keeps_the_usage_contract() {
         violations.len(),
         violations.join("\n")
     );
+}
+
+#[tokio::test]
+async fn the_chatgpt_census_decodes_a_recorded_completion_without_an_output_cap() {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/cassettes/chatgpt/codex_sessions/streamed_phase_round_trips_on_follow_up.yaml");
+    let contents = std::fs::read_to_string(file).expect("the original cassette is readable");
+    let document = serde_yaml::Deserializer::from_str(&contents)
+        .next()
+        .expect("the cassette has its first interaction");
+    let interaction = RecordedInteraction::deserialize(document).expect("the recorded interaction");
+    assert_eq!(interaction.then.status, 200);
+    let route = Route::Responses(&rig::providers::chatgpt::DIALECT);
+    let request: Value = serde_json::from_str(interaction.when.body.as_deref().expect("request body"))
+        .expect("the request is JSON");
+    let streamed = recorded_streamed(route, &interaction.when.path, &request);
+    assert!(streamed, "the original interaction is streamed");
+    let model = replaying_model(
+        route,
+        recorded_model(route, &interaction.when.path, &request),
+        &interaction.then.header,
+        interaction.then.body.expect("the response body").into_bytes(),
+    );
+    let usage = decode(model, route, streamed)
+        .await
+        .expect("ChatGPT census decoding succeeds");
+    assert_eq!(usage.input_tokens, Some(28));
+    assert_eq!(usage.output_tokens, Some(7));
+    assert_eq!(usage.total_tokens, Some(35));
 }

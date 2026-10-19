@@ -621,20 +621,17 @@ impl From<CompletionResponseRepr> for CompletionResponse {
     }
 }
 
-/// The token usage a provider reported for one completion.
+/// Token usage for one completion, as mapped from the provider's report.
 ///
-/// Every provider mapping keeps one contract, so the counters read the same
-/// way on every provider:
+/// Counters are optional and independent. The provider mapping determines
+/// their values and any computation from component counters; this type does
+/// not reconcile totals or enforce subset relationships between counters.
+/// A total can be present without input and output counts and need not equal
+/// their sum. Cache and reasoning counts are not constrained by the input
+/// and output counts here.
 ///
-/// - `cached_input_tokens + cache_creation_input_tokens <= input_tokens`:
-///   input counts every prompt token, cache reads and writes included.
-/// - `reasoning_tokens <= output_tokens`: output counts every generated
-///   token, reasoning included.
-/// - `total_tokens == input_tokens + output_tokens`, absent unless both are
-///   reported.
-///
-/// A counter the provider did not send is `None`; a reported zero is
-/// `Some(0)`. Serialized as the same keys, absent when `None`.
+/// An unavailable counter is `None`; a known zero is `Some(0)`. Each counter
+/// serializes under its field name and is absent when `None`.
 ///
 /// ```
 /// use rig_core::completion::Usage;
@@ -646,27 +643,25 @@ impl From<CompletionResponseRepr> for CompletionResponse {
 #[non_exhaustive]
 #[derive(Debug, Default, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub struct Usage {
-    /// Every input token of the request: uncached, read from a cache,
-    /// written to a cache, and any prompt a provider's hosted tools added.
+    /// The input-token counter from the provider mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
-    /// Every output token, reasoning included.
+    /// The output-token counter from the provider mapping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
-    /// `input_tokens + output_tokens`; absent unless both are reported.
+    /// The total-token counter, independently of the input and output fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
-    /// The part of `input_tokens` read from a provider-managed cache.
+    /// Input tokens read from a provider-managed cache, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_input_tokens: Option<u64>,
-    /// The part of `input_tokens` written to a provider-managed cache.
+    /// Input tokens written to a provider-managed cache, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u64>,
-    /// The part of `input_tokens` a provider's hosted tools added to the prompt.
+    /// Prompt tokens added by the provider's hosted tools, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_prompt_tokens: Option<u64>,
-    /// The part of `output_tokens` spent on internal reasoning ("thinking",
-    /// "thoughts").
+    /// Tokens spent on internal reasoning ("thinking", "thoughts"), when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
     /// What the turn cost in USD, when known. Never derived from the token
