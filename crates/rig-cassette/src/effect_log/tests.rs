@@ -905,10 +905,10 @@ fn fresh_local_correlation_request()
     };
 
     let ids = [CallId::from_wire(""), CallId::from_wire("")];
-    assert!(
-        ids[0] != ids[1] && ids.iter().all(CallId::is_local),
-        "fixture needs two fresh local IDs"
-    );
+    let fresh = ids[0] != ids[1] && ids.iter().all(CallId::is_local);
+    if !fresh {
+        return Err(anyhow::anyhow!("fixture needs two fresh local IDs: {ids:?}").into());
+    }
     let function = ToolCall::new(
         ids[0].clone(),
         ToolFunction::new(ToolName::new("function")?, serde_json::json!({"x": 1})),
@@ -937,10 +937,11 @@ fn fresh_local_correlation_request()
 async fn replay_accepts_fresh_local_correlation_graphs() -> TestResult<()> {
     let (recorded, recorded_ids) = fresh_local_correlation_request()?;
     let (arriving, arriving_ids) = fresh_local_correlation_request()?;
-    assert!(
-        recorded_ids.iter().all(|id| !arriving_ids.contains(id)),
-        "fixture did not replace local IDs"
-    );
+    if !recorded_ids.iter().all(|id| !arriving_ids.contains(id)) {
+        return Err(anyhow::anyhow!(
+            "fixture did not replace local IDs: recorded {recorded_ids:?}, arriving {arriving_ids:?}"
+        ).into());
+    }
     for check in [RequestCheck::Payload, RequestCheck::Hash] {
         let answer = replay_local_id_request(
             EffectKind::Completion {
@@ -955,12 +956,15 @@ async fn replay_accepts_fresh_local_correlation_graphs() -> TestResult<()> {
         )
         .await??;
         let Outcome::Completion(response) = answer else {
-            panic!("fresh-ID replay changed the outcome family");
+            return Err(anyhow::anyhow!("fresh-ID replay changed the outcome family").into());
         };
-        assert!(
-            response.choice == vec![AssistantContent::text("recorded answer")],
-            "fresh-ID replay changed the recorded completion"
-        );
+        if response.choice != vec![AssistantContent::text("recorded answer")] {
+            return Err(anyhow::anyhow!(
+                "fresh-ID replay changed the recorded completion: {:?}",
+                response.choice
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -972,10 +976,10 @@ async fn replay_refuses_wrong_fresh_local_result_edge() -> TestResult<()> {
     let (recorded, _) = fresh_local_correlation_request()?;
     let (mut arriving, ids) = fresh_local_correlation_request()?;
     let Some(Message::User { content }) = arriving.chat_history.last_mut() else {
-        panic!("fixture has no tool results");
+        return Err(anyhow::anyhow!("fixture has no tool results").into());
     };
     let Some(UserContent::ToolResult(result)) = content.first_mut() else {
-        panic!("fixture has no custom result");
+        return Err(anyhow::anyhow!("fixture has no custom result").into());
     };
     result.call = ids[0].clone();
     for check in [RequestCheck::Payload, RequestCheck::Hash] {
@@ -991,16 +995,17 @@ async fn replay_refuses_wrong_fresh_local_result_edge() -> TestResult<()> {
             check,
         )
         .await?;
-        assert!(
-            matches!(
-                answer,
-                Err(ErrorReport {
-                    kind: ErrorKind::Divergence,
-                    ..
-                })
-            ),
-            "wrong fresh-local result edge accepted"
-        );
+        if !matches!(
+            answer,
+            Err(ErrorReport {
+                kind: ErrorKind::Divergence,
+                ..
+            })
+        ) {
+            return Err(
+                anyhow::anyhow!("wrong fresh-local result edge accepted: {answer:?}").into(),
+            );
+        }
     }
     Ok(())
 }
@@ -1012,17 +1017,17 @@ async fn replay_refuses_collapsed_fresh_local_identities() -> TestResult<()> {
     let (recorded, _) = fresh_local_correlation_request()?;
     let (mut arriving, ids) = fresh_local_correlation_request()?;
     let Some(Message::Assistant(turn)) = arriving.chat_history.first_mut() else {
-        panic!("fixture has no assistant calls");
+        return Err(anyhow::anyhow!("fixture has no assistant calls").into());
     };
     let Some(AssistantContent::CustomToolCall(call)) = turn.content.get_mut(1) else {
-        panic!("fixture has no custom call");
+        return Err(anyhow::anyhow!("fixture has no custom call").into());
     };
     call.id = ids[0].clone();
     let Some(Message::User { content }) = arriving.chat_history.last_mut() else {
-        panic!("fixture has no tool results");
+        return Err(anyhow::anyhow!("fixture has no tool results").into());
     };
     let Some(UserContent::ToolResult(result)) = content.first_mut() else {
-        panic!("fixture has no custom result");
+        return Err(anyhow::anyhow!("fixture has no custom result").into());
     };
     result.call = ids[0].clone();
     for check in [RequestCheck::Payload, RequestCheck::Hash] {
@@ -1038,16 +1043,18 @@ async fn replay_refuses_collapsed_fresh_local_identities() -> TestResult<()> {
             check,
         )
         .await?;
-        assert!(
-            matches!(
-                answer,
-                Err(ErrorReport {
-                    kind: ErrorKind::Divergence,
-                    ..
-                })
-            ),
-            "distinct fresh-local identities collapsed without divergence"
-        );
+        if !matches!(
+            answer,
+            Err(ErrorReport {
+                kind: ErrorKind::Divergence,
+                ..
+            })
+        ) {
+            return Err(anyhow::anyhow!(
+                "distinct fresh-local identities collapsed without divergence: {answer:?}"
+            )
+            .into());
+        }
     }
     Ok(())
 }

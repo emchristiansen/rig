@@ -98,13 +98,13 @@ async fn tool_choice_specific_is_refused_on_the_streaming_path_too() {
 // ---------------------------------------------------------------------------
 
 /// A tool result carrying plain text.
-
+///
 /// A tool result carrying a JSON document.
 ///
 /// The Chat Completions wire has no JSON content part, so a structured result
 /// is serialized into the tool message's text. The cell pins that the
 /// serialization is the document — not a `Debug` rendering, and not dropped.
-
+///
 /// The one dimension this file does not own: an *arithmetic* tool round trip
 /// through the agent loop, which the pre-merge `tools.rs` already covers on
 /// the smoke tier.

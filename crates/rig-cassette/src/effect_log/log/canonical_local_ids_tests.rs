@@ -202,37 +202,52 @@ fn check_only_locations(original: Value, first: &[&str], second: &[&str]) -> Tes
     for locations in [first, second] {
         let path = locations
             .first()
-            .expect("fixture has no identity locations");
+            .ok_or_else(|| anyhow::anyhow!("fixture has no identity locations: {locations:?}"))?;
         let canonical = normalized
             .pointer(path)
-            .expect("missing normalized identity")
+            .ok_or_else(|| anyhow::anyhow!("missing normalized identity {path}: {normalized:?}"))?
             .clone();
         let id: CallId = serde_json::from_value(canonical.clone())?;
-        assert!(id.is_local(), "local identity changed namespace");
-        assert!(
-            Some(&canonical) != original.pointer(path),
-            "local identity was not normalized"
-        );
+        if !id.is_local() {
+            return Err(anyhow::anyhow!("local identity changed namespace: {id:?}").into());
+        }
+        if Some(&canonical) == original.pointer(path) {
+            return Err(anyhow::anyhow!(
+                "local identity was not normalized at {path}: {canonical:?}"
+            )
+            .into());
+        }
         for path in locations {
-            *expected
-                .pointer_mut(path)
-                .unwrap_or_else(|| panic!("missing typed fixture location {path}")) =
-                canonical.clone();
+            let Some(value) = expected.pointer_mut(path) else {
+                return Err(
+                    anyhow::anyhow!("missing typed fixture location {path}: {expected:?}").into(),
+                );
+            };
+            *value = canonical.clone();
         }
         renamed.push(canonical);
     }
-    assert!(
-        renamed[0] != renamed[1],
-        "distinct local identities collapsed"
-    );
-    assert!(
-        normalized == expected,
-        "canonicalization changed data outside typed local identity leaves"
-    );
-    assert!(
-        canonical_local_ids(normalized.clone()) == normalized,
-        "canonicalization is not idempotent"
-    );
+    let first = renamed
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("first renamed identity missing: {renamed:?}"))?;
+    let second = renamed
+        .get(1)
+        .ok_or_else(|| anyhow::anyhow!("second renamed identity missing: {renamed:?}"))?;
+    if first == second {
+        return Err(anyhow::anyhow!("distinct local identities collapsed: {renamed:?}").into());
+    }
+    if normalized != expected {
+        return Err(anyhow::anyhow!(
+            "canonicalization changed data outside typed local identity leaves: actual {normalized:?}, expected {expected:?}"
+        ).into());
+    }
+    let again = canonical_local_ids(normalized.clone());
+    if again != normalized {
+        return Err(anyhow::anyhow!(
+            "canonicalization is not idempotent: actual {again:?}, expected {normalized:?}"
+        )
+        .into());
+    }
     Ok(normalized)
 }
 
@@ -251,10 +266,13 @@ fn canonical_local_ids_preserves_untyped_and_custom_data() -> TestResult<()> {
             payload: json!({"local": "7ecaf57b-5bbb-4b9e-a440-63738a5939ec"}),
         })?,
     ] {
-        assert!(
-            canonical_local_ids(value.clone()) == value,
-            "opaque local-looking JSON changed"
-        );
+        let normalized = canonical_local_ids(value.clone());
+        if normalized != value {
+            return Err(anyhow::anyhow!(
+                "opaque local-looking JSON changed: actual {normalized:?}, expected {value:?}"
+            )
+            .into());
+        }
     }
     Ok(())
 }
