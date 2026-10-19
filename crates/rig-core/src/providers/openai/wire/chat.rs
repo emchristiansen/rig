@@ -2567,15 +2567,18 @@ impl<'id> Decoder<'id, Completion> for ChatDecoder {
             if let Err(error) = carried::check_choice_list(&frame, &data) {
                 return Err(error);
             }
-            // The `object` tag decides when the dialect sends one: stream
-            // chunks may carry whole messages. Several gateways omit it.
-            let whole = match frame.str("object") {
-                Some(object) => object == "chat.completion",
-                None => frame
-                    .arr("choices")
-                    .iter()
-                    .any(|choice| choice.obj("message").is_some()),
-            };
+            // Reassembled unary documents retain the stream's object tag.
+            // On a stream, the tag still distinguishes cumulative messages
+            // from deltas so their text is not repeated.
+            let has_message = frame
+                .arr("choices")
+                .iter()
+                .any(|choice| choice.obj("message").is_some());
+            let whole = (self.unary && has_message)
+                || match frame.str("object") {
+                    Some(object) => object == "chat.completion",
+                    None => has_message,
+                };
             if whole {
                 if let Err(error) = carried::prepare_whole_calls(&mut frame, &data, &self.quirks) {
                     return Err(error);
