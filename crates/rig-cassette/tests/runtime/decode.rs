@@ -9,6 +9,8 @@
 //! Every reply of a provider `sweeps!` names must decode. The coverage gate
 //! reads that list and counts those replies as recordings of their reply
 //! shapes, so a cassette holding only a decoded reply shape can go.
+//! OpenRouter-origin replies run separately, including its Messages gateway
+//! recording stored in the Anthropic bank.
 
 use rig::completion::{AssistantContent, FinishReason};
 use rig::providers::anthropic::wire::AnthropicConfig;
@@ -222,6 +224,13 @@ pub(crate) async fn decode(entry: &Entry) -> Option<Decoded> {
     })
 }
 
+/// OpenRouter recordings include the Messages gateway stored under Anthropic.
+pub(crate) fn openrouter_entry(entry: &Entry) -> bool {
+    entry.provider == "openrouter"
+        || entry.source.split('#').next()
+            == Some("anthropic/streaming/gateway_message_delta_metadata.yaml")
+}
+
 /// The finish reason a decoded turn of `ending` must report.
 fn expected(ending: Ending, calls: &[String]) -> Option<FinishReason> {
     match ending {
@@ -233,12 +242,15 @@ fn expected(ending: Ending, calls: &[String]) -> Option<FinishReason> {
     }
 }
 
-/// One provider's bank, every reply decoded and compared with what the bank
-/// read off its bytes. Returns how many replies were decoded.
-async fn sweep(provider: &str) -> usize {
+/// One origin partition of a provider's bank, decoded and compared with what
+/// the bank read off its bytes. Returns how many replies were decoded.
+async fn sweep(provider: &str, openrouter_only: bool) -> usize {
     let mut decoded_count = 0;
     let mut failures = Vec::new();
     for entry in bank::entries(provider).iter() {
+        if openrouter_entry(entry) != openrouter_only {
+            continue;
+        }
         let Some(decoded) = decode(entry).await else {
             failures.push(format!(
                 "{}: no decoder for `{}`",
@@ -290,7 +302,10 @@ macro_rules! sweeps {
         $(
             #[tokio::test]
             async fn $provider() {
-                assert!(sweep(stringify!($provider)).await > 0, "the bank decodes some reply");
+                assert!(
+                    sweep(stringify!($provider), stringify!($provider) == "openrouter").await > 0,
+                    "the bank decodes some reply"
+                );
             }
         )*
     };
@@ -300,3 +315,11 @@ sweeps!(
     anthropic, chatgpt, cohere, copilot, deepseek, doubleword, gemini, groq, llamacpp, mistral,
     mistralrs, ollama, openai, openrouter, perplexity, venice, xai,
 );
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_anthropic_gateway() {
+    assert!(
+        sweep("anthropic", true).await > 0,
+        "the bank decodes some reply"
+    );
+}

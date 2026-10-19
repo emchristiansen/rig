@@ -601,7 +601,13 @@ async fn take_census(openrouter_only: bool) -> Census {
                 .to_string_lossy()
                 .into_owned()
         })
-        .filter(|provider| (provider == "openrouter") == openrouter_only)
+        .filter(|provider| {
+            if openrouter_only {
+                matches!(provider.as_str(), "anthropic" | "openrouter")
+            } else {
+                provider != "openrouter"
+            }
+        })
         .collect();
     provider_dirs.sort();
 
@@ -617,6 +623,11 @@ async fn take_census(openrouter_only: bool) -> Census {
                 .expect("cassette under the root")
                 .to_string_lossy()
                 .replace('\\', "/");
+            let openrouter_recording = provider == "openrouter"
+                || scenario == "anthropic/streaming/gateway_message_delta_metadata.yaml";
+            if openrouter_recording != openrouter_only {
+                continue;
+            }
             let contents = std::fs::read_to_string(&file).expect("cassette is readable");
             for (index, document) in serde_yaml::Deserializer::from_str(&contents).enumerate() {
                 let Ok(interaction) = RecordedInteraction::deserialize(document) else {

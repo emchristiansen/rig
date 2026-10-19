@@ -14,7 +14,7 @@
 use rig::completion::FinishReason;
 use rig_test_support::bank::{self, Entry};
 
-use crate::decode::{decode, with_model};
+use crate::decode::{decode, openrouter_entry, with_model};
 use crate::support::{
     Adder, EscalateCapOnTruncation, ObservedTermination, TurnTerminationProbe,
     collect_stream_final_response,
@@ -51,10 +51,17 @@ impl Turn {
 async fn replies(turn: Turn, streamed: bool, openrouter_only: bool) -> Vec<Entry> {
     let mut found = Vec::new();
     for provider in bank::providers() {
-        if (provider == "openrouter") != openrouter_only {
+        if openrouter_only {
+            if provider != "openrouter" && provider != "anthropic" {
+                continue;
+            }
+        } else if provider == "openrouter" {
             continue;
         }
         for entry in bank::entries(&provider).iter() {
+            if openrouter_entry(entry) != openrouter_only {
+                continue;
+            }
             if entry.then.status != 200 || entry.streamed() != streamed {
                 continue;
             }
