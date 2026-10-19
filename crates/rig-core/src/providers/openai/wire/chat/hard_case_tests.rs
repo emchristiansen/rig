@@ -97,7 +97,7 @@ fn signature(detail: &str) -> String {
 /// arrives after the answer joins the reasoning before it, and the message
 /// sent back holds the reasoning and the signature as one message did.
 #[tokio::test]
-async fn a_late_signature_joins_the_reasoning_before_the_answer() {
+async fn openrouter_a_late_signature_joins_the_reasoning_before_the_answer() {
     let (_, response) = stream(
         &OPENROUTER,
         &[
@@ -141,7 +141,7 @@ async fn a_late_signature_joins_the_reasoning_before_the_answer() {
 /// Reasoning that arrives after the answer is still the turn's first block,
 /// while the events it streams keep their arrival order.
 #[tokio::test]
-async fn late_reasoning_is_stored_first_and_streamed_in_arrival_order() {
+async fn openrouter_late_reasoning_is_stored_first_and_streamed_in_arrival_order() {
     let (items, response) = stream(
         &OPENROUTER,
         &[
@@ -180,7 +180,7 @@ async fn late_reasoning_is_stored_first_and_streamed_in_arrival_order() {
 /// pi's merge: a second signature for the same detail fills nothing, as the
 /// first already signed it.
 #[tokio::test]
-async fn a_second_signature_for_one_detail_keeps_the_first() {
+async fn openrouter_a_second_signature_for_one_detail_keeps_the_first() {
     let (_, response) = stream(
         &OPENROUTER,
         &[

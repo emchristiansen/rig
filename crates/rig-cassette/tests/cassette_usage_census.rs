@@ -4,7 +4,8 @@
 //! decoded through the provider's real wire exactly as it was recorded, and
 //! rig's `Usage` for it is set beside the total the provider reported, when
 //! it reported one. The census costs no provider traffic and covers every
-//! provider directory in the corpus.
+//! provider directory in the corpus. OpenRouter has separate named tests;
+//! the required other-provider tests and their optional report exclude it.
 //!
 //! It prints one `USAGE_CENSUS <provider>/<wire> {json}` line per provider
 //! and wire: calls, calls with a cache read or write, calls with reasoning,
@@ -304,7 +305,7 @@ impl Row {
     }
 }
 
-/// The census of the whole corpus.
+/// The census of one disjoint provider partition.
 struct Census {
     calls: Vec<Call>,
     rows: BTreeMap<String, Row>,
@@ -576,13 +577,19 @@ fn reported_total(documents: &[Value]) -> Option<u64> {
         .find_map(|key| usage.get(*key)?.as_u64())
 }
 
-/// The census, decoded once and shared by both tests.
-async fn census() -> &'static Census {
-    static CENSUS: tokio::sync::OnceCell<Census> = tokio::sync::OnceCell::const_new();
-    CENSUS.get_or_init(take_census).await
+/// Each disjoint provider census, decoded once for its coverage and usage tests.
+async fn census(openrouter_only: bool) -> &'static Census {
+    static OTHER_CENSUS: tokio::sync::OnceCell<Census> = tokio::sync::OnceCell::const_new();
+    static OPENROUTER_CENSUS: tokio::sync::OnceCell<Census> = tokio::sync::OnceCell::const_new();
+    let selected = if openrouter_only {
+        &OPENROUTER_CENSUS
+    } else {
+        &OTHER_CENSUS
+    };
+    selected.get_or_init(|| take_census(openrouter_only)).await
 }
 
-async fn take_census() -> Census {
+async fn take_census(openrouter_only: bool) -> Census {
     let root = cassette_root();
     let mut provider_dirs: Vec<String> = std::fs::read_dir(&root)
         .expect("cassette root is readable")
@@ -594,6 +601,7 @@ async fn take_census() -> Census {
                 .to_string_lossy()
                 .into_owned()
         })
+        .filter(|provider| (provider == "openrouter") == openrouter_only)
         .collect();
     provider_dirs.sort();
 
@@ -695,18 +703,29 @@ fn report(census: &Census) {
     }
 }
 
-/// Every provider directory is examined and every 200-status reply is either
+/// Every selected provider directory is examined and every 200-status reply is either
 /// decoded or named as carrying no completion.
 #[tokio::test]
 async fn every_recorded_completion_is_censused() {
+    check_completion_census(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_recorded_completions_are_censused() {
+    check_completion_census(true).await;
+}
+
+async fn check_completion_census(openrouter_only: bool) {
     for (fragment, reason) in NOT_COMPLETIONS {
         assert!(
             !reason.trim().is_empty(),
             "NOT_COMPLETIONS entry `{fragment}` needs a reason"
         );
     }
-    let census = census().await;
-    report(census);
+    let census = census(openrouter_only).await;
+    if !openrouter_only {
+        report(census);
+    }
 
     assert!(
         census.unknown.is_empty(),
@@ -744,7 +763,16 @@ async fn every_recorded_completion_is_censused() {
 /// output, and that total the provider's own wherever it reports one.
 #[tokio::test]
 async fn every_recorded_call_keeps_the_usage_contract() {
-    let census = census().await;
+    check_usage_contract(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_recorded_calls_keep_the_usage_contract() {
+    check_usage_contract(true).await;
+}
+
+async fn check_usage_contract(openrouter_only: bool) {
+    let census = census(openrouter_only).await;
     let mut violations = Vec::new();
     for call in &census.calls {
         let Some(usage) = &call.usage else {

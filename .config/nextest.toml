@@ -6,6 +6,16 @@
 required = "0.9.77"
 recommended = "0.9.91"
 
+# Eric excludes OpenRouter tests from this port's qualification. The binary
+# selector covers its provider suite; the name selector covers unit tests and
+# provider modules in shared binaries.
+[profile.default]
+default-filter = '''not (
+    binary(=openrouter)
+    | test(openrouter)
+    | (binary(=anthropic) & test(=anthropic::cassette::streaming::gateway_reports_input_tokens_on_message_delta))
+)'''
+
 # The two tests that shell out to a nested Cargo build are the slowest in the
 # tree by an order of magnitude (the facade feature-forwarding guard runs
 # four `cargo check`s over the facade's dependency graph). In lexicographic
@@ -34,6 +44,9 @@ retries = 0
 fail-fast = true
 default-filter = '''not (
     package(rig-service-tests)
+    | binary(=openrouter)
+    | test(openrouter)
+    | (binary(=anthropic) & test(=anthropic::cassette::streaming::gateway_reports_input_tokens_on_message_delta))
     | binary_id(rig-core::macro_hygiene)
     | (binary_id(rig::tool_facade_features) & test(=portable_tool_facade_is_feature_additive))
     | (binary_id(rig-reqwest::middleware_features) & test(=middleware_clients_are_available_for_each_tls_selector))

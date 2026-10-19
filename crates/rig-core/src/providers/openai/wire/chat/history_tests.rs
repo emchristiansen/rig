@@ -302,10 +302,7 @@ fn only_a_complete_item_becomes_a_native() {
 #[test]
 fn review_text_only_chat_dialect_models_get_placeholders() {
     use crate::providers::openai::wire::{MINIMAX, MOONSHOT, XIAOMIMIMO, ZAI};
-    let history = vec![Message::User {
-        content: vec![UserContent::text("look"), UserContent::Image(png())],
-    }];
-    let cases: [(&'static Dialect, &str, bool); 14] = [
+    assert_text_only_chat_dialect_models_get_placeholders(&[
         (&ZAI, "glm-4.6", false),
         (&ZAI, "glm-4.5v", true),
         (&MOONSHOT, "kimi-k2-0905-preview", false),
@@ -314,15 +311,27 @@ fn review_text_only_chat_dialect_models_get_placeholders() {
         (&MINIMAX, "MiniMax-M3", true),
         (&XIAOMIMIMO, "mimo-v2-flash", false),
         (&XIAOMIMIMO, "mimo-v2.5", true),
+    ]);
+}
+
+#[test]
+fn openrouter_review_text_only_chat_dialect_models_get_placeholders() {
+    assert_text_only_chat_dialect_models_get_placeholders(&[
         (&OPENROUTER, "z-ai/glm-4.6", false),
         (&OPENROUTER, "moonshotai/kimi-k2-0905", false),
         (&OPENROUTER, "minimax/minimax-m2", false),
         (&OPENROUTER, "xiaomi/mimo-v2-flash", false),
         (&OPENROUTER, "deepseek/deepseek-chat-v3.1", false),
         (&OPENROUTER, "z-ai/glm-4.5v", true),
-    ];
+    ]);
+}
+
+fn assert_text_only_chat_dialect_models_get_placeholders(cases: &[(&'static Dialect, &str, bool)]) {
+    let history = vec![Message::User {
+        content: vec![UserContent::text("look"), UserContent::Image(png())],
+    }];
     let mut wrong = Vec::new();
-    for (dialect, model, images) in cases {
+    for &(dialect, model, images) in cases {
         let body = sent(&wire(dialect, model), history.clone()).to_string();
         if body.contains("image_url") != images {
             wrong.push(format!("{}/{model}", dialect.name));
@@ -585,6 +594,25 @@ fn reasoning_content_follows_the_model() {
             wire.model
         );
     }
+    for wire in [wire(&OPENAI, "gpt-4o"), wire(&MOONSHOT, "kimi-k2.6")] {
+        let body = sent(&wire, history());
+        assert!(
+            body["messages"][1].get("reasoning_content").is_none(),
+            "{}: {body}",
+            wire.model
+        );
+    }
+}
+
+#[test]
+fn openrouter_reasoning_content_follows_the_model() {
+    let history = || {
+        vec![
+            Message::user("q"),
+            call_turn("call_0", "f"),
+            result("call_0", "f"),
+        ]
+    };
     // A gateway's Kimi K3 row names no field; Moonshot's supplies it before
     // OpenRouter applies its final field spelling.
     for model in ["moonshotai/kimi-k2.6", "moonshotai/kimi-k3"] {
@@ -598,14 +626,6 @@ fn reasoning_content_follows_the_model() {
         assert!(
             body["messages"][1].get("reasoning_content").is_none(),
             "{model}: {body}"
-        );
-    }
-    for wire in [wire(&OPENAI, "gpt-4o"), wire(&MOONSHOT, "kimi-k2.6")] {
-        let body = sent(&wire, history());
-        assert!(
-            body["messages"][1].get("reasoning_content").is_none(),
-            "{}: {body}",
-            wire.model
         );
     }
 }
@@ -665,7 +685,7 @@ fn index_less_id_less_calls_split_once_whole() {
 /// the fifth signs the first of two parallel calls, as Gemini 3 does.
 /// Each replays the same bytes from either form.
 #[test]
-fn reasoning_details_keep_the_fork_mode_boundaries_and_replay_values() {
+fn openrouter_reasoning_details_keep_the_fork_mode_boundaries_and_replay_values() {
     let wire = wire(&OPENROUTER, "anthropic/claude-opus-5.5");
     let signature = json!({"type": "reasoning.text", "signature": "AY89a19Q",
         "format": "google-gemini-v1", "index": 0});

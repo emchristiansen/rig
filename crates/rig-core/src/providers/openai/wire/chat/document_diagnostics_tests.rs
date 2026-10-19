@@ -50,7 +50,16 @@ fn assert_conversion(error: ProviderError, expected: &str) {
 
 #[test]
 fn original_pdf_sources_are_refused_before_adaptation() {
-    for dialect in [&OPENAI, &OPENROUTER, &MISTRAL] {
+    assert_original_pdf_sources_are_refused_before_adaptation(&[&OPENAI, &MISTRAL]);
+}
+
+#[test]
+fn openrouter_original_pdf_sources_are_refused_before_adaptation() {
+    assert_original_pdf_sources_are_refused_before_adaptation(&[&OPENROUTER]);
+}
+
+fn assert_original_pdf_sources_are_refused_before_adaptation(dialects: &[&Dialect]) {
+    for &dialect in dialects {
         let wire = chat(dialect);
         for (source, expected) in pdf_sources() {
             // URL must not become a placeholder and raw must not become sendable base64.
@@ -63,7 +72,16 @@ fn original_pdf_sources_are_refused_before_adaptation() {
 
 #[test]
 fn direct_encoding_retains_the_same_typed_pdf_diagnostics() {
-    for dialect in [&OPENAI, &OPENROUTER, &MISTRAL] {
+    assert_direct_encoding_retains_the_same_typed_pdf_diagnostics(&[&OPENAI, &MISTRAL]);
+}
+
+#[test]
+fn openrouter_direct_encoding_retains_the_same_typed_pdf_diagnostics() {
+    assert_direct_encoding_retains_the_same_typed_pdf_diagnostics(&[&OPENROUTER]);
+}
+
+fn assert_direct_encoding_retains_the_same_typed_pdf_diagnostics(dialects: &[&Dialect]) {
+    for &dialect in dialects {
         let wire = chat(dialect);
         for (source, expected) in pdf_sources() {
             let error = wire

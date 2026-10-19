@@ -169,7 +169,7 @@ fn a_result_is_a_string_or_its_parts() {
 /// Base64 PDFs, file ids, images and video keep their wire shapes. A PDF
 /// URL is refused before adaptation.
 #[test]
-fn user_parts_take_their_wire_shapes() {
+fn openrouter_user_parts_take_their_wire_shapes() {
     let document = |data: DocumentSourceKind, media_type| {
         UserContent::Document(crate::message::Document {
             data: data.into(),
@@ -234,6 +234,17 @@ fn user_parts_take_their_wire_shapes() {
         ]),
         "OpenRouter takes no file ids: {sent}"
     );
+}
+
+#[test]
+fn user_parts_take_their_wire_shapes() {
+    let document = |data: DocumentSourceKind, media_type| {
+        UserContent::Document(crate::message::Document {
+            data: data.into(),
+            media_type,
+            additional_params: None,
+        })
+    };
     let file_id = body(CompletionRequest::from(vec![Message::User {
         content: vec![
             UserContent::text("read"),

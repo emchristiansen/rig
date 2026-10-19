@@ -393,26 +393,9 @@ async fn an_in_band_envelope_with_a_status_code_is_classified_by_it() -> anyhow:
 /// for a document carrying only one; every other dialect sends the id.
 #[test]
 fn openrouter_gets_a_placeholder_for_a_file_id_document() {
-    use crate::message::{Document, DocumentSourceKind, Message, UserContent};
     use crate::providers::openai::wire::OPENROUTER;
 
-    let body = |chat: Chat| {
-        let mut request = prompt("read this");
-        request.chat_history = vec![Message::User {
-            content: vec![UserContent::Document(Document {
-                data: DocumentSourceKind::FileId("file-abc".to_owned()).into(),
-                media_type: None,
-                additional_params: None,
-            })],
-        }];
-        let request = <crate::operation::Completion as crate::wire::Operation>::prepare(
-            request,
-            &chat.describe(),
-        )
-        .expect("the request prepares");
-        json_body(&chat.encode(request, Mode::Unary).expect("encodes").request).to_string()
-    };
-    let openrouter = body(
+    let openrouter = file_id_document_body(
         OpenAIConfig::new("k")
             .with_dialect(&OPENROUTER)
             .chat("openai/gpt-4o"),
@@ -422,8 +405,31 @@ fn openrouter_gets_a_placeholder_for_a_file_id_document() {
             && !openrouter.contains("file-abc"),
         "{openrouter}"
     );
-    let openai = body(wire());
+}
+
+#[test]
+fn openai_keeps_a_file_id_document() {
+    let openai = file_id_document_body(wire());
     assert!(openai.contains("\"file_id\":\"file-abc\""), "{openai}");
+}
+
+fn file_id_document_body(chat: Chat) -> String {
+    use crate::message::{Document, DocumentSourceKind, Message, UserContent};
+
+    let mut request = prompt("read this");
+    request.chat_history = vec![Message::User {
+        content: vec![UserContent::Document(Document {
+            data: DocumentSourceKind::FileId("file-abc".to_owned()).into(),
+            media_type: None,
+            additional_params: None,
+        })],
+    }];
+    let request = <crate::operation::Completion as crate::wire::Operation>::prepare(
+        request,
+        &chat.describe(),
+    )
+    .expect("the request prepares");
+    json_body(&chat.encode(request, Mode::Unary).expect("encodes").request).to_string()
 }
 
 /// A stream's `raw` is the `chat.completion` its chunks add up to, read by
@@ -671,7 +677,7 @@ fn an_invented_call_field_replays_and_an_invented_message_field_does_not() {
 /// block keeps each detail's id, format and kind as the provider sent them,
 /// the encrypted entry whole beside the merged summary.
 #[test]
-fn a_streamed_reasoning_detail_keeps_its_id_format_and_kind() {
+fn openrouter_a_streamed_reasoning_detail_keeps_its_id_format_and_kind() {
     use crate::wire::Mode;
 
     let summary = |text: &str| {

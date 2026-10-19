@@ -244,7 +244,7 @@ fn every_choice_is_kept_by_its_index() {
 }
 
 #[test]
-fn reasoning_text_appends_and_reasoning_details_merge_as_the_decoder_merges_them() {
+fn openrouter_reasoning_text_appends_and_reasoning_details_merge_as_the_decoder_merges_them() {
     let detail = |text: &str, signature: Value| {
         json!([{"type": "reasoning.text", "index": 0, "format": "anthropic-claude-v1",
             "text": text, "signature": signature}])
@@ -380,7 +380,7 @@ fn a_bare_string_or_a_stream_of_nothing_has_no_document() {
 /// The in-band error envelope is the decoder's failure, not part of the
 /// document: the reply's `raw` is what arrived before it.
 #[test]
-fn an_in_band_error_is_not_part_of_the_document() {
+fn openrouter_an_in_band_error_is_not_part_of_the_document() {
     let failure = json!({"error": {"code": 502, "message": "upstream died"}});
     let document = rebuilt(
         &chat(&OPENROUTER),

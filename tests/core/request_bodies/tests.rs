@@ -46,6 +46,20 @@ fn every_wire_sends_the_pinned_bodies() {
         std::fs::write(&golden, render(&outputs, &models)).expect("the golden is writable");
         return;
     }
+    check_pinned_bodies(false);
+}
+
+#[test]
+fn openrouter_wires_send_the_pinned_bodies() {
+    // The original test owns full regeneration; this partition never writes a partial golden.
+    if std::env::var_os(REGENERATE).is_some() {
+        return;
+    }
+    check_pinned_bodies(true);
+}
+
+fn check_pinned_bodies(openrouter_only: bool) {
+    let golden = fixture("bodies.txt");
     let text = std::fs::read_to_string(&golden).unwrap_or_else(|error| {
         panic!(
             "{} is unreadable ({error}); run with {REGENERATE}=1",
@@ -70,6 +84,12 @@ fn every_wire_sends_the_pinned_bodies() {
         !every_wire_built() || encoders.len() == expected.len(),
         "the golden holds a wire this build no longer has; run with {REGENERATE}=1"
     );
+    let encoders: Vec<_> = encoders
+        .into_iter()
+        .filter(|encoder| {
+            matches!(encoder.key.as_str(), "chat|openrouter" | "resp|openrouter") == openrouter_only
+        })
+        .collect();
     let actual = encode_all(&models, &encoders);
     let mut changed = Vec::new();
     let mut count = 0;

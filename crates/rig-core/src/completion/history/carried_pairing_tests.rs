@@ -567,7 +567,7 @@ fn wrong_position_and_edited_opaque_followers_keep_their_original_errors() {
 }
 
 #[test]
-fn gateway_reasoning_keeps_the_existing_no_tools_route() {
+fn openrouter_gateway_reasoning_keeps_the_existing_no_tools_route() {
     let target = OpenAIConfig::with_key(
         &crate::providers::openai::wire::OPENROUTER,
         "synthetic-test-key",

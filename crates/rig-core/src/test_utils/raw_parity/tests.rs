@@ -1067,8 +1067,17 @@ async fn decoded(pair: &Pair) -> Result<(Value, Value), crate::error::ProviderEr
 /// of the same turn.
 #[tokio::test]
 async fn every_recorded_pair_agrees() {
+    recorded_pairs_agree(PAIRS.iter().filter(|pair| pair.provider != "openrouter")).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn every_openrouter_recorded_pair_agrees() {
+    recorded_pairs_agree(PAIRS.iter().filter(|pair| pair.provider == "openrouter")).await;
+}
+
+async fn recorded_pairs_agree(pairs: impl Iterator<Item = &'static Pair>) {
     let mut wrong = Vec::new();
-    for pair in PAIRS {
+    for pair in pairs {
         let (unary, streamed) = match decoded(pair).await {
             Ok(pair) => pair,
             Err(error) => {
