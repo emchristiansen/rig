@@ -6283,3 +6283,156 @@ async fn blocking_model_turn_repeat_preserves_prompt_history_with_fresh_preparat
     assert_eq!(requests[1].temperature, Some(0.9));
     assert_eq!(completion_patch.calls(), 2);
 }
+
+#[derive(Clone, Default)]
+struct RawCaptureHook {
+    completion_responses: Arc<Mutex<Vec<serde_json::Value>>>,
+    turns: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl RawCaptureHook {
+    fn completion_responses(&self) -> Vec<serde_json::Value> {
+        self.completion_responses
+            .lock()
+            .expect("completion response raws")
+            .clone()
+    }
+
+    fn turns(&self) -> Vec<serde_json::Value> {
+        self.turns.lock().expect("turn raws").clone()
+    }
+}
+
+impl AgentHook for RawCaptureHook {
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        if let Some(response) = event.completion() {
+            self.completion_responses
+                .lock()
+                .expect("completion response raws")
+                .push(response.raw.clone());
+        }
+        OutcomeAction::proceed()
+    }
+
+    async fn on_model_turn_finished(
+        &self,
+        _ctx: &HookContext,
+        event: ModelTurnFinished<'_>,
+    ) -> ModelTurnAction {
+        self.turns
+            .lock()
+            .expect("turn raws")
+            .push(event.raw.clone());
+        ModelTurnAction::continue_run()
+    }
+}
+
+#[derive(Clone, Default)]
+struct RetryOnceCapturingRaw {
+    seen: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl AgentHook for RetryOnceCapturingRaw {
+    async fn on_model_turn_finished(
+        &self,
+        _ctx: &HookContext,
+        event: ModelTurnFinished<'_>,
+    ) -> ModelTurnAction {
+        let mut seen = self.seen.lock().expect("retry raws");
+        seen.push(event.raw.clone());
+        if seen.len() == 1 {
+            ModelTurnAction::repeat()
+        } else {
+            ModelTurnAction::continue_run()
+        }
+    }
+}
+
+fn raw_payload(attempt: &str) -> serde_json::Value {
+    json!({
+        "id": format!("resp-{attempt}"),
+        "system_fingerprint": format!("fp-{attempt}"),
+        "provider_only": attempt,
+    })
+}
+
+fn call_raws(calls: &[crate::agent::CompletionCall]) -> Vec<serde_json::Value> {
+    calls.iter().map(|call| call.raw.clone()).collect()
+}
+
+#[tokio::test]
+async fn hook_events_carry_raw_blocking() {
+    let payload = raw_payload("blocking");
+
+    let hook = RawCaptureHook::default();
+    let response = AgentBuilder::new(MockCompletionModel::from_turns([
+        MockTurn::text("reply").with_raw(payload.clone())
+    ]))
+    .add_hook(hook.clone())
+    .build()
+    .prompt("prompt")
+    .await
+    .expect("blocking response");
+
+    assert_eq!(hook.completion_responses(), std::slice::from_ref(&payload));
+    assert_eq!(hook.turns(), std::slice::from_ref(&payload));
+    assert_eq!(call_raws(&response.completion_calls), [payload]);
+}
+
+#[tokio::test]
+async fn completion_calls_carry_each_attempts_own_raw_blocking() {
+    let first = raw_payload("turn-1");
+    let second = raw_payload("turn-2");
+    assert_ne!(first, second);
+
+    let hook = RawCaptureHook::default();
+    let response = AgentBuilder::new(MockCompletionModel::from_turns([
+        MockTurn::tool_call("tc1", "add", json!({"x": 2, "y": 3})).with_raw(first.clone()),
+        MockTurn::text("5").with_raw(second.clone()),
+    ]))
+    .tool(crate::test_utils::MockAddTool)
+    .add_hook(hook.clone())
+    .build()
+    .prompt("add 2 and 3")
+    .max_turns(3)
+    .await
+    .expect("blocking tool run");
+
+    assert_eq!(
+        call_raws(&response.completion_calls),
+        [first.clone(), second.clone()],
+        "each recorded call carries its own attempt's payload"
+    );
+    assert_eq!(hook.completion_responses(), [first.clone(), second.clone()]);
+    assert_eq!(hook.turns(), [first, second]);
+}
+
+#[tokio::test]
+async fn retried_turn_records_the_retried_attempts_own_raw_blocking() {
+    let first = raw_payload("attempt-1");
+    let second = raw_payload("attempt-2");
+
+    let hook = RetryOnceCapturingRaw::default();
+    let response = AgentBuilder::new(MockCompletionModel::from_turns([
+        MockTurn::text("first attempt").with_raw(first.clone()),
+        MockTurn::text("second attempt").with_raw(second.clone()),
+    ]))
+    .add_hook(hook.clone())
+    .build()
+    .prompt("prompt")
+    .max_turns(3)
+    .await
+    .expect("retried run");
+
+    assert_eq!(response.output(), "second attempt");
+    assert_eq!(
+        *hook.seen.lock().expect("retry raws"),
+        [first.clone(), second.clone()],
+        "each attempt's event carries that attempt's payload — no stale leak"
+    );
+    assert_eq!(
+        call_raws(&response.completion_calls),
+        [first, second],
+        "the retried attempt's record carries the retried attempt's payload"
+    );
+}
