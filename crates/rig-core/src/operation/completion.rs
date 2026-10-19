@@ -1534,10 +1534,17 @@ fn catalog_cost(origin: &Origin, usage: &Usage) -> Option<crate::completion::Cos
     if UNPRICED.contains(&origin.provider.as_str()) {
         return None;
     }
+    let reasoning = if origin.provider == crate::providers::gemini::completion::PROVIDER_NAME
+        && origin.api.as_str() == "gemini.interactions"
+    {
+        crate::catalog::ReasoningAccounting::SeparateFromOutput
+    } else {
+        crate::catalog::ReasoningAccounting::IncludedInOutput
+    };
     crate::catalog::lookup(&origin.provider, &origin.model)
         .or_else(|| crate::catalog::lookup_snapshot(&origin.provider, &origin.model))
         .and_then(|spec| spec.pricing.as_ref())
-        .and_then(|pricing| pricing.cost(usage))
+        .and_then(|pricing| pricing.cost(usage, reasoning))
 }
 
 /// `block` with no provider item: an opaque item no longer replays.

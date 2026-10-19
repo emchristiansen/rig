@@ -11,6 +11,9 @@
 use rig::providers::gemini::completion::{GEMINI_3_1_FLASH_LITE_PREVIEW, GEMINI_3_FLASH_PREVIEW};
 use rig_test_support::cassette_models::GeminiModels;
 
+use super::super::request_witness_support::{
+    NamedCase, attempt_cell, with_gemini_request_witness_cassette,
+};
 use super::super::support::with_gemini_cassette;
 use crate::corpus_matrix::{Wire, agent::run_agent, cells};
 
@@ -36,18 +39,6 @@ crate::matrix::golden_matrix! {
     wrapper: with_gemini_cassette, wire: wire, run: run_agent, oracle: crate::goldens::golden_effects;
     #[tokio::test]
     output_tool_under_none_degrades: ("corpus_matrix/output_tool_under_none_degrades", cells::OUTPUT_TOOL_UNDER_NONE_DEGRADES, "gemini_output_tool_under_none_degrades");
-    #[tokio::test]
-    shaping_preamble_second_turn: ("corpus_matrix/shaping_preamble_second_turn", cells::SHAPING_PREAMBLE_SECOND_TURN, "gemini_shaping_preamble_second_turn");
-    #[tokio::test]
-    causal_completion_concurrent: ("corpus_matrix/causal_completion_concurrent", cells::CAUSAL_COMPLETION_CONCURRENT, "gemini_causal_completion_concurrent");
-}
-
-crate::matrix::golden_matrix! {
-    wrapper: with_gemini_cassette, wire: wire, run: run_agent, oracle: crate::goldens::golden_effects;
-    #[tokio::test]
-    shaping_active_tools_none_second_turn: ("corpus_matrix/shaping_active_tools_none_second_turn", cells::SHAPING_ACTIVE_TOOLS_NONE_SECOND_TURN, "gemini_shaping_active_tools_none_second_turn");
-    #[tokio::test]
-    causal_completion_streamed: ("corpus_matrix/causal_completion_streamed", cells::CAUSAL_COMPLETION_STREAMED, "gemini_causal_completion_streamed");
 }
 
 #[ignore = "the Gemini REST wire streams a function call as one whole part: no tool-call delta reaches the hook, the run answers"]
@@ -126,4 +117,60 @@ fn reasoning_wire(
         additional_params: None,
         options: None,
     }
+}
+
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn shaping_preamble_second_turn() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
+        "corpus_matrix/shaping_preamble_second_turn",
+        NamedCase::ShapingPreambleSecondTurn,
+        |client| async move {
+            let wire = wire(&client);
+            attempt_cell(&wire, NamedCase::ShapingPreambleSecondTurn).await
+        },
+    )
+    .await
+}
+
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn causal_completion_concurrent() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
+        "corpus_matrix/causal_completion_concurrent",
+        NamedCase::CausalCompletionConcurrent,
+        |client| async move {
+            let wire = wire(&client);
+            attempt_cell(&wire, NamedCase::CausalCompletionConcurrent).await
+        },
+    )
+    .await
+}
+
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn shaping_active_tools_none_second_turn() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
+        "corpus_matrix/shaping_active_tools_none_second_turn",
+        NamedCase::ShapingActiveToolsNoneSecondTurn,
+        |client| async move {
+            let wire = wire(&client);
+            attempt_cell(&wire, NamedCase::ShapingActiveToolsNoneSecondTurn).await
+        },
+    )
+    .await
+}
+
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn causal_completion_streamed() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
+        "corpus_matrix/causal_completion_streamed",
+        NamedCase::CausalCompletionStreamed,
+        |client| async move {
+            let wire = wire(&client);
+            attempt_cell(&wire, NamedCase::CausalCompletionStreamed).await
+        },
+    )
+    .await
 }

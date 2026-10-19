@@ -704,12 +704,23 @@ fn h07_grpc_failed_turns(fixture: &GrpcHistory) {
             Mode::Unary,
             frames,
         );
-        if name == "MALFORMED_FUNCTION_CALL" {
+        let protocol_error = match name {
+            "MALFORMED_FUNCTION_CALL" => Some(
+                "Gemini stopped with finish_reason=MalformedFunctionCall: no finish message provided",
+            ),
+            "UNEXPECTED_TOOL_CALL" => Some(
+                "Gemini stopped with finish_reason=UnexpectedToolCall: no finish message provided",
+            ),
+            "TOO_MANY_TOOL_CALLS" => Some(
+                "Gemini stopped with finish_reason=TooManyToolCalls: no finish message provided",
+            ),
+            _ => None,
+        };
+        if let Some(expected) = protocol_error {
             assert_eq!(ending, Ending::Failure);
             assert!(
-                matches!(response, Err(ProviderError::Response(ref message))
-                    if message == "Gemini stopped with finish_reason=MalformedFunctionCall: no finish message provided"),
-                "the unchanged malformed-call finish reports its exact response error: {response:?}"
+                matches!(response, Err(ProviderError::Response(ref message)) if message == expected),
+                "the unchanged `{name}` finish reports its exact response error: {response:?}"
             );
             continue;
         }

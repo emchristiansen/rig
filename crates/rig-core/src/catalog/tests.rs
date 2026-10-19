@@ -3,7 +3,7 @@
 //! `validate` refuses what the model does not take.
 
 use super::*;
-use crate::completion::{CacheRetention, Effort, GenerationOptions, Reasoning};
+use crate::completion::{CacheRetention, Effort, GenerationOptions, Reasoning, Usage};
 
 fn options(reasoning: impl Into<Reasoning>) -> GenerationOptions {
     GenerationOptions::default().reasoning(reasoning)
@@ -357,5 +357,137 @@ fn a_cache_retention_the_model_does_not_honour_is_refused() {
         model
             .validate(&GenerationOptions::default().cache(CacheRetention::Short))
             .is_ok()
+    );
+}
+
+#[test]
+fn pricing_charges_separate_reasoning_at_the_output_rate() {
+    let pricing = Pricing {
+        input: 0.3,
+        output: 2.5,
+        cache_read: Some(0.03),
+        cache_write: None,
+    };
+    let usage = Usage::new()
+        .input_tokens(102)
+        .output_tokens(20)
+        .reasoning_tokens(75)
+        .total_tokens(197);
+    let cost = pricing
+        .cost(&usage, ReasoningAccounting::SeparateFromOutput)
+        .expect("both counters and their billed sum are known");
+    assert!(
+        cost.input
+            .is_some_and(|part| (part - 0.0000306).abs() <= 1e-12)
+    );
+    assert!(
+        cost.output
+            .is_some_and(|part| (part - 0.0002375).abs() <= 1e-12)
+    );
+    assert_eq!(cost.cache_read, Some(0.0));
+    assert_eq!(cost.cache_write, Some(0.0));
+    assert!((cost.total - 0.0002681).abs() <= 1e-12);
+    assert_eq!(usage.output_tokens, Some(20));
+    assert_eq!(usage.reasoning_tokens, Some(75));
+    assert_eq!(usage.total_tokens, Some(197));
+    assert_eq!(usage.cost, None);
+
+    let inclusive = usage.output_tokens(95);
+    assert_eq!(
+        pricing.cost(&inclusive, ReasoningAccounting::IncludedInOutput),
+        Some(cost)
+    );
+    let counted_output = pricing
+        .cost(&usage, ReasoningAccounting::IncludedInOutput)
+        .expect("included accounting prices only the output counter");
+    assert!(
+        counted_output
+            .output
+            .is_some_and(|part| (part - 0.00005).abs() <= 1e-12)
+    );
+}
+
+#[test]
+fn pricing_keeps_absent_and_zero_reasoning_equivalent() {
+    let pricing = Pricing {
+        input: 0.3,
+        output: 2.5,
+        cache_read: None,
+        cache_write: None,
+    };
+    for reasoning in [None, Some(0)] {
+        let usage = Usage::new()
+            .input_tokens(102)
+            .output_tokens(20)
+            .reasoning_tokens(reasoning);
+        for accounting in [
+            ReasoningAccounting::IncludedInOutput,
+            ReasoningAccounting::SeparateFromOutput,
+        ] {
+            let cost = pricing
+                .cost(&usage, accounting)
+                .expect("base counters exist");
+            assert!(
+                cost.output
+                    .is_some_and(|part| (part - 0.00005).abs() <= 1e-12)
+            );
+            assert!((cost.total - 0.0000806).abs() <= 1e-12);
+        }
+    }
+}
+
+#[test]
+fn pricing_requires_both_base_counters_with_either_reasoning_accounting() {
+    let pricing = Pricing {
+        input: 0.3,
+        output: 2.5,
+        cache_read: None,
+        cache_write: None,
+    };
+    for usage in [
+        Usage::new().input_tokens(102).reasoning_tokens(75),
+        Usage::new().output_tokens(20).reasoning_tokens(75),
+        Usage::new().reasoning_tokens(75),
+    ] {
+        for accounting in [
+            ReasoningAccounting::IncludedInOutput,
+            ReasoningAccounting::SeparateFromOutput,
+        ] {
+            assert_eq!(pricing.cost(&usage, accounting), None);
+        }
+    }
+}
+
+#[test]
+fn pricing_refuses_only_an_overflowing_separate_output_sum() {
+    let pricing = Pricing {
+        input: 0.3,
+        output: 2.5,
+        cache_read: None,
+        cache_write: None,
+    };
+    for (output, reasoning) in [(u64::MAX, 1), (1, u64::MAX)] {
+        let usage = Usage::new()
+            .input_tokens(102)
+            .output_tokens(output)
+            .reasoning_tokens(reasoning);
+        assert_eq!(
+            pricing.cost(&usage, ReasoningAccounting::SeparateFromOutput),
+            None
+        );
+        assert!(
+            pricing
+                .cost(&usage, ReasoningAccounting::IncludedInOutput)
+                .is_some()
+        );
+    }
+    let boundary = Usage::new()
+        .input_tokens(102)
+        .output_tokens(u64::MAX - 75)
+        .reasoning_tokens(75);
+    assert!(
+        pricing
+            .cost(&boundary, ReasoningAccounting::SeparateFromOutput)
+            .is_some()
     );
 }

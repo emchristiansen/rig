@@ -1,9 +1,8 @@
-//! The failure rows' producers on the DeepSeek wire (`deepseek-chat`): rig-agent over the
-//! wire's own recording, writing the golden. Only the recorded rows have a
-//! producer here; the scripted rows run in the `runtime` target.
+//! The original DeepSeek failed-tool continuation is refused for its single
+//! zero call index. Its completed golden trace is unavailable.
 
-use crate::corpus_matrix::{Wire, agent::run_agent, faults};
-use crate::deepseek::support::with_deepseek_cassette;
+use crate::corpus_matrix::{Wire, faults};
+use crate::deepseek::request_mismatch::{NamedCase, with_deepseek_request_mismatch};
 use rig_test_support::cassette_models::OpenAiModels;
 
 fn wire(client: &OpenAiModels) -> Wire<rig::Model<rig::providers::openai::wire::OpenAiWire>> {
@@ -17,13 +16,13 @@ fn wire(client: &OpenAiModels) -> Wire<rig::Model<rig::providers::openai::wire::
     }
 }
 
-#[tokio::test]
-async fn tool_error_streamed() {
-    with_deepseek_cassette("corpus_faults/tool_error_streamed", |client| async move {
-        run_agent(&wire(&client), &faults::TOOL_ERROR_STREAMED, |log| {
-            crate::goldens::golden_effects("deepseek_fault_tool_error_streamed", log)
-        })
-        .await;
-    })
-    .await;
+#[tokio::test(flavor = "current_thread")]
+async fn tool_error_streamed() -> anyhow::Result<()> {
+    with_deepseek_request_mismatch(
+        "corpus_faults/tool_error_streamed",
+        NamedCase::ToolErrorStreamed,
+        wire,
+        &faults::TOOL_ERROR_STREAMED,
+    )
+    .await
 }

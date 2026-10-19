@@ -815,9 +815,15 @@ pub struct Cost {
 - A cost the provider reports wins. A decoder reports it in the
   `usage.cost` of the `Finish` it ends the reply with.
 - Otherwise the driver's completion fold computes it with
-  `Pricing::cost` from the built-in catalog's pricing of the resolved
-  request model (`Origin::provider`, `Origin::model`; a dated snapshot of a
-  listed id is priced as that id). It needs both input and output tokens.
+  `Pricing::cost(usage, ReasoningAccounting)` from the built-in catalog's
+  pricing of the resolved request model (`Origin::provider`, `Origin::model`;
+  a dated snapshot of a listed id is priced as that id). The caller states
+  whether output includes reasoning or reports it separately. Separately
+  counted reasoning is charged at the output rate without changing counters;
+  the calculator has no separate reasoning rate. It needs both input and
+  output tokens and returns `None` if the output-plus-reasoning sum overflows.
+  The completion fold selects `SeparateFromOutput` for native Gemini
+  Interactions; other mappings retain output-counter pricing.
 - Otherwise it is `None`.
 - A catalog-priced cost is the standard-tier list price of the counted
   tokens. It leaves out the service tier (flex, priority, batch),

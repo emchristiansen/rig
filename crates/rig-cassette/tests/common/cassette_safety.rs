@@ -141,6 +141,7 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         wrapper_names: &[
             "with_gemini_prompt_caching_cassette",
             "with_gemini_cassette",
+            "with_gemini_request_witness_cassette",
             "with_gemini_checked_cassette",
             "with_gemini_corpus_retrieval_cassette",
             "with_gemini_corpus_delta_cassette",
@@ -221,6 +222,7 @@ const PROVIDER_CASSETTE_SUITES: &[ProviderCassetteSuite] = &[
         wrapper_names: &[
             "with_deepseek_prompt_caching_cassette",
             "with_deepseek_cassette",
+            "with_deepseek_request_mismatch",
             "with_deepseek_cassette_result",
             "with_deepseek_cassette_bogus_key_result",
             "with_deepseek_truncation_cassette_result",

@@ -5,6 +5,9 @@
 use rig::providers::gemini::completion::GEMINI_3_FLASH_PREVIEW;
 use rig_test_support::cassette_models::GeminiModels;
 
+use super::super::request_witness_support::{
+    NamedCase, attempt_cell, with_gemini_request_witness_cassette,
+};
 use super::super::support::with_gemini_cassette;
 use crate::corpus_matrix::{Wire, agent::run_agent, faults};
 
@@ -59,13 +62,16 @@ async fn setup_streamed() {
     .await;
 }
 
-#[tokio::test]
-async fn tool_error_streamed() {
-    with_gemini_cassette("corpus_faults/tool_error_streamed", |client| async move {
-        run_agent(&wire(&client), &faults::TOOL_ERROR_STREAMED, |log| {
-            crate::goldens::golden_effects("gemini_fault_tool_error_streamed", log)
-        })
-        .await;
-    })
-    .await;
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn tool_error_streamed() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
+        "corpus_faults/tool_error_streamed",
+        NamedCase::ToolErrorStreamed,
+        |client| async move {
+            let wire = wire(&client);
+            attempt_cell(&wire, NamedCase::ToolErrorStreamed).await
+        },
+    )
+    .await
 }

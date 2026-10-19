@@ -274,7 +274,10 @@ async fn memory_two_runs_effect_log_is_the_golden_fixture() {
             .name("golden")
             .preamble(BASIC_PREAMBLE)
             .temperature(0.0)
-            .additional_params(serde_json::json!({"store": false}))
+            .additional_params(serde_json::json!({
+                "store": false,
+                "include": ["reasoning.encrypted_content"],
+            }))
             .memory(rig::memory::InMemoryConversationMemory::new())
             .conversation(CONVERSATION)
             .record_to(recorder.clone())

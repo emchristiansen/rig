@@ -3042,3 +3042,310 @@ fn a_signed_answer_text_round_trips_through_serde_upstream() {
 }
 
 mod function_thought_controls;
+
+#[test]
+fn numeric_enum_declaration_keeps_the_exact_original_json_schema() {
+    for numeric in [
+        json!({"type":"integer","enum":[0,1,2]}),
+        json!({"type":"number","enum":[0,1.25,-2]}),
+    ] {
+        let parameters = json!({
+            "type":"object",
+            "properties":{"slot":numeric},
+            "required":["slot"],
+            "additionalProperties":false
+        });
+        let body = encoded_schema_request(parameters.clone()).expect("numeric enum request");
+        assert_eq!(
+            body.pointer("/tools/0/functionDeclarations/0"),
+            Some(&json!({
+                "name":"schema_tool", "description":"schema fixture",
+                "parametersJsonSchema":parameters
+            }))
+        );
+    }
+}
+
+#[test]
+fn string_enum_declaration_keeps_projected_parameters() {
+    let parameters = json!({
+        "type":"object",
+        "properties":{"unit":{"type":"string","enum":["celsius","fahrenheit"]}},
+        "required":["unit"]
+    });
+    let body = encoded_schema_request(parameters.clone()).expect("string enum request");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0"),
+        Some(&json!({
+            "name":"schema_tool", "description":"schema fixture",
+            "parameters":parameters
+        }))
+    );
+}
+
+#[test]
+fn numeric_and_string_tools_select_their_own_schema_members() {
+    use crate::wire::Operation;
+    let numeric = json!({
+        "type":"object",
+        "properties":{"slot":{"type":"integer","enum":[0,1,2]}},
+        "required":["slot"],
+        "additionalProperties":false
+    });
+    let strings = json!({
+        "type":"object",
+        "properties":{"unit":{"type":"string","enum":["celsius","fahrenheit"]}},
+        "required":["unit"]
+    });
+    let wire = wire("gemini-2.5-flash");
+    let mut request = CompletionRequest::new("hello");
+    request.tools = vec![
+        crate::completion::ToolDefinition::new(
+            message::ToolName::new("numeric_tool").expect("tool name"),
+            "numeric fixture",
+            numeric.clone(),
+        ),
+        crate::completion::ToolDefinition::new(
+            message::ToolName::new("string_tool").expect("tool name"),
+            "string fixture",
+            strings.clone(),
+        ),
+    ];
+    let request = Completion::prepare(request, &wire.describe()).expect("prepared tools");
+    let encoded = wire.encode(request, Mode::Unary).expect("encoded tools");
+    let body = crate::test_utils::json_body(&encoded.request);
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations"),
+        Some(&json!([
+            {
+                "name":"numeric_tool", "description":"numeric fixture",
+                "parametersJsonSchema":numeric
+            },
+            {
+                "name":"string_tool", "description":"string fixture",
+                "parameters":strings
+            }
+        ]))
+    );
+}
+
+#[test]
+fn schema_object_child_errors_keep_their_paths_and_request_error_type() {
+    for (parameters, path, reason) in [
+        (
+            json!({"type":"object","properties":{"slot":{"type":"integer","$defs":[]}}}),
+            "/properties/slot/$defs",
+            "$defs must be an object",
+        ),
+        (
+            json!({"type":"array","items":{"type":"integer","$defs":[]}}),
+            "/items/$defs",
+            "$defs must be an object",
+        ),
+        (
+            json!({"type":"object","properties":{"slot":{"$ref":"#/other/Missing"}},"$defs":{}}),
+            "/properties/slot/$ref",
+            "Unsupported reference format: #/other/Missing",
+        ),
+        (
+            json!({"type":"array","items":{"$defs":{},"$ref":"#/$defs/Missing"}}),
+            "/items/$ref",
+            "Reference not found: #/$defs/Missing",
+        ),
+        (
+            json!({"type":"object","properties":{"a/b~c":{"$defs":[]}}}),
+            "/properties/a~1b~0c/$defs",
+            "$defs must be an object",
+        ),
+        (
+            json!({
+                "type":"object",
+                "properties":{"slot":{"anyOf":[
+                    {"type":"null"},
+                    {"type":"object","properties":{"inner":{"$defs":[]}}}
+                ]}}
+            }),
+            "/properties/slot/anyOf/1/properties/inner/$defs",
+            "$defs must be an object",
+        ),
+    ] {
+        let error = encoded_schema_request(parameters).expect_err("schema child is refused");
+        assert!(matches!(&error, ProviderError::Request(_)), "{error:?}");
+        let diagnostic = format!(
+            "Tool 'schema_tool' could not be converted to a schema: schema path {path}: {reason}"
+        );
+        assert_eq!(
+            std::error::Error::source(&error)
+                .expect("request reason")
+                .to_string(),
+            diagnostic
+        );
+        assert_eq!(error.to_string(), format!("RequestError: {diagnostic}"));
+    }
+}
+
+#[test]
+fn numeric_enum_routing_does_not_bypass_schema_object_validation() {
+    let parameters = json!({
+        "type":"object",
+        "properties":{
+            "slot":{"type":"integer","enum":[0,1,2]},
+            "broken":{"type":"array","items":{"$defs":{},"$ref":"#/$defs/Missing"}}
+        },
+        "required":["slot"],
+        "additionalProperties":false
+    });
+    let error = encoded_schema_request(parameters).expect_err("numeric request still validates");
+    assert!(matches!(&error, ProviderError::Request(_)), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "RequestError: Tool 'schema_tool' could not be converted to a schema: schema path /properties/broken/items/$ref: Reference not found: #/$defs/Missing"
+    );
+}
+
+#[test]
+fn referenced_numeric_enum_keeps_original_definitions_and_references() {
+    let parameters = json!({
+        "type":"object",
+        "properties":{"slot":{"$ref":"#/$defs/Choice"}},
+        "required":["slot"],
+        "additionalProperties":false,
+        "$defs":{"Choice":{"type":"integer","enum":[0,1,2]}}
+    });
+    let body = encoded_schema_request(parameters.clone()).expect("referenced numeric request");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0"),
+        Some(&json!({
+            "name":"schema_tool", "description":"schema fixture",
+            "parametersJsonSchema":parameters
+        }))
+    );
+}
+
+#[test]
+fn numeric_enum_in_annotation_does_not_change_the_schema_route() {
+    let body = encoded_schema_request(json!({
+        "type":"string",
+        "enum":["a","b"],
+        "default":{"type":"integer","enum":[0,1,2]}
+    }))
+    .expect("annotation retains the ordinary route");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0"),
+        Some(&json!({
+            "name":"schema_tool", "description":"schema fixture",
+            "parameters":{"type":"string","enum":["a","b"]}
+        }))
+    );
+}
+
+#[test]
+fn untyped_numeric_enum_keeps_the_exact_original_json_schema() {
+    let parameters = json!({
+        "type":"object",
+        "properties":{"slot":{"enum":[0,1,2]}},
+        "required":["slot"],
+        "additionalProperties":false
+    });
+    let body = encoded_schema_request(parameters.clone()).expect("untyped numeric enum request");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0"),
+        Some(&json!({
+            "name":"schema_tool", "description":"schema fixture",
+            "parametersJsonSchema":parameters
+        }))
+    );
+}
+
+#[test]
+fn numeric_enum_in_unselected_composition_branch_keeps_the_original_schema() {
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        let parameters = json!({
+            "type":"object",
+            "properties":{"choice":{(keyword):[
+                {"type":"string","enum":["a","b"]},
+                {"enum":[0,1,2]}
+            ]}},
+            "required":["choice"]
+        });
+        let body = encoded_schema_request(parameters.clone()).expect("numeric composition request");
+        assert_eq!(
+            body.pointer("/tools/0/functionDeclarations/0"),
+            Some(&json!({
+                "name":"schema_tool", "description":"schema fixture",
+                "parametersJsonSchema":parameters
+            }))
+        );
+    }
+}
+
+#[test]
+fn nullable_string_enum_keeps_parameters_while_numeric_union_keeps_raw_schema() {
+    for string_types in [json!(["string", "null"]), json!(["null", "string"])] {
+        let body = encoded_schema_request(json!({
+            "type":"object",
+            "properties":{"choice":{"type":string_types,"enum":["a",1,"b"]}}
+        }))
+        .expect("nullable string enum request");
+        assert_eq!(
+            body.pointer("/tools/0/functionDeclarations/0"),
+            Some(&json!({
+                "name":"schema_tool", "description":"schema fixture",
+                "parameters":{
+                    "type":"object",
+                    "properties":{"choice":{"type":"string","nullable":true,"enum":["a","b"]}}
+                }
+            }))
+        );
+    }
+    let parameters = json!({
+        "type":"object",
+        "properties":{"choice":{"type":["string","number","null"],"enum":["a",0,1.25]}}
+    });
+    let body = encoded_schema_request(parameters.clone()).expect("numeric union request");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0"),
+        Some(&json!({
+            "name":"schema_tool", "description":"schema fixture",
+            "parametersJsonSchema":parameters
+        }))
+    );
+}
+
+#[test]
+fn unused_numeric_definition_does_not_select_the_raw_schema_member() {
+    let body = encoded_schema_request(json!({
+        "type":"object",
+        "properties":{"unit":{"type":"string","enum":["a","b"]}},
+        "$defs":{"Unused":{"enum":[0,1,2]}}
+    }))
+    .expect("unused definition does not change the route");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0"),
+        Some(&json!({
+            "name":"schema_tool", "description":"schema fixture",
+            "parameters":{
+                "type":"object",
+                "properties":{"unit":{"type":"string","enum":["a","b"]}}
+            }
+        }))
+    );
+}
+
+#[test]
+fn numeric_composition_does_not_hide_a_later_schema_object_error() {
+    let error = encoded_schema_request(json!({
+        "type":"object",
+        "properties":{"choice":{"anyOf":[
+            {"type":"string","enum":["a","b"]},
+            {"enum":[0,1,2]},
+            {"$defs":[]}
+        ]}}
+    }))
+    .expect_err("every schema-object alternative is checked");
+    assert!(matches!(&error, ProviderError::Request(_)), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "RequestError: Tool 'schema_tool' could not be converted to a schema: schema path /properties/choice/anyOf/2/$defs: $defs must be an object"
+    );
+}

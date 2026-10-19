@@ -687,10 +687,10 @@ fn base_in(
     ]))
 }
 
-/// A typed tool as a function declaration with projected `parameters`.
+/// A typed tool with projected parameters or an exact numeric-enum JSON Schema.
 /// Reference definitions must be acyclic. Conversion errors name the tool.
 fn declaration(tool: crate::completion::ToolDefinition) -> Result<Value, EncodeError> {
-    let parameters = schema::parameters(tool.parameters).map_err(|error| {
+    let parameters = schema::declaration_parameters(tool.parameters).map_err(|error| {
         let reason = std::error::Error::source(&error)
             .map_or_else(|| error.to_string(), ToString::to_string);
         EncodeError::request(format!(
@@ -698,10 +698,16 @@ fn declaration(tool: crate::completion::ToolDefinition) -> Result<Value, EncodeE
             tool.name
         ))
     })?;
+    let (member, parameters) = match parameters {
+        schema::DeclarationParameters::Projected(parameters) => ("parameters", parameters),
+        schema::DeclarationParameters::JsonSchema(parameters) => {
+            ("parametersJsonSchema", Some(parameters))
+        }
+    };
     Ok(Value::Object(object([
         ("name", Some(json!(tool.name))),
         ("description", Some(json!(tool.description))),
-        ("parameters", parameters),
+        (member, parameters),
     ])))
 }
 

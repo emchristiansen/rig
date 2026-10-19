@@ -47,7 +47,8 @@
 # Columns: what was deleted, and the kept tests that cover what it covered
 # beyond the always-kept tests (`-` when those cover all of it). A golden names
 # its producer: `with` when the producer went too, `in-test` when it checks in
-# the test now.
+# the test now. `retired request-negative` names a case whose former positive
+# self-replay check ended; its current request refusal check does not replace it.
 kind	item	covered by
 fixture	anthropic/adversarial/colliding_ids.yaml	rig-cassette::anthropic anthropic::cassette::opus_4_8::messages_preserve_system_role_after_server_tool_result
 fixture	anthropic/adversarial/empty_signed_reasoning_streamed.yaml	rig-cassette::anthropic anthropic::cassette::adversarial_matrix::empty_signed_reasoning, rig-cassette::anthropic anthropic::cassette::models::sonnet_5_5::session, rig-cassette::anthropic anthropic::cassette::session_matrix::memory_streamed
@@ -2081,7 +2082,7 @@ golden	deepseek_causal_completion_streamed	with rig-cassette::deepseek deepseek:
 golden	deepseek_checkpoint_large_result	with rig-cassette::deepseek deepseek::corpus_matrix_checkpoint::large_result
 golden	deepseek_checkpoint_multi_turn_streamed	with rig-cassette::deepseek deepseek::corpus_matrix_checkpoint::multi_turn_streamed
 golden	deepseek_checkpoint_multi_turn_unary	with rig-cassette::deepseek deepseek::corpus_matrix_checkpoint::multi_turn_unary
-golden	deepseek_checkpoint_parallel_batch	in-test rig-cassette::deepseek deepseek::corpus_matrix_checkpoint::parallel_batch
+golden	deepseek_checkpoint_parallel_batch	retired request-negative case-244; positive self-replay retired; rig-cassette::deepseek deepseek::corpus_matrix_checkpoint::parallel_batch
 golden	deepseek_endings_answer_outcome_cancelled	with rig-cassette::deepseek deepseek::corpus_matrix::endings_answer_outcome_cancelled
 golden	deepseek_endings_answer_turn_stop	with rig-cassette::deepseek deepseek::corpus_matrix::endings_answer_turn_stop
 golden	deepseek_endings_text_delta_stop	with rig-cassette::deepseek deepseek::corpus_matrix::endings_text_delta_stop
@@ -2097,7 +2098,7 @@ golden	deepseek_fault_batch_second_fails_concurrent	with rig-cassette::deepseek 
 golden	deepseek_fault_setup_streamed	with rig-cassette::deepseek deepseek::corpus_faults::setup_streamed
 golden	deepseek_fault_setup_unary	in-test rig-cassette::deepseek deepseek::corpus_faults::setup_unary
 golden	deepseek_fault_tool_error	with rig-cassette::deepseek deepseek::corpus_faults::tool_error
-golden	deepseek_fault_tool_error_streamed	in-test rig-cassette::deepseek deepseek::corpus_faults::tool_error_streamed
+golden	deepseek_fault_tool_error_streamed	retired request-negative case-210; positive self-replay retired; rig-cassette::deepseek deepseek::corpus_faults::tool_error_streamed
 golden	deepseek_hooks_demand_done	with rig-cassette::deepseek deepseek::corpus_matrix::hooks_demand_done
 golden	deepseek_hooks_deny_tool	with rig-cassette::deepseek deepseek::corpus_matrix::hooks_deny_tool
 golden	deepseek_hooks_deny_tool_streamed	with rig-cassette::deepseek deepseek::corpus_matrix::hooks_deny_tool_streamed
@@ -2148,7 +2149,7 @@ golden	deepseek_output_prompted_streamed	with rig-cassette::deepseek deepseek::c
 golden	deepseek_output_prompted_unary	with rig-cassette::deepseek deepseek::corpus_matrix::output_prompted_unary
 golden	deepseek_output_prompted_with_real_tool	with rig-cassette::deepseek deepseek::corpus_matrix::output_prompted_with_real_tool
 golden	deepseek_output_tool_choice_required	with rig-cassette::deepseek deepseek::corpus_matrix::output_tool_choice_required
-golden	deepseek_output_tool_choice_specific_output	in-test rig-cassette::deepseek deepseek::corpus_matrix::output_tool_choice_specific_output
+golden	deepseek_output_tool_choice_specific_output	retired request-negative case-129; positive self-replay retired; rig-cassette::deepseek deepseek::corpus_matrix::output_tool_choice_specific_output
 golden	deepseek_output_tool_streamed	with rig-cassette::deepseek deepseek::corpus_matrix::output_tool_streamed
 golden	deepseek_output_tool_thinking	with rig-cassette::deepseek deepseek::corpus_matrix::output_tool_thinking
 golden	deepseek_output_tool_unary	with rig-cassette::deepseek deepseek::corpus_matrix::output_tool_unary
@@ -2158,12 +2159,12 @@ golden	deepseek_reasoning_capped	in-test rig-cassette::deepseek deepseek::corpus
 golden	deepseek_reasoning_off	with rig-cassette::deepseek deepseek::corpus_matrix::reasoning_off
 golden	deepseek_reasoning_text_streamed	in-test rig-cassette::deepseek deepseek::corpus_matrix::reasoning_text_streamed
 golden	deepseek_reasoning_text_unary	with rig-cassette::deepseek deepseek::corpus_matrix::reasoning_text_unary
-golden	deepseek_reasoning_tool_streamed	in-test rig-cassette::deepseek deepseek::corpus_matrix::reasoning_tool_streamed
+golden	deepseek_reasoning_tool_streamed	retired request-negative case-128; positive self-replay retired; rig-cassette::deepseek deepseek::corpus_matrix::reasoning_tool_streamed
 golden	deepseek_reasoning_tool_unary	with rig-cassette::deepseek deepseek::corpus_matrix::reasoning_tool_unary
 golden	deepseek_resume_tool_turn	with rig-cassette::deepseek deepseek::corpus_matrix::resume_tool_turn
 golden	deepseek_serving_capacity_one	with rig-cassette::deepseek deepseek::corpus_matrix::serving_capacity_one
 golden	deepseek_serving_concurrent_concurrency_one	with rig-cassette::deepseek deepseek::corpus_matrix::serving_concurrent_concurrency_one
-golden	deepseek_serving_concurrent_concurrency_two	in-test rig-cassette::deepseek deepseek::corpus_matrix::serving_concurrent_concurrency_two
+golden	deepseek_serving_concurrent_concurrency_two	retired request-negative case-167; positive self-replay retired; rig-cassette::deepseek deepseek::corpus_matrix::serving_concurrent_concurrency_two
 golden	deepseek_serving_concurrent_concurrency_two_events	with rig-cassette::deepseek deepseek::corpus_matrix::serving_concurrent_concurrency_two_events
 golden	deepseek_serving_host_bus	with rig-cassette::deepseek deepseek::corpus_matrix::serving_host_bus
 golden	deepseek_serving_host_bus_streamed	with rig-cassette::deepseek deepseek::corpus_matrix::serving_host_bus_streamed
@@ -2178,9 +2179,9 @@ golden	deepseek_shaping_history_first_turn	with rig-cassette::deepseek deepseek:
 golden	deepseek_shaping_late_route	with rig-cassette::deepseek deepseek::corpus_matrix::shaping_late_route
 golden	deepseek_shaping_max_tokens_second_turn	with rig-cassette::deepseek deepseek::corpus_matrix::shaping_max_tokens_second_turn
 golden	deepseek_shaping_merged_three	with rig-cassette::deepseek deepseek::corpus_matrix::shaping_merged_three
-golden	deepseek_shaping_preamble_second_turn	in-test rig-cassette::deepseek deepseek::corpus_matrix::shaping_preamble_second_turn
+golden	deepseek_shaping_preamble_second_turn	retired request-negative case-132; positive self-replay retired; rig-cassette::deepseek deepseek::corpus_matrix::shaping_preamble_second_turn
 golden	deepseek_shaping_route_on_first_turn	with rig-cassette::deepseek deepseek::corpus_matrix::shaping_route_on_first_turn
-golden	deepseek_shaping_tool_choice_none_on_committed_output	in-test rig-cassette::deepseek deepseek::corpus_matrix::shaping_tool_choice_none_on_committed_output
+golden	deepseek_shaping_tool_choice_none_on_committed_output	retired request-negative case-159; positive self-replay retired; rig-cassette::deepseek deepseek::corpus_matrix::shaping_tool_choice_none_on_committed_output
 golden	deepseek_shaping_tool_choice_required_first	with rig-cassette::deepseek deepseek::corpus_matrix::shaping_tool_choice_required_first
 golden	doubleword_causal_completion_concurrent	with rig-cassette::doubleword doubleword::cassette::corpus_matrix::causal_completion_concurrent
 golden	doubleword_causal_completion_serial	with rig-cassette::doubleword doubleword::cassette::corpus_matrix::causal_completion_serial
@@ -2279,10 +2280,10 @@ golden	doubleword_shaping_route_on_first_turn	with rig-cassette::doubleword doub
 golden	doubleword_shaping_thinking_second_turn	with rig-cassette::doubleword doubleword::cassette::corpus_matrix::shaping_thinking_second_turn
 golden	doubleword_shaping_tool_choice_none_on_committed_output	in-test rig-cassette::doubleword doubleword::cassette::corpus_matrix::shaping_tool_choice_none_on_committed_output
 golden	doubleword_shaping_tool_choice_required_first	with rig-cassette::doubleword doubleword::cassette::corpus_matrix::shaping_tool_choice_required_first
-golden	gemini_causal_completion_concurrent	in-test rig-cassette::gemini gemini::cassette::corpus_matrix::causal_completion_concurrent
+golden	gemini_causal_completion_concurrent	retired request-negative case-251; positive self-replay retired; rig-cassette::gemini gemini::cassette::corpus_matrix::causal_completion_concurrent
 golden	gemini_causal_completion_serial	with rig-cassette::gemini gemini::cassette::corpus_matrix::causal_completion_serial
-golden	gemini_causal_completion_streamed	in-test rig-cassette::gemini gemini::cassette::corpus_matrix::causal_completion_streamed
-golden	gemini_checkpoint_large_result	in-test rig-cassette::gemini gemini::cassette::corpus_matrix_checkpoint::large_result
+golden	gemini_causal_completion_streamed	retired request-negative case-117; positive self-replay retired; rig-cassette::gemini gemini::cassette::corpus_matrix::causal_completion_streamed
+golden	gemini_checkpoint_large_result	retired request-negative case-234; positive self-replay retired; rig-cassette::gemini gemini::cassette::corpus_matrix_checkpoint::large_result
 golden	gemini_checkpoint_multi_turn_streamed	in-test rig-cassette::gemini gemini::cassette::corpus_matrix_checkpoint::multi_turn_streamed
 golden	gemini_checkpoint_multi_turn_unary	in-test rig-cassette::gemini gemini::cassette::corpus_matrix_checkpoint::multi_turn_unary
 golden	gemini_checkpoint_parallel_batch	in-test rig-cassette::gemini gemini::cassette::corpus_matrix_checkpoint::parallel_batch
@@ -2298,7 +2299,7 @@ golden	gemini_fault_batch_second_fails_concurrent	with rig-cassette::gemini gemi
 golden	gemini_fault_setup_streamed	in-test rig-cassette::gemini gemini::cassette::corpus_faults::setup_streamed
 golden	gemini_fault_setup_unary	in-test rig-cassette::gemini gemini::cassette::corpus_faults::setup_unary
 golden	gemini_fault_tool_error	with rig-cassette::gemini gemini::cassette::corpus_faults::tool_error
-golden	gemini_fault_tool_error_streamed	in-test rig-cassette::gemini gemini::cassette::corpus_faults::tool_error_streamed
+golden	gemini_fault_tool_error_streamed	retired request-negative case-237; positive self-replay retired; rig-cassette::gemini gemini::cassette::corpus_faults::tool_error_streamed
 golden	gemini_hooks_demand_done	with rig-cassette::gemini gemini::cassette::corpus_matrix::hooks_demand_done
 golden	gemini_hooks_deny_tool	with rig-cassette::gemini gemini::cassette::corpus_matrix::hooks_deny_tool
 golden	gemini_hooks_deny_tool_streamed	with rig-cassette::gemini gemini::cassette::corpus_matrix::hooks_deny_tool_streamed
@@ -2333,7 +2334,7 @@ golden	gemini_layers_patch_tool_args	with rig-cassette::gemini gemini::cassette:
 golden	gemini_layers_replace_tool_result	with rig-cassette::gemini gemini::cassette::corpus_matrix::layers_replace_tool_result
 golden	gemini_layers_two_layers	with rig-cassette::gemini gemini::cassette::corpus_matrix::layers_two_layers
 golden	gemini_long_loop_big_result	with rig-cassette::gemini gemini::cassette::corpus_matrix_long_loop::big_result
-golden	gemini_long_loop_long_streamed	in-test rig-cassette::gemini gemini::cassette::corpus_matrix_long_loop::long_streamed
+golden	gemini_long_loop_long_streamed	retired request-negative case-215; positive self-replay retired; rig-cassette::gemini gemini::cassette::corpus_matrix_long_loop::long_streamed
 golden	gemini_long_loop_long_unary	with rig-cassette::gemini gemini::cassette::corpus_matrix_long_loop::long_unary
 golden	gemini_long_loop_max_turns_midway	with rig-cassette::gemini gemini::cassette::corpus_matrix_long_loop::max_turns_midway
 golden	gemini_long_loop_output_cap_midway	in-test rig-cassette::gemini gemini::cassette::corpus_matrix_long_loop::output_cap_midway
@@ -2372,14 +2373,14 @@ golden	gemini_serving_model_route	with rig-cassette::gemini gemini::cassette::co
 golden	gemini_serving_model_route_unselected	with rig-cassette::gemini gemini::cassette::corpus_matrix::serving_model_route_unselected
 golden	gemini_serving_serial_concurrency_one	with rig-cassette::gemini gemini::cassette::corpus_matrix::serving_serial_concurrency_one
 golden	gemini_serving_serial_memory_tools	with rig-cassette::gemini gemini::cassette::corpus_matrix::serving_serial_memory_tools
-golden	gemini_shaping_active_tools_none_second_turn	in-test rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_active_tools_none_second_turn
+golden	gemini_shaping_active_tools_none_second_turn	retired request-negative case-243; positive self-replay retired; rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_active_tools_none_second_turn
 golden	gemini_shaping_extra_context	with rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_extra_context
 golden	gemini_shaping_extra_context_streamed	with rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_extra_context_streamed
 golden	gemini_shaping_history_first_turn	with rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_history_first_turn
 golden	gemini_shaping_late_route	with rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_late_route
 golden	gemini_shaping_max_tokens_second_turn	in-test rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_max_tokens_second_turn
 golden	gemini_shaping_merged_three	with rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_merged_three
-golden	gemini_shaping_preamble_second_turn	in-test rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_preamble_second_turn
+golden	gemini_shaping_preamble_second_turn	retired request-negative case-127; positive self-replay retired; rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_preamble_second_turn
 golden	gemini_shaping_route_on_first_turn	in-test rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_route_on_first_turn
 golden	gemini_shaping_tool_choice_required_first	with rig-cassette::gemini gemini::cassette::corpus_matrix::shaping_tool_choice_required_first
 golden	openai_chat_causal_completion_concurrent	with rig-cassette::openai openai::cassette::corpus_matrix_chat::causal_completion_concurrent

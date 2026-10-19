@@ -5,17 +5,44 @@ use crate::error::EncodeError;
 use serde_json::{Map, Value, json};
 
 /// Encode tool parameters, omitting null and the exact empty object schema.
-/// Reference definitions must be acyclic. Top-level conversion failures
+/// Reference definitions must be acyclic. Schema-object conversion failures
 /// return a request error; unmodeled keys and non-schema children are omitted.
 pub(super) fn parameters(parameters: Value) -> Result<Option<Value>, EncodeError> {
     if parameters.is_null() || parameters == json!({"type": "object", "properties": {}}) {
         Ok(None)
     } else {
-        schema_value(parameters).map(Some)
+        schema_value(parameters, "").map(Some)
     }
 }
 
-fn flatten_schema(mut schema: Value) -> Result<Value, EncodeError> {
+pub(super) enum DeclarationParameters {
+    Projected(Option<Value>),
+    JsonSchema(Value),
+}
+
+/// Numeric-domain enums use the original schema after projection validation.
+pub(super) fn declaration_parameters(value: Value) -> Result<DeclarationParameters, EncodeError> {
+    let projected = parameters(value.clone())?;
+    if requires_json_schema(&value, "")? {
+        Ok(DeclarationParameters::JsonSchema(value))
+    } else {
+        Ok(DeclarationParameters::Projected(projected))
+    }
+}
+
+fn schema_path(parent: &str, segment: &str) -> String {
+    format!("{parent}/{}", segment.replace('~', "~0").replace('/', "~1"))
+}
+
+fn schema_error(path: &str, reason: impl std::fmt::Display) -> EncodeError {
+    if path.is_empty() {
+        EncodeError::request(reason.to_string())
+    } else {
+        EncodeError::request(format!("schema path {path}: {reason}"))
+    }
+}
+
+fn flatten_schema(mut schema: Value, path: &str) -> Result<Value, EncodeError> {
     let defs = schema
         .as_object()
         .and_then(|obj| obj.get("$defs").or_else(|| obj.get("definitions")))
@@ -26,10 +53,22 @@ fn flatten_schema(mut schema: Value) -> Result<Value, EncodeError> {
     };
 
     let Some(defs_obj) = defs_value.as_object() else {
-        return Err(EncodeError::request("$defs must be an object"));
+        let path = if path.is_empty() {
+            String::new()
+        } else {
+            schema_path(
+                path,
+                if schema.get("$defs").is_some() {
+                    "$defs"
+                } else {
+                    "definitions"
+                },
+            )
+        };
+        return Err(schema_error(&path, "$defs must be an object"));
     };
 
-    resolve_refs(&mut schema, defs_obj)?;
+    resolve_refs(&mut schema, defs_obj, path)?;
 
     if let Some(obj) = schema.as_object_mut() {
         obj.shift_remove("$defs");
@@ -39,31 +78,40 @@ fn flatten_schema(mut schema: Value) -> Result<Value, EncodeError> {
     Ok(schema)
 }
 
-fn resolve_refs(value: &mut Value, defs: &Map<String, Value>) -> Result<(), EncodeError> {
+fn resolve_refs(
+    value: &mut Value,
+    defs: &Map<String, Value>,
+    path: &str,
+) -> Result<(), EncodeError> {
     match value {
         Value::Object(obj) => {
             if let Some(ref_value) = obj.get("$ref")
                 && let Some(ref_str) = ref_value.as_str()
             {
-                let def_name = parse_ref_path(ref_str)?;
+                let reference_path = if path.is_empty() {
+                    String::new()
+                } else {
+                    schema_path(path, "$ref")
+                };
+                let def_name = parse_ref_path(ref_str, &reference_path)?;
 
                 let def = defs.get(&def_name).ok_or_else(|| {
-                    EncodeError::request(format!("Reference not found: {ref_str}"))
+                    schema_error(&reference_path, format!("Reference not found: {ref_str}"))
                 })?;
 
                 let mut resolved = def.clone();
-                resolve_refs(&mut resolved, defs)?;
+                resolve_refs(&mut resolved, defs, path)?;
                 *value = resolved;
                 return Ok(());
             }
 
-            for (_, v) in obj.iter_mut() {
-                resolve_refs(v, defs)?;
+            for (name, v) in obj.iter_mut() {
+                resolve_refs(v, defs, &schema_path(path, name))?;
             }
         }
         Value::Array(arr) => {
-            for item in arr.iter_mut() {
-                resolve_refs(item, defs)?;
+            for (index, item) in arr.iter_mut().enumerate() {
+                resolve_refs(item, defs, &schema_path(path, &index.to_string()))?;
             }
         }
         _ => {}
@@ -72,21 +120,23 @@ fn resolve_refs(value: &mut Value, defs: &Map<String, Value>) -> Result<(), Enco
     Ok(())
 }
 
-fn parse_ref_path(ref_str: &str) -> Result<String, EncodeError> {
+fn parse_ref_path(ref_str: &str, path: &str) -> Result<String, EncodeError> {
     if let Some(fragment) = ref_str.strip_prefix('#') {
         if let Some(name) = fragment.strip_prefix("/$defs/") {
             Ok(name.to_string())
         } else if let Some(name) = fragment.strip_prefix("/definitions/") {
             Ok(name.to_string())
         } else {
-            Err(EncodeError::request(format!(
-                "Unsupported reference format: {ref_str}"
-            )))
+            Err(schema_error(
+                path,
+                format!("Unsupported reference format: {ref_str}"),
+            ))
         }
     } else {
-        Err(EncodeError::request(format!(
-            "Only fragment references (#/...) are supported: {ref_str}"
-        )))
+        Err(schema_error(
+            path,
+            format!("Only fragment references (#/...) are supported: {ref_str}"),
+        ))
     }
 }
 
@@ -150,24 +200,38 @@ fn extract_type_from_composition(composition: &Value) -> Option<String> {
     })
 }
 
-fn extract_schema_from_composition(composition: &Value) -> Option<Map<String, Value>> {
+fn extract_schema_from_composition(
+    composition: &Value,
+    path: &str,
+) -> Option<(Map<String, Value>, String)> {
     composition.as_array().and_then(|arr| {
-        arr.iter().find_map(|schema| {
+        arr.iter().enumerate().find_map(|(index, schema)| {
             let obj = schema.as_object()?;
             if schema_is_null(obj) {
                 None
             } else {
-                Some(obj.clone())
+                Some((obj.clone(), schema_path(path, &index.to_string())))
             }
         })
     })
 }
 
-fn extract_schema_from_composition_obj(obj: &Map<String, Value>) -> Option<Map<String, Value>> {
+fn extract_schema_from_composition_obj(
+    obj: &Map<String, Value>,
+    path: &str,
+) -> Option<(Map<String, Value>, String)> {
     obj.get("anyOf")
-        .and_then(extract_schema_from_composition)
-        .or_else(|| obj.get("oneOf").and_then(extract_schema_from_composition))
-        .or_else(|| obj.get("allOf").and_then(extract_schema_from_composition))
+        .and_then(|value| extract_schema_from_composition(value, &schema_path(path, "anyOf")))
+        .or_else(|| {
+            obj.get("oneOf").and_then(|value| {
+                extract_schema_from_composition(value, &schema_path(path, "oneOf"))
+            })
+        })
+        .or_else(|| {
+            obj.get("allOf").and_then(|value| {
+                extract_schema_from_composition(value, &schema_path(path, "allOf"))
+            })
+        })
 }
 
 fn infer_type(obj: &Map<String, Value>) -> String {
@@ -204,30 +268,96 @@ fn infer_type(obj: &Map<String, Value>) -> String {
     }
 }
 
-fn schema_value(value: Value) -> Result<Value, EncodeError> {
-    let flattened = flatten_schema(value)?;
+fn explicitly_string_only(obj: &Map<String, Value>) -> bool {
+    match obj.get("type") {
+        Some(Value::String(kind)) => kind == "string",
+        Some(Value::Array(kinds)) => {
+            kinds.iter().any(|kind| kind.as_str() == Some("string"))
+                && kinds
+                    .iter()
+                    .all(|kind| matches!(kind.as_str(), Some("string" | "null")))
+        }
+        _ => false,
+    }
+}
+
+fn requires_json_schema(value: &Value, path: &str) -> Result<bool, EncodeError> {
+    let flattened = flatten_schema(value.clone(), path)?;
+    let Some(obj) = flattened.as_object() else {
+        return Ok(false);
+    };
+    let mut required = !explicitly_string_only(obj)
+        && obj
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(Value::is_number));
+    if let Some(properties) = obj.get("properties").and_then(Value::as_object) {
+        for (name, value) in properties {
+            if value.is_object() {
+                required |= requires_json_schema(
+                    value,
+                    &schema_path(&schema_path(path, "properties"), name),
+                )?;
+            }
+        }
+    }
+    if let Some(value) = obj.get("items")
+        && value.is_object()
+    {
+        required |= requires_json_schema(value, &schema_path(path, "items"))?;
+    }
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        if let Some(alternatives) = obj.get(keyword).and_then(Value::as_array) {
+            for (index, value) in alternatives.iter().enumerate() {
+                if value.is_object() {
+                    required |= requires_json_schema(
+                        value,
+                        &schema_path(&schema_path(path, keyword), &index.to_string()),
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(required)
+}
+
+fn schema_value(value: Value, path: &str) -> Result<Value, EncodeError> {
+    let flattened = flatten_schema(value, path)?;
     let obj = flattened
         .as_object()
-        .ok_or_else(|| EncodeError::request("Expected a JSON object for Schema"))?;
-    let composition_source = extract_schema_from_composition_obj(obj);
-    let props_source = if obj.get("properties").is_none() {
-        composition_source.as_ref().unwrap_or(obj)
+        .ok_or_else(|| schema_error(path, "Expected a JSON object for Schema"))?;
+    let composition_source = extract_schema_from_composition_obj(obj, path);
+    let (props_source, props_path) = if obj.get("properties").is_none() {
+        composition_source
+            .as_ref()
+            .map_or((obj, path), |(source, source_path)| {
+                (source, source_path.as_str())
+            })
     } else {
-        obj
+        (obj, path)
     };
     let schema_type = infer_type(obj);
     // The schema conversion omits non-schema child values.
     let items = obj
         .get("items")
-        .or_else(|| props_source.get("items"))
-        .and_then(|value| schema_value(value.clone()).ok());
+        .map(|value| (value, schema_path(path, "items")))
+        .or_else(|| {
+            props_source
+                .get("items")
+                .map(|value| (value, schema_path(props_path, "items")))
+        })
+        .filter(|(value, _)| value.is_object())
+        .map(|(value, path)| schema_value(value.clone(), &path))
+        .transpose()?;
     let items = if schema_type == "array" && items.is_none() {
         Some(json!({"type":"string"}))
     } else {
         items
     };
     let nullable = (schema_is_nullable(obj)
-        || composition_source.as_ref().is_some_and(schema_is_nullable))
+        || composition_source
+            .as_ref()
+            .is_some_and(|(source, _)| schema_is_nullable(source)))
     .then_some(Value::Bool(true));
     let string_field = |name: &str| {
         obj.get(name)
@@ -256,16 +386,16 @@ fn schema_value(value: Value) -> Result<Value, EncodeError> {
         .get("properties")
         .and_then(Value::as_object)
         .map(|properties| {
-            let sorted: std::collections::BTreeMap<String, Value> = properties
-                .iter()
-                .filter_map(|(name, value)| {
-                    schema_value(value.clone())
-                        .ok()
-                        .map(|schema| (name.clone(), schema))
-                })
-                .collect();
-            Value::Object(sorted.into_iter().collect())
-        });
+            let mut sorted = std::collections::BTreeMap::new();
+            for (name, value) in properties {
+                if value.is_object() {
+                    let path = schema_path(&schema_path(props_path, "properties"), name);
+                    sorted.insert(name.clone(), schema_value(value.clone(), &path)?);
+                }
+            }
+            Ok::<_, EncodeError>(Value::Object(sorted.into_iter().collect()))
+        })
+        .transpose()?;
     let required = props_source
         .get("required")
         .and_then(Value::as_array)
