@@ -7097,3 +7097,198 @@ async fn retrieved_output_tool_collision_fails_before_provider_request() {
     );
     assert_structured_output_collision_error(&err.to_string());
 }
+
+// This fixture supplies whole documents beside the unchanged event-frame runtime.
+// It does not reproduce the retired automatic StreamFinal serialization or Final item.
+#[derive(Clone)]
+struct ExplicitStreamDocuments {
+    runtime: rig_core::test_utils::MockRuntime,
+    documents: Arc<Mutex<std::collections::VecDeque<serde_json::Value>>>,
+}
+
+impl rig_core::driver::Transport<MockScript> for ExplicitStreamDocuments {
+    fn send(
+        &self,
+        request: rig_core::completion::CompletionRequest,
+        exchange: Exchange,
+    ) -> Opening<rig_core::test_utils::MockFrame> {
+        assert_eq!(exchange.mode, rig_core::wire::Mode::Streaming);
+        let (opening, document) = {
+            let mut documents = self.documents.lock().expect("scripted documents");
+            let document = documents.pop_front().expect("one document per turn");
+            (
+                rig_core::driver::Transport::send(&self.runtime, request, exchange),
+                document,
+            )
+        };
+        Opening::new(async move { Ok(opening.await?.with_document(document)) })
+    }
+}
+
+fn with_stream_documents(
+    turns: impl IntoIterator<Item = (Vec<MockStreamEvent>, serde_json::Value)>,
+) -> rig_core::Model<MockScript, ExplicitStreamDocuments> {
+    let (events, documents): (Vec<_>, std::collections::VecDeque<_>) = turns.into_iter().unzip();
+    let model = MockCompletionModel::from_stream_turns(events);
+    rig_core::Model::new(
+        model.wire,
+        ExplicitStreamDocuments {
+            runtime: model.transport,
+            documents: Arc::new(Mutex::new(documents)),
+        },
+    )
+}
+
+fn explicit_stream_document(attempt: &str, total_tokens: u64) -> serde_json::Value {
+    json!({
+        "usage": { "total_tokens": total_tokens },
+        "finish_reason": null,
+        "message_id": null,
+        "response_id": format!("resp-{attempt}"),
+        "provider_request_id": format!("req-{attempt}"),
+        "provider": "mock",
+        "model": null,
+        "raw": {},
+    })
+}
+
+fn finish_with_document_identity(attempt: &str, total_tokens: u64) -> MockStreamEvent {
+    MockStreamEvent::FinalResponse(rig_core::operation::Finish {
+        usage: Usage::new().total_tokens(total_tokens),
+        response_id: Some(format!("resp-{attempt}")),
+        ..Default::default()
+    })
+}
+
+#[tokio::test]
+async fn hook_events_carry_explicit_stream_documents() {
+    let expected = explicit_stream_document("streamed", 3);
+    let hook = RawCaptureHook::default();
+    let mut stream = AgentBuilder::new(with_stream_documents([(
+        vec![
+            MockStreamEvent::text("reply"),
+            MockStreamEvent::RequestId("req-streamed".to_owned()),
+            finish_with_document_identity("streamed", 3),
+        ],
+        expected.clone(),
+    )]))
+    .add_hook(hook.clone())
+    .build()
+    .prompt("prompt")
+    .stream();
+    let mut forwarded_calls = Vec::new();
+    let mut final_response = None;
+    while let Some(item) = stream.next().await {
+        match item.expect("stream item") {
+            MultiTurnStreamItem::CompletionCall(call) => forwarded_calls.push(call.raw.clone()),
+            MultiTurnStreamItem::FinalResponse(response) => final_response = Some(response),
+            _ => {}
+        }
+    }
+    assert_eq!(hook.completion_responses(), std::slice::from_ref(&expected));
+    assert_eq!(hook.turns(), std::slice::from_ref(&expected));
+    assert_eq!(forwarded_calls, std::slice::from_ref(&expected));
+    let response = final_response.expect("run final response");
+    assert_eq!(call_raws(&response.completion_calls), [expected]);
+}
+
+#[tokio::test]
+async fn completion_calls_carry_each_attempts_own_explicit_stream_document() {
+    let first = explicit_stream_document("stream-1", 1);
+    let second = explicit_stream_document("stream-2", 2);
+    assert_ne!(first, second);
+    let hook = RawCaptureHook::default();
+    let mut stream = AgentBuilder::new(with_stream_documents([
+        (
+            vec![
+                MockStreamEvent::tool_call_name_delta("tc1", "add"),
+                MockStreamEvent::tool_call_arguments_delta("tc1", "{\"x\":2,\"y\":3}"),
+                MockStreamEvent::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
+                MockStreamEvent::RequestId("req-stream-1".to_owned()),
+                finish_with_document_identity("stream-1", 1),
+            ],
+            first.clone(),
+        ),
+        (
+            vec![
+                MockStreamEvent::text("5"),
+                MockStreamEvent::RequestId("req-stream-2".to_owned()),
+                finish_with_document_identity("stream-2", 2),
+            ],
+            second.clone(),
+        ),
+    ]))
+    .tool(crate::test_utils::MockAddTool)
+    .add_hook(hook.clone())
+    .build()
+    .prompt("add 2 and 3")
+    .max_turns(3)
+    .stream();
+    let mut forwarded_calls = Vec::new();
+    let mut final_response = None;
+    while let Some(item) = stream.next().await {
+        match item.expect("stream item") {
+            MultiTurnStreamItem::CompletionCall(call) => forwarded_calls.push(call.raw.clone()),
+            MultiTurnStreamItem::FinalResponse(response) => final_response = Some(response),
+            _ => {}
+        }
+    }
+    let response = final_response.expect("run final response");
+    assert_eq!(
+        call_raws(&response.completion_calls),
+        [first.clone(), second.clone()]
+    );
+    assert_eq!(forwarded_calls, [first.clone(), second.clone()]);
+    assert_eq!(hook.completion_responses(), [first.clone(), second.clone()]);
+    assert_eq!(hook.turns(), [first, second]);
+}
+
+#[tokio::test]
+async fn retried_turn_records_the_retried_attempts_own_explicit_stream_document() {
+    let first = explicit_stream_document("attempt-1", 1);
+    let second = explicit_stream_document("attempt-2", 2);
+    let retry = RetryOnceCapturingRaw::default();
+    let probe = RawCaptureHook::default();
+    let mut stream = AgentBuilder::new(with_stream_documents([
+        (
+            vec![
+                MockStreamEvent::text("first attempt"),
+                MockStreamEvent::RequestId("req-attempt-1".to_owned()),
+                finish_with_document_identity("attempt-1", 1),
+            ],
+            first.clone(),
+        ),
+        (
+            vec![
+                MockStreamEvent::text("second attempt"),
+                MockStreamEvent::RequestId("req-attempt-2".to_owned()),
+                finish_with_document_identity("attempt-2", 2),
+            ],
+            second.clone(),
+        ),
+    ]))
+    .add_hook(probe.clone())
+    .add_hook(retry.clone())
+    .build()
+    .prompt("prompt")
+    .max_turns(3)
+    .stream();
+    let mut final_response = None;
+    while let Some(item) = stream.next().await {
+        if let MultiTurnStreamItem::FinalResponse(response) = item.expect("stream item") {
+            final_response = Some(response);
+        }
+    }
+    let response = final_response.expect("run final response");
+    assert_eq!(response.output(), "second attempt");
+    assert_eq!(
+        *retry.seen.lock().expect("retry raws"),
+        [first.clone(), second.clone()]
+    );
+    assert_eq!(probe.turns(), [first.clone(), second.clone()]);
+    assert_eq!(
+        probe.completion_responses(),
+        [first.clone(), second.clone()]
+    );
+    assert_eq!(call_raws(&response.completion_calls), [first, second]);
+}
