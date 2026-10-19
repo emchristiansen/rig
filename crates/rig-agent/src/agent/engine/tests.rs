@@ -20,7 +20,7 @@ use crate::agent::AgentBuilder;
 use crate::agent::hook::{AgentHook, HookContext, RequestPatch, StepEventKind};
 use crate::agent::run::OutputMode;
 use crate::agent::streaming::MultiTurnStreamItem;
-use crate::completion::{Message, PromptError, Usage};
+use crate::completion::{FinishReason, Message, PromptError, Usage};
 use crate::streaming::{Item, StreamEvent};
 use crate::test_utils::{
     MockAddTool, MockCompletionModel, MockOperationArgs, MockScript, MockStreamEvent,
@@ -5065,8 +5065,11 @@ async fn completion_outcomes_carry_their_own_attempts_response_headers_streamed(
             let headers = self.headers.clone();
             Opening::new(async move {
                 let opened = opening.await?;
-                let headers = headers.lock().expect("header snapshots")
-                    .pop_front().expect("one header snapshot per attempt");
+                let headers = headers
+                    .lock()
+                    .expect("header snapshots")
+                    .pop_front()
+                    .expect("one header snapshot per attempt");
                 Ok(opened.with_captured_response_headers(headers))
             })
         }
@@ -5078,12 +5081,20 @@ async fn completion_outcomes_carry_their_own_attempts_response_headers_streamed(
             MockStreamEvent::tool_call("tc1", "add", json!({"x": 2, "y": 3})),
             MockStreamEvent::FinalResponse(Default::default()),
         ],
-        vec![MockStreamEvent::text("5"), MockStreamEvent::FinalResponse(Default::default())],
+        vec![
+            MockStreamEvent::text("5"),
+            MockStreamEvent::FinalResponse(Default::default()),
+        ],
     ]);
-    let model = rig_core::Model::new(scripted.wire, CapturedHeaders {
-        inner: scripted.transport,
-        headers: Arc::new(Mutex::new([codex_headers("20"), codex_headers("21")].into())),
-    });
+    let model = rig_core::Model::new(
+        scripted.wire,
+        CapturedHeaders {
+            inner: scripted.transport,
+            headers: Arc::new(Mutex::new(
+                [codex_headers("20"), codex_headers("21")].into(),
+            )),
+        },
+    );
     let mut stream = AgentBuilder::new(model)
         .tool(crate::test_utils::MockAddTool)
         .add_hook(hook.clone())
@@ -5863,7 +5874,6 @@ fn no_dispatch_events_are_built_outside_the_scope() -> anyhow::Result<()> {
     Ok(())
 }
 
-
 fn phased_carried_answer_body(answer: &str) -> serde_json::Value {
     json!({
         "id":"resp_carried_answer", "object":"response", "created_at":0,
@@ -5882,21 +5892,30 @@ async fn a_decoded_phased_responses_answer_survives_agent_chat_output() {
     let body = phased_carried_answer_body(answer);
     let http = RecordingHttpClient::new(body.to_string().into_bytes());
     let model = rig_core::Model::new(
-        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"), http.clone(),
+        Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"),
+        http.clone(),
     );
     let agent = AgentBuilder::new(model).build();
     let mut history = Vec::new();
-    let response = agent.chat("answer", &mut history).await.expect("the decoded answer succeeds");
+    let response = agent
+        .chat("answer", &mut history)
+        .await
+        .expect("the decoded answer succeeds");
     assert_eq!(response.output(), answer);
-    assert!(matches!(response.content.as_slice(), [AssistantContent::CarriedText(text)]
-        if text.text() == answer && text.phase.as_deref() == Some("final_answer")));
+    assert!(
+        matches!(response.content.as_slice(), [AssistantContent::CarriedText(text)]
+        if text.text() == answer && text.phase.as_deref() == Some("final_answer"))
+    );
     assert_eq!(response.completion_calls.len(), 1);
     assert_eq!(response.completion_calls[0].raw, body);
     assert_eq!(http.requests().len(), 1);
     let Some(Message::Assistant(turn)) = history.last() else {
         panic!("chat keeps the actual assistant answer in caller history");
     };
-    assert_eq!(rig_core::transcript::assistant_text_from_choice(&turn.content), answer);
+    assert_eq!(
+        rig_core::transcript::assistant_text_from_choice(&turn.content),
+        answer
+    );
 }
 
 #[tokio::test]
@@ -5913,22 +5932,29 @@ async fn carried_answer_telemetry_obeys_the_existing_content_consent_flag() {
         let body = phased_carried_answer_body(answer);
         let http = RecordingHttpClient::new(body.to_string().into_bytes());
         let model = rig_core::Model::new(
-            Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"), http.clone(),
+            Responses::new(OpenAIConfig::new("synthetic-test-key"), "gpt-4o-mini"),
+            http.clone(),
         );
         let response = AgentBuilder::new(model)
-            .record_content_telemetry(consent).build()
-            .prompt("answer").run().await.expect("the decoded answer succeeds");
+            .record_content_telemetry(consent)
+            .build()
+            .prompt("answer")
+            .run()
+            .await
+            .expect("the decoded answer succeeds");
         assert_eq!(response.output(), answer);
         assert_eq!(http.requests().len(), 1);
         let recorded = capture.values_of("gen_ai.completion");
         if consent {
-            assert!(recorded.iter().any(|value| value.as_str() == Some(answer)), "{recorded:?}");
+            assert!(
+                recorded.iter().any(|value| value.as_str() == Some(answer)),
+                "{recorded:?}"
+            );
         } else {
             assert!(recorded.is_empty(), "{recorded:?}");
         }
     }
 }
-
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct CarriedOutputToolValue {
@@ -6002,4 +6028,258 @@ async fn typed_output_tool_recovery_accepts_a_decoded_phased_preface_and_complet
         "provider preface{\"x\":1}"
     );
     assert_eq!(http.requests().len(), 1);
+}
+
+#[derive(Clone, Debug, Default)]
+struct EscalatingCap {
+    calls: Arc<AtomicU32>,
+}
+
+impl AgentHook for EscalatingCap {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        _event: crate::agent::CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
+        let call = self.calls.fetch_add(1, SeqCst);
+        CompletionCallAction::patch(RequestPatch::new().max_tokens(if call == 0 {
+            16
+        } else {
+            512
+        }))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TerminationProbe {
+    observations: Arc<Mutex<Vec<Termination>>>,
+}
+
+impl TerminationProbe {
+    fn observations(&self) -> Vec<Termination> {
+        self.observations.lock().expect("observations").clone()
+    }
+}
+
+impl AgentHook for TerminationProbe {
+    async fn on_model_turn_finished(
+        &self,
+        _ctx: &HookContext,
+        event: ModelTurnFinished<'_>,
+    ) -> ModelTurnAction {
+        self.observations
+            .lock()
+            .expect("observations")
+            .push((event.finish_reason.cloned(), event.max_tokens));
+        ModelTurnAction::continue_run()
+    }
+}
+
+#[derive(Clone, Default)]
+struct StatefulCompletionPatch {
+    calls: Arc<AtomicU32>,
+}
+
+impl StatefulCompletionPatch {
+    fn calls(&self) -> u32 {
+        self.calls.load(SeqCst)
+    }
+}
+
+impl AgentHook for StatefulCompletionPatch {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        _event: crate::agent::CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
+        let call = self.calls.fetch_add(1, SeqCst);
+        CompletionCallAction::patch(RequestPatch::new().temperature(if call == 0 {
+            0.1
+        } else {
+            0.9
+        }))
+    }
+}
+
+type Termination = (Option<FinishReason>, Option<u64>);
+
+#[tokio::test]
+async fn retry_reports_the_second_attempts_own_effective_max_tokens() {
+    let probe = TerminationProbe::default();
+    let escalating = EscalatingCap::default();
+    let model = MockCompletionModel::from_turns([
+        MockTurn::text("rejected").with_finish_reason(FinishReason::Length),
+        MockTurn::text("accepted").with_finish_reason(FinishReason::Stop),
+    ]);
+
+    AgentBuilder::new(model.clone())
+        // The agent's baseline, which neither attempt should report.
+        .max_tokens(64)
+        .add_hook(escalating.clone())
+        // Ahead of the hook that asks for the repeat: a non-continue action
+        // short-circuits the hooks behind it, so a probe registered after
+        // `BoundedResponseRetry` would never see the truncated attempt.
+        .add_hook(probe.clone())
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Repeat,
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .run()
+        .await
+        .expect("repeat should recover");
+
+    assert_eq!(
+        probe.observations(),
+        vec![
+            (Some(FinishReason::Length), Some(16)),
+            (Some(FinishReason::Stop), Some(512)),
+        ],
+        "each attempt must report its own post-patch cap, not the agent baseline of 64"
+    );
+    // ...and what the hook reported is what the provider was actually sent.
+    let requests = model.requests();
+    assert_eq!(requests[0].max_tokens, Some(16));
+    assert_eq!(requests[1].max_tokens, Some(512));
+    assert_eq!(escalating.calls.load(SeqCst), 2);
+}
+
+#[tokio::test]
+async fn streaming_retry_reports_the_second_attempts_own_effective_max_tokens() {
+    let probe = TerminationProbe::default();
+    let escalating = EscalatingCap::default();
+    let model = MockCompletionModel::from_stream_turns([
+        [
+            MockStreamEvent::Text("rejected".to_string()),
+            MockStreamEvent::FinalResponse(rig_core::operation::Finish {
+                usage: Usage::default(),
+                reason: Some(FinishReason::Length),
+                ..Default::default()
+            }),
+        ],
+        [
+            MockStreamEvent::Text("accepted".to_string()),
+            MockStreamEvent::FinalResponse(rig_core::operation::Finish {
+                usage: Usage::default(),
+                reason: Some(FinishReason::Stop),
+                ..Default::default()
+            }),
+        ],
+    ]);
+
+    let mut stream = AgentBuilder::new(model.clone())
+        .max_tokens(64)
+        .add_hook(escalating.clone())
+        .add_hook(probe.clone())
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Repeat,
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .stream();
+    while let Some(item) = stream.next().await {
+        item.expect("streaming item");
+    }
+
+    assert_eq!(
+        probe.observations(),
+        vec![
+            (Some(FinishReason::Length), Some(16)),
+            (Some(FinishReason::Stop), Some(512)),
+        ],
+        "streaming must report each attempt's own post-patch cap, as blocking does"
+    );
+    let requests = model.requests();
+    assert_eq!(requests[0].max_tokens, Some(16));
+    assert_eq!(requests[1].max_tokens, Some(512));
+}
+
+#[tokio::test]
+async fn blocking_model_turn_feedback_preserves_rejected_response() {
+    let model =
+        MockCompletionModel::from_turns([MockTurn::text("rejected"), MockTurn::text("accepted")]);
+    let response = AgentBuilder::new(model.clone())
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Feedback("try another approach"),
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .run()
+        .await
+        .expect("feedback retry should recover");
+
+    assert_eq!(response.output(), "accepted");
+    assert_eq!(
+        response.messages,
+        vec![
+            Message::user("question"),
+            mock_reply("rejected"),
+            Message::user("try another approach"),
+            mock_reply("accepted"),
+        ]
+    );
+    let second_request = &model.requests()[1];
+    assert_eq!(
+        second_request.chat_history.clone(),
+        vec![
+            Message::user("question"),
+            mock_reply("rejected"),
+            Message::user("try another approach"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn blocking_model_turn_repeat_preserves_prompt_history_with_fresh_preparation() {
+    let first_usage = retry_usage(10, 3);
+    let second_usage = retry_usage(7, 2);
+    let completion_patch = StatefulCompletionPatch::default();
+    let model = MockCompletionModel::from_turns([
+        MockTurn::text("rejected").with_usage(first_usage),
+        MockTurn::text("accepted").with_usage(second_usage),
+    ]);
+    let response = AgentBuilder::new(model.clone())
+        .add_hook(completion_patch.clone())
+        .add_hook(BoundedResponseRetry::new(
+            "rejected",
+            1,
+            TestRetryMode::Repeat,
+        ))
+        .build()
+        .prompt("question")
+        .max_turns(2)
+        .run()
+        .await
+        .expect("repeat should recover");
+
+    assert_eq!(response.output(), "accepted");
+    assert_eq!(response.usage, first_usage + second_usage);
+    assert_eq!(response.completion_calls.len(), 2);
+    let messages = response.messages;
+    assert_eq!(
+        messages,
+        vec![Message::user("question"), mock_reply("accepted")]
+    );
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 2);
+    let first = requests[0].chat_history.clone();
+    let second = requests[1].chat_history.clone();
+    assert_eq!(first, vec![Message::user("question")]);
+    assert_eq!(
+        second, first,
+        "Repeat must preserve the prompt and preceding history"
+    );
+    assert_eq!(requests[0].temperature, Some(0.1));
+    assert_eq!(requests[1].temperature, Some(0.9));
+    assert_eq!(completion_patch.calls(), 2);
 }
