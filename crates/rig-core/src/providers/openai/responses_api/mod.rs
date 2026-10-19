@@ -727,7 +727,7 @@ pub(crate) fn project_raw_parameters(raw: &Value) -> Result<Map<String, Value>, 
                 "`additional_params[\"__rig_tolerate_incomplete\"]` is no longer read: select the incomplete-terminal policy on the Responses wire with `Responses::with_streamed_incomplete`",
             ));
         }
-        let tools = fields.remove("tools");
+        let tools = fields.shift_remove("tools");
         if let Some(tools) = &tools {
             declared_tools(tools.clone()).map_err(|error| {
                 EncodeError::request(format!(
@@ -735,7 +735,7 @@ pub(crate) fn project_raw_parameters(raw: &Value) -> Result<Map<String, Value>, 
                 ))
             })?;
         }
-        fields.remove("stream");
+        fields.shift_remove("stream");
         tools
     } else {
         None
@@ -1796,10 +1796,10 @@ fn carried_reasoning_item(
     item.insert("type".to_owned(), json!("reasoning"));
     item.insert("id".to_owned(), json!(id));
     item.insert("summary".to_owned(), Value::Array(summary));
-    item.remove("status");
-    item.remove("content");
-    item.remove("encrypted_content");
-    item.remove("signature");
+    item.shift_remove("status");
+    item.shift_remove("content");
+    item.shift_remove("encrypted_content");
+    item.shift_remove("signature");
     if !content.is_empty() || raw_content.is_some_and(Vec::is_empty) {
         item.insert("content".to_owned(), Value::Array(content));
     }

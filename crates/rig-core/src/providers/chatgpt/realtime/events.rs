@@ -68,7 +68,7 @@ impl ServerEvent {
         let kind = kind.clone();
 
         fn body<T: DeserializeOwned>(mut object: Map<String, Value>) -> serde_json::Result<T> {
-            object.remove("type");
+            object.shift_remove("type");
             serde_json::from_value(Value::Object(object))
         }
         let event = match kind.as_str() {

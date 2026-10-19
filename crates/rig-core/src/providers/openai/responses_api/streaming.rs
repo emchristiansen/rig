@@ -346,7 +346,7 @@ impl ReasoningState {
                 json!(self.content.values().collect::<Vec<_>>()),
             );
         } else {
-            fields.remove("content");
+            fields.shift_remove("content");
         }
         if let Some(encrypted) = &self.encrypted {
             fields.insert("encrypted_content".into(), json!(encrypted));
@@ -1597,7 +1597,7 @@ impl ResponsesDecoder {
                     .is_some_and(|value| value.trim().is_empty())
                     && let Some(fields) = projection.as_object_mut()
                 {
-                    fields.remove("signature");
+                    fields.shift_remove("signature");
                 }
                 let mut reasoning = super::carried_reasoning(&projection, None)?;
                 reasoning.payload.item = item.clone();

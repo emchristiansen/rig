@@ -762,7 +762,7 @@ pub(crate) fn rewrite_body(
         BodyRewrite::GroqCompoundTools => {
             for message in messages_mut(map) {
                 if message.get("role").and_then(Value::as_str) == Some("assistant") {
-                    message.remove("reasoning_content");
+                    message.shift_remove("reasoning_content");
                 }
             }
         }
@@ -999,7 +999,7 @@ fn finalize_mistral(
                 .or_insert(serde_json::Value::Bool(false));
             // Mistral rejects unknown assistant fields; hidden reasoning
             // cannot be echoed back.
-            message.remove("reasoning_content");
+            message.shift_remove("reasoning_content");
         }
     }
     Ok(())
@@ -1196,7 +1196,7 @@ fn finalize_openrouter(map: &mut serde_json::Map<String, serde_json::Value>, pro
         // llama.cpp/DeepSeek key `reasoning_content`; OpenRouter's documented
         // assistant field is `reasoning`.
         if message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
-            && let Some(reasoning) = message.remove("reasoning_content")
+            && let Some(reasoning) = message.shift_remove("reasoning_content")
         {
             message.insert("reasoning".to_owned(), reasoning);
         }
@@ -1212,7 +1212,7 @@ fn finalize_openrouter(map: &mut serde_json::Map<String, serde_json::Value>, pro
                 .get_mut("image_url")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                image.remove("detail");
+                image.shift_remove("detail");
             }
         }
     }
@@ -2326,9 +2326,9 @@ impl ChatDecoder {
                 }
             };
             if structured || signed {
-                message.remove(REASONING_DETAILS);
+                message.shift_remove(REASONING_DETAILS);
                 for field in REASONING_TEXT_KEYS {
-                    message.remove(field);
+                    message.shift_remove(field);
                 }
             }
         }

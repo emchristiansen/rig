@@ -60,11 +60,11 @@ pub(super) fn sanitize_plain_text_history(
             continue;
         };
         if object.get("role").and_then(serde_json::Value::as_str) == Some("assistant") {
-            object.remove("tool_calls");
-            object.remove("reasoning_content");
+            object.shift_remove("tool_calls");
+            object.shift_remove("reasoning_content");
         }
         if strip_names {
-            object.remove("name");
+            object.shift_remove("name");
         }
         if let Some((separator, only_if_all_text)) = flatten
             && let Some(content) = object.get_mut("content")

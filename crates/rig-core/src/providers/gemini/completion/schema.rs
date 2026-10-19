@@ -32,8 +32,8 @@ fn flatten_schema(mut schema: Value) -> Result<Value, EncodeError> {
     resolve_refs(&mut schema, defs_obj)?;
 
     if let Some(obj) = schema.as_object_mut() {
-        obj.remove("$defs");
-        obj.remove("definitions");
+        obj.shift_remove("$defs");
+        obj.shift_remove("definitions");
     }
 
     Ok(schema)

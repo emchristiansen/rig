@@ -622,7 +622,7 @@ fn remove_pointer(item: &mut serde_json::Value, pointer: &str) {
         return;
     };
     let key = key.replace("~1", "/").replace("~0", "~");
-    fields.remove(&key);
+    fields.shift_remove(&key);
 }
 
 /// Set the value at `pointer` in `item`, creating objects on the way.
