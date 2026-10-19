@@ -731,3 +731,141 @@ fn nested_model_selection_stop_short_circuits_the_outer_stack() {
         ]
     );
 }
+
+#[test]
+fn append_entry_stamps_the_current_turn_and_reads_replay_in_order() {
+    let ctx = HookContext::new(false, None, None);
+    // A resumed run's carried entries come first.
+    ctx.seed_entries(&[RunEntry {
+        kind: "counter".into(),
+        turn: 2,
+        value: serde_json::json!(2),
+    }]);
+
+    ctx.set_turn(3);
+    ctx.append_entry("counter", &3u64).expect("serializable");
+    ctx.append_entry("other", &()).expect("null marker");
+
+    let counters = ctx.entries("counter");
+    assert_eq!(
+        counters.iter().map(|e| e.turn).collect::<Vec<_>>(),
+        [2, 3],
+        "seeded entries precede this run's appends"
+    );
+    // Last-wins snapshot read.
+    let last = ctx.last_entry("counter").expect("appended");
+    assert_eq!(last.turn, 3);
+    assert_eq!(last.value, serde_json::json!(3));
+    assert!(ctx.last_entry("absent").is_none());
+
+    // Only this run's appends are pending for the driver to flush —
+    // seeded entries are already in the run.
+    let pending = ctx.drain_pending_entries();
+    assert_eq!(
+        pending.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+        ["counter", "other"]
+    );
+    // Draining does not affect reads, and is not repeatable.
+    assert_eq!(ctx.entries("counter").len(), 2);
+    assert!(ctx.drain_pending_entries().is_empty());
+}
+
+struct TemperaturePatcher(f64);
+impl AgentHook for TemperaturePatcher {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        _event: CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
+        CompletionCallAction::patch(RequestPatch::new().temperature(self.0))
+    }
+}
+
+#[tokio::test]
+async fn nested_completion_patches_compose() {
+    let inner = HookStack::with(TemperaturePatcher(0.1));
+    let mut outer = HookStack::with(inner);
+    outer.push(TemperaturePatcher(0.2));
+    let prompt = Message::user("hi");
+    let action = outer
+        .on_completion_call(
+            &HookContext::new(false, None, None),
+            CompletionCallEvent {
+                prompt: &prompt,
+                history: &[],
+                turn: 1,
+            },
+        )
+        .await;
+    assert!(matches!(
+        action,
+        CompletionCallAction::Patch(RequestPatch {
+            temperature: Some(0.2),
+            ..
+        })
+    ));
+}
+
+struct StopThenCount {
+    stop: bool,
+    calls: Arc<AtomicUsize>,
+    seen_cancelled: Arc<AtomicUsize>,
+}
+
+impl AgentHook for StopThenCount {
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        if matches!(
+            event.outcome,
+            Err(ErrorReport {
+                kind: ErrorKind::Cancelled,
+                ..
+            })
+        ) {
+            self.seen_cancelled.fetch_add(1, Ordering::Relaxed);
+        }
+        if self.stop {
+            OutcomeAction::stop("terminal")
+        } else {
+            OutcomeAction::proceed()
+        }
+    }
+}
+
+#[tokio::test]
+async fn stop_outcome_short_circuits_later_hooks_and_surfaces_as_cancelled() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen_cancelled = Arc::new(AtomicUsize::new(0));
+    let mut stack = HookStack::with(StopThenCount {
+        stop: true,
+        calls: calls.clone(),
+        seen_cancelled: seen_cancelled.clone(),
+    });
+    stack.push(StopThenCount {
+        stop: false,
+        calls: calls.clone(),
+        seen_cancelled: seen_cancelled.clone(),
+    });
+    let kind = tool_call_kind();
+    let outcome = Ok(Outcome::ToolResult {
+        result: ToolResult::success(ToolOutput::text("ok")),
+    });
+    let action = stack
+        .on_outcome(
+            &HookContext::new(false, None, None),
+            outcome_event(&kind, &outcome),
+        )
+        .await;
+
+    assert!(matches!(
+        action,
+        OutcomeAction::Replace(Err(ErrorReport {
+            kind: ErrorKind::Cancelled,
+            ref message,
+            ..
+        })) if message == "terminal"
+    ));
+    // Cancellation is terminal; later hooks cannot recover a stopped run.
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(seen_cancelled.load(Ordering::Relaxed), 0);
+}
