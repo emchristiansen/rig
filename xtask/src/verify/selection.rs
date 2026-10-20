@@ -26,12 +26,7 @@ pub(super) fn changes(root: &Path, opts: &Options) -> Result<BTreeSet<String>> {
             &revision,
         ],
     ] {
-        paths.extend(
-            output(root, "git", &args)?
-                .split('\0')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned),
-        );
+        paths.extend(execute::git_paths(root, &args)?);
     }
     paths.extend(execute::untracked_inputs(root)?);
     Ok(paths)
@@ -349,29 +344,51 @@ pub(super) fn plan(
             )?;
             continue;
         }
-        // Agent and world goldens share this prefix. Classify both before
-        // provider cassettes and the owning package's generic asset rule.
+        // The agent goldens. Classify them before provider cassettes and the
+        // owning package's generic asset rule.
         if path.starts_with("crates/rig-cassette/fixtures/effects/") {
             add(&mut out, all, "bus-verification", "consumed golden changed")?;
             add(
                 &mut out,
                 all,
                 "default-tests",
-                "goldens may be consumed by any original/native provider target",
+                "goldens may be consumed by any provider target",
             )?;
             add(
                 &mut out,
                 all,
-                "ecs-parity",
-                "a golden changed: replay the parity lane",
+                "effect-corpus",
+                "a golden changed: replay the effect corpus",
             )?;
+            continue;
+        }
+        // The reply bank is data the runtime scenarios read, and it holds
+        // reply shapes for the coverage gate.
+        if path.starts_with("crates/rig-cassette/fixtures/bank/") {
+            add(&mut out, all, "bank", "the reply bank changed")?;
+            add(
+                &mut out,
+                all,
+                "coverage",
+                "the reply bank holds reply shapes",
+            )?;
+            if !out.iter().any(|c| c.id == "provider-runtime") {
+                out.push(provider_check(
+                    "rig-cassette",
+                    "runtime",
+                    "the reply bank changed: replay the runtime scenarios it serves",
+                ));
+            }
+            continue;
+        }
+        // The coverage baseline is data the gate reads, not package source.
+        if path.starts_with("crates/rig-cassette/coverage/") {
+            add(&mut out, all, "coverage", "coverage baseline changed")?;
             continue;
         }
         if let Some(name) = provider(path) {
             if let Some(owner) = provider_owner(packages, name) {
-                if owner == "rig-cassette"
-                    && matches!(name, "verify" | "world_replay" | "world_replay_world")
-                {
+                if owner == "rig-cassette" && name == "verify" {
                     affected.insert("rig-cassette-minimal".to_owned());
                 }
                 let id = format!("provider-{name}");
@@ -439,19 +456,56 @@ pub(super) fn plan(
     if paths.iter().any(|p| p != "DEVELOPING.md") {
         add(&mut out, all, "fmt", "changed files must remain formatted")?;
     }
-    // The runtimes and the effective-policy hash: an edit to rig-ecs (the
-    // hash, `Materialise`), rig-agent (the runner) or rig-core (the message
-    // and error rules) can stale or diverge the parity goldens, which the
-    // package's own tests never replay (tests/ecs_parity/README.md).
-    if affected
+    // Fixtures and their request snapshots are what the acceptance index
+    // reads.
+    if paths.iter().any(|p| {
+        p.starts_with("crates/rig-cassette/fixtures/cassettes/")
+            || p == "crates/rig-cassette/fixtures/acceptance.toml"
+    }) {
+        add(
+            &mut out,
+            all,
+            "acceptance",
+            "cassettes, snapshots or the index changed: every sent fact needs a recording",
+        )?;
+    }
+    // The bank is read off the cassettes.
+    if paths
         .iter()
-        .any(|name| matches!(name.as_str(), "rig-ecs" | "rig-agent" | "rig-core"))
+        .any(|p| p.starts_with("crates/rig-cassette/fixtures/cassettes/"))
     {
         add(
             &mut out,
             all,
-            "ecs-parity",
-            "runtime crate changed: the parity goldens may be stale or diverge",
+            "bank",
+            "cassettes changed: the reply bank must be the one they give",
+        )?;
+    }
+    // Rust sources move line and branch coverage; fixtures move the
+    // recorded shapes.
+    if paths
+        .iter()
+        .any(|p| p.ends_with(".rs") || p.starts_with("crates/rig-cassette/fixtures/cassettes/"))
+    {
+        add(
+            &mut out,
+            all,
+            "coverage",
+            "source or cassettes changed: coverage and shapes must not drop",
+        )?;
+    }
+    // The runtime and the effective-policy hash: an edit to rig-agent (the
+    // runner) or rig-core (the message and error rules) can stale the effect
+    // goldens, which the package's own tests never replay.
+    if affected
+        .iter()
+        .any(|name| matches!(name.as_str(), "rig-agent" | "rig-core"))
+    {
+        add(
+            &mut out,
+            all,
+            "effect-corpus",
+            "runtime crate changed: the effect goldens may be stale",
         )?;
     }
     let mut downstream = BTreeSet::new();

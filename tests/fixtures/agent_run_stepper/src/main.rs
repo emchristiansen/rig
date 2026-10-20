@@ -14,22 +14,28 @@
 use std::{
     future::Future,
     pin::{Pin, pin},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{Context, Poll, Waker},
 };
 
 use rig_agent::run::{AgentRun, AgentRunStep, ModelTurn, RunSpec, prepare_request};
 use rig_agent::tool::{ToolCatalog, ToolSet};
 use rig_agent::bus::{Bus, BusDriver, ModelHandle};
-use rig_core::completion::{AssistantContent, CompletionModel, CompletionRequest, CompletionRequestBuilder, CompletionResponse, ModelRef, Usage};
+use rig_core::completion::{
+    AssistantContent, CompletionRequest, CompletionResponse, ModelRef, Usage,
+};
+use rig_core::driver::{Exchange, Model, Opened, Opening, Transport};
 use rig_core::effect::HandlerKey;
-use rig_core::message::{Message, ToolCall, ToolFunction};
-use rig_core::serve::adapters::CompletionAdapter;
-use rig_core::streaming::StreamingCompletionResponse;
+use rig_core::message::{Message, ToolCall, ToolFunction, ToolName};
+use rig_core::serve::adapters::ModelAdapter;
+use rig_core::test_utils::{MockFrame, MockScript};
 use rig_core::tool::{DynamicTool, ToolContext, ToolOutput};
 use rig_core::transcript;
-use rig_core::wasm_compat::WasmCompatSend;
 use rig_core::error::ProviderError;
+use rig_core::wire::Mode;
 
 /// Every future here is ready on first poll (a scripted model, in-process
 /// tools); a no-op waker is all the "runtime" this driver needs.
@@ -56,17 +62,21 @@ fn drive<F: Future + Unpin>(mut future: F, driver: &mut BusDriver) -> F::Output 
     }
 }
 
-/// Calls `add(2, 3)` on its first turn, answers "done" on its second.
-#[derive(Default)]
-struct ScriptedModel {
-    calls: AtomicUsize,
+/// Calls `add(2, 3)` on its first turn, answers "done" on its second: the
+/// runtime behind a scripted completion wire, answering with a whole
+/// response.
+#[derive(Clone, Default)]
+struct Scripted {
+    calls: Arc<AtomicUsize>,
 }
 
-impl CompletionModel for ScriptedModel {
-    fn completion(
-        &self,
-        request: CompletionRequest,
-        ) -> impl Future<Output = Result<CompletionResponse, ProviderError>> + WasmCompatSend {
+impl Transport<MockScript> for Scripted {
+    fn send(&self, request: CompletionRequest, exchange: Exchange) -> Opening<MockFrame> {
+        if exchange.mode == Mode::Streaming {
+            return Opening::failed(ProviderError::Provider(
+                "fixture drives unary completions only".to_string(),
+            ));
+        }
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let choice = if call == 0 {
             // The request must carry the tool the run will call back into.
@@ -83,33 +93,26 @@ impl CompletionModel for ScriptedModel {
             );
             vec![AssistantContent::ToolCall(ToolCall::from_wire(
                 "call-1",
-                ToolFunction::new("add".to_string(), serde_json::json!({"x": 2, "y": 3})),
+                ToolFunction::new(
+                    ToolName::new("add").expect("tool name"),
+                    serde_json::json!({"x": 2, "y": 3}),
+                ),
             ))]
         } else {
             vec![AssistantContent::text("done")]
         };
-        std::future::ready(Ok(CompletionResponse::new(
-            choice,
-            Usage::default(),
-            "fixture",
-            serde_json::json!({ "provider": "fixture" }),
-        )))
-    }
-
-    fn stream(
-        &self,
-        _request: CompletionRequest,
-        ) -> impl Future<Output = Result<StreamingCompletionResponse, ProviderError>> + WasmCompatSend
-    {
-        std::future::ready(Err(ProviderError::Provider(
-            "fixture drives unary completions only".to_string(),
-        )))
+        let document = serde_json::json!({ "provider": "fixture" });
+        let response = CompletionResponse::new(choice, Usage::default(), rig_core::message::Origin::new("test.api", "fixture", ""), document.clone());
+        Opening::ready(
+            Opened::new(futures::stream::iter([Ok(MockFrame::Response(Box::new(response)))]))
+                .with_document(document),
+        )
     }
 }
 
 fn add_tool() -> DynamicTool {
     DynamicTool::new(
-        "add",
+        ToolName::new("add").expect("tool name"),
         "Add x and y",
         serde_json::json!({
             "type": "object",
@@ -133,10 +136,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (dispatcher, _registrar, mut driver) = Bus::channel();
     driver.register(
         "model",
-        CompletionAdapter::new(ModelRef::new("fixture"), ScriptedModel::default()),
+        ModelAdapter::new(
+            ModelRef::new("fixture"),
+            Model::new(MockScript::new("fixture"), Scripted::default()),
+        ),
     )?;
     let model: ModelHandle = dispatcher.handle(&HandlerKey::from("model"))?;
-    assert_eq!(model.model_ref().as_str(), "fixture");
+    assert_eq!(model.label().as_str(), "fixture");
 
     // 2. An erased tool set, pinned into a catalog for the turn.
     let mut tools = ToolSet::default();
@@ -171,19 +177,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None,
                 )?;
                 run.advertise_tools(turn, prepared.tools.clone());
-                let executable = prepared.executable_tool_names.clone();
-                let allowed = prepared.allowed_tool_names.clone();
+                let policy = prepared.policy.clone();
                 let request = prepared
-                    .apply(CompletionRequestBuilder::unbound(prompt))
-                    .build();
-                let response = drive(model.complete(request), &mut driver)?;
+                    .apply(CompletionRequest::new(prompt));
+                let response = drive(model.call(request), &mut driver)?;
                 model_calls += 1;
                 run.model_response(ModelTurn::new(
-                    None,
+                    response.head(),
                     response.choice,
                     response.usage,
-                    executable,
-                    allowed,
+                    policy,
                     response.raw,
                 ))?;
             }
@@ -191,21 +194,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut results = Vec::with_capacity(calls.len());
                 for call in calls {
                     let name = call.tool_call.function.name.clone();
-                    let arguments = call.tool_call.function.arguments.to_string();
+                    let arguments = call.tool_call.function.arguments_value().to_string();
                     let result =
                         block_on(catalog.execute(&name, &arguments, &mut ToolContext::new()));
                     assert!(result.is_success(), "dispatch by name through the catalog");
                     tool_calls += 1;
                     results.push(transcript::tool_result_output(
                         call.tool_call.id.clone(),
-                        call.tool_call.provider.clone(),
                         name,
-                        result.output().clone(),
+                        &result,
                     ));
                 }
                 run.tool_results(results)?;
             }
-            AgentRunStep::Done(response) => break response.output,
+            AgentRunStep::Done(response) => break response.output(),
         }
     };
 

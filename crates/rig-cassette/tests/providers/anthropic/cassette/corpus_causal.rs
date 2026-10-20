@@ -11,13 +11,12 @@ use futures::StreamExt;
 use rig::agent::tool::server::ToolServer;
 use rig::agent::{AgentBuilder, MultiTurnStreamItem};
 use rig::bus::Bus;
-use rig::driver::Bound;
 use rig::effect::{EffectFamily, HandlerKey};
 use rig::providers::anthropic::completion::CLAUDE_SONNET_4_6;
-use rig::providers::anthropic::wire::Anthropic;
 use rig::serve::ServingPolicy;
 use rig::tool::RegisteredTool;
 use rig_cassette::agent::AgentReplayExt;
+use rig_test_support::cassette_models::AnthropicModels;
 
 use super::super::support::with_anthropic_corpus_causal_cassette;
 use crate::goldens::{Lookup, NestedChild, Nesting, families, parent_positions};
@@ -35,13 +34,13 @@ async fn final_output(stream: &mut rig::agent::StreamingResult) -> String {
     let mut output = None;
     while let Some(item) = stream.next().await {
         if let MultiTurnStreamItem::FinalResponse(response) = item.expect("the stream yields") {
-            output = Some(response.output);
+            output = Some(response.output());
         }
     }
     output.expect("a final response")
 }
 
-async fn over_host(client: Bound<Anthropic>, host: Host) -> rig::cassette::effect_log::EffectLog {
+async fn over_host(client: AnthropicModels, host: Host) -> rig::cassette::effect_log::EffectLog {
     let config = ServingPolicy {
         serial_per_handler: host.serial,
         ..ServingPolicy::default()
@@ -51,7 +50,7 @@ async fn over_host(client: Bound<Anthropic>, host: Host) -> rig::cassette::effec
     driver
         .register_erased(
             model_key.clone(),
-            rig::serve::ErasedHandler::new(rig::serve::adapters::CompletionAdapter::new(
+            rig::serve::ErasedHandler::new(rig::serve::adapters::ModelAdapter::new(
                 "default",
                 client.completion(CLAUDE_SONNET_4_6),
             )),
@@ -96,7 +95,7 @@ async fn over_host(client: Bound<Anthropic>, host: Host) -> rig::cassette::effec
             .max_turns(3)
             .await
             .expect("the agent answers")
-            .output
+            .output()
     };
     assert!(output.contains("Paris"), "{output}");
     let log = agent.stamp(recorder.take());

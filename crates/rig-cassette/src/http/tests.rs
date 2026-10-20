@@ -145,7 +145,7 @@ fn replay_matching_is_ordered_by_default() {
     ];
 
     assert_eq!(
-        matching_interaction_index(policy, &interactions, &request),
+        matching_interaction_index(policy, &interactions, &request, None, |_| 0),
         None
     );
 }
@@ -171,19 +171,126 @@ fn replay_matching_can_be_explicitly_unordered() {
     ];
 
     assert_eq!(
-        matching_interaction_index(policy, &interactions, &request),
+        matching_interaction_index(policy, &interactions, &request, None, |_| 0),
         Some(1)
+    );
+}
+
+#[test]
+fn unordered_shape_matching_serves_the_closest_interaction() {
+    let policy = CassettePolicy {
+        replay_matching: ReplayMatching::Unordered,
+        body_matching: BodyMatching::Shape,
+        ..CassettePolicy::default()
+    };
+    let recorded = |input: &str| CassetteRequest {
+        body: Some(json!({ "input": input }).to_string()),
+        ..cassette_request("/v1/answer")
+    };
+    let interactions = vec![
+        ReplayInteraction {
+            when: recorded("first"),
+            then: cassette_response(),
+            consumed: false,
+        },
+        ReplayInteraction {
+            when: recorded("second"),
+            then: cassette_response(),
+            consumed: false,
+        },
+    ];
+    let keys: Vec<Value> = interactions
+        .iter()
+        .map(|interaction| shape::shape_key(&recorded_body_view(policy, &interaction.when)))
+        .collect();
+    let request = incoming_request("/v1/answer", json!({ "input": "second" }).to_string());
+    let sent = shape::shape_key(&incoming_body_view(policy, &request));
+    let shapes = Some(ShapeKeys {
+        recorded: &keys,
+        sent: &sent,
+    });
+    let distance = |index: usize| {
+        let recorded = recorded_body_view(policy, &interactions[index].when);
+        snapshot::diff(&recorded, &incoming_body_view(policy, &request)).len()
+    };
+
+    assert_eq!(
+        matching_interaction_index(policy, &interactions, &request, shapes, distance),
+        Some(1),
+        "the interaction the request equals wins"
+    );
+    assert_eq!(
+        matching_interaction_index(policy, &interactions, &request, shapes, |_| 3),
+        Some(0),
+        "on a tie the first of the same shape serves"
+    );
+}
+
+#[test]
+fn unordered_shape_matching_skips_candidates_with_another_method_or_path() {
+    let policy = CassettePolicy {
+        replay_matching: ReplayMatching::Unordered,
+        body_matching: BodyMatching::Shape,
+        ..CassettePolicy::default()
+    };
+    let body = json!({ "input": "same" }).to_string();
+    let interactions = vec![
+        ReplayInteraction {
+            when: CassetteRequest {
+                method: "GET".to_string(),
+                body: Some(body.clone()),
+                ..cassette_request("/v1/answer")
+            },
+            then: cassette_response(),
+            consumed: false,
+        },
+        ReplayInteraction {
+            when: CassetteRequest {
+                body: Some(body.clone()),
+                ..cassette_request("/v1/other")
+            },
+            then: cassette_response(),
+            consumed: false,
+        },
+        ReplayInteraction {
+            when: CassetteRequest {
+                body: Some(body.clone()),
+                ..cassette_request("/v1/answer")
+            },
+            then: cassette_response(),
+            consumed: false,
+        },
+    ];
+    let keys: Vec<Value> = interactions
+        .iter()
+        .map(|interaction| shape::shape_key(&recorded_body_view(policy, &interaction.when)))
+        .collect();
+    let request = incoming_request("/v1/answer", body);
+    let sent = shape::shape_key(&incoming_body_view(policy, &request));
+    let shapes = Some(ShapeKeys {
+        recorded: &keys,
+        sent: &sent,
+    });
+
+    assert_eq!(
+        matching_interaction_index(policy, &interactions, &request, shapes, |index| {
+            if index == 2 { 1 } else { 0 }
+        }),
+        Some(2),
+        "a same-shape recording with another method or path never serves, however close"
+    );
+    assert_eq!(
+        matching_interaction_index(policy, &interactions[..2], &request, shapes, |_| 0),
+        None,
+        "with only another method's and another path's recordings nothing serves"
     );
 }
 
 #[test]
 fn replay_matching_requires_bearer_provider_auth_without_recording_its_value() {
     for provider in ["openai", "doubleword"] {
-        let policy = CassettePolicy::for_scenario(
-            provider,
-            "agent/completion_smoke",
-            ReplayMatching::Ordered,
-        );
+        let policy =
+            CassettePolicy::for_scenario(provider, CassetteSpec::new("agent/completion_smoke"));
         let interaction = ReplayInteraction {
             when: cassette_request("/v1/responses"),
             then: cassette_response(),
@@ -198,7 +305,7 @@ fn replay_matching_requires_bearer_provider_auth_without_recording_its_value() {
         );
 
         assert_eq!(
-            matching_interaction_index(policy, &interactions, &request_without_auth),
+            matching_interaction_index(policy, &interactions, &request_without_auth, None, |_| 0),
             None,
             "{provider} replay should require bearer authentication"
         );
@@ -207,7 +314,7 @@ fn replay_matching_requires_bearer_provider_auth_without_recording_its_value() {
             vec!["authorization"]
         );
         assert_eq!(
-            matching_interaction_index(policy, &interactions, &request_with_auth),
+            matching_interaction_index(policy, &interactions, &request_with_auth, None, |_| 0),
             Some(0)
         );
     }
@@ -215,11 +322,8 @@ fn replay_matching_requires_bearer_provider_auth_without_recording_its_value() {
 
 #[test]
 fn gemini_interactions_policy_requires_api_key_header() {
-    let policy = CassettePolicy::for_scenario(
-        "gemini",
-        "interactions_api/tool_result",
-        ReplayMatching::Ordered,
-    );
+    let policy =
+        CassettePolicy::for_scenario("gemini", CassetteSpec::new("interactions_api/tool_result"));
     let mut request = incoming_request("/v1beta/models", Bytes::new());
 
     assert_eq!(
@@ -241,7 +345,7 @@ fn gemini_interactions_policy_requires_api_key_header() {
 #[tokio::test]
 async fn direct_recorder_keeps_no_credential_a_source_stamped() {
     let policy =
-        CassettePolicy::for_scenario("chatgpt", "agent/completion_smoke", ReplayMatching::Ordered);
+        CassettePolicy::for_scenario("chatgpt", CassetteSpec::new("agent/completion_smoke"));
     let interactions = Arc::new(Mutex::new(Vec::new()));
     let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
     let recorder = DirectRecorder {
@@ -294,7 +398,7 @@ async fn direct_recorder_keeps_no_credential_a_source_stamped() {
 #[tokio::test]
 async fn direct_recorder_omits_sigv4_headers() {
     let policy =
-        CassettePolicy::for_scenario("bedrock", "agent/completion_smoke", ReplayMatching::Ordered);
+        CassettePolicy::for_scenario("bedrock", CassetteSpec::new("agent/completion_smoke"));
     let interactions = Arc::new(Mutex::new(Vec::new()));
     let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
     let recorder = DirectRecorder {
@@ -370,7 +474,7 @@ fn replay_miss_diagnostics_scrub_actual_request_details() {
         consumed: false,
     }];
 
-    let message = replay_miss_message(policy, &request, &interactions);
+    let message = replay_miss_message(policy, &request, &interactions, None, None);
 
     assert!(!message.contains("AIzaSyExampleSecretToken123456"));
     assert!(!message.contains("raw-api-key"));
@@ -383,11 +487,8 @@ fn replay_miss_diagnostics_scrub_actual_request_details() {
 
 #[test]
 fn replay_miss_diagnostics_report_missing_required_headers_without_values() {
-    let policy = CassettePolicy::for_scenario(
-        "anthropic",
-        "agent/completion_smoke",
-        ReplayMatching::Ordered,
-    );
+    let policy =
+        CassettePolicy::for_scenario("anthropic", CassetteSpec::new("agent/completion_smoke"));
     let request = incoming_request("/v1/messages", Bytes::new());
     let interactions = vec![ReplayInteraction {
         when: cassette_request("/v1/messages"),
@@ -395,7 +496,7 @@ fn replay_miss_diagnostics_report_missing_required_headers_without_values() {
         consumed: false,
     }];
 
-    let message = replay_miss_message(policy, &request, &interactions);
+    let message = replay_miss_message(policy, &request, &interactions, None, None);
 
     assert!(message.contains("x-api-key"));
     assert!(message.contains("missing_required_headers"));
@@ -433,6 +534,8 @@ async fn replay_request_records_unexpected_misses() {
         }],
         misses: Vec::new(),
         policy: CassettePolicy::default(),
+        snapshots: None,
+        shapes: None,
     }));
 
     let response = replay_request(
@@ -1128,7 +1231,7 @@ async fn a_source_credential_sent_through_the_driver_is_never_recorded() {
     });
 
     let policy =
-        CassettePolicy::for_scenario("openai", "agent/completion_smoke", ReplayMatching::Ordered);
+        CassettePolicy::for_scenario("openai", CassetteSpec::new("agent/completion_smoke"));
     let interactions = Arc::new(Mutex::new(Vec::new()));
     let ledger_dir = assert_fs::TempDir::new().expect("ledger directory");
     let recorder = DirectRecorder {
@@ -1141,30 +1244,16 @@ async fn a_source_credential_sent_through_the_driver_is_never_recorded() {
             origin: format!("http://{address}"),
         }),
     };
-    let provider = rig_core::providers::openai::OpenAI::new("static-key")
+    let provider = rig_core::providers::openai::OpenAIConfig::new("static-key")
         .with_base_url(format!("http://{address}/v1"))
         .with_account_id("static-account")
         .with_credential_source(FixedSource);
-    let response = {
-        use rig_core::completion::CompletionModel as _;
-        rig_core::driver::Bound::new(
-            provider.chat("gpt-4o"),
-            DirectRecordingHttpClient::new(Some(recorder)),
-        )
-        .completion(rig_core::completion::CompletionRequest {
-            model: None,
-            chat_history: vec![rig_core::message::Message::user("hi")],
-            documents: Vec::new(),
-            tools: Vec::new(),
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        })
-        .await
-    };
+    let response = rig_core::Model::new(
+        provider.chat("gpt-4o"),
+        DirectRecordingHttpClient::new(Some(recorder)),
+    )
+    .call(rig_core::completion::CompletionRequest::new("hi"))
+    .await;
     response.expect("the local upstream answers");
 
     let received = received.lock().expect("unpoisoned").clone();
@@ -1186,4 +1275,502 @@ async fn a_source_credential_sent_through_the_driver_is_never_recorded() {
             "{secret} was recorded: {rendered}"
         );
     }
+}
+
+#[test]
+fn replay_matching_refuses_another_query_or_recorded_header() {
+    let policy = CassettePolicy {
+        replay_matching: ReplayMatching::Unordered,
+        ..CassettePolicy::default()
+    };
+    let interactions = vec![
+        ReplayInteraction {
+            when: CassetteRequest {
+                query_param: vec![query_pair("a", "1")],
+                ..cassette_request("/v1/answer")
+            },
+            then: cassette_response(),
+            consumed: false,
+        },
+        ReplayInteraction {
+            when: CassetteRequest {
+                header: vec![NameValue {
+                    name: "content-type".to_string(),
+                    value: "application/json".to_string(),
+                }],
+                ..cassette_request("/v1/answer")
+            },
+            then: cassette_response(),
+            consumed: false,
+        },
+        ReplayInteraction {
+            when: CassetteRequest {
+                header: vec![NameValue {
+                    name: "bad name".to_string(),
+                    value: "x".to_string(),
+                }],
+                ..cassette_request("/v1/answer")
+            },
+            then: cassette_response(),
+            consumed: false,
+        },
+        ReplayInteraction {
+            when: cassette_request("/v1/answer"),
+            then: cassette_response(),
+            consumed: false,
+        },
+    ];
+    let request = incoming_request("/v1/answer", Bytes::new());
+
+    assert_eq!(
+        matching_interaction_index(policy, &interactions[..3], &request, None, |_| 0),
+        None,
+        "another query, a missing recorded header or an unusable recorded header name never serves"
+    );
+    assert_eq!(
+        matching_interaction_index(policy, &interactions, &request, None, |_| 0),
+        Some(3)
+    );
+}
+
+#[test]
+fn an_unordered_miss_is_compared_with_the_first_unplayed_interaction_on_its_route() {
+    let policy = CassettePolicy {
+        replay_matching: ReplayMatching::Unordered,
+        ..CassettePolicy::default()
+    };
+    let interactions = vec![
+        ReplayInteraction {
+            when: CassetteRequest {
+                method: "GET".to_string(),
+                ..cassette_request("/v1/answer")
+            },
+            then: cassette_response(),
+            consumed: false,
+        },
+        ReplayInteraction {
+            when: cassette_request("/v1/answer"),
+            then: cassette_response(),
+            consumed: false,
+        },
+    ];
+
+    assert_eq!(
+        miss_candidate_index(
+            policy,
+            &interactions,
+            &incoming_request("/v1/answer", Bytes::new())
+        ),
+        Some(1)
+    );
+}
+
+#[test]
+fn replay_problem_names_what_the_replay_server_could_not_serve() {
+    let undecodable = decode_body("!", BodyEncoding::Base64).expect_err("`!` is not a base64 body");
+    let invalid_status = StatusCode::from_u16(1000).expect_err("1000 is not an HTTP status");
+    let invalid_value =
+        HeaderValue::from_str("bad\nvalue").expect_err("a newline is not a header value");
+    let problem = |when: CassetteRequest, then: CassetteResponse| {
+        replay_problem(&CassetteInteraction { when, then })
+    };
+
+    assert_eq!(
+        problem(
+            CassetteRequest {
+                body: Some("!".to_string()),
+                body_encoding: BodyEncoding::Base64,
+                ..cassette_request("/v1/answer")
+            },
+            cassette_response(),
+        ),
+        Some(format!("request body does not decode: {undecodable}"))
+    );
+    assert_eq!(
+        problem(
+            cassette_request("/v1/answer"),
+            CassetteResponse {
+                status: 1000,
+                ..cassette_response()
+            },
+        ),
+        Some(format!("response status 1000: {invalid_status}"))
+    );
+    assert_eq!(
+        problem(
+            cassette_request("/v1/answer"),
+            CassetteResponse {
+                header: vec![NameValue {
+                    name: "x-valid-name".to_string(),
+                    value: "bad\nvalue".to_string(),
+                }],
+                ..cassette_response()
+            },
+        ),
+        Some(format!(
+            "invalid value for response header \"x-valid-name\": {invalid_value}"
+        ))
+    );
+    assert_eq!(
+        problem(
+            cassette_request("/v1/answer"),
+            CassetteResponse {
+                body: Some("!".to_string()),
+                body_encoding: BodyEncoding::Base64,
+                ..cassette_response()
+            },
+        ),
+        Some(format!("response body does not decode: {undecodable}"))
+    );
+    assert_eq!(
+        problem(
+            cassette_request("/v1/answer"),
+            CassetteResponse {
+                header: vec![NameValue {
+                    name: "Connection".to_string(),
+                    value: "bad\nvalue".to_string(),
+                }],
+                ..cassette_response()
+            },
+        ),
+        None,
+        "a hop-by-hop header is never served, so its value is not checked"
+    );
+}
+
+#[test]
+fn cassette_response_drops_hop_by_hop_headers() {
+    let response = CassetteResponse {
+        header: vec![
+            NameValue {
+                name: "Connection".to_string(),
+                value: "close".to_string(),
+            },
+            NameValue {
+                name: "content-type".to_string(),
+                value: "application/json".to_string(),
+            },
+        ],
+        ..cassette_response()
+    };
+
+    let response = super::cassette_response(&response, Path::new("fixture.yaml"));
+    let headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                value.to_str().expect("ASCII header value").to_owned(),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        headers,
+        vec![("content-type".to_owned(), "application/json".to_owned())]
+    );
+}
+
+#[test]
+fn recorded_body_records_an_empty_body_as_absent() {
+    let recorded = recorded_body(&[]);
+
+    assert_eq!(recorded.encoding, BodyEncoding::Utf8);
+    assert_eq!(recorded.body, None);
+}
+
+#[test]
+fn a_recorded_path_without_an_origin_parses_against_a_placeholder_host() {
+    assert_eq!(
+        parse_recorded_uri("/v1/answer?a=1").as_str(),
+        "http://cassette.invalid/v1/answer?a=1"
+    );
+}
+
+#[test]
+#[should_panic(expected = "recorded URI \":99999\" should parse: invalid port number")]
+fn a_recorded_uri_that_parses_neither_way_panics() {
+    let _ = parse_recorded_uri(":99999");
+}
+
+#[test]
+fn body_matching_compares_non_json_text_and_refuses_non_utf8_bytes() {
+    let policy = CassettePolicy::default();
+    let headers = axum::http::HeaderMap::new();
+
+    assert!(body_matches(
+        policy,
+        &headers,
+        &[],
+        b"plain text",
+        Some("plain text"),
+        BodyEncoding::Utf8
+    ));
+    assert!(!body_matches(
+        policy,
+        &headers,
+        &[],
+        b"plain text",
+        Some("other text"),
+        BodyEncoding::Utf8
+    ));
+    assert!(!body_matches(
+        policy,
+        &headers,
+        &[],
+        &[0xff, 0xfe],
+        Some("plain text"),
+        BodyEncoding::Utf8
+    ));
+}
+
+fn content_type_header(value: &'static str) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static(value),
+    );
+    headers
+}
+
+fn recorded_content_type(value: &str) -> Vec<NameValue> {
+    vec![NameValue {
+        name: "content-type".to_string(),
+        value: value.to_string(),
+    }]
+}
+
+#[test]
+fn multipart_bodies_match_part_by_part_whatever_their_boundaries() {
+    let policy = CassettePolicy::default();
+    // The recording holds an empty part, which carries nothing to compare.
+    let recorded = "--recorded\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\nassistants\r\n--recorded\r\n\r\n--recorded--\r\n";
+    let sent: &[u8] =
+        b"--sent\r\nContent-Disposition: form-data;name=\"purpose\"\r\n\r\nassistants\r\n--sent--\r\n";
+    let recorded_headers = recorded_content_type("multipart/form-data; boundary=recorded");
+    let sent_headers = content_type_header("multipart/form-data; boundary=sent");
+    let matches = |headers: &axum::http::HeaderMap, expected: &[NameValue], actual: &[u8]| {
+        body_matches(
+            policy,
+            headers,
+            expected,
+            actual,
+            Some(recorded),
+            BodyEncoding::Utf8,
+        )
+    };
+
+    assert!(matches(&sent_headers, &recorded_headers, sent));
+    assert!(!matches(
+        &sent_headers,
+        &recorded_headers,
+        b"--sent\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\nother\r\n--sent--\r\n"
+    ));
+    assert!(
+        !matches(
+            &content_type_header("multipart/form-data; charset=utf-8"),
+            &recorded_headers,
+            sent
+        ),
+        "a sent body without a boundary cannot be split"
+    );
+    assert!(
+        !matches(
+            &sent_headers,
+            &recorded_content_type("multipart/form-data; charset=utf-8"),
+            sent
+        ),
+        "a recorded body without a boundary cannot be split"
+    );
+    assert!(
+        !matches(
+            &sent_headers,
+            &recorded_headers,
+            b"--sent\r\nno header terminator\r\n--sent--\r\n"
+        ),
+        "a part without a header block does not parse"
+    );
+}
+
+#[test]
+fn a_non_utf8_body_previews_as_its_length() {
+    assert_eq!(
+        body_preview_bytes_for_diagnostics(CassettePolicy::default(), &[0xff, 0xfe]),
+        "<2 bytes of non-UTF-8 body>"
+    );
+}
+
+#[test]
+fn scrubber_canonicalizes_retry_after_and_drops_what_it_cannot_read() {
+    let retry_after = |value: String| NameValue {
+        name: "retry-after".to_string(),
+        value,
+    };
+    let mut response = CassetteResponse {
+        status: 429,
+        header: vec![
+            retry_after(" 7 ".to_string()),
+            retry_after("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
+            retry_after("soon".to_string()),
+            retry_after("1".repeat(129)),
+        ],
+        ..cassette_response()
+    };
+
+    CassetteScrubber::new(CassettePolicy::default()).scrub_response(&mut response);
+
+    let headers: Vec<(&str, &str)> = response
+        .header
+        .iter()
+        .map(|header| (header.name.as_str(), header.value.as_str()))
+        .collect();
+    assert_eq!(
+        headers,
+        vec![
+            ("retry-after", "7"),
+            ("retry-after", "Wed, 21 Oct 2015 07:28:00 GMT"),
+        ]
+    );
+    assert_eq!(response.body, None, "an absent body stays absent");
+}
+
+#[test]
+fn scrubber_keeps_a_base64_body_that_does_not_decode() {
+    assert_eq!(
+        CassetteScrubber::new(CassettePolicy::default())
+            .scrub_encoded_body("!!!", BodyEncoding::Base64),
+        "!!!"
+    );
+}
+
+#[test]
+fn scrubber_placeholders_arn_accounts_in_non_json_sse_data_and_bare_strings() {
+    let mut scrubber = CassetteScrubber::new(CassettePolicy::default());
+
+    assert_eq!(
+        scrubber.scrub_body("data: arn:aws:iam::123456789012:role/x\n\n"),
+        "data: arn:aws:iam::account_REDACTED_1:role/x\n\n"
+    );
+    assert_eq!(
+        scrub_artifact(&json!(["arn:aws:iam::123456789012:root"])),
+        json!(["arn:aws:iam::account_REDACTED_1:root"])
+    );
+}
+
+#[test]
+fn scrubber_redacts_sensitive_request_header_values() {
+    let mut request = CassetteRequest {
+        header: vec![
+            NameValue {
+                name: "Authorization".to_string(),
+                value: "Bearer live-token".to_string(),
+            },
+            NameValue {
+                name: "content-type".to_string(),
+                value: "application/json".to_string(),
+            },
+        ],
+        ..cassette_request("/v1/answer")
+    };
+
+    CassetteScrubber::new(CassettePolicy::default()).scrub_request(&mut request);
+
+    let headers: Vec<(&str, &str)> = request
+        .header
+        .iter()
+        .map(|header| (header.name.as_str(), header.value.as_str()))
+        .collect();
+    assert_eq!(
+        headers,
+        vec![
+            ("Authorization", "[REDACTED]"),
+            ("content-type", "application/json"),
+        ]
+    );
+}
+
+#[test]
+fn safety_scans_skip_placeholders_short_tokens_and_embedded_prefixes() {
+    for contents in [
+        "sk-REDACTED_1",
+        "sk-ant-REDACTED_1",
+        "sk-ant-short",
+        "xsk-ant-abcdefghijklmnopqrstuvwxyz",
+        "AKIA1234",
+        "AIzaShort",
+    ] {
+        assert_eq!(
+            artifact_safety_failures(Path::new("note.json"), contents),
+            Vec::<String>::new(),
+            "{contents}"
+        );
+    }
+    assert_eq!(
+        artifact_safety_failures(Path::new("note.json"), "sk-svcacct-abcdefghijklmnop1234"),
+        vec!["note.json contains 1 OpenAI API key-shaped token(s)".to_string()]
+    );
+    assert!(!is_redacted_placeholder("REDACTED_1"), "no kind");
+    assert!(!is_redacted_placeholder("id_REDACTED_"), "no counter");
+    assert!(is_redacted_placeholder("id_REDACTED_1"));
+}
+
+#[test]
+fn a_response_stored_twice_is_listed_once() {
+    let stored = || CassetteInteraction {
+        when: CassetteRequest {
+            body: Some(r#"{"model":"gpt-4.1-nano","input":"hi"}"#.to_string()),
+            ..cassette_request("/v1/responses")
+        },
+        then: CassetteResponse {
+            body: Some(r#"{"id":"resp_1","object":"response"}"#.to_string()),
+            ..cassette_response()
+        },
+    };
+    let yaml = serialize_cassette_interactions(&[stored(), stored()]);
+
+    assert_eq!(
+        cassette_stored_state("openai", &yaml),
+        vec!["resp_1".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_atomic_write_removes_its_temporary_file() {
+    let dir = assert_fs::TempDir::new().expect("scratch directory");
+    let occupied = dir.path().join("cassette.yaml");
+    fs::create_dir(&occupied).expect("a directory where the cassette goes");
+    fs::write(occupied.join("inside"), "kept").expect("a file inside it");
+
+    let error = write_cassette_atomically(&occupied, b"contents")
+        .await
+        .expect_err("a file cannot replace a directory");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::IsADirectory);
+    let entries: Vec<String> = fs::read_dir(dir.path())
+        .expect("scratch directory listing")
+        .map(|entry| {
+            entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(entries, vec!["cassette.yaml".to_string()]);
+}
+
+#[test]
+fn a_fully_played_replay_finishes_silently() {
+    let interactions = vec![ReplayInteraction {
+        when: cassette_request("/v1/answer"),
+        then: cassette_response(),
+        consumed: true,
+    }];
+
+    assert_replay_finished(Path::new("fixture.yaml"), &interactions, &[]);
+    assert_eq!(
+        replay_completion_failure_message(Path::new("fixture.yaml"), &interactions, &[]),
+        None
+    );
 }

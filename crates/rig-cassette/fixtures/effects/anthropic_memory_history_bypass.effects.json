@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 10072942899351225430,
+    "run_spec": 11761598427705777809,
     "handlers": [
       {
         "key": "golden/memory",
@@ -58,7 +58,6 @@
             },
             {
               "role": "assistant",
-              "id": null,
               "content": [
                 {
                   "type": "text",
@@ -92,7 +91,14 @@
           "choice": [
             {
               "type": "text",
-              "text": "Ada"
+              "text": "Ada",
+              "native": {
+                "item": {
+                  "text": "Ada",
+                  "type": "text"
+                },
+                "fingerprint": "64c6ea57186bef51"
+              }
             }
           ],
           "usage": {
@@ -100,14 +106,25 @@
             "output_tokens": 4,
             "total_tokens": 48,
             "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "cost": {
+              "input": 0.000132,
+              "output": 0.00006,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.000192
+            }
           },
           "message_id": "msg_011CfLcbSTuG9de4Af6yxJDQ",
-          "response_id": null,
+          "origin": {
+            "api": "anthropic.messages",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "response_model": "claude-sonnet-4-6",
+            "response_id": "msg_011CfLcbSTuG9de4Af6yxJDQ"
+          },
           "provider_request_id": "req_011CfLcbSA3wMmF5cJzbfZLF",
           "finish_reason": "stop",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
           "raw": {
             "container": null,
             "content": [

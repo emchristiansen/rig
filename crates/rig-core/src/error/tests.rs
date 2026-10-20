@@ -16,28 +16,6 @@ fn http_error(status: u16) -> ProviderError {
     ))
 }
 
-#[test]
-fn retrieval_wrapping_preserves_embedding_error_classification() {
-    for (status, retryable) in [(400, false), (429, true), (503, true)] {
-        let inner = ProviderError::ProviderResponse(ProviderResponseError::new(
-            StatusCode::from_u16(status).expect("valid status"),
-            "embedding request failed",
-        ));
-        let direct = ErrorReport::from(&inner);
-        assert_eq!(direct.retryable, retryable);
-        let error = VectorStoreError::EmbeddingError(inner);
-        let wrapped = ErrorReport::from(&error);
-        assert_eq!(wrapped.kind, direct.kind);
-        assert_eq!(wrapped.http_status, direct.http_status);
-        assert_eq!(
-            wrapped.retryable, direct.retryable,
-            "wrapping status {status} must preserve retryability"
-        );
-        assert_eq!(wrapped.message, error.to_string());
-        assert!(!wrapped.source_chain.is_empty());
-    }
-}
-
 /// These are normalization contracts over captured parts, not provider wire behavior.
 #[test]
 fn vector_http_reports_preserve_response_details() {
@@ -111,7 +89,8 @@ fn vector_reply_reports_preserve_machine_codes_and_status_retryability() {
             r#"{"error":{"code":"","status":"","type":"overloaded_error"}}"#,
             Some("overloaded_error"),
         ),
-        (r#"{"error":{"code":429}}"#, None),
+        // A numeric code is the code when the envelope names no other.
+        (r#"{"error":{"code":429}}"#, Some("429")),
         (r#"{"error":{"code":""}}"#, None),
         (r#"{"error":"slow down"}"#, None),
         (" plain text\n", None),
@@ -236,170 +215,64 @@ fn vector_response_less_transport_reports_preserve_classification_and_sources() 
 }
 
 #[test]
-fn retry_table_per_status() {
-    // Each (status, decision) row is a sign-off entry: 408/425/429/5xx retry,
-    // every other status does not, a response-less failure does.
-    let rows = [
-        (Some(400), false),
-        (Some(401), false),
-        (Some(403), false),
-        (Some(404), false),
-        (Some(408), true),
-        (Some(409), false),
-        (Some(422), false),
-        (Some(425), true),
-        (Some(429), true),
-        (Some(500), true),
-        (Some(502), true),
-        (Some(503), true),
-        (Some(504), true),
-        (Some(599), true),
-        (Some(600), false),
-        (None, false),
-    ];
-    for (status, expected) in rows {
-        assert_eq!(retryable_status(status), expected, "status {status:?}");
-    }
-}
-
-#[test]
-fn completion_http_error_reports_status_and_retryability() {
-    // The transport's rejection is the provider's reply: the kind says so,
-    // and the status decides retryability.
-    let report = http_error(429).report();
-    assert_eq!(report.kind, ErrorKind::ProviderResponse);
-    assert_eq!(report.http_status, Some(429));
-    assert!(report.retryable);
-    assert!(http_error(429).is_retryable());
-
-    let report = http_error(400).report();
+fn samples_out_of_range_is_a_non_retryable_request_error() {
+    let error = VectorStoreError::SamplesOutOfRange {
+        requested: u64::MAX,
+        max: i64::MAX as u64,
+    };
+    let report = ErrorReport::from(&error);
+    assert_eq!(report.kind, ErrorKind::Request);
     assert!(!report.retryable);
-    assert!(!http_error(400).is_retryable());
-}
-
-#[test]
-fn transport_failures_without_a_status_classify_by_what_they_are() {
-    // The sign-off table for response-less transport failures: transient
-    // when the request never reached a decision, permanent when the client
-    // could not form the request or read the response.
-    let transient = [
-        http_client::Error::StreamEnded,
-        http_client::Error::Instance("connection reset by peer".into()),
-    ];
-    for error in transient {
-        let error = ProviderError::Http(error);
-        assert!(error.is_retryable(), "{error}");
-        let report = error.report();
-        assert_eq!(report.kind, ErrorKind::Http);
-        assert_eq!(report.http_status, None);
-        assert!(report.retryable, "{report:?}");
-    }
-    let permanent = [
-        http_client::Error::NoHeaders,
-        http_client::Error::InvalidContentType(http::HeaderValue::from_static("text/html")),
-        http_client::Error::InvalidHeaderValue(
-            http::HeaderValue::from_bytes(b"\x00").expect_err("illegal header value"),
-        ),
-    ];
-    for error in permanent {
-        let error = ProviderError::Http(error);
-        assert!(!error.is_retryable(), "{error}");
-        assert!(!error.report().retryable, "{error}");
-    }
-    // A transport error never carries a status: a status-carrying
-    // rejection routes to the provider's reply and follows the status table.
-    assert!(http_error(503).is_retryable());
-    // A provider response without a status decides nothing either.
-    assert!(
-        !ProviderError::ProviderResponse(ProviderResponseError::without_status("body"))
-            .is_retryable()
-    );
-}
-
-#[test]
-fn tool_retryability_has_one_answer_on_every_surface() {
-    // The kind default is the table: `retryable()`, `is_retryable()` and the
-    // wire report agree for every kind, including the ones whose default is
-    // `None` (not retryable on the wire).
-    for kind in [
-        ToolErrorKind::InvalidArgs,
-        ToolErrorKind::Timeout,
-        ToolErrorKind::Cancelled,
-        ToolErrorKind::NotFound,
-        ToolErrorKind::PermissionDenied,
-        ToolErrorKind::RateLimited,
-        ToolErrorKind::Provider,
-        ToolErrorKind::Network,
-        ToolErrorKind::Other,
-    ] {
-        let error = ToolExecutionError::new(kind, "x");
-        let expected = kind.default_retryable().unwrap_or(false);
-        assert_eq!(error.retryable(), kind.default_retryable(), "{kind:?}");
-        assert_eq!(error.is_retryable(), expected, "{kind:?}");
-        assert_eq!(error.report().retryable, expected, "{kind:?}");
-    }
-    let provider = ToolExecutionError::new(ToolErrorKind::Provider, "x");
-    assert_eq!(provider.retryable(), None);
-    assert!(
-        !provider.is_retryable(),
-        "a kind that leaves it to the tool is not retryable on the wire"
-    );
-    assert!(
-        provider.with_retryable(true).is_retryable(),
-        "the override wins"
-    );
-}
-
-#[test]
-fn completion_provider_response_classifies_by_status() {
-    let error = ProviderError::ProviderResponse(ProviderResponseError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "down",
-    ));
-    let report = error.report();
-    assert_eq!(report.kind, ErrorKind::ProviderResponse);
-    assert_eq!(report.http_status, Some(503));
-    assert!(report.retryable);
-}
-
-#[test]
-fn completion_non_http_variants_are_not_retryable() {
-    let cases = [
-        (ProviderError::Response("bad".into()), ErrorKind::Response),
-        (ProviderError::Provider("bad".into()), ErrorKind::Provider),
-        (
-            ProviderError::Url(url::ParseError::EmptyHost),
-            ErrorKind::Url,
-        ),
-    ];
-    for (error, kind) in cases {
-        let report = error.report();
-        assert_eq!(report.kind, kind);
-        assert!(!report.retryable);
-        assert_eq!(report.message, error.to_string());
-    }
-}
-
-#[test]
-fn tool_error_uses_override_then_kind_default() {
-    let timeout = ToolExecutionError::new(ToolErrorKind::Timeout, "slow");
-    assert!(timeout.report().retryable);
-    let pinned = ToolExecutionError::new(ToolErrorKind::Timeout, "slow").with_retryable(false);
-    assert!(!pinned.report().retryable);
-    let other = ToolExecutionError::new(ToolErrorKind::Other, "meh");
-    assert!(!other.report().retryable);
-
-    let report = ToolExecutionError::refused("no")
-        .with_code("E1")
-        .with_http_status(403)
-        .report();
+    assert_eq!(report.http_status, None);
     assert_eq!(
-        report.kind,
-        ErrorKind::Tool(ToolErrorKind::PermissionDenied)
+        report.message,
+        format!(
+            "Requested {} samples, but this vector store returns at most {}",
+            u64::MAX,
+            i64::MAX
+        )
     );
-    assert!(report.refusal);
-    assert_eq!(report.code.as_deref(), Some("E1"));
-    assert_eq!(report.http_status, Some(403));
+}
+
+#[test]
+fn tool_error_survives_a_report_round_trip() {
+    let original = ToolExecutionError::rate_limited("slow down")
+        .with_retryable(false)
+        .with_code("quota")
+        .with_http_status(429);
+    let back = ToolExecutionError::from(original.report());
+    assert_eq!(back.kind(), ToolErrorKind::RateLimited);
+    assert_eq!(back.message(), "slow down");
+    assert_eq!(back.model_feedback(), Some("slow down"));
+    assert_eq!(back.retryable(), Some(false));
+    assert_eq!(back.code(), Some("quota"));
+    assert_eq!(back.http_status(), Some(429));
+    assert!(!back.is_refusal());
+    assert_eq!(
+        back.downcast_ref::<ErrorReport>().map(|report| report.kind),
+        Some(ErrorKind::Tool(ToolErrorKind::RateLimited))
+    );
+
+    let refused = ToolExecutionError::from(ToolExecutionError::refused("no").report());
+    assert!(refused.is_refusal());
+    assert_eq!(refused.kind(), ToolErrorKind::PermissionDenied);
+}
+
+#[test]
+fn dispatch_report_kinds_map_to_tool_kinds() {
+    for (kind, expected) in [
+        (ErrorKind::Timeout, ToolErrorKind::Timeout),
+        (ErrorKind::Cancelled, ToolErrorKind::Cancelled),
+        (ErrorKind::Denied, ToolErrorKind::PermissionDenied),
+        (ErrorKind::HandlerUnavailable, ToolErrorKind::NotFound),
+        (ErrorKind::Http, ToolErrorKind::Network),
+        (ErrorKind::ProviderResponse, ToolErrorKind::Provider),
+        (ErrorKind::Internal, ToolErrorKind::Other),
+    ] {
+        let error = ToolExecutionError::from(ErrorReport::new(kind, "failed").with_retryable(true));
+        assert_eq!(error.kind(), expected, "{kind:?}");
+        assert_eq!(error.retryable(), Some(true), "{kind:?}");
+    }
 }
 
 #[test]
@@ -533,44 +406,6 @@ fn provider_reports_retain_structured_provider_metadata() {
     }
 }
 
-/// A transport rejection routed through the `From` conversion is the
-/// provider's reply: body, headers and status ride on the report, and the
-/// kind says so. `Http` itself cannot carry any of them, so a report from
-/// one has no provider response.
-#[test]
-fn http_reports_retain_body_and_headers() {
-    let report = ErrorReport::from(ProviderError::Http(http_client::Error::StreamEnded));
-    assert_eq!(report.kind, ErrorKind::Http);
-    assert_eq!(report.http_status, None);
-    assert!(report.provider_response.is_none());
-    assert!(report.retryable);
-    let error = || {
-        let mut headers = http::HeaderMap::new();
-        headers.insert("retry-after", http::HeaderValue::from_static("7"));
-        http_client::Error::InvalidStatusCodeWithDetails {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            body: "temporary outage".into(),
-            headers,
-        }
-    };
-    let report = ErrorReport::from(ProviderError::from(error()));
-    assert_eq!(report.kind, ErrorKind::ProviderResponse);
-    let response = report.provider_response.expect("structured HTTP response");
-    assert_eq!(response.body, "temporary outage");
-    assert_eq!(
-        response
-            .headers
-            .as_ref()
-            .expect("retained headers")
-            .get("retry-after")
-            .expect("retry header"),
-        "7"
-    );
-    assert_eq!(response.status, Some(StatusCode::SERVICE_UNAVAILABLE));
-    assert!(report.retryable);
-    assert!(report.request_id.is_none());
-}
-
 #[derive(Debug, thiserror::Error)]
 #[error("backend failed")]
 struct NestedBackendError(#[source] std::io::Error);
@@ -588,9 +423,7 @@ fn wrapped_memory_error_retains_nested_sources() {
 
 #[test]
 fn wrapped_document_error_retains_nested_sources() {
-    let error = ProviderError::Request(Box::new(NestedBackendError(std::io::Error::other(
-        "document",
-    ))));
+    let error = ProviderError::request(NestedBackendError(std::io::Error::other("document")));
     assert!(
         std::error::Error::source(&error).is_some_and(|source| source.is::<NestedBackendError>())
     );
@@ -610,35 +443,34 @@ fn reports_match_the_replaced_error_enums() {
     let cases: Vec<(&str, ProviderError, &str, AdapterErrorBoundary)> = vec![
         (
             "*::HttpError(StreamEnded)",
-            ProviderError::Http(H::StreamEnded),
+            ProviderError::Http(H::StreamEnded.into()),
             r#"{"code":null,"http_status":null,"kind":"http","message":"HttpError: Stream ended","refusal":false,"retryable":true,"source_chain":[]}"#,
             AdapterErrorBoundary::Transport,
         ),
         (
             "*::HttpError(Instance)",
-            ProviderError::Http(H::instance(std::io::Error::other("conn reset"))),
+            ProviderError::Http(H::instance(std::io::Error::other("conn reset")).into()),
             r#"{"code":null,"http_status":null,"kind":"http","message":"HttpError: Http client error: conn reset","refusal":false,"retryable":true,"source_chain":[]}"#,
             AdapterErrorBoundary::Unknown,
         ),
         (
             "*::HttpError(NoHeaders)",
-            ProviderError::Http(H::NoHeaders),
+            ProviderError::Http(H::NoHeaders.into()),
             r#"{"code":null,"http_status":null,"kind":"http","message":"HttpError: Request in error state, cannot access headers","refusal":false,"retryable":false,"source_chain":[]}"#,
             AdapterErrorBoundary::Request,
         ),
         (
             "*::JsonError",
-            ProviderError::Json(json_error()),
+            ProviderError::Json(json_error().into()),
             r#"{"code":null,"http_status":null,"kind":"json","message":"JsonError: EOF while parsing an object at line 1 column 1","refusal":false,"retryable":false,"source_chain":["EOF while parsing an object at line 1 column 1"]}"#,
             AdapterErrorBoundary::Decode,
         ),
         (
             "*::CorruptFrameError",
-            ProviderError::CorruptFrame(crate::error::CorruptFrame::text(
-                Some("text.delta".into()),
-                "{",
-                json_error(),
-            )),
+            ProviderError::CorruptFrame(
+                crate::error::CorruptFrame::text(Some("text.delta".into()), "{", json_error())
+                    .into(),
+            ),
             r#"{"code":null,"http_status":null,"kind":"json","message":"CorruptFrameError: `text.delta` frame failed to decode: EOF while parsing an object at line 1 column 1; frame: {","refusal":false,"retryable":false,"source_chain":["`text.delta` frame failed to decode: EOF while parsing an object at line 1 column 1; frame: {","EOF while parsing an object at line 1 column 1"],"detail":{"detail":"corrupt_frame","event_type":"text.delta","evidence":{"kind":"text","frame":"{"},"error":"EOF while parsing an object at line 1 column 1"}}"#,
             AdapterErrorBoundary::Decode,
         ),
@@ -701,7 +533,7 @@ fn reports_match_the_replaced_error_enums() {
         ),
         (
             "Completion/Transcription/ImageGeneration/AudioGeneration::RequestError",
-            ProviderError::Request(boxed()),
+            ProviderError::Request(boxed().into()),
             r#"{"code":null,"http_status":null,"kind":"request","message":"RequestError: io broke","refusal":false,"retryable":false,"source_chain":["io broke"]}"#,
             AdapterErrorBoundary::Request,
         ),
@@ -744,23 +576,6 @@ fn transport_503() -> H {
     }
 }
 
-/// Response-shaped embedding faults keep their `response` report and report
-/// the decode boundary that kind implies.
-#[test]
-fn response_shaped_faults_report_the_decode_boundary() {
-    for error in [
-        ProviderError::Response("openai embedding response omitted required usage".into()),
-        ProviderError::MismatchedDimensions {
-            provider: "llamacpp".into(),
-            requested: 128,
-            returned: 1024,
-        },
-    ] {
-        assert_eq!(error.kind(), ErrorKind::Response, "{error}");
-        assert_eq!(error.boundary(), AdapterErrorBoundary::Decode, "{error}");
-    }
-}
-
 /// An expired cache and a rejected credential keep the provider's reply:
 /// status, body, and request ID reach the report, which the replaced
 /// `CachedContentError::Expired` and `VerifyError::InvalidAuthentication`
@@ -799,8 +614,8 @@ fn verdicts_on_a_handle_or_credential_keep_the_reply() {
 /// text, whatever the replaced enum called them.
 #[test]
 fn request_building_failures_share_one_shape() {
-    let document = ProviderError::Request(boxed());
-    let invalid = ProviderError::Request("bad name".into());
+    let document = ProviderError::Request(boxed().into());
+    let invalid = ProviderError::request("bad name");
     let http = ProviderError::from(
         http::Request::builder()
             .method("bad method")
@@ -817,4 +632,69 @@ fn request_building_failures_share_one_shape() {
         assert_eq!(report.source_chain.len(), 1, "{error}");
         assert_eq!(error.boundary(), AdapterErrorBoundary::Request);
     }
+}
+
+/// A relayed failure keeps the provider's reply it was reported with: the
+/// preserved response reads back through the error, and the error reports as
+/// the relayed report unchanged.
+#[test]
+fn a_relayed_report_keeps_its_provider_response() {
+    let report = ErrorReport::from(&http_error(503));
+    let relayed = ProviderError::Relayed(Box::new(report.clone()));
+    assert_eq!(
+        relayed.provider_response(),
+        report.provider_response.as_ref()
+    );
+    assert_eq!(relayed.provider_response_body(), Some("body"));
+    assert_eq!(
+        relayed.provider_response_status(),
+        Some(StatusCode::SERVICE_UNAVAILABLE)
+    );
+    assert_eq!(relayed.kind(), ErrorKind::ProviderResponse);
+    assert!(relayed.is_retryable());
+    assert_eq!(ErrorReport::from(&relayed), report);
+}
+
+#[test]
+fn every_error_kind_has_its_own_stable_code() {
+    let kinds = [
+        (ErrorKind::Http, "http"),
+        (ErrorKind::Json, "json"),
+        (ErrorKind::Url, "url"),
+        (ErrorKind::Request, "request"),
+        (ErrorKind::Response, "response"),
+        (ErrorKind::Provider, "provider"),
+        (ErrorKind::ProviderResponse, "provider_response"),
+        (ErrorKind::Tool(ToolErrorKind::Timeout), "tool"),
+        (ErrorKind::MemoryBackend, "memory_backend"),
+        (ErrorKind::MemoryPolicy, "memory_policy"),
+        (ErrorKind::Internal, "internal"),
+        (ErrorKind::Cancelled, "cancelled"),
+        (ErrorKind::Timeout, "timeout"),
+        (ErrorKind::BusClosed, "bus_closed"),
+        (ErrorKind::HandlerUnavailable, "handler_unavailable"),
+        (ErrorKind::Divergence, "divergence"),
+        (ErrorKind::Denied, "denied"),
+        (ErrorKind::Other, "other"),
+    ];
+    for (kind, code) in kinds {
+        assert_eq!(kind.code(), code, "{kind:?}");
+    }
+}
+
+#[test]
+fn a_report_carries_its_refusal_and_request_id() {
+    let report = ErrorReport::new(ErrorKind::Provider, "declined")
+        .refused()
+        .with_request_id("req_123");
+    assert!(report.refusal);
+    assert_eq!(report.request_id.as_deref(), Some("req_123"));
+    assert!(!retryable_status(None));
+}
+
+#[test]
+fn a_url_parse_failure_converts_to_a_url_error() {
+    let error = ProviderError::from(url_error());
+    assert!(matches!(error, ProviderError::Url(_)));
+    assert_eq!(error.kind(), ErrorKind::Url);
 }

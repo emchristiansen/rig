@@ -247,7 +247,7 @@ fn max_output_tokens_refuses_values_below_sixteen() {
 #[test]
 fn a_rig_tool_definition_becomes_a_function_tool() {
     let tool = FunctionTool::from(ToolDefinition {
-        name: "lookup".to_owned(),
+        name: crate::message::ToolName::new("lookup").expect("a nonempty tool name"),
         description: "Look a thing up.".to_owned(),
         parameters: json!({"type": "object", "properties": {}}),
     });

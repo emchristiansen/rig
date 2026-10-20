@@ -13,8 +13,10 @@
 //!     async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
 //!         if let Some(response) = event.completion() {
 //!             println!(
-//!                 "message {:?}: {:?} ({:?})",
-//!                 response.message_id, response.choice, response.usage
+//!                 "response {:?}: {:?} ({:?})",
+//!                 response.response_id(),
+//!                 response.choice,
+//!                 response.usage
 //!             );
 //!         }
 //!         OutcomeAction::proceed()
@@ -22,7 +24,8 @@
 //! }
 //! ```
 
-use rig_core::streaming::BlockId;
+use rig_core::message::CallId;
+use rig_core::streaming::Part;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{collections::HashMap, future::Future, sync::Arc};
 
@@ -490,28 +493,28 @@ pub struct TextDelta<'a> {
 /// Streaming reasoning delta.
 #[derive(Clone, Copy)]
 pub struct ReasoningDelta<'a> {
-    /// The stream block this reasoning part streams under: stable across
-    /// the part's deltas and its eventual completed reasoning item. A minted
-    /// block id is never persisted as a provider-issued reasoning id.
-    pub id: &'a BlockId,
-    /// Provider-issued durable reasoning item id, when the wire provides one.
-    pub provider_id: Option<&'a str>,
+    /// The reasoning part: stable across its deltas and its end.
+    pub part: Part,
     /// Newly received reasoning fragment.
     pub delta: &'a str,
     /// Reasoning text accumulated for this reasoning part through this delta.
     pub aggregated: &'a str,
 }
 
-/// Streaming tool-call delta.
+/// Streaming tool-call argument delta. Fires per fragment as the provider
+/// streams a call to an allowed tool; the call's id and final arguments
+/// arrive with its end, and nothing executes before it.
 #[derive(Clone, Copy)]
 pub struct ToolCallDelta<'a> {
-    /// Stable block ID shared by fragments and the completed call's
-    /// [`DispatchEvent`]. Provider-issued IDs arrive with the completed call.
-    pub block_id: &'a BlockId,
-    /// Tool name on the first delta.
-    pub tool_name: Option<&'a str>,
-    /// Newly received argument fragment.
+    /// The call's part: stable across its deltas and its end.
+    pub part: Part,
+    /// The tool the call names.
+    pub tool_name: &'a str,
+    /// The newly received fragment of argument JSON.
     pub delta: &'a str,
+    /// The call's argument JSON accumulated through this delta. Read it with
+    /// [`parse_partial_arguments`](rig_core::streaming::parse_partial_arguments).
+    pub aggregated: &'a str,
 }
 
 /// Initial prompt event before the first completion-call hook. In a [`HookStack`],
@@ -595,7 +598,8 @@ pub enum StepEventKind {
     ReasoningDelta,
     /// `on_tool_call_delta`.
     ToolCallDelta,
-    /// `on_dispatch`/`on_outcome` for a completion effect.
+    /// `on_dispatch`/`on_outcome` for a completion effect. Every dispatched
+    /// completion gets one outcome; only an accepted turn's can be replaced.
     CompletionDispatch,
     /// `on_dispatch`/`on_outcome` for a tool-call effect.
     ToolDispatch,
@@ -641,8 +645,8 @@ pub struct DispatchEvent<'a> {
     pub kind: &'a EffectKind,
     /// The turn the effect belongs to.
     pub turn: usize,
-    /// The block the effect answers, for a tool call the model emitted.
-    pub block_id: Option<&'a BlockId>,
+    /// The call the effect answers, for a tool call the model emitted.
+    pub call_id: Option<&'a CallId>,
     /// Tool invocation context, carried separately from the effect.
     pub context: Option<&'a ToolContext>,
 }
@@ -780,8 +784,8 @@ pub struct OutcomeEvent<'a> {
     pub outcome: &'a Result<Outcome, ErrorReport>,
     /// The turn the effect belongs to.
     pub turn: usize,
-    /// The block the effect answered, for a tool call the model emitted.
-    pub block_id: Option<&'a BlockId>,
+    /// The call the effect answered, for a tool call the model emitted.
+    pub call_id: Option<&'a CallId>,
     /// Published tool context, carried separately from the outcome.
     pub context: Option<&'a ToolContext>,
 }
@@ -1035,8 +1039,17 @@ pub trait AgentHook: WasmCompatSend + WasmCompatSync {
     ///
     /// The call may be failed, retried, repaired, skipped, or used to stop the
     /// run. Return `None` to leave the decision to a later hook. If every hook
-    /// in a [`HookStack`] returns `None`, the agent preserves fail-fast
-    /// behavior.
+    /// in a [`HookStack`] returns `None`, the run's
+    /// [`UnhandledInvalidToolCall`](crate::run::UnhandledInvalidToolCall)
+    /// policy applies.
+    ///
+    /// A call whose arguments are not a JSON object
+    /// ([`InvalidToolCallReason::MalformedArguments`]) is offered in the tool
+    /// step, after its turn committed, and is always answered with a tool
+    /// result. `None` answers with feedback naming the arguments, `Retry`
+    /// with its feedback, and `Skip` with its reason. `Stop` and `Fail` end
+    /// the run, and `Repair` is refused, since renaming the tool cannot fix
+    /// its arguments.
     fn on_invalid_tool_call(
         &self,
         _ctx: &HookContext,
@@ -1069,7 +1082,10 @@ pub trait AgentHook: WasmCompatSend + WasmCompatSync {
         async { ObservationAction::Continue }
     }
 
-    /// Observes an argument delta for a streaming tool call.
+    /// Observes an argument fragment of a streaming tool call, before the
+    /// fragment reaches the stream. A stop cancels the run before the call
+    /// executes. Like all streamed deltas, it remains provisional until the
+    /// model turn is accepted.
     ///
     /// The default action continues the run.
     fn on_tool_call_delta(
@@ -1100,7 +1116,16 @@ pub trait AgentHook: WasmCompatSend + WasmCompatSync {
     }
 
     /// An effect resolved on the agent's bus. Gated by
-    /// [`AgentHook::observes`] like [`AgentHook::on_dispatch`].
+    /// [`AgentHook::observes`] like [`AgentHook::on_dispatch`]. Each
+    /// dispatched id gets at most one outcome; a denied one gets none. A
+    /// completion's outcome fires after the run validated an accepted turn,
+    /// where a replacement applies. Every other attempt closes observe-only
+    /// and a replacement is ignored. It is `Err` when no whole answer arrived:
+    /// the provider call failed, a hook stopped the run mid-reply
+    /// (`Cancelled`), or the run failed a streamed reply before it ended. It
+    /// is `Ok` with the provider's response when the answer arrived and the
+    /// run rejected, retried, recovered, abandoned or failed it, so an `Ok`
+    /// completion outcome is not proof that the turn was accepted.
     fn on_outcome(
         &self,
         _ctx: &HookContext,
@@ -1559,7 +1584,7 @@ impl AgentHook for HookStack {
 /// through their own [`Dispatcher`](crate::bus::Dispatcher).
 ///
 /// The lifetime constrains the view, not the request futures returned by
-/// [`dispatch`](Self::dispatch), [`complete`](Self::complete), or
+/// [`dispatch`](Self::dispatch), [`call`](Self::call), or
 /// [`top_n`](Self::top_n). Those futures own a single dispatch and can outlive
 /// the view. They do not retain permission to create further dispatches and
 /// do not drive the bus themselves. Await them within the hook while the run's
@@ -1641,16 +1666,13 @@ impl RunHandle<'_, rig_core::effect::family::Retrieve> {
 
 impl RunHandle<'_, rig_core::effect::family::Completion> {
     /// A unary completion.
-    pub fn complete(
-        &self,
-        request: rig_core::completion::CompletionRequest,
-    ) -> crate::bus::Completion {
-        self.inner.complete(request)
+    pub fn call(&self, request: rig_core::completion::CompletionRequest) -> crate::bus::Completion {
+        self.inner.call(request)
     }
 
     /// The model's label as the handler advertises it now.
-    pub fn model_ref(&self) -> ModelRef {
-        self.inner.model_ref()
+    pub fn label(&self) -> ModelRef {
+        self.inner.label()
     }
 }
 

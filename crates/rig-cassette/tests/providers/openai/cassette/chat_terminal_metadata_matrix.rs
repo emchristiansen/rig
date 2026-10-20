@@ -1,50 +1,22 @@
-//! OpenAI Chat Completions terminal metadata and primary-choice matrix.
+//! OpenAI Chat Completions terminal metadata on 24 retained fixtures.
 //!
-//! Live recordings showed that the provider-native blocking response erased
-//! `service_tier`, while the shared raw-stream terminal erased every unknown
-//! top-level chunk field, including `service_tier` and `system_fingerprint`.
-//! This matrix locks down that metadata together with primary-choice
-//! selection, length/tool-call terminal mapping, response identity, and usage.
-//!
-//! The complete input space exercised here is a 2 × 2 × 2 × 3 cross-product:
-//!
-//! | dimension | values |
-//! |---|---|
-//! | transport | blocking control, raw streaming regression |
-//! | model | `gpt-4o-mini`, `gpt-4.1-mini` |
-//! | output budget | roomy, constrained (`1` text token / `16` tool tokens) |
-//! | response shape | one text candidate, two text candidates, forced tool |
-//!
-//! That is 24 recorded cells. Each cell proves its request and terminal premise
-//! from the fixture, then compares the native raw response/terminal metadata
-//! with those exact bytes. The `n = 2` cells additionally prove that the shared
-//! streaming adapter selects candidate zero without concatenating candidate
-//! one into it.
-//!
-//! Coverage ledger: the pre-pruning Cartesian product is 24 and all 24 cells
-//! are recorded; none is unit-only. Each explicit test maps to
-//! `crates/rig-cassette/fixtures/cassettes/openai/chat_terminal_metadata_matrix/<test-name>.yaml`.
-//! The inexpensive mini models provide stable text, multi-choice, and tool
-//! controls across two model families. Every cell asserts the request and
-//! provider-native terminal; together they cover ids, model, finish reason,
-//! usage, primary-choice routing, `service_tier`, `system_fingerprint`, and
-//! otherwise-unmodeled top-level streaming metadata.
-//!
-//! | recorded cells | exact fixture set |
-//! |---|---|
-//! | all 24 | `crates/rig-cassette/fixtures/cassettes/openai/chat_terminal_metadata_matrix/{blocking,streaming}_{gpt_4o_mini,gpt_4_1_mini}_{roomy,tiny}_{plain_one,plain_two,tool}.yaml` |
+//! Blocking and streaming declarations preserve each original model, budget,
+//! shape, candidate-index, identity-presence, usage, cache, tier, fingerprint
+//! and finish-reason predicate. Streaming compares every original extra root
+//! field on the untouched document returned by the real stream's finish.
+//! The former Final/terminal DTO serde stage and additional_params wrapper
+//! remain separate losses. These scalar fixtures do not establish the former
+//! general recursive object/array/null merge contract or Tiny Tool dispatch.
 
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use futures::StreamExt as _;
-use rig::completion::CompletionModel;
-use rig::providers::openai;
-use rig::streaming::StreamEvent;
 use serde_json::{Value, json};
 
 use super::super::support::{OpenAiCassette, with_openai_terminal_metadata_cassette_result};
 use crate::support::assert_matches_recorded_document;
+use rig::completion::CompletionRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Transport {
@@ -122,41 +94,32 @@ fn model_name(model: ModelVariant) -> &'static str {
 
 async fn run_cell(client: OpenAiCassette, cell: Cell, observed: SharedObservation) -> Result<()> {
     let model = client.openai.chat(model_name(cell.model));
-    let mut builder = model
-        .completion_request(prompt(cell))
+    let mut builder = CompletionRequest::new(prompt(cell))
         .additional_params(params(cell))
         .max_tokens(max_tokens(cell));
     if cell.shape == Shape::Tool {
         builder = builder.tool(rig::tool::tool_definition(&crate::support::Adder));
     }
-    let request = builder.build();
+    let request = builder;
 
     let raw = match cell.transport {
         Transport::Blocking => {
-            // The provider-native chat-completions reply rides serialized on
-            // `CompletionResponse::raw`; decode it to prove the shape, then
-            // read the serialized form the way the old raw surface did.
-            let response = model.completion(request).await?;
-            let response =
-                serde_json::from_value::<openai::completion::CompletionResponse>(response.raw)?;
+            let response = model.call(request).await?;
+            let response: rig::providers::openai::completion::CompletionResponse =
+                serde_json::from_value(response.raw)?;
             serde_json::to_value(response)?
         }
         Transport::Streaming => {
-            let mut stream = model.stream(request).await?;
-            let mut terminal = None;
+            let mut stream = model.stream(request)?;
             while let Some(item) = stream.next().await {
-                if let StreamEvent::Final(record) = item? {
-                    terminal = Some(record);
-                }
+                item?;
             }
-            let terminal = terminal.context("stream should carry a terminal record")?;
-            // The provider-native chat-completions terminal rides serialized
-            // on `StreamFinal::raw`; decode it to prove the shape, then read
-            // the serialized form the way the old raw surface did.
-            let terminal = serde_json::from_value::<
-                openai::wire::StreamingCompletionResponse<openai::completion::Usage>,
-            >(terminal.raw)?;
-            serde_json::to_value(terminal)?
+            let terminal = stream
+                .finish()
+                .await
+                .context("stream should carry a terminal record")?;
+            // The chat-completions terminal record is `CompletionResponse::raw`.
+            terminal.raw
         }
     };
 
@@ -215,24 +178,23 @@ fn last_chunk_field(chunks: &[Value], field: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn recorded_additional_params(chunks: &[Value]) -> Value {
-    let mut accumulated: Option<rig::message::AdditionalParams> = None;
+/// The top-level fields of a stream's chunks as the document they rebuild
+/// states them: a later value replaces an earlier one, a `null` never
+/// erases one, and the original object tag and padding fields remain.
+fn recorded_envelope(chunks: &[Value]) -> Value {
+    let mut accumulated = serde_json::Map::new();
     for chunk in chunks {
-        let mut extras = chunk
+        let fields = chunk
             .as_object()
-            .cloned()
             .expect("recorded SSE frame should be an object");
-        for modeled in ["id", "model", "choices", "usage"] {
-            extras.remove(modeled);
-        }
-        if let Some(incoming) = rig::message::AdditionalParams::new(extras) {
-            match accumulated.as_mut() {
-                Some(current) => current.merge(incoming),
-                None => accumulated = Some(incoming),
+        for (key, value) in fields {
+            if value.is_null() && accumulated.contains_key(key) {
+                continue;
             }
+            accumulated.insert(key.clone(), value.clone());
         }
     }
-    serde_json::to_value(accumulated).expect("recorded metadata should serialize")
+    Value::Object(accumulated)
 }
 
 fn assert_scrubbed_optional_string(scenario: &str, field: &str, actual: &Value, wire: &Value) {
@@ -359,11 +321,11 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             assert!(
-                observation.raw["response_id"]
+                observation.raw["id"]
                     .as_str()
                     .is_some_and(|id| !id.is_empty())
                     && response_id.as_deref().is_some_and(|id| !id.is_empty()),
-                "{scenario}: both the native terminal and fixture retain an id"
+                "{scenario}: both the rebuilt document and fixture retain an id"
             );
             assert_eq!(
                 observation.raw["model"],
@@ -372,25 +334,25 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
             );
             assert_usage(scenario, &observation.raw["usage"], &usage);
             assert_matches_recorded_document(
-                &observation.raw["additional_params"],
-                &recorded_additional_params(&chunks),
-                &[],
+                &observation.raw,
+                &recorded_envelope(&chunks),
+                &["id", "model", "choices", "usage"],
                 &format!("{scenario}: every unmodeled top-level SSE field"),
             );
             assert_eq!(
-                observation.raw["additional_params"]["service_tier"],
+                observation.raw["service_tier"],
                 last_chunk_field(&chunks, "service_tier"),
                 "{scenario}: streaming service tier"
             );
             assert_scrubbed_optional_string(
                 scenario,
                 "streaming system fingerprint",
-                &observation.raw["additional_params"]["system_fingerprint"],
+                &observation.raw["system_fingerprint"],
                 &last_chunk_field(&chunks, "system_fingerprint"),
             );
             assert_eq!(
-                observation.raw["finish_reason"], expected_finish,
-                "{scenario}"
+                observation.raw["choices"][0]["finish_reason"], expected_finish,
+                "{scenario}: terminal reason"
             );
         }
     }

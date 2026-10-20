@@ -1,19 +1,14 @@
+use rig_test_support::cassette_models::OpenAiModels;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 
 use futures::FutureExt;
-use rig::driver::Bound;
-use rig::http_client::BoxedHttpClient;
-use rig::prelude::*;
-use rig::providers::openai::wire::{GROQ, OpenAI};
+use rig::providers::openai::wire::{GROQ, OpenAIConfig};
 
+use super::request_witness::{NamedCase, with_groq_request_witness_cassette};
 use crate::cassettes::{CassetteSpec, ProviderCassette};
 
-/// The Groq dialect bound to the bundled transport — what a cassette test
-/// builds its models from, now that a model is a bound wire.
-pub(super) type BoundGroq = Bound<OpenAI, BoxedHttpClient>;
-
-async fn groq_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, BoundGroq) {
+async fn groq_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, OpenAIConfig) {
     let cassette = ProviderCassette::start(
         &crate::cassettes::cassette_root(),
         "groq",
@@ -21,10 +16,8 @@ async fn groq_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, Boun
         GROQ.base_url,
     )
     .await;
-    let groq = OpenAI::with_key(&GROQ, cassette.api_key("GROQ_API_KEY"))
-        .with_base_url(cassette.base_url())
-        .bound()
-        .expect("Groq cassette transport should build");
+    let groq = OpenAIConfig::with_key(&GROQ, cassette.api_key("GROQ_API_KEY"))
+        .with_base_url(cassette.base_url());
 
     (cassette, groq)
 }
@@ -34,14 +27,33 @@ pub(super) async fn with_groq_cassette_result<F, Fut, E>(
     test_body: F,
 ) -> Result<(), E>
 where
-    F: FnOnce(BoundGroq) -> Fut,
+    F: FnOnce(OpenAiModels) -> Fut,
     Fut: Future<Output = Result<(), E>>,
 {
     let spec = spec.into();
     let (cassette, groq) = groq_cassette(spec).await;
-    let result = AssertUnwindSafe(test_body(groq)).catch_unwind().await;
+    let result = AssertUnwindSafe(test_body(OpenAiModels::new(
+        groq,
+        rig_test_support::cassettes::local_http(),
+    )))
+    .catch_unwind()
+    .await;
     crate::cassettes::checkpoint_attempt(&cassette, "groq", spec.scenario()).await;
     cassette.finish_after_test_result(result).await
+}
+
+/// The witness rows of the shared session file: `scenario` names one
+/// [`NamedCase`] recording, which replays as its exact request-snapshot
+/// witness. The runtime target supplies the same name over its bank.
+pub(super) async fn with_groq_request_witness_result<F, Fut>(
+    scenario: &'static str,
+    test_body: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(OpenAiModels) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    with_groq_request_witness_cassette(scenario, NamedCase::of(scenario)?, test_body).await
 }
 
 /// Bogus-key variant for recording real 401s (rig#2314 error matrix).
@@ -50,7 +62,7 @@ pub(super) async fn with_groq_cassette_bogus_key_result<F, Fut, E>(
     test_body: F,
 ) -> Result<(), E>
 where
-    F: FnOnce(BoundGroq) -> Fut,
+    F: FnOnce(OpenAiModels) -> Fut,
     Fut: Future<Output = Result<(), E>>,
 {
     let cassette = ProviderCassette::start(
@@ -62,11 +74,14 @@ where
     .await;
     // The rejected credential is this wrapper's subject.
     cassette.expect_account_failure(crate::cassettes::AccountFailure::Auth);
-    let groq = OpenAI::with_key(&GROQ, "gsk-invalid-edge-matrix-key")
-        .with_base_url(cassette.base_url())
-        .bound()
-        .expect("transport should build");
-    let result = AssertUnwindSafe(test_body(groq)).catch_unwind().await;
+    let groq = OpenAIConfig::with_key(&GROQ, "gsk-invalid-edge-matrix-key")
+        .with_base_url(cassette.base_url());
+    let result = AssertUnwindSafe(test_body(OpenAiModels::new(
+        groq,
+        rig_test_support::cassettes::local_http(),
+    )))
+    .catch_unwind()
+    .await;
     cassette.finish_after_test_result(result).await
 }
 
@@ -83,10 +98,15 @@ pub(super) async fn with_groq_prompt_caching_cassette<F, Fut>(
     spec: impl Into<CassetteSpec>,
     test_body: F,
 ) where
-    F: FnOnce(BoundGroq) -> Fut,
+    F: FnOnce(OpenAiModels) -> Fut,
     Fut: Future<Output = ()>,
 {
     let (cassette, client) = groq_cassette(spec).await;
-    let result = AssertUnwindSafe(test_body(client)).catch_unwind().await;
+    let result = AssertUnwindSafe(test_body(OpenAiModels::new(
+        client,
+        rig_test_support::cassettes::local_http(),
+    )))
+    .catch_unwind()
+    .await;
     cassette.finish_after_test(result).await;
 }

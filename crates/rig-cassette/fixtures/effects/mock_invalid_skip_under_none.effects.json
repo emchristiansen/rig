@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 13947441209079244713,
+    "run_spec": 2313939802890356396,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -113,11 +113,7 @@
             {
               "type": "toolcall",
               "id": {
-                "origin": "explicit",
-                "id": "call-1"
-              },
-              "provider": {
-                "call_id": "call-1"
+                "provider": "call-1"
               },
               "function": {
                 "name": "multiply",
@@ -125,27 +121,22 @@
                   "x": 2,
                   "y": 3
                 }
-              },
-              "signature": null,
-              "additional_params": null
+              }
             }
           ],
           "usage": {},
-          "message_id": null,
-          "response_id": null,
+          "origin": {
+            "api": "mock.script",
+            "provider": "mock",
+            "model": "mock-model"
+          },
           "finish_reason": null,
-          "provider": "mock",
-          "model": null,
           "raw": {
             "choice": [
               {
                 "type": "toolcall",
                 "id": {
-                  "origin": "explicit",
-                  "id": "call-1"
-                },
-                "provider": {
-                  "call_id": "call-1"
+                  "provider": "call-1"
                 },
                 "function": {
                   "name": "multiply",
@@ -153,9 +144,7 @@
                     "x": 2,
                     "y": 3
                   }
-                },
-                "signature": null,
-                "additional_params": null
+                }
               }
             ],
             "usage": {},

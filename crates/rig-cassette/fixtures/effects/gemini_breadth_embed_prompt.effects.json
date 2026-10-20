@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 10072942899351225430,
+    "run_spec": 11761598427705777809,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -6258,20 +6258,36 @@
           "choice": [
             {
               "type": "text",
-              "text": "ready"
+              "text": "ready",
+              "native": {
+                "item": {
+                  "text": "ready"
+                },
+                "fingerprint": "0cd5e8fd3135ad2a"
+              }
             }
           ],
           "usage": {
             "input_tokens": 19,
-            "output_tokens": 1,
+            "output_tokens": 16,
             "total_tokens": 35,
-            "reasoning_tokens": 15
+            "reasoning_tokens": 15,
+            "cost": {
+              "input": 5.7000000000000005e-6,
+              "output": 0.00004,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.000045700000000000006
+            }
           },
-          "message_id": null,
-          "response_id": "m3izatD1NOqb6dkP9J27sQk",
+          "origin": {
+            "api": "gemini.generate_content",
+            "provider": "gcp.gemini",
+            "model": "gemini-2.5-flash",
+            "response_model": "gemini-2.5-flash",
+            "response_id": "m3izatD1NOqb6dkP9J27sQk"
+          },
           "finish_reason": "stop",
-          "provider": "gcp.gemini",
-          "model": "gemini-2.5-flash",
           "raw": {
             "candidates": [
               {

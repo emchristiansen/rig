@@ -1,139 +1,22 @@
-//! Shared frame classification, tool-call identity, and reasoning lifecycle helpers.
-//! Companion providers use these helpers from [`Decoder`](crate::wire::Decoder)
-//! implementations that emit into [`AdapterOutput`](crate::operation::AdapterOutput).
+//! Shared frame classification and tool-call id spelling. Companion providers
+//! use these helpers from their [`Decoder`](crate::wire::Decoder)s and
+//! encoders.
 //!
 //! ```
-//! use rig_core::providers::internal::resolve_empty_tool_result_names;
-//! let mut history = Vec::new();
-//! resolve_empty_tool_result_names(&mut history);
+//! use rig_core::providers::internal::wire::classify_untyped_line;
+//! use rig_core::wire::WireEvent;
+//!
+//! let event: WireEvent<serde_json::Value> = classify_untyped_line(br#"{"done":true}"#);
+//! assert!(matches!(event, WireEvent::Known(_)));
 //! ```
 
 pub(crate) mod auth;
-pub mod chunk_lifecycle;
-#[cfg(not(target_family = "wasm"))]
-pub(crate) mod device_auth;
 pub(crate) mod openai_chat_completions_compatible;
 pub(crate) mod schema;
-/// The debug-mode sequence-law validator. Public only because it is the
-/// completion sink's `Laws` type; its checks run under `debug_assertions`.
-#[doc(hidden)]
-pub mod sequence_law;
-pub mod tool_call_bridge;
-pub mod tool_call_ids;
+/// The debug-mode sequence-law validator the completion fold checks a
+/// decoder's output against; its checks run under `debug_assertions`.
 pub mod wire;
-
-/// Refuse opaque Responses parts before an unsupported wire converts them to text.
-#[doc(hidden)]
-pub fn refuse_opaque_responses_part(
-    part: &crate::message::AssistantContent,
-    wire: &'static str,
-) -> Result<(), crate::message::UnrepresentableOpaqueContent> {
-    let opaque = match part {
-        crate::message::AssistantContent::Text(text) => {
-            crate::providers::openai::responses_api::opaque_message_part(
-                text.additional_params.as_ref(),
-            )
-            .is_some()
-        }
-        crate::message::AssistantContent::Reasoning(reasoning) => reasoning.has_opaque_parts(),
-        _ => false,
-    };
-    if opaque {
-        Err(crate::message::UnrepresentableOpaqueContent::new(wire))
-    } else {
-        Ok(())
-    }
-}
-
-/// Fill empty tool-result names from preceding unmatched calls.
-/// Match local correlation handles before provider identifiers. Existing names
-/// disambiguate multiple matches; ambiguous or missing matches remain unchanged.
-/// This helper is available to companion serializers but is not a stable public API.
-pub fn resolve_empty_tool_result_names(history: &mut [crate::message::Message]) {
-    use crate::message::{AssistantContent, Message, ProviderCallId, ToolCallId, UserContent};
-
-    /// An outstanding call of either kind: what a result is matched against.
-    struct PendingCall {
-        id: ToolCallId,
-        provider: Option<ProviderCallId>,
-        name: String,
-    }
-
-    // IDs are completion-local. Resolve only against preceding outstanding
-    // calls, never a future turn that happens to reuse the same generated key.
-    let mut pending: Vec<PendingCall> = Vec::new();
-    for message in history {
-        match message {
-            Message::Assistant { content, .. } => {
-                pending.extend(content.iter().filter_map(|item| match item {
-                    AssistantContent::ToolCall(call) => Some(PendingCall {
-                        id: call.id.clone(),
-                        provider: call.provider.clone(),
-                        name: call.function.name.clone(),
-                    }),
-                    AssistantContent::CustomToolCall(call) => Some(PendingCall {
-                        id: call.id.clone(),
-                        provider: call.provider.clone(),
-                        name: call.name.clone(),
-                    }),
-                    AssistantContent::Text(_)
-                    | AssistantContent::Reasoning(_)
-                    | AssistantContent::Image(_)
-                    | AssistantContent::ProviderItem(_) => None,
-                }));
-            }
-            Message::User { content } => {
-                for item in content {
-                    let UserContent::ToolResult(result) = item else {
-                        continue;
-                    };
-                    let local: Vec<_> = pending
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, call)| call.id == result.call)
-                        .map(|(index, _)| index)
-                        .collect();
-                    let mut candidates = if local.is_empty() {
-                        // Provider aliases are their own namespace, not strings
-                        // inserted alongside generated correlation keys.
-                        pending
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, call)| match (&call.provider, &result.provider) {
-                                (Some(call), Some(result)) => {
-                                    call.call_id == result.call_id
-                                        || call.item_id.as_ref().is_some_and(|id| {
-                                            id == &result.call_id
-                                                || result.item_id.as_ref() == Some(id)
-                                        })
-                                        || result.item_id.as_ref() == Some(&call.call_id)
-                                }
-                                _ => false,
-                            })
-                            .map(|(index, _)| index)
-                            .collect()
-                    } else {
-                        local
-                    };
-                    if candidates.len() > 1 && !result.name.is_empty() {
-                        candidates.retain(|index| {
-                            pending
-                                .get(*index)
-                                .is_some_and(|call| call.name == result.name)
-                        });
-                    }
-                    if let [index] = candidates.as_slice() {
-                        let call = pending.remove(*index);
-                        if result.name.is_empty() {
-                            result.name = call.name;
-                        }
-                    }
-                }
-            }
-            Message::System { .. } => {}
-        }
-    }
-}
+pub mod wire_ids;
 
 /// A rig logging target for [`trace_json`]. An enum (not a `&str`) because
 /// `tracing` targets must be literals, so the dispatch is total by
@@ -205,10 +88,7 @@ pub(crate) mod named_dialect {
 }
 
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod tool_call_id_tests;
+mod carried_header_tests;
 
 /// Reads the provider's transport request id off a response's headers, when
 /// the provider names such a header and the response carries a non-empty
@@ -264,3 +144,6 @@ pub(crate) fn with_query_pairs(path: &str, pairs: &[(&str, &str)]) -> String {
     }
     format!("{path}?{}", serializer.finish())
 }
+
+#[cfg(test)]
+mod call_identity_tests;

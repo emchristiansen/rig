@@ -6,12 +6,11 @@
 //! # Example
 //!
 //! ```no_run
-//! use rig_reqwest::prelude::*;
 //! use rig_core::providers::openai;
 //! use rig_vectorize::VectorizeVectorStore;
 //!
 //! # fn example() -> anyhow::Result<()> {
-//! let openai = openai::wire::OpenAI::from_env()?.bound()?;
+//! let openai = openai::OpenAI::from_env()?;
 //! let embedding_model = openai.embedding(openai::TEXT_EMBEDDING_3_SMALL, None);
 //!
 //! let vector_store = VectorizeVectorStore::new(
@@ -34,9 +33,10 @@ pub use client::{
 };
 
 use client::{QueryRequest as ApiQueryRequest, VectorInput as ApiVectorInput};
-use rig_core::embeddings::EmbeddingModel;
 use rig_core::vector_store::request::VectorSearchRequest;
-use rig_core::vector_store::{InsertDocuments, VectorStoreError, VectorStoreIndex};
+use rig_core::vector_store::{
+    InsertDocuments, VectorSearchIdResult, VectorSearchResult, VectorStoreError, VectorStoreIndex,
+};
 use rig_core::wasm_compat::WasmCompatSend;
 use rig_core::{Embed, embeddings::Embedding};
 use serde::{Serialize, de::DeserializeOwned};
@@ -50,31 +50,31 @@ impl From<VectorizeError> for VectorStoreError {
 
 /// Vector store backed by a Cloudflare Vectorize index.
 ///
-/// Queries are embedded with the same model `M` that populated the index, so
+/// Queries are embedded with the same model that populated the index, so
 /// results are meaningless under another model.
 #[derive(Debug, Clone)]
-pub struct VectorizeVectorStore<M> {
-    model: M,
+pub struct VectorizeVectorStore {
+    model: rig_core::DynModel<rig_core::operation::Embedding>,
     client: VectorizeClient,
 }
 
-impl<M: EmbeddingModel> VectorizeVectorStore<M> {
+impl VectorizeVectorStore {
     /// Creates a store over the named index, authenticating with a Cloudflare API
     /// token. Inserting documents additionally requires write permission.
     pub fn new(
-        model: M,
+        model: impl Into<rig_core::DynModel<rig_core::operation::Embedding>>,
         account_id: impl Into<String>,
         index_name: impl Into<String>,
         api_token: impl Into<String>,
     ) -> Self {
         Self {
-            model,
+            model: model.into(),
             client: VectorizeClient::new(account_id, index_name, api_token),
         }
     }
 }
 
-impl<M: EmbeddingModel> VectorizeVectorStore<M> {
+impl VectorizeVectorStore {
     /// Embeds the query and returns matches at or above any request threshold.
     /// Errors before querying when the filter uses an unsupported operation.
     async fn query_matches(
@@ -93,7 +93,7 @@ impl<M: EmbeddingModel> VectorizeVectorStore<M> {
             top_k: req.samples(),
             return_values: Some(false),
             return_metadata: Some(return_metadata),
-            filter: req.filter().as_ref().map(|f| f.clone().into_inner()),
+            filter: req.filter().map(|f| f.clone().into_inner()),
         };
 
         let result = self.client.query(query_request).await?;
@@ -106,15 +106,15 @@ impl<M: EmbeddingModel> VectorizeVectorStore<M> {
     }
 }
 
-impl<M: EmbeddingModel> VectorStoreIndex for VectorizeVectorStore<M> {
+impl VectorStoreIndex for VectorizeVectorStore {
     type Filter = VectorizeFilter;
 
-    /// Returns matches as `(score, vector id, metadata)`. A match without
+    /// Returns matches keyed by vector id, with metadata as the document. A match without
     /// metadata deserializes from JSON null, which fails for most `T`.
     async fn top_n<T: DeserializeOwned + WasmCompatSend>(
         &self,
         req: VectorSearchRequest<Self::Filter>,
-    ) -> Result<Vec<(f64, String, T)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchResult<T>>, VectorStoreError> {
         let matches = self.query_matches(&req, ReturnMetadata::All).await?;
 
         let results = matches
@@ -122,25 +122,35 @@ impl<M: EmbeddingModel> VectorStoreIndex for VectorizeVectorStore<M> {
             .map(|m| {
                 let metadata = m.metadata.unwrap_or(serde_json::Value::Null);
                 let doc: T = serde_json::from_value(metadata)?;
-                Ok((m.score, m.id, doc))
+                Ok(VectorSearchResult {
+                    score: m.score,
+                    id: m.id,
+                    document: doc,
+                })
             })
             .collect::<Result<Vec<_>, serde_json::Error>>()?;
 
         Ok(results)
     }
 
-    /// Like `top_n` but returns `(score, vector id)` without requesting metadata.
+    /// Like `top_n` but returns only scores and vector ids, without requesting metadata.
     async fn top_n_ids(
         &self,
         req: VectorSearchRequest<Self::Filter>,
-    ) -> Result<Vec<(f64, String)>, VectorStoreError> {
+    ) -> Result<Vec<VectorSearchIdResult>, VectorStoreError> {
         let matches = self.query_matches(&req, ReturnMetadata::None).await?;
 
-        Ok(matches.into_iter().map(|m| (m.score, m.id)).collect())
+        Ok(matches
+            .into_iter()
+            .map(|m| VectorSearchIdResult {
+                score: m.score,
+                id: m.id,
+            })
+            .collect())
     }
 }
 
-impl<M: EmbeddingModel> InsertDocuments for VectorizeVectorStore<M> {
+impl InsertDocuments for VectorizeVectorStore {
     /// Upserts one vector per embedding, storing the document as metadata under a
     /// fresh identifier, in batches of a thousand vectors.
     async fn insert_documents<Doc: Serialize + Embed + WasmCompatSend>(

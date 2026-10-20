@@ -5,7 +5,8 @@
 //! holds an undeclared account failure or undeleted stored state, in which
 //! case it goes under [`attempt_root`] instead. The `http` feature enables this
 //! engine; `bedrock` adds binary Smithy event-stream scrubbing. Invalid
-//! fixtures and failed replay assertions panic.
+//! fixtures and failed replay assertions panic in `start_at` and `finish`;
+//! `try_start_at` and `try_finish` return them as a [`CassetteError`].
 //!
 //! ```
 //! use rig_cassette::http::CassetteSpec;
@@ -33,7 +34,7 @@ use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use axum::{Router, routing::any};
 use base64::{Engine, prelude::BASE64_STANDARD};
-use futures::{FutureExt, stream};
+use futures::stream;
 use httpmock::MockServer;
 use rig_core::http_client::{
     self, HttpClientExt, LazyBody, MultipartForm, Request as HttpRequest, Response as HttpResponse,
@@ -46,7 +47,7 @@ use std::convert::Infallible;
 use std::fmt;
 use std::fs;
 use std::net::SocketAddr;
-use std::panic::{AssertUnwindSafe, resume_unwind};
+use std::panic::resume_unwind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -56,9 +57,18 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 
 mod account;
+mod clock;
+pub use clock::{CassetteClock, MAX_PAUSE, clock_sidecar};
+pub use snapshot::request_snapshot;
+use snapshot::{RequestSnapshots, SnapshotMode};
+mod error;
+pub use error::CassetteError;
 pub mod ledger;
 mod relay;
+mod shape;
+mod snapshot;
 pub use account::{AccountFailure, account_failure, reply_account_failure};
+use shape::BodyMatching;
 
 const MODE_ENV: &str = "RIG_PROVIDER_TEST_MODE";
 const ATTEMPT_DIR_ENV: &str = "RIG_CASSETTE_ATTEMPT_DIR";
@@ -74,11 +84,14 @@ enum ReplayMatching {
     Unordered,
 }
 
-/// The fixture scenario and its ordered or unordered replay matching policy.
+/// The fixture scenario and its replay matching policy: ordered or
+/// unordered, and exact or shape-matched request bodies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CassetteSpec {
     scenario: &'static str,
     replay_matching: ReplayMatching,
+    /// `None` takes `RIG_CASSETTE_MATCHING`.
+    body_matching: Option<BodyMatching>,
     expected_failures: u8,
 }
 
@@ -88,6 +101,7 @@ impl CassetteSpec {
         Self {
             scenario,
             replay_matching: ReplayMatching::Ordered,
+            body_matching: None,
             expected_failures: 0,
         }
     }
@@ -100,6 +114,28 @@ impl CassetteSpec {
     /// Allow matching an unused interaction in any order.
     pub const fn unordered(mut self) -> Self {
         self.replay_matching = ReplayMatching::Unordered;
+        self
+    }
+
+    /// Match request bodies by their coarse shape instead of exactly, as
+    /// `RIG_CASSETTE_MATCHING=shape` does for a spec that chooses neither.
+    /// The method, path, query and recorded headers still match exactly.
+    /// The key keeps the body's field structure, the order of its arrays of
+    /// objects, and the values of `model`, `role`, `name` and `stream`; it
+    /// erases other values, the types of content, tool schemas and tool
+    /// arguments. Unordered replay serves, among the interactions with the
+    /// request's key, the one its body is closest to. Pair it with
+    /// `RIG_CASSETTE_SNAPSHOTS=check`, which pins the bytes.
+    pub const fn shape_matched(mut self) -> Self {
+        self.body_matching = Some(BodyMatching::Shape);
+        self
+    }
+
+    /// Match request bodies exactly whatever `RIG_CASSETTE_MATCHING` says,
+    /// for a cell whose subject is the exact matcher. Exact is also what a
+    /// spec that chooses neither gets when the variable is unset.
+    pub const fn exact_matched(mut self) -> Self {
+        self.body_matching = Some(BodyMatching::Exact);
         self
     }
 
@@ -127,10 +163,12 @@ struct CassettePolicy {
     response_header_allowlist: &'static [&'static str],
     forbidden_patterns: &'static [&'static str],
     replay_matching: ReplayMatching,
+    body_matching: BodyMatching,
 }
 
 impl CassettePolicy {
-    fn for_scenario(provider: &str, scenario: &str, replay_matching: ReplayMatching) -> Self {
+    fn for_scenario(provider: &str, spec: CassetteSpec) -> Self {
+        let scenario = spec.scenario;
         let required_request_headers = match provider {
             "openai" | "doubleword" | "venice" => OPENAI_REQUIRED_REQUEST_HEADERS,
             "chatgpt" => CHATGPT_REQUIRED_REQUEST_HEADERS,
@@ -143,7 +181,8 @@ impl CassettePolicy {
 
         Self {
             required_request_headers,
-            replay_matching,
+            replay_matching: spec.replay_matching,
+            body_matching: spec.body_matching.unwrap_or(BodyMatching::Exact),
             ..Self::default()
         }
     }
@@ -175,6 +214,7 @@ impl Default for CassettePolicy {
             response_header_allowlist: RESPONSE_HEADER_ALLOWLIST,
             forbidden_patterns: FORBIDDEN_CASSETTE_PATTERNS,
             replay_matching: ReplayMatching::Ordered,
+            body_matching: BodyMatching::Exact,
         }
     }
 }
@@ -306,30 +346,27 @@ impl DirectRecorder {
     }
 
     /// Scrub and append one complete direct request/response exchange.
-    pub async fn record_http_interaction<RequestHeaders, ResponseHeaders>(
+    pub async fn record_http_interaction(
         &self,
-        request: DirectHttpRequest<'_, RequestHeaders>,
-        response: DirectHttpResponse<'_, ResponseHeaders>,
-    ) where
-        RequestHeaders: IntoIterator,
-        RequestHeaders::Item: DirectHeader,
-        ResponseHeaders: IntoIterator,
-        ResponseHeaders::Item: DirectHeader,
-    {
+        request: DirectHttpRequest<
+            '_,
+            impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+        >,
+        response: DirectHttpResponse<
+            '_,
+            impl IntoIterator<Item = (impl AsRef<str>, impl AsRef<str>)>,
+        >,
+    ) {
         let mut scrubber = CassetteScrubber::new(self.policy);
         let mut interaction = CassetteInteraction {
             when: recorded_request(
                 self.policy,
                 request.method,
                 request.uri,
-                request.headers.into_iter().map(DirectHeader::into_pair),
+                request.headers,
                 request.body,
             ),
-            then: recorded_response(
-                response.status,
-                response.headers.into_iter().map(DirectHeader::into_pair),
-                response.body,
-            ),
+            then: recorded_response(response.status, response.headers, response.body),
         };
         // The ledger sees the exchange before its reply reaches the caller.
         self.log_created(
@@ -345,35 +382,10 @@ impl DirectRecorder {
     }
 }
 
-/// Convert a direct-recording header into its name and value.
-pub trait DirectHeader {
-    /// The header name representation.
-    type Name: AsRef<str>;
-    /// The header value representation.
-    type Value: AsRef<str>;
-
-    /// Return the header name and value.
-    fn into_pair(self) -> (Self::Name, Self::Value);
-}
-
-impl<Name, Value> DirectHeader for (Name, Value)
-where
-    Name: AsRef<str>,
-    Value: AsRef<str>,
-{
-    type Name = Name;
-    type Value = Value;
-
-    /// Return the header name and value.
-    fn into_pair(self) -> (Self::Name, Self::Value) {
-        self
-    }
-}
-
 /// How a recording session reaches the provider. Replay never reaches it,
 /// so the transport is irrelevant then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Transport {
+pub enum RecordVia {
     /// A local mock server proxies every request to the provider and
     /// records the exchange (the default; the client is pointed at the
     /// proxy's URL).
@@ -394,6 +406,7 @@ pub struct ProviderCassette {
     scenario: &'static str,
     expected_failures: Arc<AtomicU8>,
     attempt_root: PathBuf,
+    clock: CassetteClock,
 }
 
 enum CassetteServer {
@@ -468,7 +481,7 @@ impl ProviderCassette {
         real_base_url: &str,
     ) -> Self {
         Self::start_via(
-            Transport::Proxy,
+            RecordVia::Proxy,
             cassette_root,
             provider,
             spec,
@@ -480,7 +493,7 @@ impl ProviderCassette {
     /// Start a session in the ambient [`CassetteMode`], using `transport` for
     /// recording only. Panics for an invalid mode, URL, or unusable replay fixture.
     pub async fn start_via(
-        transport: Transport,
+        transport: RecordVia,
         cassette_root: &Path,
         provider: &'static str,
         spec: impl Into<CassetteSpec>,
@@ -500,11 +513,10 @@ impl ProviderCassette {
     }
 
     /// Start with an explicit mode and fixture path, ignoring the ambient mode.
-    /// `transport` selects how recording reaches the provider. Panics for an
-    /// invalid upstream URL, missing or malformed replay fixture, or server bind
-    /// failure.
+    /// `transport` selects how recording reaches the provider. Panics with the
+    /// [`CassetteError`] that [`Self::try_start_at`] would return.
     pub async fn start_at(
-        transport: Transport,
+        transport: RecordVia,
         provider: &'static str,
         spec: CassetteSpec,
         real_base_url: &str,
@@ -523,10 +535,50 @@ impl ProviderCassette {
         .await
     }
 
+    /// [`Self::start_at`] without panicking. Returns an error for an invalid
+    /// upstream URL, a missing, unreadable or malformed replay fixture or
+    /// clock sidecar, and a local server that cannot bind.
+    ///
+    /// ```no_run
+    /// # use rig_cassette::http::{CassetteError, CassetteMode, CassetteSpec, ProviderCassette, RecordVia};
+    /// # async fn replay() -> Result<(), CassetteError> {
+    /// let cassette = ProviderCassette::try_start_at(
+    ///     RecordVia::Proxy,
+    ///     "openai",
+    ///     CassetteSpec::new("completion"),
+    ///     "https://api.openai.com/v1",
+    ///     CassetteMode::Replay,
+    ///     "sessions/openai/completion.yaml".into(),
+    /// )
+    /// .await?;
+    /// // Point a client at `cassette.base_url()` and run the session.
+    /// cassette.try_finish().await
+    /// # }
+    /// ```
+    pub async fn try_start_at(
+        transport: RecordVia,
+        provider: &'static str,
+        spec: CassetteSpec,
+        real_base_url: &str,
+        mode: CassetteMode,
+        cassette_path: PathBuf,
+    ) -> Result<Self, CassetteError> {
+        Self::try_start_with_attempts(
+            transport,
+            provider,
+            spec,
+            real_base_url,
+            mode,
+            cassette_path,
+            attempt_root(),
+        )
+        .await
+    }
+
     /// [`Self::start_at`] with failed recordings and the ledger under
     /// `attempt_root` instead of the ambient [`attempt_root`].
     pub(crate) async fn start_with_attempts(
-        transport: Transport,
+        transport: RecordVia,
         provider: &'static str,
         spec: CassetteSpec,
         real_base_url: &str,
@@ -534,21 +586,105 @@ impl ProviderCassette {
         cassette_path: PathBuf,
         attempt_root: PathBuf,
     ) -> Self {
+        Self::try_start_with_attempts(
+            transport,
+            provider,
+            spec,
+            real_base_url,
+            mode,
+            cassette_path,
+            attempt_root,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    async fn try_start_with_attempts(
+        transport: RecordVia,
+        provider: &'static str,
+        spec: CassetteSpec,
+        real_base_url: &str,
+        mode: CassetteMode,
+        cassette_path: PathBuf,
+        attempt_root: PathBuf,
+    ) -> Result<Self, CassetteError> {
+        let (snapshots, spec) = if mode.records() {
+            (SnapshotMode::Off, spec)
+        } else {
+            let spec = match spec.body_matching {
+                Some(_) => spec,
+                None => CassetteSpec {
+                    body_matching: Some(BodyMatching::current(&cassette_path)?),
+                    ..spec
+                },
+            };
+            (SnapshotMode::current(&cassette_path)?, spec)
+        };
+        Self::try_start_session(
+            transport,
+            provider,
+            spec,
+            real_base_url,
+            mode,
+            cassette_path,
+            attempt_root,
+            snapshots,
+        )
+        .await
+    }
+
+    /// [`Self::try_start_with_attempts`] with an explicit request snapshot
+    /// mode instead of the ambient `RIG_CASSETTE_SNAPSHOTS`, and the body
+    /// matching `spec` names instead of the ambient `RIG_CASSETTE_MATCHING`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the session inputs, each from a distinct public entry point"
+    )]
+    async fn try_start_session(
+        transport: RecordVia,
+        provider: &'static str,
+        spec: CassetteSpec,
+        real_base_url: &str,
+        mode: CassetteMode,
+        cassette_path: PathBuf,
+        attempt_root: PathBuf,
+        snapshots: SnapshotMode,
+    ) -> Result<Self, CassetteError> {
         let scenario = spec.scenario;
         let ledger_path = attempt_root.join(ledger::LEDGER_FILE);
-        let policy = CassettePolicy::for_scenario(provider, scenario, spec.replay_matching);
-        let upstream = UpstreamBase::parse(real_base_url);
-        let server = if !mode.records() {
+        let policy = CassettePolicy::for_scenario(provider, spec);
+        let upstream = UpstreamBase::parse(real_base_url, &cassette_path)?;
+        // Everything that can fail runs before the replay server exists, so
+        // an error never drops an unplayed server and trips its guard.
+        let replay = if mode.records() {
+            None
+        } else {
             if !cassette_path.exists() {
-                panic!(
-                    "missing provider cassette {}; run with {MODE_ENV}=record and the real API key to create it",
-                    cassette_path.display()
-                );
+                return Err(CassetteError::MissingFixture {
+                    path: cassette_path,
+                });
             }
-            CassetteServer::Replay(ReplayServer::start(&cassette_path, policy).await)
+            let interactions = load_replay_interactions(&cassette_path).await?;
+            let recorded: Vec<Value> = interactions
+                .iter()
+                .map(|interaction| recorded_body_view(policy, &interaction.when))
+                .collect();
+            let shapes = (policy.body_matching == BodyMatching::Shape).then(|| ReplayShapes {
+                keys: recorded.iter().map(shape::shape_key).collect(),
+                views: recorded.clone(),
+            });
+            let snapshots = RequestSnapshots::load(snapshots, &cassette_path, recorded)?;
+            Some((interactions, snapshots, shapes))
+        };
+        let clock = CassetteClock::start(mode, &cassette_path)?;
+        let server = if let Some((interactions, snapshots, shapes)) = replay {
+            CassetteServer::Replay(
+                ReplayServer::start(&cassette_path, interactions, policy, snapshots, shapes)
+                    .await?,
+            )
         } else {
             match transport {
-                Transport::Direct => CassetteServer::DirectRecording(DirectRecordingServer {
+                RecordVia::Direct => CassetteServer::DirectRecording(DirectRecordingServer {
                     base_url: upstream.origin.clone(),
                     interactions: Arc::new(Mutex::new(Vec::new())),
                     ledger: Arc::new(relay::LedgerTarget {
@@ -558,7 +694,7 @@ impl ProviderCassette {
                         origin: upstream.origin.clone(),
                     }),
                 }),
-                Transport::Proxy => {
+                RecordVia::Proxy => {
                     let server = MockServer::start_async().await;
                     server
                         .forward_to_async(&upstream.origin, |rule| {
@@ -590,7 +726,10 @@ impl ProviderCassette {
                         },
                     )
                     .await
-                    .expect("the recording relay should bind");
+                    .map_err(|source| CassetteError::Bind {
+                        path: cassette_path.clone(),
+                        source,
+                    })?;
                     CassetteServer::Recording {
                         server,
                         recording_id,
@@ -600,7 +739,7 @@ impl ProviderCassette {
             }
         };
 
-        Self {
+        Ok(Self {
             server,
             cassette_path,
             base_path: upstream.path,
@@ -610,7 +749,21 @@ impl ProviderCassette {
             scenario,
             expected_failures: Arc::new(AtomicU8::new(spec.expected_failures)),
             attempt_root,
-        }
+            clock,
+        })
+    }
+
+    /// The session's recorded clock: wall time while recording, the same
+    /// readings in the same order on replay. See [`CassetteClock`].
+    pub fn clock(&self) -> CassetteClock {
+        self.clock.clone()
+    }
+
+    /// Wait `duration` while recording, so a live provider sees the pause;
+    /// return at once on replay. Panics above [`MAX_PAUSE`] (60 s): no
+    /// cassette test waits longer.
+    pub async fn pause(&self, duration: std::time::Duration) {
+        self.clock.pause(duration).await;
     }
 
     /// Write completed, scrubbed exchanges to `path` without finalizing recording.
@@ -713,11 +866,23 @@ impl ProviderCassette {
     }
 
     /// Write a scrubbed recording or assert complete replay consumption and shut
-    /// down. Panics on empty recordings, export or write failures, unsafe data,
-    /// unused interactions, or refused replay requests. A recording holding an
-    /// undeclared account failure (see [`account_failure`]) is not written to
-    /// the fixture: it goes to [`attempt_root`] and this panics.
+    /// down. Panics with the [`CassetteError`] that [`Self::try_finish`] would
+    /// return. A recording holding an undeclared account failure (see
+    /// [`account_failure`]) is not written to the fixture: it goes to
+    /// [`attempt_root`] and this panics.
     pub async fn finish(self) {
+        if let Err(error) = self.try_finish().await {
+            panic!("{error}");
+        }
+    }
+
+    /// [`Self::finish`] without panicking. Returns an error for a replay that
+    /// left interactions or clock readings unused or refused a request, and
+    /// for a recording that is empty, refused, unsafe after scrubbing, or
+    /// cannot be written. A refused recording is kept under [`attempt_root`],
+    /// and [`CassetteError::RecordingRefused`] says where. The local servers
+    /// are shut down on every path, and dropping what remains never panics.
+    pub async fn try_finish(self) -> Result<(), CassetteError> {
         let expected = self.expected_failures.load(Ordering::Relaxed);
         let Self {
             server,
@@ -726,53 +891,45 @@ impl ProviderCassette {
             provider,
             scenario,
             attempt_root,
+            clock,
             ..
         } = self;
 
         let yaml = match server {
             CassetteServer::Replay(mut server) => {
-                let result = AssertUnwindSafe(server.assert_consumed(&cassette_path))
-                    .catch_unwind()
-                    .await;
+                let consumed = server.check_consumed(&cassette_path).await;
                 server.shutdown().await;
-                if let Err(payload) = result {
-                    resume_unwind(payload);
-                }
-                return;
+                consumed?;
+                return clock.finish(&cassette_path).await;
             }
-            server => server.recorded_yaml().await.unwrap_or_else(|| {
-                panic!(
-                    "provider cassette {} should contain at least one interaction",
-                    cassette_path.display()
-                )
-            }),
+            server => {
+                server
+                    .recorded_yaml()
+                    .await
+                    .ok_or_else(|| CassetteError::EmptyRecording {
+                        path: cassette_path.clone(),
+                    })?
+            }
         };
 
         let refusals = recording_refusals(provider, &yaml, expected);
         if !refusals.is_empty() {
-            let kept = write_attempt(&attempt_root, provider, scenario, policy, &yaml).await;
-            panic!(
-                "provider cassette {} was not written: {}\nthe recording was kept at {}",
-                cassette_path.display(),
-                refusals.join("; "),
-                kept.map_or_else(
-                    || "<nowhere: write failed>".to_owned(),
-                    |path| path.display().to_string()
-                )
-            );
+            let kept_at = write_attempt(&attempt_root, provider, scenario, policy, &yaml).await;
+            return Err(CassetteError::RecordingRefused {
+                path: cassette_path,
+                refusals,
+                kept_at,
+            });
         }
-        write_scrubbed_cassette(&cassette_path, policy, &yaml).await;
+        write_scrubbed_cassette(&cassette_path, policy, &yaml).await?;
+        clock.finish(&cassette_path).await
     }
 
     /// Finalize after a successful test, preserving its original panic otherwise.
     /// A failed recording is kept under [`attempt_root`], never over the fixture.
     pub async fn finish_after_test(self, test_result: Result<(), PanicPayload>) {
         match test_result {
-            Ok(()) => {
-                if let Err(payload) = self.finish_catching_unwind().await {
-                    resume_unwind(payload);
-                }
-            }
+            Ok(()) => self.finish().await,
             Err(payload) => {
                 self.keep_failed_attempt().await;
                 resume_unwind(payload);
@@ -788,9 +945,7 @@ impl ProviderCassette {
     ) -> Result<(), E> {
         match test_result {
             Ok(Ok(())) => {
-                if let Err(payload) = self.finish_catching_unwind().await {
-                    resume_unwind(payload);
-                }
+                self.finish().await;
                 Ok(())
             }
             Ok(Err(error)) => {
@@ -834,10 +989,6 @@ impl ProviderCassette {
             server.checked = true;
         }
     }
-
-    async fn finish_catching_unwind(self) -> Result<(), PanicPayload> {
-        AssertUnwindSafe(self.finish()).catch_unwind().await
-    }
 }
 
 struct ReplayServer {
@@ -850,31 +1001,30 @@ struct ReplayServer {
 }
 
 impl ReplayServer {
-    async fn start(cassette_path: &Path, policy: CassettePolicy) -> Self {
-        let contents = tokio::fs::read_to_string(cassette_path)
-            .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "provider cassette {} should be readable: {error}",
-                    cassette_path.display()
-                )
-            });
-        let interactions = parse_cassette(cassette_path, &contents);
+    async fn start(
+        cassette_path: &Path,
+        interactions: Vec<ReplayInteraction>,
+        policy: CassettePolicy,
+        snapshots: Option<RequestSnapshots>,
+        shapes: Option<ReplayShapes>,
+    ) -> Result<Self, CassetteError> {
+        let bind_error = |source| CassetteError::Bind {
+            path: cassette_path.to_path_buf(),
+            source,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(bind_error)?;
+        let addr = listener.local_addr().map_err(bind_error)?;
         let state = Arc::new(Mutex::new(ReplayState {
             cassette_path: cassette_path.to_path_buf(),
             interactions,
             misses: Vec::new(),
             policy,
+            snapshots,
+            shapes,
         }));
         let app = Router::new()
             .fallback(any(replay_request))
             .with_state(state.clone());
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("replay server should bind");
-        let addr = listener
-            .local_addr()
-            .expect("replay server address should be available");
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
@@ -890,23 +1040,32 @@ impl ReplayServer {
             }
         });
 
-        Self {
+        Ok(Self {
             addr,
             state,
             shutdown: Some(shutdown_tx),
             task: Some(task),
             checked: false,
-        }
+        })
     }
 
     fn base_url(&self) -> String {
         format!("http://{}", self.addr)
     }
 
-    async fn assert_consumed(&mut self, cassette_path: &Path) {
+    /// Check that replay played every interaction and refused nothing, then
+    /// check or write the request snapshot. This disarms the drop guard
+    /// whatever the outcome.
+    async fn check_consumed(&mut self, cassette_path: &Path) -> Result<(), CassetteError> {
         self.checked = true;
         let state = self.state.lock().await;
-        assert_replay_finished(cassette_path, &state.interactions, &state.misses);
+        if let Some(error) = replay_mismatch(cassette_path, &state.interactions, &state.misses) {
+            return Err(error);
+        }
+        state
+            .snapshots
+            .as_ref()
+            .map_or(Ok(()), RequestSnapshots::finish)
     }
 
     async fn shutdown(&mut self) {
@@ -933,11 +1092,19 @@ impl Drop for ReplayServer {
         let Ok(state) = self.state.try_lock() else {
             return;
         };
-        if let Some(message) = replay_completion_failure_message(
+        let failure = replay_completion_failure_message(
             &state.cassette_path,
             &state.interactions,
             &state.misses,
-        ) {
+        )
+        .or_else(|| {
+            state
+                .snapshots
+                .as_ref()
+                .and_then(|snapshots| snapshots.finish().err())
+                .map(|error| error.to_string())
+        });
+        if let Some(message) = failure {
             panic!("{message}\n(the replay session was dropped without `finish`)");
         }
     }
@@ -948,6 +1115,17 @@ struct ReplayState {
     interactions: Vec<ReplayInteraction>,
     misses: Vec<ReplayMiss>,
     policy: CassettePolicy,
+    snapshots: Option<RequestSnapshots>,
+    /// Each interaction's coarse shape key and body, under shape matching.
+    shapes: Option<ReplayShapes>,
+}
+
+/// What shape matching keeps of each recorded interaction.
+struct ReplayShapes {
+    /// The coarse shape key of each recorded body.
+    keys: Vec<Value>,
+    /// Each recorded body as [`snapshot::body_view`] reads it.
+    views: Vec<Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -1010,6 +1188,7 @@ struct ReplayInteraction {
     consumed: bool,
 }
 
+#[cfg(test)]
 fn assert_replay_finished(
     cassette_path: &Path,
     interactions: &[ReplayInteraction],
@@ -1025,8 +1204,17 @@ fn replay_completion_failure_message(
     interactions: &[ReplayInteraction],
     misses: &[ReplayMiss],
 ) -> Option<String> {
-    let mut failures = Vec::new();
-    let unused = interactions
+    replay_mismatch(cassette_path, interactions, misses).map(|error| error.to_string())
+}
+
+/// The replay failure for interactions left unplayed and requests refused,
+/// or `None` when replay played the fixture exactly.
+fn replay_mismatch(
+    cassette_path: &Path,
+    interactions: &[ReplayInteraction],
+    misses: &[ReplayMiss],
+) -> Option<CassetteError> {
+    let unused_interactions = interactions
         .iter()
         .enumerate()
         .filter(|(_, interaction)| !interaction.consumed)
@@ -1037,51 +1225,101 @@ fn replay_completion_failure_message(
             )
         })
         .collect::<Vec<_>>();
-
-    if !unused.is_empty() {
-        failures.push(format!("left unused interactions:\n{}", unused.join("\n")));
-    }
-
-    if !misses.is_empty() {
-        let formatted_misses = misses
-            .iter()
-            .enumerate()
-            .map(|(index, miss)| format!("[{index}] {}", miss.diagnostic))
-            .collect::<Vec<_>>()
-            .join("\n");
-        failures.push(format!(
-            "received unexpected replay request(s):\n{formatted_misses}"
-        ));
-    }
-
-    (!failures.is_empty()).then(|| {
-        format!(
-            "provider cassette replay failed for {}:\n{}",
-            cassette_path.display(),
-            failures.join("\n\n")
-        )
+    let unexpected_requests = misses
+        .iter()
+        .map(|miss| miss.diagnostic.clone())
+        .collect::<Vec<_>>();
+    (!unused_interactions.is_empty() || !unexpected_requests.is_empty()).then(|| {
+        CassetteError::ReplayMismatch {
+            path: cassette_path.to_path_buf(),
+            unused_interactions,
+            unexpected_requests,
+        }
     })
 }
 
-fn parse_cassette(cassette_path: &Path, contents: &str) -> Vec<ReplayInteraction> {
-    parse_cassette_interactions(cassette_path, contents)
+/// Read, parse and check the fixture a replay session serves.
+async fn load_replay_interactions(
+    cassette_path: &Path,
+) -> Result<Vec<ReplayInteraction>, CassetteError> {
+    let contents = tokio::fs::read_to_string(cassette_path)
+        .await
+        .map_err(|source| CassetteError::UnreadableFixture {
+            path: cassette_path.to_path_buf(),
+            source,
+        })?;
+    try_parse_cassette_interactions(cassette_path, &contents)?
         .into_iter()
-        .map(|interaction| ReplayInteraction {
-            when: interaction.when,
-            then: interaction.then,
-            consumed: false,
+        .enumerate()
+        .map(|(index, interaction)| match replay_problem(&interaction) {
+            Some(reason) => Err(CassetteError::InvalidInteraction {
+                path: cassette_path.to_path_buf(),
+                index,
+                reason,
+            }),
+            None => Ok(ReplayInteraction {
+                when: interaction.when,
+                then: interaction.then,
+                consumed: false,
+            }),
         })
         .collect()
 }
 
+/// What would make the replay server fail on `interaction`: a recorded body
+/// that does not decode, or a response that is not valid HTTP.
+fn replay_problem(interaction: &CassetteInteraction) -> Option<String> {
+    let request = &interaction.when;
+    if let Some(body) = &request.body
+        && let Err(error) = decode_body(body, request.body_encoding)
+    {
+        return Some(format!("request body does not decode: {error}"));
+    }
+    let response = &interaction.then;
+    if let Err(error) = StatusCode::from_u16(response.status) {
+        return Some(format!("response status {}: {error}", response.status));
+    }
+    for header in &response.header {
+        if is_hop_by_hop_header(&header.name) {
+            continue;
+        }
+        if let Err(error) = HeaderName::from_bytes(header.name.as_bytes()) {
+            return Some(format!(
+                "invalid response header name {:?}: {error}",
+                header.name
+            ));
+        }
+        if let Err(error) = HeaderValue::from_str(&header.value) {
+            return Some(format!(
+                "invalid value for response header {:?}: {error}",
+                header.name
+            ));
+        }
+    }
+    if let Some(body) = &response.body
+        && let Err(error) = decode_body(body, response.body_encoding)
+    {
+        return Some(format!("response body does not decode: {error}"));
+    }
+    None
+}
+
 fn parse_cassette_interactions(cassette_path: &Path, contents: &str) -> Vec<CassetteInteraction> {
+    try_parse_cassette_interactions(cassette_path, contents)
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn try_parse_cassette_interactions(
+    cassette_path: &Path,
+    contents: &str,
+) -> Result<Vec<CassetteInteraction>, CassetteError> {
     serde_yaml::Deserializer::from_str(contents)
         .map(|document| {
-            CassetteInteraction::deserialize(document).unwrap_or_else(|error| {
-                panic!(
-                    "provider cassette {} should deserialize: {error}",
-                    cassette_path.display()
-                )
+            CassetteInteraction::deserialize(document).map_err(|source| {
+                CassetteError::MalformedFixture {
+                    path: cassette_path.to_path_buf(),
+                    source,
+                }
             })
         })
         .collect()
@@ -1102,12 +1340,65 @@ async fn replay_request(
         body,
     };
     let policy = state.policy;
-
-    let Some(index) = matching_interaction_index(policy, &state.interactions, &request) else {
-        let message = replay_miss_message(policy, &request, &state.interactions);
-        state.misses.push(ReplayMiss {
-            diagnostic: message.clone(),
+    let sent = (state.snapshots.is_some() || state.shapes.is_some())
+        .then(|| incoming_body_view(policy, &request));
+    let sent_shape = state
+        .shapes
+        .as_ref()
+        .zip(sent.as_ref())
+        .map(|(_, sent)| shape::shape_key(sent));
+    let shapes = state
+        .shapes
+        .as_ref()
+        .zip(sent_shape.as_ref())
+        .map(|(shapes, sent)| ShapeKeys {
+            recorded: &shapes.keys,
+            sent,
         });
+    // Unordered shape matching serves the interaction the request is
+    // closest to: its snapshot's expected body when snapshots check, else
+    // the recording.
+    let distance = |index: usize| match (&state.snapshots, &state.shapes, &sent) {
+        (Some(snapshots), _, Some(sent)) => snapshots.distance(index, sent),
+        (None, Some(shapes), Some(sent)) => shapes
+            .views
+            .get(index)
+            .map_or(usize::MAX, |view| snapshot::diff(view, sent).len()),
+        _ => usize::MAX,
+    };
+
+    let Some(index) =
+        matching_interaction_index(policy, &state.interactions, &request, shapes, distance)
+    else {
+        // The interaction the request was most likely meant for, compared
+        // with what its snapshot expects.
+        let snapshot_diff =
+            state
+                .snapshots
+                .as_ref()
+                .zip(sent.as_ref())
+                .and_then(|(snapshots, sent)| {
+                    let candidate = miss_candidate_index(policy, &state.interactions, &request)?;
+                    snapshots.difference(candidate, sent)
+                });
+        if let Some(difference) = &snapshot_diff {
+            eprintln!(
+                "replay of {} refused a request that differs from its snapshot at {difference}",
+                state.cassette_path.display()
+            );
+        }
+        let message = replay_miss_message(
+            policy,
+            &request,
+            &state.interactions,
+            shapes,
+            snapshot_diff.as_deref(),
+        );
+        let diagnostic = match &snapshot_diff {
+            Some(difference) => format!("{message}\nsnapshot difference at {difference}"),
+            None => message.clone(),
+        };
+        state.misses.push(ReplayMiss { diagnostic });
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header("content-type", "application/json")
@@ -1115,27 +1406,109 @@ async fn replay_request(
             .expect("replay miss response should build");
     };
 
+    if let (Some(snapshots), Some(sent)) = (state.snapshots.as_mut(), sent) {
+        snapshots.observe(index, sent);
+    }
     let cassette_path = state.cassette_path.clone();
     let interaction = &mut state.interactions[index];
     interaction.consumed = true;
     cassette_response(&interaction.then, &cassette_path)
 }
 
-fn matching_interaction_index(
+/// The unplayed interaction a refused request was most likely meant for:
+/// the next one in order, or for unordered replay the first unplayed one on
+/// the request's method and path.
+fn miss_candidate_index(
     policy: CassettePolicy,
     interactions: &[ReplayInteraction],
     request: &IncomingRequest,
 ) -> Option<usize> {
+    let mut unplayed = interactions
+        .iter()
+        .enumerate()
+        .filter(|(_, interaction)| !interaction.consumed);
+    match policy.replay_matching {
+        ReplayMatching::Ordered => unplayed.next().map(|(index, _)| index),
+        ReplayMatching::Unordered => unplayed
+            .find(|(_, interaction)| {
+                request
+                    .method
+                    .as_str()
+                    .eq_ignore_ascii_case(&interaction.when.method)
+                    && request.uri.path() == interaction.when.path
+            })
+            .map(|(index, _)| index),
+    }
+}
+
+/// A recorded request's body as request snapshots compare it.
+fn recorded_body_view(policy: CassettePolicy, request: &CassetteRequest) -> Value {
+    let content_type = request
+        .header
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-type"))
+        .map(|header| header.value.as_str());
+    // `load_replay_interactions` refuses a body that does not decode.
+    let body = request
+        .body
+        .as_deref()
+        .and_then(|body| decode_body(body, request.body_encoding).ok())
+        .unwrap_or_default();
+    snapshot::body_view(policy, content_type, &body)
+}
+
+/// An incoming request's body as request snapshots compare it.
+fn incoming_body_view(policy: CassettePolicy, request: &IncomingRequest) -> Value {
+    let content_type = request
+        .headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    snapshot::body_view(policy, content_type, &request.body)
+}
+
+/// Under shape matching, the coarse shape key of every interaction's
+/// recorded body and of the request's body.
+#[derive(Clone, Copy)]
+struct ShapeKeys<'a> {
+    recorded: &'a [Value],
+    sent: &'a Value,
+}
+
+/// The interaction replay serves `request` from. Ordered replay serves the
+/// next unplayed interaction when it matches; unordered replay the first
+/// unplayed one that matches, and under shape matching the one of those at
+/// the least `distance` from the request (the first on a tie), so requests
+/// that share a shape still find their own recordings.
+fn matching_interaction_index(
+    policy: CassettePolicy,
+    interactions: &[ReplayInteraction],
+    request: &IncomingRequest,
+    shapes: Option<ShapeKeys<'_>>,
+    distance: impl Fn(usize) -> usize,
+) -> Option<usize> {
+    let matches = |index: usize, interaction: &ReplayInteraction| match shapes {
+        Some(keys) => shape_request_matches(policy, request, &interaction.when, keys, index),
+        None => request_matches(policy, request, &interaction.when),
+    };
+    let mut unplayed = interactions
+        .iter()
+        .enumerate()
+        .filter(|(_, interaction)| !interaction.consumed);
     match policy.replay_matching {
         ReplayMatching::Ordered => {
-            let index = interactions
-                .iter()
-                .position(|interaction| !interaction.consumed)?;
-            request_matches(policy, request, &interactions[index].when).then_some(index)
+            let (index, interaction) = unplayed.next()?;
+            matches(index, interaction).then_some(index)
         }
-        ReplayMatching::Unordered => interactions.iter().position(|interaction| {
-            !interaction.consumed && request_matches(policy, request, &interaction.when)
-        }),
+        ReplayMatching::Unordered => {
+            let candidates: Vec<usize> = unplayed
+                .filter(|(index, interaction)| matches(*index, interaction))
+                .map(|(index, _)| index)
+                .collect();
+            match shapes {
+                Some(_) => candidates.into_iter().min_by_key(|index| distance(*index)),
+                None => candidates.first().copied(),
+            }
+        }
     }
 }
 
@@ -1143,6 +1516,8 @@ fn replay_miss_message(
     policy: CassettePolicy,
     request: &IncomingRequest,
     interactions: &[ReplayInteraction],
+    shapes: Option<ShapeKeys<'_>>,
+    snapshot_diff: Option<&str>,
 ) -> String {
     let candidates = interactions
         .iter()
@@ -1164,6 +1539,8 @@ fn replay_miss_message(
                 interaction.when.body.as_deref(),
                 interaction.when.body_encoding,
             );
+            let shape_matches = shapes
+                .map(|keys| body_shape_matches(request, &interaction.when, keys, index));
 
             json!({
                 "index": index,
@@ -1175,6 +1552,7 @@ fn replay_miss_message(
                 "headers_match": headers_match,
                 "required_headers_match": required_headers_match,
                 "body_matches": body_matches,
+                "shape_matches": shape_matches,
                 "expected_method": interaction.when.method,
                 "expected_path": interaction.when.path,
                 "expected_body_preview": interaction.when.body.as_deref().map(|body| body_preview_for_diagnostics(policy, body)),
@@ -1182,7 +1560,7 @@ fn replay_miss_message(
         })
         .collect::<Vec<_>>();
 
-    json!({
+    let mut message = json!({
         "message": "Request did not match any route or mock",
         "actual_method": request.method.as_str(),
         "actual_path": request.uri.path(),
@@ -1192,8 +1570,11 @@ fn replay_miss_message(
         "missing_required_headers": missing_required_headers(policy, &request.headers),
         "actual_body_preview": body_preview_bytes_for_diagnostics(policy, &request.body),
         "candidates": candidates,
-    })
-    .to_string()
+    });
+    if let (Some(difference), Value::Object(fields)) = (snapshot_diff, &mut message) {
+        fields.insert("snapshot_diff".to_owned(), Value::from(difference));
+    }
+    message.to_string()
 }
 
 struct IncomingRequest {
@@ -1203,7 +1584,9 @@ struct IncomingRequest {
     body: Bytes,
 }
 
-fn request_matches(
+/// Whether everything but the body matches: method, path, query, the
+/// recorded headers and the policy's required headers.
+fn request_line_matches(
     policy: CassettePolicy,
     request: &IncomingRequest,
     expected: &CassetteRequest,
@@ -1216,6 +1599,42 @@ fn request_matches(
         && query_matches(request.uri.query(), &expected.query_param)
         && headers_match(&request.headers, &expected.header)
         && required_headers_present(policy, &request.headers)
+}
+
+/// [`request_line_matches`] with the body compared by its coarse shape key
+/// against interaction `index`.
+fn shape_request_matches(
+    policy: CassettePolicy,
+    request: &IncomingRequest,
+    expected: &CassetteRequest,
+    keys: ShapeKeys<'_>,
+    index: usize,
+) -> bool {
+    request_line_matches(policy, request, expected)
+        && body_shape_matches(request, expected, keys, index)
+}
+
+/// Whether the request body has interaction `index`'s coarse shape. A
+/// recording without a body accepts an empty body or, as exact matching
+/// does, any multipart body.
+fn body_shape_matches(
+    request: &IncomingRequest,
+    expected: &CassetteRequest,
+    keys: ShapeKeys<'_>,
+    index: usize,
+) -> bool {
+    if expected.body.is_none() {
+        return request.body.is_empty() || is_multipart_request(&request.headers, &expected.header);
+    }
+    keys.recorded.get(index) == Some(keys.sent)
+}
+
+fn request_matches(
+    policy: CassettePolicy,
+    request: &IncomingRequest,
+    expected: &CassetteRequest,
+) -> bool {
+    request_line_matches(policy, request, expected)
         && body_matches(
             policy,
             &request.headers,
@@ -1828,9 +2247,13 @@ struct UpstreamBase {
 }
 
 impl UpstreamBase {
-    fn parse(real_base_url: &str) -> Self {
-        let url = url::Url::parse(real_base_url)
-            .unwrap_or_else(|error| panic!("invalid provider base URL {real_base_url:?}: {error}"));
+    fn parse(real_base_url: &str, cassette_path: &Path) -> Result<Self, CassetteError> {
+        let url =
+            url::Url::parse(real_base_url).map_err(|source| CassetteError::InvalidBaseUrl {
+                path: cassette_path.to_path_buf(),
+                url: real_base_url.to_owned(),
+                source,
+            })?;
         let origin = url.origin().ascii_serialization();
         let path = url.path().trim_end_matches('/');
         let path = if path.is_empty() || path == "/" {
@@ -1839,7 +2262,7 @@ impl UpstreamBase {
             path.to_string()
         };
 
-        Self { origin, path }
+        Ok(Self { origin, path })
     }
 }
 
@@ -2375,19 +2798,26 @@ async fn write_attempt(
         .map(|()| path)
 }
 
-async fn write_scrubbed_cassette(cassette_path: &Path, policy: CassettePolicy, yaml: &str) {
+async fn write_scrubbed_cassette(
+    cassette_path: &Path,
+    policy: CassettePolicy,
+    yaml: &str,
+) -> Result<(), CassetteError> {
     let redacted = scrub_cassette_contents_with_policy(policy, yaml);
     let failures = cassette_safety_failures_with_policy(policy, cassette_path, &redacted);
-    assert!(
-        failures.is_empty(),
-        "provider cassette {} still contains unsafe artifacts after scrubbing:\n{}",
-        cassette_path.display(),
-        failures.join("\n")
-    );
+    if !failures.is_empty() {
+        return Err(CassetteError::UnsafeRecording {
+            path: cassette_path.to_path_buf(),
+            failures,
+        });
+    }
 
     write_cassette_atomically(cassette_path, redacted.as_bytes())
         .await
-        .expect("provider cassette should be written");
+        .map_err(|source| CassetteError::WriteFixture {
+            path: cassette_path.to_path_buf(),
+            source,
+        })
 }
 
 fn decoded_base64_body_texts(contents: &str) -> Vec<String> {
@@ -3268,6 +3698,8 @@ pub fn owned_headers(headers: &http_client::HeaderMap) -> Vec<(String, String)> 
 }
 
 #[cfg(test)]
+mod direct_session_tests;
+#[cfg(test)]
 mod explicit_destination_tests;
 #[cfg(test)]
 mod paths;
@@ -3275,6 +3707,8 @@ mod paths;
 mod recording_guard_tests;
 #[cfg(test)]
 mod replay_session_tests;
+#[cfg(test)]
+mod try_session_tests;
 
 #[cfg(test)]
 mod local_path_scrub_tests;

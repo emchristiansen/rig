@@ -111,7 +111,7 @@ fn compile(root: &str, input_any_of: bool, optional_image_detail: bool) -> Valid
             .and_then(Value::as_object_mut)
             .expect("the pinned schema has InputItem");
         let branches = input
-            .remove("oneOf")
+            .shift_remove("oneOf")
             .expect("the pinned InputItem uses oneOf");
         assert!(input.insert("anyOf".to_owned(), branches).is_none());
     }

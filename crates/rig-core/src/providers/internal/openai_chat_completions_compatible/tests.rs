@@ -1,18 +1,11 @@
-use super::map_openai_finish_reason;
+use super::finish_reason;
 use crate::completion::FinishReason;
-
-#[test]
-fn truncated_output_covers_only_the_cut_short_reasons() {
-    assert!(FinishReason::Length.truncated_output());
-    assert!(FinishReason::ContentFilter.truncated_output());
-    assert!(!FinishReason::Stop.truncated_output());
-    assert!(!FinishReason::ToolCalls.truncated_output());
-    assert!(!FinishReason::Other("whatever".to_owned()).truncated_output());
-}
+use crate::providers::openai::wire::{OPENAI, TOGETHER, ZAI};
+use bytes::Bytes;
 
 #[test]
 fn sse_error_detector_handles_null_empty_and_object_or_string_errors() {
-    use super::provider_response_from_compatible_sse_data as detect;
+    use super::provider_error_envelope as detect;
 
     // An empty `error` (`null` or `""`) with no choices must NOT terminate the
     // stream — some providers send one with the terminal usage event. Each of
@@ -56,34 +49,65 @@ fn sse_error_detector_handles_null_empty_and_object_or_string_errors() {
     );
 }
 
-/// Mistral truncates at its context ceiling with `model_length`, which is
-/// the same truncation class as `length` — only the limit differs.
-///
-/// Not a cassette test: forcing the state needs a prompt padded to the
-/// model's full context window, which would commit a ~145 KB fixture of
-/// repeated filler to exercise one mapping arm. The shape below is the
-/// live response recorded while confirming the bug against
-/// `voxtral-small-latest` (`max_context_length` 32768):
-/// `finish_reason: "model_length"` with
-/// `usage {prompt_tokens: 32424, completion_tokens: 344, total_tokens: 32768}`
-/// — generation stopped dead on the ceiling with 4096 output tokens still
-/// budgeted.
+/// A dialect states its own vocabulary on top of the shared one: Z.AI's
+/// context-window stop is a length stop there and unknown elsewhere.
 #[test]
-fn model_length_is_truncation_not_a_natural_stop() {
+fn a_dialect_states_its_own_finish_vocabulary() {
     assert_eq!(
-        map_openai_finish_reason("model_length"),
-        FinishReason::Length,
-        "a turn cut off by the context window must be distinguishable from one that \
-             simply had nothing more to say"
+        finish_reason("model_context_window_exceeded", &ZAI.quirks),
+        FinishReason::Length
     );
+    assert_eq!(
+        finish_reason("sensitive", &ZAI.quirks),
+        FinishReason::ContentFilter
+    );
+    assert_eq!(
+        finish_reason("model_context_window_exceeded", &OPENAI.quirks),
+        FinishReason::Other("model_context_window_exceeded".to_owned())
+    );
+}
 
-    // The vocabulary it joins, and the fallback that still preserves an
-    // unrecognized spelling verbatim.
-    assert_eq!(map_openai_finish_reason("length"), FinishReason::Length);
-    assert_eq!(map_openai_finish_reason("max_tokens"), FinishReason::Length);
-    assert_eq!(map_openai_finish_reason("stop"), FinishReason::Stop);
+/// Every dialect shares the stop spellings compatible servers use for a
+/// natural end, Together's `eos` among them.
+#[test]
+fn compatible_servers_stop_spellings_are_shared() {
+    for reason in ["stop", "end", "eos", "end_turn", "stop_sequence"] {
+        for quirks in [&OPENAI.quirks, &TOGETHER.quirks, &ZAI.quirks] {
+            assert_eq!(
+                finish_reason(reason, quirks),
+                FinishReason::Stop,
+                "{reason}"
+            );
+        }
+    }
     assert_eq!(
-        map_openai_finish_reason("some_new_reason"),
-        FinishReason::Other("some_new_reason".to_owned())
+        finish_reason("MALFORMED", &OPENAI.quirks),
+        FinishReason::Other("MALFORMED".to_owned())
     );
+}
+
+pub(crate) fn sse_bytes_from_data_lines<T>(events: impl IntoIterator<Item = T>) -> Bytes
+where
+    T: AsRef<str>,
+{
+    Bytes::from(
+        events
+            .into_iter()
+            .map(|event| format!("data: {}\n\n", event.as_ref()))
+            .collect::<String>(),
+    )
+}
+
+pub(crate) fn sse_bytes_from_json_events(events: &[serde_json::Value]) -> Bytes {
+    Bytes::from(
+        events
+            .iter()
+            .map(|event| {
+                format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(event).expect("event should serialize")
+                )
+            })
+            .collect::<String>(),
+    )
 }

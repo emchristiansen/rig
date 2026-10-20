@@ -8,11 +8,10 @@
 //! Run the suite with:
 //! `cargo test -p rig --test core core::streaming_conformance`
 
+use rig::completion::CompletionRequest;
 use rig_core::test_utils::streaming_conformance::{
     self as conformance,
-    fixtures::{
-        anthropic, cohere, gemini_rest, interactions, ollama, openai_chat, openai_responses,
-    },
+    fixtures::{anthropic, gemini_rest, interactions, openai_chat, openai_responses},
 };
 
 /// Lower fixture frames onto the byte transport a
@@ -45,22 +44,16 @@ fn sse(frame: &serde_json::Value) -> conformance::WireInput {
 /// only the pipeline under test differs.
 mod xai {
     use super::*;
-    use rig_core::completion::CompletionModel as _;
     use rig_core::test_utils::SequencedStreamingHttpClient;
 
     fn driver() -> conformance::WireDriver {
         conformance::WireDriver::new("xai", |chunks| {
             Box::pin(async move {
-                let model = rig_core::driver::Bind::bind(
-                    rig_core::providers::openai::OpenAI::with_key(
-                        &rig_core::providers::xai::DIALECT,
-                        "test-key",
-                    ),
-                    SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
-                )
-                .completion(rig_core::providers::xai::GROK_4);
-                let request = model.completion_request("hello").build();
-                let stream = rig_core::completion::CompletionModel::stream(&model, request).await?;
+                let model = rig_core::providers::xai::new("test-key")
+                    .with_http(SequencedStreamingHttpClient::new(byte_chunks(chunks)?))
+                    .completion(rig_core::providers::xai::GROK_4);
+                let request = CompletionRequest::new("hello");
+                let stream = model.stream(request)?;
                 Ok(conformance::fixtures::drain(stream).await)
             })
         })
@@ -80,7 +73,6 @@ mod xai {
 /// fixture frames with a Copilot pipeline driver.
 mod copilot {
     use super::*;
-    use rig_core::completion::CompletionModel as _;
     use rig_core::test_utils::SequencedStreamingHttpClient;
 
     fn driver(provider: &'static str, model_name: &'static str) -> conformance::WireDriver {
@@ -90,13 +82,11 @@ mod copilot {
                 // (`copilot::wire::routes_through_responses`), so naming the
                 // same two model ids keeps each fixture on the route it was
                 // recorded against.
-                let model = rig_core::driver::Bind::bind(
-                    rig_core::providers::copilot::wire::Copilot::new("copilot-token"),
-                    SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
-                )
-                .completion(model_name);
-                let request = model.completion_request("hello").build();
-                let stream = model.stream(request).await?;
+                let model = rig_core::providers::copilot::Copilot::new("copilot-token")
+                    .with_http(SequencedStreamingHttpClient::new(byte_chunks(chunks)?))
+                    .completion(model_name);
+                let request = CompletionRequest::new("hello");
+                let stream = model.stream(request)?;
                 Ok(conformance::fixtures::drain(stream).await)
             })
         })
@@ -119,31 +109,29 @@ mod copilot {
     }
 }
 
-/// The ChatGPT backend's LIVE SSE route: `ResponsesCompletionModel::stream`
+/// The ChatGPT backend's LIVE SSE route: `Model::stream` over the Responses wire
 /// relays the OpenAI Responses SSE wire (the envelope-repairing buffered
 /// replay is a separate pipeline, exercised by
 /// `terminal_body_content_merges_per_kind` below). The wire frames are the
 /// shared Responses fixture's; only the pipeline under test differs.
 mod chatgpt {
     use super::*;
-    use rig_core::completion::CompletionModel as _;
     use rig_core::test_utils::SequencedStreamingHttpClient;
 
     fn driver() -> conformance::WireDriver {
         conformance::WireDriver::new("chatgpt", |chunks| {
             Box::pin(async move {
-                let model = rig_core::driver::Bind::bind(
-                    rig_core::providers::openai::OpenAI::with_key(
-                        &rig_core::providers::chatgpt::DIALECT,
-                        "test-token",
-                    )
-                    .with_account_id("account-id")
-                    .with_caller_identity(rig_core::test_utils::test_caller_identity()),
-                    SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
+                let model = rig_core::providers::openai::OpenAIConfig::with_key(
+                    &rig_core::providers::chatgpt::DIALECT,
+                    "test-token",
                 )
-                .completion("gpt-5.4");
-                let request = model.completion_request("hello").build();
-                let stream = model.stream(request).await?;
+                .with_account_id("account-id")
+                .with_caller_identity(rig_core::test_utils::test_caller_identity())
+                .client()
+                .with_http(SequencedStreamingHttpClient::new(byte_chunks(chunks)?))
+                .responses("gpt-5.4");
+                let request = CompletionRequest::new("hello");
+                let stream = model.stream(request)?;
                 Ok(conformance::fixtures::drain(stream).await)
             })
         })
@@ -167,21 +155,23 @@ mod chatgpt {
 /// stop every other scenario from measuring the strict default.
 mod openai_responses_opt_in {
     use super::*;
-    use rig_core::completion::CompletionModel as _;
     use rig_core::providers::openai::responses_api::streaming::IncompleteTerminal;
     use rig_core::test_utils::SequencedStreamingHttpClient;
 
     pub fn driver_tolerating_incomplete() -> conformance::WireDriver {
         conformance::WireDriver::new("openai", |chunks| {
             Box::pin(async move {
-                let model = rig_core::driver::Bind::bind(
-                    rig_core::providers::openai::OpenAI::new("test-key"),
-                    SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
+                let wire = rig_core::providers::openai::responses_api::wire::Responses::new(
+                    rig_core::providers::openai::OpenAIConfig::new("test-key"),
+                    "gpt-5.4",
                 )
-                .responses("gpt-5.4")
-                .map_wire(|wire| wire.with_streamed_incomplete(IncompleteTerminal::Accept));
-                let request = model.completion_request("hello").build();
-                let stream = model.stream(request).await?;
+                .with_streamed_incomplete(IncompleteTerminal::Accept);
+                let model = rig_core::driver::Model::new(
+                    wire,
+                    SequencedStreamingHttpClient::new(byte_chunks(chunks)?),
+                );
+                let request = CompletionRequest::new("hello");
+                let stream = model.stream(request)?;
                 Ok(conformance::fixtures::drain(stream).await)
             })
         })
@@ -189,7 +179,7 @@ mod openai_responses_opt_in {
 }
 
 // The in-crate wire families (openai_chat, openai_responses, gemini_rest,
-// gemini_interactions, anthropic, cohere, ollama) expand their canonical
+// gemini_interactions, anthropic) expand their canonical
 // suites in `streaming_conformance_suites.rs`; the families below reuse those
 // fixtures' frames with their own pipeline drivers, through the same
 // declarative macro (with anti-tamper and capability checks). Capability rows
@@ -230,7 +220,7 @@ pub mod copilot_chat_suite {
     rig_core::streaming_conformance_suite! {
         provider: "copilot",
         fixture: copilot::chat_fixture(),
-        manifest: [partial_tool_args, zero_usage_terminal, bare_terminal, malformed_frame, defective_known_frame, delta_less_prelude],
+        manifest: [partial_tool_args, zero_usage_terminal, bare_terminal, malformed_frame, delta_less_prelude],
     }
 }
 
@@ -288,8 +278,6 @@ mod grammar_guards {
     exactly_one_text_block_test!(openai_chat, openai_chat::fixture);
     exactly_one_text_block_test!(openai_responses, openai_responses::fixture);
     exactly_one_text_block_test!(gemini_rest, gemini_rest::fixture);
-    exactly_one_text_block_test!(cohere, cohere::fixture);
-    exactly_one_text_block_test!(ollama, ollama::fixture);
     exactly_one_text_block_test!(anthropic, anthropic::fixture);
     exactly_one_text_block_test!(interactions, interactions::fixture);
     exactly_one_text_block_test!(xai, super::xai::fixture);
@@ -353,16 +341,16 @@ mod grammar_guards {
     /// on `response.output_item.done` with arguments truncated mid-JSON and
     /// item status `incomplete`, then ends with `response.incomplete`. The
     /// pipeline must accept both frames (no `Corrupt` classification), end
-    /// with a `Length` terminal, and — per the settled truncation policy —
-    /// never fabricate a tool call from the partial arguments.
-    ///
+    /// with a `Length` terminal, discarding the explicitly incomplete call while
+    /// retaining its exact received item in the raw response.
     /// Partial success is a per-request opt-in on HTTP SSE, so this drives the
     /// opted-in pipeline; the strict default is pinned by
     /// `incomplete_mid_tool_call_errors_without_the_opt_in`.
     #[tokio::test]
-    async fn incomplete_mid_tool_call_ends_with_length_and_no_fabricated_call() {
+    async fn incomplete_mid_tool_call_ends_with_length_and_discards_the_incomplete_item() {
         use rig_core::completion::FinishReason;
         use rig_core::message::AssistantContent;
+        use rig_core::streaming::{DiscardReason, Item, StreamEvent};
 
         let driver = super::openai_responses_opt_in::driver_tolerating_incomplete();
         let drained = driver
@@ -383,21 +371,44 @@ mod grammar_guards {
             .as_ref()
             .expect("a genuine response.incomplete terminal must produce a terminal record");
         assert_eq!(
-            response.finish_reason,
+            response.finish_reason(),
             Some(FinishReason::Length),
             "max_output_tokens incompletion must normalize to a Length finish"
         );
+        let calls: Vec<_> = drained
+            .choice
+            .iter()
+            .filter_map(|content| match content {
+                AssistantContent::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .collect();
         assert!(
-            drained.tool_call_names().is_empty(),
-            "partial arguments must not fabricate a streamed tool call, got {:?}",
-            drained.tool_call_names()
+            calls.is_empty(),
+            "an explicitly incomplete item is not a canonical call: {calls:?}"
         );
-        assert!(
-            !drained
-                .choice
-                .iter()
-                .any(|content| matches!(content, AssistantContent::ToolCall(_))),
-            "partial arguments must not fabricate an aggregated tool call"
+        let discards: Vec<_> = drained
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Ok(Item::Event(StreamEvent::Discard { reason, .. })) => Some(reason),
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(discards.as_slice(), [reason] if **reason == DiscardReason::Incomplete));
+        assert!(!drained.items.iter().any(|item| matches!(
+            item,
+            Ok(Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(_),
+                ..
+            }))
+        )));
+        assert_eq!(
+            response.raw["output"],
+            serde_json::json!([{
+                "type":"function_call", "id":"fc_1", "arguments":"{\"x\":48151",
+                "call_id":"call_1", "name":"add", "status":"incomplete"
+            }])
         );
     }
 
@@ -480,15 +491,15 @@ mod grammar_guards {
                 _ => None,
             })
             .collect();
-        let shape: Vec<(&str, &serde_json::Value)> = calls
+        let shape: Vec<(&str, serde_json::Value)> = calls
             .iter()
-            .map(|call| (call.function.name.as_str(), &call.function.arguments))
+            .map(|call| (call.function.name.as_str(), call.function.arguments_value()))
             .collect();
         assert_eq!(
             shape,
             vec![
-                ("get_weather", &json!({"city": "Tokyo"})),
-                ("get_time", &json!({"zone": "UTC"})),
+                ("get_weather", json!({"city": "Tokyo"})),
+                ("get_time", json!({"zone": "UTC"})),
             ],
             "two id-less indexed calls must assemble distinct and uncorrupted"
         );
@@ -498,10 +509,10 @@ mod grammar_guards {
         // provider did not issue, and never leaves the id empty.
         for call in &calls {
             assert!(
-                call.id.is_generated(),
+                call.id.is_local(),
                 "id-less calls surface a minted durable id"
             );
-            assert!(call.provider.is_none(), "no provider id was issued");
+            assert!(call.id.provider().is_none(), "no provider id was issued");
         }
         assert_ne!(
             calls[0].id, calls[1].id,
@@ -509,14 +520,11 @@ mod grammar_guards {
         );
     }
 
-    /// Sibling-reasoning supersede on the wire (the corpus counterpart of the
-    /// parts.rs `deltas_then_sibling_full_blocks_keep_each_part_once` unit
-    /// test): a summary delta followed by its item's multi-part done block —
-    /// the first part supersedes the delta accumulation (no duplicate), the
-    /// remaining sibling parts append once each, in wire order.
+    /// A summary delta followed by its item's multi-part done block is one
+    /// reasoning block: the done item states the whole text, so the parts
+    /// the deltas never carried complete it, once each, as paragraphs.
     #[tokio::test]
     async fn sibling_reasoning_supersede_on_the_responses_wire() {
-        use rig_core::message::ReasoningContent;
         use serde_json::json;
 
         let driver = openai_responses::driver();
@@ -561,27 +569,34 @@ mod grammar_guards {
             })),
         ];
 
+        // Complete-part preservation and display text are distinct projections.
+        conformance::multi_part_same_id_reasoning_keeps_every_part(
+            &driver,
+            frames.clone(),
+            &["s1", "s2", "enc"],
+        )
+        .await
+        .expect("every completed sibling must survive in order");
         let drained = driver
             .drive(conformance::ok_chunks(frames))
             .await
             .expect("stream should drive");
         let reasoning_texts: Vec<String> = drained
-            .choice_reasoning()
+            .choice
             .iter()
-            .flat_map(|reasoning| reasoning.content.iter())
-            .map(|content| match content {
-                ReasoningContent::Summary(text) => text.clone(),
-                ReasoningContent::Text { text, .. } => text.clone(),
-                ReasoningContent::Encrypted(data) => data.clone(),
-                ReasoningContent::Redacted { data } => data.clone(),
-                ReasoningContent::OpaqueSummary(value) | ReasoningContent::OpaqueContent(value) => {
-                    value.to_string()
+            .filter_map(|part| match part {
+                rig_core::message::AssistantContent::CarriedReasoning(reasoning) => {
+                    Some(reasoning.display_text())
                 }
+                rig_core::message::AssistantContent::Reasoning(reasoning) => {
+                    Some(reasoning.text.clone())
+                }
+                _ => None,
             })
             .collect();
         assert_eq!(
             reasoning_texts,
-            ["s1", "s2", "enc"],
+            ["s1\ns2"],
             "the first sibling supersedes the delta build; the rest append once each"
         );
     }
@@ -616,14 +631,12 @@ async fn terminal_body_content_merges_per_kind() {
 }
 
 // Pins #2258 F3 on the real buffered pipeline: an envelope-less reasoning
-// delta (ChatGPT replay; repair injects `output_index: 0`, minting the
-// `output-0` identity) followed by the item's envelope-full
-// `output_item.done` must aggregate the restated summary exactly once — the
-// done item's blocks adopt the minted per-slot identity instead of their
-// `rs_*` id, superseding the delta build rather than appending beside it.
+// delta (ChatGPT replay; repair injects `output_index: 0`) followed by the
+// item's envelope-full `output_item.done` is one reasoning block whose text
+// holds the restated summary exactly once.
 #[tokio::test]
 async fn envelope_less_reasoning_deltas_are_superseded_without_duplication() {
-    use rig_core::message::{AssistantContent, ReasoningContent};
+    use rig_core::message::AssistantContent;
 
     let driver = openai_responses::buffered_driver();
     let (body, summary) = openai_responses::envelope_less_reasoning_supersede_sse_body();
@@ -632,27 +645,17 @@ async fn envelope_less_reasoning_deltas_are_superseded_without_duplication() {
     let reasoning: Vec<_> = choice
         .iter()
         .filter_map(|content| match content {
-            AssistantContent::Reasoning(reasoning) => Some(reasoning),
+            AssistantContent::Reasoning(reasoning) => Some(reasoning.text.clone()),
+            AssistantContent::CarriedReasoning(reasoning) => Some(reasoning.display_text()),
             _ => None,
         })
         .collect();
+    let [reasoning] = reasoning.as_slice() else {
+        panic!("deltas and their done block must collapse to one reasoning item: {reasoning:?}");
+    };
     assert_eq!(
-        reasoning.len(),
+        reasoning.matches(summary).count(),
         1,
-        "deltas and their done block must collapse to one reasoning item: {reasoning:?}"
-    );
-    let occurrences = reasoning
-        .iter()
-        .flat_map(|item| item.content.iter())
-        .filter(|content| match content {
-            ReasoningContent::Summary(text) | ReasoningContent::Text { text, .. } => {
-                text.contains(summary)
-            }
-            _ => false,
-        })
-        .count();
-    assert_eq!(
-        occurrences, 1,
         "the restated summary must supersede its deltas, not duplicate them"
     );
 }
@@ -722,145 +725,9 @@ mod interleaved_constant_id_reasoning {
         .expect("scenario should hold");
     }
 
-    /// Two calls to the SAME tool in one turn on the id-less Ollama wire
-    /// (#2258 A2): rig fabricates no identifier — not from an index and not
-    /// from the tool name — so both calls survive as distinct parts with
-    /// their own arguments and distinct internal correlation ids, and both
-    /// replay with the durable id absent. The name-as-id scheme collapsed
-    /// exactly this shape.
+    /// Id-less calls without explicit stops refuse at the retained-ID terminal boundary.
     #[tokio::test]
-    async fn ollama_two_calls_to_the_same_tool_stay_distinct() {
-        use rig_core::message::AssistantContent;
-        use rig_core::streaming::StreamEvent;
-        use serde_json::json;
-
-        let ndjson = |frame: &serde_json::Value| {
-            conformance::WireInput::Bytes(bytes::Bytes::from(format!("{frame}\n")))
-        };
-        let frames = vec![
-            ndjson(&json!({
-                "model": "llama3.2",
-                "created_at": "2023-08-04T19:22:45.499127Z",
-                "message": {"role": "assistant", "content": "", "tool_calls": [
-                    {"function": {"name": "get_weather", "arguments": {"city": "Tokyo"}}},
-                    {"function": {"name": "get_weather", "arguments": {"city": "Paris"}}},
-                ]},
-                "done": false,
-            })),
-            ndjson(&json!({
-                "model": "llama3.2",
-                "created_at": "2023-08-04T19:22:47.499127Z",
-                "message": {"role": "assistant", "content": ""},
-                "done": true,
-                "done_reason": "stop",
-            })),
-        ];
-
-        let drained = ollama::fixture()
-            .driver
-            .drive(conformance::ok_chunks(frames))
-            .await
-            .expect("stream should drive");
-        assert_eq!(drained.error_count(), 0, "{:?}", drained.items);
-
-        let mut internal_ids = Vec::new();
-        let mut minted_ids = Vec::new();
-        let mut cities = Vec::new();
-        for item in drained.items.iter().flatten() {
-            if let StreamEvent::BlockEnd {
-                id: block_id,
-                block: Some(AssistantContent::ToolCall(tool_call)),
-                ..
-            } = item
-            {
-                assert_eq!(tool_call.function.name, "get_weather");
-                assert!(
-                    tool_call.id.is_generated(),
-                    "id-less calls surface a minted durable id"
-                );
-                assert_eq!(tool_call.provider, None, "no fabricated provider id");
-                internal_ids.push(block_id.clone());
-                minted_ids.push(tool_call.id.clone());
-                cities.push(tool_call.function.arguments["city"].clone());
-            }
-        }
-        assert_eq!(cities, vec![json!("Tokyo"), json!("Paris")]);
-        internal_ids.dedup();
-        assert_eq!(
-            internal_ids.len(),
-            2,
-            "same-name calls must stay correlatable via distinct block ids"
-        );
-        minted_ids.dedup();
-        assert_eq!(minted_ids.len(), 2, "each id-less call mints a unique id");
-        assert_eq!(
-            drained
-                .choice
-                .iter()
-                .filter(|content| matches!(content, AssistantContent::ToolCall(_)))
-                .count(),
-            2,
-            "both same-name calls must survive as distinct aggregated parts"
-        );
-    }
-
-    /// Two id-less calls arriving in SEPARATE records must also stay
-    /// distinct: a per-record index enumeration handed both `Minted(Tool,0)`
-    /// and one call silently swallowed the other (round-5 O3 bonus). The
-    /// per-stream minter counts across records.
-    #[tokio::test]
-    async fn ollama_id_less_calls_in_separate_records_stay_distinct() {
-        use rig_core::message::AssistantContent;
-        use serde_json::json;
-
-        let ndjson = |frame: &serde_json::Value| {
-            conformance::WireInput::Bytes(bytes::Bytes::from(format!("{frame}\n")))
-        };
-        let record = |city: &str| {
-            ndjson(&json!({
-                "model": "llama3.2",
-                "created_at": "2023-08-04T19:22:45.499127Z",
-                "message": {"role": "assistant", "content": "", "tool_calls": [
-                    {"function": {"name": "get_weather", "arguments": {"city": city}}},
-                ]},
-                "done": false,
-            }))
-        };
-        let frames = vec![
-            record("Tokyo"),
-            record("Paris"),
-            ndjson(&json!({
-                "model": "llama3.2",
-                "created_at": "2023-08-04T19:22:47.499127Z",
-                "message": {"role": "assistant", "content": ""},
-                "done": true,
-                "done_reason": "stop",
-            })),
-        ];
-
-        let drained = ollama::fixture()
-            .driver
-            .drive(conformance::ok_chunks(frames))
-            .await
-            .expect("stream should drive");
-        assert_eq!(drained.error_count(), 0, "{:?}", drained.items);
-        assert_eq!(
-            drained
-                .choice
-                .iter()
-                .filter(|content| matches!(content, AssistantContent::ToolCall(_)))
-                .count(),
-            2,
-            "calls from separate records must survive as distinct parts"
-        );
-    }
-
-    /// The gemini-interactions twin of the same-name pin above: two id-less
-    /// calls to one tool in a single turn stay distinct — no name-as-id
-    /// collapse, no fabricated durable id.
-    #[tokio::test]
-    async fn interactions_two_id_less_calls_to_the_same_tool_stay_distinct() {
-        use rig_core::message::AssistantContent;
+    async fn interactions_two_id_less_calls_without_stops_refuse_at_the_terminal() {
         use rig_core::streaming::StreamEvent;
         use serde_json::json;
 
@@ -896,36 +763,113 @@ mod interleaved_constant_id_reasoning {
             .driver
             .drive(conformance::ok_chunks(frames))
             .await
+            .expect("the stream reports its refusal in band");
+        assert_eq!(drained.error_count(), 1, "{:?}", drained.items);
+        let errors = drained
+            .items
+            .iter()
+            .filter_map(|item| item.as_ref().err())
+            .collect::<Vec<_>>();
+        assert_eq!(errors[0].kind, rig_core::error::ErrorKind::Response);
+        assert!(!errors[0].retryable);
+        assert_eq!(
+            errors[0].message,
+            "ResponseError: the reply finalized item 1073741824 at a provider terminal without a named function call and retained ID"
+        );
+        assert!(errors[0].detail.is_none());
+        assert!(drained.response.is_none());
+        assert!(drained.choice.is_empty());
+        let starts = drained
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Ok(rig::streaming::Item::Event(StreamEvent::Start {
+                    part,
+                    kind: rig::streaming::PartKind::ToolCall,
+                    name: Some(name),
+                    ..
+                })) => Some((part, name)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[0].1.as_str(), "get_weather");
+        assert_eq!(starts[1].1.as_str(), "get_weather");
+        assert_ne!(starts[0].0, starts[1].0);
+        assert!(drained.items.iter().all(|item| !matches!(
+            item,
+            Ok(rig::streaming::Item::Event(
+                StreamEvent::End { .. } | StreamEvent::Discard { .. }
+            ))
+        )));
+    }
+
+    /// New completed control: only explicit step stops are added to the original fixture.
+    #[tokio::test]
+    async fn interactions_two_explicitly_stopped_id_less_calls_to_the_same_tool_stay_distinct() {
+        use rig_core::message::AssistantContent;
+        use rig_core::streaming::StreamEvent;
+        use serde_json::json;
+
+        let sse = |frame: &serde_json::Value| {
+            conformance::WireInput::Bytes(bytes::Bytes::from(format!("data: {frame}\n\n")))
+        };
+        let call = |index: u64, city: &str| {
+            sse(&json!({
+                "event_type": "step.delta",
+                "index": index,
+                "delta": {
+                    "type": "function_call",
+                    "name": "get_weather",
+                    "arguments": {"city": city},
+                    // No wire id: the wire genuinely omits it here.
+                },
+            }))
+        };
+        let frames = vec![
+            call(0, "Tokyo"),
+            sse(&json!({"event_type":"step.stop","index":0})),
+            call(1, "Paris"),
+            sse(&json!({"event_type":"step.stop","index":1})),
+            sse(&json!({
+                "event_type": "interaction.completed",
+                "interaction": {
+                    "id": "int-1",
+                    "model": "gemini-2.5-pro",
+                    "status": "completed",
+                },
+            })),
+        ];
+
+        let drained = interactions::fixture()
+            .driver
+            .drive(conformance::ok_chunks(frames))
+            .await
             .expect("stream should drive");
         assert_eq!(drained.error_count(), 0, "{:?}", drained.items);
-
-        let mut internal_ids = Vec::new();
         let mut minted_ids = Vec::new();
         let mut cities = Vec::new();
         for item in drained.items.iter().flatten() {
-            if let StreamEvent::BlockEnd {
-                id: block_id,
-                block: Some(AssistantContent::ToolCall(tool_call)),
+            if let rig::streaming::Item::Event(StreamEvent::End {
+                content: AssistantContent::ToolCall(tool_call),
                 ..
-            } = item
+            }) = item
             {
                 assert_eq!(tool_call.function.name, "get_weather");
                 assert!(
-                    tool_call.id.is_generated(),
+                    tool_call.id.is_local(),
                     "id-less calls surface with a minted durable id"
                 );
                 assert_eq!(
-                    tool_call.provider, None,
+                    tool_call.id.provider(),
+                    None,
                     "no name-as-id provider-id fallback"
                 );
-                internal_ids.push(block_id.clone());
                 minted_ids.push(tool_call.id.clone());
                 cities.push(tool_call.function.arguments["city"].clone());
             }
         }
         assert_eq!(cities, vec![json!("Tokyo"), json!("Paris")]);
-        internal_ids.dedup();
-        assert_eq!(internal_ids.len(), 2, "distinct internal correlation ids");
         minted_ids.dedup();
         assert_eq!(minted_ids.len(), 2, "each id-less call mints a unique id");
         assert_eq!(

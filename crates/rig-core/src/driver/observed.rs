@@ -1,17 +1,19 @@
 //! Transport for an observed streamed reply. The request is encoded, its
 //! credential read, sent once, refused and content-type checked exactly as
-//! [`stream`](super::stream) does; the reply's SSE events are then yielded
-//! with their data unchanged, for the caller's ledger, rather than decoded.
+//! [`Model::stream`](super::Model::stream) does. The SSE events are yielded
+//! with their data unchanged for the caller's ledger.
 
 use futures::{Stream, StreamExt};
 
-use super::{accept_header, byte_request, reject_response, scope_to_wire, wrong_content_type};
+use super::http_transport::{accept_header, byte_request, reject_response, wrong_content_type};
 use crate::error::ProviderError;
 use crate::http_client::HttpClientExt;
 use crate::http_client::framing::{Framing, SseFramer};
+use crate::operation::completion::Completion;
 use crate::providers::openai::responses_api::observation::ObservationHandle;
+use crate::providers::openai::responses_api::wire::Responses;
 use crate::wasm_compat::WasmCompatSend;
-use crate::wire::{Encoded, Mode, Request, Wire};
+use crate::wire::{Encoded, Mode, Operation, Wire};
 
 /// One item of an observed reply.
 pub(crate) enum ObservedSourceEvent {
@@ -25,43 +27,31 @@ pub(crate) enum ObservedSourceEvent {
 /// Encoding errors return immediately; the credential read, the send and the
 /// reply arrive as stream items. Transport work and the send-attempt mark
 /// begin on the first poll.
-pub(crate) fn observed_sse<W, H>(
-    wire: &W,
+pub(crate) fn observed_sse<H>(
+    wire: &Responses,
     http: &H,
-    request: Request<W>,
+    request: crate::completion::CompletionRequest,
     observation: ObservationHandle,
 ) -> Result<
     impl Stream<Item = Result<ObservedSourceEvent, ProviderError>> + WasmCompatSend + 'static,
     ProviderError,
 >
 where
-    W: Wire,
     H: HttpClientExt + Clone + 'static,
 {
-    let mut request = request;
-    scope_to_wire(wire, &mut request);
+    let request = Completion::prepare(request, &wire.describe())?;
     let Encoded {
-        requests,
+        request: mut http_request,
         framing,
         request_id_header,
         relaxed_content_type,
         ..
     } = wire.encode(request, Mode::Streaming)?;
     if framing != Framing::Sse {
-        return Err(ProviderError::Request(
-            "an observed reply must be an event stream".into(),
+        return Err(ProviderError::request(
+            "an observed reply must be an event stream",
         ));
     }
-    let [http_request] = <[_; 1]>::try_from(requests).map_err(|requests| {
-        ProviderError::Request(
-            format!(
-                "a streamed reply takes exactly one request, not {}",
-                requests.len()
-            )
-            .into(),
-        )
-    })?;
-    let mut http_request = http_request;
     accept_header(&mut http_request, framing);
     let http_request = byte_request(http_request)?;
     let http = http.clone();
@@ -126,7 +116,7 @@ where
 }
 
 /// A failed send or refused reply, keeping its status, body, headers and
-/// request id, as [`stream`](super::stream) keeps them.
+/// request id, as [`Model::stream`](super::Model::stream) keeps them.
 fn rejected(
     error: crate::http_client::Error,
     request_id_header: Option<&'static str>,

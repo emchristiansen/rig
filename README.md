@@ -89,13 +89,9 @@ The root `rig` facade re-exports both at their familiar paths, so most code
 depends only on `rig`.
 
 Hosts construct HTTP or SDK models with their chosen authentication, transport
-policy and runtime lifetime; both agent runtimes execute the resulting
-`CompletionModel` through shared adapters. ECS checkpoints retain execution
-state and handler descriptors, not provider launch recipes. Restoration
-explicitly validates the complete handler set against the original saved
-contracts or accepts intentional replacements. Effect replay uses recorded
-handlers and does not require live provider construction. See the
-[ECS host/restoration contract](crates/rig-ecs/CONTRACT.md#121-host-assembly-runtime-execution).
+policy and runtime lifetime; the agent runtime executes the resulting
+`Model` through one shared adapter. Effect replay uses recorded handlers and
+does not require live provider construction.
 
 ## Who is using Rig?
 Below is a non-exhaustive list of companies and people who are using Rig:
@@ -135,19 +131,16 @@ use rig::providers::openai::{self, OpenAI};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // Create an agent over OpenAI on the bundled transport. OpenAI's default
-    // completion route is the Responses API; `.with_route(Route::Chat)` on the
-    // configuration selects Chat Completions for every agent built on it.
-    let comedian_agent = OpenAI::from_env()?
-        .bound()?
-        .agent(openai::GPT_5_2)
+    // The client reads `OPENAI_API_KEY` and builds the models it serves.
+    let model = OpenAI::from_env()?.completion(openai::GPT_5_2);
+    let comedian_agent = AgentBuilder::new(model)
         .preamble("You are a comedian here to entertain the user using humour and jokes.")
         .build();
 
     // Prompt the agent and print the response
     let response = comedian_agent.prompt("Entertain me!").await?;
 
-    println!("{}", response.output);
+    println!("{}", response.output());
 
     Ok(())
 }
@@ -159,18 +152,24 @@ More examples live in [`examples`](./examples) and each crate's `examples` direc
 
 ## Recording and replay
 
-`rig::cassette::effect_log` provides logs, recorders, replay handlers and
-checkpoints. Keep an `EffectLogRecorder` handle and attach its clone with
-`AgentBuilder::record_to`; import `rig::cassette::agent::AgentReplayExt` to stamp
-the resulting log or check replay compatibility.
+With the `cassette` feature, `rig::cassette::effect_log` provides logs,
+recorders, replay handlers and checkpoints. Keep an `EffectLogRecorder` handle
+and attach its clone with `AgentBuilder::record_to`; import
+`rig::cassette::agent::AgentReplayExt` to stamp the resulting log or check
+replay compatibility.
 
 For transport-free consumers, depend directly on `rig-cassette` with default
-features disabled. Its optional `agent` and `ecs` adapters are independent of
-each other and of the native `http` engine. Neither runtime depends on the
-concrete logging crate. See the [cassette README](crates/rig-cassette/README.md)
-for dependency guarantees, ECS replay installation and migration paths.
+features disabled. Its optional `agent` adapter is independent of the native
+`http` engine. The agent runtime does not depend on the concrete logging
+crate. See the [cassette README](crates/rig-cassette/README.md) for
+dependency guarantees and migration paths.
 
 ## Supported Integrations
+
+The built-in `rig::vector_store::in_memory_store::InMemoryVectorStore` stores
+serializable documents without requiring `Eq` or `Default`. Its custom ID
+callbacks accept closures that capture and mutate application state. See the
+[vector-search example](examples/vector_search/src/main.rs).
 
 The root `rig` facade exposes companion crates behind one feature per integration:
 
@@ -182,7 +181,7 @@ rig = { version = "0.36.0", features = ["lancedb", "fastembed"] }
 | --- | --- | --- | --- |
 | AWS Bedrock | [`rig-bedrock`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-bedrock) | `bedrock` | `rig::bedrock` |
 | AWS S3Vectors | [`rig-s3vectors`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-s3vectors) | `s3vectors` | `rig::s3vectors` |
-| Candle (local Llama/SmolLM2/Qwen3 tools) | [`rig-candle`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-candle) | `candle` | `rig::candle` |
+| Candle (local Llama/SmolLM2/Qwen3 tools, YOLOv8 pose) | [`rig-candle`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-candle) | `candle` | `rig::candle` |
 | Cloudflare Vectorize | [`rig-vectorize`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-vectorize) | `vectorize` | `rig::vectorize` |
 | FastEmbed | [`rig-fastembed`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-fastembed) | `fastembed` | `rig::fastembed` |
 | Google Gemini gRPC | [`rig-gemini-grpc`](https://github.com/0xPlaygrounds/rig/tree/main/crates/rig-gemini-grpc) | `gemini-grpc` | `rig::gemini_grpc` |

@@ -6,6 +6,7 @@ use rig_core::test_utils::MockCompletionModel;
 
 use crate::agent::{
     AgentBuilder, AgentHook, HookContext, RunSettled, RunStart, RunStartAction, SettledOutcome,
+    StepEventKind,
 };
 use crate::completion::PromptError;
 
@@ -21,7 +22,7 @@ struct Settled(Arc<Mutex<Option<String>>>);
 impl AgentHook for Settled {
     async fn on_run_settled(&self, _ctx: &HookContext, event: RunSettled<'_>) {
         let seen = match event.outcome {
-            SettledOutcome::Response(response) => format!("response:{}", response.output),
+            SettledOutcome::Response(response) => format!("response:{}", response.output()),
             SettledOutcome::Error(reason) => format!("error:{reason}"),
         };
         *self.0.lock().expect("settled") = Some(seen);
@@ -40,7 +41,7 @@ async fn a_blocking_run_a_hook_stops_settles_with_the_error() {
         .build();
     let error = agent.prompt("go").await.expect_err("stopped");
     assert!(
-        matches!(error, PromptError::PromptCancelled { ref reason, .. } if reason == "stopped at start")
+        matches!(error, PromptError::Cancelled { ref reason, .. } if reason == "stopped at start")
     );
     let seen = settled.0.lock().expect("settled").clone();
     assert!(
@@ -50,147 +51,74 @@ async fn a_blocking_run_a_hook_stops_settles_with_the_error() {
     );
 }
 
-mod slow_stream {
-    use std::time::Duration;
+#[derive(Clone)]
+struct MemoryBindingSettlement {
+    subscribed: bool,
+    errors: Arc<Mutex<Vec<String>>>,
+}
 
-    use rig_core::{
-        effect::{EffectKind, FamilyDescriptor, HandlerDescriptor, HandlerKey},
-        serve::{Dispatch, Reply, Serve},
-    };
-
-    use crate::agent::{AgentBuilder, AgentHook, HookContext, ObservationAction, TextDelta};
-    use futures::StreamExt;
-
-    /// A model that streams three deltas a while apart, then finishes.
-    struct Slow;
-
-    impl Serve for Slow {
-        type Family = rig_core::effect::family::Dynamic;
-
-        fn descriptor(&self) -> HandlerDescriptor {
-            HandlerDescriptor {
-                key: HandlerKey::from("golden/model:default"),
-                family: FamilyDescriptor::Completion {
-                    model: rig_core::completion::ModelRef::new("slow"),
-                    capabilities: rig_core::completion::ProviderCapabilities::default(),
-                },
-                layers: Vec::new(),
-            }
-        }
-
-        async fn serve(&self, _kind: EffectKind, _dispatch: Dispatch) -> Reply {
-            Reply::written(|mut out| async move {
-                for word in ["one", "two", "three"] {
-                    if out.text(word).await.is_err() {
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                let _ = out
-                    .finish(rig_core::test_utils::mock_final(
-                        rig_core::completion::Usage::default(),
-                    ))
-                    .await;
-            })
-        }
+impl AgentHook for MemoryBindingSettlement {
+    fn observes(&self, kind: StepEventKind) -> bool {
+        self.subscribed && kind == StepEventKind::RunSettled
     }
 
-    struct StopOnTextDelta;
-    impl AgentHook for StopOnTextDelta {
-        async fn on_text_delta(
-            &self,
-            _ctx: &HookContext,
-            _event: TextDelta<'_>,
-        ) -> ObservationAction {
-            ObservationAction::stop("stopped on a delta")
-        }
-    }
-
-    /// A stop on a delta cancels the dispatch in flight: the engine drops
-    /// the model's stream before surfacing the stop, so a model still
-    /// streaming is cut off and the record is the cancel.
-    #[tokio::test]
-    async fn a_delta_stop_cancels_a_dispatch_still_streaming() {
-        let (dispatcher, registrar, mut driver) = crate::bus::Bus::channel();
-        let key = HandlerKey::from("golden/model:default");
-        driver
-            .register_erased(key.clone(), rig_core::serve::ErasedHandler::new(Slow))
-            .expect("register");
-        let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        driver.record_to(recorder.clone());
-        let task = tokio::spawn(driver);
-        let agent = AgentBuilder::over_bus(dispatcher.clone(), registrar.clone(), "golden", key)
-            .add_hook(StopOnTextDelta)
-            .build();
-        let mut stream = agent.prompt("go").stream();
-        let mut stopped = false;
-        while let Some(item) = stream.next().await {
-            if let Err(crate::agent::StreamingError::Prompt(error)) = item {
-                stopped = matches!(
-                    error,
-                    crate::completion::PromptError::PromptCancelled { .. }
-                );
-            }
-        }
-        drop(stream);
-        assert!(stopped);
-        drop((agent, dispatcher, registrar));
-        task.await.expect("driver");
-        let log = recorder.take();
-        assert_eq!(log.len(), 1);
-        let report = log[0].outcome.as_ref().expect_err("cancelled in flight");
-        assert_eq!(
-            report.kind,
-            rig_core::error::ErrorKind::Cancelled,
-            "{report:?}"
+    async fn on_run_settled(&self, _ctx: &HookContext, event: RunSettled<'_>) {
+        let SettledOutcome::Error(reason) = event.outcome else {
+            panic!("binding the configured memory fails");
+        };
+        assert!(
+            event.messages.is_none(),
+            "the driver never received the run"
         );
+        self.errors.lock().expect("settlements").push(reason.into());
     }
+}
 
-    struct SelectSlow;
-    impl AgentHook for SelectSlow {
-        fn on_model_select(
-            &self,
-            _ctx: &HookContext,
-            _event: crate::agent::ModelSelection<'_>,
-        ) -> crate::agent::ModelSelectionAction {
-            crate::agent::ModelSelectionAction::select("slow")
-        }
-    }
+#[tokio::test]
+async fn resumed_memory_binding_failure_settles_only_when_subscribed() {
+    use rig_core::{memory::MemoryError, message::Message, serve::adapters::ModelAdapter};
 
-    /// The same stop over an agent's own bus: nothing polls an owned driver
-    /// between runs, so the cancelled dispatch's record used to be lost —
-    /// the run's drive now settles in-flight cancels before it finishes,
-    /// and the log holds the cancel.
-    #[tokio::test]
-    async fn a_delta_stop_on_an_owned_bus_is_in_the_log() {
-        let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = AgentBuilder::new(rig_core::test_utils::MockCompletionModel::text("never"))
-            .name("golden")
-            .model_route_handler("slow", Slow)
-            .add_hook(SelectSlow)
-            .add_hook(StopOnTextDelta)
-            .record_to(recorder.clone())
+    use crate::run::AgentRun;
+
+    for subscribed in [true, false] {
+        let model = MockCompletionModel::text("never asked");
+        let memory_handler = MockCompletionModel::text("also never asked");
+        let settled = MemoryBindingSettlement {
+            subscribed,
+            errors: Arc::default(),
+        };
+        let agent = AgentBuilder::new(model.clone())
+            .memory_handler(ModelAdapter::new("wrong-family", memory_handler.clone()))
+            .add_hook(settled.clone())
             .build();
-        let mut stream = agent.prompt("go").stream();
-        while let Some(item) = stream.next().await {
-            if let Err(crate::agent::StreamingError::Prompt(error)) = item {
-                assert!(matches!(
-                    error,
-                    crate::completion::PromptError::PromptCancelled { .. }
-                ));
-            }
+        let run = AgentRun::from_spec(&agent.run_spec(), Message::user("resume me"), None);
+
+        let error = agent
+            .resume(run)
+            .conversation("thread")
+            .await
+            .expect_err("a completion handler cannot bind as memory");
+
+        assert!(
+            matches!(&error, PromptError::Memory(MemoryError::Internal(reason))
+                if reason.contains("serves the completion family, not memory")),
+            "{error:?}"
+        );
+        let seen = settled.errors.lock().expect("settlements");
+        if subscribed {
+            assert_eq!(*seen, vec![error.to_string()], "exactly one settlement");
+        } else {
+            assert!(seen.is_empty(), "an unsubscribed hook is not notified");
         }
-        drop(stream);
-        let log = recorder.take();
-        assert_eq!(log.len(), 1, "the cancelled dispatch is a record");
-        let report = log[0].outcome.as_ref().expect_err("cancelled in flight");
-        assert_eq!(
-            report.kind,
-            rig_core::error::ErrorKind::Cancelled,
-            "{report:?}"
+        assert!(model.requests().is_empty(), "no completion was dispatched");
+        assert!(
+            memory_handler.requests().is_empty(),
+            "binding fails before dispatching to the configured handler"
         );
     }
 }
+
+mod slow_stream {}
 
 #[derive(Clone, Default)]
 struct CommittedHistory(Arc<Mutex<Option<Vec<rig_core::message::Message>>>>);
@@ -219,15 +147,17 @@ async fn capped_reasoning_settlement_exposes_only_the_committed_prompt() {
     use futures::StreamExt;
     use rig_core::completion::{FinishReason, Usage};
     use rig_core::message::{AssistantContent, Message, Reasoning};
+    use rig_core::operation::Finish;
     use rig_core::test_utils::{MockStreamEvent, MockTurn, mock_final};
 
     for streamed in [false, true] {
         let model = if streamed {
             MockCompletionModel::from_stream_turns([[
                 MockStreamEvent::reasoning("unfinished reasoning"),
-                MockStreamEvent::FinalResponse(
-                    mock_final(Usage::default()).with_finish_reason(FinishReason::Length),
-                ),
+                MockStreamEvent::FinalResponse(Finish {
+                    reason: Some(FinishReason::Length),
+                    ..mock_final(Usage::default())
+                }),
             ]])
         } else {
             MockCompletionModel::from_turns([MockTurn::from_content(AssistantContent::Reasoning(

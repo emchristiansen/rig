@@ -6,10 +6,9 @@
 use std::collections::BTreeSet;
 
 use rig::agent::CompletionCall;
-use rig::agent::run::{ModelTurn, PendingToolCall};
-use rig::completion::{CompletionModel, CompletionRequestBuilder, ToolDefinition, Usage};
-use rig::driver::Bound;
-use rig::http_client::BoxedHttpClient;
+use rig::agent::run::{ModelTurn, PendingToolCall, TurnPolicy};
+use rig::completion::{CompletionRequest, ToolDefinition, Usage};
+use rig::driver::Model;
 use rig::message::{AssistantContent, Message, ToolChoice, ToolResultContent, UserContent};
 use rig::providers::gemini;
 use rig::tool::Tool;
@@ -19,10 +18,10 @@ use serde_json::json;
 /// The Gemini GenerateContent wire bound to the bundled cassette transport —
 /// what `client.completion(model)` hands back, and the model this harness
 /// drives.
-pub(crate) type BoundGenerateContent = Bound<gemini::completion::GenerateContent, BoxedHttpClient>;
+pub(crate) type BoundGenerateContent = Model<gemini::completion::GenerateContent>;
 
 pub(crate) struct GeminiAgent {
-    model: BoundGenerateContent,
+    pub(super) model: BoundGenerateContent,
     preamble: String,
     tools: Vec<ToolDefinition>,
     tool_choice: Option<ToolChoice>,
@@ -53,14 +52,8 @@ impl GeminiAgent {
         }
     }
 
-    pub(crate) fn request(
-        &self,
-        prompt: Message,
-        history: Vec<Message>,
-    ) -> CompletionRequestBuilder<BoundGenerateContent> {
-        let mut request = self
-            .model
-            .completion_request(prompt)
+    pub(crate) fn request(&self, prompt: Message, history: Vec<Message>) -> CompletionRequest {
+        let mut request = CompletionRequest::new(prompt)
             .messages(history)
             .preamble(self.preamble.clone())
             .tools(self.tools.clone());
@@ -85,7 +78,7 @@ pub(crate) struct MathError;
 
 fn operation_definition(name: &str, description: &str) -> ToolDefinition {
     ToolDefinition {
-        name: name.to_string(),
+        name: rig_core::message::ToolName::new(name).expect("tool name"),
         description: description.to_string(),
         parameters: json!({
             "type": "object",
@@ -179,6 +172,27 @@ pub(crate) fn tool_names(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|name| (*name).to_string()).collect()
 }
 
+/// The machine's policy for a turn advertising `names` under the default
+/// tool choice.
+pub(crate) fn policy(names: &[&str]) -> TurnPolicy {
+    TurnPolicy::new(tool_names(names), None, None).expect("an auto policy")
+}
+
+/// The machine's policy for a turn advertising `executable` whose
+/// `ToolChoice::Specific` allows only `allowed`.
+pub(crate) fn restricted_policy(executable: &[&str], allowed: &[&str]) -> TurnPolicy {
+    let function_names = allowed
+        .iter()
+        .map(|name| rig::message::ToolName::new(*name).expect("tool name"))
+        .collect();
+    TurnPolicy::new(
+        tool_names(executable),
+        Some(ToolChoice::Specific { function_names }),
+        None,
+    )
+    .expect("a specific policy")
+}
+
 /// Execute one arithmetic tool call by name, the way a driver would.
 pub(crate) fn execute_arithmetic(name: &str, arguments: &serde_json::Value) -> i64 {
     let operand = |key: &str| {
@@ -206,12 +220,11 @@ pub(crate) fn execute_pending_calls(calls: &[PendingToolCall]) -> Vec<UserConten
             }
             let output = execute_arithmetic(
                 &call.tool_call.function.name,
-                &call.tool_call.function.arguments,
+                &call.tool_call.function.arguments_value(),
             );
             let content = vec![ToolResultContent::json(serde_json::json!(output))];
-            UserContent::tool_result_for(
+            UserContent::tool_result(
                 call.tool_call.id.clone(),
-                call.tool_call.provider.clone(),
                 call.tool_call.function.name.clone(),
                 content,
             )
@@ -226,32 +239,31 @@ pub(crate) async fn call_model(
     agent: &GeminiAgent,
     prompt: Message,
     history: Vec<Message>,
-    executable: &BTreeSet<String>,
-    allowed: &BTreeSet<String>,
+    policy: &TurnPolicy,
 ) -> ModelTurn {
     let response = agent
-        .request(prompt, history)
-        .send()
+        .model
+        .call(agent.request(prompt, history))
         .await
         .expect("gemini completion should succeed");
     ModelTurn::new(
-        response.message_id.clone(),
+        response.head(),
         response.choice.clone(),
         response.usage,
-        executable.clone(),
-        allowed.clone(),
+        policy.clone(),
         response.raw.clone(),
     )
 }
 
 pub(crate) fn assistant_tool_call_names(message: &Message) -> Vec<String> {
     match message {
-        Message::Assistant { content, .. } => content
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content
             .iter()
             .filter_map(|item| match item {
                 AssistantContent::ToolCall(tool_call) => Some(tool_call.function.name.clone()),
                 _ => None,
             })
+            .map(String::from)
             .collect(),
         _ => Vec::new(),
     }
@@ -311,7 +323,8 @@ pub(crate) fn sum_completion_call_usage(calls: &[CompletionCall]) -> Usage {
 /// replay order: reasoning blocks, then text, then tool calls.
 pub(crate) fn assert_canonical_assistant_order(messages: &[Message]) {
     for message in messages {
-        let Message::Assistant { content, .. } = message else {
+        let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = message
+        else {
             continue;
         };
         let kind_rank = |item: &AssistantContent| match item {

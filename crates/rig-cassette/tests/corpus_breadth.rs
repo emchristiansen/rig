@@ -152,8 +152,16 @@ const OPENAI_MEMORY_TWO_RUNS: Program = Program {
     fixture: "openai_breadth_memory_two_runs",
     conversation: Some(CONVERSATION),
     second_prompt: Some(SECOND_PROMPT),
+    additional_params: Some(stateless),
     ..BASIC
 };
+
+/// A Responses request that stores nothing, with the explicit ciphertext
+/// include its producer sends beside `store: false` (MEC132-7, producer 220),
+/// so this program runs under the producer's run spec.
+fn stateless() -> serde_json::Value {
+    serde_json::json!({ "store": false, "include": ["reasoning.encrypted_content"] })
+}
 
 both_interpreters! {
     gemini_output_tool_unary: GEMINI_OUTPUT_TOOL_UNARY,
@@ -191,6 +199,6 @@ fn the_output_tool_call_carries_the_wires_ids() {
             other => panic!("{fixture}: a completion, not {other:?}"),
         };
         assert_eq!(call.function.name, "final_result", "{fixture}");
-        assert_eq!(call.id.is_generated(), minted, "{fixture}: {:?}", call.id);
+        assert_eq!(call.id.is_local(), minted, "{fixture}: {:?}", call.id);
     }
 }

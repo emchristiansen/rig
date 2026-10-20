@@ -15,7 +15,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::completion::options::FinalBody;
 use crate::error::EncodeError;
+use crate::wire::Body;
 
 /// How a Responses wire encodes its HTTP request bodies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,14 +39,15 @@ impl RequestCompression {
         *self == Self::None
     }
 
-    /// Encode `body` for the wire, naming the encoding on `builder`.
-    pub(crate) fn apply(
+    /// Encode the sealed `body`, naming the encoding on `builder`.
+    pub(super) fn apply(
         self,
         builder: http::request::Builder,
-        body: Vec<u8>,
-    ) -> Result<(http::request::Builder, Vec<u8>), EncodeError> {
+        body: FinalBody,
+    ) -> Result<(http::request::Builder, EncodedBody), EncodeError> {
+        let body = serde_json::to_vec(&body)?;
         match self {
-            Self::None => Ok((builder, body)),
+            Self::None => Ok((builder, EncodedBody(body))),
             #[cfg(all(feature = "request-compression", not(target_family = "wasm")))]
             Self::Zstd => {
                 let compressed =
@@ -55,10 +58,20 @@ impl RequestCompression {
                     })?;
                 Ok((
                     builder.header(http::header::CONTENT_ENCODING, "zstd"),
-                    compressed,
+                    EncodedBody(compressed),
                 ))
             }
         }
+    }
+}
+
+/// Transport bytes encoded from a sealed Responses request body.
+pub(super) struct EncodedBody(Vec<u8>);
+
+impl EncodedBody {
+    /// Consume the encoded body as HTTP request bytes.
+    pub(super) fn into_body(self) -> Body {
+        Body::Bytes(self.0)
     }
 }
 

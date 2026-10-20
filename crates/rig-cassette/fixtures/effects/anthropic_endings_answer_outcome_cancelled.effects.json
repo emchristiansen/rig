@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 10072942899351225430,
+    "run_spec": 11761598427705777809,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -69,7 +69,14 @@
           "choice": [
             {
               "type": "text",
-              "text": "Rust is a systems programming language designed for performance and reliability, notable for its ownership model that enforces memory safety at compile time without a garbage collector. Memory safety matters because violations like buffer overflows, use-after-free, and null pointer dereferences are among the most common sources of critical security vulnerabilities and crashes in software."
+              "text": "Rust is a systems programming language designed for performance and reliability, notable for its ownership model that enforces memory safety at compile time without a garbage collector. Memory safety matters because violations like buffer overflows, use-after-free, and null pointer dereferences are among the most common sources of critical security vulnerabilities and crashes in software.",
+              "native": {
+                "item": {
+                  "text": "Rust is a systems programming language designed for performance and reliability, notable for its ownership model that enforces memory safety at compile time without a garbage collector. Memory safety matters because violations like buffer overflows, use-after-free, and null pointer dereferences are among the most common sources of critical security vulnerabilities and crashes in software.",
+                  "type": "text"
+                },
+                "fingerprint": "404b890fc02c6c68"
+              }
             }
           ],
           "usage": {
@@ -77,14 +84,25 @@
             "output_tokens": 72,
             "total_tokens": 109,
             "cached_input_tokens": 0,
-            "cache_creation_input_tokens": 0
+            "cache_creation_input_tokens": 0,
+            "cost": {
+              "input": 0.000111,
+              "output": 0.00108,
+              "cache_read": 0.0,
+              "cache_write": 0.0,
+              "total": 0.001191
+            }
           },
           "message_id": "msg_011CfLcW1u9YfstAuKXyLq1P",
-          "response_id": null,
+          "origin": {
+            "api": "anthropic.messages",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "response_model": "claude-sonnet-4-6",
+            "response_id": "msg_011CfLcW1u9YfstAuKXyLq1P"
+          },
           "provider_request_id": "req_011CfLcW1Q8uxpkFDCb8yoyW",
           "finish_reason": "stop",
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
           "raw": {
             "container": null,
             "content": [

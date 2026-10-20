@@ -1,11 +1,12 @@
 //! Typesafe's unary evaluation operation, using Rig's shared HTTP driver.
 
 use rig_core::client::{EnvError, env};
+use rig_core::driver::Model;
 use rig_core::error::EncodeError;
-use rig_core::operation::{One, Take};
+use rig_core::http_client::{DynHttpClient, HttpClientExt};
+use rig_core::operation::Whole;
 use rig_core::wire::{
-    Body, Decoder, Encoded, Framing, Mode, Operation, Output, Reply, Secret, Sink, Wire, WireEvent,
-    WireFrame,
+    Body, Call, Descriptor, Encoded, Framing, Free, Json, Mode, Operation, Secret, Wire,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,37 +17,37 @@ pub struct Evaluation;
 
 impl Operation for Evaluation {
     type Request = Request;
-    type Event = Response;
+    // No events: the reply's end is the response.
+    type Event = std::convert::Infallible;
+    type End = Response;
     type Response = Response;
-    type Capabilities = ();
-    type Output = One<Self>;
-    type Fold = Take<Self>;
-    type Telemetry = ();
-    const NAME: &'static str = "evaluation";
+    type Fold = Whole<Self>;
+    type Emit = Free;
 
-    fn is_terminal(_event: &Response) -> bool {
-        true
-    }
-    fn telemetry(_streaming: bool) {}
-    fn stamp_request_id(event: &mut Response, request_id: &Option<String>) {
-        event.provider_request_id.clone_from(request_id);
-    }
-    fn stamp_reply(response: &mut Response, reply: Reply) {
-        response.provider_request_id = reply.provider_request_id;
+    /// The transport request id and the reply document reach the response.
+    fn fold(_request: &Request, _call: &mut Call<'_>) -> Whole<Self> {
+        Whole::<Self>::stamping(|response, reply| {
+            response
+                .provider_request_id
+                .clone_from(&reply.provider_request_id);
+            response.raw.clone_from(&reply.raw);
+        })
     }
 }
 
-/// Configuration for Jev's `POST /v1/systemone` endpoint.
+/// The settings of Jev's `POST /v1/systemone` endpoint, which are also its
+/// wire. [`connect`](Self::connect) puts them on a transport as a [`Jev`]
+/// client.
 ///
 /// Credentials are redacted when this configuration is printed or serialized.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Jev {
+pub struct JevConfig {
     token: Secret,
     model: String,
     endpoint: String,
 }
 
-impl Jev {
+impl JevConfig {
     /// Use `jev-latest` at the Typesafe API.
     pub fn new(token: impl Into<String>) -> Self {
         Self {
@@ -79,22 +80,76 @@ impl Jev {
         self.endpoint = endpoint.into();
         self
     }
+
+    /// A client that sends these settings' requests through `http`.
+    pub fn connect(self, http: impl HttpClientExt + 'static) -> Jev {
+        Jev {
+            config: self,
+            http: DynHttpClient::new(http),
+        }
+    }
+
+    /// A client that sends through the shared reqwest client, built once
+    /// per process.
+    #[cfg(feature = "reqwest")]
+    pub fn client(self) -> Jev {
+        self.connect(rig_reqwest::shared())
+    }
 }
 
-impl Wire for Jev {
+/// Jev: its [`JevConfig`] on a transport. The model it builds sends through
+/// that transport.
+#[derive(Debug, Clone)]
+pub struct Jev {
+    config: JevConfig,
+    http: DynHttpClient,
+}
+
+impl Jev {
+    /// `jev-latest` at the Typesafe API with `token`, on the shared reqwest
+    /// client.
+    #[cfg(feature = "reqwest")]
+    pub fn new(token: impl Into<String>) -> Self {
+        JevConfig::new(token).client()
+    }
+
+    /// The credential from `JEV_TOKEN`, on the shared reqwest client.
+    #[cfg(feature = "reqwest")]
+    pub fn from_env() -> Result<Self, EnvError> {
+        Ok(JevConfig::from_env()?.client())
+    }
+
+    /// The same settings, sending through `http`.
+    pub fn with_http(self, http: impl HttpClientExt + 'static) -> Self {
+        Self {
+            http: DynHttpClient::new(http),
+            ..self
+        }
+    }
+
+    /// The settings this client sends with.
+    pub fn config(&self) -> &JevConfig {
+        &self.config
+    }
+
+    /// The evaluation model: the configured Jev model on this client's
+    /// transport.
+    pub fn evaluation(&self) -> Model<JevConfig> {
+        Model::new(self.config.clone(), self.http.clone())
+    }
+}
+
+impl Wire for JevConfig {
     type Op = Evaluation;
-    type Decoder = JevDecoder;
+    type Payload = Encoded;
+    type Frame = rig_core::wire::WireFrame;
+    // One JSON document in, the reply's end out, the document kept as `raw`.
+    type Decoder<'id> = Json;
+    type Reassembler = rig_core::wire::document::Unreassembled;
 
-    fn name(&self) -> &str {
-        "typesafeai"
+    fn describe(&self) -> Descriptor<'_> {
+        Descriptor::new("typesafeai").model(self.model.as_str())
     }
-    fn model(&self) -> Option<&str> {
-        Some(&self.model)
-    }
-    fn route(&self) -> Option<&str> {
-        Some("/v1/systemone")
-    }
-
     fn encode(&self, request: Request, _mode: Mode) -> Result<Encoded, EncodeError> {
         if self.token.is_empty() || self.model.trim().is_empty() {
             return Err(EncodeError::request(
@@ -119,30 +174,12 @@ impl Wire for Jev {
             .header(http::header::CONTENT_TYPE, "application/json")
             .header(http::header::AUTHORIZATION, authorization)
             .body(Body::Bytes(serde_json::to_vec(&body)?))?;
-        let mut encoded = Encoded::new(request, Framing::Whole);
-        encoded.request_id_header = Some("x-typesafe-request-id");
-        Ok(encoded)
+        Ok(Encoded::new(request, Framing::Whole)
+            .with_request_id_header(Some("x-typesafe-request-id"))
+            .with_route(Some("/v1/systemone")))
     }
 
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
-        JevDecoder
-    }
-}
-
-/// Decoder for the endpoint's single JSON response.
-pub struct JevDecoder;
-
-impl Decoder<Evaluation> for JevDecoder {
-    type Event = Response;
-
-    fn classify(&self, frame: WireFrame) -> WireEvent<Response> {
-        rig_core::providers::internal::wire::classify_marker_keyed_frame(
-            &frame.as_str(),
-            &["answers", "model"],
-        )
-    }
-
-    fn interpret(&mut self, response: Response, out: &mut Output<Evaluation>) {
-        out.push(Ok(response));
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
+        Json
     }
 }

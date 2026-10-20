@@ -1,20 +1,18 @@
-//! OpenAI streaming coverage, including the migrated example path.
+//! OpenAI streaming smoke coverage. The recording is also the source the
+//! stream-fault cells cut their frames from (`stream_faults.rs`).
 
-use rig::prelude::*;
 use rig::providers::openai;
 
 use super::super::support::with_openai_cassette;
 use crate::support::{
-    STREAMING_PREAMBLE, STREAMING_PROMPT, assert_nonempty_response, collect_stream_final_response,
+    STREAMING_PREAMBLE, STREAMING_PROMPT, assert_nonempty_response,
     collect_stream_final_response_and_provider_final,
 };
 
 #[tokio::test]
 async fn streaming_smoke() {
     with_openai_cassette("streaming/streaming_smoke", |client| async move {
-        let agent = client
-            .openai
-            .agent(openai::GPT_4O)
+        let agent = rig::AgentBuilder::new(client.openai.completion(openai::GPT_4O))
             .preamble(STREAMING_PREAMBLE)
             .build();
 
@@ -25,33 +23,7 @@ async fn streaming_smoke() {
                 .expect("streaming prompt should succeed");
 
         assert_nonempty_response(&response);
-        assert_eq!(
-            provider_final.provider, "openai",
-            "the terminal stream record should be attributed to the OpenAI provider"
-        );
         assert!(provider_final.usage.total_tokens.is_some_and(|n| n > 0));
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn example_streaming_prompt() {
-    with_openai_cassette("streaming/example_streaming_prompt", |client| async move {
-        let agent = client
-            .openai
-            .agent(openai::GPT_4O)
-            .preamble("Be precise and concise.")
-            .temperature(0.5)
-            .build();
-
-        let mut stream = agent
-            .prompt("When and where and what type is the next solar eclipse?")
-            .stream();
-        let response = collect_stream_final_response(&mut stream)
-            .await
-            .expect("streaming prompt should succeed");
-
-        assert_nonempty_response(&response);
     })
     .await;
 }

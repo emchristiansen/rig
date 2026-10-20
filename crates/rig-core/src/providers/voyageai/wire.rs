@@ -2,25 +2,25 @@
 //!
 //! ```no_run
 //! use rig_core::providers::voyageai::{VoyageAi, VOYAGE_3_5};
-//! let wire = VoyageAi::from_env()?.embeddings(VOYAGE_3_5, None);
+//! let wire = VoyageAi::from_env()?.embedding(VOYAGE_3_5, None);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 use crate::client::env::{self, EnvError};
-use crate::driver::{HasEmbedding, HasRerank};
-use crate::embeddings::Embedding as Vector;
 use crate::error::EncodeError;
 use crate::error::ProviderError;
-use crate::operation::{Embedding, EmbeddingCapabilities, Rerank as RerankOp, RerankRequest};
+use crate::operation::{Embedding, Rerank as RerankOp, RerankRequest};
 use crate::rerank::{RerankResponse, RerankResult};
+use crate::wire::Flow;
 use crate::wire::{
-    Body, Decoder, Encoded, Framing, Mode, Output, Secret, Sink, Wire, WireEvent, WireFrame,
+    Body, Capabilities, Decoder, Descriptor, Encoded, Framing, Mode, Out, Secret, Wire, WireEvent,
+    WireFrame,
 };
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EmbeddingResponse as VoyageEmbeddingResponse, RerankApiResponse, RerankErrorEnvelope,
-    VOYAGEAI_API_BASE_URL, model_dimensions_from_identifier,
+    EmbeddingResponse as VoyageEmbeddingResponse, RerankApiResponse, VOYAGEAI_API_BASE_URL,
+    model_dimensions_from_identifier,
 };
 
 /// The provider descriptor name, as records and telemetry spell it.
@@ -35,16 +35,18 @@ const MAX_DOCUMENTS: usize = 1024;
 /// The most documents `POST /rerank` orders in one call.
 const MAX_RERANK_DOCUMENTS: usize = 1000;
 
-/// The shared configuration of a Voyage AI provider.
+/// The settings of a Voyage AI provider: serializable, and the credential
+/// is never serialized. [`connect`](Self::connect) puts it on a transport as
+/// a [`VoyageAi`](super::VoyageAi) client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VoyageAi {
+pub struct VoyageAiConfig {
     /// The API key, sent as `Authorization: Bearer`.
     pub api_key: Secret,
     /// The API root, without a trailing slash.
     pub base_url: String,
 }
 
-impl VoyageAi {
+impl VoyageAiConfig {
     /// Voyage AI with default settings.
     pub fn new(api_key: impl Into<Secret>) -> Self {
         Self {
@@ -67,7 +69,7 @@ impl VoyageAi {
     /// Build an embedding wire reporting `ndims`, or the known model width,
     /// or zero if unknown. This does not send an output-dimension override;
     /// use [`Embeddings::with_output_dimension`] for that.
-    pub fn embeddings(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
+    pub(crate) fn embedding(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
         let model = model.into();
         let ndims = ndims
             .or_else(|| model_dimensions_from_identifier(&model))
@@ -83,7 +85,7 @@ impl VoyageAi {
     }
 
     /// The rerank wire for `model`.
-    pub fn rerank(&self, model: impl Into<String>) -> Rerank {
+    pub(crate) fn rerank(&self, model: impl Into<String>) -> Rerank {
         Rerank {
             provider: self.clone(),
             model: model.into(),
@@ -112,7 +114,7 @@ impl VoyageAi {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Embeddings {
     /// The provider this wire speaks to.
-    pub provider: VoyageAi,
+    pub provider: VoyageAiConfig,
     /// The model to address.
     pub model: String,
     /// The width this wire reports, from the caller or the model's published
@@ -156,14 +158,15 @@ impl Embeddings {
 
 impl Wire for Embeddings {
     type Op = Embedding;
-    type Decoder = EmbeddingsDecoder;
+    type Payload = crate::wire::Encoded;
+    type Frame = crate::wire::WireFrame;
+    type Decoder<'id> = EmbeddingsDecoder;
+    type Reassembler = crate::wire::document::Unreassembled;
 
-    fn name(&self) -> &str {
-        PROVIDER_NAME
-    }
-
-    fn model(&self) -> Option<&str> {
-        Some(&self.model)
+    fn describe(&self) -> Descriptor<'_> {
+        Descriptor::new(PROVIDER_NAME)
+            .model(self.model.as_str())
+            .capabilities(Capabilities::embedding(MAX_DOCUMENTS, self.ndims))
     }
 
     fn encode(&self, texts: Vec<String>, _mode: Mode) -> Result<Encoded, EncodeError> {
@@ -189,56 +192,38 @@ impl Wire for Embeddings {
         Ok(Encoded::new(request, Framing::Whole))
     }
 
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
         EmbeddingsDecoder
-    }
-
-    fn capabilities(&self) -> EmbeddingCapabilities {
-        EmbeddingCapabilities::new(MAX_DOCUMENTS, self.ndims)
     }
 }
 
 /// Decodes one `/embeddings` reply.
 pub struct EmbeddingsDecoder;
 
-impl Decoder<Embedding> for EmbeddingsDecoder {
+impl<'id> Decoder<'id, Embedding> for EmbeddingsDecoder {
     type Event = VoyageEmbeddingResponse;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
         crate::providers::internal::wire::classify_marker_keyed_frame(&frame.as_str(), &["data"])
     }
 
-    fn interpret(&mut self, reply: Self::Event, out: &mut Output<Embedding>) {
-        let raw = match serde_json::to_value(&reply) {
-            Ok(raw) => raw,
-            Err(error) => {
-                out.push(Err(error.into()));
-                return;
-            }
-        };
+    fn decode(
+        &mut self,
+        reply: Self::Event,
+        out: Out<'id, Embedding>,
+    ) -> Result<Flow, ProviderError> {
         // Voyage reports one count; every token of an embedding is input.
         let usage = crate::completion::Usage {
             input_tokens: Some(reply.usage.total_tokens as u64),
             total_tokens: Some(reply.usage.total_tokens as u64),
             ..Default::default()
         };
-        // The vectors only; the operation's fold pairs them with the texts
-        // that were sent, which `/embeddings` does not echo back.
-        let vectors = reply
-            .data
-            .into_iter()
-            .map(|embedding| Vector {
-                document: String::new(),
-                vec: embedding.embedding,
-            })
-            .collect();
-        out.push(Ok(crate::embeddings::EmbeddingResponse::new(
-            vectors,
-            PROVIDER_NAME,
-        )
-        .with_model(reply.model)
-        .with_usage(usage)
-        .with_raw(raw)));
+        let vectors = reply.data.into_iter().map(|embedding| embedding.embedding);
+        Ok(out.end(crate::embeddings::EmbeddingResponse {
+            model: Some(reply.model),
+            usage,
+            ..crate::embeddings::EmbeddingResponse::from_vectors(vectors)
+        }))
     }
 }
 
@@ -246,7 +231,7 @@ impl Decoder<Embedding> for EmbeddingsDecoder {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rerank {
     /// The provider this wire speaks to.
-    pub provider: VoyageAi,
+    pub provider: VoyageAiConfig,
     /// The model to address.
     pub model: String,
     /// Return only the `top_k` most relevant documents. `None` returns them
@@ -281,14 +266,15 @@ impl Rerank {
 
 impl Wire for Rerank {
     type Op = RerankOp;
-    type Decoder = RerankDecoder;
+    type Payload = crate::wire::Encoded;
+    type Frame = crate::wire::WireFrame;
+    type Decoder<'id> = RerankDecoder;
+    type Reassembler = crate::wire::document::Unreassembled;
 
-    fn name(&self) -> &str {
-        PROVIDER_NAME
-    }
-
-    fn model(&self) -> Option<&str> {
-        Some(&self.model)
+    fn describe(&self) -> Descriptor<'_> {
+        Descriptor::new(PROVIDER_NAME)
+            .model(self.model.as_str())
+            .capabilities(Capabilities::rerank(MAX_RERANK_DOCUMENTS))
     }
 
     fn encode(&self, request: RerankRequest, _mode: Mode) -> Result<Encoded, EncodeError> {
@@ -313,76 +299,31 @@ impl Wire for Rerank {
         Ok(Encoded::new(request, Framing::Whole))
     }
 
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
         RerankDecoder
     }
-
-    fn capabilities(&self) -> usize {
-        MAX_RERANK_DOCUMENTS
-    }
-}
-
-/// Ranking and error-envelope markers. Recognizing `message` permits fallback
-/// decoding of provider errors returned with successful HTTP status.
-const RERANK_REPLY_MARKERS: &[&str] = &["data", "message"];
-
-/// The key that recognizes the error envelope on its own.
-const RERANK_ERROR_MARKERS: &[&str] = &["message"];
-
-/// One `/rerank` reply: the ordering, or the error envelope Voyage can
-/// answer a **200** with instead.
-pub enum RerankReply {
-    /// The ordering Voyage returned.
-    Reply(RerankApiResponse),
-    /// The provider's error envelope, verbatim.
-    Failure(String),
 }
 
 /// Decodes one `/rerank` reply.
 pub struct RerankDecoder;
 
-impl Decoder<RerankOp> for RerankDecoder {
-    type Event = RerankReply;
+impl<'id> Decoder<'id, RerankOp> for RerankDecoder {
+    /// The ordering, or the error envelope Voyage can answer a **200** with.
+    type Event = Result<RerankApiResponse, String>;
 
-    /// Decode a ranking, then an error envelope if ranking decoding fails.
-    /// Retain the ranking diagnostic when neither shape decodes.
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        let data = frame.as_str();
-        crate::providers::internal::wire::classify_or(
-            &data,
-            |data| {
-                crate::providers::internal::wire::classify_marker_keyed_frame::<RerankApiResponse>(
-                    data,
-                    RERANK_REPLY_MARKERS,
-                )
-                .map(RerankReply::Reply)
-            },
-            |data| {
-                crate::providers::internal::wire::classify_marker_keyed_frame::<RerankErrorEnvelope>(
-                    data,
-                    RERANK_ERROR_MARKERS,
-                )
-                .map(|_| RerankReply::Failure(data.to_owned()))
-            },
+        crate::providers::internal::wire::classify_reply_or_message_envelope(
+            &frame.as_str(),
+            "data",
         )
     }
 
-    fn interpret(&mut self, reply: Self::Event, out: &mut Output<RerankOp>) {
-        let reply = match reply {
-            RerankReply::Reply(reply) => reply,
-            // Preserve the provider body; the driver adds the actual HTTP status.
-            RerankReply::Failure(body) => {
-                out.push(Err(ProviderError::from_provider_body(body)));
-                return;
-            }
-        };
-        let raw = match serde_json::to_value(&reply) {
-            Ok(raw) => raw,
-            Err(error) => {
-                out.push(Err(error.into()));
-                return;
-            }
-        };
+    fn decode(
+        &mut self,
+        reply: Self::Event,
+        out: Out<'id, RerankOp>,
+    ) -> Result<Flow, ProviderError> {
+        let reply = reply.map_err(ProviderError::from_provider_body)?;
         // Voyage reports one count; every token of a rerank is input.
         let usage = crate::completion::Usage {
             input_tokens: Some(reply.usage.total_tokens as u64),
@@ -398,26 +339,11 @@ impl Decoder<RerankOp> for RerankDecoder {
                 relevance_score: result.relevance_score,
             })
             .collect();
-        out.push(Ok(RerankResponse::new(results, PROVIDER_NAME)
-            .with_model(reply.model)
-            .with_usage(usage)
-            .with_raw(raw)));
-    }
-}
-
-impl HasEmbedding for VoyageAi {
-    type Wire = Embeddings;
-
-    fn embedding(&self, model: impl Into<String>, ndims: Option<usize>) -> Embeddings {
-        self.embeddings(model, ndims)
-    }
-}
-
-impl HasRerank for VoyageAi {
-    type Wire = Rerank;
-
-    fn rerank(&self, model: impl Into<String>) -> Rerank {
-        VoyageAi::rerank(self, model)
+        Ok(out.end(RerankResponse {
+            model: Some(reply.model),
+            usage,
+            ..RerankResponse::new(results)
+        }))
     }
 }
 

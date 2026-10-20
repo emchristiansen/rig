@@ -44,7 +44,6 @@
 //!    looked identical.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +60,59 @@ use cache_prefix::{EndpointKind, PrefixBlock, Violation};
 /// records that someone silenced the check, not why it is correct.
 const MOVES_CACHE_PREFIX: &[(&str, &str)] = &[
     (
+        "anthropic/corpus_shaping/tool_choice_none_on_committed_output.yaml",
+        "a request sends the conversation without tools, so the core turns its calls into text and the prefix moves (rule R4)",
+    ),
+    (
+        "deepseek/corpus_matrix/shaping_tool_choice_none_on_committed_output.yaml",
+        "a request sends the conversation without tools, so the core turns its calls into text and the prefix moves (rule R4)",
+    ),
+    (
+        "doubleword/corpus_matrix/shaping_tool_choice_none_on_committed_output.yaml",
+        "a request sends the conversation without tools, so the core turns its calls into text and the prefix moves (rule R4)",
+    ),
+    (
+        "venice/corpus_matrix/shaping_tool_choice_none_on_committed_output.yaml",
+        "a request sends the conversation without tools, so the core turns its calls into text and the prefix moves (rule R4)",
+    ),
+    (
+        "anthropic/context_binding/between_tools_after_tool_change.yaml",
+        "the cell pins how a turn made under the old tools replays after the tool list changes; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "anthropic/context_binding/changed_system_with_drop_block.yaml",
+        "the cell pins that thinking bound to the old system prompt replays after it changes; the changed system prompt is the behavior being recorded",
+    ),
+    (
+        "anthropic/context_binding/changed_system_without_drop_block.yaml",
+        "the cell pins that thinking bound to the old system prompt is refused without the binding; the changed system prompt is the behavior being recorded",
+    ),
+    (
+        "anthropic/context_binding/changed_tools_without_drop_block.yaml",
+        "the cell pins that thinking bound to the old tools is refused without the binding; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "anthropic/context_binding/changed_tools_with_drop_block.yaml",
+        "the cell pins that thinking bound to the old tools replays after the tool list changes; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "openrouter/context_binding/amazon_bedrock.yaml",
+        "the cell pins that thinking bound to the old tools replays after the tool list changes; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "openrouter/context_binding/anthropic.yaml",
+        "the cell pins that thinking bound to the old tools replays after the tool list changes; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "openrouter/context_binding/google_vertex.yaml",
+        "the cell pins that thinking bound to the old tools replays after the tool list changes; the changed tool list is the behavior being recorded",
+    ),
+    (
+        "anthropic/long_run_caching/dynamic_tools_30.yaml",
+        "the long run's request patch changes the active tools on turns 11 \
+         and 21; the changed tool list is the behavior being recorded",
+    ),
+    (
         "anthropic/corpus_shaping/active_tools_none_second_turn.yaml",
         "the effect corpus's per-turn shaping matrix: a request patch drops \
          every tool on the second turn — moving the prefix is the behavior \
@@ -73,7 +125,7 @@ const MOVES_CACHE_PREFIX: &[(&str, &str)] = &[
     ),
     (
         "openai/corpus_matrix_chat/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
@@ -96,57 +148,57 @@ const MOVES_CACHE_PREFIX: &[(&str, &str)] = &[
     ),
     (
         "openai/corpus_matrix_chat/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
         "openai/corpus_matrix_responses/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
         "openai/corpus_matrix_responses/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
         "gemini/corpus_matrix/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
         "gemini/corpus_matrix/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
         "deepseek/corpus_matrix/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
         "deepseek/corpus_matrix/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
         "doubleword/corpus_matrix/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
         "doubleword/corpus_matrix/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
         "venice/corpus_matrix/shaping_active_tools_none_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch drops every tool on the second turn",
     ),
     (
         "venice/corpus_matrix/shaping_preamble_second_turn.yaml",
-        "the ECS contract matrix's copy of the anthropic cell on this wire: the \
+        "the corpus matrix's copy of the anthropic cell on this wire: the \
          patch replaces the preamble on the second turn",
     ),
     (
@@ -200,6 +252,14 @@ const MAX_UNMODELED_FRACTION: f64 = 0.95;
 #[derive(Deserialize)]
 struct RecordedInteraction {
     when: RecordedRequest,
+    #[serde(default)]
+    then: Option<RecordedResponse>,
+}
+
+#[derive(Deserialize)]
+struct RecordedResponse {
+    #[serde(default)]
+    body: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -229,12 +289,34 @@ fn cassette_files(dir: &Path, found: &mut Vec<PathBuf>) {
 }
 
 /// Ordered `(path, body)` for every recorded request in one cassette.
+///
+/// A Gemini request that reads an explicit cache this cassette created is
+/// spliced with the body that created it (see
+/// [`cache_prefix::splice_cached_content`]), so it is compared as the whole
+/// conversation it stands for.
 fn recorded_requests(contents: &str) -> Vec<(String, Value)> {
+    let mut caches: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     serde_yaml::Deserializer::from_str(contents)
         .filter_map(|document| RecordedInteraction::deserialize(document).ok())
         .filter_map(|interaction| {
             let body = interaction.when.body?;
             let json = serde_json::from_str::<Value>(&body).ok()?;
+            if interaction.when.path.ends_with("/cachedContents") {
+                let name = interaction
+                    .then
+                    .and_then(|then| then.body)
+                    .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+                    .and_then(|reply| reply.get("name")?.as_str().map(str::to_owned));
+                if let Some(name) = name {
+                    caches.insert(name, json.clone());
+                }
+            }
+            let json = json
+                .get("cachedContent")
+                .and_then(Value::as_str)
+                .and_then(|name| caches.get(name))
+                .and_then(|cache| cache_prefix::splice_cached_content(&json, cache))
+                .unwrap_or(json);
             Some((interaction.when.path, json))
         })
         .collect()
@@ -614,9 +696,8 @@ fn an_unknown_conversational_endpoint_is_a_finding_not_a_skip() {
 // that were actually put on the wire. A literal would only prove that
 // `serde_json` is deterministic, which was never in doubt.
 
-use rig::completion::{CompletionModel as _, CompletionRequest, ToolDefinition};
+use rig::completion::{CompletionRequest, ToolDefinition};
 use rig::message::{Message, UserContent};
-use rig::prelude::*;
 use rig_core::test_utils::RecordingHttpClient;
 
 /// How many times each provider's request is serialized before the bytes are
@@ -644,7 +725,7 @@ const IGNORED_RESPONSE: &str = "{}";
 /// likely place for iteration order to leak.
 fn determinism_probe_request() -> CompletionRequest {
     let tool = |name: &str, first: &str, second: &str| ToolDefinition {
-        name: name.to_owned(),
+        name: rig_core::message::ToolName::new(name).expect("tool name"),
         description: format!("Deterministic ordering probe tool {name}."),
         parameters: serde_json::json!({
             "type": "object",
@@ -675,33 +756,28 @@ fn determinism_probe_request() -> CompletionRequest {
         .collect(),
     };
 
-    CompletionRequest {
-        chat_history: vec![
-            Message::system("You are a deterministic serialization probe."),
-            Message::User {
-                content: vec![UserContent::text("probe")],
-            },
-        ],
-        documents: vec![document],
-        tools: vec![
-            tool("alpha_probe", "alpha_first", "alpha_second"),
-            tool("beta_probe", "beta_first", "beta_second"),
-            tool("gamma_probe", "gamma_first", "gamma_second"),
-        ],
-        temperature: Some(0.0),
-        max_tokens: Some(16),
-        tool_choice: None,
-        additional_params: Some(serde_json::json!({
-            "seed": 7,
-            "top_p": 0.5,
-            "frequency_penalty": 0.0,
-            "presence_penalty": 0.0,
-            "user": "cache-determinism-probe",
-        })),
-        model: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    let mut request = CompletionRequest::from(vec![
+        Message::system("You are a deterministic serialization probe."),
+        Message::User {
+            content: vec![UserContent::text("probe")],
+        },
+    ]);
+    request.documents = vec![document];
+    request.tools = vec![
+        tool("alpha_probe", "alpha_first", "alpha_second"),
+        tool("beta_probe", "beta_first", "beta_second"),
+        tool("gamma_probe", "gamma_first", "gamma_second"),
+    ];
+    request.temperature = Some(0.0);
+    request.max_tokens = Some(16);
+    request.additional_params = Some(serde_json::json!({
+        "seed": 7,
+        "top_p": 0.5,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
+        "user": "cache-determinism-probe",
+    }));
+    request
 }
 
 /// The single request body a recording transport captured.
@@ -763,7 +839,7 @@ macro_rules! determinism_test {
                 let model = $build;
                 // The response is intentionally unparseable; only the captured
                 // request matters, and it is captured before parsing.
-                let _ = model.completion(determinism_probe_request()).await;
+                let _ = model.call(determinism_probe_request()).await;
                 bodies.push(captured_body($provider, &$http));
             }
             assert_identical($provider, &bodies);
@@ -775,8 +851,8 @@ determinism_test!(
     anthropic_request_serialization_is_deterministic,
     "anthropic",
     |http| {
-        rig::providers::anthropic::wire::Anthropic::new("test-key")
-            .bind(http.clone())
+        rig::providers::anthropic::wire::AnthropicConfig::new("test-key")
+            .connect(http.clone())
             .completion(rig::providers::anthropic::completion::CLAUDE_SONNET_4_6)
     }
 );
@@ -785,8 +861,8 @@ determinism_test!(
     openai_responses_request_serialization_is_deterministic,
     "openai/responses",
     |http| {
-        rig::providers::openai::OpenAI::new("test-key")
-            .bind(http.clone())
+        rig::providers::openai::OpenAIConfig::new("test-key")
+            .connect(http.clone())
             .completion(rig::providers::openai::GPT_4O)
     }
 );
@@ -795,11 +871,11 @@ determinism_test!(
     openai_chat_request_serialization_is_deterministic,
     "openai/chat-completions",
     |http| {
-        rig::providers::openai::wire::OpenAI::with_key(
+        rig::providers::openai::wire::OpenAIConfig::with_key(
             &rig::providers::openai::wire::OPENAI,
             "test-key",
         )
-        .bind(http.clone())
+        .connect(http.clone())
         .completion(rig::providers::openai::GPT_4O)
     }
 );
@@ -808,8 +884,8 @@ determinism_test!(
     gemini_request_serialization_is_deterministic,
     "gemini",
     |http| {
-        rig::providers::gemini::Gemini::new("test-key")
-            .bind(http.clone())
+        rig::providers::gemini::GeminiConfig::new("test-key")
+            .connect(http.clone())
             .completion(rig::providers::gemini::completion::GEMINI_2_5_FLASH)
     }
 );
@@ -818,8 +894,8 @@ determinism_test!(
     cohere_request_serialization_is_deterministic,
     "cohere",
     |http| {
-        rig::providers::cohere::wire::Cohere::new("test-key")
-            .bind(http.clone())
+        rig::providers::cohere::wire::CohereConfig::new("test-key")
+            .connect(http.clone())
             .completion(rig::providers::cohere::COMMAND_A_03_2025)
     }
 );
@@ -828,11 +904,11 @@ determinism_test!(
     deepseek_request_serialization_is_deterministic,
     "deepseek",
     |http| {
-        rig::providers::openai::wire::OpenAI::with_key(
+        rig::providers::openai::wire::OpenAIConfig::with_key(
             &rig::providers::openai::wire::DEEPSEEK,
             "test-key",
         )
-        .bind(http.clone())
+        .connect(http.clone())
         .completion(rig::providers::deepseek::DEEPSEEK_V4_FLASH)
     }
 );
@@ -841,11 +917,11 @@ determinism_test!(
     mistral_request_serialization_is_deterministic,
     "mistral",
     |http| {
-        rig::providers::openai::wire::OpenAI::with_key(
+        rig::providers::openai::wire::OpenAIConfig::with_key(
             &rig::providers::openai::wire::MISTRAL,
             "test-key",
         )
-        .bind(http.clone())
+        .connect(http.clone())
         .completion(rig::providers::mistral::MISTRAL_SMALL)
     }
 );
@@ -854,11 +930,11 @@ determinism_test!(
     openrouter_request_serialization_is_deterministic,
     "openrouter",
     |http| {
-        rig::providers::openai::wire::OpenAI::with_key(
+        rig::providers::openai::wire::OpenAIConfig::with_key(
             &rig::providers::openai::wire::OPENROUTER,
             "test-key",
         )
-        .bind(http.clone())
+        .connect(http.clone())
         .completion("openai/gpt-4o-mini")
     }
 );
@@ -867,18 +943,18 @@ determinism_test!(
     groq_request_serialization_is_deterministic,
     "groq",
     |http| {
-        rig::providers::openai::wire::OpenAI::with_key(
+        rig::providers::openai::wire::OpenAIConfig::with_key(
             &rig::providers::openai::wire::GROQ,
             "test-key",
         )
-        .bind(http.clone())
+        .connect(http.clone())
         .completion(rig::providers::groq::LLAMA_3_1_8B_INSTANT)
     }
 );
 
 determinism_test!(xai_request_serialization_is_deterministic, "xai", |http| {
-    rig::providers::openai::OpenAI::with_key(&rig::providers::xai::DIALECT, "test-key")
-        .bind(http.clone())
+    rig::providers::openai::OpenAIConfig::with_key(&rig::providers::xai::DIALECT, "test-key")
+        .connect(http.clone())
         .completion(rig::providers::xai::GROK_3_MINI)
 });
 
@@ -886,11 +962,11 @@ determinism_test!(
     venice_request_serialization_is_deterministic,
     "venice",
     |http| {
-        rig::providers::openai::wire::OpenAI::with_key(
+        rig::providers::openai::wire::OpenAIConfig::with_key(
             &rig::providers::openai::wire::VENICE,
             "test-key",
         )
-        .bind(http.clone())
+        .connect(http.clone())
         .completion(rig::providers::venice::QWEN3_5_9B)
     }
 );
@@ -899,11 +975,11 @@ determinism_test!(
     doubleword_request_serialization_is_deterministic,
     "doubleword",
     |http| {
-        rig::providers::openai::wire::OpenAI::with_key(
+        rig::providers::openai::wire::OpenAIConfig::with_key(
             &rig::providers::openai::wire::DOUBLEWORD,
             "test-key",
         )
-        .bind(http.clone())
+        .connect(http.clone())
         .completion(rig::providers::doubleword::QWEN3_5_9B)
     }
 );
@@ -912,11 +988,11 @@ determinism_test!(
     perplexity_request_serialization_is_deterministic,
     "perplexity",
     |http| {
-        rig::providers::openai::wire::OpenAI::with_key(
+        rig::providers::openai::wire::OpenAIConfig::with_key(
             &rig::providers::openai::wire::PERPLEXITY,
             "test-key",
         )
-        .bind(http.clone())
+        .connect(http.clone())
         .completion(rig::providers::perplexity::SONAR)
     }
 );
@@ -1018,9 +1094,8 @@ const NO_CACHE_SUITE: &[(&str, &str)] = &[
     ),
     (
         "ollama",
-        "Ollama's /api/chat usage payload carries no cached-token field of any kind, and rig's \
-         Ollama provider therefore has no cache mapping to test — there is nothing for a cache \
-         suite to assert",
+        "Ollama's usage payload carries no cached-token field of any kind, so there is no \
+         cache mapping to test and nothing for a cache suite to assert",
     ),
     (
         "voyageai",

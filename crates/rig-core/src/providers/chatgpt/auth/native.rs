@@ -1,18 +1,17 @@
 //! Native ChatGPT OAuth and token cache implementation.
 
-use super::{AuthContext, AuthError, DeviceCodeHandler, DeviceCodePrompt};
+use super::{AuthContext, AuthError, Authenticator, DeviceCodePrompt};
 use crate::http_client::HttpClientExt;
-use crate::providers::internal::auth::{request, send_json};
-use crate::providers::internal::device_auth::{
+use crate::providers::internal::auth::device::{
     emit_device_code_prompt, read_json_record, token_expired, write_json_record,
 };
+use crate::providers::internal::auth::{request, send_json};
 use crate::providers::openai::wire::CallerIdentity;
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use http::Method;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::path::PathBuf;
 
 const CHATGPT_AUTH_BASE: &str = "https://auth.openai.com";
 const CHATGPT_DEVICE_CODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
@@ -23,13 +22,6 @@ const CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const TOKEN_EXPIRY_SKEW_SECONDS: i64 = 60;
 const DEVICE_CODE_TIMEOUT_SECONDS: i64 = 15 * 60;
 const DEVICE_CODE_POLL_SLEEP_SECONDS: u64 = 5;
-
-#[derive(Debug, Clone)]
-pub(super) struct PlatformAuthenticator {
-    auth_file: Option<PathBuf>,
-    device_code_handler: DeviceCodeHandler,
-    allow_device_flow: bool,
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct AuthRecord {
@@ -82,23 +74,9 @@ enum RefreshTokensError {
     Auth(AuthError),
 }
 
-impl PlatformAuthenticator {
-    pub(super) fn new(
-        auth_file: Option<PathBuf>,
-        device_code_handler: DeviceCodeHandler,
-        allow_device_flow: bool,
-    ) -> Self {
-        Self {
-            auth_file,
-            device_code_handler,
-            allow_device_flow,
-        }
-    }
-
+impl Authenticator {
     /// Resolve the cached or refreshed credential, signing in when needed.
-    /// A token refresh carries `identity` exactly, as the official client's
-    /// does; the device sign-in carries none, as the official client's
-    /// does not.
+    /// A token refresh carries `identity` exactly; device sign-in carries none.
     pub(super) async fn auth_context_oauth<H>(
         &self,
         http: &H,
@@ -107,6 +85,7 @@ impl PlatformAuthenticator {
     where
         H: HttpClientExt,
     {
+        let _refresh = self.refresh_lock.lock().await;
         let mut record: AuthRecord = read_json_record(self.auth_file.as_deref())?;
 
         if let Some(access_token) = record.access_token.clone()

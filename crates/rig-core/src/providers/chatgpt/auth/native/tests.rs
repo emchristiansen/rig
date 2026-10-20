@@ -1,37 +1,25 @@
 use super::{
-    DeviceCodeHandler, DeviceCodeResponse, OAuthErrorResponse, OAuthTokenResponse,
-    PlatformAuthenticator, build_auth_record, format_refresh_error,
-    should_reauthenticate_after_refresh,
+    DeviceCodeResponse, OAuthErrorResponse, OAuthTokenResponse, build_auth_record,
+    format_refresh_error, should_reauthenticate_after_refresh,
 };
+use crate::providers::chatgpt::auth::{AuthSource, Authenticator, DeviceCodeHandler};
 use crate::test_utils::RecordingHttpClient;
 use http::StatusCode;
 
 #[test]
-fn device_code_response_accepts_numeric_interval() {
-    let response: DeviceCodeResponse = serde_json::from_str(
-        r#"{
+fn device_code_response_accepts_a_numeric_or_string_interval() {
+    for (case, interval) in [("numeric", "5"), ("string", r#""5""#)] {
+        let response: DeviceCodeResponse = serde_json::from_str(&format!(
+            r#"{{
                 "device_auth_id": "deviceauth_123",
                 "user_code": "ABCD-EFGH",
-                "interval": 5
-            }"#,
-    )
-    .expect("device code response");
+                "interval": {interval}
+            }}"#
+        ))
+        .unwrap_or_else(|error| panic!("{case}: device code response: {error}"));
 
-    assert_eq!(response.interval, Some(5));
-}
-
-#[test]
-fn device_code_response_accepts_string_interval() {
-    let response: DeviceCodeResponse = serde_json::from_str(
-        r#"{
-                "device_auth_id": "deviceauth_123",
-                "user_code": "ABCD-EFGH",
-                "interval": "5"
-            }"#,
-    )
-    .expect("device code response");
-
-    assert_eq!(response.interval, Some(5));
+        assert_eq!(response.interval, Some(5), "{case}");
+    }
 }
 
 #[test]
@@ -60,12 +48,16 @@ fn refresh_reauth_only_on_invalid_grant() {
 
 #[tokio::test]
 async fn noninteractive_oauth_requires_sign_in_instead_of_device_flow() {
-    let auth = PlatformAuthenticator::new(None, DeviceCodeHandler::default(), false);
+    let auth = Authenticator::new(
+        AuthSource::OAuth {
+            identity: crate::test_utils::test_caller_identity(),
+        },
+        None,
+        DeviceCodeHandler::default(),
+        false,
+    );
     let err = auth
-        .auth_context_oauth(
-            &RecordingHttpClient::new(""),
-            &crate::test_utils::test_caller_identity(),
-        )
+        .auth_context(&RecordingHttpClient::new(""))
         .await
         .expect_err("missing cached auth should not start device flow")
         .to_string();
@@ -118,10 +110,15 @@ async fn cached_credential_remains_persistent_and_reusable() -> anyhow::Result<(
     let record: super::AuthRecord = serde_json::from_value(fixture.clone())?;
     super::write_json_record(Some(&path), &record)?;
     let http = RecordingHttpClient::new("");
-    let auth = PlatformAuthenticator::new(Some(path.clone()), DeviceCodeHandler::default(), false);
-    let context = auth
-        .auth_context_oauth(&http, &crate::test_utils::test_caller_identity())
-        .await?;
+    let auth = Authenticator::new(
+        AuthSource::OAuth {
+            identity: crate::test_utils::test_caller_identity(),
+        },
+        Some(path.clone()),
+        DeviceCodeHandler::default(),
+        false,
+    );
+    let context = auth.auth_context(&http).await?;
     anyhow::ensure!(http.requests().is_empty(), "a fresh cache must not refresh");
     anyhow::ensure!(
         context.access_token.expose() == "synthetic-cached-chatgpt-token",
@@ -164,9 +161,14 @@ async fn a_token_refresh_carries_the_caller_s_identity_and_the_official_body() {
         Some("1.2.3".to_owned()),
     )
     .expect("a valid identity");
-    let auth = PlatformAuthenticator::new(Some(path), DeviceCodeHandler::default(), false);
+    let auth = Authenticator::new(
+        AuthSource::OAuth { identity },
+        Some(path),
+        DeviceCodeHandler::default(),
+        false,
+    );
     let context = auth
-        .auth_context_oauth(&http, &identity)
+        .auth_context(&http)
         .await
         .expect("the refresh succeeds");
     assert_eq!(context.access_token.expose(), "synthetic-refreshed-token");
@@ -210,8 +212,15 @@ async fn the_device_sign_in_carries_no_caller_identity() {
         })
         .to_string(),
     );
-    let auth = PlatformAuthenticator::new(None, DeviceCodeHandler::new(|_| {}), true);
-    auth.auth_context_oauth(&http, &crate::test_utils::test_caller_identity())
+    let auth = Authenticator::new(
+        AuthSource::OAuth {
+            identity: crate::test_utils::test_caller_identity(),
+        },
+        None,
+        DeviceCodeHandler::new(|_| {}),
+        true,
+    );
+    auth.auth_context(&http)
         .await
         .expect_err("the scripted poll reply is not a token");
 
@@ -237,4 +246,19 @@ async fn the_device_sign_in_carries_no_caller_identity() {
         );
         assert!(request.headers.get("version").is_none(), "{request:?}");
     }
+}
+
+/// An OAuth source shows the caller identity its refresh carries.
+#[test]
+fn an_oauth_source_debugs_as_its_caller_identity() {
+    let identity = crate::providers::openai::wire::CallerIdentity::new(
+        "client_exec",
+        "client_exec/1.2.3",
+        Some("1.2.3".to_owned()),
+    )
+    .expect("a valid identity");
+    assert_eq!(
+        format!("{:?}", AuthSource::OAuth { identity }),
+        r#"OAuth { identity: CallerIdentity { originator: "client_exec", user_agent: "client_exec/1.2.3", version: Some("1.2.3") } }"#
+    );
 }

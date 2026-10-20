@@ -1,17 +1,14 @@
 use super::test_connection::Script;
 use super::*;
 use crate::http_client::{HeaderMap, StatusCode};
-use crate::providers::openai::OpenAI;
-use crate::providers::openai::responses_api::{
-    IncompleteDetailsReason, ResponseError, ResponseObject, ResponsesUsage,
-};
+use crate::providers::openai::OpenAIConfig;
 use crate::ws_client::CloseFrame;
 use futures::FutureExt as _;
 use serde_json::json;
 
 /// The wire a session is opened over.
 fn test_wire(base_url: &str) -> Responses {
-    OpenAI::new("test-key")
+    OpenAIConfig::new("test-key")
         .with_base_url(base_url)
         .responses("gpt-5.4")
 }
@@ -380,36 +377,22 @@ fn an_event_with_another_type_does_not_decode_as_an_error_event() {
     assert!(decoded.is_err(), "the tag is still checked: {decoded:?}");
 }
 
-fn sample_response(status: ResponseStatus) -> CompletionResponse {
-    CompletionResponse {
-        id: "resp_123".to_string(),
-        object: ResponseObject::Response,
-        provider_request_id: None,
-        created_at: 0,
-        status,
-        error: None,
-        incomplete_details: None,
-        instructions: None,
-        max_output_tokens: None,
-        model: "gpt-5.4".to_string(),
-        usage: Some(ResponsesUsage {
-            input_tokens: 1,
-            input_tokens_details: None,
-            output_tokens: 2,
-            output_tokens_details: Some(
-                crate::providers::openai::responses_api::OutputTokensDetails {
-                    reasoning_tokens: 0,
-                },
-            ),
-            total_tokens: 3,
-        }),
-        output: Vec::new(),
-        tools: Vec::new(),
-        additional_parameters: Default::default(),
-        provider_reasoning: None,
-        reasoning_metadata: None,
-        reasoning_context: None,
-    }
+fn sample_response(status: &str) -> Value {
+    json!({
+        "id": "resp_123",
+        "object": "response",
+        "created_at": 0,
+        "status": status,
+        "model": "gpt-5.4",
+        "usage": {
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "output_tokens_details": { "reasoning_tokens": 0 },
+            "total_tokens": 3
+        },
+        "output": [],
+        "tools": []
+    })
 }
 
 #[test]
@@ -460,7 +443,7 @@ fn websocket_request_over_the_chatgpt_dialect_requires_the_caller_s_identity() {
     use crate::providers::openai::wire::MissingCallerIdentity;
 
     let error = websocket_request(
-        &OpenAI::with_key(&chatgpt::DIALECT, "test-key").responses(chatgpt::GPT_5_3_CODEX),
+        &OpenAIConfig::with_key(&chatgpt::DIALECT, "test-key").responses(chatgpt::GPT_5_3_CODEX),
     )
     .expect_err("no identity, no handshake");
     match ProviderError::from(error) {
@@ -473,7 +456,7 @@ fn websocket_request_over_the_chatgpt_dialect_requires_the_caller_s_identity() {
 
     let identity = crate::test_utils::test_caller_identity();
     let request = websocket_request(
-        &OpenAI::with_key(&chatgpt::DIALECT, "test-key")
+        &OpenAIConfig::with_key(&chatgpt::DIALECT, "test-key")
             .with_caller_identity(identity.clone())
             .responses(chatgpt::GPT_5_3_CODEX),
     )
@@ -522,18 +505,19 @@ fn done_response_keeps_valid_sparse_subsets_and_open_metadata() {
                 raw[*key] = value.clone();
             }
         }
-        let response: ResponsesWebSocketDoneResponse =
-            serde_json::from_value(raw.clone()).expect("valid sparse subsets decode");
-        assert_eq!(response.id(), "resp_sparse");
-        assert_eq!(
-            response.status(),
-            &ResponseStatus::Other("future_status".into())
+        let event: ResponsesWebSocketDoneEvent = serde_json::from_value(json!({
+            "type": "response.done",
+            "response": raw.clone(),
+        }))
+        .expect("valid sparse subsets decode");
+        assert_eq!(event.response_id(), Some("resp_sparse"));
+        assert_eq!(event.status(), Some("future_status"));
+        let full = matches!(
+            classify_websocket_payload(&raw.to_string()),
+            crate::wire::WireEvent::Known(ResponsesEvent::Whole(_))
         );
-        assert_eq!(response.full.is_some(), mask == 7);
-        assert_eq!(
-            serde_json::to_value(response).expect("raw map serializes"),
-            raw
-        );
+        assert_eq!(full, mask == 7);
+        assert_eq!(event.response, raw);
     }
 }
 
@@ -547,7 +531,12 @@ fn done_response_rejects_malformed_present_structural_fields() {
         json!({"id":"r"}),
         json!({"status":"completed"}),
     ] {
-        assert!(serde_json::from_value::<ResponsesWebSocketDoneResponse>(raw).is_err());
+        assert!(
+            serde_json::from_value::<ResponsesWebSocketDoneEvent>(json!({
+                "type": "response.done", "response": raw,
+            }))
+            .is_err()
+        );
     }
     let invalid = [
         ("id", json!(null)),
@@ -576,7 +565,10 @@ fn done_response_rejects_malformed_present_structural_fields() {
             };
             raw[field] = value.clone();
             assert!(
-                serde_json::from_value::<ResponsesWebSocketDoneResponse>(raw.clone()).is_err(),
+                serde_json::from_value::<ResponsesWebSocketDoneEvent>(json!({
+                    "type": "response.done", "response": raw.clone(),
+                }))
+                .is_err(),
                 "malformed field must not become a sparse success: {raw}"
             );
         }
@@ -631,7 +623,7 @@ fn parse_response_completed_event_is_terminal() {
         .expect("response event should deserialize")
         .expect("response event should not be skipped");
 
-    assert!(matches!(event, ResponsesWebSocketEvent::Response(_)));
+    assert!(matches!(event, ResponsesWebSocketEvent::Response { .. }));
     assert!(event.is_terminal());
     assert_eq!(event.response_id(), Some("resp_completed_1"));
 }
@@ -753,31 +745,88 @@ fn malformed_known_event_returns_error() {
         "type": "response.completed"
     });
 
-    let error =
-        parse_server_event(&payload.to_string()).expect_err("malformed known event should error");
-    assert!(
-        error.to_string().contains("StreamingCompletionChunk"),
-        "expected strict decode failure, got {error}"
+    let received = payload.to_string();
+    // RETAINED RWWS-SPARSE-001: the original expect_err and its original input.
+    let error = parse_server_event(&received).expect_err("malformed known event should error");
+    // N/A RWWS-SPARSE-001 obsolete-reader exception: the original predicate
+    // error.to_string().contains("StreamingCompletionChunk") names the removed
+    // reader type. It does not apply to the existing strict reader's diagnostic.
+
+    // NEW RWWS-SPARSE-001: pin the existing strict classifier's typed refusal.
+    assert!(matches!(
+        &error,
+        crate::error::ProviderError::CorruptFrame(_)
+    ));
+    assert_eq!(error.kind(), crate::error::ErrorKind::Json);
+    assert_eq!(
+        error.boundary(),
+        crate::observe::AdapterErrorBoundary::Decode
     );
+    assert!(!error.is_retryable());
+
+    let corrupt = error
+        .corrupt_frame()
+        .expect("new pin: the refused frame is retained");
+    assert_eq!(corrupt.event_type(), Some("response.completed"));
+    assert_eq!(corrupt.frame(), Some(received.as_str()));
+    assert_eq!(
+        corrupt.evidence(),
+        &crate::error::FrameEvidence::Text(received.clone()),
+    );
+    assert!(corrupt.error().is_data());
+    assert!(
+        corrupt
+            .error()
+            .to_string()
+            .contains("missing field `sequence_number`"),
+        "new pin: the strict Envelope requires sequence_number: {error}",
+    );
+
+    // NEW RWWS-SPARSE-001: retain the actual typed source and report evidence.
+    let source = std::error::Error::source(&error).expect("new pin: corruption has a source");
+    assert!(
+        source
+            .downcast_ref::<crate::error::CorruptFrame>()
+            .is_some()
+    );
+    let decode_source =
+        std::error::Error::source(corrupt).expect("new pin: corruption retains its decode source");
+    assert!(decode_source.downcast_ref::<serde_json::Error>().is_some());
+
+    let report = error.report();
+    assert_eq!(report.kind, crate::error::ErrorKind::Json);
+    assert!(!report.retryable);
+    assert_eq!(report.code, None);
+    assert!(report.provider_response.is_none());
+    assert_eq!(
+        report.source_chain,
+        vec![corrupt.to_string(), corrupt.error().to_string()],
+    );
+    let Some(crate::error::ErrorDetail::CorruptFrame(detail)) = &report.detail else {
+        panic!("new pin: the report retains corruption detail: {report:?}");
+    };
+    assert_eq!(detail.event_type.as_deref(), Some("response.completed"));
+    assert_eq!(&detail.evidence, corrupt.evidence());
+    assert_eq!(detail.error, corrupt.error().to_string());
 }
 
 #[test]
 fn terminal_response_requires_completed_status() {
-    let completed = terminal_response_result(sample_response(ResponseStatus::Completed))
+    let completed = terminal_response_result(sample_response("completed"))
         .expect("completed response should succeed");
-    assert_eq!(completed.id, "resp_123");
+    assert_eq!(completed["id"], "resp_123");
 
-    let failed = terminal_response_result(sample_response(ResponseStatus::Failed))
+    let failed = terminal_response_result(sample_response("failed"))
         .expect_err("failed response should error");
     assert!(failed.to_string().contains("failed response"));
 }
 
 #[test]
 fn terminal_failed_response_with_error_preserves_raw_payload() {
-    let mut response = sample_response(ResponseStatus::Failed);
-    response.error = Some(ResponseError {
-        code: Some("server_error".to_string()),
-        message: "the model failed to generate a response".to_string(),
+    let mut response = sample_response("failed");
+    response["error"] = json!({
+        "code": "server_error",
+        "message": "the model failed to generate a response"
     });
 
     let Err(err) = terminal_response_result(response) else {
@@ -803,7 +852,7 @@ fn terminal_failed_response_with_error_preserves_raw_payload() {
 
 #[test]
 fn terminal_failed_response_without_error_is_rig_diagnostic() {
-    let Err(err) = terminal_response_result(sample_response(ResponseStatus::Failed)) else {
+    let Err(err) = terminal_response_result(sample_response("failed")) else {
         panic!("failed response should fail")
     };
 
@@ -817,13 +866,11 @@ fn terminal_failed_response_without_error_is_rig_diagnostic() {
 /// and usage are kept and normalization maps the status downstream.
 #[test]
 fn terminal_incomplete_response_is_a_terminal_success() {
-    let mut response = sample_response(ResponseStatus::Incomplete);
-    response.incomplete_details = Some(IncompleteDetailsReason {
-        reason: "max_output_tokens".to_string(),
-    });
+    let mut response = sample_response("incomplete");
+    response["incomplete_details"] = json!({"reason": "max_output_tokens"});
 
     let response = terminal_response_result(response).expect("incomplete is a terminal");
-    assert!(matches!(response.status, ResponseStatus::Incomplete));
+    assert_eq!(response["status"], "incomplete");
 }
 
 /// A close frame mid-turn is an error naming the peer's reason; a keepalive
@@ -859,29 +906,16 @@ fn websocket_frame_to_text_maps_control_frames() {
 // ---------------------------------------------------------------------------
 
 fn user_request(text: &str) -> completion::CompletionRequest {
-    completion::CompletionRequest {
-        model: None,
-        chat_history: vec![completion::Message::user(text)],
-        documents: Vec::new(),
-        tools: Vec::new(),
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    completion::CompletionRequest::new(text)
 }
 
 fn completed_event(response_id: &str) -> String {
+    let mut response = sample_response("completed");
+    response["id"] = json!(response_id);
     json!({
         "type": "response.completed",
         "sequence_number": 1,
-        "response": serde_json::to_value(CompletionResponse {
-            id: response_id.to_string(),
-            ..sample_response(ResponseStatus::Completed)
-        })
-        .expect("response should serialize"),
+        "response": response,
     })
     .to_string()
 }
@@ -929,11 +963,11 @@ async fn a_session_over_an_open_connection_refuses_to_send_without_the_caller_s_
 
     for (provider, expected) in [
         (
-            OpenAI::with_key(&chatgpt::DIALECT, "test-key"),
+            OpenAIConfig::with_key(&chatgpt::DIALECT, "test-key"),
             MissingCallerIdentity::Unset { dialect: "chatgpt" },
         ),
         (
-            OpenAI::with_key(&chatgpt::DIALECT, "test-key").with_originator("ccc"),
+            OpenAIConfig::with_key(&chatgpt::DIALECT, "test-key").with_originator("ccc"),
             MissingCallerIdentity::OriginatorOnly {
                 dialect: "chatgpt",
                 originator: "ccc".to_owned(),
@@ -1389,11 +1423,11 @@ async fn a_declared_tool_reaches_the_response_create_frame_as_written() {
         "the namespace reaches the frame verbatim"
     );
     let mut untouched = tools[1].as_object().expect("a tool is an object").clone();
-    assert_eq!(untouched.remove("strict"), Some(json!(true)));
-    untouched.remove("parameters");
+    assert_eq!(untouched.shift_remove("strict"), Some(json!(true)));
+    untouched.shift_remove("parameters");
     let mut expected = function.as_object().expect("fixture is an object").clone();
-    expected.remove("strict");
-    expected.remove("parameters");
+    expected.shift_remove("strict");
+    expected.shift_remove("parameters");
     assert_eq!(
         untouched, expected,
         "every other declared member is as written"
@@ -1453,7 +1487,7 @@ impl crate::wire::CredentialSource for CountingSource {
 }
 
 fn wire_with_source(source: CountingSource) -> Responses {
-    OpenAI::new("static-key")
+    OpenAIConfig::new("static-key")
         .with_account_id("static-account")
         .with_credential_source(source)
         .responses("gpt-5.4")
@@ -1585,3 +1619,317 @@ fn an_undecodable_websocket_frame_carries_the_frame_as_received() {
         assert_eq!(corrupt.frame(), Some(frame));
     }
 }
+
+#[test]
+fn a_terminal_without_its_response_object_still_ends_the_turn() {
+    let payload = json!({
+        "type": "response.completed"
+    });
+
+    // INTENTIONAL DIFFERENCE RWWS-SPARSE-001: this original sparse input is
+    // refused by the existing strict classifier. The original returned-value
+    // predicates are N/A because no event is returned:
+    // .expect("a sparse known event classifies")
+    // .expect("it is not skipped")
+    // assert!(event.is_terminal());
+    // assert_eq!(event.response_id(), None);
+    let received = payload.to_string();
+    let error = parse_server_event(&received)
+        .expect_err("intentional difference: the original sparse known event is refused");
+
+    // NEW RWWS-SPARSE-001: pin the existing strict classifier's typed refusal.
+    assert!(matches!(
+        &error,
+        crate::error::ProviderError::CorruptFrame(_)
+    ));
+    assert_eq!(error.kind(), crate::error::ErrorKind::Json);
+    assert_eq!(
+        error.boundary(),
+        crate::observe::AdapterErrorBoundary::Decode
+    );
+    assert!(!error.is_retryable());
+
+    let corrupt = error
+        .corrupt_frame()
+        .expect("new pin: the refused frame is retained");
+    assert_eq!(corrupt.event_type(), Some("response.completed"));
+    assert_eq!(corrupt.frame(), Some(received.as_str()));
+    assert_eq!(
+        corrupt.evidence(),
+        &crate::error::FrameEvidence::Text(received.clone()),
+    );
+    assert!(corrupt.error().is_data());
+    assert!(
+        corrupt
+            .error()
+            .to_string()
+            .contains("missing field `sequence_number`"),
+        "new pin: the strict Envelope requires sequence_number: {error}",
+    );
+
+    // NEW RWWS-SPARSE-001: retain the actual typed source and report evidence.
+    let source = std::error::Error::source(&error).expect("new pin: corruption has a source");
+    assert!(
+        source
+            .downcast_ref::<crate::error::CorruptFrame>()
+            .is_some()
+    );
+    let decode_source =
+        std::error::Error::source(corrupt).expect("new pin: corruption retains its decode source");
+    assert!(decode_source.downcast_ref::<serde_json::Error>().is_some());
+
+    let report = error.report();
+    assert_eq!(report.kind, crate::error::ErrorKind::Json);
+    assert!(!report.retryable);
+    assert_eq!(report.code, None);
+    assert!(report.provider_response.is_none());
+    assert_eq!(
+        report.source_chain,
+        vec![corrupt.to_string(), corrupt.error().to_string()],
+    );
+    let Some(crate::error::ErrorDetail::CorruptFrame(detail)) = &report.detail else {
+        panic!("new pin: the report retains corruption detail: {report:?}");
+    };
+    assert_eq!(detail.event_type.as_deref(), Some("response.completed"));
+    assert_eq!(&detail.evidence, corrupt.evidence());
+    assert_eq!(detail.error, corrupt.error().to_string());
+}
+
+#[test]
+fn a_turn_records_the_response_its_events_rebuild() {
+    let wire = test_wire("wss://api.openai.com/v1");
+    let reply = std::sync::Mutex::new(Shared::new(Turn::relayed("openai")));
+    let mut decoder = wire.decoder().with_websocket_reader();
+    let mut document = document::Response::with_websocket_reader();
+    let item = json!({
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "pong", "annotations": []}]
+    });
+    // NEW RWWS-REBUILD-INPUT-001: scripted sequence0..4 and added-item status.
+    // These fixture fields are not claimed as received provider metadata.
+    let events = [
+        json!({"type": "response.created", "sequence_number": 0, "response": sample_response("in_progress")}),
+        json!({"type": "response.output_item.added", "sequence_number": 1, "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "status": "in_progress", "content": []}}),
+        json!({"type": "response.output_text.delta", "sequence_number": 2, "output_index": 0, "content_index": 0, "item_id": "msg_1", "delta": "pong"}),
+        json!({"type": "response.output_item.done", "sequence_number": 3, "output_index": 0, "item": item}),
+        json!({"type": "response.completed", "sequence_number": 4, "response": sample_response("completed")}),
+    ];
+    let mut ended = false;
+    for event in events {
+        ended = feed(&mut decoder, &mut document, &reply, event.to_string())
+            .expect("the turn's events decode");
+    }
+    assert!(ended, "the terminal event ends the turn");
+
+    let response = fold_reply(
+        reply,
+        ended,
+        "openai",
+        crate::wire::document::Reassemble::finish(document),
+    )
+    .expect("the turn folds");
+    let mut expected = sample_response("completed");
+    expected["output"] = json!([item]);
+    assert_eq!(response.raw, expected);
+}
+
+#[test]
+fn websocket_failures_with_a_transient_code_are_retryable() {
+    let payload = json!({ "type": "error", "error": { "code": "server_error" } });
+    let Ok(Some(ResponsesWebSocketEvent::Error(error))) = parse_server_event(&payload.to_string())
+    else {
+        panic!("an error event parses as one")
+    };
+    let err = provider_error_from_event(&error);
+    assert!(err.is_retryable(), "{err}");
+    assert_eq!(err.report().code.as_deref(), Some("server_error"));
+
+    // NEW RWWS-FAILED-INPUT-001: reuse the existing full scripted fixture.
+    // Its usage/output/tools are fixture companions, not minimum required keys.
+    let mut failed_response = sample_response("failed");
+    failed_response["error"] = json!({ "code": "rate_limit_exceeded", "message": "slow down" });
+    let payload = json!({
+        "type": "response.failed",
+        "sequence_number": 0,
+        "response": failed_response
+    });
+    let Ok(Some(ResponsesWebSocketEvent::Response { kind, response })) =
+        parse_server_event(&payload.to_string())
+    else {
+        panic!("a lifecycle event parses as one")
+    };
+    assert_eq!(kind, "response.failed");
+    let Err(err) = terminal_response_result(response) else {
+        panic!("a failed response fails")
+    };
+    assert!(err.is_retryable(), "{err}");
+    assert_eq!(err.report().code.as_deref(), Some("rate_limit_exceeded"));
+}
+
+#[test]
+// NEW RWWS-REBUILD-INPUT-001: refusal of each exact original sparse frame.
+fn original_sparse_rebuild_frames_are_strictly_refused() {
+    let wire = test_wire("wss://api.openai.com/v1");
+    let reply = std::sync::Mutex::new(Shared::new(Turn::relayed("openai")));
+    let mut decoder = wire.decoder().with_websocket_reader();
+    let mut document = document::Response::with_websocket_reader();
+    let item = json!({
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "pong", "annotations": []}]
+    });
+    let events = [
+        json!({"type": "response.created", "response": sample_response("in_progress")}),
+        json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}),
+        json!({"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "item_id": "msg_1", "delta": "pong"}),
+        json!({"type": "response.output_item.done", "output_index": 0, "item": item}),
+        json!({"type": "response.completed", "response": sample_response("completed")}),
+    ];
+    let expected_tags = [
+        "response.created",
+        "response.output_item.added",
+        "response.output_text.delta",
+        "response.output_item.done",
+        "response.completed",
+    ];
+    for (index, event) in events.into_iter().enumerate() {
+        let expected_tag = expected_tags[index];
+        let received = event.to_string();
+        let parse_error = parse_server_event(&received)
+            .expect_err("new pin: the original sparse known input is refused");
+        let flow = crate::driver::step(
+            &mut decoder,
+            Some(&mut document),
+            &reply,
+            WireFrame::Text(received.clone()),
+            None,
+        )
+        .expect("new pin: classifier corruption is queued as More");
+        assert!(matches!(flow, Flow::More));
+        let shared = reply
+            .lock()
+            .expect("new pin: inspect the actual driver queue");
+        assert_eq!(shared.items.len(), index + 1);
+        let Some(Err(queued_error)) = shared.items.back() else {
+            panic!("new pin: this exact original frame queues corruption");
+        };
+        // NEW: inspect both real parse refusal and the actual queued feed error.
+        // feed=false alone does not establish strict rejection.
+        for error in [&parse_error, queued_error] {
+            assert!(matches!(
+                error,
+                crate::error::ProviderError::CorruptFrame(_)
+            ));
+            assert_eq!(error.kind(), crate::error::ErrorKind::Json);
+            assert_eq!(
+                error.boundary(),
+                crate::observe::AdapterErrorBoundary::Decode
+            );
+            assert!(!error.is_retryable());
+            let corrupt = error
+                .corrupt_frame()
+                .expect("new pin: the original frame is retained");
+            assert_eq!(corrupt.event_type(), Some(expected_tag));
+            assert_eq!(corrupt.frame(), Some(received.as_str()));
+            assert_eq!(
+                corrupt.evidence(),
+                &crate::error::FrameEvidence::Text(received.clone()),
+            );
+            assert!(corrupt.error().is_data());
+            let source =
+                std::error::Error::source(error).expect("new pin: typed corruption source");
+            assert!(
+                source
+                    .downcast_ref::<crate::error::CorruptFrame>()
+                    .is_some()
+            );
+            let decode_source =
+                std::error::Error::source(corrupt).expect("new pin: retained serde decode source");
+            assert!(decode_source.downcast_ref::<serde_json::Error>().is_some());
+            let report = error.report();
+            assert_eq!(report.kind, crate::error::ErrorKind::Json);
+            assert!(!report.retryable);
+            assert_eq!(report.code, None);
+            assert!(report.provider_response.is_none());
+            assert_eq!(
+                report.source_chain,
+                vec![corrupt.to_string(), corrupt.error().to_string()],
+            );
+            let Some(crate::error::ErrorDetail::CorruptFrame(detail)) = &report.detail else {
+                panic!("new pin: original corruption detail is retained: {report:?}");
+            };
+            assert_eq!(detail.event_type.as_deref(), Some(expected_tag));
+            assert_eq!(&detail.evidence, corrupt.evidence());
+            assert_eq!(detail.error, corrupt.error().to_string());
+        }
+    }
+}
+
+#[test]
+// NEW RWWS-FAILED-INPUT-001: the exact original failed frame is a decode refusal.
+fn original_sparse_failed_response_is_strictly_refused() {
+    let payload = json!({
+        "type": "response.failed",
+        "response": {
+            "status": "failed",
+            "error": { "code": "rate_limit_exceeded", "message": "slow down" }
+        }
+    });
+    let expected_tag = "response.failed";
+    let received = payload.to_string();
+    let parse_error = parse_server_event(&received)
+        .expect_err("new pin: the original sparse failed response is refused");
+    let error = &parse_error;
+    // NEW: actual Corrupt/Json/Decode/source/no-code/exact-frame pins.
+    assert!(matches!(
+        error,
+        crate::error::ProviderError::CorruptFrame(_)
+    ));
+    assert_eq!(error.kind(), crate::error::ErrorKind::Json);
+    assert_eq!(
+        error.boundary(),
+        crate::observe::AdapterErrorBoundary::Decode
+    );
+    assert!(!error.is_retryable());
+    let corrupt = error
+        .corrupt_frame()
+        .expect("new pin: the original frame is retained");
+    assert_eq!(corrupt.event_type(), Some(expected_tag));
+    assert_eq!(corrupt.frame(), Some(received.as_str()));
+    assert_eq!(
+        corrupt.evidence(),
+        &crate::error::FrameEvidence::Text(received.clone()),
+    );
+    assert!(corrupt.error().is_data());
+    let source = std::error::Error::source(error).expect("new pin: typed corruption source");
+    assert!(
+        source
+            .downcast_ref::<crate::error::CorruptFrame>()
+            .is_some()
+    );
+    let decode_source =
+        std::error::Error::source(corrupt).expect("new pin: retained serde decode source");
+    assert!(decode_source.downcast_ref::<serde_json::Error>().is_some());
+    let report = error.report();
+    assert_eq!(report.kind, crate::error::ErrorKind::Json);
+    assert!(!report.retryable);
+    assert_eq!(report.code, None);
+    assert!(report.provider_response.is_none());
+    assert_eq!(
+        report.source_chain,
+        vec![corrupt.to_string(), corrupt.error().to_string()],
+    );
+    let Some(crate::error::ErrorDetail::CorruptFrame(detail)) = &report.detail else {
+        panic!("new pin: original corruption detail is retained: {report:?}");
+    };
+    assert_eq!(detail.event_type.as_deref(), Some(expected_tag));
+    assert_eq!(&detail.evidence, corrupt.evidence());
+    assert_eq!(detail.error, corrupt.error().to_string());
+}
+
+mod terminal_call_custody;

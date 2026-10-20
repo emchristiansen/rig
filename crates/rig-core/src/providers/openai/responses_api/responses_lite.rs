@@ -5,12 +5,13 @@
 //! each transport adds its own opt-in marker afterward.
 //!
 //! ```no_run
-//! use rig_core::providers::{chatgpt, openai::OpenAI, openai::wire::CallerIdentity};
+//! use rig_core::providers::{chatgpt, openai::{OpenAIConfig, wire::CallerIdentity, responses_api::wire::Responses}};
 //! # fn wire() -> Result<(), Box<dyn std::error::Error>> {
-//! let identity = CallerIdentity::new("my-originator", "my-user-agent/1.0", None)?;
-//! let responses = OpenAI::with_key(&chatgpt::DIALECT, "access-token")
-//!     .with_caller_identity(identity)
-//!     .responses(chatgpt::GPT_5_3_CODEX)
+//! use rig_core::providers::openai::responses_api::codex_identity::CodexIdentity;
+//! let caller = CallerIdentity::new("my-originator", "my-user-agent/1.0", None)?;
+//! let config = OpenAIConfig::from_env_with(&chatgpt::DIALECT)?.with_caller_identity(caller);
+//! let responses = Responses::new(config, chatgpt::GPT_5_3_CODEX)
+//!     .with_codex_identity(CodexIdentity::from_ids("session-a", "thread-a")?)?
 //!     .with_responses_lite()?;
 //! # let _ = responses;
 //! # Ok(())
@@ -23,15 +24,10 @@ use uuid::Uuid;
 
 use crate::providers::openai::wire::ResponsesContract;
 
+use super::SystemInstructionsPlacement;
 #[cfg(feature = "websocket")]
 use super::codex_identity::CLIENT_METADATA_FIELD;
 use super::codex_identity::CodexIdentity;
-use super::{
-    CompletionRequest, DeveloperRole, InputContent, InputItem,
-    InternalChatMessageMetadataPassthrough, Message, Reasoning, ReasoningContext, SystemContent,
-    SystemInstructionsPlacement, ToolChoice, ToolResultOutput, ToolResultOutputContent,
-    UserContent,
-};
 
 /// The request envelope a [`super::wire::Responses`] wire emits.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -102,8 +98,8 @@ pub enum ResponsesLiteError {
         /// The malformed namespace member.
         field: &'static str,
     },
-    /// The effective tool list could not be represented as JSON for hashing
-    /// and transmission.
+    /// The effective tools could not be serialized, or a merged body member
+    /// has the wrong JSON type for the request transform.
     #[error("Responses Lite could not serialize the effective tools: {0}")]
     ToolSerialization(#[from] serde_json::Error),
 }
@@ -142,86 +138,96 @@ pub(crate) fn validate_activation<'identity>(
         .ok_or(ResponsesLiteError::ResponsesLiteRequiresIdentity)
 }
 
-/// Apply the transport-independent Lite body transform.
-pub(crate) fn shape_request(
-    request: &mut CompletionRequest,
+/// Apply Lite controls and the stable developer prefix to the final merged body.
+/// Canonical image detail is omitted by the typed input builder; raw items
+/// in this body are preserved without traversal.
+pub(crate) fn shape_body(
+    body: &mut Map<String, Value>,
     identity: &CodexIdentity,
 ) -> Result<(), ResponsesLiteError> {
-    match request.additional_parameters.parallel_tool_calls {
-        Some(true) => return Err(ResponsesLiteError::ParallelToolCalls),
-        Some(false) => {}
-        None => request.additional_parameters.parallel_tool_calls = Some(false),
-    }
-
-    match request.tool_choice.as_ref() {
-        Some(ToolChoice::Mode(super::super::completion::ToolChoice::Auto)) => {}
-        Some(_) => return Err(ResponsesLiteError::ToolChoice),
-        None => {
-            request.tool_choice =
-                Some(ToolChoice::Mode(super::super::completion::ToolChoice::Auto));
+    match body.get("parallel_tool_calls") {
+        Some(Value::Bool(false)) => {}
+        None | Some(Value::Null) => {
+            body.insert("parallel_tool_calls".to_owned(), Value::Bool(false));
         }
+        Some(_) => return Err(ResponsesLiteError::ParallelToolCalls),
     }
-
-    let reasoning = request
-        .additional_parameters
-        .reasoning
-        .get_or_insert_with(Reasoning::default);
-    match reasoning.context.as_ref() {
-        Some(ReasoningContext::AllTurns) => {}
+    match body.get("tool_choice") {
+        Some(Value::String(choice)) if choice == "auto" => {}
+        None | Some(Value::Null) => {
+            body.insert("tool_choice".to_owned(), Value::String("auto".to_owned()));
+        }
+        Some(_) => return Err(ResponsesLiteError::ToolChoice),
+    }
+    if matches!(body.get("reasoning"), None | Some(Value::Null)) {
+        body.insert("reasoning".to_owned(), Value::Object(Map::new()));
+    }
+    let reasoning = body
+        .get_mut("reasoning")
+        .and_then(Value::as_object_mut)
+        .ok_or(ResponsesLiteError::ReasoningContext)?;
+    match reasoning.get("context") {
+        Some(Value::String(context)) if context == "all_turns" => {}
+        None | Some(Value::Null) => {
+            reasoning.insert("context".to_owned(), Value::String("all_turns".to_owned()));
+        }
         Some(_) => return Err(ResponsesLiteError::ReasoningContext),
-        None => reasoning.context = Some(ReasoningContext::AllTurns),
     }
 
-    normalize_image_details(&mut request.input);
-
-    let serialized_tools = serde_json::to_value(&request.tools)?;
-    let Value::Array(serialized_tools) = serialized_tools else {
-        return Err(ResponsesLiteError::ToolSerialization(
-            <serde_json::Error as serde::ser::Error>::custom(
+    let tools = match body.get("tools") {
+        None => Vec::new(),
+        Some(Value::Array(tools)) => tools.clone(),
+        Some(_) => {
+            return Err(body_type_error(
                 "the Responses tools collection did not serialize as an array",
-            ),
-        ));
+            ));
+        }
     };
-    let folded_tools = fold_tools(serialized_tools)?;
+    let folded_tools = fold_tools(tools)?;
+    let instructions = match body.get("instructions") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(_) => {
+            return Err(body_type_error(
+                "the Responses instructions did not serialize as a string",
+            ));
+        }
+    };
+    let input = body
+        .get_mut("input")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            body_type_error("the Responses input collection did not serialize as an array")
+        })?;
 
     let thread_namespace = Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.thread_id().as_bytes());
     let tools_id = Uuid::new_v5(&thread_namespace, &serde_json::to_vec(&folded_tools)?);
-    let mut prefix = vec![InputItem {
-        role: None,
-        input: InputContent::AdditionalTools {
-            id: format!("at_{tools_id}"),
-            role: DeveloperRole::Developer,
-            tools: folded_tools,
-        },
-    }];
-
-    if let Some(instructions) = request.instructions.take()
-        && !instructions.is_empty()
-    {
+    let mut prefix = vec![serde_json::json!({
+        "type": "additional_tools",
+        "id": format!("at_{tools_id}"),
+        "role": "developer",
+        "tools": folded_tools,
+    })];
+    if let Some(instructions) = instructions.filter(|text| !text.is_empty()) {
         let message_id = Uuid::new_v5(&thread_namespace, instructions.as_bytes());
-        prefix.push(InputItem {
-            role: None,
-            input: InputContent::Message(Message::Developer {
-                id: Some(format!("msg_{message_id}")),
-                content: vec![SystemContent::InputText { text: instructions }],
-                name: None,
-                internal_chat_message_metadata_passthrough: Some(
-                    InternalChatMessageMetadataPassthrough::base_instructions(),
-                ),
-            }),
-        });
+        prefix.push(serde_json::json!({
+            "type": "message",
+            "role": "developer",
+            "id": format!("msg_{message_id}"),
+            "content": [{"type": "input_text", "text": instructions}],
+            "internal_chat_message_metadata_passthrough": {
+                "content_item_kinds": ["model.base_instructions"],
+            },
+        }));
     }
-
-    request.tools.clear();
-    request.input.splice(0..0, prefix);
+    input.splice(0..0, prefix);
+    body.shift_remove("tools");
+    body.shift_remove("instructions");
     Ok(())
 }
 
-/// Remove image detail from a Lite incremental delta without rebuilding its
-/// stable full-request prefix.
-#[cfg(feature = "websocket")]
-pub(crate) fn shape_delta(input: &mut [InputItem]) {
-    normalize_image_details(input);
+fn body_type_error(message: &str) -> ResponsesLiteError {
+    ResponsesLiteError::ToolSerialization(<serde_json::Error as serde::ser::Error>::custom(message))
 }
 
 #[cfg(feature = "websocket")]
@@ -305,43 +311,6 @@ fn fold_tools(tools: Vec<Value>) -> Result<Vec<Value>, ResponsesLiteError> {
     }
 
     Ok(passthrough)
-}
-
-fn normalize_image_details(items: &mut [InputItem]) {
-    for item in items {
-        match &mut item.input {
-            InputContent::Message(Message::User { content, .. }) => {
-                for content in content {
-                    if let UserContent::InputImage { detail, .. } = content {
-                        *detail = None;
-                    }
-                }
-            }
-            InputContent::FunctionCallOutput(output) => {
-                if let ToolResultOutput::Content(content) = &mut output.output {
-                    for content in content {
-                        if let ToolResultOutputContent::InputImage { detail, .. } = content {
-                            *detail = None;
-                        }
-                    }
-                }
-            }
-            InputContent::Message(
-                Message::Developer { .. }
-                | Message::System { .. }
-                | Message::Assistant { .. }
-                | Message::AssistantInput { .. },
-            )
-            | InputContent::AdditionalTools { .. }
-            | InputContent::Reasoning(_)
-            | InputContent::FunctionCall(_)
-            | InputContent::CustomToolCall(_)
-            | InputContent::CustomToolCallOutput(_)
-            | InputContent::Compaction(_)
-            // A raw provider item replays verbatim, whatever it contains.
-            | InputContent::Raw(_) => {}
-        }
-    }
 }
 
 #[cfg(test)]

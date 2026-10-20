@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 10072942899351225430,
+    "run_spec": 11761598427705777809,
     "handlers": [
       {
         "key": "golden/model:default",
@@ -75,25 +75,31 @@
       },
       "events": [
         {
-          "event": "block_start",
-          "id": "wire:msg_07a8c3da1c500a56006ab395f3221c87d0aea2ac87f7b88fa3",
-          "source_order": {
-            "primary": 0,
-            "secondary": 0
-          },
-          "kind": {
-            "kind": "text"
+          "item": "event",
+          "value": {
+            "event": "start",
+            "part": 0,
+            "kind": "text",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            }
           }
         },
         {
-          "event": "block_delta",
-          "id": "wire:msg_07a8c3da1c500a56006ab395f3221c87d0aea2ac87f7b88fa3",
-          "delta": {
-            "delta": "text",
+          "item": "event",
+          "value": {
+            "event": "text",
+            "part": 0,
             "text": "Rust"
           }
         }
-      ]
+      ],
+      "stream_origin": {
+        "api": "openai.responses",
+        "provider": "openai",
+        "model": "gpt-4o"
+      }
     }
   ]
 }

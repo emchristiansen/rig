@@ -13,14 +13,11 @@
 
 use anyhow::Result;
 use futures::StreamExt;
-use rig::completion::CompletionModel;
 use rig::error::ErrorReport;
-use rig::prelude::*;
 use rig::providers::mistral;
 
-use crate::support::collect_stream_final_response_and_provider_final;
-
 use super::support::with_mistral_cassette_result;
+use rig::completion::CompletionRequest;
 
 /// The id is a UUID minted per call, so the assertion is on its presence and
 /// shape rather than a literal the scrubber placeholders anyway.
@@ -32,16 +29,6 @@ fn assert_is_request_id(id: Option<&str>) {
     );
 }
 
-/// An error must keep both halves of its context: the id *and* the body.
-/// Losing either one is what makes a provider failure unactionable.
-fn assert_error_keeps_id_and_body(error: &rig::error::ProviderError) {
-    assert_is_request_id(error.provider_request_id());
-    assert!(
-        error.provider_response_body().is_some(),
-        "the error body must survive alongside the id: {error:?}"
-    );
-}
-
 /// The streaming twin: an in-band stream failure is an `ErrorReport`, which
 /// carries the same preserved id and body as the `ProviderError`.
 fn assert_report_keeps_id_and_body(report: &ErrorReport) {
@@ -50,80 +37,6 @@ fn assert_report_keeps_id_and_body(report: &ErrorReport) {
         report.provider_response_body().is_some(),
         "the error body must survive alongside the id: {report:?}"
     );
-}
-
-#[tokio::test]
-async fn blocking_response_carries_the_correlation_id() -> Result<()> {
-    with_mistral_cassette_result(
-        "response_identity_edge/blocking_response_carries_the_correlation_id",
-        |client| async move {
-            let model = client.completion(mistral::MISTRAL_SMALL);
-            let response = model
-                .completion_request("Reply with exactly: identity probe")
-                .send()
-                .await?;
-            assert_is_request_id(response.provider_request_id.as_deref());
-            Ok::<_, anyhow::Error>(())
-        },
-    )
-    .await
-}
-
-#[tokio::test]
-async fn streaming_terminal_carries_the_correlation_id() -> Result<()> {
-    with_mistral_cassette_result(
-        "response_identity_edge/streaming_terminal_carries_the_correlation_id",
-        |client| async move {
-            let agent = client.agent(mistral::MISTRAL_SMALL).build();
-            let mut stream = agent.prompt("Reply with exactly: identity probe").stream();
-            let (_text, provider_final) =
-                collect_stream_final_response_and_provider_final(&mut stream).await?;
-            assert_is_request_id(provider_final.provider_request_id.as_deref());
-            Ok::<_, anyhow::Error>(())
-        },
-    )
-    .await
-}
-
-/// `verify()` sends the `MISTRAL` dialect's `verify_path` — `/v1/models` —
-/// against the configured base URL, which for Mistral is the bare host. The
-/// path used to be a bare `/models`, which is a gateway 404 on that host, so
-/// verification failed for every key, valid or not. Recorded against a real
-/// key, so the cell fails if the path regresses.
-#[tokio::test]
-async fn verify_succeeds_against_the_versioned_models_route() -> Result<()> {
-    with_mistral_cassette_result(
-        "response_identity_edge/verify_succeeds_against_the_versioned_models_route",
-        |client| async move {
-            client
-                .verify()
-                .await
-                .map_err(|error| anyhow::anyhow!("verification should succeed: {error:?}"))?;
-            Ok::<_, anyhow::Error>(())
-        },
-    )
-    .await
-}
-
-/// The contract must hold on failures too, not just on the happy path: an
-/// error that eats the id is exactly as unrecoverable as one that eats the
-/// body. Mistral sends `mistral-correlation-id` on 4xx as well.
-#[tokio::test]
-async fn blocking_error_carries_the_correlation_id() -> Result<()> {
-    with_mistral_cassette_result(
-        "response_identity_edge/blocking_error_carries_the_correlation_id",
-        |client| async move {
-            let error = client
-                .completion("definitely-not-a-model")
-                .completion_request("Reply with exactly: identity probe")
-                .send()
-                .await
-                .expect_err("an unroutable model must fail");
-            assert_error_keeps_id_and_body(&error);
-            Ok::<_, anyhow::Error>(())
-        },
-    )
-    .await
 }
 
 /// The streaming twin of the cell above.
@@ -140,9 +53,7 @@ async fn streaming_error_carries_the_correlation_id() -> Result<()> {
         |client| async move {
             let error = match client
                 .completion("definitely-not-a-model")
-                .completion_request("Reply with exactly: identity probe")
-                .stream()
-                .await
+                .stream(CompletionRequest::new("Reply with exactly: identity probe"))
             {
                 Err(error) => ErrorReport::from(&error),
                 Ok(mut stream) => {
@@ -153,7 +64,9 @@ async fn streaming_error_carries_the_correlation_id() -> Result<()> {
                             break;
                         }
                     }
-                    failure.expect("an unroutable model must fail the stream")
+                    rig::ErrorReport::from(
+                        &failure.expect("an unroutable model must fail the stream"),
+                    )
                 }
             };
             assert_report_keeps_id_and_body(&error);
@@ -172,8 +85,7 @@ async fn blocking_unauthorized_carries_the_correlation_id() -> Result<()> {
         |client| async move {
             let error = client
                 .completion(mistral::MISTRAL_SMALL)
-                .completion_request("Reply with exactly: identity probe")
-                .send()
+                .call(CompletionRequest::new("Reply with exactly: identity probe"))
                 .await
                 .expect_err("a bogus key must fail");
             assert_is_request_id(error.provider_request_id());

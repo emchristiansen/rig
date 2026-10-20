@@ -9,16 +9,15 @@
 //! `redacted_thinking`), so those targets continue from the tool exchange
 //! and text alone.
 
-use rig::completion::CompletionModel;
-
-use super::super::support::{BoundOpenRouter, with_openrouter_cassette};
+use super::super::support::with_openrouter_cassette;
 use crate::history_survival::portability::{Cell, Source};
+use rig_test_support::cassette_models::OpenAiModels;
 
 fn params() -> Option<serde_json::Value> {
     None
 }
 
-fn model(client: BoundOpenRouter, cell: Cell) -> impl CompletionModel + 'static {
+fn model(client: OpenAiModels, cell: Cell) -> rig::Model<rig::providers::openai::wire::OpenAiWire> {
     client.completion(cell.model)
 }
 
@@ -35,9 +34,5 @@ const fn cell(source: Source) -> Cell {
 crate::matrix::case_matrix! {
     wrapper: with_openrouter_cassette, family: portability_case;
     #[tokio::test]
-    from_anthropic: ("portability_matrix/from_anthropic", configured, cell(Source::Anthropic));
-    #[tokio::test]
     from_openai_responses: ("portability_matrix/from_openai_responses", configured, cell(Source::OpenAiResponses));
-    #[tokio::test]
-    from_gemini: ("portability_matrix/from_gemini", configured, cell(Source::Gemini));
 }

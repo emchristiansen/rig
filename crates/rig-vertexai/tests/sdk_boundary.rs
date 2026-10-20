@@ -1,4 +1,4 @@
-//! The real Rig Vertex AI [`CompletionModel`] driving the real
+//! The real Rig Vertex AI `GenerateContent` wire driving the real
 //! `google-cloud-aiplatform-v1` `PredictionService` against a local HTTP
 //! endpoint.
 //!
@@ -6,7 +6,7 @@
 //! production SDK client and the production response mapping. The only
 //! substitutions are the socket the SDK dials and the credentials it presents
 //! — both supplied by the host through
-//! [`ClientBuilder::with_prediction_service`], which is the seam these tests
+//! [`rig_vertexai::VertexAiBuilder::with_prediction_service`], which is the seam these tests
 //! exist to exercise. No Application Default Credentials are read and no
 //! Google endpoint is contacted.
 
@@ -20,12 +20,13 @@
 mod support;
 
 use google_cloud_aiplatform_v1::client::PredictionService;
-use rig_core::completion::{CompletionModel as _, CompletionRequest, ToolDefinition};
+use rig_core::Model;
+use rig_core::completion::{CompletionRequest, ToolDefinition};
 use rig_core::error::ProviderError;
 use rig_core::message::{AssistantContent, Message, Text, ToolChoice, UserContent};
-use rig_vertexai::Client;
+use rig_vertexai::VertexAi;
 use rig_vertexai::client::VertexAiClientError;
-use rig_vertexai::completion::CompletionModel;
+use rig_vertexai::completion::GenerateContent;
 use std::time::Duration;
 use support::{LocalEndpoint, Reply, SentinelCredentials, text_response, tool_call_response};
 
@@ -37,7 +38,7 @@ const MODEL: &str = rig_vertexai::completion::GEMINI_2_5_FLASH;
 async fn hosted_model(
     endpoint: &LocalEndpoint,
     credentials: &SentinelCredentials,
-) -> CompletionModel {
+) -> Model<GenerateContent, VertexAi> {
     let service = PredictionService::builder()
         .with_endpoint(endpoint.url())
         .with_attempt_timeout(std::time::Duration::from_secs(60))
@@ -45,30 +46,19 @@ async fn hosted_model(
         .build()
         .await
         .expect("the host builds the SDK client against the local endpoint");
-    let client = Client::builder()
+    let client = VertexAi::builder()
         .with_project(PROJECT)
         .with_location(LOCATION)
         .with_prediction_service(service)
         .build()
         .expect("supplied client plus explicit project and location");
-    CompletionModel::new(client, MODEL)
+    Model::new(GenerateContent::new(MODEL), client)
 }
 
 fn request(prompt: &str) -> CompletionRequest {
-    CompletionRequest {
-        model: None,
-        chat_history: vec![Message::User {
-            content: vec![UserContent::Text(Text::new(prompt.to_string()))],
-        }],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-        record_telemetry_content: false,
-    }
+    CompletionRequest::from(vec![Message::User {
+        content: vec![UserContent::Text(Text::new(prompt.to_string()))],
+    }])
 }
 
 /// The whole unary path: Rig's request conversion, the SDK's URL and query
@@ -95,7 +85,7 @@ async fn unary_completion_converts_the_request_and_maps_the_response() {
     request.max_tokens = Some(64);
     request.tool_choice = Some(ToolChoice::Required);
     request.tools = vec![ToolDefinition {
-        name: "lookup_weather".to_string(),
+        name: rig_core::message::ToolName::new("lookup_weather").expect("tool name"),
         description: "look up the weather".to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -104,10 +94,7 @@ async fn unary_completion_converts_the_request_and_maps_the_response() {
         }),
     }];
 
-    let response = model
-        .completion(request)
-        .await
-        .expect("completion succeeds");
+    let response = model.call(request).await.expect("completion succeeds");
 
     let captured = endpoint.requests();
     let [captured] = captured.as_slice() else {
@@ -140,8 +127,10 @@ async fn unary_completion_converts_the_request_and_maps_the_response() {
     );
     assert_eq!(
         body["systemInstruction"],
-        serde_json::json!({"role": "user", "parts": [{"text": "you are terse"}]})
+        serde_json::json!({"role": "user", "parts": [{"text": "you are terse"}]}),
+        "the Vertex wrapper uses user for the system instruction"
     );
+
     assert_eq!(
         body["tools"],
         serde_json::json!([{
@@ -175,7 +164,7 @@ async fn unary_completion_converts_the_request_and_maps_the_response() {
     };
     assert_eq!(call.function.name, "lookup_weather");
     assert_eq!(
-        call.function.arguments,
+        call.function.arguments_value(),
         serde_json::json!({"city": "Lisbon"})
     );
 }
@@ -193,8 +182,8 @@ async fn rotated_credentials_are_presented_per_request() {
     let credentials = SentinelCredentials::rotating("rotating-token");
     let model = hosted_model(&endpoint, &credentials).await;
 
-    model.completion(request("one")).await.expect("first call");
-    model.completion(request("two")).await.expect("second call");
+    model.call(request("one")).await.expect("first call");
+    model.call(request("two")).await.expect("second call");
 
     let captured = endpoint.requests();
     let tokens: Vec<_> = captured
@@ -222,7 +211,7 @@ async fn a_credential_failure_keeps_the_request_off_the_wire() {
     let model = hosted_model(&endpoint, &credentials).await;
 
     let error = model
-        .completion(request("hello"))
+        .call(request("hello"))
         .await
         .expect_err("the credentials refuse to issue a token");
 
@@ -252,7 +241,7 @@ async fn a_provider_error_preserves_the_reply_and_carries_no_request_credentials
     let model = hosted_model(&endpoint, &credentials).await;
 
     let error = model
-        .completion(request("hello"))
+        .call(request("hello"))
         .await
         .expect_err("the endpoint refuses the request");
 
@@ -275,64 +264,6 @@ async fn a_provider_error_preserves_the_reply_and_carries_no_request_credentials
     assert_eq!(credentials.issued(), 1);
 }
 
-/// Dropping the completion future releases the in-flight RPC: the endpoint,
-/// still holding the request open, sees the connection go away. The client and
-/// its credentials are not operation-scoped, so the next completion works.
-#[tokio::test]
-async fn a_cancelled_completion_releases_its_rpc_and_leaves_the_client_usable() {
-    let endpoint = LocalEndpoint::spawn([Reply::Hang, Reply::ok(text_response("after"))]).await;
-    let credentials = SentinelCredentials::rotating("cancel-token");
-    let model = hosted_model(&endpoint, &credentials).await;
-
-    // Arrival, not elapsed time, establishes that there is real work to cancel.
-    {
-        let completion = model.completion(request("abandoned"));
-        tokio::pin!(completion);
-        tokio::select! {
-            result = &mut completion => panic!("held RPC completed before cancellation: {result:?}"),
-            () = endpoint.wait_for_requests(1) => {}
-        }
-    }
-
-    endpoint.wait_for_disconnects(1).await;
-    assert_eq!(
-        endpoint.disconnects(),
-        1,
-        "the abandoned RPC's connection was actually closed, not left dangling"
-    );
-
-    let response = tokio::time::timeout(Duration::from_secs(10), model.completion(request("next")))
-        .await
-        .expect("subsequent completion deadline")
-        .expect("the shared client and its credentials survived the cancellation");
-    assert!(
-        matches!(response.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "after")
-    );
-    assert_eq!(credentials.issued(), 2);
-}
-
-/// This integration implements no streaming path, and says so rather than
-/// pretending: the model reports the operation as unsupported without dialing
-/// anything.
-#[tokio::test]
-async fn streaming_is_explicitly_unsupported() {
-    let endpoint = LocalEndpoint::spawn([]).await;
-    let credentials = SentinelCredentials::rotating("stream-token");
-    let model = hosted_model(&endpoint, &credentials).await;
-
-    let error = model
-        .stream(request("stream please"))
-        .await
-        .err()
-        .expect("streaming is not implemented for Vertex AI");
-    assert!(
-        matches!(&error, ProviderError::Provider(message) if message.contains("Streaming is not supported")),
-        "unexpected error: {error}"
-    );
-    assert_eq!(endpoint.request_count(), 0);
-    assert_eq!(credentials.issued(), 0);
-}
-
 /// A supplied client already fixes its credentials. Configuring both is a
 /// contradiction, and is refused at build time rather than by silently
 /// ignoring one of them.
@@ -348,7 +279,7 @@ async fn supplying_both_a_client_and_credentials_is_refused() {
         .await
         .expect("host-built client");
 
-    let error = Client::builder()
+    let error = VertexAi::builder()
         .with_project(PROJECT)
         .with_location(LOCATION)
         .with_prediction_service(service)
@@ -359,8 +290,8 @@ async fn supplying_both_a_client_and_credentials_is_refused() {
 }
 
 /// On the deferred path Rig builds the SDK client on the first completion, so
-/// an initialization failure surfaces there — as a Rig-side provider error,
-/// not as a provider reply — and the cached failure is reported identically to
+/// an initialization failure surfaces there — as a Rig-side request error
+/// carrying the SDK's typed error, not as a provider reply — and the cached failure is reported identically to
 /// every later caller.
 #[tokio::test]
 async fn deferred_client_initialization_failure_surfaces_on_first_use() {
@@ -368,23 +299,27 @@ async fn deferred_client_initialization_failure_surfaces_on_first_use() {
     // while it constructs the client, before any request exists.
     let credentials =
         SentinelCredentials::rotating("unused-token").with_universe_domain("test-universe.invalid");
-    let client = Client::builder()
+    let client = VertexAi::builder()
         .with_project(PROJECT)
         .with_location(LOCATION)
         .with_credentials(credentials.credentials())
         .build()
         .expect("building the Rig client resolves no SDK client yet");
-    let model = CompletionModel::new(client, MODEL);
+    let model = Model::new(GenerateContent::new(MODEL), client);
 
     for attempt in 1..=2 {
         let error = model
-            .completion(request("hello"))
+            .call(request("hello"))
             .await
             .expect_err("the SDK client cannot be built");
+        let client_error = match &error {
+            ProviderError::Request(source) => source.downcast_ref::<VertexAiClientError>(),
+            _ => None,
+        };
         assert!(
-            matches!(&error, ProviderError::Provider(message)
-                if message.contains("universe domain")),
-            "attempt {attempt}: unexpected error: {error}"
+            matches!(client_error, Some(VertexAiClientError::PredictionService(sdk))
+                if sdk.is_universe_domain_mismatch()),
+            "attempt {attempt}: unexpected error: {error:?}"
         );
         assert_eq!(
             error.provider_response_body(),
@@ -397,4 +332,40 @@ async fn deferred_client_initialization_failure_surfaces_on_first_use() {
         0,
         "no token was ever minted for a client that never existed"
     );
+}
+
+/// Dropping the completion future releases the in-flight RPC: the endpoint,
+/// still holding the request open, sees the connection go away. The client and
+/// its credentials are not operation-scoped, so the next completion works.
+#[tokio::test]
+async fn a_cancelled_completion_releases_its_rpc_and_leaves_the_client_usable() {
+    let endpoint = LocalEndpoint::spawn([Reply::Hang, Reply::ok(text_response("after"))]).await;
+    let credentials = SentinelCredentials::rotating("cancel-token");
+    let model = hosted_model(&endpoint, &credentials).await;
+
+    // Arrival, not elapsed time, establishes that there is real work to cancel.
+    {
+        let completion = model.call(request("abandoned"));
+        tokio::pin!(completion);
+        tokio::select! {
+            result = &mut completion => panic!("held RPC completed before cancellation: {result:?}"),
+            () = endpoint.wait_for_requests(1) => {}
+        }
+    }
+
+    endpoint.wait_for_disconnects(1).await;
+    assert_eq!(
+        endpoint.disconnects(),
+        1,
+        "the abandoned RPC's connection was actually closed, not left dangling"
+    );
+
+    let response = tokio::time::timeout(Duration::from_secs(10), model.call(request("next")))
+        .await
+        .expect("subsequent completion deadline")
+        .expect("the shared client and its credentials survived the cancellation");
+    assert!(
+        matches!(response.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "after")
+    );
+    assert_eq!(credentials.issued(), 2);
 }
