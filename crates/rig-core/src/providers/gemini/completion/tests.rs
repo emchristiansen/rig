@@ -925,18 +925,8 @@ fn schema_constructs_outside_the_subset_are_refused_with_their_path() {
             "must be a string",
         ),
         (
-            json!({"type":"object","properties":{"choice":{"oneOf":[{"type":"string"}]}}}),
-            "/properties/choice/oneOf",
-            "the keyword is outside Gemini's `parameters` Schema subset",
-        ),
-        (
             json!({"allOf":[{"type":"string"}]}),
             "/allOf",
-            "the keyword is outside Gemini's `parameters` Schema subset",
-        ),
-        (
-            json!({"type":"string","const":"a"}),
-            "/const",
             "the keyword is outside Gemini's `parameters` Schema subset",
         ),
         (
@@ -1038,6 +1028,56 @@ fn schema_constructs_outside_the_subset_are_refused_with_their_path() {
             "{parameters}"
         );
     }
+}
+
+/// `oneOf` and `const`, the shapes schemars gives data enums, travel whole as
+/// raw JSON Schema for their own declaration only, every variant and value
+/// intact; a plain sibling declaration stays on `parameters`
+/// (mec-rig-bodies-applied-ack-1).
+#[test]
+fn one_of_and_const_declarations_go_raw_and_plain_siblings_stay_projected() {
+    use crate::wire::Operation;
+    let one_of = json!({
+        "type":"object",
+        "properties":{"shape":{"oneOf":[
+            {"type":"object","properties":{"kind":{"const":"circle"},"radius":{"type":"number"}},
+             "required":["kind","radius"]},
+            {"type":"object","properties":{"kind":{"const":"square"},"side":{"type":"number"}},
+             "required":["kind","side"]}
+        ]}},
+        "required":["shape"]
+    });
+    let constant = json!({"type":"object","properties":{"unit":{"const":"celsius"}}});
+    let plain = json!({"type":"object","properties":{"q":{"type":"string","title":"Query"}}});
+    let wire = wire("gemini-2.5-flash");
+    let mut request = CompletionRequest::new("hello");
+    request.tools = [
+        ("shape_tool", &one_of),
+        ("unit_tool", &constant),
+        ("plain_tool", &plain),
+    ]
+    .into_iter()
+    .map(|(name, parameters)| {
+        crate::completion::ToolDefinition::new(
+            message::ToolName::new(name).expect("tool name"),
+            "schema fixture",
+            parameters.clone(),
+        )
+    })
+    .collect();
+    let request = Completion::prepare(request, &wire.describe()).expect("prepared");
+    let encoded = wire.encode(request, Mode::Unary).expect("encoded");
+    let body = crate::test_utils::json_body(&encoded.request);
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations"),
+        Some(&json!([
+            {"name":"shape_tool","description":"schema fixture","parametersJsonSchema":one_of},
+            {"name":"unit_tool","description":"schema fixture","parametersJsonSchema":constant},
+            {"name":"plain_tool","description":"schema fixture","parameters":{
+                "type":"object","properties":{"q":{"type":"string","title":"Query"}}
+            }}
+        ]))
+    );
 }
 
 #[test]

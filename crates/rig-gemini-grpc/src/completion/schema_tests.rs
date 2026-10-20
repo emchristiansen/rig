@@ -381,11 +381,6 @@ fn tool_params_refuse_a_bound_the_typed_schema_cannot_carry() -> anyhow::Result<
             "/maxProperties",
             "0 is indistinguishable from an unset bound in Gemini's Schema",
         ),
-        (
-            serde_json::json!({ "type": "object", "properties": { "x": { "oneOf": [{ "type": "string" }] } } }),
-            "/properties/x/oneOf",
-            "the keyword is outside Gemini's `parameters` Schema subset",
-        ),
     ] {
         let Err(error) = projected_schema(&v) else {
             anyhow::bail!("{v} was not refused");

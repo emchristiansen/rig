@@ -28,9 +28,10 @@ pub(super) enum DeclarationParameters {
     JsonSchema(Value),
 }
 
-/// Numeric-domain enums use the original schema, after the same reference
-/// validation, since `parametersJsonSchema` carries it whole; every other
-/// declaration is projected.
+/// A declaration with a numeric-domain enum, a `oneOf` or a `const` anywhere
+/// uses the original schema, after the same reference validation, since
+/// `parametersJsonSchema` carries it whole; every other declaration is
+/// projected.
 pub(super) fn declaration_parameters(value: Value) -> Result<DeclarationParameters, EncodeError> {
     if requires_json_schema(&value, "")? {
         Ok(DeclarationParameters::JsonSchema(value))
@@ -220,11 +221,16 @@ fn requires_json_schema(value: &Value, path: &str) -> Result<bool, EncodeError> 
     let Some(obj) = flattened.as_object() else {
         return Ok(false);
     };
-    let mut required = !explicitly_string_only(obj)
-        && obj
-            .get("enum")
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.iter().any(Value::is_number));
+    // `oneOf` and `const` (the shapes schemars gives data enums) have no
+    // faithful `parameters` carrier but travel whole as raw JSON Schema
+    // (mec-rig-bodies-applied-ack-1).
+    let mut required = obj.contains_key("oneOf")
+        || obj.contains_key("const")
+        || !explicitly_string_only(obj)
+            && obj
+                .get("enum")
+                .and_then(Value::as_array)
+                .is_some_and(|values| values.iter().any(Value::is_number));
     if let Some(properties) = obj.get("properties").and_then(Value::as_object) {
         for (name, value) in properties {
             if value.is_object() {
