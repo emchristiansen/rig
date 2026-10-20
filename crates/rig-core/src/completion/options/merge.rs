@@ -222,6 +222,13 @@ pub enum Rewrite {
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
     GeminiInteractionsTypedControls,
+    /// Gemini Interactions create: check and project the original
+    /// `additional_params` before any layer is formed. It writes nothing
+    /// after the merge.
+    ///
+    /// For rig's own crates; not covered by semver.
+    #[doc(hidden)]
+    GeminiInteractionsOriginalParameters,
 }
 
 /// The non-object, non-null JSON kinds a typed Gemini control cannot overwrite.
@@ -811,6 +818,19 @@ pub fn request_params(
     raw_at: RawAt,
     rewrites: &[Rewrite],
 ) -> Result<FinalBody, EncodeError> {
+    let projected_request = if rewrites.contains(&Rewrite::GeminiInteractionsOriginalParameters) {
+        let additional_params =
+            crate::providers::gemini::interactions_api::project_original_parameters(
+                request.additional_params.as_ref(),
+            )?;
+        Some(CompletionRequest {
+            additional_params,
+            ..request.clone()
+        })
+    } else {
+        None
+    };
+    let request = projected_request.as_ref().unwrap_or(request);
     #[cfg(feature = "websocket")]
     if let [rewrite @ Rewrite::ResponsesWebSocketCreate(create)] = rewrites
         && let crate::providers::openai::responses_api::websocket::WebSocketCreateInput::Delta {
@@ -948,6 +968,8 @@ fn apply(
         Rewrite::NoBackground => {
             body.shift_remove("background");
         }
+        // Its projection ran before the layers were formed.
+        Rewrite::GeminiInteractionsOriginalParameters => {}
         Rewrite::StreamUsage => {
             if let Some(options) = body
                 .entry("stream_options")

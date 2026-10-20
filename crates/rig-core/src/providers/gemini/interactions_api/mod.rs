@@ -417,27 +417,23 @@ pub(crate) fn create_request_body(
     request: &CompletionRequest,
     stream: Option<bool>,
 ) -> Result<crate::completion::options::FinalBody, EncodeError> {
-    let additional_params = project_original_parameters(request.additional_params.as_ref())?;
-    let request = CompletionRequest {
-        additional_params,
-        ..request.clone()
-    };
-    let mut rewrites: Vec<_> = stream
-        .map(crate::completion::options::Rewrite::Stream)
-        .into_iter()
-        .collect();
+    let mut rewrites =
+        vec![crate::completion::options::Rewrite::GeminiInteractionsOriginalParameters];
+    rewrites.extend(stream.map(crate::completion::options::Rewrite::Stream));
     rewrites.push(crate::completion::options::Rewrite::GeminiInteractionsTypedControls);
     crate::completion::options::request_params(
         wire,
-        &request,
-        |input| create_base(wire, &request, input),
+        request,
+        |input| create_base(wire, request, input),
         crate::completion::options::RawAt::Top,
         &rewrites,
     )
 }
 
 /// Project the original generation fields and omit absent original parameters.
-fn project_original_parameters(original: Option<&Value>) -> Result<Option<Value>, EncodeError> {
+pub(crate) fn project_original_parameters(
+    original: Option<&Value>,
+) -> Result<Option<Value>, EncodeError> {
     check_original_fields(original)?;
     let mut projected = original.cloned();
     if let Some(params) = projected.as_mut().and_then(Value::as_object_mut) {

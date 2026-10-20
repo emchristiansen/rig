@@ -513,28 +513,34 @@ fn reads_effect_file(syntax: &syn::File) -> bool {
 
 fn reader_chain_problems(syntax: &syn::File) -> Vec<String> {
     let mut failures = Vec::new();
-    let expected: syn::ItemMacro = syn::parse_quote! {
-        macro_rules! both_interpreters {
-            ($($test:ident: $program:ident),* $(,)?) => {
-                mod bus_engine {
-                    $(
-                        #[tokio::test]
-                        async fn $test() {
-                            $crate::corpus::bus_engine_reproduces(&super::$program).await;
-                        }
-                    )*
+    // Lexed from text like the corpus source, so both token streams carry the
+    // lexer's punctuation spacing: `parse_quote!` spaces `),*` and `::$`
+    // differently, and its tokens never print equal to the parsed file's.
+    let expected: syn::ItemMacro = syn::parse_str(
+        r#"
+macro_rules! both_interpreters {
+    ($($test:ident: $program:ident),* $(,)?) => {
+        mod bus_engine {
+            $(
+                #[tokio::test]
+                async fn $test() {
+                    $crate::corpus::bus_engine_reproduces(&super::$program).await;
                 }
-                mod hand_driver {
-                    $(
-                        #[tokio::test]
-                        async fn $test() {
-                            $crate::corpus::hand_driver_reproduces(&super::$program).await;
-                        }
-                    )*
+            )*
+        }
+        mod hand_driver {
+            $(
+                #[tokio::test]
+                async fn $test() {
+                    $crate::corpus::hand_driver_reproduces(&super::$program).await;
                 }
-            };
+            )*
         }
     };
+}
+"#,
+    )
+    .expect("the expected reader macro parses");
     let macros: Vec<_> = syntax
         .items
         .iter()
