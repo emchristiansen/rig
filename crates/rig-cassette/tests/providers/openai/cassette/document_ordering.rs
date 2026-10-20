@@ -29,13 +29,12 @@ fn ordering_document() -> Document {
     }
 }
 
+/// The reply's text: Chat text blocks, and the carried text a Responses
+/// message part decodes to.
 fn assistant_text(choice: &[AssistantContent]) -> String {
     choice
         .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
+        .filter_map(rig_test_support::support::block_text)
         .collect::<Vec<_>>()
         .join("")
 }
@@ -55,7 +54,15 @@ async fn responses_keeps_documents_after_system_before_history() {
                         .document(ordering_document())
                         .temperature(0.0)
                         .max_tokens(32)
-                        .provider_options(super::super::support::stateless()),
+                        .provider_options(super::super::support::stateless())
+                        // The recording asked for `include: ["reasoning.encrypted_content"]`, which
+                        // production no longer adds for a proven nonreasoning model
+                        // (coord-a-rig-g215-1). The test asks for it explicitly, beside its existing
+                        // options, as MEC132-7 treated producer 220; the production model guard and
+                        // the recording stay unchanged, and this test is not about `include`.
+                        .additional_params(serde_json::json!({
+                            "include": ["reasoning.encrypted_content"]
+                        })),
                 )
                 .await
                 .expect("OpenAI Responses document ordering request should succeed");

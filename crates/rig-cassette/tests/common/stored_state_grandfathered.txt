@@ -18,6 +18,7 @@ openai/corpus_retrieval/retrieved_tools_one.yaml
 openai/effect_corpus/streaming_with_events.yaml
 openai/effect_corpus/tool_call_turns.yaml
 openai/gpt_5_6_reasoning/context_current_turn.yaml
+openai/gpt_5_6_reasoning/five_turn_streaming_metadata_roundtrip.yaml
 openai/gpt_5_6_reasoning/mode_pro_with_independent_effort.yaml
 openai/gpt_5_6_reasoning/streaming_metadata.yaml
 openai/multi_extract/batch_multi_extract_chain.yaml
@@ -27,6 +28,7 @@ openai/raw_capture_matrix/responses_raw_exposes_service_tier_and_store.yaml
 openai/raw_completion_parity_matrix/responses_tool_turn_parity.yaml
 openai/raw_stream_capture_matrix/responses_stream_raw_exposes_status.yaml
 openai/reasoning_delta_hook/streaming.yaml
+openai/reasoning_matrix_responses/capped_streamed.yaml
 openai/refusal_matrix/cross_surface_refusal_parity.yaml
 openai/refusal_matrix/responses_agent_streaming_refusal_surfaces.yaml
 openai/response_identity_edge/previous_response_id_chain_keeps_axes_distinct.yaml

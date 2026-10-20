@@ -226,6 +226,11 @@ fn continuing(id: String) -> GeminiOptions {
 /// output beside `total_output_tokens`, and input plus output is the
 /// provider's own `total_tokens`. That last equality is what shows the
 /// tool-use tokens sit outside `total_input_tokens` rather than inside it.
+/// Interactions keeps its counters independent (G225; MEC132-1 item 3;
+/// mec-rig-132-dispositions-2 item 1): input, output, reasoning and tool-use
+/// prompt tokens are each the provider's own, and together they are its
+/// total. The cost prices the tool-use prompt as input and the reasoning as
+/// output at the model's catalog rates (mec-rig-port-answers-1 Q8).
 fn assert_tool_use_usage(usage: &rig::completion::Usage, raw: &serde_json::Value) {
     let wire = raw.get("usage").expect("the reply carries its usage");
     let count = |field: &str| {
@@ -238,36 +243,80 @@ fn assert_tool_use_usage(usage: &rig::completion::Usage, raw: &serde_json::Value
         tool_use > 0,
         "code execution reports tool-use tokens, or this cell proves nothing: {wire}"
     );
+    // The recorded counters: 135 + 171 + 182 + 526 = 1014.
+    assert_eq!(
+        (
+            count("total_input_tokens"),
+            count("total_output_tokens"),
+            count("total_thought_tokens"),
+            tool_use,
+            count("total_tokens"),
+        ),
+        (135, 171, 182, 526, 1014),
+        "the recording's counters: {wire}"
+    );
     assert_eq!(usage.tool_use_prompt_tokens, Some(tool_use), "{wire}");
     assert_eq!(
         usage.input_tokens,
-        Some(count("total_input_tokens") + tool_use),
-        "input counts the tool-use prompt: {wire}"
+        Some(count("total_input_tokens")),
+        "input is the provider's input, the tool-use prompt beside it: {wire}"
     );
     assert_eq!(
         usage.output_tokens,
-        Some(count("total_output_tokens") + count("total_thought_tokens")),
-        "output counts the thinking: {wire}"
+        Some(count("total_output_tokens")),
+        "output is the provider's output, the thinking beside it: {wire}"
+    );
+    assert_eq!(
+        usage.reasoning_tokens,
+        Some(count("total_thought_tokens")),
+        "reasoning is the provider's thinking: {wire}"
     );
     assert_eq!(
         usage.total_tokens,
         Some(count("total_tokens")),
-        "input plus output is the provider's total: {wire}"
+        "the total is the provider's: {wire}"
     );
     assert_eq!(
+        [
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.reasoning_tokens,
+            usage.tool_use_prompt_tokens,
+        ]
+        .into_iter()
+        .sum::<Option<u64>>(),
         usage.total_tokens,
-        usage
-            .input_tokens
-            .zip(usage.output_tokens)
-            .map(|(input, output)| input + output),
-        "the total is input plus output: {usage:?}"
+        "input, output, reasoning and tool use add up to the total: {usage:?}"
+    );
+
+    let pricing = rig::catalog::Catalog::builtin()
+        .resolve("gcp.gemini/gemini-3-flash-preview")
+        .and_then(|spec| spec.pricing)
+        .expect("the catalog prices gemini-3-flash-preview");
+    let price = |tokens: u64, per_million: f64| tokens as f64 * per_million / 1_000_000.0;
+    let cost = usage.cost.expect("a priced model's reply carries a cost");
+    let (input, output) = (
+        count("total_input_tokens") + tool_use,
+        count("total_output_tokens") + count("total_thought_tokens"),
+    );
+    assert_eq!((input, output), (661, 353));
+    assert_eq!(
+        cost.input,
+        Some(price(input, pricing.input)),
+        "the tool-use prompt is priced as input: {cost:?}"
+    );
+    assert_eq!(
+        cost.output,
+        Some(price(output, pricing.output)),
+        "the thinking is priced as output: {cost:?}"
     );
 }
 
 /// A hosted tool's prompt is input: Interactions reports it as
 /// `total_tool_use_tokens` beside `total_input_tokens`, and its own total
-/// counts it. Recorded because no other Interactions cassette carries a
-/// non-zero tool-use count (Google Search reports zero).
+/// counts it. Rig keeps it as its own counter beside input, and the cost
+/// prices it as input. Recorded because no other Interactions cassette
+/// carries a non-zero tool-use count (Google Search reports zero).
 #[tokio::test]
 async fn code_execution_usage_counts_the_tool_use_prompt_as_input() {
     super::super::support::with_gemini_interactions_cassette(

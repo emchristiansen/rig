@@ -30,6 +30,45 @@ use crate::wire::Wire;
 /// and call ids, and timestamps.
 pub const MINTED_KEYS: &[&str] = &["id", "created", "created_at", "completed_at"];
 
+/// The top-level fields a streamed Chat document keeps as the stream
+/// delivered them, where a unary body states its own value or none: the
+/// chunk's `object` tag (`chat.completion.chunk`, or Perplexity's
+/// `chat.completion.done`) and the `obfuscation` and `p` padding. The
+/// reassembler keeps the fork's last delivered scalar and envelope fields
+/// rather than normalizing them to the unary document's
+/// (coord-a-rig-port-chat-document-12 (1); mec-rig-132-dispositions-1 item 2),
+/// so parity checks them against the stream's own frames, not the unary body.
+pub const CHAT_DELIVERED_ENVELOPE: [&str; 3] = ["object", "obfuscation", "p"];
+
+/// The value a Chat stream's rebuilt document holds at the top-level `key`,
+/// read off the stream's delivered `frames` as the reassembler keeps it: the
+/// last non-null value, `null` when the key only ever arrived as `null`, and
+/// `None` when no frame delivered it.
+pub fn delivered_envelope_field(frames: &[Value], key: &str) -> Option<Value> {
+    let delivered: Vec<&Value> = frames.iter().filter_map(|frame| frame.get(key)).collect();
+    let last = delivered.last()?;
+    Some(
+        delivered
+            .iter()
+            .rev()
+            .find(|value| !value.is_null())
+            .copied()
+            .unwrap_or(last)
+            .clone(),
+    )
+}
+
+/// The JSON objects an event stream's `data:` lines carry, in order; the
+/// `[DONE]` sentinel and anything else that is not a JSON object are left out.
+pub fn sse_json_frames(stream: &[u8]) -> Vec<Value> {
+    String::from_utf8_lossy(stream)
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+        .filter(Value::is_object)
+        .collect()
+}
+
 /// `document` as parity compares it: `null`s, empty lists and empty
 /// objects, which a unary body states and a stream may omit, are dropped,
 /// as are [`MINTED_KEYS`] and the values at the JSON pointers in `minted`,

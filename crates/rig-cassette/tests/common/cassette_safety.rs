@@ -671,6 +671,17 @@ fn collect_expected_cassette_paths() -> (BTreeSet<PathBuf>, Vec<String>) {
                 }
                 Err(error) => failures.push(error),
             }
+            // A cassette a test only reads, through a read-only reader such
+            // as `recorded_interaction_bodies`, is used as surely as one it
+            // replays.
+            match read_only_cassettes_in_file(&source_file) {
+                Ok(read) => {
+                    for (provider, scenario) in read {
+                        expected.insert(crate::cassettes::cassette_path(&provider, &scenario));
+                    }
+                }
+                Err(error) => failures.push(error),
+            }
         }
     }
 
@@ -744,6 +755,13 @@ fn cassette_scenarios_in_file(
     let source = fs::read_to_string(path)
         .map_err(|error| format!("{} should be readable: {error}", display_repo_path(path)))?;
     rig_test_support::scenario_registry::cassette_scenarios(&source, wrapper_names)
+        .map_err(|error| format!("{}: {error}", display_repo_path(path)))
+}
+
+fn read_only_cassettes_in_file(path: &Path) -> Result<Vec<(String, String)>, String> {
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("{} should be readable: {error}", display_repo_path(path)))?;
+    rig_test_support::scenario_registry::read_only_cassettes(&source)
         .map_err(|error| format!("{}: {error}", display_repo_path(path)))
 }
 

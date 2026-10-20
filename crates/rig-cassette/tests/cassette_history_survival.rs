@@ -182,6 +182,11 @@ const SURVIVAL_EXEMPT: &[(&str, &str, &str)] = &[
         "thought_signature",
         "the same opt-in current-turn thought replay, with a compaction at turn 51",
     ),
+    (
+        "openai/gpt_5_6_reasoning/five_turn_streaming_metadata_roundtrip.yaml",
+        "phase",
+        "the fork recording restored byte-for-byte under coord-a-rig-wi22-2: its own test replays the original phase-less input (`gpt_5_6_reasoning/original_input.rs`), so each recorded continuation lacks the `phase` the previous reply delivered by construction; re-recording retires this entry",
+    ),
 ];
 
 /// Scenarios whose same-model continuation legitimately sends an output item
@@ -269,6 +274,10 @@ const VERBATIM_EXEMPT: &[(&str, &str)] = &[
     (
         "xai/prompt_caching/streaming_probe.yaml",
         "the cache probe rebuilds each answer from its text, so the history holds no reasoning",
+    ),
+    (
+        "openai/gpt_5_6_reasoning/five_turn_streaming_metadata_roundtrip.yaml",
+        "the fork recording restored byte-for-byte under coord-a-rig-wi22-2: its own test replays the original phase-less input (`gpt_5_6_reasoning/original_input.rs`), so each recorded continuation lacks the `phase` the previous reply delivered by construction; re-recording retires this entry",
     ),
 ];
 
