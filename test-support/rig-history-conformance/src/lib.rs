@@ -191,8 +191,9 @@ pub const TESTS: &[(&str, &str, &str)] = &[
     ),
     (
         "crates/rig-core/src/providers/openai/wire/chat/history_tests.rs",
-        "reasoning_details_fold_alike_whole_and_streamed_wherever_they_arrive",
-        "round 5: generated finding 2 (OpenRouter details after the content)",
+        "openrouter_reasoning_details_keep_the_fork_mode_boundaries_and_replay_values",
+        "round 5: generated finding 2 (OpenRouter details after the content: whole and \
+         streamed keep the fork's mode boundary, and their replay bytes stay equal)",
     ),
     (
         "crates/rig-core/src/providers/openai/responses_api/history_tests.rs",
@@ -375,15 +376,13 @@ pub const TESTS: &[(&str, &str, &str)] = &[
         "review: Responses terminal-only items duplicate text",
     ),
     (
-        "crates/rig-core/src/providers/openai/responses_api/streaming/tests.rs",
-        "a_done_item_that_contradicts_its_deltas_states_the_block",
+        "crates/rig-core/src/providers/openai/responses_api/streaming/tests/upstream.rs",
+        "contradictory_done_keeps_delivered_text_and_restates_structured_reasoning",
         "review: Responses block text and native disagree",
     ),
-    (
-        "crates/rig-core/src/providers/openai/responses_api/streaming/tests.rs",
-        "an_item_without_a_type_never_replays",
-        "review: Responses item without a type replays",
-    ),
+    // "review: Responses item without a type replays" is withdrawn under G172:
+    // an issued item without a type stays a provider item that replays its
+    // received payload (`an_item_without_a_type_replays_its_received_provider_payload`).
     (
         "crates/rig-core/src/providers/openai/responses_api/streaming/tests/upstream.rs",
         "response_incomplete_is_incomplete_whatever_its_status_says",

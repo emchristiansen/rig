@@ -108,8 +108,8 @@ pub fn disagreement<W: Wire<Op = Completion>>(
 
 /// [`disagreement`] on a wire that refuses a whole reply with no content
 /// with [`EMPTY_RESPONSE_ERROR`] when `refuses_empty_whole`: there that
-/// refusal agrees with a stream that folds to a successful turn holding
-/// no content but blank text, and with nothing else.
+/// refusal agrees with a stream that folds to a turn holding no content but
+/// blank text, whatever its stop, and with nothing else.
 pub fn disagreement_of<W: Wire<Op = Completion>>(
     wire: &W,
     frames: Frames<W::Frame>,
@@ -152,7 +152,10 @@ pub fn disagreement_of<W: Wire<Op = Completion>>(
             let empty = stream.choice.iter().all(|block| {
                 matches!(block, AssistantContent::Text(text) if text.text.trim().is_empty())
             });
-            (!empty || stream.stop().is_failure()).then(|| {
+            // The whole reply's refusal is unary-only, whatever the stop:
+            // the stream agrees when it folds to no content, even when its
+            // stop is a failure (an empty refusal ends as an error).
+            (!empty).then(|| {
                 format!(
                     "the whole reply is refused as empty, but the stream folds to {} ({:?})",
                     json!(stream.message()),
