@@ -183,11 +183,14 @@ pub fn assert_native_matches_normalized(
 }
 
 /// The id of the message item the first text block of `response` holds.
+/// The port decodes a Responses message part as carried text that names its
+/// containing message's id.
 pub fn message_item_id(response: &CompletionResponse) -> Option<&str> {
     response.choice.iter().find_map(|block| match block {
         rig_core::message::AssistantContent::Text(text) => {
             text.native.as_ref()?.item["id"].as_str()
         }
+        rig_core::message::AssistantContent::CarriedText(text) => text.item_id.as_deref(),
         _ => None,
     })
 }

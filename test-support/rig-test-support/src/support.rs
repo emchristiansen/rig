@@ -413,14 +413,45 @@ pub fn assert_nonempty_response(response: &str) {
     );
 }
 
+/// The answer text of one assistant block, as
+/// [`CompletionResponse::text`] reads it: plain text, or a carried message
+/// part's editable text. The port decodes Responses message parts and
+/// Gemini signed answers as [`AssistantContent::CarriedText`].
+pub fn block_text(content: &AssistantContent) -> Option<&str> {
+    match content {
+        AssistantContent::Text(text) => Some(text.text.as_str()),
+        AssistantContent::CarriedText(text) => Some(text.text()),
+        _ => None,
+    }
+}
+
+/// Whether one assistant block is reasoning, as
+/// [`CompletionResponse::reasoning`] reads it: upstream reasoning, or a
+/// carried reasoning item. The port decodes Responses reasoning items and
+/// Gemini thought runs as [`AssistantContent::CarriedReasoning`].
+pub fn is_reasoning(content: &AssistantContent) -> bool {
+    matches!(
+        content,
+        AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)
+    )
+}
+
+/// The exact provider item one assistant block holds: a current native item,
+/// or the item a carried block keeps with its provenance.
+pub fn provider_item(content: &AssistantContent) -> Option<&serde_json::Value> {
+    match content {
+        AssistantContent::CarriedText(text) => Some(&text.payload.item),
+        AssistantContent::CarriedReasoning(reasoning) => Some(&reasoning.payload.item),
+        AssistantContent::ProviderItem(item) => Some(&item.payload.item),
+        content => content.native_item(),
+    }
+}
+
 /// Join assistant text blocks with newlines, returning none for empty text.
 pub fn assistant_text_response(choice: &[AssistantContent]) -> Option<String> {
     let response = choice
         .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
+        .filter_map(block_text)
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -1012,13 +1043,7 @@ impl<T> Default for Observed<T> {
 /// returns a string: a matrix comparing against a recorded `content` field
 /// wants the text exactly as the wire carried it, empty included.
 pub fn assistant_text(choice: &[AssistantContent]) -> String {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
+    choice.iter().filter_map(block_text).collect()
 }
 
 /// The normalized completion response serialized with its raw capture

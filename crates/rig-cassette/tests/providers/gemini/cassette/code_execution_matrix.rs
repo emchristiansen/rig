@@ -178,10 +178,9 @@ async fn streaming_code_execution_with_visible_thoughts() {
                 states(&streamed, "6765"),
                 "streamed answer must carry the value, got {streamed:?}"
             );
+            // The port aggregates a Gemini thought run as carried reasoning.
             assert!(
-                choice
-                    .iter()
-                    .any(|content| matches!(content, AssistantContent::Reasoning(_))),
+                choice.iter().any(rig_test_support::support::is_reasoning),
                 "streamed reasoning must aggregate as reasoning, not text"
             );
             assert!(saw_terminal, "the turn must produce a terminal record");

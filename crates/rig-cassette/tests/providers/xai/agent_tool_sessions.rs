@@ -684,11 +684,12 @@ async fn reasoning_effort_preserves_reasoning_content_and_usage() -> Result<()> 
                 raw["usage"]["output_tokens_details"]["reasoning_tokens"].as_u64();
             assert_raw_response_metadata(raw);
 
+            // The port decodes a Responses reasoning item as carried reasoning.
             anyhow::ensure!(
                 response
                     .choice
                     .iter()
-                    .any(|content| matches!(content, AssistantContent::Reasoning(_))),
+                    .any(rig_test_support::support::is_reasoning),
                 "xAI reasoning response should preserve a reasoning content block"
             );
             anyhow::ensure!(

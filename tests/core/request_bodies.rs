@@ -261,12 +261,22 @@ fn encoders() -> Vec<Encoder> {
     chat.push(("zai-coding".to_owned(), &openai::ZAI_CODING));
     chat.push(("minimax-china".to_owned(), &openai::MINIMAX_CHINA));
     chat.push(("moonshot-china".to_owned(), &openai::MOONSHOT_CHINA));
+    // The ChatGPT dialect refuses to send without the caller's exact
+    // identity, so its wires carry the plainly-test one.
+    fn config(dialect: &'static openai::Dialect) -> openai::OpenAIConfig {
+        let config = openai::OpenAIConfig::with_key(dialect, "k");
+        if dialect.name == rig::providers::chatgpt::DIALECT.name {
+            config.with_caller_identity(rig::test_utils::test_caller_identity())
+        } else {
+            config
+        }
+    }
     let mut out = Vec::new();
     for (name, dialect) in &chat {
         let dialect: &'static openai::Dialect = dialect;
         out.push(encoder(
             format!("chat|{name}"),
-            move |model| openai::Chat::new(openai::OpenAIConfig::with_key(dialect, "k"), model),
+            move |model| openai::Chat::new(config(dialect), model),
             http,
         ));
     }
@@ -286,7 +296,7 @@ fn encoders() -> Vec<Encoder> {
         let dialect: &'static openai::Dialect = dialect;
         out.push(encoder(
             format!("resp|{name}"),
-            move |model| Responses::new(openai::OpenAIConfig::with_key(dialect, "k"), model),
+            move |model| Responses::new(config(dialect), model),
             http,
         ));
     }

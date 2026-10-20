@@ -123,10 +123,12 @@ mod unit {
                     rig::streaming::Item::Event(StreamEvent::Text { text, .. }) => {
                         run.text.push_str(&text)
                     }
-                    rig::streaming::Item::Event(StreamEvent::End {
-                        content: AssistantContent::Reasoning(_),
-                        ..
-                    }) => run.reasoning += 1,
+                    // The port ends a Gemini thought run as carried reasoning.
+                    rig::streaming::Item::Event(StreamEvent::End { content, .. })
+                        if rig_test_support::support::is_reasoning(&content) =>
+                    {
+                        run.reasoning += 1
+                    }
                     rig::streaming::Item::Event(StreamEvent::End {
                         content: AssistantContent::ToolCall(_),
                         ..
@@ -231,7 +233,7 @@ mod unit {
             "the envelope's message survives: {message}"
         );
         assert!(
-            !message.contains("ended before the provider ended it"),
+            !message.contains(&rig::serve::stream_truncated().message),
             "not reported as a cut stream: {message}"
         );
     }

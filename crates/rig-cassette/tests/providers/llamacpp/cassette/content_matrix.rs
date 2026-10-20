@@ -28,13 +28,15 @@ const NO_THINK: &str = "/no_think ";
 use crate::cassettes::{recorded_json_request, recorded_sse_json_frames};
 use crate::support::collect_stream_final_response;
 use rig::completion::CompletionRequest;
-use rig::message::{Message, UserContent};
+use rig::error::ProviderError;
+use rig::message::{EMPTY_RESPONSE_ERROR, Message, UserContent};
 use serde_json::json;
 
 /// A turn whose whole answer is eaten by a stop sequence is an empty turn:
-/// llama.cpp answers `200` with `finish_reason: "stop"` and `content: ""`,
-/// and rig keeps it as pi does, a success with no blocks, decided once by
-/// the core fold for whole and streamed replies alike.
+/// llama.cpp answers `200` with `finish_reason: "stop"` and `content: ""`.
+/// The port refuses an empty unary Chat reply with
+/// [`EMPTY_RESPONSE_ERROR`]; only a streamed empty reply that ended cleanly
+/// is a success with no blocks.
 #[tokio::test]
 async fn an_answer_fully_consumed_by_a_stop_sequence_is_an_empty_turn() {
     with_llamacpp_cassette(
@@ -51,10 +53,14 @@ async fn an_answer_fully_consumed_by_a_stop_sequence_is_an_empty_turn() {
                         // of it exists.
                         .stop(["<think>"]),
                 )
-                .await
-                .expect("an empty turn that ended cleanly decodes");
-            assert!(response.choice.is_empty(), "{:?}", response.choice);
-            assert!(!response.stop().is_failure(), "{:?}", response.stop());
+                .await;
+            assert!(
+                matches!(
+                    &response,
+                    Err(ProviderError::Response(message)) if message == EMPTY_RESPONSE_ERROR
+                ),
+                "an empty unary reply is refused as empty: {response:?}"
+            );
         },
     )
     .await;

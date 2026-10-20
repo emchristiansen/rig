@@ -8,7 +8,6 @@
 
 use rig::agent::AgentBuilder;
 use rig::completion::{FinishReason, Message};
-use rig::message::AssistantContent;
 use rig::providers::openai;
 use rig_test_support::cassette_models::MapWire;
 
@@ -58,14 +57,8 @@ async fn incomplete_response_surfaces_partial_output() {
                 Some(FinishReason::Length),
                 "the incomplete/max_output_tokens pair should normalize to a length stop"
             );
-            let text: String = response
-                .choice
-                .iter()
-                .filter_map(|content| match content {
-                    AssistantContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect();
+            // The port decodes the partial message part as carried text.
+            let text = response.text();
             assert!(
                 !text.trim().is_empty(),
                 "partial output text should still be surfaced"
