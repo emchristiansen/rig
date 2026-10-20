@@ -724,8 +724,7 @@ fn h07_grpc_failed_turns(fixture: &GrpcHistory) {
             );
             continue;
         }
-        let response =
-            response.unwrap_or_else(|error| panic!("the `{name}` reply decodes: {error}"));
+        let response = response.expect("the documented finish reply decodes");
         let failed = response.stop().is_failure();
         assert_eq!(
             failed,
