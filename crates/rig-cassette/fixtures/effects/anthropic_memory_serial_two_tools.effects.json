@@ -1,5 +1,215 @@
 {
   "header": {
+    "stream_done": {
+      "2": [
+        {
+          "item": 13,
+          "response": {
+            "choice": [
+              {
+                "type": "text",
+                "text": "I'll call both tools simultaneously right now!",
+                "native": {
+                  "item": {
+                    "text": "I'll call both tools simultaneously right now!",
+                    "type": "text"
+                  },
+                  "fingerprint": "419c104b03bf2e1e"
+                }
+              },
+              {
+                "type": "toolcall",
+                "id": {
+                  "provider": "toolu_01LP4kcWedzFsZ8qpaqTTvYf"
+                },
+                "function": {
+                  "name": "lookup_harbor_label",
+                  "arguments": {}
+                },
+                "native": {
+                  "item": {
+                    "caller": {
+                      "type": "direct"
+                    },
+                    "id": "toolu_01LP4kcWedzFsZ8qpaqTTvYf",
+                    "input": {},
+                    "name": "lookup_harbor_label",
+                    "type": "tool_use"
+                  },
+                  "fingerprint": "db82bf069bf0de39"
+                }
+              },
+              {
+                "type": "toolcall",
+                "id": {
+                  "provider": "toolu_01765NWXXeNERbBRmiuQTgFa"
+                },
+                "function": {
+                  "name": "lookup_orchard_label",
+                  "arguments": {}
+                },
+                "native": {
+                  "item": {
+                    "caller": {
+                      "type": "direct"
+                    },
+                    "id": "toolu_01765NWXXeNERbBRmiuQTgFa",
+                    "input": {},
+                    "name": "lookup_orchard_label",
+                    "type": "tool_use"
+                  },
+                  "fingerprint": "146471887db8d818"
+                }
+              }
+            ],
+            "usage": {
+              "input_tokens": 700,
+              "output_tokens": 70,
+              "total_tokens": 770,
+              "cached_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cost": {
+                "input": 0.0021,
+                "output": 0.00105,
+                "cache_read": 0.0,
+                "cache_write": 0.0,
+                "total": 0.00315
+              }
+            },
+            "message_id": "msg_011CfikU8TWFS3vaML1c3EFy",
+            "origin": {
+              "api": "anthropic.messages",
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "response_model": "claude-sonnet-4-6",
+              "response_id": "msg_011CfikU8TWFS3vaML1c3EFy"
+            },
+            "provider_request_id": "req_011CfikU86vjH3q2FwnVrZjx",
+            "finish_reason": "tool_calls",
+            "raw": {
+              "container": null,
+              "content": [
+                {
+                  "text": "I'll call both tools simultaneously right now!",
+                  "type": "text"
+                },
+                {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01LP4kcWedzFsZ8qpaqTTvYf",
+                  "input": {},
+                  "name": "lookup_harbor_label",
+                  "type": "tool_use"
+                },
+                {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_01765NWXXeNERbBRmiuQTgFa",
+                  "input": {},
+                  "name": "lookup_orchard_label",
+                  "type": "tool_use"
+                }
+              ],
+              "diagnostics": null,
+              "id": "msg_011CfikU8TWFS3vaML1c3EFy",
+              "model": "claude-sonnet-4-6",
+              "role": "assistant",
+              "stop_details": null,
+              "stop_reason": "tool_use",
+              "stop_sequence": null,
+              "type": "message",
+              "usage": {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "inference_geo": "global",
+                "input_tokens": 700,
+                "output_tokens": 70,
+                "service_tier": "standard"
+              }
+            }
+          }
+        }
+      ],
+      "5": [
+        {
+          "item": 8,
+          "response": {
+            "choice": [
+              {
+                "type": "text",
+                "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                "native": {
+                  "item": {
+                    "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                    "type": "text"
+                  },
+                  "fingerprint": "84a6c75f1745511b"
+                }
+              }
+            ],
+            "usage": {
+              "input_tokens": 846,
+              "output_tokens": 26,
+              "total_tokens": 872,
+              "cached_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cost": {
+                "input": 0.002538,
+                "output": 0.00039,
+                "cache_read": 0.0,
+                "cache_write": 0.0,
+                "total": 0.002928
+              }
+            },
+            "message_id": "msg_011CfikUFDozy9AKtVvtWduc",
+            "origin": {
+              "api": "anthropic.messages",
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "response_model": "claude-sonnet-4-6",
+              "response_id": "msg_011CfikUFDozy9AKtVvtWduc"
+            },
+            "provider_request_id": "req_011CfikUEsxvhxNyVpd2HQvA",
+            "finish_reason": "stop",
+            "raw": {
+              "container": null,
+              "content": [
+                {
+                  "text": "The alpha signal marker is **crimson-harbor** and the beta signal marker is **silver-orchard**.",
+                  "type": "text"
+                }
+              ],
+              "diagnostics": null,
+              "id": "msg_011CfikUFDozy9AKtVvtWduc",
+              "model": "claude-sonnet-4-6",
+              "role": "assistant",
+              "stop_details": null,
+              "stop_reason": "end_turn",
+              "stop_sequence": null,
+              "type": "message",
+              "usage": {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "inference_geo": "global",
+                "input_tokens": 846,
+                "output_tokens": 26,
+                "service_tier": "standard"
+              }
+            }
+          }
+        }
+      ]
+    },
     "run_spec": 14781373656345120039,
     "handlers": [
       {
@@ -210,6 +420,7 @@
               "total": 0.00315
             }
           },
+          "message_id": "msg_011CfikU8TWFS3vaML1c3EFy",
           "origin": {
             "api": "anthropic.messages",
             "provider": "anthropic",
@@ -274,7 +485,11 @@
           "value": {
             "event": "start",
             "part": 0,
-            "kind": "text"
+            "kind": "text",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            }
           }
         },
         {
@@ -341,6 +556,10 @@
             "event": "start",
             "part": 1,
             "kind": "tool_call",
+            "source_order": {
+              "primary": 0,
+              "secondary": 1
+            },
             "name": "lookup_harbor_label"
           }
         },
@@ -387,6 +606,10 @@
             "event": "start",
             "part": 2,
             "kind": "tool_call",
+            "source_order": {
+              "primary": 0,
+              "secondary": 2
+            },
             "name": "lookup_orchard_label"
           }
         },
@@ -665,6 +888,7 @@
               "total": 0.002928
             }
           },
+          "message_id": "msg_011CfikUFDozy9AKtVvtWduc",
           "origin": {
             "api": "anthropic.messages",
             "provider": "anthropic",
@@ -711,7 +935,11 @@
           "value": {
             "event": "start",
             "part": 0,
-            "kind": "text"
+            "kind": "text",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            }
           }
         },
         {

@@ -119,6 +119,7 @@
               "total": 0.00015299999999999998
             }
           },
+          "message_id": "msg_011CfLcb24Da17aQ4dA41F33",
           "origin": {
             "api": "anthropic.messages",
             "provider": "anthropic",

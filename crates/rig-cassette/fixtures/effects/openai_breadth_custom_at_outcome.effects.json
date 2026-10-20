@@ -443,25 +443,26 @@
           "outcome": "completion",
           "choice": [
             {
-              "type": "text",
-              "text": "42",
-              "native": {
+              "type": "carried_text",
+              "content": {
+                "type": "text",
+                "text": "42"
+              },
+              "payload": {
                 "item": {
-                  "content": [
-                    {
-                      "annotations": [],
-                      "logprobs": [],
-                      "text": "42",
-                      "type": "output_text"
-                    }
-                  ],
-                  "id": "msg_0a65494bcf9aa481006ab395f1d96c87d09bfd6c79b04254d3",
-                  "role": "assistant",
-                  "status": "completed",
-                  "type": "message"
+                  "annotations": [],
+                  "logprobs": [],
+                  "text": "42",
+                  "type": "output_text"
                 },
-                "fingerprint": "23f07d1922e80d53"
-              }
+                "provider": "openai",
+                "position": {
+                  "kind": "message_content",
+                  "item_index": 0,
+                  "part_index": 0
+                }
+              },
+              "item_id": "msg_0a65494bcf9aa481006ab395f1d96c87d09bfd6c79b04254d3"
             }
           ],
           "usage": {
@@ -479,6 +480,7 @@
               "total": 0.00034250000000000003
             }
           },
+          "message_id": "msg_0a65494bcf9aa481006ab395f1d96c87d09bfd6c79b04254d3",
           "origin": {
             "api": "openai.responses",
             "provider": "openai",

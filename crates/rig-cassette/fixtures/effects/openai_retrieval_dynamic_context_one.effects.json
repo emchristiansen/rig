@@ -110,25 +110,26 @@
           "outcome": "completion",
           "choice": [
             {
-              "type": "text",
-              "text": "A glarb-glarb is an ancient farming tool used by the ancestors of the inhabitants of planet Jiro.",
-              "native": {
+              "type": "carried_text",
+              "content": {
+                "type": "text",
+                "text": "A glarb-glarb is an ancient farming tool used by the ancestors of the inhabitants of planet Jiro."
+              },
+              "payload": {
                 "item": {
-                  "content": [
-                    {
-                      "annotations": [],
-                      "logprobs": [],
-                      "text": "A glarb-glarb is an ancient farming tool used by the ancestors of the inhabitants of planet Jiro.",
-                      "type": "output_text"
-                    }
-                  ],
-                  "id": "msg_0c6455b6bc5d98ef006ab396900c8087d0a1438eea76a87a4d",
-                  "role": "assistant",
-                  "status": "completed",
-                  "type": "message"
+                  "annotations": [],
+                  "logprobs": [],
+                  "text": "A glarb-glarb is an ancient farming tool used by the ancestors of the inhabitants of planet Jiro.",
+                  "type": "output_text"
                 },
-                "fingerprint": "53cae32d5b586795"
-              }
+                "provider": "openai",
+                "position": {
+                  "kind": "message_content",
+                  "item_index": 0,
+                  "part_index": 0
+                }
+              },
+              "item_id": "msg_0c6455b6bc5d98ef006ab396900c8087d0a1438eea76a87a4d"
             }
           ],
           "usage": {
@@ -146,6 +147,7 @@
               "total": 0.00042500000000000003
             }
           },
+          "message_id": "msg_0c6455b6bc5d98ef006ab396900c8087d0a1438eea76a87a4d",
           "origin": {
             "api": "openai.responses",
             "provider": "openai",
