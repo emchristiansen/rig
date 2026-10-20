@@ -650,8 +650,12 @@ impl Chat {
                 AssistantContent::Opaque(_) | AssistantContent::Image(_) => {}
             }
         }
+        // Groq rejects `reasoning_content` on an assistant message (HTTP 400,
+        // "property 'reasoning_content' is unsupported") but takes reasoning
+        // back under `reasoning`, the field it delivers it in, as upstream's
+        // live Groq recordings replay it.
         if self.provider.dialect.quirks.rewrite == BodyRewrite::GroqCompoundTools {
-            reasoning.clear();
+            reasoning.retain(|(field, _)| field.as_str() != "reasoning_content");
         }
         let mut message = Map::from_iter([("role".to_owned(), Value::from("assistant"))]);
         if has_parts {
@@ -2565,14 +2569,22 @@ impl<'id> Decoder<'id, Completion> for ChatDecoder {
         }
         let classified = classify_chat_completions_frame::<Value>(&data).map(|mut frame| {
             carried::check_choice_list(&frame, &data)?;
-            // Reassembled unary documents retain the stream's object tag.
-            // On a stream, the tag still distinguishes cumulative messages
-            // from deltas so their text is not repeated.
-            let has_message = frame
-                .arr("choices")
-                .iter()
-                .any(|choice| choice.obj("message").is_some());
-            let whole = (self.unary && has_message)
+            // Reassembled unary documents retain the stream's object tag, so
+            // in unary mode a first frame carrying a message is the whole
+            // reply unless it is a chunk: one with a delta and no finish yet
+            // (Perplexity streams the message so far beside each delta).
+            // Once a chunk has been read, and on a stream, the tag still
+            // distinguishes cumulative messages from deltas so their text is
+            // not repeated.
+            let choices = frame.arr("choices");
+            let has_message = choices.iter().any(|choice| choice.obj("message").is_some());
+            let chunk_shaped = choices.iter().any(|choice| choice.obj("delta").is_some())
+                && !choices.iter().any(|choice| {
+                    choice
+                        .str("finish_reason")
+                        .is_some_and(|reason| !reason.is_empty())
+                });
+            let whole = (self.unary && !self.chunked && has_message && !chunk_shaped)
                 || match frame.str("object") {
                     Some(object) => object == "chat.completion",
                     None => has_message,

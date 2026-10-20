@@ -150,24 +150,19 @@ pub(crate) fn fold_groq_native_tools(
     Ok(())
 }
 
-/// The fork's direct finish vocabulary, plus explicit upstream dialect extensions.
+/// The shared Chat finish vocabulary (the fork's direct spellings plus the
+/// `end`, `eos`, `end_turn` and `stop_sequence` compatible servers send for a
+/// natural stop), then explicit dialect extensions. Anything else is
+/// [`FinishReason::Other`].
 pub(super) fn carried_finish_reason(reason: &str, quirks: &Quirks) -> FinishReason {
-    let known = match reason {
-        "stop" => Some(FinishReason::Stop),
-        "length" | "max_tokens" | "model_length" => Some(FinishReason::Length),
-        "tool_calls" | "function_call" => Some(FinishReason::ToolCalls),
-        "content_filter" => Some(FinishReason::ContentFilter),
-        _ => None,
-    };
-    known
-        .or_else(|| {
-            quirks
-                .finishes
-                .iter()
-                .find(|(name, _)| *name == reason)
-                .map(|(_, finish)| finish.clone())
-        })
-        .unwrap_or_else(|| FinishReason::Other(reason.to_owned()))
+    crate::providers::internal::openai_chat_completions_compatible::CHAT_FINISHES
+        .iter()
+        .chain(quirks.finishes.iter())
+        .find(|(name, _)| *name == reason)
+        .map_or_else(
+            || FinishReason::Other(reason.to_owned()),
+            |(_, finish)| finish.clone(),
+        )
 }
 
 /// Known carried blocks replay with F's ordered indices and exact signatures.
@@ -256,7 +251,6 @@ pub(super) fn prepare_whole_calls(
             let parsed = crate::json_utils::parse_tool_arguments(raw);
             let incomplete = raw.trim().is_empty() || parsed.is_err();
             let function_shape = call.str("type").is_none_or(|kind| kind == "function")
-                && call.str("id").is_some()
                 && call
                     .pointer("/function/name")
                     .and_then(Value::as_str)
@@ -280,10 +274,11 @@ pub(super) fn prepare_whole_calls(
 
 // Private validation shapes for F's budget-repair probe; output stays the
 // original value, never this parse. No retired provider DTO is reintroduced.
+// The call `id` is not required: the decoder accepts an id-less call on
+// every other path (streamed, and whole without a length cut), so the cut
+// path discards it the same way rather than failing the reply.
 #[derive(serde::Deserialize)]
 struct BudgetFunctionCall {
-    #[serde(rename = "id")]
-    _id: String,
     #[serde(default, rename = "type")]
     _kind: BudgetFunctionKind,
     #[serde(rename = "function")]
