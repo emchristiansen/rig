@@ -9,10 +9,11 @@ use rig::providers::gemini::GeminiConfig;
 use rig::providers::gemini::completion::{
     GEMINI_3_1_FLASH_LITE_PREVIEW, GEMINI_3_FLASH_PREVIEW, GenerateContent,
 };
+use rig::providers::openai::responses_api::streaming::IncompleteTerminal;
 use rig::providers::openai::wire::{Chat, DEEPSEEK, DOUBLEWORD, OpenAIConfig, OpenAiWire, VENICE};
 use rig::providers::openai::{GPT_5_MINI, GPT_5_NANO};
 use rig::providers::venice::MISTRAL_SMALL_3_2_24B;
-use rig_test_support::cassette_models::{AnthropicModels, GeminiModels, OpenAiModels};
+use rig_test_support::cassette_models::{AnthropicModels, GeminiModels, MapWire, OpenAiModels};
 
 use rig::completion::{GenerationOptions, ProviderOptions, Reasoning};
 use rig::providers::openai::extension::{OpenAiOptions, OpenAiShared};
@@ -91,6 +92,32 @@ pub(crate) fn openai_responses(http: DynHttpClient) -> OpenAi {
         additional_params: None,
         options: Some(|| openai_shared(OpenAiShared::default().store(false))),
     }
+}
+
+/// `wire` with the HTTP SSE incomplete-terminal opt-in on its models: a
+/// streamed Responses reply ending in `response.incomplete` then keeps its
+/// output and ends the turn with the provider's finish reason, where the
+/// default refuses it (G193, coord-a-rig-g191-g195-1). A Chat model passes
+/// through unchanged.
+fn accepting_incomplete(wire: OpenAi) -> OpenAi {
+    fn accept(wire: OpenAiWire) -> OpenAiWire {
+        match wire {
+            OpenAiWire::Responses(responses) => OpenAiWire::Responses(
+                responses.with_streamed_incomplete(IncompleteTerminal::Accept),
+            ),
+            chat => chat,
+        }
+    }
+    Wire {
+        model: wire.model.map_wire(accept),
+        route: wire.route.map(|route| route.map_wire(accept)),
+        ..wire
+    }
+}
+
+/// [`openai_responses`] accepting a streamed `response.incomplete`.
+pub(crate) fn openai_responses_accepting_incomplete(http: DynHttpClient) -> OpenAi {
+    accepting_incomplete(openai_responses(http))
 }
 
 pub(crate) fn gemini(http: DynHttpClient) -> Wire<rig::Model<GenerateContent, DynHttpClient>> {
@@ -216,6 +243,11 @@ pub(crate) fn openai_responses_image(http: DynHttpClient) -> OpenAi {
         route: None,
         ..openai_responses(http)
     }
+}
+
+/// [`openai_responses_image`] accepting a streamed `response.incomplete`.
+pub(crate) fn openai_responses_image_accepting_incomplete(http: DynHttpClient) -> OpenAi {
+    accepting_incomplete(openai_responses_image(http))
 }
 
 pub(crate) fn anthropic_sonnet(

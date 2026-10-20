@@ -26,7 +26,7 @@ use crate::support::{
     assistant_text_response, collect_raw_stream_observation, collect_stream_observation,
 };
 
-use super::support::with_groq_cassette_result;
+use super::support::{with_groq_cassette_result, with_groq_request_witness_result};
 use rig::completion::CompletionRequest;
 
 const SESSION_MODEL: &str = "qwen/qwen3.8-27b";
@@ -553,6 +553,18 @@ crate::matrix::case_matrix! {
     parallel_tool_calls_single_turn_nonstreaming: ("agent_tool_sessions/parallel_tool_calls_single_turn_nonstreaming", parallel_tool_calls_single_turn_nonstreaming_3);
     # [tokio :: test]
     parallel_tool_calls_single_turn_streaming: ("agent_tool_sessions/parallel_tool_calls_single_turn_streaming", parallel_tool_calls_single_turn_streaming_4);
+}
+
+crate::matrix::case_matrix! {
+    wrapper: with_groq_request_witness_result, family: agent_tool_sessions_case;
+    /// Exact named snapshot witness (coord-a-rig-port-chat-document-12 (2)):
+    /// the recording is unchanged; the only request difference is that the
+    /// three replayed assistant texts, messages 2, 4 and 8, are each sent as
+    /// one text part where the recording holds a string. Replay serves the
+    /// recorded reply, every assertion of the session holds, and the request
+    /// snapshot check refuses exactly those three changes. The kept predicates
+    /// run on the replies recorded for the string form, which shape-matched
+    /// replay serves to the text-part request.
     # [tokio :: test]
     long_history_replay_with_tool_result_continuation: ("agent_tool_sessions/long_history_replay_with_tool_result_continuation", long_history_replay_with_tool_result_continuation_5);
 }

@@ -672,6 +672,13 @@ pub trait HistoryFixture {
         None
     }
 
+    /// Exactly how the wire refuses the reply of [`Self::calls_reply`] for
+    /// `shape` in `mode`, or `None` when it reads the two calls (row H16).
+    fn refused_calls(&self, shape: CallShape, mode: Mode) -> Option<Refusal> {
+        let _ = (shape, mode);
+        None
+    }
+
     /// A reply that ends cleanly with no content (row H3).
     fn empty_reply(&self, mode: Mode) -> Option<Vec<<Self::Wire as Wire>::Frame>> {
         let _ = mode;
@@ -804,6 +811,18 @@ pub trait HistoryFixture {
         &self,
         streamed: &[<Self::Wire as Wire>::Frame],
     ) -> Option<(String, Self::Wire)> {
+        let _ = streamed;
+        None
+    }
+
+    /// When the wire's stream never publishes a function or custom call that
+    /// its terminal response states for the first time (G195), the wire ids
+    /// of those calls in `streamed`, possibly none; only the whole reply
+    /// supplies them (row H18). `None` when the wire has no such rule. The
+    /// comparison reconciles the whole fold's `ToolCalls` finish back to
+    /// `Stop` when no call remains, so a wire that returns `Some` must state
+    /// no tool-call finish of its own, as Responses does not.
+    fn terminal_only_calls(&self, streamed: &[<Self::Wire as Wire>::Frame]) -> Option<Vec<String>> {
         let _ = streamed;
         None
     }
@@ -2656,9 +2675,10 @@ pub fn h15_item_round_trip<F: HistoryFixture>(fixture: &F) {
 
 /// H16. Calls are told apart and keep their identity: streamed calls with
 /// no index, a `null` one or a reused one, and a whole list whose calls
-/// state one index, are two calls; and a history whose calls share ids, in
-/// one turn and across turns, sends each call once with one result under
-/// the same wire id.
+/// state one index, are two calls, unless the wire refuses that shape
+/// exactly as [`HistoryFixture::refused_calls`] states; and a history
+/// whose calls share ids, in one turn and across turns, sends each call
+/// once with one result under the same wire id.
 pub fn h16_call_identity<F: HistoryFixture>(fixture: &F) {
     let wire = fixture.wire(fixture.model());
     for shape in [
@@ -2671,8 +2691,22 @@ pub fn h16_call_identity<F: HistoryFixture>(fixture: &F) {
             let Some(frames) = fixture.calls_reply(shape, mode) else {
                 continue;
             };
-            let response = decode(&wire, &CompletionRequest::new("restate"), mode, frames)
-                .unwrap_or_else(|error| panic!("{shape:?} in {mode:?} decodes: {error}"));
+            let decoded = decode(&wire, &CompletionRequest::new("restate"), mode, frames);
+            if let Some(refusal) = fixture.refused_calls(shape, mode) {
+                match decoded {
+                    Err(error) => assert!(
+                        refusal.is(&error),
+                        "{shape:?} in {mode:?} is refused exactly as {refusal:?}: {error}"
+                    ),
+                    Ok(response) => panic!(
+                        "{shape:?} in {mode:?} is refused as {refusal:?}, but decodes: {}",
+                        serde_json::json!(response.message())
+                    ),
+                }
+                continue;
+            }
+            let response =
+                decoded.unwrap_or_else(|error| panic!("{shape:?} in {mode:?} decodes: {error}"));
             let calls: Vec<(String, Value)> = response
                 .tool_calls()
                 .map(|call| (call.id.wire().into_owned(), call.function.arguments_value()))
@@ -3173,10 +3207,13 @@ pub fn h17_generated_histories<F: HistoryFixture>(fixture: &F) {
 /// the wire declares ([`replies::Agreement`]), and that a wire refusing a
 /// streamed incomplete terminal by default
 /// ([`HistoryFixture::refused_incomplete`]) refuses it exactly and agrees
-/// once it accepts it.
+/// once it accepts it, and that a stream leaves out exactly the calls its
+/// terminal states for the first time
+/// ([`HistoryFixture::terminal_only_calls`]).
 pub fn h18_generated_stream_equals_whole<F: HistoryFixture>(fixture: &F) {
     let wire = fixture.wire(fixture.model());
     let reached = Reached::default();
+    let withholds = std::cell::Cell::new(false);
     let ran = generated_replies(fixture, |spec| {
         let Some(frames) = fixture.reply_frames(spec) else {
             return Vec::new();
@@ -3187,8 +3224,18 @@ pub fn h18_generated_stream_equals_whole<F: HistoryFixture>(fixture: &F) {
             transport_local: fixture.transport_local(),
             splits_trailing_signature: fixture.splits_trailing_signature(),
         };
+        let withheld = match fixture.terminal_only_calls(&frames.streamed) {
+            Some(withheld) => {
+                withholds.set(true);
+                if !withheld.is_empty() {
+                    reached.hit("terminal-only calls withheld");
+                }
+                withheld
+            }
+            None => Vec::new(),
+        };
         let Some((body, accepting)) = fixture.refused_incomplete(&frames.streamed) else {
-            return replies::disagreement_of(&wire, frames, agreement)
+            return replies::disagreement_withholding(&wire, frames, agreement, &withheld)
                 .into_iter()
                 .collect();
         };
@@ -3208,11 +3255,17 @@ pub fn h18_generated_stream_equals_whole<F: HistoryFixture>(fixture: &F) {
         let accepted = fixture
             .reply_frames(spec)
             .expect("the spec's frames, again");
-        problems.extend(replies::disagreement_of(&accepting, accepted, agreement));
+        problems.extend(replies::disagreement_withholding(
+            &accepting, accepted, agreement, &withheld,
+        ));
         problems
     });
     if ran {
-        reached.assert("H18", &["compared"]);
+        let mut checks = vec!["compared"];
+        if withholds.get() {
+            checks.push("terminal-only calls withheld");
+        }
+        reached.assert("H18", &checks);
     }
 }
 

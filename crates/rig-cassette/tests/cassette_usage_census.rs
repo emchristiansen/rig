@@ -166,13 +166,28 @@ enum UsageMapping {
     /// Gemini Interactions: input, output, reasoning and tool-use prompt
     /// tokens are separate, and the total is the four together.
     Interactions,
+    /// Gemini GenerateContent whose provider states no output count (its
+    /// usage has no `candidatesTokenCount`): output stays unknown, the
+    /// total is the provider's, and input and reasoning are each within
+    /// it. No sum relates the counters, since one of them is missing
+    /// (G190, coord-a-rig-g190-2 and coord-a-rig-g190-3: "preserve ...
+    /// baseline missing counts"). Cached and written input stay within
+    /// input.
+    UnstatedOutput,
 }
 
 impl Route {
-    fn usage_mapping(self) -> UsageMapping {
+    /// The mapping of a call on this route whose last usage object is
+    /// `usage`, the one its decoder keeps.
+    fn usage_mapping(self, usage: Option<&serde_json::Map<String, Value>>) -> UsageMapping {
         match self {
             Self::Messages | Self::Converse => UsageMapping::SeparateCache,
             Self::Interactions => UsageMapping::Interactions,
+            Self::GenerateContent
+                if usage.is_some_and(|usage| !usage.contains_key("candidatesTokenCount")) =>
+            {
+                UsageMapping::UnstatedOutput
+            }
             Self::Chat(_)
             | Self::Responses(_)
             | Self::Copilot { .. }
@@ -334,6 +349,15 @@ fn input_output_reasoning_and_tool_use(usage: &Usage) -> Option<u64> {
     })
 }
 
+/// `count` exceeds `total`, or comes without a total.
+fn exceeds_total(count: Option<u64>, total: Option<u64>) -> bool {
+    match (count, total) {
+        (Some(count), Some(total)) => count > total,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
 /// How `call`'s usage breaks the contract of its route's mapping.
 fn contract_breaks(call: &Call, usage: &Usage) -> Vec<&'static str> {
     let mut broken = Vec::new();
@@ -372,6 +396,23 @@ fn contract_breaks(call: &Call, usage: &Usage) -> Vec<&'static str> {
             }
             if usage.total_tokens != input_output_reasoning_and_tool_use(usage) {
                 broken.push("input + output + reasoning + tool use != total");
+            }
+        }
+        UsageMapping::UnstatedOutput => {
+            if usage.output_tokens.is_some() {
+                broken.push("output is stated where the provider states none");
+            }
+            if cache_exceeds_input(usage) {
+                broken.push("cached + written > input");
+            }
+            if call.reported_total != usage.total_tokens {
+                broken.push("total != the provider's total");
+            }
+            if exceeds_total(usage.input_tokens, usage.total_tokens) {
+                broken.push("input > total");
+            }
+            if exceeds_total(usage.reasoning_tokens, usage.total_tokens) {
+                broken.push("reasoning > total");
             }
         }
     }
@@ -758,7 +799,9 @@ async fn take_census(openrouter_only: bool) -> Census {
                 } else {
                     text.into_bytes()
                 };
-                let reported_total = reported_total(&reply_documents(route, streamed, &body));
+                let documents = reply_documents(route, streamed, &body);
+                let reported_total = reported_total(&documents);
+                let mapping = route.usage_mapping(documents.iter().rev().find_map(usage_object));
                 let model = replaying_model(
                     route,
                     recorded_model(route, path, &request),
@@ -770,7 +813,7 @@ async fn take_census(openrouter_only: bool) -> Census {
                     key,
                     provider: provider.clone(),
                     wire: route.wire(),
-                    mapping: route.usage_mapping(),
+                    mapping,
                     streamed,
                     usage: decoded.as_ref().ok().copied(),
                     reported_total,
@@ -874,7 +917,9 @@ async fn check_completion_census(openrouter_only: bool) {
 /// and Bedrock Converse the total is input, cached, written and output
 /// together, and the provider's wherever it reports one; on Gemini
 /// Interactions the total is the provider's, and input, output, reasoning and
-/// tool-use prompt tokens add up to it.
+/// tool-use prompt tokens add up to it; on Gemini GenerateContent whose
+/// provider states no output count, output stays unknown, the total is the
+/// provider's, and input and reasoning are within it (G190).
 #[tokio::test]
 async fn every_recorded_call_keeps_the_usage_contract() {
     check_usage_contract(false).await;
@@ -916,6 +961,81 @@ async fn check_usage_contract(openrouter_only: bool) {
          mapping:\n{}",
         violations.len(),
         violations.join("\n")
+    );
+}
+
+/// G190 on GenerateContent: a reply whose usage states no output count
+/// takes [`UsageMapping::UnstatedOutput`], and a reply that states one, or
+/// any other route, keeps its own mapping. Under it, the recorded counts of
+/// `gemini/thought_text_matrix/text_response_across_two_candidates.yaml#0`
+/// keep the contract, and each other difference still breaks it.
+#[test]
+fn an_unstated_generate_content_output_keeps_the_provider_total() {
+    let stated = json!({"promptTokenCount": 12, "candidatesTokenCount": 3, "totalTokenCount": 15});
+    let unstated = json!({"promptTokenCount": 12, "thoughtsTokenCount": 84, "totalTokenCount": 96});
+    assert!(matches!(
+        Route::GenerateContent.usage_mapping(unstated.as_object()),
+        UsageMapping::UnstatedOutput
+    ));
+    assert!(matches!(
+        Route::GenerateContent.usage_mapping(stated.as_object()),
+        UsageMapping::Subset
+    ));
+    assert!(matches!(
+        Route::GenerateContent.usage_mapping(None),
+        UsageMapping::Subset
+    ));
+    assert!(matches!(
+        Route::Chat(&OPENAI).usage_mapping(unstated.as_object()),
+        UsageMapping::Subset
+    ));
+
+    let breaks = |edit: fn(&mut Usage)| {
+        let mut usage = Usage::default();
+        usage.input_tokens = Some(12);
+        usage.total_tokens = Some(96);
+        usage.reasoning_tokens = Some(84);
+        edit(&mut usage);
+        let call = Call {
+            key: "gemini/thought_text_matrix/text_response_across_two_candidates.yaml#0".into(),
+            provider: "gemini".into(),
+            wire: Route::GenerateContent.wire(),
+            mapping: UsageMapping::UnstatedOutput,
+            streamed: false,
+            usage: Some(usage),
+            reported_total: Some(96),
+            error: None,
+        };
+        contract_breaks(&call, &usage)
+    };
+    assert_eq!(breaks(|_| {}), Vec::<&str>::new());
+    assert_eq!(
+        breaks(|usage| usage.output_tokens = Some(0)),
+        ["output is stated where the provider states none"]
+    );
+    assert_eq!(
+        breaks(|usage| usage.total_tokens = Some(95)),
+        ["total != the provider's total"]
+    );
+    assert_eq!(
+        breaks(|usage| usage.total_tokens = None),
+        [
+            "total != the provider's total",
+            "input > total",
+            "reasoning > total"
+        ]
+    );
+    assert_eq!(
+        breaks(|usage| usage.input_tokens = Some(97)),
+        ["input > total"]
+    );
+    assert_eq!(
+        breaks(|usage| usage.reasoning_tokens = Some(97)),
+        ["reasoning > total"]
+    );
+    assert_eq!(
+        breaks(|usage| usage.cached_input_tokens = Some(13)),
+        ["cached + written > input"]
     );
 }
 

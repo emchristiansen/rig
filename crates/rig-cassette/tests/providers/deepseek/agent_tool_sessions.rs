@@ -9,19 +9,21 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use rig::completion::{GenerationOptions, Message, Reasoning};
-use rig::message::{AssistantContent, ToolChoice, UserContent};
+use rig::message::{AssistantContent, ToolChoice};
 use rig::providers::deepseek;
 use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::support::{
-    ALPHA_SIGNAL_OUTPUT, AlphaSignal, BETA_SIGNAL_OUTPUT, BetaSignal, TWO_TOOL_STREAM_PREAMBLE,
-    TWO_TOOL_STREAM_PROMPT, assert_contains_all_case_insensitive, assert_nonempty_response,
-    assistant_text_response, collect_raw_stream_observation, collect_stream_observation,
+    AlphaSignal, BetaSignal, TWO_TOOL_STREAM_PREAMBLE, TWO_TOOL_STREAM_PROMPT,
+    assert_contains_all_case_insensitive, assert_nonempty_response, assistant_text_response,
+    collect_raw_stream_observation,
 };
 
+use super::request_witness::{NamedCase, with_deepseek_request_witness_cassette};
 use super::support::with_deepseek_cassette_result;
+use crate::chat_request_witness::stream_result;
 use rig::completion::CompletionRequest;
 
 pub(super) const SESSION_MODEL: &str = deepseek::DEEPSEEK_V4_FLASH;
@@ -283,89 +285,6 @@ pub(super) fn complex_tools(
     )
 }
 
-pub(super) fn assert_complex_invocations(log: &InvocationLog) {
-    let invocations = log
-        .lock()
-        .expect("tool invocation log lock should not be poisoned")
-        .clone();
-    let names = invocations.iter().map(|call| call.name).collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        vec![
-            PingEmpty::NAME,
-            InspectManifest::NAME,
-            JoinLabels::NAME,
-            EscapeEcho::NAME,
-        ],
-        "expected one complex tool call of each shape in order"
-    );
-
-    assert_eq!(invocations[0].args, json!({}));
-    assert_eq!(invocations[1].args["project"], "rig-deepseek");
-    assert_eq!(
-        invocations[1].args["flags"],
-        json!({"critical": true, "retries": 2})
-    );
-    assert_eq!(
-        invocations[1].args["steps"].as_array().map(Vec::len),
-        Some(2)
-    );
-    assert_eq!(
-        invocations[1].args["note"],
-        "line one; line two says \"hello\" and path C:\\rig\\deepseek"
-    );
-    assert_eq!(
-        invocations[2].args,
-        json!({
-            "labels": ["north", "beta gamma", "quote:\"delta\"", "slash\\path"],
-            "separator": "|"
-        })
-    );
-    assert_eq!(
-        invocations[3].args["text"],
-        "Line 1\nLine \"2\" with backslash \\ and unicode snowman ☃"
-    );
-}
-
-pub(super) struct ToolEvent {
-    pub(super) message_index: usize,
-    pub(super) name: String,
-}
-
-pub(super) fn history_tool_calls(history: &[Message]) -> Vec<ToolEvent> {
-    let mut calls = Vec::new();
-    for (message_index, message) in history.iter().enumerate() {
-        if let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = message {
-            for item in content.iter() {
-                if let AssistantContent::ToolCall(tool_call) = item {
-                    calls.push(ToolEvent {
-                        message_index,
-                        name: tool_call.function.name.clone().into(),
-                    });
-                }
-            }
-        }
-    }
-    calls
-}
-
-pub(super) fn history_tool_results(history: &[Message]) -> Vec<ToolEvent> {
-    let mut results = Vec::new();
-    for (message_index, message) in history.iter().enumerate() {
-        if let Message::User { content } = message {
-            for item in content.iter() {
-                if let UserContent::ToolResult(tool_result) = item {
-                    results.push(ToolEvent {
-                        message_index,
-                        name: tool_result.name.clone().into(),
-                    });
-                }
-            }
-        }
-    }
-    results
-}
-
 /// The provider-only facts of a completed turn, read off the captured `raw`.
 ///
 /// The normalized response carries one finish reason for the turn and none of
@@ -405,12 +324,22 @@ fn assert_response_metadata(response: &rig::completion::CompletionResponse) {
     );
 }
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 6): the
+/// recording is unchanged; the only request difference is that the replayed
+/// `ping_empty` call of assistant message 2 carries `"index": 0`, and strict
+/// replay refuses interaction 1, the first continuation. Before it,
+/// `ping_empty` runs once with `{}`. Named losses: the four ordered streamed
+/// calls and their four results, the final answer with `EMPTY-OK`,
+/// `MANIFEST-OK`, `LABELS-OK` and `ESCAPE-OK`, and the exact arguments of the
+/// last three calls.
 #[tokio::test]
 async fn sequential_complex_tool_calls_streaming() -> Result<()> {
-    with_deepseek_cassette_result(
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let invocations = log.clone();
+    with_deepseek_request_witness_cassette(
         "agent_tool_sessions/sequential_complex_tool_calls_streaming",
+        NamedCase::SequentialComplexToolCallsStreamed,
         |client| async move {
-            let log = Arc::new(Mutex::new(Vec::new()));
             let (ping, manifest, labels, echo) = complex_tools(&log);
             let agent = rig::AgentBuilder::new(client.completion(SESSION_MODEL))
                 .preamble(COMPLEX_SESSION_PREAMBLE)
@@ -427,49 +356,39 @@ async fn sequential_complex_tool_calls_streaming() -> Result<()> {
                 .history(Vec::<Message>::new())
                 .max_turns(10)
                 .stream();
-            let observation = collect_stream_observation(&mut stream).await;
-
-            anyhow::ensure!(
-                observation.errors.is_empty(),
-                "stream should not emit errors: {:?}",
-                observation.errors
-            );
-            anyhow::ensure!(
-                observation.tool_calls
-                    == vec![
-                        PingEmpty::NAME.to_string(),
-                        InspectManifest::NAME.to_string(),
-                        JoinLabels::NAME.to_string(),
-                        EscapeEcho::NAME.to_string(),
-                    ],
-                "stream should expose ordered tool calls, saw {:?}",
-                observation.tool_calls
-            );
-            anyhow::ensure!(
-                observation.tool_results == 4,
-                "expected 4 streamed tool results, saw {}",
-                observation.tool_results
-            );
-            let response = observation
-                .final_response_text
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("stream should produce final response text"))?;
-            assert_contains_all_case_insensitive(
-                response,
-                &["EMPTY-OK", "MANIFEST-OK", "LABELS-OK", "ESCAPE-OK"],
-            );
-            assert_complex_invocations(&log);
-
-            Ok(())
+            let result = stream_result(&mut stream).await?;
+            drop(stream);
+            drop(agent);
+            Ok(vec![result])
         },
     )
-    .await
+    .await?;
+    let invocations = invocations
+        .lock()
+        .map_err(|_| anyhow::anyhow!("tool invocation log lock poisoned"))?
+        .clone();
+    anyhow::ensure!(
+        invocations
+            == vec![ToolInvocation {
+                name: PingEmpty::NAME,
+                args: json!({}),
+            }],
+        "only ping_empty runs before the refused continuation: {invocations:?}"
+    );
+    Ok(())
 }
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 6): the
+/// recording is unchanged; the only request difference is that both
+/// parallel calls replayed on assistant message 2 carry `"index": 0`, and
+/// strict replay refuses interaction 1, the continuation. Named losses: the
+/// answer naming both signals, both calls on one assistant message in the
+/// history, and their two tool results.
 #[tokio::test]
 async fn parallel_tool_calls_single_turn_nonstreaming() -> Result<()> {
-    with_deepseek_cassette_result(
+    with_deepseek_request_witness_cassette(
         "agent_tool_sessions/parallel_tool_calls_single_turn_nonstreaming",
+        NamedCase::ParallelToolCallsUnary,
         |client| async move {
             let agent = rig::AgentBuilder::new(client.completion(SESSION_MODEL))
                 .preamble(TWO_TOOL_STREAM_PREAMBLE)
@@ -481,33 +400,12 @@ async fn parallel_tool_calls_single_turn_nonstreaming() -> Result<()> {
                 .build();
             let mut history = Vec::<Message>::new();
 
-            let response = agent.chat(TWO_TOOL_STREAM_PROMPT, &mut history).await?;
-
-            assert_contains_all_case_insensitive(
-                &response.output(),
-                &[ALPHA_SIGNAL_OUTPUT, BETA_SIGNAL_OUTPUT],
-            );
-            let calls = history_tool_calls(&history);
-            let call_names = calls
-                .iter()
-                .map(|call| call.name.as_str())
-                .collect::<Vec<_>>();
-            anyhow::ensure!(
-                calls.len() == 2
-                    && call_names.contains(&AlphaSignal::NAME)
-                    && call_names.contains(&BetaSignal::NAME),
-                "expected both zero-argument tools, saw {call_names:?}"
-            );
-            anyhow::ensure!(
-                calls[0].message_index == calls[1].message_index,
-                "parallel tool calls should be recorded on one assistant message"
-            );
-            anyhow::ensure!(
-                history_tool_results(&history).len() == 2,
-                "expected two tool results"
-            );
-
-            Ok(())
+            let result = agent
+                .chat(TWO_TOOL_STREAM_PROMPT, &mut history)
+                .await
+                .map(|_| ());
+            drop(agent);
+            Ok(vec![result])
         },
     )
     .await

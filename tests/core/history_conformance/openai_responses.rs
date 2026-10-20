@@ -31,8 +31,9 @@ pub struct ResponsesHistory<W> {
     pub other_model: &'static str,
     /// A model on the wire that reads no images.
     pub text_only_model: Option<&'static str>,
-    /// Whether the dialect reads item events that carry no numeric
-    /// `output_index`; the strict reader of the others refuses them.
+    /// Whether the dialect reads item events that leave out `output_index`;
+    /// the strict reader of the others refuses them. Even this dialect
+    /// refuses `output_index: null`.
     pub reads_indexless: bool,
     /// Whether the dialect reads a whole reply from a buffered SSE body
     /// (ChatGPT), whose frame decode errors say so.
@@ -499,6 +500,46 @@ where
         Some((body, (self.accepting)((self.wire)(self.model))))
     }
 
+    /// The function and custom calls the stream's terminal response states
+    /// for the first time, which no added, delta or done event announced:
+    /// the stream publishes none of them, and only whole-body decoding
+    /// supplies them (G195, coord-a-rig-g191-g195-1).
+    fn terminal_only_calls(&self, streamed: &[WireFrame]) -> Option<Vec<String>> {
+        let events: Vec<Value> = streamed
+            .iter()
+            .filter_map(|frame| match frame {
+                WireFrame::Text(text) => serde_json::from_str(text).ok(),
+                _ => None,
+            })
+            .collect();
+        let announced: Vec<&str> = events
+            .iter()
+            .flat_map(|event| [event.pointer("/item/id"), event.get("item_id")])
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let output = events
+            .iter()
+            .rev()
+            .find_map(|event| event.pointer("/response/output"))
+            .and_then(Value::as_array);
+        Some(
+            output
+                .into_iter()
+                .flatten()
+                .filter(|item| {
+                    matches!(
+                        item["type"].as_str(),
+                        Some("function_call" | "custom_tool_call")
+                    ) && !item["id"]
+                        .as_str()
+                        .is_some_and(|id| announced.contains(&id))
+                })
+                .filter_map(|item| item["call_id"].as_str().map(str::to_owned))
+                .collect(),
+        )
+    }
+
     /// Every status the API documents, every incomplete reason, and a body
     /// that states no status, which the strict reader refuses, as it
     /// refuses a streamed `response.incomplete` without one. A call
@@ -641,6 +682,24 @@ where
                 Some(events(&stream))
             }
         }
+    }
+
+    /// A dialect that reads indexless item events (ChatGPT) repairs only an
+    /// absent `output_index`; its typed decode refuses `output_index: null`
+    /// on the first event (G139/G191).
+    fn refused_calls(&self, shape: CallShape, mode: Mode) -> Option<Refusal> {
+        if !(self.reads_indexless && self.buffered)
+            || (shape, mode) != (CallShape::NullIndex, Mode::Streaming)
+        {
+            return None;
+        }
+        let Some(WireFrame::Text(frame)) = self.calls_reply(shape, mode)?.into_iter().next() else {
+            unreachable!("the stream starts on a text event");
+        };
+        Some(Refusal::CorruptFrame(format!(
+            "`response.output_item.added` frame failed to decode: malformed \
+             `response.output_item.added` event in buffered Responses SSE body; frame: {frame}"
+        )))
     }
 
     /// A completed response with no output: an empty turn, as pi keeps it.

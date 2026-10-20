@@ -11,8 +11,13 @@
 //! shapes, so a cassette holding only a decoded reply shape can go.
 //! OpenRouter-origin replies run separately, including its Messages gateway
 //! recording stored in the Anthropic bank.
+//!
+//! A reply the port refuses by contract is named in [`REFUSED`] with its
+//! exact refusal; it must be refused with exactly that, and any other reply
+//! that is refused still disagrees.
 
 use rig::completion::{AssistantContent, FinishReason};
+use rig::message::EMPTY_RESPONSE_ERROR;
 use rig::providers::anthropic::wire::AnthropicConfig;
 use rig::providers::cohere::CohereConfig;
 use rig::providers::copilot::CopilotConfig;
@@ -22,6 +27,7 @@ use rig::providers::openai::wire::{
     DEEPSEEK, DOUBLEWORD, Dialect, GROQ, LLAMACPP, MISTRAL, OPENROUTER, OpenAIConfig, PERPLEXITY,
     VENICE,
 };
+use rig::{ProviderError, ProviderResponseError};
 use rig_test_support::bank::{self, Ending, Entry};
 use rig_test_support::cassette_models::{
     AnthropicModels, CohereModels, CopilotModels, GeminiModels, OllamaModels,
@@ -38,7 +44,7 @@ pub(crate) struct Decoded {
     /// The distinct names of the tools the turn calls, sorted.
     pub(crate) calls: Vec<String>,
     /// The decoder's error, when it refused the reply.
-    pub(crate) error: Option<String>,
+    pub(crate) error: Option<ProviderError>,
     /// The response's raw provider document; `Null` when it was refused.
     pub(crate) raw: serde_json::Value,
 }
@@ -89,7 +95,7 @@ where
             finish: None,
             text: String::new(),
             calls: Vec::new(),
-            error: Some(error.to_string()),
+            error: Some(error),
             raw: serde_json::Value::Null,
         },
     }
@@ -451,6 +457,122 @@ async fn calls_after_length_discards(
     Ok(Some(kept))
 }
 
+/// How the port refuses a reply by contract.
+#[derive(Debug)]
+enum Refusal {
+    /// G193 (coord-a-rig-g191-g195-1): a default Responses stream refuses a
+    /// terminal `response.incomplete` as the provider's reply. The refusal
+    /// is [`ProviderError::ProviderResponse`] whose body is that frame's data,
+    /// verbatim, with no status and the reply's request id.
+    IncompleteTerminal { request_id: &'static str },
+    /// [`ProviderError::Response`] with exactly this text.
+    Response(&'static str),
+}
+
+/// The replies the port refuses by contract, by bank source, each with its
+/// exact refusal:
+///
+/// * the three Responses streams ending in `response.incomplete` (G193);
+/// * Gemini's `MALFORMED_FUNCTION_CALL` finish, a REST tool-protocol finish
+///   refused with its finish message (mec-rig-78-four-subjects-1 D,
+///   mec-rig-132-dispositions-2);
+/// * llama.cpp's empty unary Chat reply, refused with
+///   [`EMPTY_RESPONSE_ERROR`] (the listed empty-unary contract).
+const REFUSED: &[(&str, Refusal)] = &[
+    (
+        "openai/reasoning_matrix_responses/capped_streamed.yaml#0",
+        Refusal::IncompleteTerminal {
+            request_id: "req_754c1faf9b714535a2165baef9aa63e3",
+        },
+    ),
+    (
+        "openai/truncated_turn_matrix/responses_streaming_reasoning_budget_exhausted.yaml#0",
+        Refusal::IncompleteTerminal {
+            request_id: "req_acf96114e4b341969e8df1c5a0eae76b",
+        },
+    ),
+    (
+        "openai/streaming_grammar/incomplete_mid_tool_call.yaml#0",
+        Refusal::IncompleteTerminal {
+            request_id: "req_1eb9969a53024964a71f2b0820075968",
+        },
+    ),
+    (
+        "gemini/long_loop_matrix/output_cap_midway.yaml#0",
+        Refusal::Response(
+            "Gemini stopped with finish_reason=MalformedFunctionCall: Malformed function call: tool",
+        ),
+    ),
+    (
+        "llamacpp/content_matrix/empty_answer_with_stop.yaml#0",
+        Refusal::Response(EMPTY_RESPONSE_ERROR),
+    ),
+];
+
+/// The data of the one `response.incomplete` event among a Responses
+/// stream's `frames`, verbatim. `Err` unless exactly one frame is that
+/// event.
+pub(crate) fn incomplete_frame_data(frames: &[String]) -> Result<String, String> {
+    let data: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| {
+            let line = frame.lines().find_map(|line| line.strip_prefix("data:"))?;
+            let line = line.strip_prefix(' ').unwrap_or(line);
+            let event: serde_json::Value = serde_json::from_str(line).ok()?;
+            (event["type"] == "response.incomplete").then_some(line)
+        })
+        .collect();
+    match data.as_slice() {
+        [one] => Ok((*one).to_owned()),
+        other => Err(format!(
+            "{} `response.incomplete` frames, not one",
+            other.len()
+        )),
+    }
+}
+
+/// The provider reply a default Responses stream refuses its
+/// `response.incomplete` terminal with (G193): that frame's `body`, no
+/// status, the reply's request id, nothing else.
+pub(crate) fn incomplete_refusal(body: String, request_id: Option<&str>) -> ProviderResponseError {
+    ProviderResponseError {
+        status: None,
+        body,
+        provider_request_id: request_id.map(str::to_owned),
+        headers: None,
+        code: None,
+        transient: None,
+        refusal: false,
+        route: None,
+    }
+}
+
+/// Whether `error` is exactly the contract's `refusal` of `entry`; `Err`
+/// names how it differs.
+fn check_refusal(entry: &Entry, refusal: &Refusal, error: &ProviderError) -> Result<(), String> {
+    match (refusal, error) {
+        (Refusal::IncompleteTerminal { request_id }, ProviderError::ProviderResponse(response)) => {
+            let frames = rig_test_support::stream_faults::sse_frames(&String::from_utf8_lossy(
+                &entry.body(),
+            ));
+            let expected = incomplete_refusal(incomplete_frame_data(&frames)?, Some(request_id));
+            if *response == expected {
+                Ok(())
+            } else {
+                Err(format!(
+                    "refused with {response:?}, the contract refuses with {expected:?}"
+                ))
+            }
+        }
+        (Refusal::Response(expected), ProviderError::Response(message)) if message == expected => {
+            Ok(())
+        }
+        (refusal, error) => Err(format!(
+            "refused with {error:?}, the contract refuses with {refusal:?}"
+        )),
+    }
+}
+
 /// The finish reason a decoded turn of `ending` must report.
 fn expected(ending: Ending, calls: &[String]) -> Option<FinishReason> {
     match ending {
@@ -467,6 +589,7 @@ fn expected(ending: Ending, calls: &[String]) -> Option<FinishReason> {
 async fn sweep(provider: &str, openrouter_only: bool) -> usize {
     let mut decoded_count = 0;
     let mut failures = Vec::new();
+    let mut refused = Vec::new();
     for entry in bank::entries(provider).iter() {
         if openrouter_entry(entry) != openrouter_only {
             continue;
@@ -486,6 +609,18 @@ async fn sweep(provider: &str, openrouter_only: bool) -> usize {
                     "{}: status {status} decoded as a reply",
                     entry.source
                 ));
+            }
+            continue;
+        }
+        if let Some((source, refusal)) = REFUSED.iter().find(|(source, _)| *source == entry.source)
+        {
+            refused.push(*source);
+            let verdict = match &decoded.error {
+                Some(error) => check_refusal(entry, refusal, error),
+                None => Err(format!("decoded, the contract refuses it with {refusal:?}")),
+            };
+            if let Err(problem) = verdict {
+                failures.push(format!("{}: {problem}", entry.source));
             }
             continue;
         }
@@ -519,6 +654,16 @@ async fn sweep(provider: &str, openrouter_only: bool) -> usize {
                 entry.source, decoded.finish, entry.ends
             ));
         }
+    }
+    // A row this sweep never reaches names a reply the bank no longer holds.
+    if !openrouter_only {
+        let prefix = format!("{provider}/");
+        failures.extend(
+            REFUSED
+                .iter()
+                .filter(|(source, _)| source.starts_with(&prefix) && !refused.contains(source))
+                .map(|(source, _)| format!("{source}: listed in REFUSED, not in the bank")),
+        );
     }
     assert!(
         failures.is_empty(),
