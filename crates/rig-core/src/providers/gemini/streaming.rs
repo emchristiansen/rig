@@ -554,7 +554,14 @@ impl GenerateContentDecoder {
             .str("text")
             .filter(|_| selected == Some(reader::SelectedKind::Text))
         {
-            if !thought && signature.is_some() {
+            // A signed answer part ends its block. A signature on an empty
+            // part, or an empty signature, keeps a block of its own and
+            // never joins the unsigned text before it. A signed part with
+            // text is the last piece of the answer the open unsigned run
+            // streams, so it joins that run, as it does whole.
+            if !thought
+                && signature.is_some_and(|signature| text.is_empty() || signature.is_empty())
+            {
                 self.open(Block::Text, part.clone(), text, out)?;
                 return self.close(out);
             }
@@ -578,7 +585,7 @@ impl GenerateContentDecoder {
                 _ => self.open(Block::Text, part.clone(), text, out),
             };
             result?;
-            if thought && signature.is_some() {
+            if signature.is_some() {
                 return self.close(out);
             }
             return Ok(());
