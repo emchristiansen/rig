@@ -443,41 +443,42 @@ bedrock	POST /model/{model}/converse-stream	reply	aadfb53ba018b4e8	2	bedrock/raw
 bedrock	POST /model/{model}/invoke	request	$ {dimensions:num,inputText:str,normalize:bool}	1	bedrock/embeddings/embeddings_smoke.yaml#0
 bedrock	POST /model/{model}/invoke	reply	9bb1f2925a9ff9ec	1	bedrock/embeddings/embeddings_smoke.yaml#0
 chatgpt	POST /backend-api/codex/responses	request	$ {include:[str],input:[{}],instructions:str,model:str,reasoning:{},store:bool,stream:bool,tools:[{}]}	2	chatgpt/codex_sessions/reasoning_session_two_tool_calls_streaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$ {include:[str],input:[{}],instructions:str,model:str,store:bool,stream:bool,tool_choice:str,tools:[{}]}	1	chatgpt/streaming_tools/tool_call_completed_response_without_output.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$ {include:[str],input:[{}],instructions:str,model:str,store:bool,stream:bool,tool_choice:str,tools:[{}]}	3	chatgpt/codex_tool_choice/none_suppresses_tool_calls.yaml#0
 chatgpt	POST /backend-api/codex/responses	request	$ {include:[str],input:[{}],instructions:str,model:str,store:bool,stream:bool,tool_choice:{},tools:[{}]}	2	chatgpt/codex_tool_choice/specific_multiple_functions_use_allowed_tools.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$ {include:[str],input:[{}],instructions:str,model:str,store:bool,stream:bool,tools:[{}]}	7	chatgpt/codex_behaviors/strict_tools_opt_in_roundtrip.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$ {include:[str],input:[{}],instructions:str,model:str,store:bool,stream:bool}	2	chatgpt/codex_sessions/streamed_phase_round_trips_on_follow_up.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.input[] {arguments:str,call_id:str,id:str,name:str,status:"completed",type:"function_call"}	2	chatgpt/codex_sessions/reasoning_session_two_tool_calls_streaming.yaml#1
+chatgpt	POST /backend-api/codex/responses	request	$ {include:[str],input:[{}],instructions:str,model:str,store:bool,stream:bool,tools:[{}]}	21	chatgpt/codex_behaviors/strict_tools_opt_in_roundtrip.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$ {include:[str],input:[{}],instructions:str,model:str,store:bool,stream:bool}	5	chatgpt/codex_behaviors/default_instructions_merge_with_explicit_preamble.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.input[] {arguments:str,call_id:str,id:str,name:str,status:"completed",type:"function_call"}	9	chatgpt/codex_sessions/parallel_tool_calls_single_turn_nonstreaming.yaml#1
 chatgpt	POST /backend-api/codex/responses	request	$.input[] {arguments:str,call_id:str,name:str,type:"function_call"}	1	chatgpt/codex_sessions/long_history_replay_nonstreaming.yaml#1
-chatgpt	POST /backend-api/codex/responses	request	$.input[] {call_id:str,output:str,status:"completed",type:"function_call_output"}	3	chatgpt/codex_sessions/long_history_replay_nonstreaming.yaml#1
+chatgpt	POST /backend-api/codex/responses	request	$.input[] {call_id:str,output:str,status:"completed",type:"function_call_output"}	10	chatgpt/codex_sessions/long_history_replay_nonstreaming.yaml#1
 chatgpt	POST /backend-api/codex/responses	request	$.input[] {content:[],encrypted_content:str,id:str,summary:[],type:"reasoning"}	1	chatgpt/codex_sessions/reasoning_session_two_tool_calls_streaming.yaml#1
 chatgpt	POST /backend-api/codex/responses	request	$.input[] {content:[{}],id:str,phase:str,role:"assistant",status:"completed",type:"message"}	1	chatgpt/codex_sessions/streamed_phase_round_trips_on_follow_up.yaml#1
 chatgpt	POST /backend-api/codex/responses	request	$.input[] {content:[{}],id:str,role:"assistant",status:"completed",type:"message"}	1	chatgpt/codex_sessions/long_history_replay_nonstreaming.yaml#1
-chatgpt	POST /backend-api/codex/responses	request	$.input[] {content:[{}],role:"user",type:"message"}	14	chatgpt/codex_behaviors/strict_tools_opt_in_roundtrip.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.input[] {content:[{}],role:"user",type:"message"}	33	chatgpt/codex_behaviors/default_instructions_merge_with_explicit_preamble.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.input[] {content:str,role:"assistant",type:"message"}	1	chatgpt/codex_behaviors/explicit_preamble_and_mid_conversation_system_messages_are_instructions.yaml#0
 chatgpt	POST /backend-api/codex/responses	request	$.input[].content[] {annotations:[],logprobs:[],text:str,type:"output_text"}	1	chatgpt/codex_sessions/streamed_phase_round_trips_on_follow_up.yaml#1
 chatgpt	POST /backend-api/codex/responses	request	$.input[].content[] {annotations:[],text:str,type:"output_text"}	1	chatgpt/codex_sessions/long_history_replay_nonstreaming.yaml#1
-chatgpt	POST /backend-api/codex/responses	request	$.input[].content[] {text:str,type:"input_text"}	14	chatgpt/codex_behaviors/strict_tools_opt_in_roundtrip.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.input[].content[] {text:str,type:"input_text"}	33	chatgpt/codex_behaviors/default_instructions_merge_with_explicit_preamble.yaml#0
 chatgpt	POST /backend-api/codex/responses	request	$.reasoning {effort:str}	2	chatgpt/codex_sessions/reasoning_session_two_tool_calls_streaming.yaml#0
 chatgpt	POST /backend-api/codex/responses	request	$.tool_choice {mode:str,tools:[{}],type:"allowed_tools"}	1	chatgpt/codex_tool_choice/specific_multiple_functions_use_allowed_tools.yaml#0
 chatgpt	POST /backend-api/codex/responses	request	$.tool_choice {name:str,type:"function"}	1	chatgpt/codex_tool_choice/specific_single_function_targets_named_tool.yaml#0
 chatgpt	POST /backend-api/codex/responses	request	$.tool_choice.tools[] {name:str,type:"function"}	1	chatgpt/codex_tool_choice/specific_multiple_functions_use_allowed_tools.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[] {description:str,name:str,parameters:{},strict:bool,type:"function"}	12	chatgpt/codex_behaviors/strict_tools_opt_in_roundtrip.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[] {description:str,name:str,parameters:{},strict:bool,type:"function"}	28	chatgpt/codex_behaviors/strict_tools_opt_in_roundtrip.yaml#0
 chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters {additionalProperties:bool,properties:{},required:[str],type:"object"}	1	chatgpt/codex_behaviors/strict_tools_opt_in_roundtrip.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters {properties:{},required:[],type:"object"}	5	chatgpt/codex_sessions/long_history_replay_nonstreaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters {properties:{},required:[str],type:"object"}	7	chatgpt/codex_sessions/reasoning_session_two_tool_calls_streaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.* {description:str,properties:{},required:[str],type:"object"}	2	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.* {description:str,type:"number"}	3	chatgpt/codex_behaviors/strict_tools_opt_in_roundtrip.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters {properties:{},required:[],type:"object"}	12	chatgpt/codex_sessions/long_history_replay_nonstreaming.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters {properties:{},required:[str],type:"object"}	16	chatgpt/codex_sessions/reasoning_session_two_tool_calls_streaming.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.* {description:str,properties:{},required:[str],type:"object"}	3	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.* {description:str,type:"number"}	11	chatgpt/codex_behaviors/strict_tools_opt_in_roundtrip.yaml#0
 chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.* {description:str,type:"string"}	2	chatgpt/codex_sessions/reasoning_session_two_tool_calls_streaming.yaml#0
 chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.* {type:"string"}	1	chatgpt/codex_tool_args/unicode_arguments_streaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.* {items:{},type:"array"}	2	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.* {properties:{},required:[str],type:"object"}	2	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.* {type:"integer"}	2	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.* {type:"string"}	2	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.*.items {type:"string"}	2	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.*.properties.* {type:"integer"}	2	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
-chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.*.properties.* {type:"string"}	2	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.* {items:{},type:"array"}	3	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.* {properties:{},required:[str],type:"object"}	3	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.* {type:"integer"}	3	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.* {type:"string"}	3	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.*.items {type:"string"}	3	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.*.properties.* {type:"integer"}	3	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
+chatgpt	POST /backend-api/codex/responses	request	$.tools[].parameters.properties.*.properties.*.properties.* {type:"string"}	3	chatgpt/codex_tool_args/nested_arguments_roundtrip_nonstreaming.yaml#0
 chatgpt	POST /backend-api/codex/responses	reply	5fc1919bd3c8120e	1	bank:chatgpt/http_errors/nonstreaming_unauthorized_preserves_status_and_body.yaml#0
-chatgpt	POST /backend-api/codex/responses	reply	85b37547ed997e40	14	chatgpt/codex_behaviors/strict_tools_opt_in_roundtrip.yaml#0
+chatgpt	POST /backend-api/codex/responses	reply	85b37547ed997e40	33	chatgpt/codex_behaviors/default_instructions_merge_with_explicit_preamble.yaml#0
 cohere	POST /compatibility/v1/chat/completions	request	$ {frequency_penalty:num,max_tokens:num,messages:[{}],model:str,seed:num,temperature:num,top_p:num}	1	cohere/agent/sampling_parameters_are_forwarded.yaml#0
 cohere	POST /compatibility/v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,seed:num,stop:[str],temperature:num}	1	cohere/agent/stop_sequences_are_forwarded.yaml#0
 cohere	POST /compatibility/v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},temperature:num}	1	cohere/raw_stream_capture_matrix/stream_terminal_reproduces_the_usage_chunk.yaml#0
@@ -1160,7 +1161,7 @@ gemini	POST /v1beta/models/{model}:generateContent	reply	fe1cb78e632056bf	1	gemi
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {cachedContent:str,contents:[{}],generationConfig:{},safetySettings:null,systemInstruction:null,toolConfig:null}	1	gemini/cached_content_matrix/use_streaming.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {cachedContent:str,contents:[{}],generationConfig:{},safetySettings:null}	198	gemini/auto_caching/support_chat_100_streamed.yaml#3
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {contents:[{}],generationConfig:null,safetySettings:null,systemInstruction:null,toolConfig:null}	1	gemini/response_identity/streaming_request_id_is_none_by_design.yaml#0
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {contents:[{}],generationConfig:null,safetySettings:null,systemInstruction:{},toolConfig:null,tools:[{}]}	9	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#0
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {contents:[{}],generationConfig:null,safetySettings:null,systemInstruction:{},toolConfig:null,tools:[{}]}	10	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {contents:[{}],generationConfig:null,safetySettings:null,systemInstruction:{},toolConfig:null}	1	gemini/response_identity/streamed_agent_run_reports_none_identity.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {contents:[{}],generationConfig:null,safetySettings:null,systemInstruction:{},toolConfig:{},tools:[{}]}	1	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {contents:[{}],generationConfig:{},safetySettings:null,systemInstruction:null,toolConfig:null,tools:[{}]}	1	gemini/code_execution_matrix/streaming_code_execution_with_visible_thoughts.yaml#0
@@ -1169,25 +1170,26 @@ gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {contents:[{}
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {contents:[{}],generationConfig:{},safetySettings:null,systemInstruction:{},toolConfig:null,tools:[{}]}	35	gemini/auto_caching/support_chat_100_streamed.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {contents:[{}],generationConfig:{},safetySettings:null,systemInstruction:{},toolConfig:null}	3	gemini/corpus_breadth/text_delta_stop.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$ {contents:[{}],generationConfig:{},safetySettings:null,systemInstruction:{},toolConfig:{},tools:[{}]}	1	gemini/tool_choice/none_streaming_no_tools.yaml#0
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[] {parts:[{}],role:"model"}	217	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[] {parts:[{}],role:"user"}	255	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[] {parts:[{}],role:"model"}	218	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[] {parts:[{}],role:"user"}	256	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[] {functionCall:{},thought:bool}	1	gemini/streaming_grammar/chat_sourced_history_replay.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[] {functionCall:{},thoughtSignature:str}	128	gemini/auto_caching/support_chat_100_streamed.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[] {functionCall:{}}	178	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[] {functionResponse:{},thought:bool}	217	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[] {functionResponse:{},thought:bool}	218	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[] {inlineData:{},thought:bool}	1	gemini/image_matrix/inline_text_streamed.yaml#0
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[] {text:str,thought:bool}	255	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[] {text:str,thought:bool}	256	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[] {text:str,thoughtSignature:str}	4	gemini/history_survival_matrix/streaming.yaml#6
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[] {text:str}	175	gemini/auto_caching/support_chat_100_streamed.yaml#5
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionCall {args:{},id:str,name:str}	190	gemini/auto_caching/support_chat_100_streamed.yaml#1
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionCall {args:{},name:str}	27	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionCall {args:{},name:str}	28	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse {id:str,name:str,parts:[{}],response:{}}	1	gemini/streaming_multimodal_tool_results/streaming_history_preserves_hybrid_tool_result_image_parts.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse {id:str,name:str,response:{}}	189	gemini/auto_caching/support_chat_100_streamed.yaml#1
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse {name:str,response:{}}	27	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse {name:str,response:{}}	28	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse.parts[] {inlineData:{}}	1	gemini/streaming_multimodal_tool_results/streaming_history_preserves_hybrid_tool_result_image_parts.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse.parts[].inlineData {data:str,mimeType:str}	1	gemini/streaming_multimodal_tool_results/streaming_history_preserves_hybrid_tool_result_image_parts.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse.response {error:str}	8	gemini/agent_run_streamed/streamed_skip_abandons_the_turn_and_recovers.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse.response {result:num}	7	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse.response {result:str}	20	gemini/corpus_matrix/causal_completion_streamed.yaml#2
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse.response {result:str}	21	gemini/corpus_matrix/causal_completion_streamed.yaml#2
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].functionResponse.response {result:{}}	188	gemini/auto_caching/support_chat_100_streamed.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.contents[].parts[].inlineData {data:str,mimeType:str}	1	gemini/image_matrix/inline_text_streamed.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.generationConfig {maxOutputTokens:num,temperature:num,thinkingConfig:{}}	2	gemini/cached_content_matrix/use_streaming.yaml#1
@@ -1203,16 +1205,19 @@ gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.generationCon
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.generationConfig.thinkingConfig {includeThoughts:bool,thinkingBudget:num}	11	gemini/code_execution_matrix/streaming_code_execution_with_visible_thoughts.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.generationConfig.thinkingConfig {thinkingBudget:num}	2	gemini/cached_content_matrix/use_streaming.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.generationConfig.thinkingConfig {thinkingLevel:str}	201	gemini/auto_caching/support_chat_100_streamed.yaml#0
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.systemInstruction {parts:[{}],role:"model"}	50	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.systemInstruction.parts[] {text:str,thought:bool}	50	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.systemInstruction {parts:[{}],role:"model"}	51	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.systemInstruction.parts[] {text:str,thought:bool}	51	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.toolConfig {functionCallingConfig:{}}	4	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.toolConfig.functionCallingConfig {allowed_function_names:[str],mode:str}	1	gemini/raw_stream_capture_matrix/raw_terminal_keeps_stop_on_forced_function_call.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.toolConfig.functionCallingConfig {mode:str,streamFunctionCallArguments:bool}	1	gemini/stream_function_call_arguments/developer_api.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.toolConfig.functionCallingConfig {mode:str}	2	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
-gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[] {codeExecution:null,functionDeclarations:[{}]}	48	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[] {codeExecution:null,functionDeclarations:[{}]}	49	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[] {codeExecution:{}}	1	gemini/code_execution_matrix/streaming_code_execution_with_visible_thoughts.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[].codeExecution {}	1	gemini/code_execution_matrix/streaming_code_execution_with_visible_thoughts.yaml#0
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[].functionDeclarations[] {description:str,name:str,parameters:{}}	1	gemini/streaming_grammar/chat_sourced_history_replay.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[].functionDeclarations[] {description:str,name:str,parametersJsonSchema:{}}	48	gemini/agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn.yaml#0
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[].functionDeclarations[].parameters {properties:{},required:[str],type:"object"}	1	gemini/streaming_grammar/chat_sourced_history_replay.yaml#0
+gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[].functionDeclarations[].parameters.properties.* {description:str,type:"number"}	1	gemini/streaming_grammar/chat_sourced_history_replay.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[].functionDeclarations[].parametersJsonSchema {$schema:str,properties:{},required:[str],title:str,type:"object"}	5	gemini/multi_turn_streaming/manual_multi_turn_streaming_loop.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[].functionDeclarations[].parametersJsonSchema {additionalProperties:bool,properties:{},required:[str],type:"object"}	11	gemini/long_loop_matrix/long_streamed.yaml#0
 gemini	POST /v1beta/models/{model}:streamGenerateContent	request	$.tools[].functionDeclarations[].parametersJsonSchema {additionalProperties:bool,properties:{},type:"object"}	11	gemini/long_loop_matrix/long_streamed.yaml#0
@@ -1244,7 +1249,7 @@ gemini	POST /v1beta/models/{model}:streamGenerateContent	reply	50a6713f20027a91	
 gemini	POST /v1beta/models/{model}:streamGenerateContent	reply	57d6b69df25220b0	1	gemini/cached_content_matrix/use_streaming.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	reply	678858bf8adebaab	2	gemini/long_loop_matrix/long_streamed.yaml#5
 gemini	POST /v1beta/models/{model}:streamGenerateContent	reply	6e8abd5400998a61	3	gemini/long_loop_matrix/long_streamed.yaml#0
-gemini	POST /v1beta/models/{model}:streamGenerateContent	reply	95859f25ae819f72	223	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
+gemini	POST /v1beta/models/{model}:streamGenerateContent	reply	95859f25ae819f72	224	gemini/agent_run_streamed/streamed_repair_continues_the_same_stream.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	reply	a9f978883f2a95d8	1	gemini/long_loop_matrix/long_streamed.yaml#4
 gemini	POST /v1beta/models/{model}:streamGenerateContent	reply	c4e5a51bb580da45	3	gemini/agent_run_streamed/streamed_skip_abandons_the_turn_and_recovers.yaml#1
 gemini	POST /v1beta/models/{model}:streamGenerateContent	reply	ca4b2af1cf520fa4	1	gemini/raw_stream_capture_matrix/raw_terminal_keeps_stop_on_forced_function_call.yaml#0
@@ -1341,14 +1346,14 @@ llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model
 llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},temperature:num}	1	llamacpp/turn_termination_matrix/streaming_truncated_turn.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},tool_choice:str,tools:[{}]}	1	llamacpp/truncation_matrix/streaming_tool_call_cut_mid_arguments.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},tools:[{}]}	2	llamacpp/streaming_tools/example_streaming_with_tools.yaml#0
-llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{}}	1	llamacpp/error_matrix/context_overflow_streaming.yaml#0
+llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{}}	2	llamacpp/content_matrix/unicode_across_chunks.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,temperature:num,tool_choice:str,tools:[{}]}	1	llamacpp/multimodal_matrix/image_plus_tools.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,temperature:num,tools:[{}]}	1	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,temperature:num}	3	llamacpp/prompt_caching/cache_prompt_disabled.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,temperature:str}	1	llamacpp/error_matrix/malformed_request_field.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,tool_choice:str,tools:[{}]}	1	llamacpp/truncation_matrix/tool_call_cut_mid_arguments.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,tools:[{}]}	1	llamacpp/model_family_matrix/llama_blocking_tool_call.yaml#0
-llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str}	3	llamacpp/error_matrix/context_overflow_blocking.yaml#0
+llamacpp	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str}	8	llamacpp/content_matrix/consecutive_same_role.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {messages:[{}],model:str,response_format:{},temperature:num}	1	llamacpp/structured_output/prompt_typed_extended_details_structured_output.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {messages:[{}],model:str,response_format:{},tools:[{}]}	1	llamacpp/typed_prompt_tools/prompt_typed_with_tool_call_roundtrip.yaml#1
 llamacpp	POST /v1/chat/completions	request	$ {messages:[{}],model:str,response_format:{}}	1	llamacpp/structured_output/structured_output_smoke.yaml#0
@@ -1358,26 +1363,27 @@ llamacpp	POST /v1/chat/completions	request	$ {messages:[{}],model:str,stream:boo
 llamacpp	POST /v1/chat/completions	request	$ {messages:[{}],model:str,stream:bool,stream_options:{}}	1	llamacpp/streaming_tools/raw_followup_uses_tool_result_without_new_tool_calls.yaml#1
 llamacpp	POST /v1/chat/completions	request	$ {messages:[{}],model:str,temperature:num,tools:[{}]}	2	llamacpp/prompt_caching/agent_loop.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {messages:[{}],model:str,tool_choice:str,tools:[{}]}	9	llamacpp/multi_extract/batch_multi_extract_chain.yaml#0
-llamacpp	POST /v1/chat/completions	request	$ {messages:[{}],model:str,tools:[{}]}	3	llamacpp/permission_control/permission_control_prompt_example.yaml#0
+llamacpp	POST /v1/chat/completions	request	$ {messages:[{}],model:str,tools:[{}]}	5	llamacpp/permission_control/permission_control_prompt_example.yaml#0
 llamacpp	POST /v1/chat/completions	request	$ {messages:[{}],model:str}	1	llamacpp/agent/completion_smoke.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.json_schema {properties:{},required:[str],type:"object"}	1	llamacpp/structured_output_matrix/schema_and_grammar_conflict.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.json_schema.properties.* {type:"string"}	1	llamacpp/structured_output_matrix/schema_and_grammar_conflict.yaml#0
-llamacpp	POST /v1/chat/completions	request	$.messages[] {content:[{}],role:"system"}	30	llamacpp/agent/completion_smoke.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.messages[] {content:[{}],role:"assistant"}	1	llamacpp/content_matrix/system_plus_history.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.messages[] {content:[{}],role:"system"}	37	llamacpp/agent/completion_smoke.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.messages[] {content:[{}],role:"tool",tool_call_id:str}	1	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.messages[] {content:[{}],role:"user"}	3	llamacpp/multimodal_matrix/image_plus_tools.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.messages[] {content:str,role:"assistant"}	2	llamacpp/prompt_caching/streaming_probe.yaml#2
-llamacpp	POST /v1/chat/completions	request	$.messages[] {content:str,role:"tool",tool_call_id:str}	4	llamacpp/permission_control/permission_control_prompt_example.yaml#1
-llamacpp	POST /v1/chat/completions	request	$.messages[] {content:str,role:"user"}	48	llamacpp/agent/completion_smoke.yaml#0
-llamacpp	POST /v1/chat/completions	request	$.messages[] {reasoning_content:str,role:"assistant",tool_calls:[{}]}	2	llamacpp/streaming_tools/example_streaming_with_tools.yaml#1
-llamacpp	POST /v1/chat/completions	request	$.messages[] {role:"assistant",tool_calls:[{}]}	3	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.messages[] {content:str,role:"tool",tool_call_id:str}	8	llamacpp/content_matrix/long_tool_output.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.messages[] {content:str,role:"user"}	56	llamacpp/agent/completion_smoke.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.messages[] {reasoning_content:str,role:"assistant",tool_calls:[{}]}	3	llamacpp/streaming_tools/example_streaming_with_tools.yaml#1
+llamacpp	POST /v1/chat/completions	request	$.messages[] {role:"assistant",tool_calls:[{}]}	6	llamacpp/content_matrix/long_tool_output.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.messages[].content[] {image_url:{},type:"image_url"}	2	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
-llamacpp	POST /v1/chat/completions	request	$.messages[].content[] {text:str,type:"text"}	32	llamacpp/agent/completion_smoke.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.messages[].content[] {text:str,type:"text"}	39	llamacpp/agent/completion_smoke.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.messages[].content[] {type:"video_url",video_url:{}}	1	llamacpp/multimodal_matrix/video_part_is_refused.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.messages[].content[].image_url {detail:str,url:str}	1	llamacpp/multimodal_matrix/image_plus_tools.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.messages[].content[].image_url {url:str}	1	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.messages[].content[].video_url {url:str}	1	llamacpp/multimodal_matrix/video_part_is_refused.yaml#0
-llamacpp	POST /v1/chat/completions	request	$.messages[].tool_calls[] {function:{},id:str,type:"function"}	5	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
-llamacpp	POST /v1/chat/completions	request	$.messages[].tool_calls[].function {arguments:str,name:str}	5	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.messages[].tool_calls[] {function:{},id:str,type:"function"}	9	llamacpp/content_matrix/long_tool_output.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.messages[].tool_calls[].function {arguments:str,name:str}	9	llamacpp/content_matrix/long_tool_output.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.response_format {json_schema:{},type:"json_schema"}	4	llamacpp/structured_output/prompt_typed_extended_details_structured_output.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.response_format {type:"json_object"}	1	llamacpp/structured_output_matrix/json_object_is_enforced.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.response_format.json_schema {name:str,schema:{},strict:bool}	4	llamacpp/structured_output/prompt_typed_extended_details_structured_output.yaml#0
@@ -1390,25 +1396,25 @@ llamacpp	POST /v1/chat/completions	request	$.response_format.json_schema.schema.
 llamacpp	POST /v1/chat/completions	request	$.response_format.json_schema.schema.properties.* {$ref:str}	1	llamacpp/structured_output/prompt_typed_extended_details_structured_output.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.response_format.json_schema.schema.properties.* {format:str,type:"number"}	1	llamacpp/structured_output_matrix/response_format_beats_grammar_silently.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.response_format.json_schema.schema.properties.* {type:"string"}	4	llamacpp/structured_output/prompt_typed_extended_details_structured_output.yaml#0
-llamacpp	POST /v1/chat/completions	request	$.stream_options {include_usage:bool}	13	llamacpp/error_matrix/context_overflow_streaming.yaml#0
-llamacpp	POST /v1/chat/completions	request	$.tools[] {function:{},type:"function"}	27	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
-llamacpp	POST /v1/chat/completions	request	$.tools[].function {description:str,name:str,parameters:{}}	27	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.stream_options {include_usage:bool}	14	llamacpp/content_matrix/unicode_across_chunks.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.tools[] {function:{},type:"function"}	29	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.tools[].function {description:str,name:str,parameters:{}}	29	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters {$schema:str,properties:{},required:[str],title:str,type:"object"}	9	llamacpp/multi_extract/batch_multi_extract_chain.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters {properties:{},required:[],type:"object"}	3	llamacpp/image_tool_result/a_tool_result_image_is_read_by_the_model.yaml#0
-llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters {properties:{},required:[str],type:"object"}	13	llamacpp/model_family_matrix/llama_blocking_tool_call.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters {properties:{},required:[str],type:"object"}	15	llamacpp/model_family_matrix/llama_blocking_tool_call.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters {properties:{},type:"object"}	2	llamacpp/permission_control/permission_control_prompt_example.yaml#0
-llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {description:str,type:"number"}	3	llamacpp/model_family_matrix/llama_blocking_tool_call.yaml#0
+llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {description:str,type:"number"}	5	llamacpp/model_family_matrix/llama_blocking_tool_call.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {description:str,type:"string"}	5	llamacpp/prompt_caching/agent_loop.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {format:str,type:"number"}	3	llamacpp/multi_extract/batch_multi_extract_chain.yaml#1
 llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {items:{},type:"array"}	6	llamacpp/multi_extract/batch_multi_extract_chain.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {type:"string"}	5	llamacpp/multimodal_matrix/image_plus_tools.yaml#0
 llamacpp	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.*.items {type:"string"}	6	llamacpp/multi_extract/batch_multi_extract_chain.yaml#0
-llamacpp	POST /v1/chat/completions	reply	03c0136974b99b83	10	llamacpp/multi_extract/batch_multi_extract_chain.yaml#0
-llamacpp	POST /v1/chat/completions	reply	0e939b9cd7b45f35	14	llamacpp/agent/completion_smoke.yaml#0
+llamacpp	POST /v1/chat/completions	reply	03c0136974b99b83	11	llamacpp/multi_extract/batch_multi_extract_chain.yaml#0
+llamacpp	POST /v1/chat/completions	reply	0e939b9cd7b45f35	17	llamacpp/agent/completion_smoke.yaml#0
 llamacpp	POST /v1/chat/completions	reply	125ee17dc5ee2bc0	1	bank:llamacpp/prompt_caching/blocking_probe.yaml#2
-llamacpp	POST /v1/chat/completions	reply	1e4e50054488619c	4	llamacpp/permission_control/permission_control_prompt_example.yaml#1
+llamacpp	POST /v1/chat/completions	reply	1e4e50054488619c	7	llamacpp/permission_control/permission_control_prompt_example.yaml#1
 llamacpp	POST /v1/chat/completions	reply	3b2a1451ccafd032	4	llamacpp/model_family_matrix/llama_blocking_tool_call.yaml#0
-llamacpp	POST /v1/chat/completions	reply	476cea21032cef26	3	llamacpp/prompt_caching/streaming_probe.yaml#0
+llamacpp	POST /v1/chat/completions	reply	476cea21032cef26	4	llamacpp/content_matrix/unicode_across_chunks.yaml#0
 llamacpp	POST /v1/chat/completions	reply	59a9886eea7a3355	1	llamacpp/streaming_tools/example_streaming_with_tools.yaml#0
 llamacpp	POST /v1/chat/completions	reply	697f0cad2a971dc7	1	llamacpp/prompt_caching/streaming_probe.yaml#2
 llamacpp	POST /v1/chat/completions	reply	74a599ae8bedffec	3	llamacpp/streaming/example_streaming_prompt.yaml#0
@@ -1558,19 +1564,29 @@ mistralrs	POST /v1/responses	reply	b822b8a39fd2c63b	2	mistralrs/responses_api/re
 ollama	GET /api/tags	request	$ empty	1	ollama/models/list_models_smoke.yaml#0
 ollama	GET /api/tags	reply	b78b1057c501b58f	1	ollama/models/list_models_smoke.yaml#0
 ollama	POST /api/chat	request	$ {keep_alive:str,messages:[{}],model:str,options:{},stream:bool,think:bool}	1	ollama/native/options_and_keep_alive.yaml#0
-ollama	POST /api/chat	request	$ {messages:[{}],model:str,options:{},stream:bool,think:bool,tools:[{}]}	1	ollama/native/streamed_tool_call.yaml#0
+ollama	POST /api/chat	request	$ {messages:[{}],model:str,options:{},stream:bool,think:bool,tools:[{}]}	5	ollama/native/streamed_tool_call.yaml#0
 ollama	POST /api/chat	request	$ {messages:[{}],model:str,options:{},stream:bool,think:bool}	2	ollama/native/inline_think_streamed.yaml#0
 ollama	POST /api/chat	request	$ {messages:[{}],model:str,options:{},stream:bool,think:str}	1	ollama/native/think_level.yaml#0
-ollama	POST /api/chat	request	$.messages[] {content:str,role:"system"}	1	ollama/native/streamed_tool_call.yaml#0
-ollama	POST /api/chat	request	$.messages[] {content:str,role:"user"}	5	ollama/native/inline_think_streamed.yaml#0
+ollama	POST /api/chat	request	$.messages[] {content:str,role:"assistant",tool_calls:[{}]}	1	ollama/streaming_grammar/chat_sourced_history_replay.yaml#0
+ollama	POST /api/chat	request	$.messages[] {content:str,role:"system"}	5	ollama/native/streamed_tool_call.yaml#0
+ollama	POST /api/chat	request	$.messages[] {content:str,role:"tool",tool_name:str}	1	ollama/streaming_grammar/chat_sourced_history_replay.yaml#0
+ollama	POST /api/chat	request	$.messages[] {content:str,role:"user"}	9	ollama/native/inline_think_streamed.yaml#0
+ollama	POST /api/chat	request	$.messages[].tool_calls[] {function:{},type:"function"}	1	ollama/streaming_grammar/chat_sourced_history_replay.yaml#0
+ollama	POST /api/chat	request	$.messages[].tool_calls[].function {arguments:{},name:str}	1	ollama/streaming_grammar/chat_sourced_history_replay.yaml#0
 ollama	POST /api/chat	request	$.options {num_ctx:num,num_predict:num,seed:num,temperature:num,top_k:num}	1	ollama/native/options_and_keep_alive.yaml#0
 ollama	POST /api/chat	request	$.options {seed:num,temperature:num}	4	ollama/native/inline_think_streamed.yaml#0
-ollama	POST /api/chat	request	$.tools[] {function:{},type:"function"}	1	ollama/native/streamed_tool_call.yaml#0
-ollama	POST /api/chat	request	$.tools[].function {description:str,name:str,parameters:{}}	1	ollama/native/streamed_tool_call.yaml#0
-ollama	POST /api/chat	request	$.tools[].function.parameters {properties:{},required:[str],type:"object"}	1	ollama/native/streamed_tool_call.yaml#0
-ollama	POST /api/chat	request	$.tools[].function.parameters.properties.* {description:str,type:"number"}	1	ollama/native/streamed_tool_call.yaml#0
+ollama	POST /api/chat	request	$.options {}	4	ollama/streaming_grammar/chat_sourced_history_replay.yaml#0
+ollama	POST /api/chat	request	$.tools[] {function:{},type:"function"}	5	ollama/native/streamed_tool_call.yaml#0
+ollama	POST /api/chat	request	$.tools[].function {description:str,name:str,parameters:{}}	5	ollama/native/streamed_tool_call.yaml#0
+ollama	POST /api/chat	request	$.tools[].function.parameters {properties:{},required:[],type:"object"}	2	ollama/streaming_grammar/parallel_tool_calls.yaml#0
+ollama	POST /api/chat	request	$.tools[].function.parameters {properties:{},required:[str],type:"object"}	3	ollama/native/streamed_tool_call.yaml#0
+ollama	POST /api/chat	request	$.tools[].function.parameters.properties.* {description:str,type:"number"}	3	ollama/native/streamed_tool_call.yaml#0
 ollama	POST /api/chat	reply	38fa26a1af4ed7df	1	ollama/native/streamed_tool_call.yaml#0
+ollama	POST /api/chat	reply	39ed95675029fc6e	1	ollama/streaming_grammar/chat_sourced_history_replay.yaml#0
+ollama	POST /api/chat	reply	54c1b0e9d571fcad	1	ollama/streaming_grammar/same_tool_twice.yaml#0
 ollama	POST /api/chat	reply	67ff536ee85477a6	1	ollama/native/options_and_keep_alive.yaml#0
+ollama	POST /api/chat	reply	7314b9fbc2fb944d	1	ollama/streaming_grammar/thinking_and_tool_call_native_original.yaml#0
+ollama	POST /api/chat	reply	7e2664d48ed6c6c6	1	ollama/streaming_grammar/parallel_tool_calls.yaml#0
 ollama	POST /api/chat	reply	ca566cb30a835bc5	1	ollama/native/think_level.yaml#0
 ollama	POST /api/chat	reply	db3c060e1ab5040c	1	ollama/native/inline_think_streamed.yaml#0
 ollama	POST /api/chat	reply	f28a1de54878a342	1	ollama/native/inline_think_whole.yaml#0
@@ -1646,10 +1662,10 @@ openai	POST /v1/audio/transcriptions	reply	12933072f75ecdc1	1	openai/transcripti
 openai	POST /v1/audio/transcriptions	reply	27d63f92b4ed87f8	1	openai/transcription_usage_matrix/verbose_json_still_reports_duration_usage.yaml#0
 openai	POST /v1/audio/transcriptions	reply	4755529bfc7e61ee	1	openai/transcription_usage_matrix/completions_client_reports_token_usage.yaml#0
 openai	POST /v1/audio/transcriptions	reply	76793510eb361ac3	1	openai/transcription_usage_matrix/completions_client_reports_duration_usage.yaml#0
-openai	POST /v1/chat/completions	request	$ {logprobs:bool,max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},top_logprobs:num}	1	openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_zero.yaml#0
-openai	POST /v1/chat/completions	request	$ {logprobs:bool,max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{}}	1	openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_stop_top_absent.yaml#0
-openai	POST /v1/chat/completions	request	$ {logprobs:bool,max_tokens:num,messages:[{}],model:str,top_logprobs:num}	1	openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_zero.yaml#0
-openai	POST /v1/chat/completions	request	$ {logprobs:bool,max_tokens:num,messages:[{}],model:str}	1	openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_stop_top_absent.yaml#0
+openai	POST /v1/chat/completions	request	$ {logprobs:bool,max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},top_logprobs:num}	8	openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_two.yaml#0
+openai	POST /v1/chat/completions	request	$ {logprobs:bool,max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{}}	4	openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_absent.yaml#0
+openai	POST /v1/chat/completions	request	$ {logprobs:bool,max_tokens:num,messages:[{}],model:str,top_logprobs:num}	8	openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_two.yaml#0
+openai	POST /v1/chat/completions	request	$ {logprobs:bool,max_tokens:num,messages:[{}],model:str}	4	openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_absent.yaml#0
 openai	POST /v1/chat/completions	request	$ {logprobs:bool,messages:[{}],model:str,stream:bool,stream_options:{},top_logprobs:num}	1	openai/streaming_grammar_chat/logprobs_chunks.yaml#0
 openai	POST /v1/chat/completions	request	$ {max_completion_tokens:num,messages:[{}],model:str,prompt_cache_key:str,reasoning_effort:str,tools:[{}]}	200	openai/long_run_caching/support_chat_100_chat.yaml#0
 openai	POST /v1/chat/completions	request	$ {max_completion_tokens:num,messages:[{}],model:str,prompt_cache_options:{},reasoning_effort:str,tools:[{}]}	60	openai/long_run_caching/support_chat_30_baseline.yaml#0
@@ -1668,22 +1684,22 @@ openai	POST /v1/chat/completions	request	$ {max_completion_tokens:num,messages:[
 openai	POST /v1/chat/completions	request	$ {max_completion_tokens:num,messages:[{}],model:str,tool_choice:str,tools:[{}]}	1	openai/models/gpt_5_4_nano/session.yaml#82
 openai	POST /v1/chat/completions	request	$ {max_completion_tokens:num,messages:[{}],model:str,tools:[{}]}	1	openai/models/gpt_6_luna/session.yaml#87
 openai	POST /v1/chat/completions	request	$ {max_completion_tokens:num,messages:[{}],model:str}	5	openai/models/gpt_5_4_nano/session.yaml#51
-openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,n:num,stream:bool,stream_options:{}}	1	openai/chat_terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_plain_two.yaml#0
-openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,n:num}	1	openai/chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_plain_two.yaml#0
-openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,parallel_tool_calls:bool,stream:bool,stream_options:{},tool_choice:str,tools:[{}]}	1	openai/chat_tool_lifecycle_matrix/streaming_gpt4o_nested_model.yaml#0
-openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,parallel_tool_calls:bool,tool_choice:str,tools:[{}]}	1	openai/chat_tool_lifecycle_matrix/blocking_gpt4o_zero_agent.yaml#0
+openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,n:num,stream:bool,stream_options:{}}	4	openai/chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_plain_two.yaml#0
+openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,n:num}	4	openai/chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_plain_two.yaml#0
+openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,parallel_tool_calls:bool,stream:bool,stream_options:{},tool_choice:str,tools:[{}]}	12	openai/chat_tool_lifecycle_matrix/streaming_gpt41_nested_agent.yaml#0
+openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,parallel_tool_calls:bool,tool_choice:str,tools:[{}]}	12	openai/chat_tool_lifecycle_matrix/blocking_gpt41_nested_agent.yaml#0
 openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,response_format:{},temperature:num}	1	openai/raw_capture_matrix/chat_structured_output_raw_exposes_system_fingerprint.yaml#0
 openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},temperature:num,tool_choice:str,tools:[{}]}	1	openai/raw_stream_capture_matrix/chat_tool_call_stream_raw_round_trips_typed.yaml#0
 openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},temperature:num}	1	openai/raw_stream_capture_matrix/chat_stream_raw_round_trips_typed.yaml#0
-openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},tool_choice:str,tools:[{}]}	1	openai/chat_tool_truncation_matrix/streaming_gpt4o_low_agent.yaml#0
+openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},tool_choice:str,tools:[{}]}	16	openai/chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_tool.yaml#0
 openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{},tools:[{}]}	1	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
-openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{}}	1	openai/streaming_grammar_chat/long_text_stream.yaml#0
+openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,stream:bool,stream_options:{}}	19	openai/chat_history_roundtrip_matrix/streaming_gpt_4_1_mini_normalized_text.yaml#0
 openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,temperature:num,tool_choice:str,tools:[{}]}	1	openai/raw_capture_matrix/chat_tool_call_raw_round_trips_typed.yaml#0
 openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,temperature:num,tools:[{}]}	2	openai/checkpoint_matrix_chat/parallel_batch.yaml#0
 openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,temperature:num}	1	openai/raw_capture_matrix/chat_raw_round_trips_typed.yaml#0
-openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,tool_choice:str,tools:[{}]}	1	openai/chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_tool.yaml#0
+openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,tool_choice:str,tools:[{}]}	16	openai/chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_tool.yaml#0
 openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str,tools:[{}]}	1	openai/portability_matrix/chat_from_anthropic.yaml#0
-openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str}	1	openai/max_completion_tokens_matrix/legacy_gpt_3_5_turbo_blocking_cap.yaml#0
+openai	POST /v1/chat/completions	request	$ {max_tokens:num,messages:[{}],model:str}	19	openai/chat_history_roundtrip_matrix/blocking_gpt_4_1_mini_normalized_text.yaml#0
 openai	POST /v1/chat/completions	request	$ {messages:[{}],model:str,parallel_tool_calls:bool,stream:bool,stream_options:{},tools:[{}]}	1	openai/streaming_grammar_chat/parallel_tool_calls.yaml#0
 openai	POST /v1/chat/completions	request	$ {messages:[{}],model:str,reasoning_effort:str,stream:bool,stream_options:{},tools:[{}]}	4	openai/models/gpt_6_luna/session.yaml#64
 openai	POST /v1/chat/completions	request	$ {messages:[{}],model:str,reasoning_effort:str,tool_choice:str,tools:[{}]}	2	openai/models/gpt_6_luna/session.yaml#74
@@ -1702,19 +1718,20 @@ openai	POST /v1/chat/completions	request	$ {messages:[{}],model:str,tool_choice:
 openai	POST /v1/chat/completions	request	$ {messages:[{}],model:str,tool_choice:{},tools:[{}]}	1	openai/corpus_matrix_chat/output_tool_choice_specific_output.yaml#0
 openai	POST /v1/chat/completions	request	$ {messages:[{}],model:str,tools:[{}]}	15	openai/corpus_matrix_chat/causal_completion_serial.yaml#0
 openai	POST /v1/chat/completions	request	$ {messages:[{}],model:str}	4	openai/corpus_matrix_chat/causal_completion_serial.yaml#1
-openai	POST /v1/chat/completions	request	$.messages[] {content:[{}],role:"system"}	342	openai/chat_tool_lifecycle_matrix/blocking_gpt4o_zero_agent.yaml#0
+openai	POST /v1/chat/completions	request	$.messages[] {content:[{}],role:"assistant"}	12	openai/chat_history_roundtrip_matrix/blocking_gpt_4_1_mini_normalized_text.yaml#0
+openai	POST /v1/chat/completions	request	$.messages[] {content:[{}],role:"system"}	387	openai/chat_tool_lifecycle_matrix/blocking_gpt41_nested_agent.yaml#0
 openai	POST /v1/chat/completions	request	$.messages[] {content:[{}],role:"user"}	4	openai/models/gpt_5_4_nano/session.yaml#52
 openai	POST /v1/chat/completions	request	$.messages[] {content:str,role:"assistant",tool_calls:[{}]}	1	openai/portability_matrix/chat_from_anthropic.yaml#0
 openai	POST /v1/chat/completions	request	$.messages[] {content:str,role:"assistant"}	261	openai/corpus_matrix_chat/shaping_active_tools_none_second_turn.yaml#1
-openai	POST /v1/chat/completions	request	$.messages[] {content:str,role:"tool",tool_call_id:str}	289	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
-openai	POST /v1/chat/completions	request	$.messages[] {content:str,role:"user"}	379	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
+openai	POST /v1/chat/completions	request	$.messages[] {content:str,role:"tool",tool_call_id:str}	305	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
+openai	POST /v1/chat/completions	request	$.messages[] {content:str,role:"user"}	493	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
 openai	POST /v1/chat/completions	request	$.messages[] {reasoning_content:str,role:"assistant",tool_calls:[{}]}	1	openai/openai_compatible/dual_reasoning_keys_tool_roundtrip.yaml#1
-openai	POST /v1/chat/completions	request	$.messages[] {role:"assistant",tool_calls:[{}]}	287	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
+openai	POST /v1/chat/completions	request	$.messages[] {role:"assistant",tool_calls:[{}]}	303	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
 openai	POST /v1/chat/completions	request	$.messages[].content[] {image_url:{},type:"image_url"}	4	openai/models/gpt_5_4_nano/session.yaml#52
-openai	POST /v1/chat/completions	request	$.messages[].content[] {text:str,type:"text"}	342	openai/chat_tool_lifecycle_matrix/blocking_gpt4o_zero_agent.yaml#0
+openai	POST /v1/chat/completions	request	$.messages[].content[] {text:str,type:"text"}	399	openai/chat_history_roundtrip_matrix/blocking_gpt_4_1_mini_normalized_text.yaml#0
 openai	POST /v1/chat/completions	request	$.messages[].content[].image_url {detail:str,url:str}	4	openai/models/gpt_5_4_nano/session.yaml#52
-openai	POST /v1/chat/completions	request	$.messages[].tool_calls[] {function:{},id:str,type:"function"}	289	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
-openai	POST /v1/chat/completions	request	$.messages[].tool_calls[].function {arguments:str,name:str}	289	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
+openai	POST /v1/chat/completions	request	$.messages[].tool_calls[] {function:{},id:str,type:"function"}	305	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
+openai	POST /v1/chat/completions	request	$.messages[].tool_calls[].function {arguments:str,name:str}	305	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
 openai	POST /v1/chat/completions	request	$.prompt_cache_options {mode:str}	60	openai/long_run_caching/support_chat_30_baseline.yaml#0
 openai	POST /v1/chat/completions	request	$.response_format {json_schema:{},type:"json_schema"}	6	openai/models/gpt_5_4_nano/session.yaml#54
 openai	POST /v1/chat/completions	request	$.response_format.json_schema {name:str,schema:{},strict:bool}	6	openai/models/gpt_5_4_nano/session.yaml#54
@@ -1722,17 +1739,17 @@ openai	POST /v1/chat/completions	request	$.response_format.json_schema.schema {$
 openai	POST /v1/chat/completions	request	$.response_format.json_schema.schema {$schema:str,additionalProperties:bool,properties:{},required:[str],title:str,type:"object"}	3	openai/models/gpt_5_4_nano/session.yaml#54
 openai	POST /v1/chat/completions	request	$.response_format.json_schema.schema {additionalProperties:bool,properties:{},required:[str],type:"object"}	2	openai/refusal_matrix/chat_streaming_agent_surfaces_refusal.yaml#0
 openai	POST /v1/chat/completions	request	$.response_format.json_schema.schema.properties.* {type:"string"}	6	openai/models/gpt_5_4_nano/session.yaml#54
-openai	POST /v1/chat/completions	request	$.stream_options {include_usage:bool}	31	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
+openai	POST /v1/chat/completions	request	$.stream_options {include_usage:bool}	88	openai/chat_history_roundtrip_matrix/streaming_gpt_4_1_mini_normalized_text.yaml#0
 openai	POST /v1/chat/completions	request	$.tool_choice {function:{},type:"function"}	3	openai/corpus_matrix_chat/output_tool_choice_specific_output.yaml#0
 openai	POST /v1/chat/completions	request	$.tool_choice.function {name:str}	3	openai/corpus_matrix_chat/output_tool_choice_specific_output.yaml#0
-openai	POST /v1/chat/completions	request	$.tools[] {function:{},type:"function"}	345	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
-openai	POST /v1/chat/completions	request	$.tools[].function {description:str,name:str,parameters:{}}	345	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
+openai	POST /v1/chat/completions	request	$.tools[] {function:{},type:"function"}	397	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
+openai	POST /v1/chat/completions	request	$.tools[].function {description:str,name:str,parameters:{}}	397	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters {$defs:{},$schema:str,properties:{},required:[str],title:str,type:"object"}	4	openai/models/gpt_5_4_nano/session.yaml#70
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters {$schema:str,properties:{},required:[str],title:str,type:"object"}	24	openai/models/gpt_5_4_nano/session.yaml#59
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters {additionalProperties:bool,properties:{},required:[str],type:"object"}	2	openai/checkpoint_matrix_chat/parallel_batch.yaml#0
-openai	POST /v1/chat/completions	request	$.tools[].function.parameters {additionalProperties:bool,properties:{},type:"object"}	4	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
+openai	POST /v1/chat/completions	request	$.tools[].function.parameters {additionalProperties:bool,properties:{},type:"object"}	11	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters {properties:{},required:[],type:"object"}	11	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
-openai	POST /v1/chat/completions	request	$.tools[].function.parameters {properties:{},required:[str],type:"object"}	300	openai/chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_tool.yaml#0
+openai	POST /v1/chat/completions	request	$.tools[].function.parameters {properties:{},required:[str],type:"object"}	345	openai/chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_tool.yaml#0
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters {properties:{},type:"object"}	1	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters.$defs.* {enum:[str],type:"string"}	4	openai/models/gpt_5_4_nano/session.yaml#70
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters.$defs.* {properties:{},required:[str],type:"object"}	4	openai/models/gpt_5_4_nano/session.yaml#70
@@ -1742,54 +1759,54 @@ openai	POST /v1/chat/completions	request	$.tools[].function.parameters.$defs.*.p
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {$ref:str}	4	openai/models/gpt_5_4_nano/session.yaml#70
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {description:str,format:str,minimum:num,type:[str]}	4	openai/models/gpt_5_4_nano/session.yaml#68
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {description:str,type:"boolean"}	2	openai/corpus_matrix_chat/causal_completion_serial.yaml#0
-openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {description:str,type:"number"}	22	openai/chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_tool.yaml#0
+openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {description:str,type:"number"}	29	openai/chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_tool.yaml#0
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {description:str,type:"string"}	9	openai/corpus_matrix_chat/causal_completion_serial.yaml#0
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {enum:[num],type:"integer"}	2	openai/checkpoint_matrix_chat/parallel_batch.yaml#0
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {format:str,type:"integer"}	18	openai/models/gpt_5_4_nano/session.yaml#59
-openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {items:{},type:"array"}	1	openai/chat_tool_lifecycle_matrix/streaming_gpt4o_nested_model.yaml#0
-openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {properties:{},required:[str],type:"object"}	1	openai/chat_tool_lifecycle_matrix/streaming_gpt4o_nested_model.yaml#0
+openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {items:{},type:"array"}	8	openai/chat_tool_lifecycle_matrix/blocking_gpt41_nested_agent.yaml#0
+openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {properties:{},required:[str],type:"object"}	8	openai/chat_tool_lifecycle_matrix/blocking_gpt41_nested_agent.yaml#0
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {type:"integer"}	6	openai/models/gpt_5_4_nano/session.yaml#79
-openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {type:"string"}	273	openai/chat_tool_lifecycle_matrix/streaming_gpt4o_nested_model.yaml#0
+openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {type:"string"}	311	openai/chat_tool_lifecycle_matrix/blocking_gpt41_nested_agent.yaml#0
 openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.* {type:[str]}	12	openai/models/gpt_5_4_nano/session.yaml#70
-openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.*.items {type:"integer"}	1	openai/chat_tool_lifecycle_matrix/streaming_gpt4o_nested_model.yaml#0
-openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.*.properties.* {type:"boolean"}	1	openai/chat_tool_lifecycle_matrix/streaming_gpt4o_nested_model.yaml#0
+openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.*.items {type:"integer"}	8	openai/chat_tool_lifecycle_matrix/blocking_gpt41_nested_agent.yaml#0
+openai	POST /v1/chat/completions	request	$.tools[].function.parameters.properties.*.properties.* {type:"boolean"}	8	openai/chat_tool_lifecycle_matrix/blocking_gpt41_nested_agent.yaml#0
 openai	POST /v1/chat/completions	reply	00a825d4b2a9fba6	1	bank:openai/corpus_faults_chat/batch_second_fails.yaml#0
 openai	POST /v1/chat/completions	reply	038a8e994e3c6a26	142	openai/long_run_caching/support_chat_100_chat.yaml#1
 openai	POST /v1/chat/completions	reply	09500bbc3b46f6d2	2	openai/models/gpt_6_luna/session.yaml#58
 openai	POST /v1/chat/completions	reply	0c86e42feebee126	1	openai/max_completion_tokens_matrix/legacy_gpt_3_5_turbo_blocking_cap.yaml#0
 openai	POST /v1/chat/completions	reply	16667897d6fcd5f7	6	openai/corpus_matrix_chat/host_custom_at_start_streamed.yaml#0
-openai	POST /v1/chat/completions	reply	24d75e7b66e48ede	1	openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_zero.yaml#0
+openai	POST /v1/chat/completions	reply	24d75e7b66e48ede	4	openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_absent.yaml#0
 openai	POST /v1/chat/completions	reply	35faa42883d88036	1	bank:openai/streaming_grammar_chat/tool_call_with_content.yaml#0
-openai	POST /v1/chat/completions	reply	4b5af52d06f27eca	1	bank:openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_two.yaml#0
+openai	POST /v1/chat/completions	reply	4b5af52d06f27eca	2	openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_two.yaml#0
 openai	POST /v1/chat/completions	reply	4c367e02a1f6d465	1	bank:openai/error_identity_edge/chat_completions_validation_error_carries_identity.yaml#0
 openai	POST /v1/chat/completions	reply	4dcf6b171ad520f8	21	openai/corpus_matrix_chat/causal_completion_serial.yaml#0
 openai	POST /v1/chat/completions	reply	5a76ac29d0020cab	1	openai/models/gpt_6_luna/session.yaml#87
-openai	POST /v1/chat/completions	reply	5baf521224769d1e	1	openai/chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_plain_two.yaml#0
+openai	POST /v1/chat/completions	reply	5baf521224769d1e	4	openai/chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_plain_one.yaml#0
 openai	POST /v1/chat/completions	reply	5ce71b034eefdc3d	18	openai/corpus_matrix_chat/causal_completion_serial.yaml#1
-openai	POST /v1/chat/completions	reply	61a0cad11a0661c8	5	openai/chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_parallel_tool.yaml#0
-openai	POST /v1/chat/completions	reply	67464968c7c72895	1	bank:openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_stop_top_two.yaml#0
-openai	POST /v1/chat/completions	reply	67ec3cffc55697d2	1	openai/chat_tool_truncation_matrix/streaming_gpt4o_low_agent.yaml#0
+openai	POST /v1/chat/completions	reply	61a0cad11a0661c8	23	openai/chat_history_roundtrip_matrix/streaming_gpt_4_1_mini_normalized_text.yaml#0
+openai	POST /v1/chat/completions	reply	67464968c7c72895	2	openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_stop_top_two.yaml#0
+openai	POST /v1/chat/completions	reply	67ec3cffc55697d2	10	openai/chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_tiny_tool.yaml#0
 openai	POST /v1/chat/completions	reply	6d68815ca0ed23b9	1	openai/models/gpt_5_4_nano/session.yaml#55
 openai	POST /v1/chat/completions	reply	6e317cdf0be90b87	1	bank:openai/request_identity_matrix/chat_completions.yaml#2
 openai	POST /v1/chat/completions	reply	71f23db3e75b733a	1	openai/models/gpt_6_luna/session.yaml#55
-openai	POST /v1/chat/completions	reply	7247abbb79f39707	5	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
+openai	POST /v1/chat/completions	reply	7247abbb79f39707	22	openai/additional_params_tools/builder_tools_survive_additional_params_tools.yaml#0
 openai	POST /v1/chat/completions	reply	74dbf5be5c05fa65	146	openai/long_run_caching/support_chat_100_chat.yaml#0
 openai	POST /v1/chat/completions	reply	756799328fe16b0f	4	openai/max_completion_tokens_matrix/reasoning_gpt5_nano_tool_turn_streaming_cap.yaml#0
 openai	POST /v1/chat/completions	reply	8b8665662e170203	1	bank:openai/truncated_turn_matrix/chat_streaming_reasoning_budget_exhausted.yaml#0
-openai	POST /v1/chat/completions	reply	8f007d0be24ecd31	1	bank:openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_two.yaml#0
-openai	POST /v1/chat/completions	reply	8fe14392e5f46d8a	5	openai/checkpoint_matrix_chat/parallel_batch.yaml#1
-openai	POST /v1/chat/completions	reply	9542c11f14d0c429	1	openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_stop_top_absent.yaml#0
-openai	POST /v1/chat/completions	reply	ac986fd2993fc63b	1	openai/chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_tool.yaml#0
+openai	POST /v1/chat/completions	reply	8f007d0be24ecd31	2	openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_two.yaml#0
+openai	POST /v1/chat/completions	reply	8fe14392e5f46d8a	23	openai/chat_history_roundtrip_matrix/blocking_gpt_4_1_mini_normalized_text.yaml#0
+openai	POST /v1/chat/completions	reply	9542c11f14d0c429	4	openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_stop_top_absent.yaml#0
+openai	POST /v1/chat/completions	reply	ac986fd2993fc63b	10	openai/chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_tool.yaml#0
 openai	POST /v1/chat/completions	reply	adfc3ea78c0c8752	1	openai/openai_compatible/dual_reasoning_keys_tool_roundtrip.yaml#0
-openai	POST /v1/chat/completions	reply	b013685b42b92ca6	1	openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_stop_top_absent.yaml#0
-openai	POST /v1/chat/completions	reply	b0b04c538d47c2a5	1	openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_zero.yaml#0
+openai	POST /v1/chat/completions	reply	b013685b42b92ca6	4	openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_stop_top_absent.yaml#0
+openai	POST /v1/chat/completions	reply	b0b04c538d47c2a5	4	openai/chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_absent.yaml#0
 openai	POST /v1/chat/completions	reply	bd072c74925e6170	3	openai/models/gpt_6_luna/session.yaml#64
-openai	POST /v1/chat/completions	reply	c50a094a9bec2670	1	openai/chat_terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_plain_two.yaml#0
+openai	POST /v1/chat/completions	reply	c50a094a9bec2670	4	openai/chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_tiny_plain_one.yaml#0
 openai	POST /v1/chat/completions	reply	d24994f638a6b912	1	bank:openai/max_completion_tokens_matrix/legacy_gpt_3_5_turbo_streaming_cap.yaml#0
-openai	POST /v1/chat/completions	reply	dd19d52ab3c4ea5a	1	openai/streaming_grammar_chat/logprobs_chunks.yaml#0
+openai	POST /v1/chat/completions	reply	dd19d52ab3c4ea5a	3	openai/chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_stop_top_two.yaml#0
 openai	POST /v1/chat/completions	reply	e326ac5b97126bad	1	openai/refusal_matrix/chat_streaming_agent_surfaces_refusal.yaml#0
-openai	POST /v1/chat/completions	reply	ee6064a8a616c08c	1	openai/streaming_grammar_chat/parallel_tool_calls.yaml#0
-openai	POST /v1/chat/completions	reply	f2fa162a2a9f340e	4	openai/chat_tool_lifecycle_matrix/streaming_gpt4o_nested_model.yaml#0
+openai	POST /v1/chat/completions	reply	ee6064a8a616c08c	5	openai/chat_tool_lifecycle_matrix/streaming_gpt41_parallel_agent.yaml#0
+openai	POST /v1/chat/completions	reply	f2fa162a2a9f340e	17	openai/chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_tool.yaml#0
 openai	POST /v1/chat/completions	reply	f4e2b8f209e71dec	1	openai/refusal_matrix/cross_surface_refusal_parity.yaml#1
 openai	POST /v1/chat/completions	reply	f6d1ea189808ba91	1	openai/openai_compatible/dual_reasoning_keys_tool_roundtrip.yaml#1
 openai	POST /v1/embeddings	request	$ {dimensions:num,input:[str],model:str}	20	openai/corpus_host/embed_prompt.yaml#0
@@ -1819,7 +1836,7 @@ openai	POST /v1/responses	request	$ {include:[str],input:[{}],instructions:str,m
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],instructions:str,max_output_tokens:num,model:str,reasoning:{},store:bool,stream:bool}	2	openai/stateless_replay_matrix/commentary_and_final_answer_replay_as_two_items.yaml#0
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],instructions:str,max_output_tokens:num,model:str,reasoning:{},store:bool,tools:[{}]}	11	openai/history_survival_matrix/responses_unary_image_tool_result.yaml#0
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],instructions:str,max_output_tokens:num,model:str,reasoning:{},store:bool}	1	openai/reasoning_matrix_responses/capped.yaml#0
-openai	POST /v1/responses	request	$ {include:[str],input:[{}],instructions:str,max_output_tokens:num,model:str,reasoning:{},stream:bool}	1	openai/reasoning_delta_hook/streaming.yaml#0
+openai	POST /v1/responses	request	$ {include:[str],input:[{}],instructions:str,max_output_tokens:num,model:str,reasoning:{},stream:bool}	2	openai/reasoning_delta_hook/streaming.yaml#0
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],instructions:str,max_output_tokens:num,model:str,store:bool,stream:bool,tools:[{}]}	4	openai/models/gpt_5_2_pro/session.yaml#22
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],instructions:str,max_output_tokens:num,model:str,store:bool,stream:bool}	1	openai/image_matrix_responses/inline_text_streamed.yaml#0
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],instructions:str,max_output_tokens:num,model:str,store:bool,temperature:num,tools:[{}]}	3	openai/prompt_caching/responses_unkeyed_probe.yaml#0
@@ -1863,7 +1880,7 @@ openai	POST /v1/responses	request	$ {include:[str],input:[{}],model:str,previous
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],model:str,reasoning:{},store:bool,stream:bool}	1	openai/streaming_grammar/previous_response_id_chain.yaml#0
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],model:str,reasoning:{},store:bool}	5	openai/gpt_5_6_reasoning/five_turn_metadata_roundtrip.yaml#0
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],model:str,reasoning:{},stream:bool,text:{}}	1	openai/streaming_grammar/structured_output_stream.yaml#0
-openai	POST /v1/responses	request	$ {include:[str],input:[{}],model:str,reasoning:{},stream:bool}	1	openai/gpt_5_6_reasoning/streaming_metadata.yaml#0
+openai	POST /v1/responses	request	$ {include:[str],input:[{}],model:str,reasoning:{},stream:bool}	6	openai/gpt_5_6_reasoning/five_turn_streaming_metadata_roundtrip.yaml#0
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],model:str,reasoning:{}}	2	openai/gpt_5_6_reasoning/context_current_turn.yaml#0
 openai	POST /v1/responses	request	$ {include:[str],input:[{}],model:str,store:bool}	4	openai/models/gpt_5_2_pro/session.yaml#48
 openai	POST /v1/responses	request	$ {input:[{}],instructions:str,max_output_tokens:num,model:str,stream:bool,temperature:num,tools:[{}]}	5	openai/checkpoint_matrix_responses/multi_turn_streamed.yaml#0
@@ -1899,22 +1916,23 @@ openai	POST /v1/responses	request	$.input[] {call_id:str,output:str,status:"comp
 openai	POST /v1/responses	request	$.input[] {content:[],encrypted_content:str,id:str,summary:[],type:"reasoning"}	59	openai/corpus_matrix_responses/serving_concurrent_concurrency_one.yaml#1
 openai	POST /v1/responses	request	$.input[] {content:[{}],encrypted_content:str,id:str,status:"completed",summary:[],type:"reasoning"}	1	openai/openai_compatible/reasoning_content_tool_roundtrip.yaml#1
 openai	POST /v1/responses	request	$.input[] {content:[{}],id:str,phase:str,role:"assistant",status:"completed",type:"message"}	95	openai/gpt_5_6_reasoning/five_turn_metadata_roundtrip.yaml#1
-openai	POST /v1/responses	request	$.input[] {content:[{}],id:str,role:"assistant",status:"completed",type:"message"}	30	openai/adversarial/three_provider_round_trip.yaml#0
+openai	POST /v1/responses	request	$.input[] {content:[{}],id:str,role:"assistant",status:"completed",type:"message"}	34	openai/adversarial/three_provider_round_trip.yaml#0
 openai	POST /v1/responses	request	$.input[] {content:[{}],role:"system",type:"message"}	1	openai/responses_behaviors/system_messages_as_input_items_mid_conversation.yaml#0
-openai	POST /v1/responses	request	$.input[] {content:[{}],role:"user",type:"message"}	351	openai/adversarial/three_provider_round_trip.yaml#0
+openai	POST /v1/responses	request	$.input[] {content:[{}],role:"user",type:"message"}	357	openai/adversarial/three_provider_round_trip.yaml#0
 openai	POST /v1/responses	request	$.input[].content[] {annotations:[],logprobs:[],text:str,type:"output_text"}	117	openai/corpus_breadth/memory_two_runs.yaml#1
 openai	POST /v1/responses	request	$.input[].content[] {annotations:[],text:str,type:"output_text"}	8	openai/adversarial/three_provider_round_trip.yaml#0
 openai	POST /v1/responses	request	$.input[].content[] {detail:str,image_url:str,type:"input_image"}	14	openai/image_matrix_responses/inline_text_streamed.yaml#0
 openai	POST /v1/responses	request	$.input[].content[] {file_id:str,type:"input_file"}	2	openai/stateful_chain_matrix/file_id_chain.yaml#1
 openai	POST /v1/responses	request	$.input[].content[] {file_url:str,type:"input_file"}	9	openai/models/gpt_5_2_pro/session.yaml#12
-openai	POST /v1/responses	request	$.input[].content[] {text:str,type:"input_text"}	351	openai/adversarial/three_provider_round_trip.yaml#0
+openai	POST /v1/responses	request	$.input[].content[] {text:str,type:"input_text"}	357	openai/adversarial/three_provider_round_trip.yaml#0
+openai	POST /v1/responses	request	$.input[].content[] {text:str,type:"output_text"}	4	openai/gpt_5_6_reasoning/five_turn_streaming_metadata_roundtrip.yaml#1
 openai	POST /v1/responses	request	$.input[].content[] {text:str,type:"reasoning_text"}	1	openai/openai_compatible/reasoning_content_tool_roundtrip.yaml#1
 openai	POST /v1/responses	request	$.input[].output[] {detail:str,image_url:str,type:"input_image"}	9	openai/history_survival_matrix/responses_unary_image_tool_result.yaml#1
 openai	POST /v1/responses	request	$.input[].output[] {text:str,type:"input_text"}	8	openai/history_survival_matrix/responses_unary_image_tool_result.yaml#1
-openai	POST /v1/responses	request	$.reasoning {context:str,effort:str,mode:str}	6	openai/gpt_5_6_reasoning/five_turn_metadata_roundtrip.yaml#0
+openai	POST /v1/responses	request	$.reasoning {context:str,effort:str,mode:str}	11	openai/gpt_5_6_reasoning/five_turn_metadata_roundtrip.yaml#0
 openai	POST /v1/responses	request	$.reasoning {context:str,effort:str}	1	openai/gpt_5_6_reasoning/context_current_turn.yaml#0
 openai	POST /v1/responses	request	$.reasoning {effort:str,mode:str}	1	openai/gpt_5_6_reasoning/mode_pro_with_independent_effort.yaml#0
-openai	POST /v1/responses	request	$.reasoning {effort:str,summary:str}	2	openai/reasoning_delta_hook/streaming.yaml#0
+openai	POST /v1/responses	request	$.reasoning {effort:str,summary:str}	3	openai/reasoning_delta_hook/streaming.yaml#0
 openai	POST /v1/responses	request	$.reasoning {effort:str}	130	openai/adversarial/three_provider_round_trip.yaml#0
 openai	POST /v1/responses	request	$.text {format:{}}	10	openai/corpus_matrix_responses/output_tool_under_none_degrades.yaml#0
 openai	POST /v1/responses	request	$.text.format {name:str,schema:{},strict:bool,type:"json_schema"}	10	openai/corpus_matrix_responses/output_tool_under_none_degrades.yaml#0
@@ -1986,6 +2004,7 @@ openai	POST /v1/responses	reply	0ee8f0d592f1f07c	3	openai/models/gpt_5_4_nano/se
 openai	POST /v1/responses	reply	1099ef49c82af82a	2	openai/raw_completion_parity_matrix/responses_tool_turn_parity.yaml#0
 openai	POST /v1/responses	reply	123058a3dc9f32fc	3	openai/streaming_grammar/three_turn_tool_session.yaml#1
 openai	POST /v1/responses	reply	12cd2c40e7f8d077	3	openai/history_survival_matrix/responses_unary_image_tool_result.yaml#4
+openai	POST /v1/responses	reply	14ea41654b5a66a6	1	openai/reasoning_matrix_responses/capped_streamed.yaml#0
 openai	POST /v1/responses	reply	157955349de75e1a	1	bank:openai/corpus_faults_responses/tool_error.yaml#0
 openai	POST /v1/responses	reply	1839993a92202130	4	openai/models/gpt_5_4_nano/session.yaml#21
 openai	POST /v1/responses	reply	1b980a16b6704b8e	1	bank:openai/streaming_grammar/reasoning_summary_stream.yaml#0
@@ -2000,7 +2019,7 @@ openai	POST /v1/responses	reply	247065479e6494bf	2	openai/stateless_replay_matri
 openai	POST /v1/responses	reply	251e0fec33a0446f	3	openai/prompt_caching/responses_streaming_probe.yaml#0
 openai	POST /v1/responses	reply	2610b5606ad5d905	1	openai/models/gpt_5_2_pro/session.yaml#29
 openai	POST /v1/responses	reply	27039bf40cf9f334	4	openai/models/gpt_5_2_pro/session.yaml#1
-openai	POST /v1/responses	reply	2733f6b08f03d8ce	1	openai/gpt_5_6_reasoning/streaming_metadata.yaml#0
+openai	POST /v1/responses	reply	2733f6b08f03d8ce	6	openai/gpt_5_6_reasoning/five_turn_streaming_metadata_roundtrip.yaml#0
 openai	POST /v1/responses	reply	29320d2a01c25829	2	openai/streaming_grammar/parallel_tool_calls.yaml#0
 openai	POST /v1/responses	reply	2c92ce5a2ccad4f4	3	openai/models/gpt_5_2_pro/session.yaml#39
 openai	POST /v1/responses	reply	2ca10fda2e60b542	1	bank:openai/long_run_caching/tool_loop_60_responses.yaml#0
@@ -2069,7 +2088,6 @@ openai	POST /v1/responses	reply	70e4952582d79125	1	openai/models/gpt_5_2_pro/ses
 openai	POST /v1/responses	reply	716de7db1e36c58d	1	openai/openai_compatible/reasoning_content_tool_roundtrip.yaml#0
 openai	POST /v1/responses	reply	717b82214e077b8c	2	openai/corpus_matrix_responses/shaping_active_tools_none_second_turn.yaml#0
 openai	POST /v1/responses	reply	7283edfe3ef640f2	1	openai/web_search_citations/streamed_and_unary.yaml#0
-openai	POST /v1/responses	reply	740ed685945bdc7b	1	bank:openai/reasoning_matrix_responses/capped_streamed.yaml#0
 openai	POST /v1/responses	reply	741dde190a42b7bf	1	bank:openai/vllm/responses_api_accepts_null_metadata.yaml#0
 openai	POST /v1/responses	reply	74535185f0b7d1fc	1	openai/openai_compatible/reasoning_content_tool_roundtrip.yaml#1
 openai	POST /v1/responses	reply	749c8dd16da92d61	1	bank:openai/truncated_turn_matrix/cross_surface_truncation_parity.yaml#0
