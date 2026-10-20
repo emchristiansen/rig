@@ -140,7 +140,7 @@
       "created": 0,
       "id": "chatcmpl-325",
       "model": "qwen3:4b",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "fp_ollama",
       "usage": {
         "completion_tokens": 291,
@@ -180,7 +180,7 @@
       "created": 0,
       "id": "chatcmpl-96",
       "model": "qwen3:4b",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "fp_ollama",
       "usage": {
         "completion_tokens": 42,
@@ -259,7 +259,7 @@
       "created": 0,
       "id": "chatcmpl-986",
       "model": "qwen3:4b",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "fp_ollama",
       "usage": {
         "completion_tokens": 351,
@@ -352,7 +352,7 @@
       "created": 0,
       "id": "chatcmpl-473",
       "model": "qwen3:4b",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "fp_ollama",
       "usage": {
         "completion_tokens": 64,
@@ -477,7 +477,7 @@
       "created": 0,
       "id": "chatcmpl-584",
       "model": "qwen3:4b",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "fp_ollama",
       "usage": {
         "completion_tokens": 139,

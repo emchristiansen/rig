@@ -285,7 +285,7 @@
       "created": 0,
       "id": "gen-1790976037-lIPdoZ3vL6ydGG3GYT6W",
       "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "cache_creation": {
@@ -345,7 +345,7 @@
       "created": 0,
       "id": "gen-1790976042-9vkv7V6JOpBahXa1vtZf",
       "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "cache_creation": {
@@ -459,7 +459,7 @@
       "created": 0,
       "id": "gen-1790976554-Of88HQmmbG7U473Z99RD",
       "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "usage": {
         "cache_creation": {
           "ephemeral_1h_input_tokens": 0,
@@ -578,7 +578,7 @@
       "created": 0,
       "id": "gen-1790976622-pOFvx4fBgHopzmqfborQ",
       "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "usage": {
         "cache_creation": {
           "ephemeral_1h_input_tokens": 0,
@@ -845,7 +845,7 @@
       "created": 0,
       "id": "gen-1790146106-u2lt0nHGwFb06QROdTgz",
       "model": "Qwen/Qwen3.5-9B",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "vllm-0.23.0-ed3ef83f",
       "usage": {
         "cache_creation": {
@@ -931,7 +931,7 @@
       "created": 0,
       "id": "gen-1790146107-Yw7tSS9uqnLrnfZKBsjs",
       "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "usage": {
         "cache_creation": {
           "ephemeral_1h_input_tokens": 0,
@@ -1073,7 +1073,7 @@
       "created": 0,
       "id": "gen-1790976788-FWs0AVKYIAH0gaSK15Fk",
       "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "usage": {
         "cache_creation": {
           "ephemeral_1h_input_tokens": 0,
@@ -1187,7 +1187,7 @@
       "created": 0,
       "id": "gen-1790976794-HQaHDhjIG4moi2dpGtpW",
       "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "cache_creation": {
@@ -1276,7 +1276,7 @@
       "created": 0,
       "id": "gen-1790976802-roSdGLTdhWyaoRW1UF5V",
       "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "cache_creation": {
@@ -1365,7 +1365,7 @@
       "created": 0,
       "id": "gen-1790976805-peJ39B34VNGu02l5u4PU",
       "model": "Qwen/Qwen3.5-397B-A17B-FP8",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "usage": {
         "cache_creation": {
           "ephemeral_1h_input_tokens": 0,
@@ -1628,7 +1628,7 @@
       "created": 0,
       "id": "gen-1790928894-VhZVZlM5JTFngTg1Hz0g",
       "model": "Qwen/Qwen3.5-9B",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "usage": {
         "cache_creation": {
           "ephemeral_1h_input_tokens": 0,
@@ -2060,7 +2060,7 @@
       "created": 0,
       "id": "gen-1790146153-9DEkkgm3hyeFgRRvORTT",
       "model": "Qwen/Qwen3.5-9B",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "vllm-0.23.0-ed3ef83f",
       "usage": {
         "cache_creation": {

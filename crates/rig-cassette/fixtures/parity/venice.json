@@ -343,7 +343,7 @@
       "created": 0,
       "id": "chatcmpl-RdCF9gi0ew6x4n6yQ8miYJcM",
       "model": "mistral-small-3-2-24b-instruct",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "completion_tokens": 2,
@@ -442,7 +442,7 @@
       "created": 0,
       "id": "chatcmpl-R3ck2XYWWJIQudgYvpHQkpua",
       "model": "mistral-small-3-2-24b-instruct",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "completion_tokens": 16,
@@ -684,7 +684,7 @@
       "created": 0,
       "id": "chatcmpl-RzsxOqJhiuBiGKu2mv6SruGe",
       "model": "mistral-small-3-2-24b-instruct",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "completion_tokens": 17,
@@ -919,7 +919,7 @@
       "created": 0,
       "id": "chatcmpl-bcb93d5a6dcb51ac9f1da34f629c32a2",
       "model": "qwen3-5-9b",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "prompt_text": null,
       "prompt_token_ids": null,
       "cost": {
@@ -987,7 +987,7 @@
       "created": 0,
       "id": "chatcmpl-c4c246b338dc4a29232c58f2b5297aef",
       "model": "qwen3-5-9b",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "prompt_text": null,
       "prompt_token_ids": null,
       "cost": {
@@ -1048,7 +1048,7 @@
       "created": 0,
       "id": "chatcmpl-b34c4d18153f4b32ffbd14d08e808180",
       "model": "qwen3-5-9b",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "prompt_text": null,
       "prompt_token_ids": null,
       "cost": {
@@ -1189,7 +1189,7 @@
       "created": 0,
       "id": "chatcmpl-RR0NS98V91en94tElVzFWAdT",
       "model": "qwen3-235b-a22b-thinking-2507",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "completion_tokens": 938,
@@ -1278,7 +1278,7 @@
       "created": 0,
       "id": "chatcmpl-RK2elfMdbpHxenYFMH7PJsJf",
       "model": "qwen3-235b-a22b-thinking-2507",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "completion_tokens": 191,
@@ -1344,7 +1344,7 @@
       "created": 0,
       "id": "chatcmpl-Riltw5EI2PwNqnGAgcmWPYdI",
       "model": "qwen3-235b-a22b-thinking-2507",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "completion_tokens": 45,
@@ -1598,7 +1598,7 @@
       "created": 0,
       "id": "chatcmpl-f5f96d3fafe46b48608101e771980cab",
       "model": "qwen3-5-9b",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "prompt_text": null,
       "prompt_token_ids": null,
       "cost": {
@@ -1719,7 +1719,7 @@
       "created": 0,
       "id": "chatcmpl-RzsAE60JyFLMFAMNeEl6011j",
       "model": "mistral-small-3-2-24b-instruct",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "service_tier": "default",
       "usage": {
         "completion_tokens": 16,

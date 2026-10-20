@@ -60,7 +60,7 @@
       "created": 0,
       "id": "9650c59b-62d1-4df0-bc14-95407b4ba305",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 36,
@@ -226,7 +226,7 @@
       "created": 0,
       "id": "935900cb-aa60-4baa-a7f1-b31ccbd038b9",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 1,
@@ -347,7 +347,7 @@
       "created": 0,
       "id": "6b593998-bbbb-46ef-a099-989a122cd56d",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 16,
@@ -411,7 +411,7 @@
       "created": 0,
       "id": "e7440eb4-289a-4e2d-9538-80addd0574c7",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 20,
@@ -533,7 +533,7 @@
       "created": 0,
       "id": "f507b884-8a3b-4600-a3cb-0a5e0190c161",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 102,
@@ -684,7 +684,7 @@
       "created": 0,
       "id": "1f0db891-4fca-4bed-8102-5eece7f3c962",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 73,
@@ -736,7 +736,7 @@
       "created": 0,
       "id": "13923399-cdbc-43e6-958f-4bf99042a574",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 2,
@@ -1175,7 +1175,7 @@
       "created": 0,
       "id": "aa0ce3b8-9e41-4a00-b467-aaf07fd94194",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 1,
@@ -1259,7 +1259,7 @@
       "created": 0,
       "id": "70322b86-e0e2-4d50-9d0f-1ef3b887e29b",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 1,
@@ -1328,7 +1328,7 @@
       "created": 0,
       "id": "9e38a311-b2c6-4d90-adb4-0371d28a571f",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 1,
@@ -1417,7 +1417,7 @@
       "created": 0,
       "id": "35d4cd5f-f99f-4a51-b7ac-fe62cacf8550",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 1,
@@ -1491,7 +1491,7 @@
       "created": 0,
       "id": "0466771a-94f8-48ac-9e3c-714110e80113",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 15,
@@ -1526,16 +1526,6 @@
             },
             "fingerprint": "ff4dd52559afd8be"
           }
-        }
-      },
-      {
-        "tool_call": {
-          "id": "call_01_5actx8fjHHsFCzBfQuHB8626",
-          "name": "file_report",
-          "arguments": {
-            "summary": "Log this incident"
-          },
-          "native": null
         }
       }
     ],
@@ -1678,7 +1668,7 @@
       "created": 0,
       "id": "a002b8de-ea4b-440f-97a1-db54fb2aeb66",
       "model": "deepseek-flash",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669",
       "usage": {
         "completion_tokens": 16,

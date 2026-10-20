@@ -1006,7 +1006,7 @@
       "created": 0,
       "id": "5ea49730-acc5-46ce-a2d4-5d2a2cd6b511",
       "model": "sonar",
-      "object": "chat.completion",
+      "object": "chat.completion.done",
       "search_results": [
         {
           "date": "2023-12-27",
@@ -1436,7 +1436,7 @@
       "created": 0,
       "id": "ea63f2f9-52d6-4b17-a112-de770eeca3d4",
       "model": "sonar",
-      "object": "chat.completion",
+      "object": "chat.completion.done",
       "search_results": [
         {
           "date": null,

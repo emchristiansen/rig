@@ -45,7 +45,7 @@
       "created": 0,
       "id": "6",
       "model": "Qwen/Qwen3-4B",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "local",
       "usage": {
         "avg_compl_tok_per_sec": 4.9165516,

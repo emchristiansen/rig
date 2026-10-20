@@ -942,7 +942,7 @@ facts = [
   { provider = "llamacpp", encoder = "POST /v1/chat/completions", path = "$", fact = "{max_tokens:num,messages:[{}],model:str,temperature:str}", recording = "llamacpp/error_matrix/malformed_request_field.yaml#0" },
   { provider = "llamacpp", encoder = "POST /v1/chat/completions", path = "$", fact = "{max_tokens:num,messages:[{}],model:str,tool_choice:str,tools:[{}]}", recording = "llamacpp/truncation_matrix/tool_call_cut_mid_arguments.yaml#0" },
   { provider = "llamacpp", encoder = "POST /v1/chat/completions", path = "$", fact = "{max_tokens:num,messages:[{}],model:str,tools:[{}]}", recording = "llamacpp/model_family_matrix/llama_blocking_tool_call.yaml#0" },
-  { provider = "llamacpp", encoder = "POST /v1/chat/completions", path = "$", fact = "{max_tokens:num,messages:[{}],model:str}", recording = "llamacpp/content_matrix/long_tool_output.yaml#0" },
+  { provider = "llamacpp", encoder = "POST /v1/chat/completions", path = "$", fact = "{max_tokens:num,messages:[{}],model:str}", recording = "llamacpp/content_matrix/consecutive_same_role.yaml#0" },
   { provider = "llamacpp", encoder = "POST /v1/chat/completions", path = "$", fact = "{messages:[{}],model:str,response_format:{},temperature:num}", recording = "llamacpp/structured_output/prompt_typed_extended_details_structured_output.yaml#0" },
   { provider = "llamacpp", encoder = "POST /v1/chat/completions", path = "$", fact = "{messages:[{}],model:str,response_format:{},tools:[{}]}", recording = "llamacpp/typed_prompt_tools/prompt_typed_with_tool_call_roundtrip.yaml#1" },
   { provider = "llamacpp", encoder = "POST /v1/chat/completions", path = "$", fact = "{messages:[{}],model:str,response_format:{}}", recording = "llamacpp/structured_output/structured_output_smoke.yaml#0" },
