@@ -4,12 +4,12 @@
 
 use rig_core::completion::CompletionRequest;
 use rig_core::error::EncodeError;
-use rig_core::message::{AssistantContent, Message};
+use rig_core::message::{AssistantContent, DocumentMediaType, Message, UserContent};
 use rig_core::providers::anthropic::completion::{CLAUDE_HAIKU_4_5, CLAUDE_SONNET_4_6};
 use rig_core::providers::anthropic::{ANTHROPIC, AnthropicConfig, Dialect, Messages};
 use rig_core::wire::{Mode, Wire, WireFrame};
 use rig_history_conformance::{
-    Ablation, CallShape, Ending, HistoryFixture, Rng, Shape, decode, http_body, replies,
+    Ablation, CallShape, Ending, HistoryFixture, MediaPart, Rng, Shape, decode, http_body, replies,
 };
 use serde_json::{Value, json};
 
@@ -332,6 +332,32 @@ impl HistoryFixture for MessagesHistory {
 
     fn finish_reason_pointer(&self) -> Option<&'static str> {
         Some("/stop_reason")
+    }
+
+    /// A whole message with no content is refused unless it ended on
+    /// `end_turn` or a reported stop sequence; a stream that ended cleanly
+    /// is a successful empty turn.
+    fn refuses_empty_whole(&self) -> bool {
+        true
+    }
+
+    /// CSV and Markdown documents, and a document of no declared type, are
+    /// refused before adaptation.
+    fn preflight_refusal(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+        let MediaPart::User(UserContent::Document(document)) = part else {
+            return None;
+        };
+        let refused = match &document.media_type {
+            Some(DocumentMediaType::CSV) => {
+                "Anthropic only supports PDF and plain text documents, got: text/csv"
+            }
+            Some(DocumentMediaType::MARKDOWN) => {
+                "Anthropic only supports PDF and plain text documents, got: text/markdown"
+            }
+            None => "Anthropic cannot receive this media in its form",
+            Some(_) => return None,
+        };
+        Some(refused.to_owned())
     }
 
     fn error_frame(&self) -> Option<WireFrame> {

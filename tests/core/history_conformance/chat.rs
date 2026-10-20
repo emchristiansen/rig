@@ -5,13 +5,17 @@
 
 use rig_core::completion::{CompletionRequest, FinishReason};
 use rig_core::error::EncodeError;
-use rig_core::message::{AssistantContent, AssistantMessage};
+use rig_core::message::{
+    AssistantContent, AssistantMessage, DocumentData, DocumentMediaType, DocumentSourceKind,
+    UserContent,
+};
 use rig_core::providers::openai::wire::{
     Chat, DEEPSEEK, Dialect, MISTRAL, OPENROUTER, OpenAIConfig,
 };
 use rig_core::wire::{Mode, Wire, WireFrame};
 use rig_history_conformance::{
-    Ablation, CallShape, Ending, HistoryFixture, Rng, Shape, decode, http_body, replies,
+    Ablation, CallShape, Ending, HistoryFixture, MediaPart, RefusedArguments, Rng, Shape, decode,
+    http_body, replies,
 };
 use serde_json::{Map, Value, json};
 
@@ -360,6 +364,49 @@ impl HistoryFixture for ChatHistory {
         Some(match mode {
             Mode::Unary => frames(self.document(message, "stop")),
             Mode::Streaming => self.stream(vec![message], "stop"),
+        })
+    }
+
+    /// A whole message with no content is refused; a stream that ended
+    /// cleanly is a successful empty turn.
+    fn refuses_empty_reply(&self, mode: Mode) -> bool {
+        mode == Mode::Unary
+    }
+
+    fn refuses_empty_whole(&self) -> bool {
+        true
+    }
+
+    /// Argument text that is not JSON is refused: a whole message fails its
+    /// `chat.completion` frame with the parser's error, and a stream fails
+    /// the call with its malformed input.
+    fn refused_arguments(&self, arguments: &str, mode: Mode) -> Option<RefusedArguments> {
+        let error = serde_json::from_str::<Value>(arguments).err()?.to_string();
+        Some(match mode {
+            Mode::Unary => RefusedArguments::CorruptFrame {
+                event_type: Some("chat.completion"),
+                error,
+            },
+            Mode::Streaming => RefusedArguments::MalformedToolInput,
+        })
+    }
+
+    /// A PDF named by URL is refused before adaptation.
+    fn preflight_refusal(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+        let MediaPart::User(UserContent::Document(document)) = part else {
+            return None;
+        };
+        matches!(
+            (&document.media_type, &document.data),
+            (
+                Some(DocumentMediaType::PDF),
+                DocumentData::File(DocumentSourceKind::Url(_))
+            )
+        )
+        .then(|| {
+            "Message conversion error: OpenAI chat completions does not accept URL files; \
+             use the Responses API or pass base64-encoded bytes"
+                .to_owned()
         })
     }
 

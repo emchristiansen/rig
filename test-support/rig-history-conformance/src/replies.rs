@@ -12,6 +12,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use serde_json::{Value, json};
 
 use rig_core::completion::CompletionRequest;
+use rig_core::error::ProviderError;
+use rig_core::message::{AssistantContent, EMPTY_RESPONSE_ERROR};
 use rig_core::operation::Completion;
 use rig_core::wire::{Mode, Wire};
 
@@ -101,6 +103,18 @@ pub fn disagreement<W: Wire<Op = Completion>>(
     wire: &W,
     frames: Frames<W::Frame>,
 ) -> Option<String> {
+    disagreement_of(wire, frames, false)
+}
+
+/// [`disagreement`] on a wire that refuses a whole reply with no content
+/// with [`EMPTY_RESPONSE_ERROR`] when `refuses_empty_whole`: there that
+/// refusal agrees with a stream that folds to a successful turn holding
+/// no content but blank text, and with nothing else.
+pub fn disagreement_of<W: Wire<Op = Completion>>(
+    wire: &W,
+    frames: Frames<W::Frame>,
+    refuses_empty_whole: bool,
+) -> Option<String> {
     let request = CompletionRequest::new("restate");
     let Frames { whole, streamed } = frames;
     let unary = quiet(|| decode(wire, &request, Mode::Unary, whole));
@@ -128,6 +142,20 @@ pub fn disagreement<W: Wire<Op = Completion>>(
                 format!(
                     "the stops differ: whole {:?}, streamed {:?}",
                     unary.stop(),
+                    stream.stop()
+                )
+            })
+        }
+        (Ok(Err(ProviderError::Response(message))), Ok(Ok(stream)))
+            if refuses_empty_whole && message == EMPTY_RESPONSE_ERROR =>
+        {
+            let empty = stream.choice.iter().all(|block| {
+                matches!(block, AssistantContent::Text(text) if text.text.trim().is_empty())
+            });
+            (!empty || stream.stop().is_failure()).then(|| {
+                format!(
+                    "the whole reply is refused as empty, but the stream folds to {} ({:?})",
+                    json!(stream.message()),
                     stream.stop()
                 )
             })
@@ -378,20 +406,25 @@ fn responses_response(output: &[Value], finish: &str) -> Value {
     response
 }
 
-pub fn responses_build(spec: &Spec) -> (Vec<String>, Vec<String>) {
+/// `spec` as a whole Responses reply and its stream. Only a dialect that
+/// reads item events without a numeric `output_index` (`indexless`) gets
+/// streams that leave it out.
+pub fn responses_build(spec: &Spec, indexless: bool) -> (Vec<String>, Vec<String>) {
     let mut rng = Rng::new(spec.seed);
     let whole = responses_response(&spec.blocks, &spec.finish).to_string();
-    let mut events = vec![
-        json!({"type": "response.created", "response": {"id": "resp_1", "object": "response", "status": "in_progress", "output": []}}),
-    ];
+    let started = json!({"id": "resp_1", "object": "response", "created_at": 1_700_000_000,
+        "model": "the-model", "status": "in_progress", "output": []});
+    let mut events = vec![json!({"type": "response.created", "response": started})];
     if rng.chance(50) {
-        events.push(json!({"type": "response.in_progress", "response": {"id": "resp_1", "object": "response", "status": "in_progress", "output": []}}));
+        events.push(json!({"type": "response.in_progress", "response": started}));
     }
-    // 0: standard; 1: no output_index on any event; 2: some items only in
-    // the terminal response; 3: calls with no argument deltas.
+    // 0: standard; 1: no output_index on any event, only where the dialect
+    // reads that; 2: some items only in the terminal response; 3: calls with
+    // no argument deltas.
     let variant = match rng.below(100) {
         0..=59 => 0,
-        60..=74 => 1,
+        60..=74 if indexless => 1,
+        60..=74 => 0,
         75..=89 => 2,
         _ => 3,
     };

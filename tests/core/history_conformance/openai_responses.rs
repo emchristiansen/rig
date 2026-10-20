@@ -11,7 +11,7 @@ use rig_core::providers::openai::OpenAIConfig;
 use rig_core::providers::openai::responses_api::wire::Responses;
 use rig_core::wire::{Encoded, Mode, Wire, WireFrame};
 use rig_history_conformance::{
-    Ablation, CallShape, Ending, HistoryFixture, Rng, Shape, http_body, replies,
+    Ablation, CallShape, Ending, HistoryFixture, RefusedArguments, Rng, Shape, http_body, replies,
 };
 use serde_json::{Value, json};
 
@@ -26,6 +26,9 @@ pub struct ResponsesHistory<W> {
     pub other_model: &'static str,
     /// A model on the wire that reads no images.
     pub text_only_model: Option<&'static str>,
+    /// Whether the dialect reads item events that carry no numeric
+    /// `output_index`; the strict reader of the others refuses them.
+    pub reads_indexless: bool,
 }
 
 fn message(id: &str, text: &str, extra: Value) -> Value {
@@ -159,8 +162,8 @@ fn added(item: &Value) -> Value {
 fn streamed(output: &[Value], status: Value) -> Vec<WireFrame> {
     let mut events = vec![json!({
         "type": "response.created",
-        "sequence_number": 0,
-        "response": {"id": "resp_1", "object": "response", "status": "in_progress", "output": []},
+        "response": {"id": "resp_1", "object": "response", "created_at": 1_700_000_000,
+            "model": "the-model", "status": "in_progress", "output": []},
     })];
     for (index, item) in output.iter().enumerate() {
         events.push(json!({
@@ -208,17 +211,20 @@ fn streamed(output: &[Value], status: Value) -> Vec<WireFrame> {
         _ => "response.completed",
     };
     events.push(json!({"type": terminal, "response": response(output, status)}));
-    events
-        .into_iter()
-        .map(|event| WireFrame::Text(event.to_string()))
-        .collect()
+    self::events(&events)
 }
 
-/// One frame per event.
+/// One frame per event, each numbered in order by its `sequence_number`,
+/// which the strict reader requires of every event.
 fn events(events: &[Value]) -> Vec<WireFrame> {
     events
         .iter()
-        .map(|event| WireFrame::Text(event.to_string()))
+        .enumerate()
+        .map(|(number, event)| {
+            let mut event = event.clone();
+            event["sequence_number"] = json!(number);
+            WireFrame::Text(event.to_string())
+        })
         .collect()
 }
 
@@ -293,7 +299,7 @@ where
     }
 
     fn reply_frames(&self, spec: &replies::Spec) -> Option<replies::Frames<WireFrame>> {
-        let (whole, streamed) = replies::responses_build(spec);
+        let (whole, streamed) = replies::responses_build(spec, self.reads_indexless);
         Some(replies::Frames {
             whole: replies::texts(whole),
             streamed: replies::texts(streamed),
@@ -322,6 +328,14 @@ where
             completed(),
             mode,
         ))
+    }
+
+    /// Argument text that is not JSON fails the call with its malformed
+    /// input, whole or streamed.
+    fn refused_arguments(&self, arguments: &str, _mode: Mode) -> Option<RefusedArguments> {
+        serde_json::from_str::<Value>(arguments)
+            .is_err()
+            .then_some(RefusedArguments::MalformedToolInput)
     }
 
     /// Every status the API documents, every incomplete reason, and a body
@@ -427,7 +441,9 @@ where
     }
 
     /// Calls a stream tells apart by item, whatever their output index
-    /// says; a whole reply's are its `output` list.
+    /// says; a whole reply's are its `output` list. A dialect whose strict
+    /// reader refuses an item event without a numeric `output_index` has no
+    /// stream that leaves it out or sends it `null`.
     fn calls_reply(&self, shape: CallShape, mode: Mode) -> Option<Vec<WireFrame>> {
         let calls = [
             json!({"type": "function_call", "id": "fc_a1", "call_id": "a1", "name": "weather",
@@ -443,6 +459,11 @@ where
         };
         match (shape, mode) {
             (CallShape::WholeList, Mode::Unary) => Some(whole(&calls, completed())),
+            (CallShape::Indexless | CallShape::NullIndex, Mode::Streaming)
+                if !self.reads_indexless =>
+            {
+                None
+            }
             (CallShape::WholeList, Mode::Streaming) | (_, Mode::Unary) => None,
             (_, Mode::Streaming) => {
                 let mut stream = Vec::new();
@@ -543,5 +564,6 @@ rig_history_conformance::history_conformance_suite! {
         model: "gpt-5.4",
         other_model: "gpt-5.2",
         text_only_model: Some("o3-mini"),
+        reads_indexless: false,
     },
 }

@@ -7,9 +7,11 @@
 use google_cloud_aiplatform_v1::model::GenerateContentResponse;
 use rig_core::completion::CompletionRequest;
 use rig_core::error::EncodeError;
-use rig_core::message::{AssistantContent, AssistantMessage};
+use rig_core::message::{AssistantContent, AssistantMessage, DocumentSourceKind};
 use rig_core::wire::{Mode, Wire};
-use rig_history_conformance::{Ablation, CallShape, Ending, HistoryFixture, Rng, Shape, replies};
+use rig_history_conformance::{
+    Ablation, CallShape, Ending, HistoryFixture, MediaPart, Rng, Shape, replies,
+};
 use rig_vertexai::completion::GenerateContent;
 use serde_json::{Value, json};
 
@@ -178,6 +180,7 @@ impl HistoryFixture for VertexHistory {
                 "/candidates",
                 "/candidates/0/content",
                 "/candidates/0/content/parts",
+                "/candidates/0/content/parts/4/functionCall/name",
                 "/candidates/0/finishReason",
             ],
             frames: |mut document| {
@@ -214,6 +217,31 @@ impl HistoryFixture for VertexHistory {
 
     fn empty_reply(&self, _mode: Mode) -> Option<Vec<GenerateContentResponse>> {
         Some(vec![frame(reply_document(json!([]), "STOP"))])
+    }
+
+    /// A reply with no part is refused in both modes, since a streamed call
+    /// re-emits the unary reply.
+    fn refuses_empty_reply(&self, _mode: Mode) -> bool {
+        true
+    }
+
+    /// Gemini's tool-protocol finishes fail the reply.
+    fn refused_finish(&self, name: &str) -> Option<String> {
+        let reason = match name {
+            "MALFORMED_FUNCTION_CALL" => "MalformedFunctionCall",
+            "UNEXPECTED_TOOL_CALL" => "UnexpectedToolCall",
+            _ => return None,
+        };
+        Some(format!(
+            "Gemini stopped with finish_reason={reason}: no finish message provided"
+        ))
+    }
+
+    /// An assistant image the caller holds as anything but base64 data is
+    /// refused before adaptation.
+    fn preflight_refusal(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+        matches!(part, MediaPart::AssistantImage(image) if !matches!(image.data, DocumentSourceKind::Base64(_)))
+            .then(|| "Vertex AI assistant images must use base64 data".to_owned())
     }
 
     fn finish_reason_pointer(&self) -> Option<&'static str> {
@@ -282,6 +310,45 @@ fn fitted(value: &mut Value, typed: &Value) {
             values.retain_mut(|value| fits(value, types.next()));
         }
         _ => {}
+    }
+}
+
+/// A call without a name, or with a `null` or retyped one, is refused with
+/// the exact empty tool name error, so H5 takes the name as required.
+#[test]
+fn h05_vertex_missing_function_call_name_is_refused() {
+    use rig_core::error::ProviderError;
+    use rig_core::message::EmptyToolName;
+
+    const NAME: &str = "/candidates/0/content/parts/4/functionCall/name";
+    let fixture = VertexHistory;
+    let ablation = fixture
+        .ablation()
+        .expect("the Vertex ablation fixture exists");
+    assert_eq!(ablation.document.pointer(NAME), Some(&json!("lookup")));
+    for change in [None, Some(Value::Null), Some(json!(7))] {
+        let mut document = ablation.document.clone();
+        match &change {
+            Some(value) => *document.pointer_mut(NAME).expect("the call's name") = value.clone(),
+            None => {
+                document
+                    .pointer_mut("/candidates/0/content/parts/4/functionCall")
+                    .and_then(Value::as_object_mut)
+                    .expect("the fifth part's call")
+                    .shift_remove("name");
+            }
+        }
+        let result = rig_core::test_utils::history::decode(
+            &fixture.wire(MODEL),
+            Mode::Unary,
+            (ablation.frames)(document),
+        );
+        assert!(
+            matches!(&result, Err(ProviderError::Request(error))
+                if error.downcast_ref::<EmptyToolName>() == Some(&EmptyToolName)
+                    && error.to_string() == EmptyToolName.to_string()),
+            "the name changed to {change:?} reports the exact empty tool name error: {result:?}"
+        );
     }
 }
 

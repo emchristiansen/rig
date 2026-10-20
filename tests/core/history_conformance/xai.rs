@@ -17,5 +17,6 @@ rig_history_conformance::history_conformance_suite! {
         model: xai::GROK_4,
         other_model: "grok-4-fast-reasoning",
         text_only_model: Some(xai::GROK_3_MINI),
+        reads_indexless: false,
     },
 }
