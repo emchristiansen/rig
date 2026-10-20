@@ -196,7 +196,7 @@ fn the_mode_decides_whether_the_body_asks_for_a_stream() {
 /// `[DONE]` before any finish reason fails the turn, as pi's
 /// `openai-completions` throws: the provider never said the turn ended.
 #[tokio::test]
-async fn the_done_sentinel_emits_the_deferred_terminal() {
+async fn the_done_sentinel_without_a_finish_fails() {
     const BODY: &str = concat!(
         "data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl-1\",",
         "\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
@@ -210,16 +210,11 @@ async fn the_done_sentinel_emits_the_deferred_terminal() {
     );
     let mut response = bound.stream(prompt("hi")).expect("the stream opens");
     while response.next().await.is_some() {}
-    let folded = response
+    let error = response
         .finish()
         .await
-        .expect("the sentinel ends the reply");
-    assert_eq!(
-        canonical(&folded.choice),
-        vec![AssistantContent::text("hi")]
-    );
-    assert_eq!(folded.finish_reason(), None);
-    assert_eq!(folded.response_id(), Some("chatcmpl-1"));
+        .expect_err("a stream the provider never finished has no response");
+    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
 }
 
 /// Drive `body` through a gateway whose quirks end a `[DONE]` stream that
@@ -515,8 +510,9 @@ async fn a_gateway_may_answer_with_a_bare_string() {
         response.choice.first().map(AssistantContent::canonical),
         Some(AssistantContent::text("the whole answer"))
     );
-    // F retains the absence of a reported reason on a bare-string reply.
-    assert_eq!(response.finish_reason(), None);
+    // No metadata and no terminal reason: the whole answer is a stop, as
+    // pi ends a reply on a wire that states none.
+    assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
     assert_eq!(response.usage, crate::completion::Usage::default());
     assert_eq!(response.response_id(), None);
 

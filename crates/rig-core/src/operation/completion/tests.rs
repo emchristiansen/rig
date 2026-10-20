@@ -1056,6 +1056,93 @@ fn gemini_interactions_prices_reasoning_without_changing_counters() {
     );
 }
 
+/// Interactions reports the hosted-tool prompt beside its input counter;
+/// the price charges it as input, as GenerateContent does by folding it
+/// into input, while the counters stay as reported. The counts are the
+/// `code_execution_usage` recording's.
+#[test]
+fn gemini_interactions_prices_the_tool_use_prompt_as_input_without_changing_counters() {
+    let usage = Usage::new()
+        .input_tokens(135)
+        .output_tokens(171)
+        .reasoning_tokens(182)
+        .tool_use_prompt_tokens(526)
+        .cached_input_tokens(0)
+        .total_tokens(1014);
+    let response = write_from(
+        crate::message::Origin::new(
+            "gemini.interactions",
+            crate::providers::gemini::completion::PROVIDER_NAME,
+            "gemini-2.5-flash",
+        ),
+        Finish {
+            usage,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    let cost = response.usage.cost.expect("the requested model is priced");
+    // (135 + 526) input tokens at 0.30 USD and (171 + 182) output tokens
+    // at 2.50 USD per million.
+    assert!(
+        cost.input.is_some_and(|part| close(part, 0.0001983)),
+        "{cost:?}"
+    );
+    assert!(
+        cost.output.is_some_and(|part| close(part, 0.0008825)),
+        "{cost:?}"
+    );
+    assert_eq!(cost.cache_read, Some(0.0));
+    assert_eq!(cost.cache_write, Some(0.0));
+    assert!(close(cost.total, 0.0010808), "{cost:?}");
+    assert_eq!(response.usage, usage.cost(cost), "the counters stay");
+
+    // The same turn as GenerateContent's mapping counts it, tool-use prompt
+    // in input and thinking in output, costs the same.
+    let folded = Usage::new()
+        .input_tokens(661)
+        .output_tokens(353)
+        .reasoning_tokens(182)
+        .tool_use_prompt_tokens(526)
+        .cached_input_tokens(0)
+        .total_tokens(1014);
+    let generate_content = write_from(
+        crate::message::Origin::new(
+            "gemini.generate_content",
+            crate::providers::gemini::completion::PROVIDER_NAME,
+            "gemini-2.5-flash",
+        ),
+        Finish {
+            usage: folded,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    assert_eq!(generate_content.usage.cost, Some(cost));
+}
+
+#[test]
+fn gemini_interactions_has_no_cost_when_priced_input_overflows() {
+    let usage = Usage::new()
+        .input_tokens(u64::MAX)
+        .output_tokens(20)
+        .tool_use_prompt_tokens(1);
+    let response = write_from(
+        crate::message::Origin::new(
+            "gemini.interactions",
+            crate::providers::gemini::completion::PROVIDER_NAME,
+            "gemini-2.5-flash",
+        ),
+        Finish {
+            usage,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    assert_eq!(response.usage, usage);
+    assert_eq!(response.usage.cost, None);
+}
+
 #[test]
 fn inclusive_output_is_not_charged_for_reasoning_twice() {
     for (api, provider, model, usage, output_cost, total_cost) in [

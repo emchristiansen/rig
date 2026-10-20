@@ -619,13 +619,16 @@ fn opus_4_8_hoists_leading_system_message_when_documents_are_present() {
 
     let value = serde_json::to_value(request).unwrap();
     assert_eq!(value["system"][0]["text"], "Global history instruction.");
-    assert_eq!(value["system"][1]["text"], "Mid-conversation instruction.");
+    assert_eq!(value["system"].as_array().map(Vec::len), Some(1));
 
+    // The misplaced mid-conversation instruction moves after the next user
+    // turn instead of into `system`.
     let messages = value["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.len(), 4);
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[1]["role"], "assistant");
     assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[3]["role"], "system");
     assert!(
         messages[0].to_string().contains("<file id: doc>"),
         "document message should follow top-level system: {messages:?}"
@@ -638,10 +641,12 @@ fn opus_4_8_hoists_leading_system_message_when_documents_are_present() {
         1,
         "document message should appear exactly once: {messages:?}"
     );
-    assert!(
+    assert_eq!(
         messages
             .iter()
-            .all(|message| message["role"].as_str() != Some("system"))
+            .filter(|message| message["role"].as_str() == Some("system"))
+            .count(),
+        1
     );
 }
 
@@ -757,8 +762,11 @@ fn opus_4_8_preserves_system_message_after_assistant_server_tool_use() {
     assert_eq!(messages[2]["role"], "assistant");
 }
 
+/// A system message before a user turn moves after that turn, the next slot
+/// Anthropic takes one in, rather than into `system`, which would change the
+/// prompt prefix.
 #[test]
-fn opus_4_8_hoists_system_message_in_invalid_mid_conversation_position() {
+fn opus_4_8_defers_system_message_in_invalid_mid_conversation_position() {
     let request = completion_request_with_history(
         vec![
             message::Message::user("Review this code."),
@@ -780,15 +788,17 @@ fn opus_4_8_hoists_system_message_in_invalid_mid_conversation_position() {
     .unwrap();
 
     let value = serde_json::to_value(request).unwrap();
-    assert_eq!(
-        value["system"][0]["text"],
-        "From now on, require explicit type annotations."
-    );
+    assert!(value.get("system").is_none(), "{value}");
 
     let messages = value["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 3);
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[2]["role"], "system");
+    assert_eq!(
+        messages[2]["content"][0]["text"],
+        "From now on, require explicit type annotations."
+    );
 }
 
 #[test]

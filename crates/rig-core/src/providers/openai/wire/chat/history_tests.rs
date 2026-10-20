@@ -157,7 +157,7 @@ fn mistral_thinking_parts_are_reasoning() {
         );
         assert_eq!(
             body["messages"][1],
-            json!({"role": "assistant", "prefix": false,
+            json!({"role": "assistant",
                 "content": [thinking("plan it"), {"type": "text", "text": "Hi"}]}),
             "{mode:?}"
         );

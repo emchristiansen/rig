@@ -1479,9 +1479,21 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
             })
     };
 
-    // Text-only content keeps the plain-string form it always took.
+    // A lone text part is the plain string the shared encoder sends.
     let body = encode(vec![UserContent::text("just words")]).expect("encodes");
     assert_eq!(body["messages"][0]["content"], "just words");
+
+    // A text-only array stays an array of text chunks, as upstream sends it,
+    // rather than being flattened into one string.
+    let body = encode(vec![
+        UserContent::text("first"),
+        UserContent::text("second"),
+    ])
+    .expect("encodes");
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([{"type": "text", "text": "first"}, {"type": "text", "text": "second"}])
+    );
 
     // An image rides as Mistral's own `image_url` chunk, in an array \u2014 not
     // flattened away.
@@ -1502,19 +1514,23 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
     assert_eq!(parts[0]["type"], "text");
     assert_eq!(parts[1]["type"], "image_url");
 
-    // Content Mistral has no chunk for fails here rather than being removed.
-    let refused = encode(vec![
+    // A part of a type Mistral has no chunk for is forwarded verbatim, as
+    // upstream forwards it, rather than refused or removed.
+    let body = encode(vec![
         UserContent::text("watch"),
         UserContent::Video(crate::message::Video {
             data: crate::message::DocumentSourceKind::Url("https://x.invalid/a.mp4".to_owned()),
             media_type: None,
             ..Default::default()
         }),
-    ]);
-    let error = refused.expect_err("Mistral carries no video chunk");
-    assert!(
-        error.to_string().contains("Mistral cannot carry"),
-        "the error names the constraint: {error}"
+    ])
+    .expect("an unknown part type is forwarded, not refused");
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([
+            {"type": "text", "text": "watch"},
+            {"type": "video_url", "video_url": {"url": "https://x.invalid/a.mp4"}}
+        ])
     );
 
     // A document with inline bytes becomes `document_url`, carrying its name

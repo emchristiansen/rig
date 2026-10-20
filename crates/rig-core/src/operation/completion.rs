@@ -1539,20 +1539,27 @@ const CACHE_BESIDE_INPUT: [&str; 2] = [
 /// What `usage` costs at the built-in catalog's pricing for `origin`'s
 /// model, or `None` when the catalog has no price for it or the provider
 /// is one it does not price ([`UNPRICED`]). The counters stay unchanged;
-/// only the priced input adds back cache counts its mapping reports beside
-/// it, and an overflowing sum has no cost.
+/// only the priced input adds back the counts its mapping reports beside
+/// it (cache reads and writes for [`CACHE_BESIDE_INPUT`], the hosted-tool
+/// prompt for Gemini Interactions), and an overflowing sum has no cost.
 fn catalog_cost(origin: &Origin, usage: &Usage) -> Option<crate::completion::Cost> {
     if UNPRICED.contains(&origin.provider.as_str()) {
         return None;
     }
-    let reasoning = if origin.provider == crate::providers::gemini::completion::PROVIDER_NAME
-        && origin.api.as_str() == "gemini.interactions"
-    {
+    // The native Gemini Interactions mapping reports thought and tool-use
+    // prompt tokens beside its output and input counters, where
+    // GenerateContent folds them into those counters.
+    let interactions = origin.provider == crate::providers::gemini::completion::PROVIDER_NAME
+        && origin.api.as_str() == "gemini.interactions";
+    let reasoning = if interactions {
         crate::catalog::ReasoningAccounting::SeparateFromOutput
     } else {
         crate::catalog::ReasoningAccounting::IncludedInOutput
     };
     let mut priced = *usage;
+    if interactions && let Some(input) = usage.input_tokens {
+        priced.input_tokens = Some(input.checked_add(usage.tool_use_prompt_tokens.unwrap_or(0))?);
+    }
     if CACHE_BESIDE_INPUT.contains(&origin.api.as_str())
         && let Some(uncached) = usage.input_tokens
     {

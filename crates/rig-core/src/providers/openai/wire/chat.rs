@@ -935,21 +935,18 @@ fn finalize_deepseek(map: &mut serde_json::Map<String, serde_json::Value>) {
     }
 }
 
-/// Mistral's wire-level differences: its own spelling for a forced tool
-/// choice, the relaxation that lets a structured format ride beside tools,
-/// and its assistant-message schema.
+/// Mistral's wire-level differences: the relaxation that lets a structured
+/// format ride beside tools, its content chunks, and the reasoning field its
+/// assistant messages refuse.
+///
+/// A forced tool choice goes as the shared encoder spells it (`required`),
+/// and assistant messages carry no `prefix` and no inserted empty
+/// `content`, as upstream's live re-recordings send them.
 ///
 /// Its multimodal content mapping is [`mistral_content`].
 fn finalize_mistral(
     map: &mut serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), EncodeError> {
-    // Mistral spells the "must call some tool" mode `any`, not `required`.
-    if let Some(tool_choice) = map.get_mut("tool_choice")
-        && tool_choice.as_str() == Some("required")
-    {
-        *tool_choice = serde_json::Value::String("any".to_owned());
-    }
-
     // Mistral rejects forced tool calls beside JSON response formats.
     // Relax the choice rather than discard the requested schema; text formats are exempt.
     let forces_a_tool_call = map
@@ -985,25 +982,14 @@ fn finalize_mistral(
         let is_assistant =
             message.get("role").and_then(serde_json::Value::as_str) == Some("assistant");
 
-        // Mistral takes text-only message `content` as a plain string and
-        // carries images, audio and documents as its own chunk array.
-        // Content it has no chunk for fails here rather than reaching the API
-        // with the part removed.
+        // Mistral carries text, images, audio and documents as its own
+        // chunk array; a part of a type it has no chunk for is forwarded as
+        // it is, never removed.
         if let Some(content) = message.get_mut("content") {
             mistral_content(content)?;
         }
 
         if is_assistant {
-            if !message.contains_key("content") {
-                message.insert(
-                    "content".to_owned(),
-                    serde_json::Value::String(String::new()),
-                );
-            }
-            // `prefix` is part of Mistral's assistant message schema.
-            message
-                .entry("prefix")
-                .or_insert(serde_json::Value::Bool(false));
             // Mistral rejects unknown assistant fields; hidden reasoning
             // cannot be echoed back.
             message.shift_remove("reasoning_content");
@@ -1034,16 +1020,6 @@ fn mistral_part_text(part: &serde_json::Value) -> Option<&str> {
             part.get(MISTRAL_REFUSAL)
                 .and_then(serde_json::Value::as_str)
         })
-}
-
-/// Identify text and refusal parts by tag, falling back to payload keys without a tag.
-/// An explicit nontext tag prevents flattening even when a text key is present.
-fn is_mistral_text_part(part: &serde_json::Value) -> bool {
-    match part.get("type").and_then(serde_json::Value::as_str) {
-        Some(MISTRAL_TEXT | MISTRAL_REFUSAL) => true,
-        Some(_) => false,
-        None => mistral_part_text(part).is_some(),
-    }
 }
 
 fn mistral_unsupported(what: &str) -> EncodeError {
@@ -1116,7 +1092,10 @@ fn mistral_audio_chunk(part: &serde_json::Value) -> Result<serde_json::Value, En
 ///
 /// Dispatched on the `type` tag, which the shared conversion always emits, so
 /// a part naming a chunk kind is converted as that kind regardless of what
-/// other keys it carries.
+/// other keys it carries. A part of any other type (Magistral `thinking`, a
+/// decoded `reference`, or content Mistral has no chunk for), and an
+/// untagged part carrying no text, is forwarded verbatim, as upstream
+/// forwards it.
 fn mistral_chunk(part: &serde_json::Value) -> Result<serde_json::Value, EncodeError> {
     /// Text and refusal parts are both re-tagged `text`: Mistral's schema has
     /// no `refusal` field and every chunk forbids unknown keys.
@@ -1149,38 +1128,25 @@ fn mistral_chunk(part: &serde_json::Value) -> Result<serde_json::Value, EncodeEr
                 None => serde_json::json!({"type": MISTRAL_DOCUMENT, MISTRAL_DOCUMENT: url}),
             })
         }
-        // U-native Magistral thinking is already a Mistral content chunk.
-        Some("thinking") => Ok(part.clone()),
-        // A decoded Mistral `reference` chunk replays as Mistral sent it.
-        Some("reference") => Ok(part.clone()),
-        Some(kind) => Err(mistral_unsupported(&format!("`{kind}` message content"))),
-        // Untagged, but textual: the flattening would have taken it, so it
-        // converts rather than failing.
+        // Any other type, whether a Mistral chunk already (Magistral
+        // `thinking`, a decoded `reference`) or one Mistral has no chunk
+        // for, is forwarded as it is rather than refused or removed.
+        Some(_) => Ok(part.clone()),
+        // Untagged, but textual: it converts as text.
         None if mistral_part_text(part).is_some() => text_chunk(part),
-        None => Err(mistral_unsupported("untyped message content")),
+        // Untagged and not textual: forwarded as it is, as upstream does.
+        None => Ok(part.clone()),
     }
 }
 
-/// Flatten text-only arrays and convert mixed arrays to Mistral content chunks.
-/// Nonarrays remain unchanged. Unsupported mixed content returns a conversion
-/// error; text-only parts without string payloads are omitted.
+/// Convert every part of an array `content` to its Mistral content chunk
+/// ([`mistral_chunk`]); a text-only array stays an array, as upstream sends
+/// it. Nonarrays remain unchanged. A part of a known chunk type missing its
+/// payload returns a conversion error.
 fn mistral_content(content: &mut serde_json::Value) -> Result<(), EncodeError> {
-    let Some(parts) = content.as_array() else {
-        return Ok(());
-    };
-
-    if parts.iter().all(is_mistral_text_part) {
-        // The tag-based guard is authoritative even for text parts missing their payload.
-        flatten_text_content_parts(content, "", false);
-        return Ok(());
+    for part in content.as_array_mut().into_iter().flatten() {
+        *part = mistral_chunk(part)?;
     }
-
-    if let Some(parts) = content.as_array_mut() {
-        for part in parts {
-            *part = mistral_chunk(part)?;
-        }
-    }
-
     Ok(())
 }
 
@@ -1495,10 +1461,6 @@ impl crate::completion::ReplayTarget for Chat {
             .find(|key| item.get(**key).is_some_and(Value::is_string))
             .map(|key| Map::from_iter([((*key).to_owned(), Value::String(String::new()))]))
             .unwrap_or_default()
-    }
-
-    fn states_finish_reason(&self) -> bool {
-        false
     }
 
     fn call_id_slot(&self) -> Option<&'static str> {
@@ -2407,15 +2369,14 @@ impl ChatDecoder {
     /// The `[DONE]` sentinel. A dialect whose streams omit the finish reason
     /// ends a turn that streamed a chunk as pi does without
     /// `supportsFinishReason`: a tool call when it holds one, else a stop.
+    /// Any other `[DONE]` before a finish reason was cut short.
     fn done(&mut self, out: Out<'_, Completion>) -> Result<Flow, ProviderError> {
-        if self.chunked {
-            if self.quirks.done_without_finish_reason && self.finish.is_none() {
-                self.finish = Some(if self.calls.is_empty() {
-                    FinishReason::Stop
-                } else {
-                    FinishReason::ToolCalls
-                });
-            }
+        if !self.ended && self.chunked && self.quirks.done_without_finish_reason {
+            self.finish = Some(if self.calls.is_empty() {
+                FinishReason::Stop
+            } else {
+                FinishReason::ToolCalls
+            });
             self.ended = true;
         }
         self.finish(out)
@@ -2625,6 +2586,7 @@ impl<'id> Decoder<'id, Completion> for ChatDecoder {
             // reply that names no reason.
             ChatEvent::BareText(text) => {
                 self.ended = true;
+                self.finish = Some(FinishReason::Stop);
                 if !text.is_empty() {
                     self.write(Writing::Text, &text, &mut out)?;
                 }
