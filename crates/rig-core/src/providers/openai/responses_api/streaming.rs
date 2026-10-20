@@ -31,6 +31,12 @@ const REUSED_REASONING_SLOTS: u64 = 1 << 62;
 /// Order slots for distinct provider items at a reused output index; no
 /// output index reaches them.
 const REUSED_PROVIDER_SLOTS: u64 = 1 << 61;
+/// Message state slots for distinct message items at a reused output index;
+/// no output index reaches them.
+const REUSED_MESSAGE_SLOTS: u64 = 1 << 60;
+/// Where items at a reused output index sort within it: beyond every content
+/// position of the item that first used the index.
+const REUSED_ORDER_BASE: u64 = 1 << 32;
 
 /// How an output item reached the decoder.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -590,9 +596,43 @@ impl ResponsesDecoder {
                 .then_some(*slot)
             })
         });
-        let slot = anonymous.unwrap_or(index);
+        let slot = match anonymous {
+            Some(slot) => slot,
+            // A distinct message at an index a reasoning, call or provider
+            // item already holds gets its own slot, as those items do. A
+            // second message id there still joins the index's message:
+            // Copilot names one message by different ids.
+            None if self.reasoning_ids.values().any(|slot| *slot == index)
+                || self.reasoning.contains_key(&index)
+                || self.calls.contains_key(&index)
+                || self.call_items.values().any(|slot| *slot == index)
+                || self.provider_items.contains(&index) =>
+            {
+                let slot = REUSED_MESSAGE_SLOTS
+                    + self
+                        .reused_orders
+                        .keys()
+                        .filter(|slot| {
+                            (REUSED_MESSAGE_SLOTS..REUSED_PROVIDER_SLOTS).contains(*slot)
+                        })
+                        .count() as u64;
+                self.reuse(index, slot);
+                slot
+            }
+            None => index,
+        };
         self.message_ids.insert(id.to_owned(), slot);
         slot
+    }
+
+    /// Where content part `part` of message slot `slot` sorts among the
+    /// reply's blocks. A message at a reused index sorts after every earlier
+    /// item there; its parts keep arrival order.
+    fn message_order(&self, slot: u64, part: u64) -> SourceOrder {
+        self.reused_orders
+            .get(&slot)
+            .copied()
+            .unwrap_or(SourceOrder::new(slot, part))
     }
 
     fn relocate_terminal_messages(&mut self, output: &[Value]) -> Result<(), ProviderError> {
@@ -773,6 +813,7 @@ impl ResponsesDecoder {
         let index = self.message_slot(index, id, None);
         self.check_message_kind(index, part_index, false, id)?;
         self.bind(index, Parent::Message, id, out)?;
+        let order = self.message_order(index, part_index);
         let message = self.messages.entry(index).or_default();
         if message.id.is_none() {
             message.id = nonempty(id);
@@ -781,7 +822,7 @@ impl ResponsesDecoder {
         // deltas do not revoke the phase an actual message snapshot supplied.
         let part = message.parts.entry(part_index).or_default();
         part.refusal |= refusal;
-        let at = text_at(part, index, part_index, out)?;
+        let at = text_at(part, order, out)?;
         activate_text(
             &mut self.active_message_part,
             at,
@@ -848,6 +889,7 @@ impl ResponsesDecoder {
         let kind = raw.str("type");
         let opaque = !matches!(kind, Some("output_text" | "refusal"));
         self.check_message_kind(index, part_index, opaque, id)?;
+        let order = self.message_order(index, part_index);
         let message = self.messages.entry(index).or_default();
         if message.id.is_none() {
             message.id = nonempty(id);
@@ -859,7 +901,7 @@ impl ResponsesDecoder {
             let stated = raw
                 .str(if part.refusal { "refusal" } else { "text" })
                 .unwrap_or_default();
-            let at = text_at(part, index, part_index, out)?;
+            let at = text_at(part, order, out)?;
             let metadata_changed = message_activation_metadata(part.raw.as_ref())
                 != message_activation_metadata(Some(&raw));
             let phase_changed =
@@ -1362,6 +1404,7 @@ impl ResponsesDecoder {
         if !self.call_items.values().any(|slot| *slot == current)
             && !self.reasoning_ids.values().any(|slot| *slot == current)
             && !self.provider_items.contains(&current)
+            && !self.message_ids.values().any(|slot| *slot == current)
         {
             return current;
         }
@@ -1422,6 +1465,7 @@ impl ResponsesDecoder {
         if !self.reasoning_ids.values().any(|slot| *slot == current)
             && !self.call_items.values().any(|slot| *slot == current)
             && !self.provider_items.contains(&current)
+            && !self.message_ids.values().any(|slot| *slot == current)
         {
             self.reasoning_ids.insert(id.to_owned(), current);
             return current;
@@ -1449,7 +1493,7 @@ impl ResponsesDecoder {
             .count() as u64
             + 1;
         self.reused_orders
-            .insert(slot, SourceOrder::new(index, later));
+            .insert(slot, SourceOrder::new(index, REUSED_ORDER_BASE + later));
     }
 
     /// Where the block of state slot `slot`, reached at output `index`,
@@ -1572,7 +1616,8 @@ impl ResponsesDecoder {
         // slots do.
         let held = self.provider_items.contains(&index)
             || self.call_items.values().any(|slot| *slot == index)
-            || self.reasoning_ids.values().any(|slot| *slot == index);
+            || self.reasoning_ids.values().any(|slot| *slot == index)
+            || self.message_ids.values().any(|slot| *slot == index);
         let order = if held {
             let slot = REUSED_PROVIDER_SLOTS
                 + self
@@ -1629,12 +1674,20 @@ impl ResponsesDecoder {
             .unwrap_or(index);
         let part = frame.u64("content_index").unwrap_or(0);
         match kind {
-            "response.output_item.added" => {
-                self.output(index, frame.get("item").unwrap_or(&Value::Null), Arrival::Added, out)
-            }
+            "response.output_item.added" => self.output(
+                index,
+                frame.get("item").unwrap_or(&Value::Null),
+                Arrival::Added,
+                out,
+            ),
             "response.output_item.done" => {
                 self.active_message_part = None;
-                self.output(index, frame.get("item").unwrap_or(&Value::Null), Arrival::Done, out)
+                self.output(
+                    index,
+                    frame.get("item").unwrap_or(&Value::Null),
+                    Arrival::Done,
+                    out,
+                )
             }
             "response.output_text.delta" | "response.refusal.delta" => self.message_delta(
                 index,
@@ -1735,6 +1788,8 @@ impl ResponsesDecoder {
 
     fn flush_messages(&mut self, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
         for (index, message) in std::mem::take(&mut self.messages) {
+            // A message still in a reused slot is carried at its output index.
+            let position = self.message_order(index, 0).primary;
             let unknown_fields = message
                 .item
                 .as_ref()
@@ -1770,13 +1825,13 @@ impl ResponsesDecoder {
                         raw = Value::Object(fields);
                     }
                     let item = json!({"content":[raw], "id":message.id, "phase":message.phase});
-                    let mut text = super::carried_message_parts(&item, index, None)?.remove(0);
+                    let mut text = super::carried_message_parts(&item, position, None)?.remove(0);
                     text = text.with_unknown_message_fields(unknown_fields.clone());
                     text.payload.position = CarriedPosition::MessageContent {
-                        item_index: index,
+                        item_index: position,
                         part_index,
                     };
-                    let at = text_at(&mut part, index, part_index, out)?;
+                    let at = text_at(&mut part, self.message_order(index, part_index), out)?;
                     if !part.opaque {
                         out.set_citations(
                             at,
@@ -2096,17 +2151,14 @@ fn part_matches(part: &MessagePart, raw: &Value) -> bool {
 
 fn text_at(
     part: &mut MessagePart,
-    index: u64,
-    part_index: u64,
+    order: SourceOrder,
     out: &mut Out<'_, Completion>,
 ) -> Result<usize, ProviderError> {
     if let Some(at) = part.at {
         return Ok(at);
     }
     let at = out.fresh_index();
-    out.in_source_order(SourceOrder::new(index, part_index), |out| {
-        out.open(at, Block::Text, Value::Null)
-    })?;
+    out.in_source_order(order, |out| out.open(at, Block::Text, Value::Null))?;
     part.at = Some(at);
     Ok(at)
 }

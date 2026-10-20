@@ -2863,6 +2863,44 @@ fn repaired_indexless_provider_items_keep_arrival_order_and_fold_as_the_whole_re
     }
 }
 
+/// A message streamed without indices after a call or reasoning item shares
+/// the repaired index 0 with it. The message gets its own state slot, sorted
+/// after the earlier item, so the terminal can move it to its real position
+/// and the reply folds as its whole reply does (hc-r4 h18 case 94).
+#[test]
+fn repaired_indexless_message_after_another_item_keeps_its_own_slot() {
+    let replies = [
+        vec![
+            function_call("fc_2", "call_2", r#"{"n":3}"#),
+            message("msg_3", "Done."),
+        ],
+        vec![reasoning("rs_1", &["Plan."]), message("msg_3", "Done.")],
+        vec![
+            function_call("fc_0", "call_0", r#"{"q":"rig"}"#),
+            reasoning("rs_1", &["Plan."]),
+            function_call("fc_2", "call_2", r#"{"n":3}"#),
+            message("msg_3", "Done."),
+        ],
+    ];
+    let repaired = |input: Vec<WireFrame>| {
+        feed_frames!(
+            ResponsesDecoder::new("openai", super::super::ResponsesStreamOptions::strict())
+                .with_envelope_repair(),
+            super::super::document::Response::with_strict_reader(true),
+            "openai",
+            input
+        )
+        .outcome
+        .expect("the repaired reply decodes")
+    };
+    for output in replies {
+        let streamed = repaired(frames(&without_indices(restated(&output))));
+        let unary = repaired(whole(&output));
+        assert_eq!(streamed.choice, unary.choice, "{output:?}");
+        assert_eq!(streamed.choice.len(), output.len(), "{:?}", streamed.choice);
+    }
+}
+
 #[test]
 fn retained_index_reasoning_without_ciphertext_keeps_item_and_replayed_ids() {
     let mut thought = reasoning("rs_1", &["Plan."]);
