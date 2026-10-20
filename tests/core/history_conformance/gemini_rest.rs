@@ -4,13 +4,15 @@
 
 use rig_core::completion::CompletionRequest;
 use rig_core::error::EncodeError;
-use rig_core::message::{AssistantContent, AssistantMessage, DocumentSourceKind, UserContent};
+use rig_core::message::{
+    AssistantContent, AssistantMessage, CarriedTextContent, DocumentSourceKind, UserContent,
+};
 use rig_core::providers::gemini::GeminiConfig;
 use rig_core::providers::gemini::completion::GenerateContent;
 use rig_core::wire::{Mode, Wire, WireFrame};
 use rig_history_conformance::{
-    Ablated, Ablation, CallShape, Ending, HistoryFixture, MediaPart, RefusedArguments, Rng, Shape,
-    decode, http_body, replies,
+    Ablated, Ablation, CallShape, Ending, HistoryFixture, MediaPart, Refusal, RefusedArguments,
+    Rng, Shape, decode, http_body, replies,
 };
 use serde_json::{Value, json};
 
@@ -52,6 +54,38 @@ pub fn weather_calls() -> [Value; 2] {
 /// The error a Gemini tool-protocol finish fails the reply with: a
 /// malformed or unexpected call, too many calls, a missing thought
 /// signature or a malformed response.
+/// What breaks inspection-only custody of the invented field in `turn`, the
+/// decoded unknown-item reply, and `body`, its same-model replay, where the
+/// known text replays as exactly `text` (row H4).
+pub fn inspected_field(turn: &AssistantMessage, body: &Value, text: Value) -> Vec<String> {
+    let mut problems = Vec::new();
+    let kept = turn.content.iter().any(|block| {
+        matches!(block, AssistantContent::CarriedText(carried)
+            if carried.content == CarriedTextContent::InspectionOnlyText("noted".to_owned())
+                && carried.payload.item.get("x_rig_field").is_some())
+    });
+    if !kept {
+        problems.push(format!(
+            "the turn keeps `noted` as inspection-only text whose part holds `x_rig_field`: {:?}",
+            turn.content
+        ));
+    }
+    let parts: Vec<&Value> = body["contents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|content| content["role"] == "model")
+        .map(|content| &content["parts"])
+        .collect();
+    let expected = json!([text, {"x_rig_invented": {"id": "x_1"}}]);
+    if parts != [&expected] {
+        problems.push(format!(
+            "the model turn replays exactly {expected}: {parts:?}"
+        ));
+    }
+    problems
+}
+
 pub fn tool_protocol_error(finish: &str) -> Option<String> {
     let reason = match finish {
         "MALFORMED_FUNCTION_CALL" => "MalformedFunctionCall",
@@ -373,25 +407,56 @@ impl HistoryFixture for GeminiRestHistory {
         })
     }
 
-    fn refuses_ablation(&self, pointer: &str, change: Ablated) -> bool {
-        TYPED_BOUNDARY.iter().any(|(field, refused)| {
-            *field == pointer
-                && refused[match change {
-                    Ablated::Removed => 0,
-                    Ablated::Null => 1,
-                    Ablated::Retyped => 2,
-                }]
-        })
+    fn ablation_refusal(
+        &self,
+        pointer: &str,
+        change: Ablated,
+        _document: &Value,
+    ) -> Option<Refusal> {
+        TYPED_BOUNDARY
+            .iter()
+            .any(|(field, refused)| {
+                *field == pointer
+                    && refused[match change {
+                        Ablated::Removed => 0,
+                        Ablated::Null => 1,
+                        Ablated::Retyped => 2,
+                    }]
+            })
+            .then_some(Refusal::UndecodedFrame)
     }
 
     /// Gemini's tool-protocol finishes fail the reply.
-    fn refused_finish(&self, name: &str) -> Option<String> {
-        tool_protocol_error(name)
+    fn refused_finish(&self, name: &str) -> Option<Refusal> {
+        tool_protocol_error(name).map(Refusal::Response)
+    }
+
+    /// Unsigned text with an invented sibling field is inspection-only text
+    /// (A48; AG §8): the turn keeps the whole part, and replay sends the
+    /// known text alone beside the invented part.
+    fn inspected_field(&self, turn: &AssistantMessage, body: &Value) -> Option<Vec<String>> {
+        Some(inspected_field(
+            turn,
+            body,
+            json!({"text": "noted", "thought": false}),
+        ))
+    }
+
+    /// A part's index within the chunk that carried it
+    /// (mec-rig-h03-carried-position-1).
+    fn transport_local(&self) -> &'static [&'static str] {
+        &["/payload/position/part_index"]
+    }
+
+    /// A signature on a trailing empty part is an empty signed block of its
+    /// own (AG §2).
+    fn splits_trailing_signature(&self) -> bool {
+        true
     }
 
     /// A document of no declared type, and a tool-result image named by
     /// URL, are refused before adaptation.
-    fn preflight_refusal(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+    fn original_media_preflight(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
         let refused = match part {
             MediaPart::User(UserContent::Document(document)) if document.media_type.is_none() => {
                 "A mime type is required for document inputs to Gemini"

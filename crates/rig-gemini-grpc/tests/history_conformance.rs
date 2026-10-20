@@ -256,6 +256,18 @@ impl HistoryFixture for GrpcHistory {
         Some("/candidates/0/finishReason")
     }
 
+    /// A part's index within the chunk that carried it
+    /// (mec-rig-h03-carried-position-1).
+    fn transport_local(&self) -> &'static [&'static str] {
+        &["/payload/position/part_index"]
+    }
+
+    /// A signature on a trailing empty part is an empty signed block of its
+    /// own (AG §2); the stream wraps the REST decoder.
+    fn splits_trailing_signature(&self) -> bool {
+        true
+    }
+
     /// Each replayed provider part as REST JSON, including interleaved reasoning.
     fn replayed(&self, turn: &AssistantMessage) -> Vec<Value> {
         let interleaved = matches!(
