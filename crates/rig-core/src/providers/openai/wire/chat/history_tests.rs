@@ -562,8 +562,7 @@ fn a_typeless_text_part_is_text() {
 /// pi's `requiresReasoningContentOnAssistantMessages` follows the model:
 /// DeepSeek at its own base URL behind the OpenAI dialect, every MiMo
 /// model, and Kimi K3 under any gateway path send an empty
-/// `reasoning_content` on a call turn with none. OpenRouter's final body
-/// uses its `reasoning` spelling; other models send none.
+/// `reasoning_content` on a call turn with none; other models send none.
 #[test]
 fn reasoning_content_follows_the_model() {
     let history = || {
@@ -613,19 +612,17 @@ fn openrouter_reasoning_content_follows_the_model() {
             result("call_0", "f"),
         ]
     };
-    // A gateway's Kimi K3 row names no field; Moonshot's supplies it before
-    // OpenRouter applies its final field spelling.
-    for model in ["moonshotai/kimi-k2.6", "moonshotai/kimi-k3"] {
-        let wire = wire(&OPENROUTER, model);
+    for wire in [
+        wire(&OPENROUTER, "moonshotai/kimi-k2.6"),
+        // A gateway's own row for Kimi K3 names no field; Moonshot's does.
+        wire(&OPENROUTER, "moonshotai/kimi-k3"),
+    ] {
         let body = sent(&wire, history());
         assert_eq!(
-            body["messages"][1]["reasoning"],
+            body["messages"][1]["reasoning_content"],
             json!(""),
-            "{model}: {body}"
-        );
-        assert!(
-            body["messages"][1].get("reasoning_content").is_none(),
-            "{model}: {body}"
+            "{}: {body}",
+            wire.model
         );
     }
 }

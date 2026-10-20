@@ -415,7 +415,7 @@ fn generation_config_maps_supported_fields_and_typed_fields_take_precedence() {
         "generationConfig": {
             "temperature": 0.2,
             "maxOutputTokens": 20,
-            "candidateCount": 2,
+            "candidateCount": 1,
             "stopSequences": ["END"],
             "responseMimeType": "application/json",
             "responseJsonSchema": { "type": "object" },
@@ -468,6 +468,43 @@ fn generation_config_maps_supported_fields_and_typed_fields_take_precedence() {
     let image = config.image_config.expect("image config should be mapped");
     assert_eq!(image.aspect_ratio.as_deref(), Some("16:9"));
     assert_eq!(image.image_size.as_deref(), Some("1K"));
+}
+
+#[test]
+fn a_caller_candidate_count_above_one_is_refused_on_the_actual_sdk_wire() {
+    for (raw, spelling, count) in [
+        (
+            serde_json::json!({"generationConfig": {"candidateCount": 2}}),
+            "candidateCount",
+            serde_json::json!(2),
+        ),
+        (
+            serde_json::json!({"generationConfig": {"candidate_count": "3"}}),
+            "candidate_count",
+            serde_json::json!("3"),
+        ),
+    ] {
+        let mut request = minimal_request();
+        request.additional_params = Some(raw);
+        let error = ProviderError::from(
+            sdk_request(request).expect_err("a count above 1 is refused, not lowered to 1"),
+        );
+        let ProviderError::Request(source) = &error else {
+            panic!("a request refusal, got {error:?}")
+        };
+        let refusal = source
+            .downcast_ref::<rest::UnsupportedVertexCandidateCount>()
+            .expect("the refusal is typed");
+        assert_eq!((refusal.spelling, &refusal.count), (spelling, &count));
+    }
+    let mut request = minimal_request();
+    request.additional_params =
+        Some(serde_json::json!({"generationConfig": {"candidateCount": 1}}));
+    let config = sdk_request(request)
+        .expect("one candidate encodes")
+        .generation_config
+        .expect("generation config should exist");
+    assert_eq!(config.candidate_count, Some(1));
 }
 
 #[test]

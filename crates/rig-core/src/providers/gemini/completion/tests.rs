@@ -750,16 +750,21 @@ fn schema_request_expands_definitions_and_removes_reference_sections() {
 }
 
 #[test]
-fn schema_request_sorts_properties_and_projects_only_modeled_fields() {
+fn schema_request_sorts_properties_and_carries_every_documented_keyword() {
     let parameters: Value = serde_json::from_str(
         r#"{
-        "type":"object", "additionalProperties":false, "default":{},
+        "type":"object", "title":"Booking", "description":"A booking",
+        "default":{}, "example":{"zeta":["a"]},
+        "minProperties":1, "maxProperties":4, "propertyOrdering":["zeta","alpha","count"],
         "properties":{
-            "zeta":{"type":"array","minItems":1,"maxItems":3,"default":["ignored"]},
-            "alpha":{"anyOf":[{"type":"null"},{"type":"string","enum":["a",1,"b"]}]},
-            "invalid":17
+            "zeta":{
+                "type":"array","minItems":1,"maxItems":3,"default":["a"],
+                "items":{"type":"string","format":"date","minLength":2,"maxLength":8,"pattern":"^[a-z]+$"}
+            },
+            "alpha":{"type":["string","null"],"enum":["a","b"],"example":"a"},
+            "count":{"type":"integer","format":"int32","minimum":0,"maximum":10.5,"nullable":true}
         },
-        "required":["zeta",false,"alpha"]
+        "required":["zeta","alpha"]
     }"#,
     )
     .expect("literal schema field order");
@@ -770,12 +775,25 @@ fn schema_request_sorts_properties_and_projects_only_modeled_fields() {
     assert_eq!(
         schema,
         &json!({
-            "type":"object",
+            "type":"object", "title":"Booking", "description":"A booking",
             "properties":{
-                "alpha":{"type":"string","nullable":true,"enum":["a","b"]},
-                "zeta":{"type":"array","max_items":3,"min_items":1,"items":{"type":"string"}}
+                "alpha":{"type":"string","nullable":true,"enum":["a","b"],"example":"a"},
+                "count":{
+                    "type":"integer","format":"int32","nullable":true,"minimum":0,"maximum":10.5
+                },
+                "zeta":{
+                    "type":"array","maxItems":3,"minItems":1,
+                    "items":{
+                        "type":"string","format":"date","minLength":2,"maxLength":8,
+                        "pattern":"^[a-z]+$"
+                    },
+                    "default":["a"]
+                }
             },
-            "required":["zeta","alpha"]
+            "required":["zeta","alpha"],
+            "propertyOrdering":["zeta","alpha","count"],
+            "minProperties":1, "maxProperties":4,
+            "example":{"zeta":["a"]}, "default":{}
         })
     );
     assert_eq!(
@@ -785,11 +803,263 @@ fn schema_request_sorts_properties_and_projects_only_modeled_fields() {
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        ["alpha", "zeta"]
+        ["alpha", "count", "zeta"]
     );
     assert!(
         body.pointer("/tools/0/functionDeclarations/0/parametersJsonSchema")
             .is_none()
+    );
+}
+
+#[test]
+fn schema_request_keeps_every_any_of_branch() {
+    let body = encoded_schema_request(json!({
+        "type":"object",
+        "properties":{"choice":{"description":"A choice","anyOf":[
+            {"type":"null"},
+            {"type":"string","enum":["a","b"]},
+            {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},
+            {"anyOf":[{"type":"integer","minimum":1},{"type":"boolean"}]}
+        ]}}
+    }))
+    .expect("union request");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0/parameters/properties/choice"),
+        Some(&json!({
+            "description":"A choice",
+            "anyOf":[
+                {"type":"null"},
+                {"type":"string","enum":["a","b"]},
+                {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},
+                {"anyOf":[{"type":"integer","minimum":1},{"type":"boolean"}]}
+            ]
+        }))
+    );
+}
+
+#[test]
+fn schema_request_drops_exactly_the_named_losses() {
+    let body = encoded_schema_request(json!({
+        "$schema":"https://json-schema.org/draft/2020-12/schema",
+        "$id":"https://example.com/args",
+        "$comment":"root comment",
+        "title":"Args",
+        "type":"object",
+        "additionalProperties":false,
+        "properties":{"inner":{
+            "$comment":"inner comment", "$id":"#inner",
+            "type":"object", "additionalProperties":false,
+            "properties":{"q":{"type":"string"}}
+        }}
+    }))
+    .expect("named losses are accepted");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0/parameters"),
+        Some(&json!({
+            "type":"object", "title":"Args",
+            "properties":{"inner":{"type":"object","properties":{"q":{"type":"string"}}}}
+        }))
+    );
+}
+
+#[test]
+fn schema_request_carries_reference_siblings_and_null_enum_values_faithfully() {
+    let body = encoded_schema_request(json!({
+        "type":"object",
+        "properties":{
+            "destination":{"$ref":"#/$defs/Place","description":"Where to go"},
+            "unit":{"type":["string","null"],"enum":["c",null,"f"]}
+        },
+        "$defs":{"Place":{
+            "type":"object","description":"A place",
+            "properties":{"city":{"type":"string"}}
+        }}
+    }))
+    .expect("faithful reference siblings and null enum value");
+    // The reference site's own description documents this use of the
+    // definition, so it takes the place of the definition's.
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0/parameters/properties"),
+        Some(&json!({
+            "destination":{
+                "type":"object","description":"Where to go",
+                "properties":{"city":{"type":"string"}}
+            },
+            "unit":{"type":"string","nullable":true,"enum":["c","f"]}
+        }))
+    );
+}
+
+#[test]
+fn schema_constructs_outside_the_subset_are_refused_with_their_path() {
+    let place = json!({"Place":{"type":"object","description":"A place"}});
+    for (parameters, path, reason) in [
+        (
+            json!({"type":"object","properties":{"invalid":17}}),
+            "/properties/invalid",
+            "must be a schema object",
+        ),
+        (
+            json!({"type":"object","properties":{"alpha":{"type":"string","enum":["a",1,"b"]}}}),
+            "/properties/alpha/enum/1",
+            "Gemini enum values are strings",
+        ),
+        (
+            json!({"type":"string","enum":["a",true]}),
+            "/enum/1",
+            "Gemini enum values are strings",
+        ),
+        (
+            json!({"type":"string","enum":["a",null]}),
+            "/enum/1",
+            "a null enum value needs a type that admits null",
+        ),
+        (
+            json!({"type":["string","null"],"enum":[null]}),
+            "/enum",
+            "Gemini's Schema cannot express an enum of only null",
+        ),
+        (
+            json!({"type":"object","properties":{"q":{"type":"string"}},"required":["q",false]}),
+            "/required/1",
+            "must be a string",
+        ),
+        (
+            json!({"type":"object","properties":{"choice":{"oneOf":[{"type":"string"}]}}}),
+            "/properties/choice/oneOf",
+            "the keyword is outside Gemini's `parameters` Schema subset",
+        ),
+        (
+            json!({"allOf":[{"type":"string"}]}),
+            "/allOf",
+            "the keyword is outside Gemini's `parameters` Schema subset",
+        ),
+        (
+            json!({"type":"string","const":"a"}),
+            "/const",
+            "the keyword is outside Gemini's `parameters` Schema subset",
+        ),
+        (
+            json!({"type":"integer","exclusiveMinimum":0}),
+            "/exclusiveMinimum",
+            "the keyword is outside Gemini's `parameters` Schema subset",
+        ),
+        (
+            json!({"type":"array","items":{"type":"string"},"uniqueItems":true}),
+            "/uniqueItems",
+            "the keyword is outside Gemini's `parameters` Schema subset",
+        ),
+        (
+            json!({"type":"string","examples":["a"]}),
+            "/examples",
+            "the keyword is outside Gemini's `parameters` Schema subset",
+        ),
+        (
+            json!({"type":"array","max_items":3}),
+            "/max_items",
+            "the keyword is outside Gemini's `parameters` Schema subset",
+        ),
+        (
+            json!({"type":"object","additionalProperties":true}),
+            "/additionalProperties",
+            "only `false` is accepted, as a named loss; Gemini's Schema has no field for it",
+        ),
+        (
+            json!({"type":"object","additionalProperties":{"type":"string"}}),
+            "/additionalProperties",
+            "only `false` is accepted, as a named loss; Gemini's Schema has no field for it",
+        ),
+        (
+            json!({"type":"object","properties":{"x":{"type":["string","integer"]}}}),
+            "/properties/x/type",
+            "names more than one type besides null, and a Gemini schema has one type",
+        ),
+        (
+            json!({"type":"date"}),
+            "/type",
+            "\"date\" is not a Gemini schema type",
+        ),
+        (
+            json!({"type":"string","title":7}),
+            "/title",
+            "must be a string",
+        ),
+        (
+            json!({"type":"string","minLength":1.5}),
+            "/minLength",
+            "must be a non-negative integer",
+        ),
+        (
+            json!({"type":"array","items":{"type":"string"},"maxItems":0}),
+            "/maxItems",
+            "0 is indistinguishable from an unset bound in Gemini's Schema",
+        ),
+        (
+            json!({"type":"number","maximum":"10"}),
+            "/maximum",
+            "must be a number",
+        ),
+        (
+            json!({"type":"array","items":[{"type":"string"}]}),
+            "/items",
+            "must be a schema object",
+        ),
+        (
+            json!({"anyOf":[{"type":"string"},true]}),
+            "/anyOf/1",
+            "must be a schema object",
+        ),
+        (
+            json!({"type":"object","properties":{"x":{"$ref":"#/$defs/Missing"}}}),
+            "/properties/x/$ref",
+            "the reference cannot be resolved",
+        ),
+        (
+            json!({
+                "type":"object",
+                "properties":{"x":{"$ref":"#/$defs/Place","type":"string"}},
+                "$defs":place
+            }),
+            "/properties/x/type",
+            "differs from the same keyword of #/$defs/Place",
+        ),
+    ] {
+        let error = encoded_schema_request(parameters.clone())
+            .expect_err("a construct outside the subset is refused");
+        assert!(matches!(&error, ProviderError::Request(_)), "{error:?}");
+        let diagnostic = format!(
+            "Tool 'schema_tool' could not be converted to a schema: schema path {path}: {reason}"
+        );
+        assert_eq!(
+            std::error::Error::source(&error)
+                .expect("request reason")
+                .to_string(),
+            diagnostic,
+            "{parameters}"
+        );
+    }
+}
+
+#[test]
+fn numeric_enum_declaration_goes_raw_even_with_constructs_outside_the_subset() {
+    let parameters = json!({
+        "$schema":"https://json-schema.org/draft/2020-12/schema",
+        "type":"object",
+        "properties":{
+            "slot":{"type":"integer","enum":[0,1,2],"exclusiveMinimum":-1},
+            "mode":{"oneOf":[{"const":"a"},{"const":"b"}]},
+            "unit":{"type":"string","enum":["c","f"],"examples":["c"]}
+        },
+        "required":["slot"],
+        "additionalProperties":true
+    });
+    let body = encoded_schema_request(parameters.clone()).expect("numeric enum request");
+    assert_eq!(
+        body.pointer("/tools/0/functionDeclarations/0"),
+        Some(&json!({
+            "name":"schema_tool", "description":"schema fixture",
+            "parametersJsonSchema":parameters
+        }))
     );
 }
 
@@ -3240,7 +3510,10 @@ fn numeric_enum_in_annotation_does_not_change_the_schema_route() {
         body.pointer("/tools/0/functionDeclarations/0"),
         Some(&json!({
             "name":"schema_tool", "description":"schema fixture",
-            "parameters":{"type":"string","enum":["a","b"]}
+            "parameters":{
+                "type":"string","enum":["a","b"],
+                "default":{"type":"integer","enum":[0,1,2]}
+            }
         }))
     );
 }
@@ -3290,7 +3563,7 @@ fn nullable_string_enum_keeps_parameters_while_numeric_union_keeps_raw_schema() 
     for string_types in [json!(["string", "null"]), json!(["null", "string"])] {
         let body = encoded_schema_request(json!({
             "type":"object",
-            "properties":{"choice":{"type":string_types,"enum":["a",1,"b"]}}
+            "properties":{"choice":{"type":string_types,"enum":["a","b"]}}
         }))
         .expect("nullable string enum request");
         assert_eq!(
@@ -3302,6 +3575,17 @@ fn nullable_string_enum_keeps_parameters_while_numeric_union_keeps_raw_schema() 
                     "properties":{"choice":{"type":"string","nullable":true,"enum":["a","b"]}}
                 }
             }))
+        );
+        // A number in an explicitly string-typed enum is refused, not omitted.
+        let error = encoded_schema_request(json!({
+            "type":"object",
+            "properties":{"choice":{"type":string_types,"enum":["a",1,"b"]}}
+        }))
+        .expect_err("a numeric value of a string enum is refused");
+        assert!(matches!(&error, ProviderError::Request(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            "RequestError: Tool 'schema_tool' could not be converted to a schema: schema path /properties/choice/enum/1: Gemini enum values are strings"
         );
     }
     let parameters = json!({

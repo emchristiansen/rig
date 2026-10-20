@@ -222,49 +222,72 @@ fn codex() -> Responses {
     OpenAIConfig::with_key(&crate::providers::chatgpt::DIALECT, "test-key").responses("gpt-5.4")
 }
 
+/// A raw `max_output_tokens` or `temperature` in `additional_params` is
+/// refused on Codex with exactly the error the typed field gets, whatever its
+/// value, rather than dropped unseen (mec-rig-bodies-answers-1 Q6). A raw
+/// `null` sets nothing: it is neither sent nor refused.
 #[test]
-fn responses_raw_outer_controls_are_ignored_but_typed_codex_controls_are_refused() {
+fn raw_and_typed_codex_output_caps_and_temperatures_are_refused_alike() {
     use super::super::Delivery;
     use crate::error::ProviderError;
     use crate::wire::Mode;
 
-    let request =
-        codex_request(json!({"max_output_tokens":"ignored","temperature":{"ignored":true}}));
+    let refusal = |request: &crate::completion::CompletionRequest| {
+        let error = ProviderError::from(
+            codex()
+                .responses_request(request, Delivery::Http(Mode::Unary))
+                .expect_err("a caller-set control is refused"),
+        );
+        let typed = error
+            .source()
+            .expect("typed source")
+            .downcast_ref::<super::UnsupportedCodexControl>()
+            .copied();
+        (typed, error.to_string())
+    };
+    let mut typed_cap = codex_request(json!({}));
+    typed_cap.max_tokens = Some(64);
+    let mut typed_temperature = codex_request(json!({}));
+    typed_temperature.temperature = Some(0.5);
+    for (typed, expected, raws) in [
+        (
+            typed_cap,
+            super::UnsupportedCodexControl::MaxOutputTokens,
+            [
+                json!({"max_output_tokens":64}),
+                json!({"max_output_tokens":"ignored"}),
+            ],
+        ),
+        (
+            typed_temperature,
+            super::UnsupportedCodexControl::Temperature,
+            [
+                json!({"temperature":0.5}),
+                json!({"temperature":{"ignored":true}}),
+            ],
+        ),
+    ] {
+        let typed = refusal(&typed);
+        assert_eq!(typed.0, Some(expected));
+        for raw in raws {
+            assert_eq!(refusal(&codex_request(raw.clone())), typed, "{raw}");
+        }
+    }
+
+    let request = codex_request(json!({"max_output_tokens":null,"temperature":null,
+        "unrecognized":"dropped"}));
     let body = codex()
         .responses_request(&request, Delivery::Http(Mode::Unary))
-        .expect("raw outer controls are not fork additional parameters");
+        .expect("a raw null sets nothing");
     assert!(body.get("max_output_tokens").is_none());
     assert!(body.get("temperature").is_none());
+    assert!(body.get("unrecognized").is_none());
     assert_eq!(body.get("store"), Some(&json!(false)));
     assert_eq!(
         body.get("include"),
         Some(&json!(["reasoning.encrypted_content"])),
         "store:false keeps reasoning available for stateless replay"
     );
-    for (max_tokens, temperature, expected) in [
-        (
-            Some(1),
-            None,
-            super::UnsupportedCodexControl::MaxOutputTokens,
-        ),
-        (None, Some(0.5), super::UnsupportedCodexControl::Temperature),
-    ] {
-        let mut request = request.clone();
-        request.max_tokens = max_tokens;
-        request.temperature = temperature;
-        let error = ProviderError::from(
-            codex()
-                .responses_request(&request, Delivery::Http(Mode::Unary))
-                .expect_err("typed outer choice refused"),
-        );
-        assert_eq!(
-            error
-                .source()
-                .expect("typed source")
-                .downcast_ref::<super::UnsupportedCodexControl>(),
-            Some(&expected)
-        );
-    }
 }
 
 #[test]

@@ -222,7 +222,7 @@ fn tool_params_nullable_type_array_preserves_non_null_type() -> anyhow::Result<(
 }
 
 #[test]
-fn tool_params_any_of_uses_non_null_schema() -> anyhow::Result<()> {
+fn tool_params_any_of_keeps_every_branch() -> anyhow::Result<()> {
     let v = serde_json::json!({
         "anyOf": [
             { "type": "null" },
@@ -237,30 +237,175 @@ fn tool_params_any_of_uses_non_null_schema() -> anyhow::Result<()> {
     });
 
     let schema = projected_schema(&v)?.context("schema is absent")?;
+    let expected = proto::Schema {
+        any_of: vec![
+            proto::Schema {
+                r#type: proto::Type::Null as i32,
+                ..proto::Schema::default()
+            },
+            proto::Schema {
+                r#type: proto::Type::Object as i32,
+                properties: [(
+                    "query".to_owned(),
+                    proto::Schema {
+                        r#type: proto::Type::String as i32,
+                        ..proto::Schema::default()
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                required: vec!["query".to_owned()],
+                ..proto::Schema::default()
+            },
+        ],
+        ..proto::Schema::default()
+    };
+    ensure!(
+        schema == expected,
+        "schema differs: actual {schema:?}, expected {expected:?}"
+    );
+    Ok(())
+}
 
+#[test]
+fn tool_params_carry_every_documented_keyword_into_the_typed_schema() -> anyhow::Result<()> {
+    use prost_types::value::Kind;
+    let v = serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "title": "Booking",
+        "description": "A booking",
+        "additionalProperties": false,
+        "minProperties": 1,
+        "maxProperties": 4,
+        "propertyOrdering": ["tags", "count"],
+        "example": { "count": 2 },
+        "default": {},
+        "properties": {
+            "tags": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 3,
+                "items": {
+                    "type": "string",
+                    "format": "date",
+                    "minLength": 2,
+                    "maxLength": 8,
+                    "pattern": "^[a-z]+$",
+                    "enum": ["2026-01-01", "2026-12-31"]
+                }
+            },
+            "count": {
+                "type": ["integer", "null"],
+                "minimum": 0,
+                "maximum": 10.5,
+                "default": 2
+            }
+        },
+        "required": ["tags"]
+    });
+
+    let schema = projected_schema(&v)?.context("schema is absent")?;
+    let number = |value: f64| prost_types::Value {
+        kind: Some(Kind::NumberValue(value)),
+    };
+    let tags = proto::Schema {
+        r#type: proto::Type::Array as i32,
+        min_items: 1,
+        max_items: 3,
+        items: Some(Box::new(proto::Schema {
+            r#type: proto::Type::String as i32,
+            format: "date".to_owned(),
+            r#enum: vec!["2026-01-01".to_owned(), "2026-12-31".to_owned()],
+            min_length: 2,
+            max_length: 8,
+            pattern: "^[a-z]+$".to_owned(),
+            ..proto::Schema::default()
+        })),
+        ..proto::Schema::default()
+    };
+    let count = proto::Schema {
+        r#type: proto::Type::Integer as i32,
+        nullable: true,
+        minimum: Some(0.0),
+        maximum: Some(10.5),
+        default: Some(number(2.0)),
+        ..proto::Schema::default()
+    };
+    let expected = proto::Schema {
+        r#type: proto::Type::Object as i32,
+        title: "Booking".to_owned(),
+        description: "A booking".to_owned(),
+        min_properties: 1,
+        max_properties: 4,
+        property_ordering: vec!["tags".to_owned(), "count".to_owned()],
+        example: Some(prost_types::Value {
+            kind: Some(Kind::StructValue(prost_types::Struct {
+                fields: [("count".to_owned(), number(2.0))].into_iter().collect(),
+            })),
+        }),
+        default: Some(prost_types::Value {
+            kind: Some(Kind::StructValue(prost_types::Struct::default())),
+        }),
+        properties: [("tags".to_owned(), tags), ("count".to_owned(), count)]
+            .into_iter()
+            .collect(),
+        required: vec!["tags".to_owned()],
+        ..proto::Schema::default()
+    };
     ensure!(
-        schema.r#type == proto::Type::Object as i32,
-        "schema type differs: actual {:?}, expected {:?}",
-        schema.r#type,
-        proto::Type::Object as i32
+        schema == expected,
+        "schema differs: actual {schema:?}, expected {expected:?}"
     );
-    ensure!(schema.nullable, "schema is not nullable: {schema:?}");
-    ensure!(
-        schema.required == vec!["query".to_string()],
-        "schema.required differs: actual {:?}, expected {:?}",
-        schema.required,
-        vec!["query".to_string()]
-    );
-    let query = schema
-        .properties
-        .get("query")
-        .with_context(|| format!("query prop is absent: {schema:?}"))?;
-    ensure!(
-        query.r#type == proto::Type::String as i32,
-        "query type differs: actual {:?}, expected {:?}",
-        query.r#type,
-        proto::Type::String as i32
-    );
+    Ok(())
+}
+
+#[test]
+fn tool_params_refuse_a_bound_the_typed_schema_cannot_carry() -> anyhow::Result<()> {
+    for (v, path, reason) in [
+        (
+            serde_json::json!({
+                "type": "object",
+                "properties": { "tags": { "type": "array", "items": { "type": "string" }, "maxItems": 0 } }
+            }),
+            "/properties/tags/maxItems",
+            "0 is indistinguishable from an unset bound in Gemini's Schema",
+        ),
+        (
+            serde_json::json!({ "type": "string", "maxLength": 0 }),
+            "/maxLength",
+            "0 is indistinguishable from an unset bound in Gemini's Schema",
+        ),
+        (
+            serde_json::json!({ "type": "object", "properties": { "x": { "type": "string" } }, "maxProperties": 0 }),
+            "/maxProperties",
+            "0 is indistinguishable from an unset bound in Gemini's Schema",
+        ),
+        (
+            serde_json::json!({ "type": "object", "properties": { "x": { "oneOf": [{ "type": "string" }] } } }),
+            "/properties/x/oneOf",
+            "the keyword is outside Gemini's `parameters` Schema subset",
+        ),
+    ] {
+        let Err(error) = projected_schema(&v) else {
+            anyhow::bail!("{v} was not refused");
+        };
+        let error = rig_core::error::ProviderError::from(error);
+        ensure!(
+            matches!(&error, rig_core::error::ProviderError::Request(_)),
+            "not a request error: {error:?}"
+        );
+        let expected = format!(
+            "Tool 'schema_fixture' could not be converted to a schema: schema path {path}: {reason}"
+        );
+        let actual = std::error::Error::source(&error)
+            .context("request reason")?
+            .to_string();
+        ensure!(
+            actual == expected,
+            "refusal differs: actual {actual:?}, expected {expected:?}"
+        );
+    }
     Ok(())
 }
 

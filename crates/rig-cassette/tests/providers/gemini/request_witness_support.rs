@@ -86,8 +86,8 @@ pub(super) enum NamedCase {
     ThreeProviderRoundTrip,
 }
 
-/// One recorded schema member the projected `parameters` subset does not
-/// send: a JSON Pointer from the declaration's schema root and its exact
+/// One recorded schema member the projected `parameters` drops as a named
+/// loss: a JSON Pointer from the declaration's schema root and its exact
 /// recorded JSON value.
 #[derive(Clone, Copy, Debug)]
 struct Loss {
@@ -95,37 +95,27 @@ struct Loss {
     recorded: &'static str,
 }
 
-/// The root `additionalProperties: false` the subset has no field for.
+/// The root `additionalProperties: false`, a named loss: the subset has no
+/// field for it.
 const CLOSED_ROOT: &[Loss] = &[Loss {
     pointer: "/additionalProperties",
     recorded: "false",
 }];
 
-/// The schemars root `$schema` and `title` of `OperationArgs`, which the
-/// subset has no field for.
-const OPERATION_ARGS_ROOT: &[Loss] = &[
-    Loss {
-        pointer: "/$schema",
-        recorded: r#""https://json-schema.org/draft/2020-12/schema""#,
-    },
-    Loss {
-        pointer: "/title",
-        recorded: r#""OperationArgs""#,
-    },
-];
+/// The schemars root `$schema` of `OperationArgs`, an annotation keyword the
+/// projection drops as a named loss. Its root `title` is carried.
+const OPERATION_ARGS_ROOT: &[Loss] = &[Loss {
+    pointer: "/$schema",
+    recorded: r#""https://json-schema.org/draft/2020-12/schema""#,
+}];
 
-/// The `#[rig_tool]` root `$schema` and `title` of `MacroCalculatorParameters`,
-/// which the subset has no field for.
-const MACRO_CALCULATOR_ROOT: &[Loss] = &[
-    Loss {
-        pointer: "/$schema",
-        recorded: r#""https://json-schema.org/draft/2020-12/schema""#,
-    },
-    Loss {
-        pointer: "/title",
-        recorded: r#""MacroCalculatorParameters""#,
-    },
-];
+/// The `#[rig_tool]` root `$schema` of `MacroCalculatorParameters`, an
+/// annotation keyword the projection drops as a named loss. Its root `title`
+/// is carried.
+const MACRO_CALCULATOR_ROOT: &[Loss] = &[Loss {
+    pointer: "/$schema",
+    recorded: r#""https://json-schema.org/draft/2020-12/schema""#,
+}];
 
 /// One request member the port sends that the recording lacks: a JSON
 /// Pointer into the request body and its exact sent JSON value.

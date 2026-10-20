@@ -141,7 +141,9 @@ pub enum Rewrite {
     CodexStore,
     /// Validate recognized raw Responses controls. Off Codex, other raw keys
     /// and explicit nulls are sent as written, except `model`, and the
-    /// typed request's output cap and temperature win over raw ones.
+    /// typed request's output cap and temperature win over raw ones. On
+    /// Codex, a raw output cap or temperature reaches the body only to be
+    /// refused there as the typed one is.
     ///
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
@@ -191,7 +193,13 @@ pub enum Rewrite {
     ///
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
-    ChatDialect(BodyRewrite),
+    ChatDialect {
+        /// The dialect's rewrite.
+        kind: BodyRewrite,
+        /// The assistant reasoning field the catalog names for the
+        /// request's model, which the dialect's history rewrite keeps.
+        reasoning_field: Option<&'static str>,
+    },
     /// Mark the selected OpenRouter chat wire's system-prompt cache boundary.
     ///
     /// For rig's own crates; not covered by semver.
@@ -213,6 +221,7 @@ pub enum Rewrite {
     GeminiTypedControls,
     /// Vertex AI: explicit legacy temperature and output cap replace their
     /// fields after the raw merge, and every request asks for one candidate.
+    /// A merged candidate count above 1 is refused, never overwritten.
     ///
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
@@ -867,7 +876,7 @@ pub fn request_params(
         crate::providers::openai::responses_api::project_raw_parameters(
             request.additional_params.as_ref().unwrap_or(&Value::Null),
             if rewrites.contains(&Rewrite::ResponsesCodex) {
-                UnrecognizedRaw::Dropped
+                UnrecognizedRaw::Codex
             } else {
                 UnrecognizedRaw::Sent {
                     typed_output_cap: request.max_tokens.is_some(),
@@ -1079,8 +1088,11 @@ fn apply(
                 body.insert("generate".to_owned(), Value::Bool(generate));
             }
         }
-        Rewrite::ChatDialect(kind) => {
-            crate::providers::openai::wire::chat::rewrite_body(*kind, body)?;
+        Rewrite::ChatDialect {
+            kind,
+            reasoning_field,
+        } => {
+            crate::providers::openai::wire::chat::rewrite_body(*kind, *reasoning_field, body)?;
             if *kind == BodyRewrite::GroqCompoundTools {
                 crate::providers::openai::wire::chat::fold_groq_native_tools(
                     body,
@@ -1111,6 +1123,7 @@ fn apply(
                 typed.insert("responseJsonSchema".to_owned(), schema.clone().to_value());
             }
             if matches!(rewrite, Rewrite::VertexTypedControls) {
+                crate::providers::gemini::completion::refuse_vertex_candidate_counts_but_one(body)?;
                 typed.insert("candidateCount".to_owned(), Value::from(1));
             }
             if let Some(temperature) = request.temperature {

@@ -205,6 +205,7 @@ fn sanitize_plain_text_history_strips_tool_exchange_and_keeps_alternation() {
     let mut body = json!({"messages": messages});
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
         body.as_object_mut().expect("body object"),
     )
     .expect("existing Perplexity rewrite");
@@ -239,6 +240,7 @@ fn sanitize_plain_text_history_merges_consecutive_user_messages() {
     let mut body = json!({"messages": messages});
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
         body.as_object_mut().expect("body object"),
     )
     .expect("existing Perplexity rewrite");
@@ -260,6 +262,7 @@ fn flatten_text_content_parts_treats_refusals_as_text() {
     let mut body = json!({"messages": [{"role": "user", "content": content}]});
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
         body.as_object_mut().expect("body object"),
     )
     .expect("existing Perplexity rewrite");
@@ -279,6 +282,7 @@ fn sanitize_plain_text_history_merges_consecutive_assistant_messages() {
     let mut body = json!({"messages": messages});
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
         body.as_object_mut().expect("body object"),
     )
     .expect("existing Perplexity rewrite");

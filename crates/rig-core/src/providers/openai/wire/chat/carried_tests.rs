@@ -193,15 +193,141 @@ fn groq_native_tools_refuse_a_nonarray() {
 #[test]
 fn hyperbolic_removes_tool_remnants_and_retains_image_arrays() {
     let image = json!({"type":"image_url","image_url":{"url":"https://x.invalid/a.png"}});
-    let mut body = json!({"messages":[{"role":"tool","content":"answer"},
-        {"role":"assistant","content":null,"tool_calls":[{}]},
-        {"role":"user","content":[{"type":"text","text":"look"},image]},
-        {"role":"assistant","content":"answer","tool_calls":[{}],"reasoning_content":"private"}]});
-    rewrite_body(BodyRewrite::Hyperbolic, body.as_object_mut().expect("map")).expect("rewrite");
-    assert_eq!(body["messages"].as_array().expect("messages").len(), 2);
-    assert_eq!(body["messages"][0]["content"][1], image);
-    assert!(body["messages"][1].get("tool_calls").is_none());
-    assert!(body["messages"][1].get("reasoning_content").is_none());
+    // `reasoning_content` stays only for a model whose catalog entry names
+    // it, as upstream sends it (mec-rig-bodies-answers-1 Q3).
+    for (reasoning_field, kept) in [
+        (None, None),
+        (Some("reasoning_content"), Some(json!("private"))),
+    ] {
+        let mut body = json!({"messages":[{"role":"tool","content":"answer"},
+            {"role":"assistant","content":null,"tool_calls":[{}]},
+            {"role":"user","content":[{"type":"text","text":"look"},image]},
+            {"role":"assistant","content":"answer","tool_calls":[{}],"reasoning_content":"private"}]});
+        rewrite_body(
+            BodyRewrite::Hyperbolic,
+            reasoning_field,
+            body.as_object_mut().expect("map"),
+        )
+        .expect("rewrite");
+        assert_eq!(body["messages"].as_array().expect("messages").len(), 2);
+        assert_eq!(body["messages"][0]["content"][1], image);
+        assert!(body["messages"][1].get("tool_calls").is_none());
+        assert_eq!(
+            body["messages"][1].get("reasoning_content"),
+            kept.as_ref(),
+            "{reasoning_field:?}"
+        );
+    }
+}
+
+/// Perplexity, Mira, Hyperbolic and Mistral keep assistant
+/// `reasoning_content` for a model whose catalog entry names it, and remove
+/// it for every other model (mec-rig-bodies-answers-1 Q3).
+#[test]
+fn plain_text_gateways_and_mistral_keep_only_a_catalog_reasoning_field() {
+    for kind in [
+        BodyRewrite::Perplexity,
+        BodyRewrite::Mira,
+        BodyRewrite::Hyperbolic,
+        BodyRewrite::Mistral,
+    ] {
+        for (reasoning_field, kept) in [
+            (None, None),
+            (Some("reasoning"), None),
+            (Some("reasoning_content"), Some(json!("private"))),
+        ] {
+            let mut body = json!({"messages":[{"role":"user","content":"q"},
+                {"role":"assistant","content":"answer","reasoning_content":"private"},
+                {"role":"user","content":"next"}]});
+            rewrite_body(kind, reasoning_field, body.as_object_mut().expect("map"))
+                .expect("rewrite");
+            assert_eq!(body["messages"][1]["content"], "answer", "{kind:?}");
+            assert_eq!(
+                body["messages"][1].get("reasoning_content"),
+                kept.as_ref(),
+                "{kind:?}/{reasoning_field:?}: {body}"
+            );
+        }
+    }
+}
+
+/// Perplexity's same-role merge keeps a catalog reasoning field: the
+/// non-empty values join with a newline, as the merged text does.
+#[test]
+fn perplexity_merge_joins_a_kept_reasoning_field() {
+    for (first, second, joined) in [
+        ("a", "b", "a\nb"),
+        ("", "b", "b"),
+        ("a", "", "a"),
+        ("", "", ""),
+    ] {
+        let mut body = json!({"messages":[
+            {"role":"assistant","content":"First.","reasoning_content":first},
+            {"role":"tool","tool_call_id":"c","content":"x"},
+            {"role":"assistant","content":"Second.","reasoning_content":second}]});
+        rewrite_body(
+            BodyRewrite::Perplexity,
+            Some("reasoning_content"),
+            body.as_object_mut().expect("map"),
+        )
+        .expect("rewrite");
+        assert_eq!(
+            body["messages"],
+            json!([{"role":"assistant","content":"First.\nSecond.","reasoning_content":joined}]),
+            "{first:?}/{second:?}"
+        );
+    }
+}
+
+/// A Kimi model, whose catalog entry names `reasoning_content`, sends it on
+/// every assistant turn through Perplexity, Mira, Hyperbolic and Mistral as
+/// upstream does on any gateway: the replayed reasoning, or empty when the
+/// turn has none (mec-rig-bodies-answers-1 Q3).
+#[test]
+fn kimi_reasoning_content_reaches_the_plain_text_gateways_and_mistral() {
+    use crate::message::Reasoning;
+    use crate::providers::openai::wire::{HYPERBOLIC, MIRA, MISTRAL, PERPLEXITY};
+
+    let history = || {
+        let mut request = CompletionRequest::new("and then?");
+        request.chat_history = vec![
+            Message::user("think first"),
+            Message::Assistant(AssistantMessage {
+                content: vec![
+                    AssistantContent::Reasoning(Reasoning::new("private chain")),
+                    AssistantContent::text("visible answer"),
+                ],
+                ..Default::default()
+            }),
+            Message::user("go on"),
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContent::text("second answer")],
+                ..Default::default()
+            }),
+            Message::user("and then?"),
+        ];
+        request
+    };
+    for dialect in [&PERPLEXITY, &MIRA, &HYPERBOLIC, &MISTRAL] {
+        for model in ["kimi-k3", "moonshotai/kimi-k2.6"] {
+            let encoded = OpenAIConfig::with_key(dialect, "k")
+                .chat(model)
+                .encode(history(), Mode::Unary)
+                .expect("encodes");
+            let body = json_body(&encoded.request);
+            let context = format!("{}/{model}: {body}", dialect.name);
+            assert_eq!(
+                body["messages"][1]["content"], "visible answer",
+                "{context}"
+            );
+            assert_eq!(
+                body["messages"][1]["reasoning_content"], "private chain",
+                "{context}"
+            );
+            assert_eq!(body["messages"][3]["content"], "second answer", "{context}");
+            assert_eq!(body["messages"][3]["reasoning_content"], "", "{context}");
+        }
+    }
 }
 
 #[test]
@@ -1577,7 +1703,7 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
     );
     assert_eq!(
         body["messages"][0]["content"][0]["image_url"]["detail"], "auto",
-        "the carried OpenRouter detail rewrite does not change OpenAI"
+        "OpenAI keeps the shared detail level"
     );
 }
 
@@ -2031,9 +2157,10 @@ fn presealed_openrouter_cache_marks_the_raw_system_override_in_both_modes() {
                 let mut expected = json!({"model":"openai/gpt-4o", "messages":[
                     {"role":"system","content":if caching { &cached_system } else { &system }},
                     {"role":"system","content":"second system"},
-                    {"role":"assistant","content":"before","reasoning":"plan"},
+                    {"role":"assistant","content":"before","reasoning_content":"plan"},
                     {"role":"user","content":[{"type":"text","text":"raw user"},
-                        {"type":"image_url","image_url":{"url":"https://x.invalid/a.png"}}]}
+                        {"type":"image_url","image_url":{"url":"https://x.invalid/a.png",
+                            "detail":"high"}}]}
                 ], "raw_marker":"kept"});
                 if mode == Mode::Streaming {
                     expected["stream"] = json!(true);

@@ -79,7 +79,7 @@ fn finite_typed_controls_override_raw_values_without_changing_candidate_or_schem
     request.additional_params = Some(serde_json::json!({"generationConfig": {
         "temperature": f64::MAX,
         "maxOutputTokens": 2_147_483_648_u64,
-        "candidateCount": 2,
+        "candidateCount": 1,
         "responseJsonSchema": {"type": "object"},
     }}));
     let config = encoded(request)?

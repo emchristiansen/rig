@@ -613,12 +613,20 @@ struct RawParameterProjection {
     unrecognized: Map<String, Value>,
 }
 
+/// The raw keys the fork's reader does not recognize that Codex still
+/// carries to its refusal ([`UnrecognizedRaw::Codex`]).
+const CODEX_REFUSED_RAW: [&str; 2] = ["max_output_tokens", "temperature"];
+
 /// What reaches the request of the raw keys the fork's reader does not
 /// recognize, and of explicit raw nulls, which that reader read as absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UnrecognizedRaw {
-    /// Codex keeps the fork's reader: nothing.
-    Dropped,
+    /// Codex keeps the fork's reader, which sends none of them and no raw
+    /// null, except a non-null raw `max_output_tokens` or `temperature`: it
+    /// reaches the merged body, where the Codex contract refuses it with the
+    /// same [`wire::UnsupportedCodexControl`] a typed one gets, rather than
+    /// being dropped unseen (mec-rig-bodies-answers-1 Q6).
+    Codex,
     /// Every other contract sends them as written (mec-rig-port-answers-1
     /// Q7), but never a raw `model` (the request names the model, G132), and
     /// a raw `max_output_tokens` or `temperature` only where the request
@@ -786,8 +794,10 @@ pub(crate) fn project_raw_parameters(
                 "Invalid OpenAI Responses additional_params payload: {error}"
             ))
         })?;
-    if unrecognized == UnrecognizedRaw::Dropped {
-        parameters.unrecognized.clear();
+    if unrecognized == UnrecognizedRaw::Codex {
+        parameters
+            .unrecognized
+            .retain(|key, value| CODEX_REFUSED_RAW.contains(&key.as_str()) && !value.is_null());
     }
     let mut fields =
         serde_json::from_value::<Map<String, Value>>(serde_json::to_value(parameters)?)?;

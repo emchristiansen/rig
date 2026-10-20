@@ -46,11 +46,17 @@ pub(super) fn flatten_text_content_parts(
 /// Optionally strip names and flatten content using the supplied separator and
 /// text-only guard. With `merge_same_role`, join adjacent user or assistant text
 /// messages of the same role with newlines.
+///
+/// `reasoning_field` is the reasoning field the catalog names for the model.
+/// Assistant `reasoning_content` is kept when it is that field (upstream sends
+/// it for such a model on any gateway) and removed otherwise. A kept field
+/// survives a same-role merge: the non-empty values are joined with newlines.
 pub(super) fn sanitize_plain_text_history(
     messages: &mut Vec<serde_json::Value>,
     flatten: Option<(&str, bool)>,
     strip_names: bool,
     merge_same_role: bool,
+    reasoning_field: Option<&str>,
 ) {
     messages
         .retain(|message| message.get("role").and_then(serde_json::Value::as_str) != Some("tool"));
@@ -61,7 +67,9 @@ pub(super) fn sanitize_plain_text_history(
         };
         if object.get("role").and_then(serde_json::Value::as_str) == Some("assistant") {
             object.shift_remove("tool_calls");
-            object.shift_remove("reasoning_content");
+            if reasoning_field != Some("reasoning_content") {
+                object.shift_remove("reasoning_content");
+            }
         }
         if strip_names {
             object.shift_remove("name");
@@ -108,6 +116,16 @@ pub(super) fn sanitize_plain_text_history(
             && let Some(previous) = merged.last_mut().and_then(serde_json::Value::as_object_mut)
         {
             previous.insert("content".to_string(), serde_json::Value::String(text));
+            if let Some(field) = reasoning_field
+                && let Some(reasoning) = message.get(field).and_then(serde_json::Value::as_str)
+                && !reasoning.is_empty()
+            {
+                let joined = match previous.get(field).and_then(serde_json::Value::as_str) {
+                    Some(earlier) if !earlier.is_empty() => format!("{earlier}\n{reasoning}"),
+                    _ => reasoning.to_owned(),
+                };
+                previous.insert(field.to_owned(), serde_json::Value::String(joined));
+            }
             continue;
         }
         merged.push(message);

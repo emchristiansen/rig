@@ -310,11 +310,16 @@ impl HistoryFixture for VertexHistory {
     }
 
     /// Each provider part as the SDK sends it: its JSON read into the SDK's
-    /// `Part`, which spells enums by number. The interleaved shape includes
-    /// its carried reasoning.
+    /// `Part`, which spells enums by number, without a call's `id`, which
+    /// Vertex AI's v1 `FunctionCall` does not declare. The interleaved shape
+    /// includes its carried reasoning.
     fn replayed(&self, turn: &AssistantMessage) -> Vec<Value> {
         let sdk = |item: &Value| {
-            serde_json::from_value::<google_cloud_aiplatform_v1::model::Part>(item.clone())
+            let mut item = item.clone();
+            if let Some(call) = item.get_mut("functionCall").and_then(Value::as_object_mut) {
+                call.shift_remove("id");
+            }
+            serde_json::from_value::<google_cloud_aiplatform_v1::model::Part>(item)
                 .ok()
                 .and_then(|part| serde_json::to_value(part).ok())
         };

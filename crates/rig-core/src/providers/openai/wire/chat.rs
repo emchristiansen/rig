@@ -246,7 +246,10 @@ impl Chat {
             }
             rewrites.push(Rewrite::Stream(true));
         }
-        rewrites.push(Rewrite::ChatDialect(quirks.rewrite));
+        rewrites.push(Rewrite::ChatDialect {
+            kind: quirks.rewrite,
+            reasoning_field: self.listed_reasoning_field(&self.request_model(&request)),
+        });
         if quirks.rewrite == BodyRewrite::OpenRouter && self.prompt_caching {
             rewrites.push(Rewrite::OpenRouterPromptCaching);
         }
@@ -296,26 +299,45 @@ impl Chat {
     /// gateway). Each lookup is asked for the field, not just the entry, so a
     /// gateway's own row without one does not hide the vendor's.
     fn reasoning_field(&self, model: &str) -> Option<&'static str> {
-        use crate::providers::openai::wire::{MOONSHOT, OPENROUTER};
         let deepseek = self
             .provider
             .base_url
             .to_ascii_lowercase()
             .contains("deepseek.com");
-        let name = model.rsplit('/').next().unwrap_or(model);
-        let field = |vendor: &str, id: &str| {
-            crate::catalog::lookup(vendor, id)
-                .and_then(|spec| spec.compat.reasoning_field.as_deref())
-        };
-        let listed = field(self.provider.dialect.name, model)
-            .or_else(|| field(MOONSHOT.name, name))
-            .or_else(|| field(OPENROUTER.name, model));
         self.provider
             .dialect
             .quirks
             .reasoning_field
             .or(deepseek.then_some("reasoning_content"))
-            .or(listed)
+            .or_else(|| self.listed_reasoning_field(model))
+    }
+
+    /// The reasoning field a catalog entry names for `model`: the entry on
+    /// this dialect, Moonshot's under the id's last path segment, or
+    /// OpenRouter's under the full id. A dialect's history rewrite keeps
+    /// this field on assistant messages, as upstream sends it
+    /// (mec-rig-bodies-answers-1 Q3).
+    fn listed_reasoning_field(&self, model: &str) -> Option<&'static str> {
+        use crate::providers::openai::wire::{MOONSHOT, OPENROUTER};
+        let name = model.rsplit('/').next().unwrap_or(model);
+        let field = |vendor: &str, id: &str| {
+            crate::catalog::lookup(vendor, id)
+                .and_then(|spec| spec.compat.reasoning_field.as_deref())
+        };
+        field(self.provider.dialect.name, model)
+            .or_else(|| field(MOONSHOT.name, name))
+            .or_else(|| field(OPENROUTER.name, model))
+    }
+
+    /// The model id the body names: the request's model or the wire's,
+    /// qualified for a Hugging Face router sub-provider that demands it.
+    fn request_model(&self, request: &CompletionRequest) -> String {
+        let model = request.model.clone().unwrap_or_else(|| self.model.clone());
+        if self.provider.dialect.quirks.rewrite == BodyRewrite::HuggingFaceRouter {
+            // Some sub-providers (Fireworks) address models by a qualified id.
+            return self.provider.route().model_identifier(&model);
+        }
+        model
     }
 
     /// The wire for `model` on `provider`, with every option off.
@@ -356,11 +378,7 @@ impl Chat {
         input: &mut BaseInput<'_>,
     ) -> Result<Map<String, Value>, EncodeError> {
         let quirks = &self.provider.dialect.quirks;
-        let mut model = request.model.clone().unwrap_or_else(|| self.model.clone());
-        if quirks.rewrite == BodyRewrite::HuggingFaceRouter {
-            // Some sub-providers (Fireworks) address models by a qualified id.
-            model = self.provider.route().model_identifier(&model);
-        }
+        let model = self.request_model(request);
         let passthrough = input.raw_tools()?;
         let groq_native = quirks.rewrite == BodyRewrite::GroqCompoundTools;
         // A call to a custom tool the request declares is a custom call (pi).
@@ -706,8 +724,16 @@ impl Chat {
 /// where the provider would answer with an error or silently do something
 /// else, Moonshot's steering for `required`, and each dialect's spellings and
 /// content shapes. It runs after the merge and reads the merged body.
+///
+/// `reasoning_field` is the assistant reasoning field the catalog names for
+/// the request's model (`Chat::listed_reasoning_field`). The plain-text
+/// history rewrites (Perplexity, Mira, Hyperbolic) and Mistral keep it on
+/// assistant messages, as upstream sends it for such a model on any gateway;
+/// for every other model they remove `reasoning_content` as before. Groq's
+/// removal does not depend on the model: Groq rejects the field.
 pub(crate) fn rewrite_body(
     kind: BodyRewrite,
+    reasoning_field: Option<&str>,
     map: &mut Map<String, Value>,
 ) -> Result<(), EncodeError> {
     let forced = map
@@ -753,14 +779,22 @@ pub(crate) fn rewrite_body(
         BodyRewrite::Perplexity | BodyRewrite::Mira | BodyRewrite::Hyperbolic => {
             if let Some(Value::Array(messages)) = map.get_mut("messages") {
                 match kind {
-                    BodyRewrite::Perplexity => {
-                        sanitize_plain_text_history(messages, Some(("\n", true)), false, true)
-                    }
-                    BodyRewrite::Mira => {
-                        sanitize_plain_text_history(messages, Some(("\n", false)), true, false)
-                    }
+                    BodyRewrite::Perplexity => sanitize_plain_text_history(
+                        messages,
+                        Some(("\n", true)),
+                        false,
+                        true,
+                        reasoning_field,
+                    ),
+                    BodyRewrite::Mira => sanitize_plain_text_history(
+                        messages,
+                        Some(("\n", false)),
+                        true,
+                        false,
+                        reasoning_field,
+                    ),
                     BodyRewrite::Hyperbolic => {
-                        sanitize_plain_text_history(messages, None, false, false)
+                        sanitize_plain_text_history(messages, None, false, false, reasoning_field)
                     }
                     _ => {}
                 }
@@ -774,10 +808,14 @@ pub(crate) fn rewrite_body(
             }
         }
         BodyRewrite::DeepSeek => finalize_deepseek(map),
-        BodyRewrite::Mistral => finalize_mistral(map)?,
+        BodyRewrite::Mistral => finalize_mistral(map, reasoning_field)?,
         BodyRewrite::Ollama => finalize_ollama(map)?,
-        BodyRewrite::OpenRouter => finalize_openrouter(map, false),
-        BodyRewrite::None | BodyRewrite::HuggingFaceRouter => {}
+        // OpenRouter takes assistant `reasoning_content` and an image part's
+        // `detail` as the shared encoder writes them, as upstream sends and
+        // re-recorded them (mec-rig-bodies-answers-1 Q4). Its routing
+        // preferences reach the body through `additional_params` as
+        // `{"provider": …}`.
+        BodyRewrite::OpenRouter | BodyRewrite::None | BodyRewrite::HuggingFaceRouter => {}
     }
     Ok(())
 }
@@ -941,11 +979,14 @@ fn finalize_deepseek(map: &mut serde_json::Map<String, serde_json::Value>) {
 ///
 /// A forced tool choice goes as the shared encoder spells it (`required`),
 /// and assistant messages carry no `prefix` and no inserted empty
-/// `content`, as upstream's live re-recordings send them.
+/// `content`, as upstream's live re-recordings send them. Assistant
+/// `reasoning_content` is removed unless it is the field the catalog names
+/// for the model (`reasoning_field`), which upstream sends.
 ///
 /// Its multimodal content mapping is [`mistral_content`].
 fn finalize_mistral(
     map: &mut serde_json::Map<String, serde_json::Value>,
+    reasoning_field: Option<&str>,
 ) -> Result<(), EncodeError> {
     // Mistral rejects forced tool calls beside JSON response formats.
     // Relax the choice rather than discard the requested schema; text formats are exempt.
@@ -989,9 +1030,10 @@ fn finalize_mistral(
             mistral_content(content)?;
         }
 
-        if is_assistant {
+        if is_assistant && reasoning_field != Some("reasoning_content") {
             // Mistral rejects unknown assistant fields; hidden reasoning
-            // cannot be echoed back.
+            // cannot be echoed back, except under the field the catalog
+            // names for the model.
             message.shift_remove("reasoning_content");
         }
     }
@@ -1148,49 +1190,6 @@ fn mistral_content(content: &mut serde_json::Value) -> Result<(), EncodeError> {
         *part = mistral_chunk(part)?;
     }
     Ok(())
-}
-
-/// OpenRouter's body rewrites.
-///
-/// OpenRouter's routing preferences (`ProviderPreferences`) need no rewrite:
-/// they reach the body through the request's `additional_params` as
-/// `{"provider": …}`.
-fn finalize_openrouter(map: &mut serde_json::Map<String, serde_json::Value>, prompt_caching: bool) {
-    if prompt_caching {
-        apply_openrouter_prompt_caching(map);
-    }
-
-    let Some(messages) = map.get_mut("messages").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for message in messages {
-        let Some(message) = message.as_object_mut() else {
-            continue;
-        };
-        // The shared assistant message serializes hidden reasoning under the
-        // llama.cpp/DeepSeek key `reasoning_content`; OpenRouter's documented
-        // assistant field is `reasoning`.
-        if message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
-            && let Some(reasoning) = message.shift_remove("reasoning_content")
-        {
-            message.insert("reasoning".to_owned(), reasoning);
-        }
-
-        // OpenRouter image parts omit the shared fidelity hint.
-        for part in message
-            .get_mut("content")
-            .and_then(Value::as_array_mut)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(image) = part
-                .get_mut("image_url")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                image.shift_remove("detail");
-            }
-        }
-    }
 }
 
 pub(crate) fn apply_openrouter_prompt_caching(
