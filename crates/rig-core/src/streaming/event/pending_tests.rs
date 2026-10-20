@@ -203,3 +203,44 @@ fn default_call_starts_still_wait_for_a_name_and_serialize_identically() {
         Err(SequenceError::WrongKind(_))
     ));
 }
+
+#[test]
+fn transcript_refuses_slot_starts_that_contradict_their_state() {
+    let encoded = serde_json::to_value(items(&bound())).expect("actual bound writer stream");
+    let original = encoded.as_array().expect("items");
+    let pending = original[0].clone();
+    let named = original[3].clone();
+
+    let mut pending_with_name = pending.clone();
+    pending_with_name["value"]["name"] = json!("lookup");
+    assert_eq!(
+        Transcript::parse_prefix(Value::Array(vec![pending_with_name])),
+        Err(SequenceError::WrongKind(0)),
+        "a pending slot has no name yet"
+    );
+
+    assert_eq!(
+        Transcript::parse_prefix(Value::Array(vec![pending.clone(), pending.clone()])),
+        Err(SequenceError::ToolSlotTransition(1)),
+        "a pending slot cannot reopen its position"
+    );
+
+    let mut named_text = named.clone();
+    named_text["value"]["kind"] = json!("text");
+    assert_eq!(
+        Transcript::parse_prefix(Value::Array(vec![pending.clone(), named_text])),
+        Err(SequenceError::WrongKind(1)),
+        "only a function call binds a pending name"
+    );
+
+    let mut named_without_name = named;
+    named_without_name["value"]
+        .as_object_mut()
+        .expect("Start")
+        .shift_remove("name");
+    assert_eq!(
+        Transcript::parse_prefix(Value::Array(vec![pending, named_without_name])),
+        Err(SequenceError::WrongKind(1)),
+        "a named binding carries the name"
+    );
+}

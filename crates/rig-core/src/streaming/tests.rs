@@ -1508,3 +1508,44 @@ async fn stream_aggregates_assistant_items_in_current_start_order() {
         matches!(&choice[2],AssistantContent::ToolCall(call) if call.function.name.as_str() == "mock_tool" && call.function.arguments_value() == json!({"arg":1}))
     );
 }
+
+#[test]
+fn a_default_pause_control_starts_running_and_toggles() {
+    let control = PauseControl::default();
+    assert!(!control.is_paused());
+    control.pause();
+    assert!(control.is_paused());
+    control.resume();
+    assert!(!control.is_paused());
+}
+
+#[test]
+fn only_typed_corrupt_frame_evidence_is_recoverable_even_over_a_relay() {
+    let corrupt = ProviderError::CorruptFrame(Arc::new(crate::error::CorruptFrame::bytes(
+        vec![0xff, b'{'],
+        serde_json::from_str::<Value>("{").expect_err("invalid JSON"),
+    )));
+    assert!(recoverable_frame(&corrupt));
+    assert!(recoverable_frame(&ProviderError::Relayed(Box::new(
+        corrupt.report()
+    ))));
+    let ordinary = ProviderError::Response("CorruptFrameError: looks corrupt".to_owned());
+    assert!(!recoverable_frame(&ordinary));
+    assert!(!recoverable_frame(&ProviderError::Relayed(Box::new(
+        ordinary.report()
+    ))));
+}
+
+#[tokio::test]
+async fn a_finished_relay_reports_the_relayed_response_as_its_partial() {
+    let response = stream_of([MockStreamEvent::text("relayed"), total(3)])
+        .finish()
+        .await
+        .expect("the source stream has a terminal record");
+    let bus = futures::stream::iter([Ok::<_, ErrorReport>(Relayed::Done(Box::new(
+        response.clone(),
+    )))]);
+    let mut stream = Streamed::relay("done-relay", Box::pin(bus));
+    assert!(stream.next().await.is_none());
+    assert_eq!(stream.partial(), response);
+}

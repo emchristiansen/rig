@@ -918,3 +918,6 @@ mod terminal_tests;
 
 #[cfg(test)]
 mod upstream_tests;
+
+#[cfg(test)]
+mod step_edge_tests;

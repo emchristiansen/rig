@@ -996,4 +996,6 @@ impl CacheBook {
 }
 
 #[cfg(test)]
+mod book_tests;
+#[cfg(test)]
 mod tests;

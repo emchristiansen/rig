@@ -1595,11 +1595,15 @@ mod opaque_content_tests;
 #[cfg(test)]
 mod openapi_schema;
 #[cfg(test)]
+mod raw_projection_tests;
+#[cfg(test)]
 mod stateless_replay_tests;
 #[cfg(test)]
 mod streaming_conformance;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod websocket_context_tests;
 #[cfg(all(test, feature = "websocket"))]
 mod websocket_delta_tests;
 

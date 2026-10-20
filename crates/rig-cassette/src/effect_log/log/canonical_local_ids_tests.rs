@@ -302,6 +302,41 @@ fn canonical_local_ids_preserves_bijection_in_whole_logs() -> TestResult<()> {
     Ok(())
 }
 
+/// A struct also deserializes from the sequence of its field values, so
+/// `[header, records]` is a typed log. Its local identities' locations are
+/// object paths, which do not resolve in a sequence; each is skipped and the
+/// value comes back unchanged.
+#[test]
+fn canonical_local_ids_skips_locations_absent_from_sequence_form_logs() -> TestResult<()> {
+    let log = typed_log()?;
+    let object = serde_json::to_value(&log)?;
+    if canonical_local_ids(object.clone()) == object {
+        return Err(
+            anyhow::anyhow!("fixture has no typed local identity to locate: {object:?}").into(),
+        );
+    }
+    let sequence = json!([
+        serde_json::to_value(&log.header)?,
+        serde_json::to_value(&log.records)?,
+    ]);
+    let from_sequence: EffectLog = serde_json::from_value(sequence.clone())?;
+    let from_object: EffectLog = serde_json::from_value(object)?;
+    if serde_json::to_value(&from_sequence)? != serde_json::to_value(&from_object)? {
+        return Err(anyhow::anyhow!(
+            "sequence form read as another log: actual {from_sequence:?}, expected {from_object:?}"
+        )
+        .into());
+    }
+    let normalized = canonical_local_ids(sequence.clone());
+    if normalized != sequence {
+        return Err(anyhow::anyhow!(
+            "unresolvable locations changed the sequence form: actual {normalized:?}, expected {sequence:?}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 #[test]
 fn canonical_local_ids_preserves_bijection_in_record_arrays() -> TestResult<()> {
     let first: Vec<_> = FIRST

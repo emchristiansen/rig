@@ -1219,3 +1219,6 @@ fn apply(
 
 #[cfg(test)]
 mod gemini_controls_tests;
+
+#[cfg(test)]
+mod rewrite_tests;

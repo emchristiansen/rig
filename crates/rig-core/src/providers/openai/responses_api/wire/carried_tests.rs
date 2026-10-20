@@ -567,3 +567,38 @@ fn recognized_raw_prompt_cache_options_keep_exact_values_and_unknown_keys_are_se
         assert_eq!(body.get("unknown_outer"), Some(&json!([null, 9])));
     }
 }
+
+/// A provider-options entry read back from JSON carries no typed options and
+/// is sent as written, so the raw-field reader never decodes the `top_p` or
+/// `store` it sets. Final Codex shaping decodes them itself: a malformed one
+/// is refused there with the error a malformed raw one gets, and the request
+/// is never built.
+#[test]
+fn malformed_codex_controls_from_untyped_provider_options_are_refused_at_shaping() {
+    use super::super::Delivery;
+    use crate::completion::ProviderOptions;
+    use crate::wire::Mode;
+
+    for (field, value, expected) in [
+        (
+            "store",
+            json!("bad"),
+            "RequestError: Invalid OpenAI Responses additional_params payload: invalid type: string \"bad\", expected a boolean",
+        ),
+        (
+            "top_p",
+            json!("bad"),
+            "RequestError: Invalid OpenAI Responses additional_params payload: invalid type: string \"bad\", expected f64",
+        ),
+    ] {
+        let mut request = codex_request(json!({}));
+        request.provider_options = serde_json::from_value::<ProviderOptions>(
+            json!({ (crate::providers::chatgpt::PROVIDER_NAME): { "*": { (field): value } } }),
+        )
+        .expect("an object of object sections");
+        let error = codex()
+            .responses_request(&request, Delivery::Http(Mode::Unary))
+            .expect_err("a malformed Codex control is refused at shaping");
+        assert_eq!(error.to_string(), expected, "{field}");
+    }
+}

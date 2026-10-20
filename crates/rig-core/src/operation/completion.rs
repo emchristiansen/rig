@@ -2779,3 +2779,6 @@ mod anthropic_pause_tests;
 
 #[cfg(test)]
 mod gemini_signature_tests;
+
+#[cfg(test)]
+mod coverage_tests;

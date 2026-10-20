@@ -2008,3 +2008,6 @@ mod image_preflight_tests;
 
 #[cfg(test)]
 mod carried_pairing_tests;
+
+#[cfg(test)]
+mod branch_tests;

@@ -19,6 +19,7 @@ mod protected_reasoning;
 mod protected_slots;
 mod protected_snapshots;
 mod protected_terminal;
+mod relocation_parts_and_flush_failures;
 mod upstream;
 
 mod terminal_call_custody;

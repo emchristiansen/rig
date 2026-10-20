@@ -169,3 +169,6 @@ impl CassetteClock {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

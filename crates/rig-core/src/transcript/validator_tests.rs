@@ -262,3 +262,70 @@ fn empty_canonical_carried_text_never_promotes_raw_siblings() {
         "edited canonical answer"
     );
 }
+
+/// A system message resets the consecutive-assistant check but keeps the
+/// pending calls, so the next assistant turn finds the call unanswered.
+#[test]
+fn pending_calls_survive_a_system_message_into_the_next_assistant_turn() {
+    let history = vec![
+        assistant(vec![call("c1")]),
+        Message::system("note"),
+        assistant(vec![AssistantContent::text("moving on")]),
+    ];
+    assert_eq!(
+        validate_canonical(&history),
+        Err(TranscriptError::UnansweredToolCall {
+            index: 1,
+            call_id: CallId::from_wire("c1"),
+        })
+    );
+}
+
+/// Custom calls in a turn with an invalid call are answered like function
+/// calls: the invalid one with the feedback, every other one as not
+/// executed; non-call parts get no result.
+#[test]
+fn invalid_call_feedback_answers_custom_calls_by_kind() {
+    let invalid = CustomToolCall::new(
+        CallId::from_wire("k1"),
+        ToolName::new("patch").expect("tool name"),
+        "raw one",
+    );
+    let peer = CustomToolCall::new(
+        CallId::from_wire("k2"),
+        ToolName::new("apply").expect("tool name"),
+        "raw two",
+    );
+    let function = function_call(CallId::from_wire("f1"));
+    let content = vec![
+        AssistantContent::text("preamble"),
+        AssistantContent::CustomToolCall(invalid.clone()),
+        AssistantContent::ToolCall(function.clone()),
+        AssistantContent::CustomToolCall(peer.clone()),
+    ];
+    let custom_error = |call: &CustomToolCall, text: &str| {
+        UserContent::ToolResult(crate::message::ToolResult {
+            call: call.id.clone(),
+            name: call.name.clone(),
+            answers: AnsweredToolCall::Custom,
+            content: vec![ToolResultContent::text(text)],
+            is_error: true,
+        })
+    };
+    assert_eq!(
+        invalid_call_feedback(&content, &invalid.id, "bad input"),
+        vec![
+            custom_error(&invalid, "bad input"),
+            UserContent::ToolResult(crate::message::ToolResult {
+                call: function.id.clone(),
+                name: function.function.name.clone(),
+                answers: AnsweredToolCall::Function,
+                content: vec![ToolResultContent::text(
+                    TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER
+                )],
+                is_error: true,
+            }),
+            custom_error(&peer, TOOL_NOT_EXECUTED_DUE_TO_INVALID_PEER),
+        ]
+    );
+}

@@ -1527,3 +1527,6 @@ mod checked_usage_tests;
 
 #[cfg(test)]
 mod signed_answer_issuer_tests;
+
+#[cfg(test)]
+mod encode_refusal_tests;

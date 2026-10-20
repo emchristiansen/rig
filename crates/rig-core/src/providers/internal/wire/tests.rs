@@ -253,3 +253,67 @@ fn tagged_duplicate_non_discriminator_key_still_classifies() {
     );
     assert!(matches!(event, WireEvent::Known(TestEvent::TextDelta { delta }) if delta == "hi"));
 }
+
+/// What an `Unknown` kept, as `(event type, payload)`.
+fn unknown_payload<T: std::fmt::Debug>(event: WireEvent<T>) -> (String, serde_json::Value) {
+    let WireEvent::Unknown { event_type, value } = event else {
+        panic!("expected an unknown frame, got {event:?}");
+    };
+    (event_type, value.value().clone())
+}
+
+/// Boolean, negative and fractional keep-alives are non-object JSON: they
+/// are unknown with their payload, never a typed decode.
+#[test]
+fn boolean_negative_and_fractional_frames_are_unknown_with_their_payload() {
+    for (frame, value) in [
+        ("true", serde_json::json!(true)),
+        ("-3", serde_json::json!(-3)),
+        ("2.5", serde_json::json!(2.5)),
+    ] {
+        assert_eq!(
+            unknown_payload(classify_tagged_frame::<TestEvent>(frame, "type", known)),
+            (String::new(), value),
+            "{frame}"
+        );
+    }
+}
+
+/// A negative or fractional tag is no discriminator value: the frame takes
+/// the typed decode, whose failure is corrupt with no event type.
+#[test]
+fn a_numeric_tag_value_names_no_event_type_and_takes_the_typed_decode() {
+    for frame in [
+        r#"{"type":-1,"delta":"hi"}"#,
+        r#"{"type":1.5,"delta":"hi"}"#,
+    ] {
+        assert_eq!(
+            corrupt_evidence(classify_tagged_frame::<TestEvent>(frame, "type", known)),
+            (None, text(frame)),
+            "{frame}"
+        );
+    }
+}
+
+/// An escaped tag is read as its decoded string, both for a known and an
+/// unknown discriminator.
+#[test]
+fn an_escaped_tag_value_is_read_decoded() {
+    let event = classify_tagged_frame::<TestEvent>(
+        r#"{"type":"text\u002edelta","delta":"hi"}"#,
+        "type",
+        known,
+    );
+    assert!(matches!(event, WireEvent::Known(TestEvent::TextDelta { delta }) if delta == "hi"));
+    assert_eq!(
+        unknown_payload(classify_tagged_frame::<TestEvent>(
+            r#"{"type":"future\u002eevent"}"#,
+            "type",
+            known,
+        )),
+        (
+            "future.event".to_owned(),
+            serde_json::json!({"type": "future.event"})
+        )
+    );
+}

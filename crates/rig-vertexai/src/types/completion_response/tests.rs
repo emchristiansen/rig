@@ -368,6 +368,41 @@ fn several_responses_rebuild_the_whole_one() {
     );
 }
 
+/// A blocked prompt's feedback reads back as the REST JSON Vertex AI sent:
+/// its block reason and each safety rating's enums are spelled by name, not
+/// by the SDK's numbers. A unit test: no Vertex AI recording carries prompt
+/// feedback.
+#[test]
+fn prompt_feedback_enums_are_spelled_by_name() {
+    let feedback = vertexai::model::generate_content_response::PromptFeedback::new()
+        .set_block_reason(
+            vertexai::model::generate_content_response::prompt_feedback::BlockedReason::Safety,
+        )
+        .set_safety_ratings([vertexai::model::SafetyRating::new()
+            .set_category(vertexai::model::HarmCategory::DangerousContent)
+            .set_probability(vertexai::model::safety_rating::HarmProbability::High)
+            .set_severity(vertexai::model::safety_rating::HarmSeverity::High)
+            .set_blocked(true)])
+        .set_block_reason_message("blocked for safety");
+    let response = vertexai::model::GenerateContentResponse::new().set_prompt_feedback(feedback);
+
+    assert_eq!(
+        Value::Object(rest_chunk(&response).expect("the response transcodes")),
+        json!({
+            "promptFeedback": {
+                "blockReason": "SAFETY",
+                "safetyRatings": [{
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "probability": "HIGH",
+                    "severity": "HARM_SEVERITY_HIGH",
+                    "blocked": true
+                }],
+                "blockReasonMessage": "blocked for safety"
+            }
+        })
+    );
+}
+
 /// A hand-built reply, as no Vertex AI recording carries grounding: each
 /// grounding segment cites the bytes of its part with its web sources and
 /// scores, and each `citations` entry, whose offsets Vertex AI states no

@@ -946,4 +946,266 @@ fn default_document_requests_keep_native_structured_documents() {
     }
 }
 
+/// Carried text whose known text is empty and carried reasoning with no
+/// visible text send nothing, so a turn holding only them is no message.
+#[test]
+fn empty_carried_parts_are_skipped() {
+    use crate::message::{
+        CarriedPayload, CarriedReasoning, CarriedReasoningPart, CarriedText, CarriedTextContent,
+    };
+    let turn = AssistantMessage {
+        content: vec![
+            AssistantContent::CarriedText(CarriedText::new(
+                CarriedTextContent::Text(String::new()),
+                CarriedPayload::new(json!({"type": "output_text"}), Some("foreign".to_owned())),
+            )),
+            AssistantContent::CarriedReasoning(CarriedReasoning::new(
+                vec![CarriedReasoningPart::Encrypted("sealed".to_owned())],
+                CarriedPayload::new(json!({"type": "reasoning"}), Some("foreign".to_owned())),
+            )),
+        ],
+        origin: None,
+        stop: None,
+    };
+    assert_eq!(
+        native()
+            .assistant(&turn, 0, &WireIds::default())
+            .expect("empty carried parts encode"),
+        None
+    );
+}
+
+/// A whole provider item cannot be replayed on the native API: the encoder
+/// refuses it with the item's issuer and type.
+#[test]
+fn a_provider_item_is_refused() {
+    use crate::message::{ProviderItem, UnreplayableProviderItem};
+    use std::error::Error as _;
+    let turn = AssistantMessage {
+        content: vec![AssistantContent::ProviderItem(ProviderItem::new(
+            json!({"type": "future_item", "id": "item_1"}),
+            "openai",
+        ))],
+        origin: None,
+        stop: None,
+    };
+    let error = crate::error::ProviderError::from(
+        native()
+            .assistant(&turn, 0, &WireIds::default())
+            .expect_err("a provider item is refused"),
+    );
+    assert_eq!(error.kind(), crate::error::ErrorKind::Request);
+    assert_eq!(
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<UnreplayableProviderItem>()),
+        Some(&UnreplayableProviderItem {
+            wire: "Cohere native chat".to_owned(),
+            issuer: Some("openai".to_owned()),
+            item_type: Some("future_item".to_owned()),
+        })
+    );
+}
+
+/// A current item that is not a JSON object carries no fields to keep, so
+/// the block is sent as its canonical part; a current call item whose
+/// `function` is not an object gets one holding the canonical name and
+/// arguments.
+#[test]
+fn malformed_current_items_fall_back_to_canonical_parts() {
+    let call = AssistantContent::ToolCall(ToolCall::new(
+        CallId::from_wire("c1"),
+        ToolFunction::new(
+            ToolName::new("lookup").expect("a tool name"),
+            json!({"q": "x"}),
+        ),
+    ))
+    .with_native(json!({"type": "function", "function": "broken", "index": 3}));
+    let turn = AssistantMessage {
+        content: vec![AssistantContent::text("hi").with_native(json!("raw")), call],
+        origin: None,
+        stop: None,
+    };
+    let ids = WireIds::for_target(&[Message::Assistant(turn.clone())], &native(), MODEL)
+        .expect("the call history plans");
+    assert_eq!(
+        native()
+            .assistant(&turn, 0, &ids)
+            .expect("the turn encodes"),
+        Some(json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "tool_calls": [{"type": "function", "index": 3, "id": "c1",
+                "function": {"name": "lookup", "arguments": "{\"q\":\"x\"}"}}],
+        }))
+    );
+}
+
+/// An image in an unprepared tool result is left out of the `tool`
+/// message, which carries text only.
+#[test]
+fn an_image_in_a_tool_result_is_left_out() {
+    let call = ToolCall::new(
+        CallId::from_wire("call_1"),
+        ToolFunction::new(
+            ToolName::new("lookup").expect("a tool name"),
+            json!({"q": "rig"}),
+        ),
+    );
+    let mut request = CompletionRequest::new("unused");
+    request.chat_history = vec![
+        Message::user("q"),
+        Message::Assistant(AssistantMessage {
+            content: vec![AssistantContent::ToolCall(call.clone())],
+            origin: None,
+            stop: None,
+        }),
+        Message::User {
+            content: vec![UserContent::ToolResult(call.result(vec![
+                ToolResultContent::text("found"),
+                ToolResultContent::Image(Image {
+                    data: Source::base64("aGk="),
+                    media_type: Some(ImageMediaType::PNG),
+                    ..Image::default()
+                }),
+            ]))],
+        },
+    ];
+    let encoded = native()
+        .encode(request, Mode::Unary)
+        .expect("the request encodes");
+    assert_eq!(
+        json_body(&encoded.request)["messages"],
+        json!([
+            {"role": "user", "content": [{"type": "text", "text": "q"}]},
+            {"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function",
+                "function": {"name": "lookup", "arguments": "{\"q\":\"rig\"}"}}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": [
+                {"type": "text", "text": "found"},
+            ]},
+        ])
+    );
+}
+
+/// Carried text sends alone when its known text is not empty, carried
+/// reasoning when its visible text is not empty, and a provider item never.
+#[test]
+fn carried_parts_send_alone_only_with_text() {
+    use crate::message::{
+        CarriedPayload, CarriedReasoning, CarriedReasoningPart, CarriedText, CarriedTextContent,
+        ProviderItem,
+    };
+    let wire = native();
+    let payload = || CarriedPayload::new(json!({"type": "x"}), Some("foreign".to_owned()));
+    let text = |content| AssistantContent::CarriedText(CarriedText::new(content, payload()));
+    let reasoning =
+        |part| AssistantContent::CarriedReasoning(CarriedReasoning::new(vec![part], payload()));
+    assert!(wire.sends_alone(&text(CarriedTextContent::Text("hi".to_owned()))));
+    assert!(!wire.sends_alone(&text(CarriedTextContent::Text(String::new()))));
+    assert!(!wire.sends_alone(&text(CarriedTextContent::Opaque("hi".to_owned()))));
+    assert!(wire.sends_alone(&reasoning(CarriedReasoningPart::Summary("hi".to_owned()))));
+    assert!(
+        !wire.sends_alone(&reasoning(CarriedReasoningPart::Encrypted(
+            "sealed".to_owned()
+        )))
+    );
+    assert!(
+        !wire.sends_alone(&AssistantContent::ProviderItem(ProviderItem::new(
+            json!({"type": "x"}),
+            "foreign",
+        )))
+    );
+}
+
+/// What the native wire maps `reasoning`, `cache`, `top_p` and `stop` to,
+/// with every other option unset.
+fn native_options(
+    model: &str,
+    reasoning: crate::completion::Reasoning,
+    cache: crate::completion::CacheRetention,
+    top_p: f64,
+    stop: &[String],
+) -> crate::completion::options::OptionMap {
+    let wire = NativeChat::new(CohereConfig::new("key"), model);
+    ReplayTarget::map_options(
+        &wire,
+        &CompletionRequest::new("hi"),
+        crate::completion::options::OptionFields {
+            reasoning: Some(&reasoning),
+            cache: Some(&cache),
+            service_tier: None,
+            verbosity: None,
+            parallel_tool_calls: None,
+            top_p: Some(top_p),
+            seed: None,
+            stop,
+        },
+    )
+}
+
+/// The native API refuses an effort other than `high`, any prompt cache
+/// retention, a `p` outside 0.01 to 0.99 and more than five stop
+/// sequences, and honours `cache: None` by sending nothing.
+#[test]
+fn native_options_refuse_what_cohere_cannot_take() {
+    use crate::completion::options::{Mapping, OptionMap};
+    use crate::completion::{CacheRetention, Effort, Reasoning as Thinking};
+    const THINKS: &str = "command-a-reasoning-08-2025";
+    let six: Vec<String> = (1..=6).map(|n| format!("S{n}")).collect();
+    let five = &six[..5];
+    assert_eq!(
+        native_options(
+            THINKS,
+            Thinking::Effort(Effort::Low),
+            CacheRetention::Short,
+            1.0,
+            &six
+        ),
+        OptionMap {
+            reasoning: Mapping::Unsupported(
+                "Cohere takes thinking on or a token budget, not `low`".to_owned()
+            ),
+            cache: Mapping::Unsupported("Cohere has no prompt cache".to_owned()),
+            service_tier: Mapping::Nothing,
+            verbosity: Mapping::Nothing,
+            parallel_tool_calls: Mapping::Nothing,
+            top_p: Mapping::Unsupported("Cohere takes `p` from 0.01 to 0.99".to_owned()),
+            seed: Mapping::Nothing,
+            stop: Mapping::Unsupported("Cohere takes at most 5 stop sequences".to_owned()),
+        }
+    );
+    assert_eq!(
+        native_options(
+            THINKS,
+            Thinking::Effort(Effort::XHigh),
+            CacheRetention::None,
+            0.0,
+            five
+        ),
+        OptionMap {
+            reasoning: Mapping::Unsupported(
+                "Cohere takes thinking on or a token budget, not `xhigh`".to_owned()
+            ),
+            cache: Mapping::Omit("Cohere does not cache prompts"),
+            service_tier: Mapping::Nothing,
+            verbosity: Mapping::Nothing,
+            parallel_tool_calls: Mapping::Nothing,
+            top_p: Mapping::Unsupported("Cohere takes `p` from 0.01 to 0.99".to_owned()),
+            seed: Mapping::Nothing,
+            stop: Mapping::Send(json!({"stop_sequences": ["S1", "S2", "S3", "S4", "S5"]})),
+        }
+    );
+    assert_eq!(
+        native_options(
+            THINKS,
+            Thinking::Effort(Effort::High),
+            CacheRetention::Long,
+            0.5,
+            five
+        )
+        .cache,
+        Mapping::Unsupported("Cohere has no prompt cache".to_owned())
+    );
+}
+
 mod g89_pair_request_tests;

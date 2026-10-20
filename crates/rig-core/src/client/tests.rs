@@ -168,3 +168,21 @@ async fn chatgpt_sign_in_sets_the_token_and_account() {
         "http://localhost:1/backend-api/codex"
     );
 }
+
+/// `completion` is the native-chat alias: it builds the same `/api/chat`
+/// model as `native_completion`, not the compatibility route.
+#[test]
+fn the_ollama_completion_alias_builds_the_native_chat_model() {
+    let config = ollama::OllamaConfig::new().with_base_url("http://ollama.internal:11434");
+    let client = config
+        .clone()
+        .connect(crate::test_utils::RecordingHttpClient::default());
+    assert_eq!(
+        client.completion("qwen3:4b").wire,
+        config.native_completion("qwen3:4b")
+    );
+    assert_eq!(
+        client.completion("qwen3:4b").wire,
+        client.native_completion("qwen3:4b").wire
+    );
+}

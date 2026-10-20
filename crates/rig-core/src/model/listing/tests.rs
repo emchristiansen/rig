@@ -145,3 +145,22 @@ fn test_parse_error_with_context_includes_parse_error_and_preview() {
         _ => panic!("Expected a response error"),
     }
 }
+
+#[test]
+fn a_corrupt_listing_frame_is_returned_whole_by_its_route() {
+    let frame = std::sync::Arc::new(crate::error::CorruptFrame::text(
+        Some("model.page".to_owned()),
+        "{\"data\":",
+        serde_json::from_str::<serde_json::Value>("{\"data\":").expect_err("truncated"),
+    ));
+    let ProviderError::CorruptFrame(routed) = with_route(
+        ProviderError::CorruptFrame(std::sync::Arc::clone(&frame)),
+        "openai",
+        "/v1/models",
+    ) else {
+        panic!("a corrupt frame stays a corrupt frame");
+    };
+    assert!(std::sync::Arc::ptr_eq(&routed, &frame));
+    assert_eq!(routed.frame(), Some("{\"data\":"));
+    assert_eq!(routed.event_type(), Some("model.page"));
+}
