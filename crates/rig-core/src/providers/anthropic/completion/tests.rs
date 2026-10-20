@@ -2392,15 +2392,13 @@ fn stop_reason_maps_onto_the_normalized_vocabulary() {
 
 #[test]
 fn unknown_stop_reason_is_preserved_verbatim() {
-    for reason in ["pause_turn"] {
-        let mut response = empty_response_with(Some(reason), None);
-        response["content"] = json!([{"type": "text", "text": "answer"}]);
-        let parsed = fold_reply(&response).expect("the response folds");
-        assert_eq!(
-            parsed.finish_reason(),
-            Some(completion::FinishReason::Other(reason.to_owned()))
-        );
-    }
+    let mut response = empty_response_with(Some("pause_turn"), None);
+    response["content"] = json!([{"type": "text", "text": "answer"}]);
+    let parsed = fold_reply(&response).expect("the response folds");
+    assert_eq!(
+        parsed.finish_reason(),
+        Some(completion::FinishReason::Other("pause_turn".to_owned()))
+    );
 }
 
 #[test]
