@@ -11,6 +11,10 @@
 //!   finalization retains exactly those refusals
 //!   ([`CassetteError::ReplayMismatch`]). What the program does after a
 //!   refusal is unavailable to the witness.
+//! - [`with_concurrent_refusal_witness`]: as [`with_refusal_witness`] for a
+//!   concurrent program whose requests are all refused, in whatever order
+//!   and number it sends them; finalization keeps exactly the refusals the
+//!   engine received.
 //! - [`with_snapshot_witness`]: for changes that keep a request's coarse
 //!   shape, shape-matched replay serves every request, the program runs to
 //!   completion, and finalization refuses exactly the named changes against
@@ -27,7 +31,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt};
-use rig::http_client::{self, HeaderMap, HttpMiddleware, Method, Uri};
+use rig::http_client::{self, HeaderMap, HttpMiddleware, Method, Request, StatusCode, Uri};
 use rig::providers::openai::wire::{Dialect, OpenAIConfig};
 use rig_agent::agent::MultiTurnStreamItem;
 use rig_agent::completion::PromptError;
@@ -279,8 +283,6 @@ fn recorded_request_methods(provider: &str, scenario: &str) -> Result<Vec<String
 pub(crate) enum Replay {
     /// It equals its recording, and replay serves it.
     Served,
-    /// Replay refuses it, and the operation that sent it sends it again.
-    RefusedThenRetried,
     /// Replay refuses it, and the operation that sent it fails with that
     /// refusal.
     Refused,
@@ -304,15 +306,6 @@ impl Expected {
             changes: Vec::new(),
         }
     }
-}
-
-/// Which recorded interaction strict replay offers a request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Order {
-    /// The next unplayed one, as the recording ran.
-    Recorded,
-    /// Any unplayed one.
-    Any,
 }
 
 #[derive(Clone, Debug)]
@@ -484,24 +477,15 @@ fn ensure_sent(
     Ok(())
 }
 
-/// The real matcher's refusal of the request standing for `interaction`,
-/// with `consumed` the interactions served before it, and the engine's
-/// snapshot difference it carries.
-fn ensure_refusal(
+/// The real matcher's refusal JSON for a request standing for
+/// `interaction`, with `consumed` the interactions served before it.
+fn ensure_matcher_refusal(
     recording: &Recording,
-    order: Order,
-    response: &ProviderResponseError,
-    request: &SentRequest,
+    diagnostic: &Value,
+    headers: &HeaderMap,
     interaction: usize,
     consumed: &[bool],
-    changes: &[Change],
-) -> Result<String> {
-    ensure!(
-        response.status == Some(http::StatusCode::NOT_FOUND),
-        "the actual response is not HTTP 404: {response:?}"
-    );
-    let diagnostic: Value =
-        serde_json::from_str(&response.body).context("the real matcher response is JSON")?;
+) -> Result<()> {
     let recorded = recording.request(interaction)?;
     ensure!(
         diagnostic.get("message") == Some(&json!("Request did not match any route or mock"))
@@ -542,8 +526,7 @@ fn ensure_refusal(
     ] {
         ensure!(
             candidate.get(field) == Some(&json!(true)),
-            "the refusal also changes {field}: {candidate:?}; actual headers={:?}",
-            request.headers
+            "the refusal also changes {field}: {candidate:?}; actual headers={headers:?}"
         );
     }
     ensure!(
@@ -551,40 +534,49 @@ fn ensure_refusal(
             && candidate.get("shape_matches") == Some(&Value::Null),
         "the real matcher did not refuse only the exact body: {candidate:?}"
     );
-    // The engine compares the refused request with the interaction it was
-    // most likely meant for: the next unplayed one, or for any order the
-    // first unplayed one.
+    Ok(())
+}
+
+/// The real matcher's refusal of the request standing for `interaction`,
+/// the next unplayed one with `consumed` served before it, and the engine's
+/// snapshot difference it carries: exactly the named changes. Returns the
+/// diagnostic finalization keeps.
+fn ensure_refusal(
+    recording: &Recording,
+    response: &ProviderResponseError,
+    request: &SentRequest,
+    interaction: usize,
+    consumed: &[bool],
+    changes: &[Change],
+) -> Result<String> {
+    ensure!(
+        response.status == Some(http::StatusCode::NOT_FOUND),
+        "the actual response is not HTTP 404: {response:?}"
+    );
+    let diagnostic: Value =
+        serde_json::from_str(&response.body).context("the real matcher response is JSON")?;
+    ensure_matcher_refusal(
+        recording,
+        &diagnostic,
+        &request.headers,
+        interaction,
+        consumed,
+    )?;
     let offered = consumed
         .iter()
         .position(|played| !played)
         .context("a refused request has an unplayed interaction")?;
     ensure!(
-        order == Order::Any || offered == interaction,
+        offered == interaction,
         "a recorded-order refusal stands for the next unplayed interaction {offered}, not {interaction}"
     );
-    match diagnostic.get("snapshot_diff") {
-        Some(Value::String(difference)) => {
-            if offered == interaction {
-                let lines: Vec<String> = changes.iter().map(Change::snapshot_line).collect();
-                let named = format!("interaction {interaction}:\n{}", lines.join("\n"));
-                ensure!(
-                    *difference == named,
-                    "the engine's snapshot difference is not exactly the named changes: {difference:?}, expected {named:?}"
-                );
-            } else {
-                ensure!(
-                    difference.starts_with(&format!("interaction {offered}:\n")),
-                    "the engine compared the refusal with another interaction: {difference:?}"
-                );
-            }
-            Ok(format!(
-                "{}\nsnapshot difference at {difference}",
-                response.body
-            ))
-        }
-        None => bail!("the request snapshot check is off; the refusal names no difference"),
-        Some(other) => bail!("the matcher snapshot difference is not text: {other:?}"),
-    }
+    let lines: Vec<String> = changes.iter().map(Change::snapshot_line).collect();
+    let named = format!("interaction {interaction}:\n{}", lines.join("\n"));
+    ensure!(
+        diagnostic.get("snapshot_diff") == Some(&json!(named)),
+        "the engine's snapshot difference is not exactly the named changes: {diagnostic:?}, expected {named:?}"
+    );
+    Ok(format!("{}\nsnapshot difference at {named}", response.body))
 }
 
 /// Bind one named program to its real strict request refusals.
@@ -596,7 +588,6 @@ fn ensure_refusal(
 /// finalized.
 pub(crate) async fn with_refusal_witness<F, Fut>(
     recording: Recording,
-    order: Order,
     expected: Vec<Expected>,
     body: F,
 ) -> Result<()>
@@ -620,12 +611,7 @@ where
         expected.last().map(|request| request.replay) == Some(Replay::Refused),
         "the named program ends with a reported refusal"
     );
-    let spec = match order {
-        Order::Recorded => CassetteSpec::new(recording.scenario()).exact_matched(),
-        Order::Any => CassetteSpec::new(recording.scenario())
-            .exact_matched()
-            .unordered(),
-    };
+    let spec = CassetteSpec::new(recording.scenario()).exact_matched();
     let (outcomes, finished, sent) = observed_session(&recording, spec, body).await?;
     let outcomes = outcomes?;
     ensure_sent(&recording, &sent, &bodies)?;
@@ -642,9 +628,6 @@ where
     let mut outcomes = outcomes.iter();
     let mut consumed = vec![false; recording.len()];
     let mut diagnostics = Vec::new();
-    // The diagnostics of retried attempts, settled by the refusal that ends
-    // their operation: an identical request meets an identical matcher state.
-    let mut pending = 0;
     for (index, request) in expected.iter().enumerate() {
         match request.replay {
             Replay::Served => {
@@ -658,7 +641,6 @@ where
                 );
                 *slot = true;
             }
-            Replay::RefusedThenRetried => pending += 1,
             Replay::Refused => {
                 let error = match outcomes.next() {
                     Some(Err(error)) => error,
@@ -669,7 +651,6 @@ where
                 };
                 let diagnostic = ensure_refusal(
                     &recording,
-                    order,
                     provider_response(error)?,
                     sent.get(index)
                         .context("the actual refused request exists")?,
@@ -677,8 +658,7 @@ where
                     &consumed,
                     &request.changes,
                 )?;
-                diagnostics.extend(std::iter::repeat_n(diagnostic, pending + 1));
-                pending = 0;
+                diagnostics.push(diagnostic);
             }
         }
     }
@@ -792,5 +772,435 @@ where
         *refused == differences,
         "the snapshot check did not refuse exactly the named changes: {refused:?}, expected={differences:?}"
     );
+    Ok(())
+}
+
+/// The engine's readable lines for how `sent` differs from `expected`, as a
+/// refused request's `snapshot_diff` states them: one line per change,
+/// object members in key order, an array's changed middle element by
+/// element when its length is unchanged and as one splice otherwise, the
+/// list cut after twenty lines.
+fn engine_difference(index: usize, expected: &Value, sent: &Value) -> Option<String> {
+    const LISTED: usize = 20;
+    let mut lines = Vec::new();
+    difference_into(String::new(), expected, sent, &mut lines);
+    let total = lines.len();
+    lines.truncate(LISTED);
+    if total > LISTED {
+        lines.push(format!("  ... and {} more difference(s)", total - LISTED));
+    }
+    (!lines.is_empty()).then(|| format!("interaction {index}:\n{}", lines.join("\n")))
+}
+
+fn difference_into(path: String, expected: &Value, sent: &Value, lines: &mut Vec<String>) {
+    if expected == sent {
+        return;
+    }
+    let shown = |path: &str| {
+        if path.is_empty() {
+            "body".to_owned()
+        } else {
+            path.to_owned()
+        }
+    };
+    match (expected, sent) {
+        (Value::Object(expected), Value::Object(sent)) => {
+            let keys: std::collections::BTreeSet<&String> =
+                expected.keys().chain(sent.keys()).collect();
+            for key in keys {
+                let at = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
+                match (expected.get(key), sent.get(key)) {
+                    (Some(expected), Some(sent)) => difference_into(at, expected, sent, lines),
+                    (Some(expected), None) => {
+                        lines.push(format!("  {at}: snapshot {}, not sent", preview(expected)));
+                    }
+                    (None, Some(sent)) => {
+                        lines.push(format!(
+                            "  {at}: not in the snapshot, sent {}",
+                            preview(sent)
+                        ));
+                    }
+                    (None, None) => {}
+                }
+            }
+        }
+        (Value::Array(expected), Value::Array(sent)) => {
+            let prefix = expected
+                .iter()
+                .zip(sent)
+                .take_while(|(expected, sent)| expected == sent)
+                .count();
+            let expected_rest = expected.get(prefix..).unwrap_or_default();
+            let sent_rest = sent.get(prefix..).unwrap_or_default();
+            let suffix = expected_rest
+                .iter()
+                .rev()
+                .zip(sent_rest.iter().rev())
+                .take_while(|(expected, sent)| expected == sent)
+                .count();
+            let expected_middle = expected_rest
+                .get(..expected_rest.len() - suffix)
+                .unwrap_or_default();
+            let sent_middle = sent_rest
+                .get(..sent_rest.len() - suffix)
+                .unwrap_or_default();
+            if expected_middle.len() == sent_middle.len() {
+                for (offset, (expected, sent)) in
+                    expected_middle.iter().zip(sent_middle).enumerate()
+                {
+                    difference_into(format!("{path}/{}", prefix + offset), expected, sent, lines);
+                }
+            } else {
+                lines.push(format!(
+                    "  {} from item {prefix}: snapshot {}, sent {}",
+                    shown(&path),
+                    preview(&Value::Array(expected_middle.to_vec())),
+                    preview(&Value::Array(sent_middle.to_vec()))
+                ));
+            }
+        }
+        _ => lines.push(format!(
+            "  {}: snapshot {}, sent {}",
+            shown(&path),
+            preview(expected),
+            preview(sent)
+        )),
+    }
+}
+
+/// How one request sent through [`Receipts`] ended.
+#[derive(Clone, Debug)]
+enum Returned {
+    /// The transport returned a non-success response with its body.
+    Refused { status: StatusCode, body: String },
+    /// Anything else: a response, or another transport failure.
+    Other(String),
+}
+
+/// One request the transport sent, and how it ended if its sender awaited
+/// it: a sender dropped mid-flight leaves `returned` empty.
+#[derive(Clone, Debug)]
+struct Receipt {
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+    returned: Option<Returned>,
+}
+
+/// A transport that keeps a [`Receipt`] for every request it sends.
+#[derive(Clone)]
+struct Receipts {
+    inner: http_client::DynHttpClient,
+    log: Arc<Mutex<Vec<Receipt>>>,
+}
+
+impl Receipts {
+    fn poisoned() -> http_client::Error {
+        http_client::Error::instance(std::io::Error::other("request receipt mutex poisoned"))
+    }
+
+    fn open(log: &Mutex<Vec<Receipt>>, request: &Request<Bytes>) -> http_client::Result<usize> {
+        let mut log = log.lock().map_err(|_| Self::poisoned())?;
+        log.push(Receipt {
+            method: request.method().clone(),
+            uri: request.uri().clone(),
+            headers: request.headers().clone(),
+            body: request.body().clone(),
+            returned: None,
+        });
+        Ok(log.len() - 1)
+    }
+
+    fn close(
+        log: &Mutex<Vec<Receipt>>,
+        index: usize,
+        returned: Returned,
+    ) -> http_client::Result<()> {
+        let mut log = log.lock().map_err(|_| Self::poisoned())?;
+        if let Some(receipt) = log.get_mut(index) {
+            receipt.returned = Some(returned);
+        }
+        Ok(())
+    }
+
+    fn returned<T>(result: &http_client::Result<http_client::Response<T>>) -> Returned {
+        match result {
+            Err(http_client::Error::InvalidStatusCodeWithDetails { status, body, .. }) => {
+                Returned::Refused {
+                    status: *status,
+                    body: body.clone(),
+                }
+            }
+            Err(other) => Returned::Other(other.to_string()),
+            Ok(response) => Returned::Other(format!("status {}", response.status())),
+        }
+    }
+
+    fn receipts(&self) -> Result<Vec<Receipt>> {
+        Ok(self
+            .log
+            .lock()
+            .map_err(|_| anyhow::anyhow!("request receipt mutex poisoned"))?
+            .clone())
+    }
+}
+
+impl http_client::HttpClientExt for Receipts {
+    fn send<T, U>(
+        &self,
+        request: Request<T>,
+    ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
+    + rig_core::wasm_compat::WasmCompatSend
+    + 'static
+    where
+        T: Into<Bytes>,
+        T: rig_core::wasm_compat::WasmCompatSend,
+        U: From<Bytes>,
+        U: rig_core::wasm_compat::WasmCompatSend + 'static,
+    {
+        let request = request.map(Into::into);
+        let this = self.clone();
+        async move {
+            let index = Self::open(&this.log, &request)?;
+            let result = this.inner.send::<Bytes, U>(request).await;
+            Self::close(&this.log, index, Self::returned(&result))?;
+            result
+        }
+    }
+
+    fn send_multipart<U>(
+        &self,
+        request: Request<http_client::MultipartForm>,
+    ) -> impl Future<Output = http_client::Result<http_client::Response<http_client::LazyBody<U>>>>
+    + rig_core::wasm_compat::WasmCompatSend
+    + 'static
+    where
+        U: From<Bytes>,
+        U: rig_core::wasm_compat::WasmCompatSend + 'static,
+    {
+        self.inner.send_multipart(request)
+    }
+
+    fn send_streaming<T>(
+        &self,
+        request: Request<T>,
+    ) -> impl Future<Output = http_client::Result<http_client::StreamingResponse>>
+    + rig_core::wasm_compat::WasmCompatSend
+    where
+        T: Into<Bytes> + rig_core::wasm_compat::WasmCompatSend,
+    {
+        let request = request.map(Into::into);
+        let this = self.clone();
+        async move {
+            let index = Self::open(&this.log, &request)?;
+            let result = this.inner.send_streaming::<Bytes>(request).await;
+            Self::close(&this.log, index, Self::returned(&result))?;
+            result
+        }
+    }
+}
+
+/// Split one kept refusal into its matcher JSON and its snapshot
+/// difference.
+fn kept_refusal(diagnostic: &str) -> Result<(Value, &str)> {
+    let (message, difference) = diagnostic
+        .split_once("\nsnapshot difference at ")
+        .with_context(|| format!("a kept refusal names its snapshot difference: {diagnostic}"))?;
+    let message: Value =
+        serde_json::from_str(message).context("a kept refusal's matcher response is JSON")?;
+    ensure!(
+        message.get("snapshot_diff") == Some(&json!(difference)),
+        "a kept refusal's difference is not its response's: {diagnostic}"
+    );
+    Ok((message, difference))
+}
+
+/// Bind one named concurrent program to its real strict refusals, in any
+/// order and number.
+///
+/// `named` lists each recorded interaction the program may send and its
+/// exact changes. Strict unordered replay refuses every one, so no
+/// interaction is ever served and the engine compares each refused request
+/// with interaction 0. `body` runs the program and returns its outcome,
+/// which must be one of those refusals.
+///
+/// The program drops its in-flight requests at its first failure, so which
+/// of them reach the engine is not fixed. The witness requires every sent
+/// body to equal exactly one named changed body; every refusal returned to
+/// the program to be the real HTTP 404 of the named matcher state, kept by
+/// finalization word for word; and every further kept refusal to be a real
+/// refusal of a sent request whose sender was dropped, matched one to one.
+/// Setup failures and panics remain failures after the session is
+/// finalized.
+pub(crate) async fn with_concurrent_refusal_witness<F, Fut>(
+    recording: Recording,
+    named: Vec<(usize, Vec<Change>)>,
+    body: F,
+) -> Result<()>
+where
+    F: FnOnce(OpenAiModels) -> Fut,
+    Fut: Future<Output = Result<Outcome>>,
+{
+    ensure_replay_only()?;
+    let snapshot = crate::cassettes::request_snapshot(&recording.cassette_path());
+    ensure!(
+        !snapshot.exists(),
+        "the witness states changes from the recording, so {} must not exist",
+        snapshot.display()
+    );
+    let mut bodies = Vec::with_capacity(named.len());
+    for (interaction, changes) in &named {
+        ensure!(
+            !changes.is_empty(),
+            "every named concurrent request has a change: {interaction}"
+        );
+        bodies.push((*interaction, recording.changed(*interaction, changes)?));
+    }
+    let offered = recording.body(0)?;
+    let consumed = vec![false; recording.len()];
+
+    let receipts = Receipts {
+        inner: crate::cassettes::local_http(),
+        log: Arc::default(),
+    };
+    let cassette = ProviderCassette::start(
+        &crate::cassettes::cassette_root(),
+        recording.provider,
+        CassetteSpec::new(recording.scenario())
+            .exact_matched()
+            .unordered(),
+        recording.dialect.base_url,
+    )
+    .await;
+    let result = AssertUnwindSafe(async {
+        let config = OpenAIConfig::with_key(
+            recording.dialect,
+            cassette.api_key(recording.dialect.api_key_env),
+        )
+        .with_base_url(cassette.base_url());
+        let client = OpenAiModels::new(config, http_client::DynHttpClient::new(receipts.clone()));
+        body(client).await
+    })
+    .catch_unwind()
+    .await;
+    let finished = cassette.try_finish().await;
+    let outcome = match result {
+        Err(payload) => resume_unwind(payload),
+        Ok(outcome) => outcome?,
+    };
+    let sent = receipts.receipts()?;
+
+    // Every sent request is exactly one named changed body; the engine's
+    // refusal of it is a function of its body alone, since no interaction
+    // is ever served.
+    let mut returned = Vec::new();
+    let mut dropped = Vec::new();
+    for (index, request) in sent.iter().enumerate() {
+        let actual: Value =
+            serde_json::from_slice(&request.body).context("the complete actual request is JSON")?;
+        let matches: Vec<usize> = bodies
+            .iter()
+            .filter(|(_, body)| *body == actual)
+            .map(|(interaction, _)| *interaction)
+            .collect();
+        let [interaction] = matches.as_slice() else {
+            bail!(
+                "request {index} is not exactly one named changed body: {actual}, matching {matches:?}"
+            );
+        };
+        let recorded = recording.request(*interaction)?;
+        ensure!(
+            request.method.as_str() == recorded.method
+                && request.uri.path() == recorded.path
+                && request.uri.query().is_none(),
+            "different actual request line at {index}: {request:?}"
+        );
+        let difference = engine_difference(0, offered, &actual)
+            .context("a named changed body differs from interaction 0")?;
+        match &request.returned {
+            Some(Returned::Refused { status, body }) => {
+                ensure!(
+                    *status == StatusCode::NOT_FOUND,
+                    "request {index} was answered {status}, not refused: {body}"
+                );
+                let message: Value =
+                    serde_json::from_str(body).context("the real matcher response is JSON")?;
+                ensure_matcher_refusal(
+                    &recording,
+                    &message,
+                    &request.headers,
+                    *interaction,
+                    &consumed,
+                )?;
+                ensure!(
+                    message.get("snapshot_diff") == Some(&json!(difference)),
+                    "request {index}'s snapshot difference is not exactly its named body's: {message:?}, expected {difference:?}"
+                );
+                returned.push((
+                    body.clone(),
+                    format!("{body}\nsnapshot difference at {difference}"),
+                ));
+            }
+            Some(Returned::Other(other)) => {
+                bail!("request {index} was not refused: {other}")
+            }
+            None => dropped.push((*interaction, &request.headers, difference)),
+        }
+    }
+    ensure!(!returned.is_empty(), "no refusal returned to the program");
+    let error = match outcome {
+        Err(error) => error,
+        Ok(()) => bail!("the named incompatible program unexpectedly succeeded"),
+    };
+    let response = provider_response(&error)?;
+    ensure!(
+        returned.iter().any(|(body, _)| *body == response.body),
+        "the program's error is not a refusal it received: {response:?}"
+    );
+
+    let finish_error = finished
+        .err()
+        .context("finalization must retain the strict refusals")?;
+    let CassetteError::ReplayMismatch {
+        path,
+        unused_interactions,
+        unexpected_requests,
+    } = &finish_error
+    else {
+        bail!("unexpected finalizer error: {finish_error:?}");
+    };
+    ensure!(
+        *path == recording.cassette_path(),
+        "the finalizer names another fixture: {path:?}"
+    );
+    let unused = (0..recording.len())
+        .map(|index| recording.unused(index))
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        *unused_interactions == unused,
+        "different unused exchanges: {unused_interactions:?}, expected={unused:?}"
+    );
+    let mut kept: Vec<&String> = unexpected_requests.iter().collect();
+    for (_, diagnostic) in &returned {
+        let position = kept
+            .iter()
+            .position(|kept| *kept == diagnostic)
+            .with_context(|| {
+                format!("finalization lost a refusal the program received: {diagnostic}")
+            })?;
+        kept.remove(position);
+    }
+    for diagnostic in kept {
+        let (message, difference) = kept_refusal(diagnostic)?;
+        let position = dropped
+            .iter()
+            .position(|(_, _, expected)| expected == difference)
+            .with_context(|| {
+                format!("finalization kept a refusal of no dropped sent request: {diagnostic}")
+            })?;
+        let (interaction, headers, _) = dropped.remove(position);
+        ensure_matcher_refusal(&recording, &message, headers, interaction, &consumed)?;
+    }
     Ok(())
 }

@@ -180,7 +180,21 @@ fn model_name(model: ModelVariant) -> &'static str {
         ModelVariant::Gpt41Mini => "gpt-4.1-mini",
     }
 }
-async fn run_cell(scenario: &str, cell: Cell) -> Result<()> {
+/// One cell's cassette, `path` under the OpenAI recordings, with its
+/// recorded request and reply bodies, which each test reads under a
+/// constant path so that the cassette registry sees the file it reads.
+struct Recording {
+    path: &'static str,
+    request: Value,
+    reply: String,
+}
+
+async fn run_cell(recording: Recording, cell: Cell) -> Result<()> {
+    let Recording {
+        path: scenario,
+        request: original_request,
+        reply,
+    } = recording;
     let wire = OpenAIConfig::new("sk-test").chat(model_name(cell.model));
     let request = request(cell);
     let mode = match cell.transport {
@@ -190,8 +204,7 @@ async fn run_cell(scenario: &str, cell: Cell) -> Result<()> {
     // G240: this is the original request, before Model's upstream preparation.
     let encoded = wire.encode(request.clone(), mode)?;
     let actual_request = json_body(&encoded.request);
-    let original_request = recorded_request(scenario);
-    let response_body = recorded("then", &fixture(scenario));
+    let response_body = reply.clone();
     let observation = match (cell.transport, cell.surface) {
         (Transport::Blocking, Surface::Raw) => {
             let response = Model::new(wire, RecordingHttpClient::new(response_body))
@@ -240,8 +253,8 @@ async fn run_cell(scenario: &str, cell: Cell) -> Result<()> {
     };
     // Keep the original recording premises and independently test real encoding.
     // Both share the unchanged received-response and text/terminal predicates.
-    assert_cell(scenario, cell, &original_request, &observation);
-    assert_cell(scenario, cell, &actual_request, &observation);
+    assert_cell(scenario, &reply, cell, &original_request, &observation);
+    assert_cell(scenario, &reply, cell, &actual_request, &observation);
     Ok(())
 }
 
@@ -256,12 +269,14 @@ fn content_text(content: &Value) -> String {
     }
 }
 
-fn recorded_text(scenario: &str, transport: Transport) -> String {
+fn recorded_text(reply: &str, transport: Transport) -> String {
     match transport {
         Transport::Blocking => {
-            content_text(&recorded_response(scenario)["choices"][0]["message"]["content"])
+            let reply: Value =
+                serde_json::from_str(reply).expect("the recorded reply should be JSON");
+            content_text(&reply["choices"][0]["message"]["content"])
         }
-        Transport::Streaming => recorded_stream_chunks(scenario)
+        Transport::Streaming => recorded_stream_chunks(reply)
             .iter()
             .flat_map(|chunk| chunk["choices"].as_array().into_iter().flatten())
             .filter(|choice| choice["index"].as_u64() == Some(0))
@@ -269,20 +284,7 @@ fn recorded_text(scenario: &str, transport: Transport) -> String {
             .collect(),
     }
 }
-fn fixture(scenario: &str) -> String {
-    format!("chat_history_roundtrip_originals/{scenario}.yaml")
-}
-
-fn recorded_request(scenario: &str) -> Value {
-    recorded_json("when", &fixture(scenario))
-}
-
-fn recorded_response(scenario: &str) -> Value {
-    recorded_json("then", &fixture(scenario))
-}
-
-fn recorded_stream_chunks(scenario: &str) -> Vec<Value> {
-    let body = recorded("then", &fixture(scenario));
+fn recorded_stream_chunks(body: &str) -> Vec<Value> {
     // Existing transport framing and existing JSON parser; no fixture parser.
     Framing::Sse
         .split(body.as_bytes())
@@ -294,7 +296,13 @@ fn recorded_stream_chunks(scenario: &str) -> Vec<Value> {
         .collect()
 }
 
-fn assert_cell(scenario: &str, cell: Cell, request: &Value, observation: &Observation) {
+fn assert_cell(
+    scenario: &str,
+    reply: &str,
+    cell: Cell,
+    request: &Value,
+    observation: &Observation,
+) {
     assert_eq!(
         request["model"],
         model_name(cell.model),
@@ -392,7 +400,7 @@ fn assert_cell(scenario: &str, cell: Cell, request: &Value, observation: &Observ
         "{scenario}: current prompt text"
     );
 
-    let wire_text = recorded_text(scenario, cell.transport);
+    let wire_text = recorded_text(reply, cell.transport);
     assert_eq!(
         wire_text.trim(),
         expected_text(cell.shape),
@@ -413,8 +421,13 @@ fn cell(transport: Transport, model: ModelVariant, surface: Surface, shape: Shap
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_raw_text() -> Result<()> {
+    const PATH: &str = "chat_history_roundtrip_originals/blocking_gpt_4o_mini_raw_text.yaml";
     run_cell(
-        "blocking_gpt_4o_mini_raw_text",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt4oMini,
@@ -427,8 +440,13 @@ async fn blocking_gpt_4o_mini_raw_text() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_raw_single_tool() -> Result<()> {
+    const PATH: &str = "chat_history_roundtrip_originals/blocking_gpt_4o_mini_raw_single_tool.yaml";
     run_cell(
-        "blocking_gpt_4o_mini_raw_single_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt4oMini,
@@ -441,8 +459,14 @@ async fn blocking_gpt_4o_mini_raw_single_tool() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_raw_parallel_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/blocking_gpt_4o_mini_raw_parallel_tool.yaml";
     run_cell(
-        "blocking_gpt_4o_mini_raw_parallel_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt4oMini,
@@ -455,8 +479,14 @@ async fn blocking_gpt_4o_mini_raw_parallel_tool() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_normalized_single_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/blocking_gpt_4o_mini_normalized_single_tool.yaml";
     run_cell(
-        "blocking_gpt_4o_mini_normalized_single_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt4oMini,
@@ -469,8 +499,14 @@ async fn blocking_gpt_4o_mini_normalized_single_tool() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_normalized_parallel_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/blocking_gpt_4o_mini_normalized_parallel_tool.yaml";
     run_cell(
-        "blocking_gpt_4o_mini_normalized_parallel_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt4oMini,
@@ -483,8 +519,13 @@ async fn blocking_gpt_4o_mini_normalized_parallel_tool() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_raw_text() -> Result<()> {
+    const PATH: &str = "chat_history_roundtrip_originals/blocking_gpt_4_1_mini_raw_text.yaml";
     run_cell(
-        "blocking_gpt_4_1_mini_raw_text",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt41Mini,
@@ -497,8 +538,14 @@ async fn blocking_gpt_4_1_mini_raw_text() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_raw_single_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/blocking_gpt_4_1_mini_raw_single_tool.yaml";
     run_cell(
-        "blocking_gpt_4_1_mini_raw_single_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt41Mini,
@@ -511,8 +558,14 @@ async fn blocking_gpt_4_1_mini_raw_single_tool() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_raw_parallel_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/blocking_gpt_4_1_mini_raw_parallel_tool.yaml";
     run_cell(
-        "blocking_gpt_4_1_mini_raw_parallel_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt41Mini,
@@ -525,8 +578,14 @@ async fn blocking_gpt_4_1_mini_raw_parallel_tool() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_normalized_single_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/blocking_gpt_4_1_mini_normalized_single_tool.yaml";
     run_cell(
-        "blocking_gpt_4_1_mini_normalized_single_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt41Mini,
@@ -539,8 +598,14 @@ async fn blocking_gpt_4_1_mini_normalized_single_tool() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_normalized_parallel_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/blocking_gpt_4_1_mini_normalized_parallel_tool.yaml";
     run_cell(
-        "blocking_gpt_4_1_mini_normalized_parallel_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt41Mini,
@@ -553,8 +618,13 @@ async fn blocking_gpt_4_1_mini_normalized_parallel_tool() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_raw_text() -> Result<()> {
+    const PATH: &str = "chat_history_roundtrip_originals/streaming_gpt_4o_mini_raw_text.yaml";
     run_cell(
-        "streaming_gpt_4o_mini_raw_text",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt4oMini,
@@ -567,8 +637,14 @@ async fn streaming_gpt_4o_mini_raw_text() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_raw_single_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/streaming_gpt_4o_mini_raw_single_tool.yaml";
     run_cell(
-        "streaming_gpt_4o_mini_raw_single_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt4oMini,
@@ -581,8 +657,14 @@ async fn streaming_gpt_4o_mini_raw_single_tool() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_raw_parallel_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/streaming_gpt_4o_mini_raw_parallel_tool.yaml";
     run_cell(
-        "streaming_gpt_4o_mini_raw_parallel_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt4oMini,
@@ -595,8 +677,14 @@ async fn streaming_gpt_4o_mini_raw_parallel_tool() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_normalized_single_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/streaming_gpt_4o_mini_normalized_single_tool.yaml";
     run_cell(
-        "streaming_gpt_4o_mini_normalized_single_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt4oMini,
@@ -609,8 +697,14 @@ async fn streaming_gpt_4o_mini_normalized_single_tool() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_normalized_parallel_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/streaming_gpt_4o_mini_normalized_parallel_tool.yaml";
     run_cell(
-        "streaming_gpt_4o_mini_normalized_parallel_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt4oMini,
@@ -623,8 +717,13 @@ async fn streaming_gpt_4o_mini_normalized_parallel_tool() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_raw_text() -> Result<()> {
+    const PATH: &str = "chat_history_roundtrip_originals/streaming_gpt_4_1_mini_raw_text.yaml";
     run_cell(
-        "streaming_gpt_4_1_mini_raw_text",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt41Mini,
@@ -637,8 +736,14 @@ async fn streaming_gpt_4_1_mini_raw_text() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_raw_single_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/streaming_gpt_4_1_mini_raw_single_tool.yaml";
     run_cell(
-        "streaming_gpt_4_1_mini_raw_single_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt41Mini,
@@ -651,8 +756,14 @@ async fn streaming_gpt_4_1_mini_raw_single_tool() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_raw_parallel_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/streaming_gpt_4_1_mini_raw_parallel_tool.yaml";
     run_cell(
-        "streaming_gpt_4_1_mini_raw_parallel_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt41Mini,
@@ -665,8 +776,14 @@ async fn streaming_gpt_4_1_mini_raw_parallel_tool() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_normalized_single_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/streaming_gpt_4_1_mini_normalized_single_tool.yaml";
     run_cell(
-        "streaming_gpt_4_1_mini_normalized_single_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt41Mini,
@@ -679,8 +796,14 @@ async fn streaming_gpt_4_1_mini_normalized_single_tool() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_normalized_parallel_tool() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/streaming_gpt_4_1_mini_normalized_parallel_tool.yaml";
     run_cell(
-        "streaming_gpt_4_1_mini_normalized_parallel_tool",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt41Mini,
@@ -695,8 +818,13 @@ async fn streaming_gpt_4_1_mini_normalized_parallel_tool() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4o_mini_normalized_text() -> Result<()> {
+    const PATH: &str = "chat_history_roundtrip_originals/blocking_gpt_4o_mini_normalized_text.yaml";
     run_cell(
-        "blocking_gpt_4o_mini_normalized_text",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt4oMini,
@@ -709,8 +837,14 @@ async fn blocking_gpt_4o_mini_normalized_text() -> Result<()> {
 
 #[tokio::test]
 async fn blocking_gpt_4_1_mini_normalized_text() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/blocking_gpt_4_1_mini_normalized_text.yaml";
     run_cell(
-        "blocking_gpt_4_1_mini_normalized_text",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Blocking,
             ModelVariant::Gpt41Mini,
@@ -723,8 +857,14 @@ async fn blocking_gpt_4_1_mini_normalized_text() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4o_mini_normalized_text() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/streaming_gpt_4o_mini_normalized_text.yaml";
     run_cell(
-        "streaming_gpt_4o_mini_normalized_text",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt4oMini,
@@ -737,8 +877,14 @@ async fn streaming_gpt_4o_mini_normalized_text() -> Result<()> {
 
 #[tokio::test]
 async fn streaming_gpt_4_1_mini_normalized_text() -> Result<()> {
+    const PATH: &str =
+        "chat_history_roundtrip_originals/streaming_gpt_4_1_mini_normalized_text.yaml";
     run_cell(
-        "streaming_gpt_4_1_mini_normalized_text",
+        Recording {
+            path: PATH,
+            request: recorded_json("when", PATH),
+            reply: recorded("then", PATH),
+        },
         cell(
             Transport::Streaming,
             ModelVariant::Gpt41Mini,

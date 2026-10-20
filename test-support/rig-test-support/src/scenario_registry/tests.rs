@@ -189,8 +189,9 @@ const IN_SOURCE_READERS: &[InSourceReader] = &[
 ];
 
 /// Each in-source reader registers the cassettes its literal and same-file
-/// constant paths name, a template applied to them, and a parameter at each
-/// same-file call passing them; a file nothing names stays an orphan.
+/// constant paths name. A path built at run time, through a `format!`
+/// helper or a parameter, registers nothing, and a file nothing names stays
+/// an orphan.
 #[test]
 fn in_source_readers_register_literal_and_same_file_constant_cassettes() -> anyhow::Result<()> {
     let source = r#"
@@ -211,13 +212,8 @@ fn in_source_readers_register_literal_and_same_file_constant_cassettes() -> anyh
             let body = recorded("then", &fixture(scenario));
         }
         async fn first() { run_cell("first", cell(Blocking)).await }
-        async fn second() { run_cell("second", cell(Streaming)).await }
-        async fn computed(name: &str) { run_cell(&format!("{name}_x"), cell(Blocking)).await }
-        fn rebound(scenario: &str) {
-            let scenario = format!("{scenario}_rebound");
-            recorded("then", &fixture(&scenario));
-        }
-        fn calls_rebound() { rebound("rebound"); }
+        fn passed(path: &str) { recorded("then", path); }
+        fn calls_passed() { passed("originals/passed.yaml"); }
         const PAIRS: &[Pair] = &[Pair {
             provider: "openai",
             unary: "matrix/blocking.yaml",
@@ -242,8 +238,6 @@ fn in_source_readers_register_literal_and_same_file_constant_cassettes() -> anyh
         "ollama/grammar/included",
         "llamacpp/content/local",
         "openai/chat/shared",
-        "openai/originals/first",
-        "openai/originals/second",
         "openai/matrix/blocking",
         "openai/matrix/streaming",
         "gemini/raw/named",
@@ -254,6 +248,8 @@ fn in_source_readers_register_literal_and_same_file_constant_cassettes() -> anyh
     );
 
     let corpus = registered.iter().copied().chain([
+        "openai/originals/first",
+        "openai/originals/passed",
         "openai/originals/unreferenced",
         "openai/absent",
         "openai/unrelated",
@@ -262,6 +258,8 @@ fn in_source_readers_register_literal_and_same_file_constant_cassettes() -> anyh
     anyhow::ensure!(
         orphans
             == [
+                "openai/originals/first",
+                "openai/originals/passed",
                 "openai/originals/unreferenced",
                 "openai/absent",
                 "openai/unrelated"
