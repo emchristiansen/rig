@@ -172,3 +172,104 @@ fn read_only_readers_register_literal_and_same_file_constant_cassettes() {
     );
     assert!(read_only_cassettes("not Rust").is_err());
 }
+
+const IN_SOURCE_READERS: &[InSourceReader] = &[
+    InSourceReader::Included {
+        root: "/../rig-cassette/fixtures/cassettes/",
+    },
+    InSourceReader::Path {
+        name: "recorded",
+        provider: "openai",
+    },
+    InSourceReader::Path {
+        name: "recorded_json",
+        provider: "openai",
+    },
+    InSourceReader::ParityRow,
+];
+
+/// Each in-source reader registers the cassettes its literal and same-file
+/// constant paths name, a template applied to them, and a parameter at each
+/// same-file call passing them; a file nothing names stays an orphan.
+#[test]
+fn in_source_readers_register_literal_and_same_file_constant_cassettes() -> anyhow::Result<()> {
+    let source = r#"
+        const SHARED: &str = "chat/shared.yaml";
+        fn included() {
+            drain(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+                "/../rig-cassette/fixtures/cassettes/ollama/grammar/included.yaml")));
+        }
+        fn local() {
+            const FIXTURE: &str = "../llamacpp/content/local.yaml";
+            let request = recorded_json("when", FIXTURE);
+            let reply = recorded("then", SHARED);
+        }
+        fn fixture(scenario: &str) -> String {
+            format!("originals/{scenario}.yaml")
+        }
+        async fn run_cell(scenario: &str, cell: Cell) {
+            let body = recorded("then", &fixture(scenario));
+        }
+        async fn first() { run_cell("first", cell(Blocking)).await }
+        async fn second() { run_cell("second", cell(Streaming)).await }
+        async fn computed(name: &str) { run_cell(&format!("{name}_x"), cell(Blocking)).await }
+        fn rebound(scenario: &str) {
+            let scenario = format!("{scenario}_rebound");
+            recorded("then", &fixture(&scenario));
+        }
+        fn calls_rebound() { rebound("rebound"); }
+        const PAIRS: &[Pair] = &[Pair {
+            provider: "openai",
+            unary: "matrix/blocking.yaml",
+            streamed: "matrix/streaming.yaml#2",
+            minted: &[],
+        }];
+        fn named() { Recorded::named("gemini", "raw/named.yaml"); }
+        #[test] #[ignore = "not recorded"] fn ignored() { recorded("then", "absent.yaml"); }
+        fn escaping() { recorded("then", "../../outside.yaml"); }
+        fn not_a_cassette() { recorded("then", "notes.txt"); }
+        fn unrelated() {
+            other("then", "unrelated.yaml");
+            include_str!("../unrelated.yaml");
+        }
+        // recorded("then", "comment.yaml");
+    "#;
+    let read: std::collections::BTreeSet<String> = in_source_cassettes(source, IN_SOURCE_READERS)?
+        .into_iter()
+        .map(|(provider, scenario)| format!("{provider}/{scenario}"))
+        .collect();
+    let registered = [
+        "ollama/grammar/included",
+        "llamacpp/content/local",
+        "openai/chat/shared",
+        "openai/originals/first",
+        "openai/originals/second",
+        "openai/matrix/blocking",
+        "openai/matrix/streaming",
+        "gemini/raw/named",
+    ];
+    anyhow::ensure!(
+        read == registered.iter().map(|path| (*path).to_owned()).collect(),
+        "registered {read:?}"
+    );
+
+    let corpus = registered.iter().copied().chain([
+        "openai/originals/unreferenced",
+        "openai/absent",
+        "openai/unrelated",
+    ]);
+    let orphans: Vec<&str> = corpus.filter(|path| !read.contains(*path)).collect();
+    anyhow::ensure!(
+        orphans
+            == [
+                "openai/originals/unreferenced",
+                "openai/absent",
+                "openai/unrelated"
+            ],
+        "orphans {orphans:?}"
+    );
+
+    anyhow::ensure!(in_source_cassettes("not Rust; recorded", IN_SOURCE_READERS).is_err());
+    anyhow::ensure!(in_source_cassettes("not Rust", IN_SOURCE_READERS)?.is_empty());
+    Ok(())
+}

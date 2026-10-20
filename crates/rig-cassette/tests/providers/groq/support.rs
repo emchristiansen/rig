@@ -5,6 +5,7 @@ use std::panic::AssertUnwindSafe;
 use futures::FutureExt;
 use rig::providers::openai::wire::{GROQ, OpenAIConfig};
 
+use super::request_witness::{NamedCase, with_groq_request_witness_cassette};
 use crate::cassettes::{CassetteSpec, ProviderCassette};
 
 async fn groq_cassette(spec: impl Into<CassetteSpec>) -> (ProviderCassette, OpenAIConfig) {
@@ -39,6 +40,20 @@ where
     .await;
     crate::cassettes::checkpoint_attempt(&cassette, "groq", spec.scenario()).await;
     cassette.finish_after_test_result(result).await
+}
+
+/// The witness rows of the shared session file: `scenario` names one
+/// [`NamedCase`] recording, which replays as its exact request-snapshot
+/// witness. The runtime target supplies the same name over its bank.
+pub(super) async fn with_groq_request_witness_result<F, Fut>(
+    scenario: &'static str,
+    test_body: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(OpenAiModels) -> Fut,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
+    with_groq_request_witness_cassette(scenario, NamedCase::of(scenario)?, test_body).await
 }
 
 /// Bogus-key variant for recording real 401s (rig#2314 error matrix).

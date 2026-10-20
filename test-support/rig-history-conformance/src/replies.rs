@@ -11,7 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use serde_json::{Value, json};
 
-use rig_core::completion::CompletionRequest;
+use rig_core::completion::{CompletionRequest, FinishReason};
 use rig_core::error::ProviderError;
 use rig_core::message::{AssistantContent, EMPTY_RESPONSE_ERROR};
 use rig_core::operation::Completion;
@@ -132,6 +132,21 @@ pub fn disagreement_of<W: Wire<Op = Completion>>(
     frames: Frames<W::Frame>,
     agreement: Agreement,
 ) -> Option<String> {
+    disagreement_withholding(wire, frames, agreement, &[])
+}
+
+/// [`disagreement_of`] for a stream that publishes none of `withheld`, the
+/// wire ids of the function and custom calls its terminal response states
+/// for the first time (G195): the streamed fold must equal the whole fold
+/// with exactly those calls taken out, its finish reconciled against the
+/// calls that remain. Every other difference disagrees, and so does a
+/// withheld id that the whole fold does not hold exactly once.
+pub fn disagreement_withholding<W: Wire<Op = Completion>>(
+    wire: &W,
+    frames: Frames<W::Frame>,
+    agreement: Agreement,
+    withheld: &[String],
+) -> Option<String> {
     let request = CompletionRequest::new("restate");
     let Frames { whole, streamed } = frames;
     let unary = quiet(|| decode(wire, &request, Mode::Unary, whole));
@@ -146,9 +161,40 @@ pub fn disagreement_of<W: Wire<Op = Completion>>(
     };
     match (&unary, &stream) {
         (Ok(Ok(unary)), Ok(Ok(stream))) => {
+            let is_withheld = |block: &AssistantContent, id: &str| match block {
+                AssistantContent::ToolCall(call) => call.id.wire() == id,
+                AssistantContent::CustomToolCall(call) => call.id.wire() == id,
+                _ => false,
+            };
+            for id in withheld {
+                let held = unary
+                    .choice
+                    .iter()
+                    .filter(|block| is_withheld(block, id))
+                    .count();
+                if held != 1 {
+                    return Some(format!(
+                        "the whole fold holds the terminal-only call {id} {held} times: {}",
+                        json!(unary.message())
+                    ));
+                }
+            }
+            let mut kept = unary.clone();
+            if !withheld.is_empty() {
+                kept.choice
+                    .retain(|block| !withheld.iter().any(|id| is_withheld(block, id)));
+                // The finish is reconciled again against the calls that
+                // remain: a Responses status states no tool-call finish, so
+                // `ToolCalls` there is only that reconciliation of `Stop`.
+                let stated = match unary.finish_reason() {
+                    Some(FinishReason::ToolCalls) => Some(FinishReason::Stop),
+                    stated => stated,
+                };
+                kept = kept.with_optional_finish_reason(stated);
+            }
             let local = |turn: Value| transport_local(turn, agreement.transport_local);
             let (whole, streamed) = (
-                local(numbered(json!(unary.message()))),
+                local(numbered(json!(kept.message()))),
                 local(numbered(json!(stream.message()))),
             );
             if whole != streamed
@@ -158,10 +204,10 @@ pub fn disagreement_of<W: Wire<Op = Completion>>(
                     "the folds differ\nwhole:    {whole}\nstreamed: {streamed}"
                 ));
             }
-            (unary.stop() != stream.stop()).then(|| {
+            (kept.stop() != stream.stop()).then(|| {
                 format!(
                     "the stops differ: whole {:?}, streamed {:?}",
-                    unary.stop(),
+                    kept.stop(),
                     stream.stop()
                 )
             })
