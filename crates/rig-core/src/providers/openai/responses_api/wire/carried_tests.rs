@@ -324,17 +324,25 @@ fn standard_body(raw: Value) -> crate::completion::options::FinalBody {
     .expect("recognized raw fields encode")
 }
 
+/// mec-rig-port-answers-1 Q7: off Codex, raw keys the fork's reader does not
+/// recognize, outer request keys included, are sent as written and outrank
+/// the typed provider options, as raw params do on every wire. A raw `model`
+/// is never sent (G132), and the typed output cap and temperature win over
+/// raw ones, which are sent only where the typed field is unset. Codex keeps
+/// the fork's reader and sends none of them.
 #[test]
-fn raw_projection_ignores_outer_and_unknown_keys_without_changing_typed_options() {
+fn raw_projection_sends_unknown_keys_but_not_model_or_raw_cap_and_temperature_over_typed() {
     use crate::providers::openai::extension::OpenAiOptions;
     let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
-    let mut request = codex_request(json!({
-        "input":[{"role":"developer","content":"ignored"}],
-        "model":"ignored-model", "instructions":"ignored", "tool_choice":"required",
+    let raw = json!({
+        "input":[{"role":"developer","content":"raw"}],
+        "model":"ignored-model", "instructions":"raw", "tool_choice":"required",
         "max_output_tokens":999, "temperature":0.99,
-        "conversation":"ignored-raw-conversation", "future_parameter":{"keep":false}
-    }))
-    .provider_option(OpenAiOptions::default().conversation("typed-conversation"));
+        "conversation":"raw-conversation", "future_parameter":{"keep":false},
+        "top_logprobs":2, "user":null
+    });
+    let mut request = codex_request(raw.clone())
+        .provider_option(OpenAiOptions::default().conversation("typed-conversation"));
     request.max_tokens = Some(7);
     request.temperature = Some(0.25);
     let body = wire
@@ -344,17 +352,38 @@ fn raw_projection_ignores_outer_and_unknown_keys_without_changing_typed_options(
         )
         .expect("typed options survive raw projection");
     assert_eq!(body.get("model"), Some(&json!("gpt-5.4")));
-    assert_eq!(
-        body.get("input"),
-        Some(
-            &json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}])
-        )
-    );
     assert_eq!(body.get("max_output_tokens"), Some(&json!(7)));
     assert_eq!(body.get("temperature"), Some(&json!(0.25)));
-    assert_eq!(body.get("conversation"), Some(&json!("typed-conversation")));
-    for key in ["instructions", "tool_choice", "future_parameter"] {
-        assert!(body.get(key).is_none(), "unrecognized raw {key} is absent");
+    for key in [
+        "input",
+        "instructions",
+        "tool_choice",
+        "conversation",
+        "future_parameter",
+        "top_logprobs",
+        "user",
+    ] {
+        assert_eq!(body.get(key), raw.get(key), "raw {key} is sent as written");
+    }
+
+    let untyped = wire
+        .responses_request(
+            &codex_request(raw.clone()),
+            super::super::Delivery::Http(crate::wire::Mode::Unary),
+        )
+        .expect("raw cap and temperature encode where the typed fields are unset");
+    assert_eq!(untyped.get("model"), Some(&json!("gpt-5.4")));
+    assert_eq!(untyped.get("max_output_tokens"), Some(&json!(999)));
+    assert_eq!(untyped.get("temperature"), Some(&json!(0.99)));
+
+    let codex_body = codex()
+        .responses_request(
+            &codex_request(json!({"future_parameter":{"keep":false},"top_logprobs":2,"user":null})),
+            super::super::Delivery::Http(crate::wire::Mode::Unary),
+        )
+        .expect("Codex keeps the fork's reader");
+    for key in ["future_parameter", "top_logprobs", "user"] {
+        assert!(codex_body.get(key).is_none(), "Codex sends no raw {key}");
     }
 }
 
@@ -405,11 +434,15 @@ fn recognized_raw_projection_keeps_fork_nested_defaults_and_string_service_tiers
         body.get("tools"),
         Some(&json!([{"type":"web_search","future":{"nested":[null,1]}}]))
     );
-    assert!(body.get("top_p").is_none());
+    // mec-rig-port-answers-1 Q7: an explicit raw null is sent as null.
+    assert_eq!(body.get("top_p"), Some(&Value::Null));
 }
 
+/// A null or boolean `additional_params` is empty. Off Codex, an explicit raw
+/// null for a key is sent as null (mec-rig-port-answers-1 Q7); nothing else
+/// emits these keys.
 #[test]
-fn raw_null_and_boolean_are_empty_and_nullable_fields_are_omitted() {
+fn raw_null_and_boolean_are_empty_and_explicit_null_fields_are_sent_as_null() {
     for raw in [
         Value::Null,
         json!(false),
@@ -417,7 +450,7 @@ fn raw_null_and_boolean_are_empty_and_nullable_fields_are_omitted() {
         json!({"stream":"ignored"}),
         json!({"metadata":null,"text":null,"reasoning":null,"include":null,"store":null}),
     ] {
-        let body = standard_body(raw);
+        let body = standard_body(raw.clone());
         for key in [
             "stream",
             "metadata",
@@ -427,9 +460,10 @@ fn raw_null_and_boolean_are_empty_and_nullable_fields_are_omitted() {
             "store",
             "client_metadata",
         ] {
-            assert!(
-                body.get(key).is_none(),
-                "empty/null raw does not emit {key}"
+            assert_eq!(
+                body.get(key),
+                raw.get(key).filter(|value| value.is_null()),
+                "raw {raw} emits {key} only as its explicit null"
             );
         }
     }
@@ -490,8 +524,10 @@ fn raw_projection_refuses_malformed_roots_nested_known_fields_and_tools() {
     }
 }
 
+/// Off Codex an unrecognised raw key is sent as written beside the exact
+/// recognised value (mec-rig-port-answers-1 Q7).
 #[test]
-fn recognized_raw_prompt_cache_options_keep_exact_values_without_unknown_passthrough() {
+fn recognized_raw_prompt_cache_options_keep_exact_values_and_unknown_keys_are_sent() {
     let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
     for value in [
         json!({"ttl":"30m","comparison_response_id":"resp_0","future":[null,7]}),
@@ -505,6 +541,6 @@ fn recognized_raw_prompt_cache_options_keep_exact_values_without_unknown_passthr
             )
             .expect("existing request merge");
         assert_eq!(body.get("prompt_cache_options"), Some(&value));
-        assert!(body.get("unknown_outer").is_none());
+        assert_eq!(body.get("unknown_outer"), Some(&json!([null, 9])));
     }
 }

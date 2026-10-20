@@ -357,19 +357,24 @@ async fn a_contentless_reasoning_item_survives_the_fold() {
     .await
     .expect("the recorded responses body folds");
 
+    // The port decodes Responses reasoning as `CarriedReasoning`, whose
+    // payload holds the received item (U: `Reasoning` and its native item).
     let reasoning = response
         .choice
         .iter()
-        .find(|content| matches!(content, crate::message::AssistantContent::Reasoning(_)))
+        .find_map(|content| match content {
+            crate::message::AssistantContent::CarriedReasoning(reasoning) => Some(reasoning),
+            _ => None,
+        })
         .unwrap_or_else(|| panic!("the turn's reasoning item survives: {:?}", response.choice));
     assert_eq!(
-        reasoning.native_item(),
-        Some(&serde_json::json!({
+        reasoning.payload.item,
+        serde_json::json!({
             "content": [],
             "id": "id_REDACTED_1",
             "summary": [],
             "type": "reasoning"
-        }))
+        })
     );
 }
 

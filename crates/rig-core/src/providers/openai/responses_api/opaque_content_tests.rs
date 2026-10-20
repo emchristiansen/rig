@@ -287,7 +287,8 @@ fn opaque_message_parts_replay_in_place_with_and_without_ids() {
 }
 
 /// OC04 / G128 / G201: tagged calls and untagged whole items keep their content;
-/// the original empty known reasoning keeps exact raw without a canonical part.
+/// the original empty known reasoning keeps exact raw and, since
+/// mec-rig-port-answers-1 Q5 reopened G165, is one empty reasoning block.
 #[test]
 fn tagged_calls_and_untagged_items_keep_content_while_empty_reasoning_keeps_raw() {
     for tagged in [true, false] {
@@ -312,8 +313,17 @@ fn tagged_calls_and_untagged_items_keep_content_while_empty_reasoning_keeps_raw(
         let response =
             decode(vec![reasoning.clone()]).expect("the original reasoning fixture reads");
         if tagged {
-            // G201: G165 suppresses the original wholly empty known reasoning.
-            assert!(response.choice.is_empty());
+            // Q5 (G201 narrowed): the original wholly empty known reasoning
+            // is one empty reasoning block whose payload is the exact item.
+            let [CoreContent::CarriedReasoning(kept)] = response.choice.as_slice() else {
+                panic!(
+                    "the tagged empty reasoning is one reasoning block: {:?}",
+                    response.choice
+                );
+            };
+            assert_eq!(kept.id.as_deref(), Some("rs_1"));
+            assert!(kept.content.is_empty());
+            assert_eq!(kept.payload.item, reasoning);
         } else {
             assert_eq!(response.choice.len(), 1);
             let CoreContent::ProviderItem(item) = &response.choice[0] else {

@@ -223,6 +223,34 @@ fn websocket_lifecycle_preserves_optional_code_and_original_tool_description_con
     assert!(websocket_response(&invalid_description).is_err());
 }
 
+/// The strict SSE reader accepts `"description": null` on a whole response's
+/// tool and keeps the body exactly. This departs from F, whose typed reader
+/// refused it; the departure was accepted under mec-rig-port-answers-1 Q9.
+/// A present description must still be a string or null, and the WebSocket
+/// reader keeps refusing null (see the tests beside this one).
+#[test]
+fn the_strict_reader_accepts_a_null_tool_description() {
+    let response = json!({"id":"r","object":"response","created_at":0,
+        "status":"completed","model":"gpt-test","output":[],
+        "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"},
+            "strict":false,"description":null}]});
+    assert!(super::whole(&response).is_ok());
+    let raw = response.to_string();
+    assert!(matches!(classify_responses_payload(&raw),
+        WireEvent::Known(ResponsesEvent::Whole(retained)) if retained == response));
+    let decoder = ResponsesDecoder::new("openai", ResponsesStreamOptions::strict());
+    assert!(matches!(decoder.classify(WireFrame::Text(raw)),
+        WireEvent::Known(ResponsesEvent::Whole(retained)) if retained == response));
+    let frame = json!({"type":"response.completed","sequence_number":0,"response":response});
+    assert!(matches!(
+        classify_responses_payload(&frame.to_string()),
+        WireEvent::Known(_)
+    ));
+    let mut numeric = response.clone();
+    numeric["tools"][0]["description"] = json!(7);
+    assert!(super::whole(&numeric).is_err());
+}
+
 #[test]
 fn websocket_lifecycle_optionality_does_not_relax_the_sse_reader() {
     let response = json!({"id":"r","status":"failed","object":"response",

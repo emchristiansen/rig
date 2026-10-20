@@ -2780,6 +2780,48 @@ fn retained_index_stream_agrees_with_its_whole_reply() {
     }
 }
 
+/// mec-rig-port-answers-1 Q6: ChatGPT's envelope repair fills every missing
+/// `output_index` with 0, so reasoning slots are keyed by item id. Two
+/// distinct reasoning items streamed without indices stay two reasoning
+/// blocks, in order, and fold as their whole reply does.
+#[test]
+fn repaired_indexless_reasoning_items_keep_their_own_slots_and_fold_as_the_whole_reply() {
+    let output = [
+        json!({"type":"reasoning","id":"rs_1","summary":[],
+            "content":[{"type":"reasoning_text","text":"x y z"}]}),
+        json!({"type":"reasoning","id":"rs_4",
+            "summary":[{"type":"summary_text","text":"ünï ✓ \"q\""}],
+            "encrypted_content":"ciphertext-4"}),
+    ];
+    let repaired = |input: Vec<WireFrame>| {
+        feed_frames!(
+            ResponsesDecoder::new("openai", super::super::ResponsesStreamOptions::strict())
+                .with_envelope_repair(),
+            super::super::document::Response::with_strict_reader(true),
+            "openai",
+            input
+        )
+        .outcome
+        .expect("the repaired reply decodes")
+    };
+    let streamed = repaired(frames(&without_indices(restated(&output))));
+    let unary = repaired(whole(&output));
+    assert_eq!(streamed.choice, unary.choice);
+    let reasoning = streamed
+        .choice
+        .iter()
+        .map(|block| match block {
+            AssistantContent::CarriedReasoning(reasoning) => reasoning,
+            other => panic!("only reasoning blocks: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reasoning.len(), 2, "{:?}", streamed.choice);
+    assert_eq!(reasoning[0].id.as_deref(), Some("rs_1"));
+    assert_eq!(reasoning[0].payload.item, output[0]);
+    assert_eq!(reasoning[1].id.as_deref(), Some("rs_4"));
+    assert_eq!(reasoning[1].payload.item, output[1]);
+}
+
 #[test]
 fn retained_index_reasoning_without_ciphertext_keeps_item_and_replayed_ids() {
     let mut thought = reasoning("rs_1", &["Plan."]);

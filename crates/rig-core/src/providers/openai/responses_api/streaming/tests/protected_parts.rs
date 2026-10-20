@@ -195,8 +195,11 @@ fn a_waiting_part_binds_only_to_the_item_its_event_named() {
         ])),
     ]);
     let reasoning = reasoning_items(&choice);
-    // G188: the empty known rs_1 contributes no canonical reasoning item.
-    assert!(reasoning.is_empty(), "{choice:?}");
+    // mec-rig-port-answers-1 Q5 (G165 reopened, G188 narrowed): the empty
+    // known rs_1 is one empty reasoning item, as F asserted.
+    assert_eq!(reasoning.len(), 1, "{choice:?}");
+    assert_eq!(reasoning[0].id.as_deref(), Some("rs_1"));
+    assert!(reasoning[0].content.is_empty(), "{choice:?}");
     assert_eq!(opaque_texts(&choice), [&unknown]);
     assert!(unknown_payloads(&events).is_empty(), "{events:?}");
 }
@@ -339,7 +342,7 @@ fn a_waiting_part_of_the_same_item_still_refuses_a_contradicting_kind() {
 #[test]
 fn a_reasoning_items_waiting_part_moves_to_its_own_slot() {
     // Repair puts rs_1's unknown part at rs_0's position; it binds once to
-    // rs_1 when rs_1 establishes its slot; empty known rs_0 is not canonical.
+    // rs_1 when rs_1 establishes its slot, and rs_0 stays empty.
     let unknown = json!({"type":"future_part","payload":[4]});
     let (choice, events) = fold_driven(&[
         json!({"type":"response.content_part.added","item_id":"rs_1","output_index":0,"content_index":0,"sequence_number":0,"part":unknown}),
@@ -349,11 +352,15 @@ fn a_reasoning_items_waiting_part_moves_to_its_own_slot() {
         ])),
     ]);
     let reasoning = reasoning_items(&choice);
-    // G188: empty known rs_0 is absent; opaque rs_1 remains at its own coordinate.
-    assert_eq!(reasoning.len(), 1, "{choice:?}");
-    assert_eq!(reasoning[0].id.as_deref(), Some("rs_1"));
+    // mec-rig-port-answers-1 Q5 (G165 reopened, G188 narrowed): empty known
+    // rs_0 is one empty reasoning item, as F asserted; opaque rs_1 remains
+    // at its own coordinate.
+    assert_eq!(reasoning.len(), 2, "{choice:?}");
+    assert_eq!(reasoning[0].id.as_deref(), Some("rs_0"));
+    assert!(reasoning[0].content.is_empty(), "{choice:?}");
+    assert_eq!(reasoning[1].id.as_deref(), Some("rs_1"));
     assert_eq!(
-        reasoning[0].content,
+        reasoning[1].content,
         vec![CarriedReasoningPart::OpaqueContent(
             crate::message::CarriedPayload::new(unknown.clone(), Some("openai".into()))
                 .with_position(crate::message::CarriedPosition::ReasoningContent { part_index: 0 })

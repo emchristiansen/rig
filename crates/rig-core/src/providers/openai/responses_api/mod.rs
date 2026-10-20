@@ -566,9 +566,10 @@ pub(crate) fn include_ciphertext(body: &mut Map<String, Value>) {
     body.insert("include".to_owned(), Value::Array(include));
 }
 
-/// The fork's recognized raw fields, independently of newer typed options.
-/// This projection is private; the U canonical request and FinalBody are the
-/// only request representations used by the operation and transports.
+/// The fork's recognized raw fields, independently of newer typed options,
+/// and every other raw key as written. This projection is private; the U
+/// canonical request and FinalBody are the only request representations used
+/// by the operation and transports.
 #[derive(Deserialize, Serialize, Default)]
 #[serde(rename = "AdditionalParameters")]
 struct RawParameterProjection {
@@ -607,6 +608,27 @@ struct RawParameterProjection {
     store: Option<bool>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     client_metadata: std::collections::BTreeMap<String, String>,
+    /// The raw keys the fork's reader does not recognize, as written.
+    #[serde(flatten)]
+    unrecognized: Map<String, Value>,
+}
+
+/// What reaches the request of the raw keys the fork's reader does not
+/// recognize, and of explicit raw nulls, which that reader read as absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnrecognizedRaw {
+    /// Codex keeps the fork's reader: nothing.
+    Dropped,
+    /// Every other contract sends them as written (mec-rig-port-answers-1
+    /// Q7), but never a raw `model` (the request names the model, G132), and
+    /// a raw `max_output_tokens` or `temperature` only where the request
+    /// leaves that typed field unset, so a typed value wins.
+    Sent {
+        /// The request sets its typed output cap (`max_tokens`).
+        typed_output_cap: bool,
+        /// The request sets its typed `temperature`.
+        typed_temperature: bool,
+    },
 }
 
 fn raw_metadata<'de, D: Deserializer<'de>>(
@@ -707,7 +729,12 @@ enum RawInclude {
 }
 
 /// Apply the fork's raw-field reader before the U option layers merge.
-pub(crate) fn project_raw_parameters(raw: &Value) -> Result<Map<String, Value>, EncodeError> {
+/// Recognized keys keep its decode validation and are sent as it decodes
+/// them; `unrecognized` decides the rest.
+pub(crate) fn project_raw_parameters(
+    raw: &Value,
+    unrecognized: UnrecognizedRaw,
+) -> Result<Map<String, Value>, EncodeError> {
     if raw.is_null() || raw.is_boolean() {
         return Ok(Map::new());
     }
@@ -746,13 +773,41 @@ pub(crate) fn project_raw_parameters(raw: &Value) -> Result<Map<String, Value>, 
     } else {
         None
     };
-    let parameters = serde_json::from_value::<RawParameterProjection>(raw).map_err(|error| {
-        EncodeError::request(format!(
-            "Invalid OpenAI Responses additional_params payload: {error}"
-        ))
-    })?;
+    let nulls = raw
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, value)| value.is_null())
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let mut parameters =
+        serde_json::from_value::<RawParameterProjection>(raw).map_err(|error| {
+            EncodeError::request(format!(
+                "Invalid OpenAI Responses additional_params payload: {error}"
+            ))
+        })?;
+    if unrecognized == UnrecognizedRaw::Dropped {
+        parameters.unrecognized.clear();
+    }
     let mut fields =
         serde_json::from_value::<Map<String, Value>>(serde_json::to_value(parameters)?)?;
+    if let UnrecognizedRaw::Sent {
+        typed_output_cap,
+        typed_temperature,
+    } = unrecognized
+    {
+        // A recognized key the reader decoded from `null` is sent as `null`.
+        for key in nulls {
+            fields.entry(key).or_insert(Value::Null);
+        }
+        fields.shift_remove("model");
+        if typed_output_cap {
+            fields.shift_remove("max_output_tokens");
+        }
+        if typed_temperature {
+            fields.shift_remove("temperature");
+        }
+    }
     if let Some(tools) = tools {
         fields.insert("tools".to_owned(), tools);
     }

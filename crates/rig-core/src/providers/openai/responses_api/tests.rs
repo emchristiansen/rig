@@ -1766,7 +1766,9 @@ fn an_unknown_reasoning_summary_supplies_no_text() {
     assert_eq!(raw.item, json!({"type":"future_summary","list":[1]}));
 }
 
-// D08 / G202: known nonempty categories survive; known empty reasoning keeps raw.
+// D08 / G202, narrowed by mec-rig-port-answers-1 Q5 (G165 reopened): known
+// nonempty categories survive; known empty reasoning keeps raw and is one
+// empty reasoning block that replays exactly.
 #[test]
 fn known_tags_keep_nonempty_categories_and_empty_reasoning_keeps_raw() {
     for (item, kind) in [
@@ -1781,15 +1783,21 @@ fn known_tags_keep_nonempty_categories_and_empty_reasoning_keeps_raw() {
         (json!({"type":"reasoning","id":"r1","summary":[]}), 2),
     ] {
         let response = fold_items(vec![item.clone()]);
+        assert_eq!(response.choice.len(), 1);
+        assert!(matches!(
+            (&response.choice[0], kind),
+            (CoreContent::CarriedText(_), 0)
+                | (CoreContent::ToolCall(_), 1)
+                | (CoreContent::CarriedReasoning(_), 2)
+        ));
         if kind == 2 {
-            // G202: the original known empty item retains raw, not a canonical part.
-            assert!(response.choice.is_empty());
-        } else {
-            assert_eq!(response.choice.len(), 1);
-            assert!(matches!(
-                (&response.choice[0], kind),
-                (CoreContent::CarriedText(_), 0) | (CoreContent::ToolCall(_), 1)
-            ));
+            // Q5: the original known empty item is an empty reasoning block.
+            let reasoning = reasoning_of(&response);
+            assert_eq!(reasoning.id.as_deref(), Some("r1"));
+            assert!(reasoning.content.is_empty());
+            assert_eq!(reasoning.payload.item, item);
+            let replay = input_items(response.message().expect("received turn")).expect("replay");
+            assert_eq!(replay, vec![item.clone()]);
         }
         assert_eq!(response.raw["output"][0], item);
     }

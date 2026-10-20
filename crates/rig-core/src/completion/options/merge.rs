@@ -139,8 +139,9 @@ pub enum Rewrite {
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
     CodexStore,
-    /// Validate recognized raw Responses controls; its output cap and
-    /// temperature come from the typed request, not this raw layer.
+    /// Validate recognized raw Responses controls. Off Codex, other raw keys
+    /// and explicit nulls are sent as written, except `model`, and the
+    /// typed request's output cap and temperature win over raw ones.
     ///
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
@@ -862,8 +863,17 @@ pub fn request_params(
     }
     let provider = provider.fields;
     let mut raw = if rewrites.contains(&Rewrite::ResponsesTypedControls) {
+        use crate::providers::openai::responses_api::UnrecognizedRaw;
         crate::providers::openai::responses_api::project_raw_parameters(
             request.additional_params.as_ref().unwrap_or(&Value::Null),
+            if rewrites.contains(&Rewrite::ResponsesCodex) {
+                UnrecognizedRaw::Dropped
+            } else {
+                UnrecognizedRaw::Sent {
+                    typed_output_cap: request.max_tokens.is_some(),
+                    typed_temperature: request.temperature.is_some(),
+                }
+            },
         )?
     } else {
         raw_layer(request)?
