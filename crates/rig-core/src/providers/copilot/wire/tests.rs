@@ -50,10 +50,12 @@ fn prompt() -> CompletionRequest {
     CompletionRequest::new("say hi")
 }
 
-/// The first text block of a folded turn.
+/// The first text block of a folded turn: a Chat text block, or the carried
+/// text a Responses message part decodes to.
 fn text_of(response: &crate::completion::CompletionResponse) -> Option<String> {
     response.choice.iter().find_map(|content| match content {
         crate::message::AssistantContent::Text(text) => Some(text.text.clone()),
+        crate::message::AssistantContent::CarriedText(text) => Some(text.text().to_owned()),
         _ => None,
     })
 }

@@ -143,9 +143,9 @@ async fn chat_stream_raw_terminal_round_trips_provider_type() {
     // The rebuilt document carries the wire's own accounting, the
     // OpenAI-compatible counters and whatever else the dialect added, and
     // the accounting's own normalization is what the terminal must carry.
-    chat::assert_terminal_round_trips(&terminal);
+    let (frames, terminal_frame) = recorded_chat_frames(scenario);
+    chat::assert_terminal_round_trips(&terminal, &frames);
 
-    let (_, terminal_frame) = recorded_chat_frames(scenario);
     assert_eq!(
         terminal.raw["usage"]["prompt_tokens"], terminal_frame["usage"]["prompt_tokens"],
         "raw usage must be the terminal frame's usage"

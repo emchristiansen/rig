@@ -194,6 +194,153 @@ impl<'ast, 'a> Visit<'ast> for CassetteScenarioVisitor<'a> {
     }
 }
 
+/// The read-only cassette readers: each takes `(provider, scenario, ..)` and
+/// reads that recorded cassette without replaying it, so a test that only
+/// reads a fixture through one of them still uses it.
+pub const READ_ONLY_READERS: &[&str] = &[
+    "recorded_interaction_bodies",
+    "recorded_json_request",
+    "recorded_json_response",
+    "recorded_request_header_pairs",
+    "recorded_response_header_pairs",
+    "recorded_response_header",
+    "recorded_json_turns",
+    "recorded_json_turn",
+    "recorded_request_query_pairs",
+    "recorded_request_paths",
+    "recorded_statuses_and_bodies",
+    "recorded_sse_json_frames",
+    // `stream_faults::recorded_sse_frames`.
+    "recorded_sse_frames",
+    // `raw_capture::chat`.
+    "recorded_sole_usage_frame",
+    "recorded_frames_with_terminal",
+    "recorded_agreeing_usage_frames",
+];
+
+/// The `(provider, scenario)` pairs `source` reads through a
+/// [`READ_ONLY_READERS`] call whose first two arguments are string literals
+/// or `&str` constants declared in the same file, a function's own
+/// constants before the file's. A call with any other argument is not
+/// counted, and neither is a call in an `#[ignore]`d function, as for
+/// [`cassette_scenarios`].
+pub fn read_only_cassettes(source: &str) -> Result<Vec<(String, String)>, ScenarioError> {
+    let syntax = syn::parse_file(source)?;
+    let mut file_consts = ConstCollector::default();
+    file_consts.visit_file(&syntax);
+    let mut visitor = ReaderVisitor {
+        file: file_consts.unambiguous(),
+        local: Vec::new(),
+        read: Vec::new(),
+    };
+    visitor.visit_file(&syntax);
+    Ok(visitor.read)
+}
+
+/// String constants by name; a name declared twice with different values is
+/// ambiguous and resolves to nothing.
+#[derive(Default)]
+struct ConstCollector {
+    values: std::collections::BTreeMap<String, Option<String>>,
+    /// Whether to stop at nested functions, which hold their own constants.
+    outer_only: bool,
+}
+
+impl ConstCollector {
+    fn unambiguous(self) -> std::collections::BTreeMap<String, String> {
+        self.values
+            .into_iter()
+            .filter_map(|(name, value)| Some((name, value?)))
+            .collect()
+    }
+}
+
+impl<'ast> Visit<'ast> for ConstCollector {
+    fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
+        if let Expr::Lit(ExprLit {
+            lit: Lit::Str(value),
+            ..
+        }) = node.expr.as_ref()
+        {
+            let value = value.value();
+            self.values
+                .entry(node.ident.to_string())
+                .and_modify(|known| {
+                    if known.as_deref() != Some(value.as_str()) {
+                        *known = None;
+                    }
+                })
+                .or_insert(Some(value));
+        }
+        visit::visit_item_const(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        if !self.outer_only {
+            visit::visit_item_fn(self, node);
+        }
+    }
+}
+
+struct ReaderVisitor {
+    file: std::collections::BTreeMap<String, String>,
+    /// The constants of each enclosing function, innermost last.
+    local: Vec<std::collections::BTreeMap<String, String>>,
+    read: Vec<(String, String)>,
+}
+
+impl ReaderVisitor {
+    fn value(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Lit(ExprLit {
+                lit: Lit::Str(value),
+                ..
+            }) => Some(value.value()),
+            Expr::Reference(reference) => self.value(&reference.expr),
+            Expr::Paren(paren) => self.value(&paren.expr),
+            Expr::Path(path) if path.qself.is_none() => {
+                let name = path.path.get_ident()?.to_string();
+                self.local
+                    .iter()
+                    .rev()
+                    .find_map(|scope| scope.get(&name))
+                    .or_else(|| self.file.get(&name))
+                    .cloned()
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for ReaderVisitor {
+    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
+        if node.attrs.iter().any(|attr| attr.path().is_ident("ignore")) {
+            return;
+        }
+        let mut consts = ConstCollector {
+            outer_only: true,
+            ..ConstCollector::default()
+        };
+        visit::visit_block(&mut consts, &node.block);
+        self.local.push(consts.unambiguous());
+        visit::visit_item_fn(self, node);
+        self.local.pop();
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast ExprCall) {
+        if let Some(name) = cassette_wrapper_name(node)
+            && READ_ONLY_READERS.contains(&name.as_str())
+            && let (Some(provider), Some(scenario)) = (
+                node.args.first().and_then(|expr| self.value(expr)),
+                node.args.iter().nth(1).and_then(|expr| self.value(expr)),
+            )
+        {
+            self.read.push((provider, scenario));
+        }
+        visit::visit_expr_call(self, node);
+    }
+}
+
 fn cassette_scenario_value(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Lit(ExprLit {

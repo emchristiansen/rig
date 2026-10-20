@@ -11,6 +11,7 @@
 //! Those stay at the call site.
 
 use rig_core::completion::{CompletionResponse, FinishReason};
+use rig_core::test_utils::raw_parity::delivered_envelope_field;
 use serde_json::Value;
 
 use crate::support::{assert_matches_recorded_token, assistant_text};
@@ -181,17 +182,36 @@ pub fn assert_terminal_reproduces_frame(
     );
 }
 
-/// The `chat.completion` document a stream's `raw` holds: the reply's id,
-/// model and first choice's finish reason, which the normalized terminal
-/// reports, and the provider's own usage object, whose counters are the
-/// normalized ones. Returned for the cell to read whatever its dialect keeps
-/// beside the shared fields.
-pub fn assert_terminal_round_trips(terminal: &CompletionResponse) -> Value {
+/// The document a stream's `raw` holds, rebuilt from the stream's recorded
+/// `frames`: the reply's id, model and first choice's finish reason, which
+/// the normalized terminal reports, and the provider's own usage object,
+/// whose counters are the normalized ones. Returned for the cell to read
+/// whatever its dialect keeps beside the shared fields.
+///
+/// Its envelope is the stream's, not a unary body's: `object` is the tag the
+/// frames delivered (`chat.completion.chunk`, or Perplexity's
+/// `chat.completion.done`), and `obfuscation` and `p` are present exactly when
+/// a frame delivered them, with the value the reassembler keeps
+/// (coord-a-rig-port-chat-document-12 (1); mec-rig-132-dispositions-1 item 2).
+pub fn assert_terminal_round_trips(terminal: &CompletionResponse, frames: &[Value]) -> Value {
     let raw = terminal.raw.clone();
-    assert_eq!(
-        raw["object"], "chat.completion",
-        "the captured value is the unary document the stream rebuilt: {raw}"
+    let delivered_object = delivered_envelope_field(frames, "object");
+    assert!(
+        delivered_object.as_ref().is_some_and(Value::is_string),
+        "the recorded frames deliver an `object` tag"
     );
+    assert_eq!(
+        raw.get("object"),
+        delivered_object.as_ref(),
+        "the rebuilt document keeps the delivered `object` tag: {raw}"
+    );
+    for key in ["obfuscation", "p"] {
+        assert_eq!(
+            raw.get(key),
+            delivered_envelope_field(frames, key).as_ref(),
+            "the rebuilt document carries `{key}` exactly as delivered: {raw}"
+        );
+    }
     assert!(
         raw["choices"][0]["message"].is_object(),
         "the rebuilt document holds the answer's message: {raw}"

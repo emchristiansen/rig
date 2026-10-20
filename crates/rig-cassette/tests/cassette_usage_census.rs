@@ -19,8 +19,9 @@
 //! completion the census decodes or an endpoint it names as carrying none,
 //! and every provider directory yields decoded completions.
 //! [`every_recorded_call_keeps_the_usage_contract`] asserts `Usage`'s
-//! contract on every decoded call of every provider, and that rig's total is
-//! the provider's wherever the provider reports one.
+//! contract on every decoded call of every provider, as its route's usage
+//! mapping relates the counters, and that rig's total is the provider's
+//! wherever the provider reports one.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
@@ -149,6 +150,39 @@ impl Route {
     }
 }
 
+/// How a route's usage mapping relates its counters, and so which totals
+/// `Usage` must keep for it. The counters are independent
+/// (G225; MEC132-1 item 3; mec-rig-132-dispositions-2 item 1), so each
+/// mapping states its own sums.
+#[derive(Clone, Copy, Debug)]
+enum UsageMapping {
+    /// Input includes cache reads and writes, output includes reasoning, and
+    /// the total is input plus output.
+    Subset,
+    /// Anthropic Messages and Bedrock Converse: input is the uncached count,
+    /// beside the cache reads and writes, and the total is input, cached,
+    /// written and output together.
+    SeparateCache,
+    /// Gemini Interactions: input, output, reasoning and tool-use prompt
+    /// tokens are separate, and the total is the four together.
+    Interactions,
+}
+
+impl Route {
+    fn usage_mapping(self) -> UsageMapping {
+        match self {
+            Self::Messages | Self::Converse => UsageMapping::SeparateCache,
+            Self::Interactions => UsageMapping::Interactions,
+            Self::Chat(_)
+            | Self::Responses(_)
+            | Self::Copilot { .. }
+            | Self::Ollama
+            | Self::GenerateContent
+            | Self::CohereChat => UsageMapping::Subset,
+        }
+    }
+}
+
 /// What the census makes of one 200-status reply.
 enum Endpoint {
     Completion(Route),
@@ -232,6 +266,8 @@ struct Call {
     key: String,
     provider: String,
     wire: &'static str,
+    #[serde(skip)]
+    mapping: UsageMapping,
     streamed: bool,
     usage: Option<Usage>,
     reported_total: Option<u64>,
@@ -279,6 +315,67 @@ fn input_plus_output(usage: &Usage) -> Option<u64> {
         .input_tokens
         .zip(usage.output_tokens)
         .map(|(input, output)| input + output)
+}
+
+/// Input, cached, written and output together, when input and output were
+/// reported.
+fn input_cache_and_output(usage: &Usage) -> Option<u64> {
+    input_plus_output(usage).map(|sum| {
+        sum + usage.cached_input_tokens.unwrap_or(0)
+            + usage.cache_creation_input_tokens.unwrap_or(0)
+    })
+}
+
+/// Input, output, reasoning and tool-use prompt tokens together, when input
+/// and output were reported.
+fn input_output_reasoning_and_tool_use(usage: &Usage) -> Option<u64> {
+    input_plus_output(usage).map(|sum| {
+        sum + usage.reasoning_tokens.unwrap_or(0) + usage.tool_use_prompt_tokens.unwrap_or(0)
+    })
+}
+
+/// How `call`'s usage breaks the contract of its route's mapping.
+fn contract_breaks(call: &Call, usage: &Usage) -> Vec<&'static str> {
+    let mut broken = Vec::new();
+    match call.mapping {
+        UsageMapping::Subset => {
+            if cache_exceeds_input(usage) {
+                broken.push("cached + written > input");
+            }
+            if reasoning_exceeds_output(usage) {
+                broken.push("reasoning > output");
+            }
+            if usage.total_tokens != input_plus_output(usage) {
+                broken.push("total != input + output");
+            }
+            if call.reported_total.is_some() && call.reported_total != input_plus_output(usage) {
+                broken.push("the provider's total != input + output");
+            }
+        }
+        UsageMapping::SeparateCache => {
+            if reasoning_exceeds_output(usage) {
+                broken.push("reasoning > output");
+            }
+            if usage.total_tokens != input_cache_and_output(usage) {
+                broken.push("total != input + cached + written + output");
+            }
+            if call.reported_total.is_some() && call.reported_total != usage.total_tokens {
+                broken.push("the provider's total != total");
+            }
+        }
+        UsageMapping::Interactions => {
+            if cache_exceeds_input(usage) {
+                broken.push("cached + written > input");
+            }
+            if call.reported_total != usage.total_tokens {
+                broken.push("total != the provider's total");
+            }
+            if usage.total_tokens != input_output_reasoning_and_tool_use(usage) {
+                broken.push("input + output + reasoning + tool use != total");
+            }
+        }
+    }
+    broken
 }
 
 impl Row {
@@ -673,6 +770,7 @@ async fn take_census(openrouter_only: bool) -> Census {
                     key,
                     provider: provider.clone(),
                     wire: route.wire(),
+                    mapping: route.usage_mapping(),
                     streamed,
                     usage: decoded.as_ref().ok().copied(),
                     reported_total,
@@ -769,9 +867,14 @@ async fn check_completion_census(openrouter_only: bool) {
     );
 }
 
-/// `Usage`'s contract on every decoded call of every provider: cached plus
-/// written input within input, reasoning within output, the total input plus
-/// output, and that total the provider's own wherever it reports one.
+/// `Usage`'s contract on every decoded call of every provider, per its
+/// route's [`UsageMapping`]: by default cached plus written input within
+/// input, reasoning within output, the total input plus output, and that
+/// total the provider's own wherever it reports one; on Anthropic Messages
+/// and Bedrock Converse the total is input, cached, written and output
+/// together, and the provider's wherever it reports one; on Gemini
+/// Interactions the total is the provider's, and input, output, reasoning and
+/// tool-use prompt tokens add up to it.
 #[tokio::test]
 async fn every_recorded_call_keeps_the_usage_contract() {
     check_usage_contract(false).await;
@@ -789,19 +892,7 @@ async fn check_usage_contract(openrouter_only: bool) {
         let Some(usage) = &call.usage else {
             continue;
         };
-        let mut broken = Vec::new();
-        if cache_exceeds_input(usage) {
-            broken.push("cached + written > input");
-        }
-        if reasoning_exceeds_output(usage) {
-            broken.push("reasoning > output");
-        }
-        if usage.total_tokens != input_plus_output(usage) {
-            broken.push("total != input + output");
-        }
-        if call.reported_total.is_some() && call.reported_total != input_plus_output(usage) {
-            broken.push("the provider's total != input + output");
-        }
+        let broken = contract_breaks(call, usage);
         if !broken.is_empty() {
             violations.push(format!(
                 "{} ({}/{}): {}; usage {usage:?}, provider total {:?}",

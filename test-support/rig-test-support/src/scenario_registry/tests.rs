@@ -139,3 +139,36 @@ fn a_wrapper_declares_through_its_session() {
         ]
     );
 }
+
+#[test]
+fn read_only_readers_register_literal_and_same_file_constant_cassettes() {
+    let source = r#"
+        const PROVIDER: &str = "x";
+        const SHARED: &str = "file/shared";
+        fn literal() { crate::cassettes::recorded_interaction_bodies("y", "dir/literal"); }
+        fn constants() { recorded_sse_json_frames(PROVIDER, SHARED); }
+        fn local() {
+            const SCENARIO: &str = "dir/local";
+            let frames = chat::recorded_sole_usage_frame(PROVIDER, &SCENARIO);
+        }
+        fn other_local() {
+            const SCENARIO: &str = "dir/other_local";
+            stream_faults::recorded_sse_frames(PROVIDER, SCENARIO, 0);
+        }
+        fn helper(scenario: &str) { recorded_json_request(PROVIDER, scenario); }
+        fn computed() { recorded_json_request(PROVIDER, &format!("dir/{}", 1)); }
+        #[test] #[ignore = "not recorded"] fn ignored() { recorded_json_request("x", "absent"); }
+        fn unrelated() { recorded_other("x", "other"); }
+    "#;
+    let pair = |provider: &str, scenario: &str| (provider.to_owned(), scenario.to_owned());
+    assert_eq!(
+        read_only_cassettes(source).expect("readers parse"),
+        [
+            pair("y", "dir/literal"),
+            pair("x", "file/shared"),
+            pair("x", "dir/local"),
+            pair("x", "dir/other_local"),
+        ]
+    );
+    assert!(read_only_cassettes("not Rust").is_err());
+}

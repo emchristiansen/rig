@@ -178,8 +178,10 @@ fn recorded_stream_chunks(scenario: &str) -> Vec<Value> {
 }
 
 /// The top-level fields of a stream's chunks as the document they rebuild
-/// states them: a later value replaces an earlier one, a `null` never
-/// erases one, stream padding is dropped and the tag is the unary one.
+/// states them: a later value replaces an earlier one and a `null` never
+/// erases one. The stream's own envelope is kept as delivered: the chunk tag
+/// and the `p` padding Mistral sends (coord-a-rig-port-chat-document-12 (1);
+/// mec-rig-132-dispositions-1 item 2).
 fn recorded_envelope(chunks: &[Value]) -> Value {
     let mut accumulated = serde_json::Map::new();
     for chunk in chunks {
@@ -187,17 +189,10 @@ fn recorded_envelope(chunks: &[Value]) -> Value {
             .as_object()
             .expect("recorded SSE frame should be an object");
         for (key, value) in fields {
-            if ["obfuscation", "p"].contains(&key.as_str())
-                || (value.is_null() && accumulated.contains_key(key))
-            {
+            if value.is_null() && accumulated.contains_key(key) {
                 continue;
             }
-            let value = if key == "object" {
-                json!("chat.completion")
-            } else {
-                value.clone()
-            };
-            accumulated.insert(key.clone(), value);
+            accumulated.insert(key.clone(), value.clone());
         }
     }
     Value::Object(accumulated)

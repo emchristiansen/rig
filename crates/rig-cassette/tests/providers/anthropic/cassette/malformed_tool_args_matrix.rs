@@ -18,11 +18,22 @@
 //! **Fixtures.** Every cell is recorded live. Cell 3 caps its first request
 //! at [`CUT_AT`] output tokens, which cuts Sonnet 4.6's `subtract` call
 //! inside its input, so the assembled input is not JSON and the turn stops
-//! on `max_tokens`. Its follow-up carries the call rebuilt from the
+//! on `max_tokens`. Its recorded follow-up carries the call rebuilt from the
 //! arguments the cut text states, with no `caller` (which lived only in the
 //! provider item), and the `is_error` result naming the raw text. The cell
 //! asserts its fixture really holds a cut input, so a re-record that heals
 //! it fails.
+//!
+//! **Cell 3 under the port.** The cut leaves the call's block open: the
+//! stream reaches `message_delta` with no `content_block_stop` for it. A
+//! call that never finished fails its turn before the finish reason is
+//! weighed (G48b, coord-a-rig-g48b-1; G157, coord-a-rig-g138-g184-1), so the
+//! run ends with "the turn failed, so none of its tool calls ran: the
+//! provider ended the reply with a tool call it never finished", no tool
+//! runs and the recorded follow-up is never sent. The cell therefore serves
+//! the recorded first reply itself rather than replaying the whole
+//! recording. The malformed-arguments path above still covers a call whose
+//! block closed on unparseable input.
 //!
 //! Anthropic is the provider for this matrix because its wire states the
 //! close of every tool-input block. Bedrock (`contentBlockStop`) needs AWS
@@ -32,28 +43,32 @@
 //! |---|------|-----------|-------------------|---------|
 //! | 1 | `blocking_healthy_control` | blocking | valid | recorded |
 //! | 2 | `streaming_healthy_control` | streaming | valid | recorded |
-//! | 3 | `streaming_malformed_call_is_answered_with_an_error` | streaming | cut by `max_tokens` | recorded |
+//! | 3 | `streaming_malformed_call_is_answered_with_an_error` | streaming | cut by `max_tokens`, block never closed: unfinished-call refusal | recorded |
 //!
 //! Unit cells for the seam itself live beside the code:
 //! `crates/rig-agent/src/agent/streaming/malformed_tool_args_tests.rs` (what
 //! the model sees on the next request) and the history conformance row
 //! `h06_malformed_arguments`.
 
-use std::sync::{Arc, Mutex};
-
 use futures::StreamExt;
 use rig::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, InvalidToolCallAction,
-    InvalidToolCallContext, InvalidToolCallReason, MultiTurnStreamItem, RequestPatch,
+    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, MultiTurnStreamItem,
+    RequestPatch,
 };
+use rig::completion::PromptError;
+use rig::error::ProviderError;
 use rig::providers::anthropic;
+use rig::providers::anthropic::wire::AnthropicConfig;
+use rig::test_utils::{MockHttpResponse, SequencedHttpClient};
 use rig_test_support::cassette_models::AnthropicModels;
 use serde_json::Value;
 
 use super::super::support::with_anthropic_cassette;
+use crate::cassettes::recorded_interaction_bodies;
 use crate::support::{
     Adder, STREAMING_TOOLS_PREAMBLE, STREAMING_TOOLS_PROMPT, Subtract,
-    assert_mentions_expected_number, collect_stream_final_response,
+    assert_matches_recorded_document, assert_mentions_expected_number,
+    collect_stream_final_response,
 };
 
 /// The tool input each recorded response stream in `scenario` assembles
@@ -133,34 +148,6 @@ impl AgentHook for CutFirstCall {
     }
 }
 
-/// Records every invalid call it is offered and leaves the decision to the
-/// default, so the follow-up request is the one the cassette recorded.
-#[derive(Clone, Default)]
-struct Consulted(Arc<Mutex<Vec<InvalidToolCallContext>>>);
-
-impl Consulted {
-    fn seen(&self) -> Vec<InvalidToolCallContext> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-}
-
-impl AgentHook for Consulted {
-    async fn on_invalid_tool_call(
-        &self,
-        _ctx: &HookContext,
-        context: &InvalidToolCallContext,
-    ) -> Option<InvalidToolCallAction> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(context.clone());
-        None
-    }
-}
-
 /// The calculator agent, allowed `calls` model calls.
 fn agent(client: AnthropicModels, calls: usize) -> rig::agent::Agent {
     rig::AgentBuilder::new(client.completion(anthropic::completion::CLAUDE_SONNET_4_6))
@@ -202,74 +189,83 @@ async fn streaming_healthy_control() {
     assert_fixture_is_healthy("malformed_tool_args_matrix/streaming_healthy_control");
 }
 
+/// The exact refusal the cut turn ends with: its call never closed, so the
+/// turn fails and none of its calls run (G48b, coord-a-rig-g48b-1; G157,
+/// coord-a-rig-g138-g184-1).
+const UNFINISHED_CALL_REFUSAL: &str = "the turn failed, so none of its tool calls ran: \
+     the provider ended the reply with a tool call it never finished";
+
+/// Cell 3. The name is the recorded scenario's; the contract it now pins is
+/// the port's: the `max_tokens` cut leaves the `subtract` call's block open
+/// (no `content_block_stop`), so the turn fails with the unfinished-call
+/// refusal before any tool runs, and the run gives no final response.
+///
+/// The error-result follow-up the fixture records as interaction 1 is never
+/// sent, and a replay session fails on an interaction left unplayed, so the
+/// cell serves the recorded first reply itself and checks the request it
+/// answers against the recorded first request. The loss: the recording is
+/// no longer replayed end to end, and nothing pins its follow-up.
 #[tokio::test]
 async fn streaming_malformed_call_is_answered_with_an_error() {
-    with_anthropic_cassette(
-        "malformed_tool_args_matrix/streaming_malformed_call_is_answered_with_an_error",
-        |client| async move {
-            let consulted = Consulted::default();
-            // Room for the call the model makes again after the error result.
-            let mut stream = agent(client, 4)
-                .prompt(STREAMING_TOOLS_PROMPT)
-                .add_hook(CutFirstCall)
-                .add_hook(consulted.clone())
-                .stream();
-            let mut executed = false;
-            let mut text = String::new();
-            while let Some(item) = stream.next().await {
-                match item.expect("a malformed call never ends the run") {
-                    MultiTurnStreamItem::ToolExecutionCommitted { tool_call } => {
-                        executed |= tool_call.function.invalid_arguments.is_some();
-                    }
-                    MultiTurnStreamItem::FinalResponse(response) => {
-                        text = response.output().to_owned();
-                    }
-                    _ => {}
-                }
-            }
-            assert!(!executed, "a malformed call must never be executed");
-            assert_mentions_expected_number(&text, -3);
-            let seen = consulted.seen();
-            let [context] = seen.as_slice() else {
-                panic!("the hook is offered the malformed call once: {seen:?}");
-            };
-            assert_eq!(context.tool_name, "subtract");
-            assert!(context.is_streaming);
-            assert!(
-                matches!(
-                    &context.reason,
-                    InvalidToolCallReason::MalformedArguments { .. }
-                ),
-                "{:?}",
-                context.reason
-            );
-            assert!(
-                context
-                    .args
-                    .as_deref()
-                    .is_some_and(|raw| serde_json::from_str::<Value>(raw).is_err()),
-                "the hook sees the cut text: {:?}",
-                context.args
-            );
-        },
-    )
-    .await;
     let scenario = "malformed_tool_args_matrix/streaming_malformed_call_is_answered_with_an_error";
     assert_fixture_is_cut(scenario);
-    // The follow-up the model answers carries the error result, which the
-    // cassette matched against this request.
-    let interactions = crate::cassettes::recorded_interaction_bodies("anthropic", scenario);
-    let follow_up: Value = interactions
-        .get(1)
-        .and_then(|(request, _)| serde_json::from_str(request).ok())
-        .expect("the follow-up request is recorded");
-    let result = &follow_up["messages"][2]["content"][0];
-    assert_eq!(result["is_error"], Value::Bool(true));
-    assert!(
-        result["content"][0]["text"]
-            .as_str()
-            .is_some_and(|text| text
-                .starts_with("The arguments for tool `subtract` are not a JSON object: ")),
-        "{result}"
+    let recorded = recorded_interaction_bodies(
+        "anthropic",
+        "malformed_tool_args_matrix/streaming_malformed_call_is_answered_with_an_error",
     );
+    let (first_request, first_reply) = recorded
+        .first()
+        .cloned()
+        .expect("the cut reply is recorded");
+    let http = SequencedHttpClient::new([MockHttpResponse::success_typed(
+        first_reply,
+        "text/event-stream",
+    )]);
+    let client = AnthropicModels::new(AnthropicConfig::new("cassette"), http.clone());
+    let mut stream = agent(client, 4)
+        .prompt(STREAMING_TOOLS_PROMPT)
+        .add_hook(CutFirstCall)
+        .stream();
+    let mut executed = Vec::new();
+    let mut finals = Vec::new();
+    let mut errors = Vec::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(MultiTurnStreamItem::ToolExecutionCommitted { tool_call }) => {
+                executed.push(format!("{:?}", tool_call.function.name));
+            }
+            Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                finals.push(response.output().to_owned());
+            }
+            Ok(_) => {}
+            Err(error) => errors.push(error),
+        }
+    }
+    drop(stream);
+    let [error] = errors.as_slice() else {
+        panic!("the stream fails exactly once: {errors:?}");
+    };
+    assert!(
+        matches!(
+            error,
+            PromptError::Provider(ProviderError::Response(message))
+                if message == UNFINISHED_CALL_REFUSAL
+        ),
+        "the cut turn fails with the unfinished-call refusal: {error:?}"
+    );
+    assert!(executed.is_empty(), "no tool is executed: {executed:?}");
+    assert!(
+        finals.is_empty(),
+        "the run gives no final response: {finals:?}"
+    );
+
+    // The one request sent is the recorded first request.
+    let sent = http.requests();
+    let [sent] = sent.as_slice() else {
+        panic!("only the cut turn is requested: {sent:?}");
+    };
+    let sent: Value = serde_json::from_slice(&sent.body).expect("the sent body is JSON");
+    let first_request: Value =
+        serde_json::from_str(&first_request).expect("the recorded request is JSON");
+    assert_matches_recorded_document(&sent, &first_request, &[], "the cut turn's request");
 }
