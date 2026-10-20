@@ -106,10 +106,15 @@ pub(crate) fn openai_family(provider: &str) -> Option<OpenAIConfig> {
         "openai" | "mistralrs" => None,
         _ => return None,
     };
-    let config = match dialect {
+    let mut config = match dialect {
         Some(dialect) => OpenAIConfig::with_key(dialect, KEY),
         None => OpenAIConfig::new(KEY),
     };
+    // The ChatGPT dialect refuses to send without the caller's exact
+    // identity; the harness supplies the plainly-test one.
+    if provider == "chatgpt" {
+        config = config.with_caller_identity(rig::test_utils::test_caller_identity());
+    }
     Some(config.with_base_url(BASE_URL))
 }
 

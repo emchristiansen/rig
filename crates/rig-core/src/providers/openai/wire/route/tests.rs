@@ -169,6 +169,8 @@ fn rebuilt<R: Reassemble<WireFrame>>(
 
 /// Each route rebuilds a streamed reply with its own wire's reassembler,
 /// and a default one is the chat route's, as the default route is.
+/// The Responses frame carries the `created_at` and `model` the strict
+/// Responses reader requires; without them its reassembler rebuilds nothing.
 #[test]
 fn each_route_rebuilds_its_own_document() {
     let chunk = serde_json::json!({
@@ -181,7 +183,14 @@ fn each_route_rebuilds_its_own_document() {
     let completed = serde_json::json!({
         "type": "response.completed",
         "sequence_number": 0,
-        "response": {"id": "resp_1", "object": "response", "status": "completed", "output": []}
+        "response": {
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1,
+            "model": "model",
+            "status": "completed",
+            "output": []
+        }
     });
     for (provider, frame) in [(chat(), &chunk), (responses(), &completed)] {
         let wire = OpenAiWire::new(provider, "model");

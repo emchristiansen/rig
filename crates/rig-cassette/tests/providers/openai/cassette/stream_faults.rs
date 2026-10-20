@@ -87,12 +87,12 @@ async fn truncation_after_content_fails_the_run_and_keeps_the_prefix() {
     assert!(!drained.errors.is_empty(), "{drained:?}");
     for report in &drained.errors {
         assert_eq!(report.kind, ErrorKind::Response, "{report:?}");
-        assert!(
-            report
-                .message
-                .contains("ended before the provider ended it"),
+        // The serving layer names a truncation with the fork's text.
+        assert_eq!(
+            report.message, "the stream ended before its terminal record",
             "a truncation, by name: {report:?}"
         );
+        assert!(report.retryable, "a truncation is retryable: {report:?}");
     }
 
     let log = agent.stamp(recorder.take());

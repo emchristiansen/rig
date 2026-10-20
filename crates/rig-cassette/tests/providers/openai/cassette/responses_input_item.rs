@@ -2,6 +2,7 @@ use rig::completion::Message as CompletionMessage;
 use rig::error::ProviderError;
 use rig::message::AssistantContent;
 use rig::wire::{Mode, Wire};
+use rig_core::providers::internal::wire_ids::WireIdError;
 use serde_json::Value;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -60,6 +61,8 @@ fn openai_responses_request_auto_adds_reasoning_encrypted_include() {
 }
 
 /// The reasoning block a whole Responses body holding `item` decodes to.
+/// The port's strict Responses reader requires `created_at` and `model` on a
+/// whole response, so the body carries both.
 fn decoded_reasoning(item: serde_json::Value) -> rig::message::CarriedReasoning {
     let wire = rig::providers::openai::responses_api::wire::Responses::new(
         rig::providers::openai::OpenAIConfig::new("unused"),
@@ -68,6 +71,7 @@ fn decoded_reasoning(item: serde_json::Value) -> rig::message::CarriedReasoning 
     let body = serde_json::json!({
         "id": "resp_1",
         "object": "response",
+        "created_at": 1_700_000_000,
         "status": "completed",
         "model": "gpt-5",
         "output": [item],
@@ -177,31 +181,26 @@ fn assistant_tool_call_without_provider_id_serializes_the_minted_call_id() {
 }
 
 #[test]
-fn user_tool_result_without_provider_id_serializes_the_minted_call_id() {
-    // An empty provider call id mints rig's correlation handle; the
-    // Responses wire requires a `call_id`, so the minted id is sent instead
-    // of the old "`call_id` is required" request error.
+fn user_tool_result_without_provider_id_is_refused_as_a_local_orphan() {
+    // An empty provider call id mints rig's local correlation handle. A
+    // local result with no preceding call cannot be paired with anything the
+    // provider saw, so the Responses wire refuses it instead of sending a
+    // `function_call_output` for a call_id the provider never issued.
     let message = CompletionMessage::tool_result(
         rig_core::message::CallId::from_wire(""),
         rig_core::message::ToolName::new("my_tool").expect("tool name"),
         "result payload",
     );
 
-    let items =
-        input_of(message).expect("id-less tool result should serialize with the minted call_id");
-    let item_json = items[0].clone();
+    let error =
+        ProviderError::from(input_of(message).expect_err("a local orphan tool result is refused"));
     assert_eq!(
-        item_json.get("type").and_then(|value| value.as_str()),
-        Some("function_call_output"),
-        "tool result should serialize as a function_call_output: {item_json}"
-    );
-    let call_id = item_json
-        .get("call_id")
-        .and_then(|value| value.as_str())
-        .expect("function_call_output should carry a call_id");
-    assert!(
-        !call_id.is_empty(),
-        "minted call_id must be non-empty: {item_json}"
+        std::error::Error::source(&error).and_then(|source| source.downcast_ref::<WireIdError>()),
+        Some(&WireIdError::OrphanResult {
+            message: 0,
+            content: 0,
+        }),
+        "{error:?}"
     );
 }
 
@@ -214,13 +213,15 @@ fn openai_responses_invalid_additional_params_returns_error_without_panicking() 
         body_of("gpt-test", request)
     }));
 
+    // The fork's raw-field reader runs before the option layers merge and
+    // names the payload it could not read.
     let conversion = panic_result.expect("request conversion should not panic");
     assert!(matches!(
         conversion.map_err(ProviderError::from),
         Err(ProviderError::Request(error))
-            if error
-                .to_string()
-                .contains("`additional_params` must be a JSON object")
+            if error.to_string().contains(
+                "Invalid OpenAI Responses additional_params payload: invalid type: string \"not_a_valid_object\", expected struct AdditionalParameters"
+            )
     ));
 }
 

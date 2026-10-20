@@ -4,12 +4,13 @@
 
 use rig_core::completion::CompletionRequest;
 use rig_core::error::EncodeError;
-use rig_core::message::AssistantContent;
+use rig_core::message::{AssistantContent, UserContent};
 use rig_core::providers::gemini::GeminiConfig;
 use rig_core::providers::gemini::interactions_api::Interactions;
 use rig_core::wire::{Mode, Wire, WireFrame};
 use rig_history_conformance::{
-    Ablation, CallShape, Ending, HistoryFixture, Rng, Shape, http_body, replies,
+    Ablation, CallShape, Ending, HistoryFixture, MediaPart, RefusedArguments, Rng, Shape,
+    http_body, replies,
 };
 use serde_json::{Value, json};
 
@@ -234,7 +235,8 @@ impl HistoryFixture for InteractionsHistory {
     }
 
     /// Every documented `status`, the deprecated `budget_exceeded`, an
-    /// unknown one, and none.
+    /// unknown one, and none. An `incomplete` interaction did not finish
+    /// its turn, so it is a failure.
     fn finishes(&self) -> Vec<(&'static str, Vec<WireFrame>, Ending)> {
         let ended = |status: &str| {
             let mut document = resource(vec![output("done")], status);
@@ -252,7 +254,7 @@ impl HistoryFixture for InteractionsHistory {
         vec![
             ("completed", ended("completed"), Ending::Success),
             ("requires_action", called, Ending::Success),
-            ("incomplete", ended("incomplete"), Ending::Success),
+            ("incomplete", ended("incomplete"), Ending::Failure),
             ("budget_exceeded", ended("budget_exceeded"), Ending::Success),
             ("failed", ended("failed"), Ending::Failure),
             ("cancelled", ended("cancelled"), Ending::Failure),
@@ -309,6 +311,19 @@ impl HistoryFixture for InteractionsHistory {
             }
             _ => None,
         }
+    }
+
+    /// A streamed call whose argument text is not JSON fails with its
+    /// malformed input.
+    fn refused_arguments(&self, arguments: &str, mode: Mode) -> Option<RefusedArguments> {
+        (mode == Mode::Streaming && serde_json::from_str::<Value>(arguments).is_err())
+            .then_some(RefusedArguments::MalformedToolInput)
+    }
+
+    /// A document of no declared type is refused before adaptation.
+    fn preflight_refusal(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+        matches!(part, MediaPart::User(UserContent::Document(document)) if document.media_type.is_none())
+            .then(|| "Media type for document is required for Gemini".to_owned())
     }
 
     fn empty_reply(&self, mode: Mode) -> Option<Vec<WireFrame>> {

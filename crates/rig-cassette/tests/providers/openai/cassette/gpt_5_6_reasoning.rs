@@ -12,7 +12,7 @@
 use futures::StreamExt;
 use rig::completion::CompletionResponse;
 use rig::driver::Model;
-use rig::message::{AssistantContent, Message};
+use rig::message::Message;
 use rig::providers::openai;
 use rig::providers::openai::wire::OpenAiWire;
 use serde::{Deserialize, Serialize};
@@ -108,15 +108,10 @@ fn model_constants() {
     assert_eq!(openai::GPT_5_6_LUNA, "gpt-5.6-luna");
 }
 
+/// The port decodes Responses message parts as carried text, which
+/// [`CompletionResponse::text`] reads.
 fn assert_has_text(response: &CompletionResponse) {
-    let text: String = response
-        .choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect();
+    let text = response.text();
     assert!(
         !text.trim().is_empty(),
         "response should surface output text"
@@ -214,14 +209,7 @@ async fn five_turn_reasoning_metadata_roundtrip() {
                     reasoning_of(&extras),
                     [Some("low"), Some("pro"), Some("all_turns"), None]
                 );
-                let text = response
-                    .choice
-                    .iter()
-                    .filter_map(|content| match content {
-                        AssistantContent::Text(text) => Some(text.text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<String>();
+                let text = response.text();
                 assert_eq!(
                     text.trim(),
                     expected_text,

@@ -4,12 +4,13 @@
 
 use rig_core::completion::CompletionRequest;
 use rig_core::error::EncodeError;
-use rig_core::message::{AssistantContent, AssistantMessage};
+use rig_core::message::{AssistantContent, AssistantMessage, DocumentSourceKind, UserContent};
 use rig_core::providers::gemini::GeminiConfig;
 use rig_core::providers::gemini::completion::GenerateContent;
 use rig_core::wire::{Mode, Wire, WireFrame};
 use rig_history_conformance::{
-    Ablation, CallShape, Ending, HistoryFixture, Rng, Shape, http_body, replies,
+    Ablated, Ablation, CallShape, Ending, HistoryFixture, MediaPart, RefusedArguments, Rng, Shape,
+    decode, http_body, replies,
 };
 use serde_json::{Value, json};
 
@@ -47,6 +48,90 @@ pub fn weather_calls() -> [Value; 2] {
         json!({ "functionCall": { "name": "weather", "args": { "city": "Rome" }, "id": "b2" } }),
     ]
 }
+
+/// The error a Gemini tool-protocol finish fails the reply with: a
+/// malformed or unexpected call, too many calls, a missing thought
+/// signature or a malformed response.
+pub fn tool_protocol_error(finish: &str) -> Option<String> {
+    let reason = match finish {
+        "MALFORMED_FUNCTION_CALL" => "MalformedFunctionCall",
+        "UNEXPECTED_TOOL_CALL" => "UnexpectedToolCall",
+        "TOO_MANY_TOOL_CALLS" => "TooManyToolCalls",
+        "MISSING_THOUGHT_SIGNATURE" => "MissingThoughtSignature",
+        "MALFORMED_RESPONSE" => "MalformedResponse",
+        _ => return None,
+    };
+    Some(format!(
+        "Gemini stopped with finish_reason={reason}: no finish message provided"
+    ))
+}
+
+/// Each field of the rich reply the typed reader refuses when it is
+/// removed, `null` or retyped, in that order.
+const TYPED_BOUNDARY: &[(&str, [bool; 3])] = &[
+    ("/candidates/0/content/role", [false, false, true]),
+    ("/candidates/0/content/parts/0/text", [false, true, true]),
+    (
+        "/candidates/0/content/parts/0/thought",
+        [false, false, true],
+    ),
+    (
+        "/candidates/0/content/parts/0/thoughtSignature",
+        [false, false, true],
+    ),
+    ("/candidates/0/content/parts/1/text", [false, true, true]),
+    (
+        "/candidates/0/content/parts/2/inlineData",
+        [false, true, true],
+    ),
+    (
+        "/candidates/0/content/parts/2/inlineData/mimeType",
+        [true, true, true],
+    ),
+    (
+        "/candidates/0/content/parts/2/inlineData/data",
+        [true, true, true],
+    ),
+    (
+        "/candidates/0/content/parts/3/executableCode",
+        [false, true, true],
+    ),
+    (
+        "/candidates/0/content/parts/3/executableCode/language",
+        [true, true, true],
+    ),
+    (
+        "/candidates/0/content/parts/3/executableCode/code",
+        [true, true, true],
+    ),
+    (
+        "/candidates/0/content/parts/4/functionCall",
+        [false, true, true],
+    ),
+    (
+        "/candidates/0/content/parts/4/functionCall/name",
+        [true, true, true],
+    ),
+    (
+        "/candidates/0/content/parts/4/functionCall/args",
+        [false, true, true],
+    ),
+    (
+        "/candidates/0/content/parts/4/functionCall/id",
+        [false, false, true],
+    ),
+    (
+        "/candidates/0/content/parts/4/thoughtSignature",
+        [false, false, true],
+    ),
+    ("/candidates/0/index", [false, false, true]),
+    ("/usageMetadata", [false, false, true]),
+    ("/usageMetadata/promptTokenCount", [false, true, true]),
+    ("/usageMetadata/candidatesTokenCount", [false, false, true]),
+    ("/usageMetadata/totalTokenCount", [false, true, true]),
+    ("/modelVersion", [false, false, true]),
+    ("/responseId", [false, true, true]),
+];
 
 pub struct GeminiRestHistory;
 
@@ -262,6 +347,64 @@ impl HistoryFixture for GeminiRestHistory {
         Some(frames([chunk(json!([]), Some("STOP"))]))
     }
 
+    /// A whole reply with no part is refused; a stream that ended cleanly
+    /// is a successful empty turn.
+    fn refuses_empty_reply(&self, mode: Mode) -> bool {
+        mode == Mode::Unary
+    }
+
+    fn refuses_empty_whole(&self) -> bool {
+        true
+    }
+
+    /// The typed reader takes `args` only as an object: any other JSON
+    /// fails the frame.
+    fn refused_arguments(&self, arguments: &str, _mode: Mode) -> Option<RefusedArguments> {
+        let found = match serde_json::from_str::<Value>(arguments).ok()? {
+            Value::Object(_) => return None,
+            Value::Null => "null".to_owned(),
+            Value::String(text) => format!("string {}", json!(text)),
+            Value::Array(_) => "sequence".to_owned(),
+            other => panic!("no H6 case sends `{other}`"),
+        };
+        Some(RefusedArguments::CorruptFrame {
+            event_type: None,
+            error: format!("invalid type: {found}, expected a map"),
+        })
+    }
+
+    fn refuses_ablation(&self, pointer: &str, change: Ablated) -> bool {
+        TYPED_BOUNDARY.iter().any(|(field, refused)| {
+            *field == pointer
+                && refused[match change {
+                    Ablated::Removed => 0,
+                    Ablated::Null => 1,
+                    Ablated::Retyped => 2,
+                }]
+        })
+    }
+
+    /// Gemini's tool-protocol finishes fail the reply.
+    fn refused_finish(&self, name: &str) -> Option<String> {
+        tool_protocol_error(name)
+    }
+
+    /// A document of no declared type, and a tool-result image named by
+    /// URL, are refused before adaptation.
+    fn preflight_refusal(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+        let refused = match part {
+            MediaPart::User(UserContent::Document(document)) if document.media_type.is_none() => {
+                "A mime type is required for document inputs to Gemini"
+            }
+            MediaPart::ResultImage(image) if matches!(image.data, DocumentSourceKind::Url(_)) => {
+                "Message conversion error: Gemini tool result images must use base64 inline \
+                 data; URL-backed images are not supported"
+            }
+            _ => return None,
+        };
+        Some(refused.to_owned())
+    }
+
     fn finish_reason_pointer(&self) -> Option<&'static str> {
         Some("/candidates/0/finishReason")
     }
@@ -306,7 +449,69 @@ impl HistoryFixture for GeminiRestHistory {
     }
 }
 
+/// H3 on REST: whole and streamed turns agree except where a carried part
+/// sits in its own frame. A carried part's position keeps its
+/// transport-local `part_index`: the rich PNG (inspection-only media) and
+/// the interleaved second thought are part 2 of the whole reply and part 0
+/// of the stream chunk that holds each.
+fn h03_gemini_rest_stream_equals_whole(fixture: &GeminiRestHistory) {
+    let wire = fixture.wire(MODEL);
+    let turn = |shape, mode| {
+        let response = decode(
+            &wire,
+            &CompletionRequest::new("restate"),
+            mode,
+            reply_of(shape, mode),
+        )
+        .unwrap_or_else(|error| panic!("{shape:?} in {mode:?} decodes: {error}"));
+        serde_json::to_value(response.message()).expect("a turn serializes")
+    };
+    let carried = [
+        (
+            Shape::Rich,
+            json!({"type": "inspection_only_media", "text": ""}),
+            json!({ "inlineData": { "mimeType": "image/png", "data": "aW1hZ2U=" } }),
+        ),
+        (
+            Shape::Interleaved,
+            json!([{"type": "text", "content": {"text": "second", "signature": "c2lnLXNlY29uZA=="}}]),
+            json!({ "text": "second", "thought": true, "thoughtSignature": "c2lnLXNlY29uZA==" }),
+        ),
+    ];
+    for (shape, content, item) in carried {
+        const PART_INDEX: &str = "/content/2/payload/position/part_index";
+        let whole = turn(shape, Mode::Unary);
+        let mut streamed = turn(shape, Mode::Streaming);
+        for (mode, turn, part_index) in [(Mode::Unary, &whole, 2), (Mode::Streaming, &streamed, 0)]
+        {
+            assert_eq!(
+                (
+                    turn.pointer("/content/2/content"),
+                    turn.pointer("/content/2/payload/item"),
+                    turn.pointer(PART_INDEX),
+                ),
+                (Some(&content), Some(&item), Some(&json!(part_index))),
+                "{shape:?} in {mode:?}: block 2 is carried at its own part index: {turn}"
+            );
+        }
+        if let Some(index) = streamed.pointer_mut(PART_INDEX) {
+            *index = json!(2);
+        }
+        assert_eq!(
+            whole, streamed,
+            "{shape:?}: the turns agree everywhere but block 2's transport-local part index"
+        );
+    }
+    rig_core::test_utils::history::assert_restated_agrees(
+        &wire,
+        reply_of(Shape::Unknown, Mode::Unary),
+        reply_of(Shape::Unknown, Mode::Streaming),
+    );
+    rig_history_conformance::h03_empty_reply(fixture);
+}
+
 rig_history_conformance::history_conformance_suite! {
     wire: "gemini_rest",
     fixture: GeminiRestHistory,
+    h03_stream_equals_whole: h03_gemini_rest_stream_equals_whole,
 }

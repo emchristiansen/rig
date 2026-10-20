@@ -101,12 +101,20 @@ async fn compaction_item_decodes_on_the_response() {
             assert_eq!(compaction.get("id"), Some(&Value::from("cmp_REDACTED_1")));
 
             // It reaches history as a block that replays, beside the
-            // regular items.
-            assert!(response.choice.iter().any(|block| matches!(
-                block,
-                AssistantContent::Opaque(opaque)
-                    if opaque.replay && opaque.item == compaction
-            )));
+            // regular items: the port carries an unknown completed output
+            // item as a provider item, issued by OpenAI, holding the exact
+            // item.
+            assert!(
+                response.choice.iter().any(|block| matches!(
+                    block,
+                    AssistantContent::ProviderItem(item)
+                        if item.payload.item == compaction
+                            && item.payload.provider.as_deref() == Some("openai")
+                            && item.replayable_to("openai")
+                )),
+                "{:?}",
+                response.choice
+            );
         },
     )
     .await;

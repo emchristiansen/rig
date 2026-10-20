@@ -25,10 +25,11 @@
 use serde_json::Value;
 
 use rig_core::completion::{CompletionRequest, CompletionResponse};
-use rig_core::error::{EncodeError, ErrorKind, ProviderError};
+use rig_core::error::{EncodeError, ErrorDetail, ErrorKind, ProviderError};
 use rig_core::message::{
-    AssistantContent, AssistantMessage, CallId, DocumentData, Image, Message, Origin, StopReason,
-    Text, ToolCall, ToolFunction, ToolName, ToolResult, ToolResultContent, UserContent,
+    AssistantContent, AssistantMessage, CallId, DocumentData, EMPTY_RESPONSE_ERROR, Image, Message,
+    Origin, StopReason, Text, ToolCall, ToolFunction, ToolName, ToolResult, ToolResultContent,
+    UserContent,
 };
 use rig_core::operation::Completion;
 use rig_core::wire::{Mode, Operation, Wire};
@@ -269,7 +270,7 @@ pub const TESTS: &[(&str, &str, &str)] = &[
         "chatB NEW response-only fields replayed, #1835",
     ),
     (
-        "crates/rig-core/src/providers/openai/responses_api/streaming/tests.rs",
+        "crates/rig-core/src/providers/openai/responses_api/streaming/tests/upstream.rs",
         "a_call_added_but_never_done_fails_the_turn",
         "Responses NEW call added but never done, review: a never-done call loses its id",
     ),
@@ -364,12 +365,12 @@ pub const TESTS: &[(&str, &str, &str)] = &[
         "review: hand-derived malformed-arguments cassette",
     ),
     (
-        "crates/rig-core/src/providers/openai/responses_api/streaming/tests.rs",
+        "crates/rig-core/src/providers/openai/responses_api/streaming/tests/upstream.rs",
         "reasoning_done_without_ciphertext_keeps_its_item_in_a_stream_without_indices",
         "review: Responses reasoning loses its item without output_index",
     ),
     (
-        "crates/rig-core/src/providers/openai/responses_api/streaming/tests.rs",
+        "crates/rig-core/src/providers/openai/responses_api/streaming/tests/upstream.rs",
         "a_terminal_only_item_does_not_repeat_text_streamed_without_indices",
         "review: Responses terminal-only items duplicate text",
     ),
@@ -384,7 +385,7 @@ pub const TESTS: &[(&str, &str, &str)] = &[
         "review: Responses item without a type replays",
     ),
     (
-        "crates/rig-core/src/providers/openai/responses_api/streaming/tests.rs",
+        "crates/rig-core/src/providers/openai/responses_api/streaming/tests/upstream.rs",
         "response_incomplete_is_incomplete_whatever_its_status_says",
         "review: response.incomplete without status is Stop",
     ),
@@ -528,6 +529,46 @@ pub enum Ending {
     Failure,
 }
 
+/// How a wire refuses a reply whose call arguments it does not keep
+/// ([`HistoryFixture::refused_arguments`], row H6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefusedArguments {
+    /// The reply fails with the call's typed malformed-input report: kind
+    /// `Response`, the message `tool call `lookup` arrived with malformed
+    /// JSON input: <parser error>`, and the exact argument text.
+    MalformedToolInput,
+    /// The frame carrying the call fails to decode, with this event type
+    /// and exactly this decode error.
+    CorruptFrame {
+        /// The frame's event type, when the classifier read one.
+        event_type: Option<&'static str>,
+        /// The decode error, as serde states it.
+        error: String,
+    },
+}
+
+/// How [`h05_field_ablation`] changes one field of the whole reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ablated {
+    /// The field is left out.
+    Removed,
+    /// The field is `null`.
+    Null,
+    /// The field holds a value of another JSON type.
+    Retyped,
+}
+
+/// A media part of the H9 history ([`HistoryFixture::preflight_refusal`]).
+#[derive(Debug, Clone, Copy)]
+pub enum MediaPart<'a> {
+    /// A part of a user message.
+    User(&'a UserContent),
+    /// An image block of an assistant turn.
+    AssistantImage(&'a Image),
+    /// An image inside a tool result.
+    ResultImage(&'a Image),
+}
+
 /// One wire's side of the suite.
 pub trait HistoryFixture {
     /// The wire.
@@ -597,6 +638,52 @@ pub trait HistoryFixture {
     fn empty_reply(&self, mode: Mode) -> Option<Vec<<Self::Wire as Wire>::Frame>> {
         let _ = mode;
         None
+    }
+
+    /// Whether the wire refuses [`Self::empty_reply`] in `mode` with
+    /// [`EMPTY_RESPONSE_ERROR`] instead of folding it to a successful turn
+    /// (row H3).
+    fn refuses_empty_reply(&self, mode: Mode) -> bool {
+        let _ = mode;
+        false
+    }
+
+    /// Whether the wire refuses a whole reply that carries no content with
+    /// [`EMPTY_RESPONSE_ERROR`], while the same reply streamed and ended
+    /// cleanly folds to a successful turn without content (row H18).
+    fn refuses_empty_whole(&self) -> bool {
+        false
+    }
+
+    /// How the wire refuses the reply of [`Self::call_reply`] for
+    /// `arguments` in `mode`, or `None` when it keeps the call (row H6).
+    fn refused_arguments(&self, arguments: &str, mode: Mode) -> Option<RefusedArguments> {
+        let _ = (arguments, mode);
+        None
+    }
+
+    /// The exact response error the wire refuses a whole reply ending on
+    /// the documented finish `name` with, or `None` when such a reply
+    /// decodes to a turn (row H7).
+    fn refused_finish(&self, name: &str) -> Option<String> {
+        let _ = name;
+        None
+    }
+
+    /// The exact request error the wire's preflight refuses `part` with in
+    /// the caller's history for `model`, before adaptation can replace it,
+    /// or `None` when it lets the part through (row H9).
+    fn preflight_refusal(&self, model: &str, part: MediaPart<'_>) -> Option<String> {
+        let _ = (model, part);
+        None
+    }
+
+    /// Whether the wire's typed reader refuses the [`Self::ablation`]
+    /// document with `pointer` changed as `change` says, failing its frame's
+    /// decode, instead of decoding it (row H5).
+    fn refuses_ablation(&self, pointer: &str, change: Ablated) -> bool {
+        let _ = (pointer, change);
+        false
     }
 
     /// The JSON pointer of the finish reason in the [`Self::ablation`]
@@ -1021,14 +1108,29 @@ pub fn h03_stream_equals_whole<F: HistoryFixture>(fixture: &F) {
         };
         rig_core::test_utils::history::assert_restated_agrees(&wire, whole, streamed);
     }
-    // An empty reply is a success in both modes, decided once by the fold.
+    h03_empty_reply(fixture);
+}
+
+/// H3's empty reply: a success in both modes, decided once by the fold,
+/// unless the wire refuses it in a mode with the shared empty-response
+/// error ([`HistoryFixture::refuses_empty_reply`]).
+pub fn h03_empty_reply<F: HistoryFixture>(fixture: &F) {
+    let wire = fixture.wire(fixture.model());
     if let (Some(whole), Some(streamed)) = (
         fixture.empty_reply(Mode::Unary),
         fixture.empty_reply(Mode::Streaming),
     ) {
         for (mode, frames) in [(Mode::Unary, whole), (Mode::Streaming, streamed)] {
-            let response = decode(&wire, &CompletionRequest::new("restate"), mode, frames)
-                .unwrap_or_else(|error| panic!("{mode:?}: an empty reply decodes: {error}"));
+            let decoded = decode(&wire, &CompletionRequest::new("restate"), mode, frames);
+            if fixture.refuses_empty_reply(mode) {
+                assert!(
+                    matches!(&decoded, Err(ProviderError::Response(message)) if message == EMPTY_RESPONSE_ERROR),
+                    "{mode:?}: an empty reply has the exact shared refusal: {decoded:?}"
+                );
+                continue;
+            }
+            let response =
+                decoded.unwrap_or_else(|error| panic!("{mode:?}: an empty reply decodes: {error}"));
             assert!(
                 !response.stop().is_failure(),
                 "{mode:?}: an empty reply that ended cleanly is a success: {:?}",
@@ -1065,7 +1167,9 @@ pub fn h04_unknown_kept<F: HistoryFixture>(fixture: &F) {
 
 /// H5. Removing any one field no block or the finish is built from, making
 /// it `null`, or giving it a value of another type still decodes the whole
-/// reply.
+/// reply, except where the wire's typed reader refuses that field's change
+/// ([`HistoryFixture::refuses_ablation`]): that reply fails its frame's
+/// decode.
 pub fn h05_field_ablation<F: HistoryFixture>(fixture: &F) {
     let Some(ablation) = fixture.ablation() else {
         eprintln!("skip: the wire's replies are not JSON documents");
@@ -1090,20 +1194,21 @@ pub fn h05_field_ablation<F: HistoryFixture>(fixture: &F) {
         }
         let mut document = ablation.document.clone();
         remove_pointer(&mut document, &pointer);
-        if let Err(error) = decode(&wire, &request, Mode::Unary, (ablation.frames)(document)) {
-            panic!("the reply without `{pointer}` still decodes: {error}");
-        }
+        let decoded = decode(&wire, &request, Mode::Unary, (ablation.frames)(document));
+        ablated(fixture, &pointer, Ablated::Removed, &decoded);
         let Some(value) = ablation.document.pointer(&pointer) else {
             continue;
         };
-        for (change, replacement) in [("null", Value::Null), ("retyped", retyped(value))] {
+        for (change, replacement) in [
+            (Ablated::Null, Value::Null),
+            (Ablated::Retyped, retyped(value)),
+        ] {
             let mut document = ablation.document.clone();
             if let Some(field) = document.pointer_mut(&pointer) {
                 *field = replacement;
             }
-            if let Err(error) = decode(&wire, &request, Mode::Unary, (ablation.frames)(document)) {
-                panic!("the reply with `{pointer}` {change} still decodes: {error}");
-            }
+            let decoded = decode(&wire, &request, Mode::Unary, (ablation.frames)(document));
+            ablated(fixture, &pointer, change, &decoded);
         }
     }
     if let Some(pointer) = fixture.finish_reason_pointer() {
@@ -1115,6 +1220,28 @@ pub fn h05_field_ablation<F: HistoryFixture>(fixture: &F) {
             failed,
             "a reply without its finish reason `{pointer}` failed"
         );
+    }
+}
+
+/// Assert the reply with `pointer` changed as `change` says decodes, or
+/// fails its frame's decode where the wire's typed reader refuses it.
+fn ablated<F: HistoryFixture>(
+    fixture: &F,
+    pointer: &str,
+    change: Ablated,
+    decoded: &Result<CompletionResponse, ProviderError>,
+) {
+    if fixture.refuses_ablation(pointer, change) {
+        assert!(
+            decoded
+                .as_ref()
+                .err()
+                .and_then(ProviderError::corrupt_frame)
+                .is_some(),
+            "the typed reader refuses the reply with `{pointer}` {change:?} as a corrupt frame: {decoded:?}"
+        );
+    } else if let Err(error) = decoded {
+        panic!("the reply with `{pointer}` {change:?} still decodes: {error}");
     }
 }
 
@@ -1175,7 +1302,9 @@ fn remove_pointer(document: &mut Value, pointer: &str) {
 }
 
 /// H6. Arguments that are not a JSON object never fail the reply: the call
-/// keeps an object, and the text it arrived as when it was not one.
+/// keeps an object, and the text it arrived as when it was not one. A wire
+/// that refuses such a reply instead ([`HistoryFixture::refused_arguments`])
+/// refuses it with exactly the error it states.
 pub fn h06_malformed_arguments<F: HistoryFixture>(fixture: &F) {
     let cases: [(&str, Value, bool); 6] = [
         (r#"{"a": 1}"#, serde_json::json!({"a": 1}), false),
@@ -1192,10 +1321,14 @@ pub fn h06_malformed_arguments<F: HistoryFixture>(fixture: &F) {
                 eprintln!("skip: the wire cannot carry `{arguments}` in {mode:?}");
                 continue;
             };
-            let response = decode(&wire, &CompletionRequest::new("restate"), mode, frames)
-                .unwrap_or_else(|error| {
-                    panic!("{mode:?}: arguments `{arguments}` do not fail the reply: {error}")
-                });
+            let decoded = decode(&wire, &CompletionRequest::new("restate"), mode, frames);
+            if let Some(refusal) = fixture.refused_arguments(arguments, mode) {
+                assert_refused_arguments(arguments, mode, &refusal, &decoded);
+                continue;
+            }
+            let response = decoded.unwrap_or_else(|error| {
+                panic!("{mode:?}: arguments `{arguments}` do not fail the reply: {error}")
+            });
             let calls: Vec<&ToolCall> = response.tool_calls().collect();
             let [call] = calls.as_slice() else {
                 panic!(
@@ -1217,6 +1350,58 @@ pub fn h06_malformed_arguments<F: HistoryFixture>(fixture: &F) {
     }
 }
 
+/// Assert `decoded`, the reply of a call to `lookup` whose argument text is
+/// `arguments`, is refused exactly as `refusal` states.
+fn assert_refused_arguments(
+    arguments: &str,
+    mode: Mode,
+    refusal: &RefusedArguments,
+    decoded: &Result<CompletionResponse, ProviderError>,
+) {
+    match refusal {
+        RefusedArguments::MalformedToolInput => {
+            let parse = serde_json::from_str::<Value>(arguments)
+                .expect_err("only argument text that is not JSON is malformed input")
+                .to_string();
+            let Err(ProviderError::Relayed(report)) = decoded else {
+                panic!("{mode:?}: `{arguments}` is refused as malformed input: {decoded:?}");
+            };
+            assert_eq!(report.kind, ErrorKind::Response, "{mode:?}: `{arguments}`");
+            assert_eq!(
+                report.message,
+                format!("tool call `lookup` arrived with malformed JSON input: {parse}"),
+                "{mode:?}: `{arguments}`"
+            );
+            let Some(ErrorDetail::MalformedToolInput(detail)) = &report.detail else {
+                panic!("{mode:?}: `{arguments}` carries its malformed input: {report:?}");
+            };
+            assert_eq!(
+                (
+                    detail.name.as_str(),
+                    detail.raw.as_str(),
+                    detail.error.as_str()
+                ),
+                ("lookup", arguments, parse.as_str()),
+                "{mode:?}: `{arguments}` keeps the call's name, text and parser error"
+            );
+        }
+        RefusedArguments::CorruptFrame { event_type, error } => {
+            let corrupt = decoded
+                .as_ref()
+                .err()
+                .and_then(ProviderError::corrupt_frame)
+                .unwrap_or_else(|| {
+                    panic!("{mode:?}: `{arguments}` is refused as a corrupt frame: {decoded:?}")
+                });
+            assert_eq!(
+                (corrupt.event_type(), corrupt.error().to_string()),
+                (*event_type, error.clone()),
+                "{mode:?}: `{arguments}` fails its frame's decode"
+            );
+        }
+    }
+}
+
 /// The failed-cut observation permits carried custody without granting replay.
 fn failed_cut_custody(message: &Message) -> bool {
     match message {
@@ -1227,21 +1412,31 @@ fn failed_cut_custody(message: &Message) -> bool {
         Message::User { .. } | Message::System { .. } => true,
     }
 }
-/// H7. Every documented finish ends a turn as documented, a reply cut off
-/// before its end is a failed turn, and adaptation retains only carried
-/// custody from failed turns.
+/// H7. Every documented finish ends a turn as documented, or fails the
+/// reply with the exact error [`HistoryFixture::refused_finish`] states; a
+/// reply cut off before its end is a failed turn; and adaptation retains
+/// only carried custody from failed turns.
 pub fn h07_failed_turns<F: HistoryFixture>(fixture: &F) {
     let wire = fixture.wire(fixture.model());
     let finishes = fixture.finishes();
     assert!(!finishes.is_empty(), "the wire documents its finishes");
     for (name, frames, ending) in finishes {
-        let response = decode(
+        let decoded = decode(
             &wire,
             &CompletionRequest::new("restate"),
             Mode::Unary,
             frames,
-        )
-        .unwrap_or_else(|error| panic!("the `{name}` reply decodes: {error}"));
+        );
+        if let Some(expected) = fixture.refused_finish(name) {
+            assert_eq!(ending, Ending::Failure, "a refused `{name}` is a failure");
+            assert!(
+                matches!(&decoded, Err(ProviderError::Response(message)) if *message == expected),
+                "the `{name}` reply is refused with `{expected}`: {decoded:?}"
+            );
+            continue;
+        }
+        let response =
+            decoded.unwrap_or_else(|error| panic!("the `{name}` reply decodes: {error}"));
         let failed = response.stop().is_failure();
         assert_eq!(
             failed,
@@ -1463,11 +1658,14 @@ pub fn h08_pairing<F: HistoryFixture>(fixture: &F) {
 /// cannot carry in its form, so the encoder never refuses a history and
 /// never drops a part the adapter kept: images, audio, video and documents
 /// in every source form and role, tool calls and results, and blank system
-/// messages. A text-only model gets no image at all.
+/// messages. A text-only model gets no image at all. A part the wire's
+/// preflight refuses before adaptation ([`HistoryFixture::preflight_refusal`])
+/// fails the request with its exact error, and the rest of the history is
+/// checked without it.
 pub fn h09_capability_downgrades<F: HistoryFixture>(fixture: &F) {
-    let history = media_history();
     let models = std::iter::once(fixture.model()).chain(fixture.text_only_model());
     for model in models {
+        let history = preflighted(fixture, model, media_history());
         let wire = fixture.wire(model);
         let describe = wire.describe();
         let replay = describe.replay.expect("a replay target");
@@ -1498,6 +1696,92 @@ pub fn h09_capability_downgrades<F: HistoryFixture>(fixture: &F) {
                     "{model} in {mode:?}: the {kind} the adapter kept is sent ({needles:?}): {body}"
                 );
             }
+        }
+    }
+}
+
+/// Where a media part sits in a history: the message, then the block or
+/// part, then the part of a tool result.
+type MediaAt = (usize, usize, Option<usize>);
+
+/// Every media part of `history`, where it sits.
+fn media_parts(history: &[Message]) -> Vec<(MediaAt, MediaPart<'_>)> {
+    let mut found = Vec::new();
+    for (at, message) in history.iter().enumerate() {
+        match message {
+            Message::User { content } => {
+                for (part_at, part) in content.iter().enumerate() {
+                    if let UserContent::ToolResult(result) = part {
+                        for (inner, content) in result.content.iter().enumerate() {
+                            if let ToolResultContent::Image(image) = content {
+                                found.push((
+                                    (at, part_at, Some(inner)),
+                                    MediaPart::ResultImage(image),
+                                ));
+                            }
+                        }
+                    } else if !matches!(part, UserContent::Text(_)) {
+                        found.push(((at, part_at, None), MediaPart::User(part)));
+                    }
+                }
+            }
+            Message::Assistant(turn) => {
+                for (block_at, block) in turn.content.iter().enumerate() {
+                    if let AssistantContent::Image(image) = block {
+                        found.push(((at, block_at, None), MediaPart::AssistantImage(image)));
+                    }
+                }
+            }
+            Message::System { .. } => {}
+        }
+    }
+    found
+}
+
+/// `history` without the parts the wire's preflight refuses for `model`.
+/// Each refused part, in history order, must fail preparing the history
+/// that still holds it with the exact request error the fixture states.
+fn preflighted<F: HistoryFixture>(
+    fixture: &F,
+    model: &str,
+    mut history: Vec<Message>,
+) -> Vec<Message> {
+    let wire = fixture.wire(model);
+    loop {
+        let refused = media_parts(&history).into_iter().find_map(|(at, part)| {
+            fixture
+                .preflight_refusal(model, part)
+                .map(|expected| (at, expected))
+        });
+        let Some(((message, part, inner), expected)) = refused else {
+            return history;
+        };
+        let mut request = CompletionRequest::new("next").model(model);
+        request.tools = tools_of(&history);
+        request.chat_history = history.clone();
+        match Completion::prepare(request, &wire.describe()) {
+            Err(ProviderError::Request(cause)) => assert_eq!(
+                cause.to_string(),
+                expected,
+                "{model}: the preflight refuses message {message} part {part} before adaptation"
+            ),
+            other => panic!(
+                "{model}: the preflight refuses message {message} part {part} with `{expected}`: {other:?}"
+            ),
+        }
+        match (&mut history[message], inner) {
+            (Message::User { content }, Some(inner)) => {
+                if let Some(UserContent::ToolResult(result)) = content.get_mut(part) {
+                    result.content.remove(inner);
+                }
+            }
+            (Message::User { content }, None) => {
+                content.remove(part);
+            }
+            (Message::Assistant(turn), _) => {
+                turn.content.remove(part);
+            }
+            (Message::System { .. }, _) => panic!("a system message holds no media"),
         }
     }
 }
@@ -2666,7 +2950,8 @@ pub fn h17_generated_histories<F: HistoryFixture>(fixture: &F) {
 
 /// H18: on generated replies ([`HistoryFixture::reply_spec`]), the stream
 /// folds to the turn and stop its whole form folds to, and neither mode
-/// fails or panics alone.
+/// fails or panics alone, except that a wire which refuses an empty whole
+/// reply ([`HistoryFixture::refuses_empty_whole`]) refuses exactly that.
 pub fn h18_generated_stream_equals_whole<F: HistoryFixture>(fixture: &F) {
     let wire = fixture.wire(fixture.model());
     let reached = Reached::default();
@@ -2675,7 +2960,9 @@ pub fn h18_generated_stream_equals_whole<F: HistoryFixture>(fixture: &F) {
             return Vec::new();
         };
         reached.hit("compared");
-        replies::disagreement(&wire, frames).into_iter().collect()
+        replies::disagreement_of(&wire, frames, fixture.refuses_empty_whole())
+            .into_iter()
+            .collect()
     });
     if ran {
         reached.assert("H18", &["compared"]);

@@ -2726,16 +2726,22 @@ fn canonical_blocks_rebuild_as_pi_rebuilds_them() {
         message::AssistantContent::text("answer"),
         call,
     ]);
+    // A rebuilt canonical functionCall part carries the recorded
+    // `"thought": false` marker on the REST JSON wire.
     for (model, call) in [
         (
             "gemini-2.5-flash",
             // Gemini25 preserves genuine provider handles on every model.
-            json!({ "functionCall": { "name": "lookup", "args": { "q": 1 }, "id":"call-1" } }),
+            json!({
+                "functionCall": { "name": "lookup", "args": { "q": 1 }, "id":"call-1" },
+                "thought": false,
+            }),
         ),
         (
             "gemini-3-flash-preview",
             json!({
                 "functionCall": { "name": "lookup", "args": { "q": 1 }, "id": "call-1" },
+                "thought": false,
                 "thoughtSignature": "skip_thought_signature_validator",
             }),
         ),
