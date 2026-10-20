@@ -468,7 +468,14 @@ pub enum StreamToStdoutError {
 pub async fn stream_to_stdout(
     stream: &mut StreamingResult,
 ) -> Result<PromptResponse, StreamToStdoutError> {
-    let mut stdout = std::io::stdout();
+    stream_to(stream, &mut std::io::stdout()).await
+}
+
+/// [`stream_to_stdout`] over any writer.
+async fn stream_to(
+    stream: &mut StreamingResult,
+    stdout: &mut impl Write,
+) -> Result<PromptResponse, StreamToStdoutError> {
     write!(stdout, "Response: ")?;
     while let Some(content) = stream.next().await {
         match content? {
@@ -484,6 +491,15 @@ pub async fn stream_to_stdout(
                 ..
             })) => {
                 write!(stdout, "{}", reasoning.text)?;
+                stdout.flush()?;
+            }
+            // Providers that carry their reasoning item finish it here; its
+            // visible text prints as plain reasoning does.
+            MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::End {
+                content: AssistantContent::CarriedReasoning(reasoning),
+                ..
+            })) => {
+                write!(stdout, "{}", reasoning.display_text())?;
                 stdout.flush()?;
             }
             MultiTurnStreamItem::FinalResponse(response) => return Ok(response),
