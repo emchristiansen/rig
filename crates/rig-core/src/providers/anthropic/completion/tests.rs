@@ -2376,6 +2376,10 @@ fn stop_reason_maps_onto_the_normalized_vocabulary() {
         ("end_turn", completion::FinishReason::Stop),
         ("stop_sequence", completion::FinishReason::Stop),
         ("max_tokens", completion::FinishReason::Length),
+        (
+            "model_context_window_exceeded",
+            completion::FinishReason::Length,
+        ),
         ("tool_use", completion::FinishReason::ToolCalls),
         ("refusal", completion::FinishReason::ContentFilter),
     ] {
@@ -2388,7 +2392,7 @@ fn stop_reason_maps_onto_the_normalized_vocabulary() {
 
 #[test]
 fn unknown_stop_reason_is_preserved_verbatim() {
-    for reason in ["pause_turn", "model_context_window_exceeded"] {
+    for reason in ["pause_turn"] {
         let mut response = empty_response_with(Some(reason), None);
         response["content"] = json!([{"type": "text", "text": "answer"}]);
         let parsed = fold_reply(&response).expect("the response folds");
