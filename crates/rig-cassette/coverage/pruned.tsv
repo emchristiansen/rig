@@ -1083,7 +1083,6 @@ fixture	llamacpp/bare_openai_client/authorization_header_is_always_sent.yaml	rig
 fixture	llamacpp/bare_openai_client/caller_supplies_the_v1_prefix.yaml	rig-cassette::llamacpp llamacpp::cassette::error_matrix::a_missing_api_key_is_a_401_the_caller_can_read, rig-cassette::llamacpp llamacpp::cassette::permission_control::permission_control_prompt_example
 fixture	llamacpp/bare_openai_client/raw_response_text_matches_normalized_choice_text.yaml	rig-cassette::llamacpp llamacpp::cassette::permission_control::permission_control_prompt_example
 fixture	llamacpp/bare_openai_client/tool_call_stream_without_the_single_chunk_const.yaml	rig-cassette::llamacpp llamacpp::cassette::streaming_tools::example_streaming_with_tools, rig-cassette::llamacpp llamacpp::cassette::streaming_tools::raw_followup_uses_tool_result_without_new_tool_calls
-fixture	llamacpp/content_matrix/consecutive_same_role.yaml	rig-cassette::llamacpp llamacpp::cassette::multimodal_matrix::a_video_part_is_refused_even_though_props_advertises_video
 fixture	llamacpp/context/context_smoke.yaml	rig-cassette::llamacpp llamacpp::cassette::multimodal_matrix::a_video_part_is_refused_even_though_props_advertises_video, rig-cassette::llamacpp llamacpp::cassette::permission_control::permission_control_prompt_example
 fixture	llamacpp/embedding_matrix/batch.yaml	-
 fixture	llamacpp/embedding_matrix/declared_width_matches.yaml	-

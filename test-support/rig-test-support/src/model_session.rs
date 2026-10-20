@@ -999,11 +999,25 @@ pub async fn anthropic(
     let mut raw_types = Vec::new();
     use futures::StreamExt;
     while let Some(item) = stream.next().await {
+        // A hosted server-tool block arrives carried, as opaque `CarriedText`
+        // holding the exact block (FA-ANTH-HOSTED-AS-CARRIED); an unmodelled
+        // one stays `Opaque`.
         if let rig_core::streaming::Item::Event(rig_core::streaming::StreamEvent::End {
-            content: AssistantContent::Opaque(opaque),
+            content,
             ..
         }) = item.unwrap_or_else(|error| panic!("{}: web search item: {error}", session.run))
-            && let Some(kind) = opaque.kind()
+            && let Some(kind) = match &content {
+                AssistantContent::Opaque(opaque) => opaque.kind(),
+                AssistantContent::CarriedText(text)
+                    if matches!(
+                        text.content,
+                        rig_core::message::CarriedTextContent::Opaque(_)
+                    ) =>
+                {
+                    text.payload.item_type()
+                }
+                _ => None,
+            }
         {
             raw_types.push(kind.to_owned());
         }

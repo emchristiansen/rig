@@ -1,4 +1,4 @@
-//! Every current golden has one producer; the eight frozen historical logs
+//! Every current golden has one producer; the nine frozen historical logs
 //! retain named offline readers. Pruned current producers check in-test.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -171,7 +171,7 @@ fn checked_in_test() -> BTreeSet<String> {
         .collect()
 }
 
-/// These eight logs are frozen inputs of the named offline readers. Their
+/// These nine logs are frozen inputs of the named offline readers. Their
 /// former producers now witness request refusal, not successful effect logs.
 struct HistoricalGolden {
     path: &'static str,
@@ -265,6 +265,16 @@ const HISTORICAL_GOLDENS: &[HistoricalGolden] = &[
             module: "corpus_breadth",
             program: "GEMINI_DISPATCH_CANCELLED",
             row: "gemini_tool_dispatch_cancelled",
+        },
+    },
+    HistoricalGolden {
+        path: "crates/rig-cassette/fixtures/effects/gemini_tool_call_turns.effects.json",
+        retired: "mec-rig-132-dispositions-1 item 5 gemini::cassette::hook_stress::tool_call_turns_effect_log_is_the_golden_fixture",
+        reader: HistoricalReader {
+            source: "crates/rig-cassette/tests/golden_replay.rs",
+            module: "golden_replay",
+            program: "TOOL_CALL_TURNS",
+            row: "reproduces_tool_call_turns",
         },
     },
 ];
