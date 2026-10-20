@@ -1800,7 +1800,6 @@ fn carried_reasoning_item(
     item.insert("type".to_owned(), json!("reasoning"));
     item.insert("id".to_owned(), json!(id));
     item.insert("summary".to_owned(), Value::Array(summary));
-    item.shift_remove("status");
     item.shift_remove("content");
     item.shift_remove("encrypted_content");
     item.shift_remove("signature");

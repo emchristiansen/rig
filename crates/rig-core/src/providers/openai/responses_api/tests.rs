@@ -3219,14 +3219,9 @@ fn carried_reasoning_object_preserves_root_and_known_part_siblings() {
     let encoded = carried_reasoning_item(&reasoning)
         .expect("object reasoning encodes")
         .expect("identified reasoning");
-    let mut expected = raw.clone();
-    expected
-        .as_object_mut()
-        .expect("object")
-        .shift_remove("status");
     assert_eq!(
-        encoded, expected,
-        "only the existing status omission applies; siblings stay exact"
+        encoded, raw,
+        "the received root, its status and known-part siblings stay exact"
     );
 }
 

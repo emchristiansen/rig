@@ -22,6 +22,9 @@ pub(crate) use reader::websocket_done;
 
 /// The protected accumulator's per-call fragment bound.
 const MAX_TOOL_INPUT_BYTES: usize = 32 * 1024 * 1024;
+/// Call state slots for distinct call items at a reused output index; no
+/// output index reaches them.
+const REUSED_CALL_SLOTS: u64 = 1 << 63;
 
 const ITEM_EVENTS: &str = "output_item.added output_item.done content_part.added content_part.done \
     output_text.delta output_text.done refusal.delta refusal.done function_call_arguments.delta \
@@ -448,6 +451,8 @@ pub struct ResponsesDecoder {
     provider_items: HashSet<u64>,
     finished_calls: HashSet<u64>,
     call_items: HashMap<String, u64>,
+    /// The slot of the latest distinct call item at a reused output index.
+    reused_call_slots: HashMap<u64, u64>,
     last_message_id: Option<String>,
     /// The real text Draft last activated by a provider event. Interleaving
     /// resets this without closing that Part or duplicating canonical content.
@@ -476,6 +481,7 @@ impl ResponsesDecoder {
             provider_items: HashSet::new(),
             finished_calls: HashSet::new(),
             call_items: HashMap::new(),
+            reused_call_slots: HashMap::new(),
             last_message_id: None,
             active_message_part: None,
             pending_flush_error: None,
@@ -878,7 +884,15 @@ impl ResponsesDecoder {
             )?;
         }
         let message = self.messages.entry(index).or_default();
-        if message.id.is_none() {
+        // The first completed item states the message's identity; an id an
+        // announcement or delta stated first only stands in until then, and a
+        // later terminal restatement never replaces it.
+        if completed
+            && message.item.is_none()
+            && let Some(id) = nonempty(item.str("id"))
+        {
+            message.id = Some(id);
+        } else if message.id.is_none() {
             message.id = nonempty(item.str("id"));
         }
         message.phase = item.str("phase").map(str::to_owned);
@@ -1041,13 +1055,15 @@ impl ResponsesDecoder {
             return Ok(());
         }
         self.active_message_part = None;
+        let source = index;
+        let index = self.call_slot(index, item.str("id"));
         if self.finished_calls.contains(&index) {
             return Ok(());
         }
         if let Some(id) = item.str("id").filter(|id| !id.is_empty()) {
             self.call_items.entry(id.to_owned()).or_insert(index);
         }
-        let call = Self::call_state(self.calls.entry(index), item, out)?;
+        let call = Self::call_state(self.calls.entry(index), source, item, out)?;
         if call.name.is_empty()
             && let Some(name) = item.str("name").filter(|name| !name.is_empty())
         {
@@ -1074,6 +1090,7 @@ impl ResponsesDecoder {
 
     fn call_state<'a>(
         entry: Entry<'a, u64, CallState>,
+        index: u64,
         item: &Value,
         out: &mut Out<'_, Completion>,
     ) -> Result<&'a mut CallState, ProviderError> {
@@ -1081,7 +1098,6 @@ impl ResponsesDecoder {
             Entry::Occupied(entry) => return Ok(entry.into_mut()),
             Entry::Vacant(entry) => entry,
         };
-        let index = *entry.key();
         let at = out.fresh_index();
         let id = CallId::from_wire(item.str("call_id").unwrap_or_default());
         let name = item.str("name").unwrap_or_default().to_owned();
@@ -1128,6 +1144,8 @@ impl ResponsesDecoder {
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
         self.active_message_part = None;
+        let source = index;
+        let index = self.call_slot(index, id);
         if self.finished_calls.contains(&index)
             || self
                 .calls
@@ -1144,6 +1162,7 @@ impl ResponsesDecoder {
         }
         let call = Self::call_state(
             entry,
+            source,
             &json!({"type":"function_call", "id":id.unwrap_or_default()}),
             out,
         )?;
@@ -1174,11 +1193,8 @@ impl ResponsesDecoder {
         item: &Value,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
-        let index = item
-            .str("id")
-            .filter(|id| !id.is_empty())
-            .and_then(|id| self.call_items.get(id).copied())
-            .unwrap_or(index);
+        let source = index;
+        let index = self.call_slot(index, item.str("id"));
         if self.finished_calls.contains(&index)
             || self
                 .calls
@@ -1200,7 +1216,7 @@ impl ResponsesDecoder {
             let namespace = item.str("namespace").map(str::to_owned);
             let custom: reader::CustomFields = reader::fields(item)?;
             let input = custom.input.as_str();
-            out.in_source_order(SourceOrder::new(index, 0), |out| {
+            out.in_source_order(SourceOrder::new(source, 0), |out| {
                 out.open(
                     at,
                     Block::CustomCall {
@@ -1231,7 +1247,7 @@ impl ResponsesDecoder {
             if matches!(&entry, Entry::Vacant(_)) {
                 self.active_message_part = None;
             }
-            let call = Self::call_state(entry, item, out)?;
+            let call = Self::call_state(entry, source, item, out)?;
             if call.name.is_empty() {
                 call.name = item.str("name").unwrap_or_default().to_owned();
             }
@@ -1284,6 +1300,34 @@ impl ResponsesDecoder {
             self.finish_call(index, FlushBoundary::Partial, out)?;
         }
         Ok(())
+    }
+
+    /// The state slot for call item `id` at output `index`. An output index
+    /// is not a call's identity: a known item keeps its slot, and a distinct
+    /// item at an index another call item already holds gets its own slot
+    /// beyond every output index, so it is neither merged into nor dropped as
+    /// the earlier call. Id-less events follow the index's latest item.
+    fn call_slot(&mut self, index: u64, id: Option<&str>) -> u64 {
+        let current = self.reused_call_slots.get(&index).copied().unwrap_or(index);
+        let Some(id) = id.filter(|id| !id.is_empty()) else {
+            return current;
+        };
+        if let Some(slot) = self.call_items.get(id) {
+            return *slot;
+        }
+        if !self.call_items.values().any(|slot| *slot == current) {
+            return current;
+        }
+        let slot = self
+            .call_items
+            .values()
+            .copied()
+            .filter(|slot| *slot >= REUSED_CALL_SLOTS)
+            .max()
+            .map_or(REUSED_CALL_SLOTS, |slot| slot + 1);
+        self.reused_call_slots.insert(index, slot);
+        self.call_items.insert(id.to_owned(), slot);
+        slot
     }
 
     fn finish_call(

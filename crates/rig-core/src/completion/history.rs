@@ -903,14 +903,24 @@ fn tools_as_text(history: Vec<Message>) -> Vec<Message> {
         .map(|message| match message {
             Message::Assistant(mut turn) => {
                 for block in &mut turn.content {
-                    if let AssistantContent::ToolCall(call) = block {
-                        *block = AssistantContent::Text(Text::new(format!(
-                            "[called tool {} with {}]",
-                            call.function.name,
-                            crate::json_utils::to_canonical_string(
-                                &call.function.arguments_value()
-                            )
-                        )));
+                    match block {
+                        AssistantContent::ToolCall(call) => {
+                            *block = AssistantContent::Text(Text::new(format!(
+                                "[called tool {} with {}]",
+                                call.function.name,
+                                crate::json_utils::to_canonical_string(
+                                    &call.function.arguments_value()
+                                )
+                            )));
+                        }
+                        // A custom call's raw input is its whole argument.
+                        AssistantContent::CustomToolCall(call) => {
+                            *block = AssistantContent::Text(Text::new(format!(
+                                "[called tool {} with {}]",
+                                call.name, call.input
+                            )));
+                        }
+                        _ => {}
                     }
                 }
                 Message::Assistant(turn)
