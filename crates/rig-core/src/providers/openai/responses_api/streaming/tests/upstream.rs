@@ -2822,6 +2822,47 @@ fn repaired_indexless_reasoning_items_keep_their_own_slots_and_fold_as_the_whole
     assert_eq!(reasoning[1].payload.item, output[1]);
 }
 
+/// ChatGPT's envelope repair fills every missing `output_index` with 0, so
+/// provider items are known by item id and sort, like call and reasoning
+/// slots, after every earlier item at their reused index. Each reply folds
+/// streamed without indices exactly as its whole reply does (hc-r4 case 37).
+#[test]
+fn repaired_indexless_provider_items_keep_arrival_order_and_fold_as_the_whole_reply() {
+    let search = json!({"type":"web_search_call","id":"ws_0","status":"completed",
+        "action":{"type":"search","query":"rig"}});
+    let invented = |id: &str| json!({"type":"x_rig_invented","id":id,"payload":{"n":1}});
+    let replies = [
+        vec![
+            search.clone(),
+            invented("x_1"),
+            function_call("fc_4", "call_4", r#"{"q":"rig"}"#),
+        ],
+        vec![
+            search.clone(),
+            function_call("fc_1", "call_1", r#"{"q":"rig"}"#),
+            invented("x_2"),
+            function_call("fc_3", "call_3", r#"{"q":"harbor"}"#),
+        ],
+    ];
+    let repaired = |input: Vec<WireFrame>| {
+        feed_frames!(
+            ResponsesDecoder::new("openai", super::super::ResponsesStreamOptions::strict())
+                .with_envelope_repair(),
+            super::super::document::Response::with_strict_reader(true),
+            "openai",
+            input
+        )
+        .outcome
+        .expect("the repaired reply decodes")
+    };
+    for output in replies {
+        let streamed = repaired(frames(&without_indices(restated(&output))));
+        let unary = repaired(whole(&output));
+        assert_eq!(streamed.choice, unary.choice, "{output:?}");
+        assert_eq!(streamed.choice.len(), output.len(), "{:?}", streamed.choice);
+    }
+}
+
 #[test]
 fn retained_index_reasoning_without_ciphertext_keeps_item_and_replayed_ids() {
     let mut thought = reasoning("rs_1", &["Plan."]);

@@ -28,6 +28,20 @@ const REUSED_CALL_SLOTS: u64 = 1 << 63;
 /// Reasoning state slots for distinct reasoning items at a reused output
 /// index; no output index reaches them.
 const REUSED_REASONING_SLOTS: u64 = 1 << 62;
+/// Order slots for distinct provider items at a reused output index; no
+/// output index reaches them.
+const REUSED_PROVIDER_SLOTS: u64 = 1 << 61;
+
+/// How an output item reached the decoder.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arrival {
+    /// `response.output_item.added`.
+    Added,
+    /// `response.output_item.done`.
+    Done,
+    /// The terminal response's `output`.
+    Restated,
+}
 
 const ITEM_EVENTS: &str = "output_item.added output_item.done content_part.added content_part.done \
     output_text.delta output_text.done refusal.delta refusal.done function_call_arguments.delta \
@@ -452,13 +466,18 @@ pub struct ResponsesDecoder {
     reasoning_ids: HashMap<String, u64>,
     /// The slot of the latest distinct reasoning item at a reused output index.
     reused_reasoning_slots: HashMap<u64, u64>,
-    /// Where each call or reasoning slot opened at an output index an
-    /// earlier item already used sorts: after every earlier item there.
+    /// Where each call, reasoning or provider-item slot opened at an output
+    /// index an earlier item already used sorts: after every earlier item
+    /// there.
     reused_orders: HashMap<u64, SourceOrder>,
     calls: BTreeMap<u64, CallState>,
     parents: HashMap<u64, Parent>,
     undecided: BTreeMap<(u64, u64), Vec<UndecidedPart>>,
     provider_items: HashSet<u64>,
+    /// The identified provider items already emitted. An output index is
+    /// not a provider item's identity: ChatGPT's envelope repair fills
+    /// every missing index with 0.
+    provider_item_ids: HashSet<String>,
     finished_calls: HashSet<u64>,
     call_items: HashMap<String, u64>,
     /// The slot of the latest distinct call item at a reused output index.
@@ -492,6 +511,7 @@ impl ResponsesDecoder {
             parents: HashMap::new(),
             undecided: BTreeMap::new(),
             provider_items: HashSet::new(),
+            provider_item_ids: HashSet::new(),
             finished_calls: HashSet::new(),
             call_items: HashMap::new(),
             reused_call_slots: HashMap::new(),
@@ -1341,6 +1361,7 @@ impl ResponsesDecoder {
         }
         if !self.call_items.values().any(|slot| *slot == current)
             && !self.reasoning_ids.values().any(|slot| *slot == current)
+            && !self.provider_items.contains(&current)
         {
             return current;
         }
@@ -1400,6 +1421,7 @@ impl ResponsesDecoder {
         }
         if !self.reasoning_ids.values().any(|slot| *slot == current)
             && !self.call_items.values().any(|slot| *slot == current)
+            && !self.provider_items.contains(&current)
         {
             self.reasoning_ids.insert(id.to_owned(), current);
             return current;
@@ -1532,13 +1554,43 @@ impl ResponsesDecoder {
         &mut self,
         index: u64,
         item: &Value,
+        arrival: Arrival,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
-        if !self.provider_items.insert(index) {
+        // A streamed item is known by its id, else by its index. A terminal
+        // restatement's index is its real position, so an item restated
+        // under an id the stream did not use is still the one streamed there.
+        let id = item.str("id").filter(|id| !id.is_empty());
+        let seen = id.is_some_and(|id| self.provider_item_ids.contains(id))
+            || (id.is_none() || arrival == Arrival::Restated)
+                && self.provider_items.contains(&index);
+        if seen {
             return Ok(());
         }
+        // A distinct item at an index another item already holds sorts
+        // after every earlier item there, as reused call and reasoning
+        // slots do.
+        let held = self.provider_items.contains(&index)
+            || self.call_items.values().any(|slot| *slot == index)
+            || self.reasoning_ids.values().any(|slot| *slot == index);
+        let order = if held {
+            let slot = REUSED_PROVIDER_SLOTS
+                + self
+                    .reused_orders
+                    .keys()
+                    .filter(|slot| (REUSED_PROVIDER_SLOTS..REUSED_REASONING_SLOTS).contains(*slot))
+                    .count() as u64;
+            self.reuse(index, slot);
+            self.slot_order(slot, index)
+        } else {
+            SourceOrder::new(index, 0)
+        };
+        self.provider_items.insert(index);
+        if let Some(id) = id {
+            self.provider_item_ids.insert(id.to_owned());
+        }
         let at = out.fresh_index();
-        out.in_source_order(SourceOrder::new(index, 0), |out| {
+        out.in_source_order(order, |out| {
             out.whole(at, Block::ProviderItem { provider: None }, item.clone(), "")
         })
     }
@@ -1547,9 +1599,10 @@ impl ResponsesDecoder {
         &mut self,
         index: u64,
         item: &Value,
-        completed: bool,
+        arrival: Arrival,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
+        let completed = arrival != Arrival::Added;
         match item.str("type") {
             Some("message") => self.message_item(index, item, completed, out),
             Some("reasoning") => self.reasoning_item(index, item, completed, out),
@@ -1557,7 +1610,7 @@ impl ResponsesDecoder {
                 self.call_done(index, item, out)
             }
             Some("function_call" | "custom_tool_call") => self.call_added(index, item, out),
-            _ if completed => self.provider_item(index, item, out),
+            _ if completed => self.provider_item(index, item, arrival, out),
             _ => Ok(()),
         }
     }
@@ -1577,11 +1630,11 @@ impl ResponsesDecoder {
         let part = frame.u64("content_index").unwrap_or(0);
         match kind {
             "response.output_item.added" => {
-                self.output(index, frame.get("item").unwrap_or(&Value::Null), false, out)
+                self.output(index, frame.get("item").unwrap_or(&Value::Null), Arrival::Added, out)
             }
             "response.output_item.done" => {
                 self.active_message_part = None;
-                self.output(index, frame.get("item").unwrap_or(&Value::Null), true, out)
+                self.output(index, frame.get("item").unwrap_or(&Value::Null), Arrival::Done, out)
             }
             "response.output_text.delta" | "response.refusal.delta" => self.message_delta(
                 index,
@@ -1973,7 +2026,7 @@ impl ResponsesDecoder {
             // Other streamed terminal calls retain their existing route; only
             // whole-body decoding supplies new or unannounced whole calls (G195).
             if (whole || !matches!(item.str("type"), Some("function_call" | "custom_tool_call")))
-                && let Err(error) = self.output(index as u64, item, true, &mut out)
+                && let Err(error) = self.output(index as u64, item, Arrival::Restated, &mut out)
             {
                 first_error.get_or_insert(error);
             }
