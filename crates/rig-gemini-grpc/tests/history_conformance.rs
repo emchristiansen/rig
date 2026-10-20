@@ -7,7 +7,7 @@
 
 use rig_core::completion::CompletionRequest;
 use rig_core::error::EncodeError;
-use rig_core::message::AssistantContent;
+use rig_core::message::{AssistantContent, AssistantMessage};
 use rig_core::wire::{Mode, Wire};
 use rig_gemini_grpc::completion::GenerateContent;
 use rig_gemini_grpc::proto::{self, GenerateContentResponse};
@@ -254,6 +254,38 @@ impl HistoryFixture for GrpcHistory {
 
     fn finish_reason_pointer(&self) -> Option<&'static str> {
         Some("/candidates/0/finishReason")
+    }
+
+    /// Each replayed provider part as REST JSON, including interleaved reasoning.
+    fn replayed(&self, turn: &AssistantMessage) -> Vec<Value> {
+        let interleaved = matches!(
+            turn.content.as_slice(),
+            [
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_),
+                AssistantContent::Text(_),
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_),
+                AssistantContent::ToolCall(_),
+            ]
+        );
+        let replayed: Vec<Value> = turn
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                AssistantContent::Opaque(opaque) if opaque.replay => Some(opaque.item.clone()),
+                AssistantContent::CarriedReasoning(reasoning) if interleaved => {
+                    Some(reasoning.payload.item.clone())
+                }
+                block => block.native_item().cloned(),
+            })
+            .collect();
+        if interleaved {
+            assert_eq!(
+                replayed.len(),
+                4,
+                "the interleaved reply supplies all four outbound items: {turn:?} gives {replayed:?}"
+            );
+        }
+        replayed
     }
 }
 

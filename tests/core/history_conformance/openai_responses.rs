@@ -5,7 +5,7 @@
 
 use rig_core::completion::CompletionRequest;
 use rig_core::error::EncodeError;
-use rig_core::message::AssistantContent;
+use rig_core::message::{AssistantContent, AssistantMessage, CarriedTextContent};
 use rig_core::operation::Completion;
 use rig_core::providers::openai::OpenAIConfig;
 use rig_core::providers::openai::responses_api::wire::Responses;
@@ -475,6 +475,47 @@ where
         Some(WireFrame::Text(
             json!({"type": "error", "code": "server_error", "message": "boom"}).to_string(),
         ))
+    }
+
+    /// The interleaved reply includes its carried reasoning and known text part.
+    fn replayed(&self, turn: &AssistantMessage) -> Vec<Value> {
+        let interleaved = match turn.content.as_slice() {
+            [
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_),
+                text,
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_),
+                AssistantContent::ToolCall(_),
+            ] => {
+                matches!(text, AssistantContent::Text(_))
+                    || matches!(text, AssistantContent::CarriedText(text)
+                    if matches!(&text.content, CarriedTextContent::Text(_)))
+            }
+            _ => false,
+        };
+        let replayed: Vec<Value> = turn
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                AssistantContent::Opaque(opaque) if opaque.replay => Some(opaque.item.clone()),
+                AssistantContent::CarriedReasoning(reasoning) if interleaved => {
+                    Some(reasoning.payload.item.clone())
+                }
+                AssistantContent::CarriedText(text)
+                    if interleaved && matches!(&text.content, CarriedTextContent::Text(_)) =>
+                {
+                    Some(text.payload.item.clone())
+                }
+                block => block.native_item().cloned(),
+            })
+            .collect();
+        if interleaved {
+            assert_eq!(
+                replayed.len(),
+                4,
+                "the interleaved reply supplies all four outbound items: {turn:?} gives {replayed:?}"
+            );
+        }
+        replayed
     }
 
     /// No field fails a reply: an item without its `type` is opaque, and

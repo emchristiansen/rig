@@ -1845,7 +1845,17 @@ pub fn h11_order<F: HistoryFixture>(fixture: &F) {
             .iter()
             .map(|block| match block {
                 AssistantContent::Text(_) => "text",
-                AssistantContent::Reasoning(_) => "reasoning",
+                AssistantContent::CarriedText(text)
+                    if matches!(
+                        &text.content,
+                        rig_core::message::CarriedTextContent::Text(_)
+                    ) =>
+                {
+                    "text"
+                }
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_) => {
+                    "reasoning"
+                }
                 AssistantContent::ToolCall(_) => "call",
                 AssistantContent::Image(_) => "image",
                 AssistantContent::Opaque(_) => "opaque",
@@ -1864,10 +1874,20 @@ pub fn h11_order<F: HistoryFixture>(fixture: &F) {
             mode,
         )
         .unwrap_or_else(|error| panic!("{mode:?}: the history encodes: {error}"));
-        let positions: Vec<usize> = fixture
-            .replayed(&turn)
+        let expected = fixture.replayed(&turn);
+        if fixture.keeps_natives() {
+            assert!(
+                !expected.is_empty(),
+                "{mode:?}: the interleaved reply keeps provider items: {turn:?}"
+            );
+        }
+        let positions: Vec<usize> = expected
             .iter()
-            .filter_map(|item| position_of(&body, item))
+            .map(|item| {
+                position_of(&body, item).unwrap_or_else(|| {
+                    panic!("{mode:?}: the same model gets every expected item: missing {item} in {body}")
+                })
+            })
             .collect();
         assert!(
             positions.windows(2).all(|pair| pair[0] < pair[1]),

@@ -221,21 +221,43 @@ impl HistoryFixture for VertexHistory {
     }
 
     /// Each provider part as the SDK sends it: its JSON read into the SDK's
-    /// `Part`, which spells enums by number.
+    /// `Part`, which spells enums by number. The interleaved shape includes
+    /// its carried reasoning.
     fn replayed(&self, turn: &AssistantMessage) -> Vec<Value> {
         let sdk = |item: &Value| {
             serde_json::from_value::<google_cloud_aiplatform_v1::model::Part>(item.clone())
                 .ok()
                 .and_then(|part| serde_json::to_value(part).ok())
         };
-        turn.content
+        let interleaved = matches!(
+            turn.content.as_slice(),
+            [
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_),
+                AssistantContent::Text(_),
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_),
+                AssistantContent::ToolCall(_),
+            ]
+        );
+        let replayed: Vec<Value> = turn
+            .content
             .iter()
             .filter_map(|block| match block {
                 AssistantContent::Opaque(opaque) if opaque.replay => sdk(&opaque.item),
                 AssistantContent::Opaque(_) => None,
+                AssistantContent::CarriedReasoning(reasoning) if interleaved => {
+                    sdk(&reasoning.payload.item)
+                }
                 block => block.native_item().and_then(sdk),
             })
-            .collect()
+            .collect();
+        if interleaved {
+            assert_eq!(
+                replayed.len(),
+                4,
+                "the interleaved reply supplies all four outbound items: {turn:?} gives {replayed:?}"
+            );
+        }
+        replayed
     }
 }
 
