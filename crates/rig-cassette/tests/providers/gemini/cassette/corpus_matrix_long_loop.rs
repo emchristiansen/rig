@@ -36,7 +36,7 @@ async fn long_streamed() -> anyhow::Result<()> {
     with_gemini_request_witness_cassette(
         "long_loop_matrix/long_streamed",
         NamedCase::LongStreamed,
-        |client| async move {
+        |client, _clock| async move {
             let wire = wire(&client);
             attempt_cell(&wire, NamedCase::LongStreamed).await
         },

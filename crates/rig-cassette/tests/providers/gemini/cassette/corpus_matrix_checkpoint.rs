@@ -44,7 +44,7 @@ async fn large_result() -> anyhow::Result<()> {
     with_gemini_request_witness_cassette(
         "checkpoint_matrix/large_result",
         NamedCase::LargeResult,
-        |client| async move {
+        |client, _clock| async move {
             let wire = wire(&client);
             attempt_cell(&wire, NamedCase::LargeResult).await
         },

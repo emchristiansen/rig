@@ -6,16 +6,20 @@
 //! | 2 | `stream_function_call_arguments/developer_api` | A request that sets `streamFunctionCallArguments` still gets each call's arguments whole from the Developer API, never as `partialArgs`. Vertex AI documents `partialArgs` for the flag; Rig's Vertex wire is unary, and the Vertex streaming form is not verified here. |
 //!
 //! Cell 1 sends raw requests, through the session's client: Rig's images
-//! carry no per-part settings. Every check of cell 2 runs on the recorded
-//! exchanges before a recording is written.
+//! carry no per-part settings. Cell 2's recording sends the declaration as
+//! `parametersJsonSchema`, which the port sends as `parameters`, so in replay
+//! it is an exact named request-mismatch witness; its checks of the recorded
+//! exchanges still run on the fixture.
 
-use futures::StreamExt;
 use rig::completion::{CompletionRequest, Effort, ToolDefinition};
-use rig::message::{AssistantContent, ToolName};
+use rig::message::ToolName;
 use rig::providers::gemini::completion::GEMINI_3_FLASH_PREVIEW;
 use serde_json::{Value, json};
 
-use super::super::support::{with_gemini_cassette, with_gemini_checked_cassette};
+use super::super::request_witness_support::{
+    NamedCase, model_stream_result, with_gemini_request_witness_cassette,
+};
+use super::super::support::with_gemini_cassette;
 
 /// A one-pixel PNG.
 const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
@@ -70,11 +74,22 @@ async fn per_part_media_resolution() {
     .await;
 }
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declaration 0's recorded `parametersJsonSchema`
+/// is sent, value unchanged, as `parameters`, and replay refuses interaction
+/// 0. Every recorded-exchange check of the fact still runs on the fixture:
+/// the recorded request asks for streamed arguments, and the recorded stream
+/// carries the call without `partialArgs` or `willContinue`. Named losses,
+/// read from the refused stream: a stream without error items that ends
+/// cleanly, and its lookup call's `q` arriving whole (more than ten words).
 #[tokio::test]
-async fn stream_function_call_arguments() {
-    with_gemini_checked_cassette(
+async fn stream_function_call_arguments() -> anyhow::Result<()> {
+    const SCENARIO: &str = "stream_function_call_arguments/developer_api";
+    with_gemini_request_witness_cassette(
         "stream_function_call_arguments/developer_api",
-        |models| async move {
+        NamedCase::StreamFunctionCallArguments,
+        |models, _clock| async move {
             let request = CompletionRequest::new(
                 "Call lookup with q set to a 40 word sentence about harbors.",
             )
@@ -91,46 +106,26 @@ async fn stream_function_call_arguments() {
                     "streamFunctionCallArguments": true
                 }}
             }));
-            let mut stream = models
-                .completion(GEMINI_3_FLASH_PREVIEW)
-                .stream(request)
-                .expect("the stream opens");
-            while let Some(item) = stream.next().await {
-                item.expect("no stream item is an error");
-            }
-            let response = stream.finish().await.expect("the stream ends cleanly");
-            let call = response
-                .choice
-                .iter()
-                .find_map(|block| match block {
-                    AssistantContent::ToolCall(call) => Some(call.clone()),
-                    _ => None,
-                })
-                .expect("the reply calls lookup");
-            let q = call.function.arguments_value()["q"].clone();
-            assert!(
-                q.as_str().is_some_and(|q| q.split_whitespace().count() > 10),
-                "the call's arguments arrive whole: {q}"
-            );
-        },
-        |root, scenario| {
-            let request = rig_cassette::http::recorded_json_request(root, "gemini", scenario);
-            assert_eq!(
-                request["toolConfig"]["functionCallingConfig"]["streamFunctionCallArguments"],
-                true,
-                "the recorded request asks for streamed arguments: {request}"
-            );
-            let frames = rig_cassette::http::recorded_sse_json_frames(root, "gemini", scenario);
-            let text = serde_json::to_string(&frames).expect("frames serialize");
-            assert!(
-                !text.contains("partialArgs") && !text.contains("willContinue"),
-                "the Developer API sends no partial arguments"
-            );
-            assert!(
-                text.contains("functionCall"),
-                "the recorded stream carries the call"
-            );
+            model_stream_result(models.completion(GEMINI_3_FLASH_PREVIEW).stream(request)).await
         },
     )
-    .await;
+    .await?;
+
+    let root = crate::cassettes::cassette_root();
+    let request = rig_cassette::http::recorded_json_request(&root, "gemini", SCENARIO);
+    anyhow::ensure!(
+        request["toolConfig"]["functionCallingConfig"]["streamFunctionCallArguments"] == true,
+        "the recorded request asks for streamed arguments: {request}"
+    );
+    let frames = rig_cassette::http::recorded_sse_json_frames(&root, "gemini", SCENARIO);
+    let text = serde_json::to_string(&frames).expect("frames serialize");
+    anyhow::ensure!(
+        !text.contains("partialArgs") && !text.contains("willContinue"),
+        "the Developer API sends no partial arguments"
+    );
+    anyhow::ensure!(
+        text.contains("functionCall"),
+        "the recorded stream carries the call"
+    );
+    Ok(())
 }

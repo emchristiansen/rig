@@ -10,10 +10,16 @@
 //! call. The two transports disagreed about
 //! identical wire bytes.
 //!
-//! Both transports now keep the cut call, as pi does: its arguments are what
-//! pi's tolerant parse reads from the text (blank text is an empty object),
-//! and a call whose text never parses keeps it as `invalid_arguments`, so the
-//! agent answers it with an error result and never runs it.
+//! Both transports now keep the turn. Upstream kept the cut call as well, as
+//! pi does; the port instead discards a Chat call cut at an explicit `length`
+//! finish (coord-a-rig-port-discard-15): it yields no canonical call. On a
+//! stream its Part closes with the typed `Discard` reason `Length`, and the
+//! argument fragments it delivered stay visible as `Arguments` events; a
+//! unary reply drops the call before decoding, its arguments visible in the
+//! raw document. A call whose arguments are whole under the same `length`
+//! finish is kept and still dispatches. The
+//! ignored cells below still state upstream's retention; they have no
+//! recording to replay.
 //!
 //! Live budget sweep against `deepseek-v4-flash` (thinking disabled), one tool
 //! whose required `summary` argument must be long:
@@ -283,11 +289,15 @@ async fn blocking_parallel_calls_keep_the_complete_one() {
                     .iter()
                     .map(|call| call.function.name.as_str())
                     .collect::<Vec<_>>(),
-                vec!["page_oncall", "file_report"],
-                "both calls are kept: {:?}",
+                vec!["page_oncall"],
+                "the complete call is kept and the cut one is discarded: {:?}",
                 normalized.choice
             );
-            assert_one_cut_call(calls.iter().skip(1).copied());
+            assert!(
+                calls[0].function.invalid_arguments.is_none(),
+                "the complete call's arguments parse, so it dispatches: {:?}",
+                calls[0]
+            );
             assert_eq!(
                 calls[0].function.arguments_value(),
                 json!({ "team": "platform" })
@@ -295,6 +305,30 @@ async fn blocking_parallel_calls_keep_the_complete_one() {
             assert_eq!(
                 normalized.finish_reason(),
                 Some(rig::completion::FinishReason::Length)
+            );
+
+            // A unary reply has no event surface: the port drops the cut
+            // call from the whole document before decoding it, so no typed
+            // `Discard` exists for it. Its delivered arguments stay visible
+            // in the response's raw document.
+            let arguments = recorded_blocking_arguments(SCENARIO);
+            let raw_calls = normalized.raw["choices"][0]["message"]["tool_calls"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                raw_calls
+                    .iter()
+                    .map(|call| (
+                        call["function"]["name"].as_str().unwrap_or_default(),
+                        call["function"]["arguments"].as_str().unwrap_or_default(),
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("page_oncall", arguments[0].as_str()),
+                    ("file_report", arguments[1].as_str()),
+                ],
+                "the cut call's delivered arguments stay visible in the raw document"
             );
             Ok::<(), anyhow::Error>(())
         },

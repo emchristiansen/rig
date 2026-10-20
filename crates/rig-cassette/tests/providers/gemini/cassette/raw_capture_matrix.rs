@@ -31,17 +31,16 @@
 //! so `raw` must keep the wire spelling while the normalized response reports
 //! the upgraded reason.
 
-use rig::completion::{
-    AssistantContent, CompletionResponse as RigCompletionResponse, FinishReason,
-};
+use rig::completion::CompletionResponse as RigCompletionResponse;
 use rig::message::ToolChoice;
-use rig::providers::gemini::extension::GeminiExt;
 use rig::tool::Tool;
 use serde_json::Value;
 
-use super::super::support::with_gemini_cassette;
+use super::super::request_witness_support::{
+    NamedCase, model_result, with_gemini_request_witness_cassette,
+};
 use crate::raw_capture::capture_completion;
-use crate::support::{Adder, Observed, json_contains_key, normalized_without_raw};
+use crate::support::{Adder, Observed};
 use rig::completion::CompletionRequest;
 
 const PROVIDER: &str = "gemini";
@@ -89,47 +88,6 @@ fn assert_recorded_function_call_body(scenario: &str) -> Value {
     body
 }
 
-/// The `(name, arguments)` of every tool call in a choice — the part of a
-/// Gemini `functionCall` the wire actually carries (Gemini assigns no call
-/// id; rig mints one per normalization).
-fn tool_functions(choice: &[AssistantContent]) -> Vec<(String, Value)> {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::ToolCall(call) => Some((
-                call.function.name.to_string(),
-                call.function.arguments_value(),
-            )),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The parts of a candidate's content, in wire order.
-fn candidate_parts(candidate: &Value) -> impl Iterator<Item = &Value> {
-    candidate
-        .pointer("/content/parts")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-}
-
-/// The first candidate of a `generateContent` document.
-fn first_candidate(raw: &Value) -> &Value {
-    assert!(
-        raw.is_object(),
-        "raw must be Gemini's generateContent document, got {raw}"
-    );
-    raw.pointer("/candidates/0")
-        .expect("the recorded turn carries a candidate")
-}
-
-/// A `usageMetadata` token count, which Gemini omits when it is zero.
-fn usage_count(raw: &Value, field: &str) -> Option<u64> {
-    raw.get("usageMetadata")
-        .map(|usage| usage.get(field).and_then(Value::as_u64).unwrap_or_default())
-}
-
 // ---------------------------------------------------------------------------
 // 1: the document is recoverable, and tells the same story
 // ---------------------------------------------------------------------------
@@ -142,141 +100,43 @@ fn usage_count(raw: &Value, field: &str) -> Option<u64> {
 // 3: a forced tool call keeps the wire's functionCall and finishReason
 // ---------------------------------------------------------------------------
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declaration 0's recorded `parametersJsonSchema`
+/// is sent, value unchanged, as `parameters`, and replay refuses interaction
+/// 0. The recorded premise (a `functionCall` naming `add`, `finishReason`
+/// spelled `"STOP"`, a non-empty `finishMessage`) is still read from the
+/// fixture. Named losses, all read from the refused reply: `raw` carrying the
+/// wire's `functionCall` parts, `finishReason` and `finishMessage` exactly;
+/// the normalized `ToolCalls` finish and typed `add(2, 3)` call; the
+/// canonical choice without `functionCall`; `totalTokenCount` agreeing with
+/// usage; and the typed `GeminiExt` extras (model version, response id
+/// `Ag7BauSXOKisz7IPlZS6iAg`, service tier, finish message, 67 prompt text
+/// tokens, no Interactions id).
 #[tokio::test]
-async fn raw_exposes_forced_function_call() {
+async fn raw_exposes_forced_function_call() -> anyhow::Result<()> {
     const SCENARIO: &str = "raw_capture_matrix/raw_exposes_forced_function_call";
-    let observed: Observed<RigCompletionResponse> = Observed::default();
-    let sink = observed.clone();
-    with_gemini_cassette(
+    with_gemini_request_witness_cassette(
         "raw_capture_matrix/raw_exposes_forced_function_call",
-        |client| async move {
-            capture_completion(client.completion(MODEL), forced_tool_request(), sink)
-                .await
-                .expect("forced tool completion should succeed");
+        NamedCase::RawForcedFunctionCall,
+        |client, _clock| async move {
+            let observed: Observed<RigCompletionResponse> = Observed::default();
+            Ok(model_result(
+                capture_completion(client.completion(MODEL), forced_tool_request(), observed).await,
+            ))
         },
     )
-    .await;
-
-    let response = observed.take();
-    let raw = &response.raw;
-
-    // The read-back holds for a functionCall turn too.
-    let candidate = first_candidate(raw);
-    // Gemini `functionCall` parts carry no id, so the decoder mints one: the
-    // document's call is compared by what the wire carried (name +
-    // arguments), not by the minted id.
-    let wire_calls: Vec<(String, Value)> = candidate_parts(candidate)
-        .filter_map(|part| part.get("functionCall"))
-        .map(|call| {
-            let name = call
-                .get("name")
-                .and_then(Value::as_str)
-                .expect("a functionCall part names its function");
-            let args = call.get("args").cloned().unwrap_or(Value::Null);
-            (name.to_owned(), args)
-        })
-        .collect();
-    assert_eq!(wire_calls, tool_functions(&response.choice));
-    assert_eq!(
-        usage_count(raw, "totalTokenCount"),
-        response.usage.total_tokens
-    );
-
-    // The normalized response says ToolCalls and carries the call as a typed
-    // ToolCall …
-    assert_eq!(response.finish_reason(), Some(FinishReason::ToolCalls));
-    let call = response
-        .choice
-        .iter()
-        .find_map(|content| match content {
-            AssistantContent::ToolCall(call) => Some(call),
-            _ => None,
-        })
-        .expect("the normalized choice carries the forced tool call");
-    assert_eq!(call.function.name, Adder::NAME);
-    assert_eq!(
-        call.function.arguments_value(),
-        serde_json::json!({ "x": 2, "y": 3 })
-    );
-
-    // … while raw keeps Gemini's own spelling of both.
-    assert_eq!(
-        raw.pointer("/candidates/0/finishReason"),
-        Some(&Value::String("STOP".to_string())),
-        "raw keeps Gemini's finishReason spelling on a call-only turn"
-    );
-    let normalized = normalized_without_raw(response.clone());
-    assert_ne!(
-        normalized.get("finish_reason"),
-        Some(&Value::String("STOP".to_string())),
-        "the normalized finish reason is rig's vocabulary, not Gemini's"
-    );
-    let canonical: Vec<AssistantContent> = response
-        .choice
-        .iter()
-        .map(AssistantContent::canonical)
-        .collect();
-    assert!(
-        !json_contains_key(&serde_json::json!(canonical), "functionCall"),
-        "functionCall is Gemini's wire spelling, kept only in the call's provider item; \
-         the canonical choice carries a ToolCall"
-    );
+    .await?;
 
     let body = assert_recorded_function_call_body(SCENARIO);
-    assert_eq!(
-        raw.pointer("/candidates/0/content/parts"),
-        body.pointer("/candidates/0/content/parts"),
-        "raw must carry the wire's functionCall parts exactly as Gemini sent them"
-    );
-    assert_eq!(
-        raw.pointer("/candidates/0/finishReason"),
-        body.pointer("/candidates/0/finishReason"),
-        "raw must keep the wire's finishReason on the tool turn"
-    );
-    // Gemini annotates a call-only STOP with a `finishMessage`; the normalized
-    // response has no home for it, so it too is only reachable through raw.
-    assert!(
+    // Gemini annotates a call-only STOP with a `finishMessage`.
+    anyhow::ensure!(
         body.pointer("/candidates/0/finishMessage")
             .and_then(Value::as_str)
             .is_some_and(|message| !message.is_empty()),
         "{SCENARIO}: the recorded call-only turn should carry Gemini's finishMessage"
     );
-    assert_eq!(
-        raw.pointer("/candidates/0/finishMessage"),
-        body.pointer("/candidates/0/finishMessage"),
-        "raw must carry the wire's finishMessage untouched"
-    );
-
-    // The typed extras read the same recorded reply.
-    let extras = response
-        .extras::<GeminiExt>()
-        .expect("a Gemini API reply has Gemini extras")
-        .expect("the recorded reply holds the extras' shape");
-    assert_eq!(
-        extras.model_version.as_deref(),
-        Some("gemini-2.5-flash-lite")
-    );
-    assert_eq!(
-        extras.response_id.as_deref(),
-        Some("Ag7BauSXOKisz7IPlZS6iAg")
-    );
-    assert_eq!(extras.service_tier.as_deref(), Some("standard"));
-    assert_eq!(
-        extras.finish_message.as_deref(),
-        Some("Model generated function call(s).")
-    );
-    let prompt = extras.prompt_tokens_details.unwrap_or_default();
-    assert_eq!(
-        prompt
-            .iter()
-            .map(|detail| (detail.modality.as_deref(), detail.token_count))
-            .collect::<Vec<_>>(),
-        [(Some("TEXT"), Some(67))]
-    );
-    assert_eq!(
-        extras.id, None,
-        "an Interactions field on a GenerateContent reply"
-    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

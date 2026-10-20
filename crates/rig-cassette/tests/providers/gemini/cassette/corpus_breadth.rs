@@ -113,7 +113,7 @@ async fn output_tool_streamed_effect_log_is_the_golden_fixture() -> anyhow::Resu
     with_gemini_request_witness_cassette(
         "corpus_breadth/output_tool_streamed",
         NamedCase::OutputToolStreamed,
-        |client| async move {
+        |client, _clock| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
             let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .name("golden")
@@ -180,7 +180,7 @@ async fn tool_dispatch_cancelled_effect_log_is_the_golden_fixture() -> anyhow::R
     with_gemini_request_witness_cassette(
         "corpus_breadth/tool_dispatch_cancelled",
         NamedCase::ToolDispatchCancelled,
-        |client| async move {
+        |client, _clock| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
             let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .name("golden")
@@ -206,7 +206,7 @@ async fn custom_at_outcome_effect_log_is_the_golden_fixture() -> anyhow::Result<
     with_gemini_request_witness_cassette(
         "corpus_breadth/custom_at_outcome",
         NamedCase::CustomAtOutcome,
-        |client| async move {
+        |client, _clock| async move {
             let (dispatcher, registrar, mut driver, model_key) = host_bus(&client, true, false);
             let recorder = rig::cassette::effect_log::EffectLogRecorder::new();
             driver.record_to(recorder.clone());
@@ -251,7 +251,7 @@ async fn output_tool_unary_effect_log_is_the_golden_fixture() -> anyhow::Result<
     with_gemini_request_witness_cassette(
         "corpus_breadth/output_tool_unary",
         NamedCase::OutputToolUnary,
-        |client| async move {
+        |client, _clock| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
             let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .name("golden")

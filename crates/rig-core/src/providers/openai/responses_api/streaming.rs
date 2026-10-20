@@ -460,6 +460,8 @@ pub struct ResponsesDecoder {
     undecided: BTreeMap<(u64, u64), Vec<UndecidedPart>>,
     provider_items: HashSet<u64>,
     finished_calls: HashSet<u64>,
+    /// The provider call ids of the calls already finished.
+    finished_call_ids: HashSet<String>,
     call_items: HashMap<String, u64>,
     /// The slot of the latest distinct call item at a reused output index.
     reused_call_slots: HashMap<u64, u64>,
@@ -493,6 +495,7 @@ impl ResponsesDecoder {
             undecided: BTreeMap::new(),
             provider_items: HashSet::new(),
             finished_calls: HashSet::new(),
+            finished_call_ids: HashSet::new(),
             call_items: HashMap::new(),
             reused_call_slots: HashMap::new(),
             last_message_id: None,
@@ -1339,7 +1342,9 @@ impl ResponsesDecoder {
         if let Some(slot) = self.call_items.get(id) {
             return *slot;
         }
-        if !self.call_items.values().any(|slot| *slot == current) {
+        if !self.call_items.values().any(|slot| *slot == current)
+            && !self.reasoning_ids.values().any(|slot| *slot == current)
+        {
             return current;
         }
         let slot = self
@@ -1396,7 +1401,9 @@ impl ResponsesDecoder {
         if let Some(slot) = self.reasoning_ids.get(id) {
             return *slot;
         }
-        if !self.reasoning_ids.values().any(|slot| *slot == current) {
+        if !self.reasoning_ids.values().any(|slot| *slot == current)
+            && !self.call_items.values().any(|slot| *slot == current)
+        {
             self.reasoning_ids.insert(id.to_owned(), current);
             return current;
         }
@@ -1467,6 +1474,9 @@ impl ResponsesDecoder {
             return Ok(());
         };
         self.finished_calls.insert(index);
+        if let Some(id) = call.id.provider() {
+            self.finished_call_ids.insert(id.as_str().to_owned());
+        }
         let complete = call.ending.is_complete();
         match call.ending {
             CallEnding::Custom => return out.finish(call.at),
@@ -1921,6 +1931,28 @@ impl ResponsesDecoder {
         Ok(true)
     }
 
+    /// Whether the stream already holds the call a terminal item states: its
+    /// item id or its provider call id was seen. An item naming neither is
+    /// treated as held, so an unidentifiable restatement is never published
+    /// twice.
+    fn streamed_call(&self, item: &Value) -> bool {
+        if item
+            .str("id")
+            .filter(|id| !id.is_empty())
+            .is_some_and(|id| self.call_items.contains_key(id))
+        {
+            return true;
+        }
+        let Some(call_id) = item.str("call_id").filter(|id| !id.is_empty()) else {
+            return true;
+        };
+        self.finished_call_ids.contains(call_id)
+            || self
+                .calls
+                .values()
+                .any(|call| call.id.provider().is_some_and(|id| id.as_str() == call_id))
+    }
+
     fn terminal(
         &mut self,
         response: Value,
@@ -1966,9 +1998,11 @@ impl ResponsesDecoder {
                     continue;
                 }
             }
-            // Other streamed terminal calls retain their existing route; only
-            // whole-body decoding supplies new or unannounced whole calls.
-            if (whole || !matches!(item.str("type"), Some("function_call" | "custom_tool_call")))
+            // Streamed calls the stream already holds keep their existing
+            // route. A call the stream never announced is published from the
+            // terminal at its output position, as the whole reply has it.
+            let call = matches!(item.str("type"), Some("function_call" | "custom_tool_call"));
+            if (whole || !call || !self.streamed_call(item))
                 && let Err(error) = self.output(index as u64, item, true, &mut out)
             {
                 first_error.get_or_insert(error);

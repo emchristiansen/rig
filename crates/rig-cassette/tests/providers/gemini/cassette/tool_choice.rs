@@ -3,15 +3,26 @@
 use rig::message::ToolChoice;
 use rig::providers::gemini;
 
-use crate::support::{
-    Adder, Subtract, assert_mentions_expected_number, collect_stream_observation,
+use super::super::request_witness_support::{
+    NamedCase, stream_result, with_gemini_request_witness_cassette,
 };
+use crate::support::{Adder, Subtract};
 
+/// `ToolChoice::None` while tools are registered.
+///
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declarations 0 and 1 send their recorded
+/// `parametersJsonSchema`, value unchanged, as `parameters`, and replay
+/// refuses interaction 0. Named losses: a stream without errors ending in a
+/// final response, no tool calls or tool results, and the answer mentioning
+/// 42.
 #[tokio::test]
-async fn none_streaming_does_not_emit_tool_calls() {
-    super::super::support::with_gemini_cassette(
+async fn none_streaming_does_not_emit_tool_calls() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "tool_choice/none_streaming_no_tools",
-        |client| async move {
+        NamedCase::ToolChoiceNoneStreamed,
+        |client, _clock| async move {
             let agent =
                 rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
                     .preamble("You are a deterministic calculator test. Answer directly in text.")
@@ -24,31 +35,11 @@ async fn none_streaming_does_not_emit_tool_calls() {
             let mut stream = agent
                 .prompt("Calculate 20 + 22 directly in text. Do not call tools.")
                 .stream();
-            let observation = collect_stream_observation(&mut stream).await;
-
-            assert!(
-                observation.errors.is_empty(),
-                "stream should not emit errors: {:?}",
-                observation.errors
-            );
-            assert!(
-                observation.got_final_response,
-                "stream should emit a final response"
-            );
-            assert!(
-                observation.tool_calls.is_empty(),
-                "expected no tool calls, saw {:?}",
-                observation.tool_calls
-            );
-            assert_eq!(observation.tool_results, 0, "expected no tool results");
-            assert_mentions_expected_number(
-                observation
-                    .final_response_text
-                    .as_deref()
-                    .expect("stream should produce a final response"),
-                42,
-            );
+            let result = stream_result(&mut stream).await;
+            drop(stream);
+            drop(agent);
+            result
         },
     )
-    .await;
+    .await
 }

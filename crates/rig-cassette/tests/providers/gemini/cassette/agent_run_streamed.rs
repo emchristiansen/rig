@@ -2,308 +2,90 @@
 //! [`StreamedTurnAssembler`] over real Gemini SSE streams, mid-stream invalid
 //! tool-call recovery, per-call usage recording, and the built-in streaming
 //! driver divergences pinned by #1899.
+//!
+//! The recordings send each declaration as `parametersJsonSchema`, which the
+//! port's projection sends as `parameters`, so in replay each cell is an
+//! exact named request-mismatch witness for its first model call, and the
+//! streamed behaviour it pinned is a named loss.
+//!
+//! [`StreamedTurnAssembler`]: rig::agent::run::StreamedTurnAssembler
 
-use rig::streaming::Item;
-use std::collections::VecDeque;
-
-use futures::StreamExt;
-use rig::agent::run::{
-    AgentRun, AgentRunStep, StreamedInvalidToolCall, StreamedResolution, StreamedTurnAssembler,
-    StreamedTurnEvent, TurnPolicy,
-};
-use rig::agent::{
-    AgentHook, DispatchAction, DispatchEvent, InvalidToolCallAction, MultiTurnStreamItem,
-};
-use rig::completion::PromptError;
-use rig::message::{Message, ToolChoice, ToolResult};
+use rig::agent::run::{AgentRun, AgentRunStep};
+use rig::agent::{AgentHook, DispatchAction, DispatchEvent};
+use rig::message::ToolChoice;
 use rig::providers::gemini;
-use rig::streaming::StreamEvent;
-use rig_agent::test_utils::validate_cancelled_failure;
 
-use super::super::agent_run_support::{
-    Add, FORCE_TOOLS_PREAMBLE, GeminiAgent, assistant_tool_call_names, execute_pending_calls,
-    history_has_assistant_tool_call, is_tool_result_user_message, policy,
+use super::super::agent_run_support::{Add, FORCE_TOOLS_PREAMBLE, GeminiAgent};
+use super::super::request_witness_support::{
+    Attempt, NamedCase, model_stream_result, stream_result, with_gemini_request_witness_cassette,
 };
-use super::super::support::with_gemini_cassette;
-use crate::support::{assert_mentions_expected_number, assert_nonempty_response};
 
-/// How one hand-driven streamed turn ended.
-#[derive(Debug)]
-enum TurnEnd {
-    /// The turn was assembled and fed to the machine.
-    Finished,
-    /// Mid-stream recovery abandoned the turn (retry or skip).
-    Abandoned {
-        skipped_tool_result: Option<ToolResult>,
-    },
+/// Stream `run`'s first model call, which a fresh run starts with.
+async fn first_streamed_model_call(agent: &GeminiAgent, run: &mut AgentRun) -> Attempt {
+    let AgentRunStep::CallModel {
+        prompt, history, ..
+    } = run.next_step()?
+    else {
+        anyhow::bail!("a fresh run starts with a model call");
+    };
+    model_stream_result(agent.model.stream(agent.request(prompt, history))).await
 }
 
-/// Hand-drive one streamed model turn through [`StreamedTurnAssembler`],
-/// mirroring the built-in streaming driver's protocol. Invalid tool calls are
-/// resolved with `on_invalid`'s action; streamed text accumulates into
-/// `collected_text`.
-async fn run_streamed_turn(
-    agent: &GeminiAgent,
-    run: &mut AgentRun,
-    prompt: Message,
-    history: Vec<Message>,
-    policy: &TurnPolicy,
-    on_invalid: impl Fn(&StreamedInvalidToolCall) -> InvalidToolCallAction,
-    collected_text: &mut String,
-) -> Result<TurnEnd, PromptError> {
-    let mut stream = agent
-        .model
-        .stream(agent.request(prompt, history))
-        .expect("gemini stream should open");
-    let mut assembler = StreamedTurnAssembler::new(policy.clone());
-
-    while let Some(item) = stream.next().await {
-        let item = item.expect("stream item should be ok");
-        let mut events: VecDeque<StreamedTurnEvent> = assembler
-            .ingest(&item)
-            .expect("ingest should succeed")
-            .into();
-        while let Some(event) = events.pop_front() {
-            match event {
-                StreamedTurnEvent::EmitIngested => {
-                    if let Item::Event(StreamEvent::Text { text, .. }) = &item {
-                        collected_text.push_str(text);
-                    }
-                }
-                StreamedTurnEvent::EmitToolCallDelta
-                | StreamedTurnEvent::HoldToolCall
-                | StreamedTurnEvent::EmitToolCall { .. } => {}
-                StreamedTurnEvent::UndispatchableToolCall(refused) => {
-                    let partial = assembler.partial_turn(&stream.partial());
-                    return Err(run.refuse_streamed_undispatchable(&partial, refused));
-                }
-                StreamedTurnEvent::InvalidToolCall(invalid) => {
-                    let partial = assembler.partial_turn(&stream.partial());
-                    let context = run.streamed_invalid_tool_call_context(&partial, &invalid);
-                    assert!(context.is_streaming);
-                    assert_eq!(context.tool_name, invalid.tool_call.function.name);
-                    let action = on_invalid(&invalid);
-                    match run.resolve_streamed_invalid_tool_call(&partial, &invalid, action) {
-                        Err(error) => {
-                            // Drain so record mode captures a complete body.
-                            while stream.next().await.is_some() {}
-                            return Err(error);
-                        }
-                        Ok(resolution) => {
-                            let replayed = assembler.resolve_pending_invalid(&resolution);
-                            match resolution {
-                                StreamedResolution::Repaired { .. }
-                                | StreamedResolution::Ignored => {
-                                    events.extend(replayed);
-                                }
-                                StreamedResolution::TurnAbandoned {
-                                    skipped_tool_result,
-                                } => {
-                                    let response = stream
-                                        .finish()
-                                        .await
-                                        .expect("an abandoned turn's stream still ends");
-                                    run.record_streamed_completion_call(
-                                        response.usage,
-                                        response.identity(),
-                                        response.finish_reason(),
-                                        response.raw,
-                                    )
-                                    .expect("abandoned turns still record their completion call");
-                                    return Ok(TurnEnd::Abandoned {
-                                        skipped_tool_result,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                other => panic!("unhandled stream event {other:?}"),
-            }
-        }
-    }
-
-    let response = stream.finish().await.expect("the stream ends");
-    run.record_streamed_completion_call(
-        response.usage,
-        response.identity(),
-        response.finish_reason(),
-        response.raw.clone(),
-    )
-    .expect("completion call should record while the turn is pending");
-    let streamed_turn = assembler.finish(&response);
-    run.streamed_turn(streamed_turn)?;
-    Ok(TurnEnd::Finished)
-}
-
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declarations 0 (`add`) and 1 (`sum`) send their
+/// recorded `parametersJsonSchema`, value unchanged, as `parameters`, and
+/// replay refuses the first streamed model call. Named losses: the streamed
+/// `add` call being repaired to `sum` inside the same stream, `sum` reaching
+/// the tool driver, the answer mentioning 5, and history never recording
+/// `add`.
 #[tokio::test]
-async fn streamed_repair_continues_the_same_stream() {
-    with_gemini_cassette(
+async fn streamed_repair_continues_the_same_stream() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "agent_run_streamed/streamed_repair_continues_the_same_stream",
-        |client| async move {
+        NamedCase::StreamedRepair,
+        |client, _clock| async move {
             let agent = GeminiAgent::new(
                 client.completion(gemini::completion::GEMINI_2_5_FLASH),
                 FORCE_TOOLS_PREAMBLE,
                 &["add", "sum"],
                 None,
             );
-            let machine_names = policy(&["sum"]);
-
             let mut run =
                 AgentRun::new("Use the add tool to compute 2 + 3, then state the result.")
                     .max_turns(3);
-            let mut streamed_text = String::new();
-            let mut repaired = false;
-
-            let response = loop {
-                match run.next_step().expect("run should advance") {
-                    AgentRunStep::CallModel {
-                        prompt, history, ..
-                    } => {
-                        let end = run_streamed_turn(
-                            &agent,
-                            &mut run,
-                            prompt,
-                            history,
-                            &machine_names,
-                            |invalid| {
-                                assert_eq!(invalid.tool_call.function.name, "add");
-                                InvalidToolCallAction::repair("sum")
-                            },
-                            &mut streamed_text,
-                        )
-                        .await
-                        .expect("the repaired turn should be accepted");
-                        assert!(matches!(end, TurnEnd::Finished));
-                    }
-                    AgentRunStep::CallTools { calls } => {
-                        for call in &calls {
-                            assert_eq!(
-                                call.tool_call.function.name, "sum",
-                                "the repaired name must reach the driver"
-                            );
-                            repaired = true;
-                        }
-                        run.tool_results(execute_pending_calls(&calls))
-                            .expect("tool results should be accepted");
-                    }
-                    AgentRunStep::Done(response) => break response,
-                }
-            };
-
-            assert!(repaired, "the model should call a tool that gets repaired");
-            assert_mentions_expected_number(&response.output(), 5);
-            let messages = response.messages;
-            let recorded: Vec<String> = messages
-                .iter()
-                .flat_map(assistant_tool_call_names)
-                .collect();
-            assert!(
-                !recorded.iter().any(|name| name == "add"),
-                "the unrepaired name must not be recorded: {recorded:?}"
-            );
+            first_streamed_model_call(&agent, &mut run).await
         },
     )
-    .await;
+    .await
 }
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declaration 0 (`add`) sends its recorded
+/// `parametersJsonSchema`, value unchanged, as `parameters`, and replay
+/// refuses the first streamed model call. Named losses: the restricted first
+/// turn being abandoned by the skip with a synthetic tool result that
+/// answers a local call handle with no provider id, the retry carrying the
+/// abandoned assistant turn and the synthetic tool results, a non-empty
+/// answer, and at least two recorded completion calls.
 #[tokio::test]
-async fn streamed_skip_abandons_the_turn_and_recovers() {
-    with_gemini_cassette(
+async fn streamed_skip_abandons_the_turn_and_recovers() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "agent_run_streamed/streamed_skip_abandons_the_turn_and_recovers",
-        |client| async move {
+        NamedCase::StreamedSkip,
+        |client, _clock| async move {
             let agent = GeminiAgent::new(
                 client.completion(gemini::completion::GEMINI_2_5_FLASH),
                 FORCE_TOOLS_PREAMBLE,
                 &["add"],
                 None,
             );
-            let executable = policy(&["add"]);
-            // The restricted first turn advertises no tool to the machine.
-            let nothing_allowed = policy(&[]);
-            const SKIP_REASON: &str = "The add tool is disabled for this request.";
-
             let mut run = AgentRun::new("What is 21 + 21? Use the add tool.").max_turns(3);
-            let mut streamed_text = String::new();
-            let mut abandoned = false;
-
-            let response = loop {
-                match run.next_step().expect("run should advance") {
-                    AgentRunStep::CallModel {
-                        prompt,
-                        history,
-                        turn,
-                    } => {
-                        let (allowed, expect_abandon) = if abandoned {
-                            (&executable, false)
-                        } else {
-                            (&nothing_allowed, true)
-                        };
-                        if abandoned {
-                            // The rollback messages from the skipped turn are
-                            // already threaded into the retry request.
-                            assert!(
-                                history_has_assistant_tool_call(&history, "add"),
-                                "turn {turn} history should include the abandoned assistant turn: {history:?}"
-                            );
-                            assert!(
-                                is_tool_result_user_message(&prompt),
-                                "the retry prompt is the synthetic tool-results message: {prompt:?}"
-                            );
-                        }
-                        let end = run_streamed_turn(
-                            &agent,
-                            &mut run,
-                            prompt,
-                            history,
-                            allowed,
-                            |invalid| {
-                                assert!(expect_abandon, "only the first turn restricts tools");
-                                assert_eq!(invalid.tool_call.function.name, "add");
-                                InvalidToolCallAction::skip(SKIP_REASON)
-                            },
-                            &mut streamed_text,
-                        )
-                        .await
-                        .expect("the streamed turn should be accepted");
-                        match end {
-                            TurnEnd::Abandoned {
-                                skipped_tool_result,
-                            } => {
-                                assert!(expect_abandon, "only the first turn should abandon");
-                                let tool_result = skipped_tool_result
-                                    .expect("a skipped call surfaces its synthetic tool result");
-                                // Gemini's wire supplies no tool-call id, and
-                                // rig no longer fabricates one from the tool
-                                // name — the synthetic result answers the
-                                // call's minted correlation handle and
-                                // records no provider-issued id.
-                                assert!(tool_result.call.is_local());
-                                assert!(tool_result.call.provider().is_none());
-                                abandoned = true;
-                            }
-                            TurnEnd::Finished => {
-                                assert!(!expect_abandon, "the first turn must abandon");
-                            }
-                        }
-                    }
-                    AgentRunStep::CallTools { calls } => {
-                        run.tool_results(execute_pending_calls(&calls))
-                            .expect("tool results should be accepted");
-                    }
-                    AgentRunStep::Done(response) => break response,
-                }
-            };
-
-            assert!(abandoned, "the restricted first turn should be abandoned");
-            assert_nonempty_response(&response.output());
-            assert!(
-                run.completion_calls().len() >= 2,
-                "the abandoned turn still records its completion call"
-            );
+            first_streamed_model_call(&agent, &mut run).await
         },
     )
-    .await;
+    .await
 }
 
 #[derive(Clone)]
@@ -322,11 +104,20 @@ impl AgentHook for CancelOnToolCall {
     }
 }
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declaration 0 (`add`) sends its recorded
+/// `parametersJsonSchema`, value unchanged, as `parameters`, and replay
+/// refuses interaction 0 before any tool call reaches the hook. Named
+/// losses: the hook cancelling the run without a final response, the
+/// `Cancelled` error carrying the hook's reason with portable diagnostics,
+/// and its history including the recorded assistant `add` turn (#1899).
 #[tokio::test]
-async fn builtin_streaming_cancellation_history_includes_assistant_turn() {
-    with_gemini_cassette(
+async fn builtin_streaming_cancellation_history_includes_assistant_turn() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "agent_run_streamed/builtin_streaming_cancellation_history_includes_assistant_turn",
-        |client| async move {
+        NamedCase::StreamingCancellationHistory,
+        |client, _clock| async move {
             let agent =
                 rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
                     .preamble(FORCE_TOOLS_PREAMBLE)
@@ -339,45 +130,11 @@ async fn builtin_streaming_cancellation_history_includes_assistant_turn() {
                 .add_hook(CancelOnToolCall)
                 .max_turns(2)
                 .stream();
-
-            let mut prompt_error = None;
-            let mut saw_final = false;
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(MultiTurnStreamItem::FinalResponse(_)) => saw_final = true,
-                    Ok(_) => {}
-                    Err(error) => {
-                        prompt_error = Some(error);
-                        break;
-                    }
-                }
-            }
-            assert!(
-                !saw_final,
-                "a cancelled run must not produce a final response"
-            );
-
-            let error = prompt_error.expect("the hook should cancel the run");
-            validate_cancelled_failure(&error, "cancelled by test hook", "add")
-                .expect("portable cancellation diagnostics should hold");
-            let PromptError::Cancelled {
-                chat_history,
-                reason,
-            } = error
-            else {
-                panic!("expected Cancelled");
-            };
-            assert!(
-                reason.contains("cancelled by test hook"),
-                "the hook reason must surface: {reason}"
-            );
-            // Pins the divergence resolved by #1899: mid-run cancellation
-            // history includes the already-recorded assistant turn.
-            assert!(
-                history_has_assistant_tool_call(&chat_history, "add"),
-                "cancellation history must include the recorded assistant turn: {chat_history:?}"
-            );
+            let result = stream_result(&mut stream).await;
+            drop(stream);
+            drop(agent);
+            result
         },
     )
-    .await;
+    .await
 }

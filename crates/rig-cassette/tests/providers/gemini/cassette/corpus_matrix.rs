@@ -125,7 +125,7 @@ async fn shaping_preamble_second_turn() -> anyhow::Result<()> {
     with_gemini_request_witness_cassette(
         "corpus_matrix/shaping_preamble_second_turn",
         NamedCase::ShapingPreambleSecondTurn,
-        |client| async move {
+        |client, _clock| async move {
             let wire = wire(&client);
             attempt_cell(&wire, NamedCase::ShapingPreambleSecondTurn).await
         },
@@ -139,7 +139,7 @@ async fn causal_completion_concurrent() -> anyhow::Result<()> {
     with_gemini_request_witness_cassette(
         "corpus_matrix/causal_completion_concurrent",
         NamedCase::CausalCompletionConcurrent,
-        |client| async move {
+        |client, _clock| async move {
             let wire = wire(&client);
             attempt_cell(&wire, NamedCase::CausalCompletionConcurrent).await
         },
@@ -153,7 +153,7 @@ async fn shaping_active_tools_none_second_turn() -> anyhow::Result<()> {
     with_gemini_request_witness_cassette(
         "corpus_matrix/shaping_active_tools_none_second_turn",
         NamedCase::ShapingActiveToolsNoneSecondTurn,
-        |client| async move {
+        |client, _clock| async move {
             let wire = wire(&client);
             attempt_cell(&wire, NamedCase::ShapingActiveToolsNoneSecondTurn).await
         },
@@ -167,7 +167,7 @@ async fn causal_completion_streamed() -> anyhow::Result<()> {
     with_gemini_request_witness_cassette(
         "corpus_matrix/causal_completion_streamed",
         NamedCase::CausalCompletionStreamed,
-        |client| async move {
+        |client, _clock| async move {
             let wire = wire(&client);
             attempt_cell(&wire, NamedCase::CausalCompletionStreamed).await
         },

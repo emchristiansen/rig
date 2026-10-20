@@ -22,14 +22,23 @@
 //! 12 tokens gives `{`, 20 gives `{"note": "The`, 28 gives
 //! `{"note": "The quarterly incident review found three unrelate`.
 //!
+//! The port replaces upstream's retention on Chat
+//! (coord-a-rig-port-discard-15): a function call cut at an explicit
+//! `length` finish is discarded and yields no canonical call. On a stream its
+//! Part closes with the typed `Discard` reason `Length`, and the argument
+//! fragments it delivered stay visible as `Arguments` events; a unary reply
+//! drops the call before decoding, its arguments visible in the raw
+//! document. The turn itself, its usage and finish reason included, still
+//! decodes.
+//!
 //! | Cell | Transport | Pinned |
 //! | --- | --- | --- |
-//! | [`a_tool_call_cut_mid_arguments_does_not_destroy_the_turn`] | blocking | the response decodes; the cut call is kept with its text, so nothing runs it |
-//! | [`the_streaming_path_keeps_the_same_cut_call`] | streaming | the same boundary, and the stream still terminates cleanly |
+//! | [`a_tool_call_cut_mid_arguments_does_not_destroy_the_turn`] | blocking | the response decodes with no call; the cut arguments stay visible in its raw document (a unary reply has no event surface, so no typed `Discard`) |
+//! | [`the_streaming_path_discards_the_same_cut_call`] | streaming | the same discard on the stream, which still terminates cleanly |
 
 use rig::completion::FinishReason;
 use rig::message::AssistantContent;
-use rig::streaming::Item;
+use rig::streaming::{DiscardReason, Item, PartKind, StreamEvent};
 use serde_json::Value;
 
 use crate::cassettes::{recorded_sse_json_frames, recorded_statuses_and_bodies};
@@ -53,6 +62,57 @@ fn record_tool() -> rig::completion::ToolDefinition {
             "required": ["note"],
         }),
     }
+}
+
+/// Each function call `items` close with a typed `Discard`, in stream order:
+/// the tool its Part started under, the reason, and the argument fragments
+/// the Part delivered, joined.
+fn discarded_calls(items: &[Item<StreamEvent>]) -> Vec<(String, DiscardReason, String)> {
+    let mut discarded = Vec::new();
+    for item in items {
+        let Item::Event(StreamEvent::Discard { part, reason }) = item else {
+            continue;
+        };
+        let name = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Event(StreamEvent::Start {
+                    part: started,
+                    kind: PartKind::ToolCall,
+                    name,
+                    ..
+                }) if started == part => name.as_ref().map(|name| name.as_str().to_owned()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let fragments: String = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Event(StreamEvent::Arguments { part: grown, json }) if grown == part => {
+                    Some(json.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        discarded.push((name, *reason, fragments));
+    }
+    discarded
+}
+
+/// How many function calls `items` end with a canonical call.
+fn ended_calls(items: &[Item<StreamEvent>]) -> usize {
+    items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                Item::Event(StreamEvent::End {
+                    content: AssistantContent::ToolCall(_),
+                    ..
+                })
+            )
+        })
+        .count()
 }
 
 /// The recorded `(finish_reason, arguments)` of a blocking turn.
@@ -99,25 +159,30 @@ async fn a_tool_call_cut_mid_arguments_does_not_destroy_the_turn() {
                 Some(FinishReason::Length),
                 "the turn ran out of budget, and that is what authorizes the tolerance"
             );
-            let calls: Vec<&rig::message::ToolCall> = response
-                .choice
-                .iter()
-                .filter_map(|item| match item {
-                    AssistantContent::ToolCall(call) => Some(call),
-                    _ => None,
-                })
-                .collect();
-            let [call] = calls.as_slice() else {
-                panic!("the cut call is kept: {:?}", response.choice);
-            };
             assert!(
-                call.function.invalid_arguments.is_some(),
-                "a call whose arguments never parse keeps their text, so nothing runs it: {call:?}"
+                response
+                    .choice
+                    .iter()
+                    .all(|item| !matches!(item, AssistantContent::ToolCall(_))),
+                "a call cut at Length is discarded, never a canonical call: {:?}",
+                response.choice
             );
             assert!(
                 response.usage.output_tokens.is_some_and(|n| n > 0),
                 "the rest of the turn survives, usage included: {:?}",
                 response.usage
+            );
+
+            // A unary reply has no event surface: the port drops the cut
+            // call from the whole document before decoding it, so no typed
+            // `Discard` exists for it. Its delivered arguments stay visible
+            // in the response's raw document.
+            let (_, arguments) = recorded_call("truncation_matrix/tool_call_cut_mid_arguments");
+            assert_eq!(
+                response.raw["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+                    .as_str(),
+                arguments.as_deref(),
+                "the cut call's delivered arguments stay visible in the raw document"
             );
         },
     )
@@ -141,9 +206,8 @@ async fn a_tool_call_cut_mid_arguments_does_not_destroy_the_turn() {
 
 /// The streaming path applies the same boundary.
 #[tokio::test]
-async fn the_streaming_path_keeps_the_same_cut_call() {
+async fn the_streaming_path_discards_the_same_cut_call() {
     use futures::StreamExt as _;
-    use rig::streaming::StreamEvent;
 
     with_llamacpp_competent_cassette(
         "truncation_matrix/streaming_tool_call_cut_mid_arguments",
@@ -158,23 +222,35 @@ async fn the_streaming_path_keeps_the_same_cut_call() {
                 )
                 .expect("stream should start");
 
-            let mut invalid_calls = 0usize;
+            let mut items = Vec::new();
             while let Some(item) = stream.next().await {
-                if let Item::Event(StreamEvent::End {
-                    content: AssistantContent::ToolCall(call),
-                    ..
-                }) = item.expect("no stream item may be an error")
-                    && call.function.invalid_arguments.is_some()
-                {
-                    invalid_calls += 1
-                }
+                items.push(item.expect("no stream item may be an error"));
             }
-            stream.finish().await.expect(
+            let response = stream.finish().await.expect(
                 "the stream must terminate cleanly even though its only tool call was unusable",
             );
+            assert_eq!(response.finish_reason(), Some(FinishReason::Length));
             assert_eq!(
-                invalid_calls, 1,
-                "a call cut before its arguments parse is kept with their text"
+                response.tool_calls().count(),
+                0,
+                "a call cut at Length is discarded, never a canonical call: {:?}",
+                response.choice
+            );
+            assert_eq!(ended_calls(&items), 0, "no completed call is fabricated");
+            let discarded = discarded_calls(&items);
+            let [(name, reason, fragments)] = discarded.as_slice() else {
+                panic!("exactly the cut call is discarded: {discarded:?}");
+            };
+            assert_eq!(name, "record");
+            assert_eq!(
+                *reason,
+                DiscardReason::Length,
+                "the stream closes the cut call with the typed reason Length"
+            );
+            assert_eq!(
+                *fragments,
+                recorded_stream_arguments(),
+                "the fragments the stream delivered stay visible"
             );
         },
     )
@@ -184,16 +260,7 @@ async fn the_streaming_path_keeps_the_same_cut_call() {
         "llamacpp",
         "truncation_matrix/streaming_tool_call_cut_mid_arguments",
     );
-    let accumulated: String = frames
-        .iter()
-        .flat_map(|frame| {
-            frame["choices"][0]["delta"]["tool_calls"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-        })
-        .filter_map(|call| call["function"]["arguments"].as_str().map(str::to_string))
-        .collect();
+    let accumulated = recorded_stream_arguments();
     assert!(
         !accumulated.is_empty() && serde_json::from_str::<Value>(&accumulated).is_err(),
         "the recorded stream must accumulate to an unparseable fragment: {accumulated:?}"
@@ -204,4 +271,21 @@ async fn the_streaming_path_keeps_the_same_cut_call() {
             .any(|frame| frame["choices"][0]["finish_reason"] == serde_json::json!("length")),
         "and it must end under `length`, which is what authorizes dropping the call"
     );
+}
+
+/// The argument text the recorded stream delivered for its one call.
+fn recorded_stream_arguments() -> String {
+    recorded_sse_json_frames(
+        "llamacpp",
+        "truncation_matrix/streaming_tool_call_cut_mid_arguments",
+    )
+    .iter()
+    .flat_map(|frame| {
+        frame["choices"][0]["delta"]["tool_calls"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    })
+    .filter_map(|call| call["function"]["arguments"].as_str().map(str::to_string))
+    .collect()
 }

@@ -17,21 +17,20 @@
 //! cassettes survive re-recording. Deterministic hooks (no clocks/RNG) keep the
 //! outbound requests byte-identical for replay.
 
-use rig_cassette::agent::AgentReplayExt;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use futures::StreamExt;
 use rig::agent::{
     AgentHook, CompletionCallAction, CompletionCallEvent, DispatchAction, DispatchEvent,
-    HookContext, ModelTurnAction, ModelTurnFinished, MultiTurnStreamItem, OutcomeAction,
-    OutcomeEvent, RequestPatch,
+    HookContext, ModelTurnAction, ModelTurnFinished, OutcomeAction, OutcomeEvent, RequestPatch,
 };
 use rig::completion::Document;
 use rig::providers::gemini;
 
-use super::super::support::with_gemini_cassette;
+use super::super::request_witness_support::{
+    NamedCase, stream_result, with_gemini_request_witness_cassette,
+};
 use super::super::tools_support::{CountingAdd, CountingSubtract};
 
 /// Preamble that forces tool use and a dependent two-step chain so the model
@@ -259,16 +258,24 @@ fn assert_hook_impls() {
 }
 
 /// Golden `gemini_tool_call_turns`: two tool turns on a wire that carries
-/// no tool-call ids. Every id in the log is minted from the block that
-/// assembled the call, so the record is the same on every run — the proof
-/// that nothing the engine mints is random.
+/// no tool-call ids, the same program `corpus_serving` serves serially, here
+/// on the default serving policy.
+///
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declarations 0 and 1 send their recorded
+/// `parametersJsonSchema`, value unchanged, as `parameters`, and replay
+/// refuses interaction 0. Named losses: the stream's `FinalResponse`, every
+/// tool-call id in the effect log being minted locally from its block, and
+/// the stamped log equalling the `gemini_tool_call_turns` golden.
 #[tokio::test]
-async fn tool_call_turns_effect_log_is_the_golden_fixture() {
+async fn tool_call_turns_effect_log_is_the_golden_fixture() -> anyhow::Result<()> {
     let add = CountingAdd::default();
     let subtract = CountingSubtract::default();
-    with_gemini_cassette(
+    with_gemini_request_witness_cassette(
         "hook_stress/streaming_lifecycle_ordering_and_context_streaming_flag",
-        |client| async move {
+        NamedCase::ToolCallTurns,
+        |client, _clock| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
             let agent =
                 rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
@@ -286,34 +293,11 @@ async fn tool_call_turns_effect_log_is_the_golden_fixture() {
                 )
                 .max_turns(6)
                 .stream();
-            let mut saw_final = false;
-            while let Some(item) = stream.next().await {
-                if let Ok(MultiTurnStreamItem::FinalResponse(_)) = item {
-                    saw_final = true;
-                }
-            }
-            assert!(saw_final, "the stream must yield a FinalResponse");
-            let log = agent.stamp(recorder.take());
-            let tool_ids: Vec<&rig::message::CallId> = log
-                .records
-                .iter()
-                .filter_map(|record| match &record.outcome {
-                    Ok(rig::effect::Outcome::Completion(response)) => Some(response),
-                    _ => None,
-                })
-                .flat_map(|response| response.choice.iter())
-                .filter_map(|content| match content {
-                    rig::message::AssistantContent::ToolCall(call) => Some(&call.id),
-                    _ => None,
-                })
-                .collect();
-            assert!(!tool_ids.is_empty(), "the program calls tools");
-            assert!(
-                tool_ids.iter().all(|id| id.is_local()),
-                "every id-less wire call is named by its block: {tool_ids:?}"
-            );
-            crate::goldens::golden_effects("gemini_tool_call_turns", &log);
+            let result = stream_result(&mut stream).await;
+            drop(stream);
+            drop(agent);
+            result
         },
     )
-    .await;
+    .await
 }

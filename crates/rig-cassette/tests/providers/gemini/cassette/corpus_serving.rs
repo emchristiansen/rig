@@ -17,7 +17,7 @@ async fn two_turns_serial_effect_log_is_the_golden_fixture() -> anyhow::Result<(
     with_gemini_request_witness_cassette(
         "hook_stress/streaming_lifecycle_ordering_and_context_streaming_flag",
         NamedCase::TwoTurnsSerial,
-        |client| async move {
+        |client, _clock| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
             let agent =
                 rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))

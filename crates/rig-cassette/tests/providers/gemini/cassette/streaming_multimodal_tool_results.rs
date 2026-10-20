@@ -1,15 +1,13 @@
 //! Gemini streaming regression for multimodal tool results in chat history.
 
-use futures::StreamExt;
-use rig::agent::MultiTurnStreamItem;
-use rig::message::{
-    AssistantContent, DocumentSourceKind, ImageMediaType, Message, ToolResultContent, UserContent,
-};
+use rig::message::{ImageMediaType, Message, ToolResultContent};
 use rig::providers::gemini;
 use rig::tool::{Tool, ToolOutput};
 use serde_json::json;
 
-use crate::support::assert_nonempty_response;
+use super::super::request_witness_support::{
+    NamedCase, stream_result, with_gemini_request_witness_cassette,
+};
 
 const RED_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 const MULTIMODAL_FUNCTION_RESPONSE_MODEL: &str = gemini::completion::GEMINI_3_FLASH_PREVIEW;
@@ -60,116 +58,44 @@ impl Tool for HybridImageTool {
     }
 }
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declaration 0's recorded `parametersJsonSchema`
+/// is sent as `parameters`, as named in `NamedCase::HybridToolResultImage`,
+/// and replay refuses interaction 0, before the tool runs. Named losses: a
+/// non-empty final response, and the final history keeping the assistant's
+/// render_reference_image call and its hybrid tool result as `[json, image]`
+/// with the instruction JSON and the PNG base64 payload intact.
 #[tokio::test]
-async fn streaming_history_preserves_hybrid_tool_result_image_parts() {
-    super::super::support::with_gemini_cassette("streaming_multimodal_tool_results/streaming_history_preserves_hybrid_tool_result_image_parts", |client| async move {
-    let agent = rig::AgentBuilder::new(client.completion(MULTIMODAL_FUNCTION_RESPONSE_MODEL))
-        .preamble(
-            "You are a precise assistant. Call `render_reference_image` exactly once before \
-             answering. After the tool result arrives, do not call any more tools. Answer in one \
-             short sentence.",
-        )
-        .tool(HybridImageTool)
-        .additional_params(streaming_tool_params())
-        .build();
+async fn streaming_history_preserves_hybrid_tool_result_image_parts() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
+        "streaming_multimodal_tool_results/streaming_history_preserves_hybrid_tool_result_image_parts",
+        NamedCase::HybridToolResultImage,
+        |client, _clock| async move {
+            let agent =
+                rig::AgentBuilder::new(client.completion(MULTIMODAL_FUNCTION_RESPONSE_MODEL))
+                    .preamble(
+                        "You are a precise assistant. Call `render_reference_image` exactly once \
+                         before answering. After the tool result arrives, do not call any more \
+                         tools. Answer in one short sentence.",
+                    )
+                    .tool(HybridImageTool)
+                    .additional_params(streaming_tool_params())
+                    .build();
 
-    let empty_history: &[Message] = &[];
-    let mut stream = agent
-        .prompt(
-            "Use the tool once, then answer with the dominant color in the returned image.",
-        )
-        .history(empty_history)
-        .max_turns(4)
-        .stream();
-
-    let mut final_response = None;
-    let mut final_history = None;
-
-    while let Some(item) = stream.next().await {
-        match item.expect("streaming prompt should succeed") {
-            MultiTurnStreamItem::FinalResponse(response) => {
-                final_response = Some(response.output().to_owned());
-                final_history = Some(response.messages().to_vec());
-                break;
-            }
-            MultiTurnStreamItem::StreamAssistantItem(_)
-            | MultiTurnStreamItem::ToolResult { .. } => {}
-            _ => {}
-        }
-    }
-
-    let final_response = final_response.expect("stream should yield a final response");
-    assert_nonempty_response(&final_response);
-
-    let history = final_history.expect("final response should include updated history");
-    assert!(
-        history.iter().any(|message| matches!(
-            message,
-            Message::Assistant(rig::message::AssistantMessage { content, .. })
-                if content.iter().any(|item| matches!(
-                    item,
-                    AssistantContent::ToolCall(tool_call)
-                        if tool_call.function.name == HybridImageTool::NAME
-                ))
-        )),
-        "history should retain the assistant tool call: {history:#?}"
-    );
-
-    let tool_result = history
-        .iter()
-        .find_map(|message| match message {
-            Message::User { content } => content.iter().find_map(|item| match item {
-                UserContent::ToolResult(tool_result) => Some(tool_result),
-                _ => None,
-            }),
-            _ => None,
-        })
-        .expect("history should retain the tool result user message");
-
-    assert_eq!(
-        tool_result.content.len(),
-        2,
-        "hybrid tool results should round-trip as [json, image], not a single text blob: {tool_result:#?}"
-    );
-
-    let mut saw_instruction_json = false;
-    let mut saw_image = false;
-
-    for content in tool_result.content.iter() {
-        match content {
-            ToolResultContent::Text(text) => {
-                panic!("expected structured JSON and image blocks, got text: {text:?}")
-            }
-            ToolResultContent::Image(image) => {
-                saw_image = true;
-                assert_eq!(image.media_type, Some(ImageMediaType::PNG));
-                assert!(
-                    matches!(image.data, DocumentSourceKind::Base64(ref data) if data == RED_PIXEL_PNG_BASE64),
-                    "tool result image should preserve the base64 image payload: {image:?}"
-                );
-            }
-            ToolResultContent::Json { value } => {
-                saw_instruction_json = true;
-                assert_eq!(
-                    value,
-                    &json!({
-                        "instruction": "Use the image part to answer the user's question."
-                    }),
-                    "tool result JSON should preserve the structured response payload"
-                );
-            }
-        }
-    }
-
-    assert!(
-        saw_instruction_json,
-        "hybrid tool results should preserve the structured response payload"
-    );
-    assert!(
-        saw_image,
-        "hybrid tool results should preserve the image payload as ToolResultContent::Image"
-    );
-
-    })
-    .await;
+            let empty_history: &[Message] = &[];
+            let mut stream = agent
+                .prompt(
+                    "Use the tool once, then answer with the dominant color in the returned image.",
+                )
+                .history(empty_history)
+                .max_turns(4)
+                .stream();
+            let result = stream_result(&mut stream).await;
+            drop(stream);
+            drop(agent);
+            result
+        },
+    )
+    .await
 }

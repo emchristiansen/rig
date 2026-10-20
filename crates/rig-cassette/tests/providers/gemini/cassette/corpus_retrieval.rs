@@ -231,7 +231,7 @@ async fn retrieved_tools_one_effect_log_is_the_golden_fixture() -> anyhow::Resul
     with_gemini_request_witness_cassette(
         "corpus_retrieval/retrieved_tools_one",
         NamedCase::RetrievedToolsOne,
-        |client| async move {
+        |client, _clock| async move {
             let toolset = retrievable_toolset();
             let index = tool_index(client.embedding(EMBEDDING, None), &toolset).await;
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
@@ -258,7 +258,7 @@ async fn retrieved_tools_with_static_effect_log_is_the_golden_fixture() -> anyho
     with_gemini_request_witness_cassette(
         "corpus_retrieval/retrieved_tools_with_static",
         NamedCase::RetrievedToolsWithStatic,
-        |client| async move {
+        |client, _clock| async move {
             let mut toolset = rig::tool::ToolSet::default();
             toolset
                 .add_retrieved_tool(EmbedSubtract)
@@ -293,7 +293,7 @@ async fn context_and_tools_effect_log_is_the_golden_fixture() -> anyhow::Result<
     with_gemini_request_witness_cassette(
         "corpus_retrieval/context_and_tools",
         NamedCase::ContextAndTools,
-        |client| async move {
+        |client, _clock| async move {
             let facts = facts_index(client.embedding(EMBEDDING, None), &FACTS).await;
             let toolset = retrievable_toolset();
             let tools = tool_index(client.embedding(EMBEDDING, None), &toolset).await;

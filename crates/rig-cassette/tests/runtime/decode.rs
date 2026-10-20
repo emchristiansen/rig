@@ -39,6 +39,8 @@ pub(crate) struct Decoded {
     pub(crate) calls: Vec<String>,
     /// The decoder's error, when it refused the reply.
     pub(crate) error: Option<String>,
+    /// The response's raw provider document; `Null` when it was refused.
+    pub(crate) raw: serde_json::Value,
 }
 
 async fn call<W, T>(model: rig::driver::Model<W, T>, streamed: bool) -> Decoded
@@ -80,6 +82,7 @@ where
                     .collect(),
                 calls,
                 error: None,
+                raw: response.raw,
             }
         }
         Err(error) => Decoded {
@@ -87,6 +90,7 @@ where
             text: String::new(),
             calls: Vec::new(),
             error: Some(error.to_string()),
+            raw: serde_json::Value::Null,
         },
     }
 }
@@ -236,6 +240,217 @@ pub(crate) fn openrouter_entry(entry: &Entry) -> bool {
             == Some("anthropic/streaming/gateway_message_delta_metadata.yaml")
 }
 
+/// One function call the port closed with the typed
+/// [`DiscardReason::Length`]: the tool its Part started under and the
+/// argument fragments it had delivered, joined.
+#[derive(Debug, PartialEq, Eq)]
+struct Discarded {
+    name: String,
+    arguments: String,
+}
+
+/// The calls `wire` discards with reason Length when it decodes `frames` in
+/// `mode`, in stream order. A discard under any other reason is returned as
+/// an error: this sweep subtracts only the Chat Length contract.
+fn length_discards<W>(
+    wire: &W,
+    mode: rig::wire::Mode,
+    frames: Vec<rig::wire::WireFrame>,
+) -> Result<Vec<Discarded>, String>
+where
+    W: rig::wire::Wire<Op = rig::operation::Completion, Frame = rig::wire::WireFrame>,
+{
+    use rig::streaming::{DiscardReason, Item, PartKind, StreamEvent};
+    let (_, _, items) = rig_core::test_utils::history_conformance::cut(wire, mode, frames);
+    let mut names = std::collections::HashMap::new();
+    let mut arguments: std::collections::HashMap<_, String> = std::collections::HashMap::new();
+    let mut discarded = Vec::new();
+    for item in items {
+        match item {
+            Item::Event(StreamEvent::Start {
+                part,
+                kind: PartKind::ToolCall,
+                name,
+                ..
+            }) => {
+                names.insert(part, name.map(|name| name.as_str().to_owned()));
+            }
+            Item::Event(StreamEvent::Arguments { part, json }) => {
+                arguments.entry(part).or_default().push_str(&json);
+            }
+            Item::Event(StreamEvent::Discard {
+                part,
+                reason: DiscardReason::Length,
+            }) => {
+                let Some(Some(name)) = names.get(&part) else {
+                    return Err(format!("a Length discard of unnamed part {part:?}"));
+                };
+                discarded.push(Discarded {
+                    name: name.clone(),
+                    arguments: arguments.remove(&part).unwrap_or_default(),
+                });
+            }
+            Item::Event(StreamEvent::Discard { part, reason }) => {
+                return Err(format!("part {part:?} discarded with reason {reason:?}"));
+            }
+            _ => {}
+        }
+    }
+    Ok(discarded)
+}
+
+/// The function calls a Chat Completions reply's bytes carry on choice 0, in
+/// wire order: each call's name and its argument text, joined across stream
+/// fragments by `index`. Custom calls carry no function arguments and are
+/// left out.
+fn chat_calls(entry: &Entry) -> Vec<(String, String)> {
+    let body = entry.body();
+    chat_document_calls(&String::from_utf8_lossy(&body), entry.streamed())
+}
+
+/// [`chat_calls`] of a Chat body's text: a stream of `data:` chunks when
+/// `streamed`, else one `chat.completion` document.
+fn chat_document_calls(text: &str, streamed: bool) -> Vec<(String, String)> {
+    let mut calls: Vec<(String, String)> = Vec::new();
+    let mut absorb = |call: &serde_json::Value, position: usize| {
+        let Some(function) = call.get("function") else {
+            return;
+        };
+        if calls.len() <= position {
+            calls.resize(position + 1, (String::new(), String::new()));
+        }
+        let slot = &mut calls[position];
+        if let Some(name) = function["name"].as_str()
+            && slot.0.is_empty()
+        {
+            name.clone_into(&mut slot.0);
+        }
+        if let Some(arguments) = function["arguments"].as_str() {
+            slot.1.push_str(arguments);
+        }
+    };
+    let choice_zero = |reply: &serde_json::Value| -> Option<serde_json::Value> {
+        reply["choices"]
+            .as_array()?
+            .iter()
+            .find(|choice| choice["index"].as_u64().unwrap_or(0) == 0)
+            .cloned()
+    };
+    if streamed {
+        for line in text.lines() {
+            let Some(data) = line.trim().strip_prefix("data:").map(str::trim) else {
+                continue;
+            };
+            let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue;
+            };
+            let Some(choice) = choice_zero(&chunk) else {
+                continue;
+            };
+            for (order, call) in choice["delta"]["tool_calls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let index = call["index"].as_u64().map_or(order, |index| index as usize);
+                absorb(call, index);
+            }
+        }
+    } else if let Ok(reply) = serde_json::from_str::<serde_json::Value>(text)
+        && let Some(choice) = choice_zero(&reply)
+    {
+        for (position, call) in choice["message"]["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            absorb(call, position);
+        }
+    }
+    calls.retain(|(name, _)| !name.is_empty());
+    calls
+}
+
+/// Whether a Chat call's argument text, as the bytes carry it, was cut:
+/// empty, or not a JSON value.
+fn cut_arguments(arguments: &str) -> bool {
+    arguments.trim().is_empty() || serde_json::from_str::<serde_json::Value>(arguments).is_err()
+}
+
+/// The calls a Chat Completions entry ending at Length must decode to, under
+/// coord-a-rig-port-discard-15: a call the bytes cut (empty or non-JSON
+/// arguments) is discarded and every other call is kept. `Ok(None)` for any
+/// other entry, whose calls the bank states as they are. `Err` when what the
+/// port discarded is not exactly the bytes' cut calls:
+///
+/// * a stream closes each discarded call's Part with the typed `Discard`
+///   reason Length, its delivered `Arguments` fragments visible;
+/// * a unary reply has no event surface: the port drops a cut call from the
+///   whole document before decoding it (`prepare_whole_calls`), so no Part,
+///   and no typed `Discard`, ever exists for it. Its delivered arguments stay
+///   visible only in the response's raw document, which must still carry
+///   each cut call verbatim while the decoded calls leave it out. Should a
+///   unary decode ever emit typed Length discards, they are held to the
+///   stream's standard instead.
+async fn calls_after_length_discards(
+    entry: &Entry,
+    decoded: &Decoded,
+) -> Result<Option<Vec<String>>, String> {
+    if entry.ending() != Ending::Length || !entry.encoder.ends_with("/chat/completions") {
+        return Ok(None);
+    }
+    let (mode, framing) = if entry.streamed() {
+        (rig::wire::Mode::Streaming, rig::wire::Framing::Sse)
+    } else {
+        (rig::wire::Mode::Unary, rig::wire::Framing::Whole)
+    };
+    let frames = framing.split(&entry.body());
+    let discarded = with_model!(entry, bank::client(std::slice::from_ref(entry)), |model| {
+        length_discards(&model.wire, mode, frames)
+    })
+    .ok_or_else(|| format!("no decoder for `{}`", entry.encoder))??;
+    let calls = chat_calls(entry);
+    let mut read: Vec<String> = calls.iter().map(|(name, _)| name.clone()).collect();
+    read.sort();
+    read.dedup();
+    if read != entry.calls {
+        return Err(format!(
+            "the Chat bytes carry calls {read:?}, the bank read {:?}",
+            entry.calls
+        ));
+    }
+    let (cut, kept): (Vec<_>, Vec<_>) = calls
+        .into_iter()
+        .partition(|(_, arguments)| cut_arguments(arguments));
+    let cut: Vec<Discarded> = cut
+        .into_iter()
+        .map(|(name, arguments)| Discarded { name, arguments })
+        .collect();
+    let discarded = if entry.streamed() || !discarded.is_empty() {
+        discarded
+    } else {
+        let raw = chat_document_calls(&decoded.raw.to_string(), false);
+        cut.iter()
+            .filter(|call| raw.contains(&(call.name.clone(), call.arguments.clone())))
+            .map(|call| Discarded {
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            })
+            .collect()
+    };
+    if discarded != cut {
+        return Err(format!(
+            "Length discards {discarded:?}, the bytes cut {cut:?}"
+        ));
+    }
+    let mut kept: Vec<String> = kept.into_iter().map(|(name, _)| name).collect();
+    kept.sort();
+    kept.dedup();
+    Ok(Some(kept))
+}
+
 /// The finish reason a decoded turn of `ending` must report.
 fn expected(ending: Ending, calls: &[String]) -> Option<FinishReason> {
     match ending {
@@ -278,11 +493,23 @@ async fn sweep(provider: &str, openrouter_only: bool) -> usize {
             failures.push(format!("{}: {error}", entry.source));
             continue;
         }
-        if decoded.calls != entry.calls {
-            failures.push(format!(
+        // A Chat call the bytes cut at Length is discarded, never decoded
+        // into a call; the bank reads every call the bytes carry.
+        match calls_after_length_discards(entry, &decoded).await {
+            Ok(Some(kept)) if decoded.calls != kept => failures.push(format!(
+                "{}: calls {:?}, the bank read {:?}, of which {kept:?} survive its Length cut",
+                entry.source, decoded.calls, entry.calls
+            )),
+            Ok(Some(_)) => {}
+            Ok(None) if decoded.calls != entry.calls => failures.push(format!(
                 "{}: calls {:?}, the bank read {:?}",
                 entry.source, decoded.calls, entry.calls
-            ));
+            )),
+            Ok(None) => {}
+            Err(error) => {
+                failures.push(format!("{}: {error}", entry.source));
+                continue;
+            }
         }
         if let Some(finish) = expected(entry.ending(), &entry.calls)
             && decoded.finish.as_ref() != Some(&finish)

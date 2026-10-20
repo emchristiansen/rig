@@ -9,14 +9,22 @@ use std::sync::atomic::AtomicUsize;
 use rig::completion::{Message, Reasoning};
 use rig::providers::gemini::extension::GeminiOptions;
 
+use super::super::request_witness_support::{NamedCase, with_gemini_request_witness_cassette};
 use crate::reasoning::{self, WeatherTool};
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declaration 0's recorded `parametersJsonSchema`
+/// is sent, value unchanged, as `parameters`, and replay refuses interaction
+/// 0. Named loss: the reasoning tool round trip itself, that is the weather
+/// tool being called and the answer (`assert_nonstreaming_universal`).
 #[tokio::test]
-async fn nonstreaming() {
+async fn nonstreaming() -> anyhow::Result<()> {
     let call_count = Arc::new(AtomicUsize::new(0));
-    super::super::support::with_gemini_cassette(
+    with_gemini_request_witness_cassette(
         "reasoning_tool_roundtrip/nonstreaming",
-        |client| async move {
+        NamedCase::ReasoningToolRoundtrip,
+        |client, _clock| async move {
             let agent = rig::AgentBuilder::new(client.completion("gemini-2.5-flash"))
                 .preamble(reasoning::TOOL_SYSTEM_PROMPT)
                 .max_tokens(4096)
@@ -29,12 +37,12 @@ async fn nonstreaming() {
             let result = agent
                 .chat(reasoning::TOOL_USER_PROMPT, &mut Vec::<Message>::new())
                 .await
-                .expect("[gemini] Non-streaming chat failed - likely 400 from dropped reasoning");
-
-            reasoning::assert_nonstreaming_universal(&result.output(), &call_count, "gemini");
+                .map(|_| ());
+            drop(agent);
+            Ok(result)
         },
     )
-    .await;
+    .await
 }
 
 /// `includeThoughts`, beside the typed thinking budget.

@@ -68,7 +68,7 @@ async fn tool_error_streamed() -> anyhow::Result<()> {
     with_gemini_request_witness_cassette(
         "corpus_faults/tool_error_streamed",
         NamedCase::ToolErrorStreamed,
-        |client| async move {
+        |client, _clock| async move {
             let wire = wire(&client);
             attempt_cell(&wire, NamedCase::ToolErrorStreamed).await
         },

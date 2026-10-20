@@ -68,5 +68,5 @@ rows! {
     long_big_result: recorded (LongLoop, anthropic, "anthropic", "long_loop_matrix/big_result", long_loop::BIG_RESULT);
     long_tool_error_midway: recorded (LongLoop, openai_responses_mini, "openai", "long_loop_matrix_responses/tool_error_midway", long_loop::TOOL_ERROR_MIDWAY);
     long_max_turns_midway: recorded (LongLoop, deepseek_flash, "deepseek", "long_loop_matrix/max_turns_midway", long_loop::MAX_TURNS_MIDWAY);
-    long_output_cap_midway: recorded (LongLoop, openai_chat_mini, "openai", "long_loop_matrix_chat/output_cap_midway", long_loop::OUTPUT_CAP_MIDWAY_MAX_TURNS);
+    long_output_cap_midway: recorded (LongLoop, openai_chat_mini, "openai", "long_loop_matrix_chat/output_cap_midway", long_loop::OUTPUT_CAP_MIDWAY);
 }
