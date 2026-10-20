@@ -108,6 +108,11 @@ pub(crate) enum Tools {
     ChoiceNone,
 }
 
+impl Tools {
+    /// Every way a request declares its tools.
+    pub(crate) const ALL: [Self; 3] = [Self::Declared, Self::Raw, Self::ChoiceNone];
+}
+
 /// The tools of a generated request.
 pub(crate) fn tools(rng: &mut Rng) -> Tools {
     match rng.below(20) {

@@ -4,13 +4,17 @@
 
 #![allow(clippy::expect_used)]
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use google_cloud_aiplatform_v1::model::GenerateContentResponse;
 use rig_core::completion::CompletionRequest;
 use rig_core::error::EncodeError;
-use rig_core::message::{AssistantContent, AssistantMessage, DocumentSourceKind};
+use rig_core::message::{
+    AssistantContent, AssistantMessage, CarriedTextContent, DocumentSourceKind, ImageMediaType,
+};
 use rig_core::wire::{Mode, Wire};
 use rig_history_conformance::{
-    Ablation, CallShape, Ending, HistoryFixture, MediaPart, Rng, Shape, replies,
+    Ablation, CallShape, Ending, HistoryFixture, MediaPart, Refusal, Rng, Shape, replies,
 };
 use rig_vertexai::completion::GenerateContent;
 use serde_json::{Value, json};
@@ -226,22 +230,79 @@ impl HistoryFixture for VertexHistory {
     }
 
     /// Gemini's tool-protocol finishes fail the reply.
-    fn refused_finish(&self, name: &str) -> Option<String> {
+    fn refused_finish(&self, name: &str) -> Option<Refusal> {
         let reason = match name {
             "MALFORMED_FUNCTION_CALL" => "MalformedFunctionCall",
             "UNEXPECTED_TOOL_CALL" => "UnexpectedToolCall",
             _ => return None,
         };
-        Some(format!(
+        Some(Refusal::Response(format!(
             "Gemini stopped with finish_reason={reason}: no finish message provided"
-        ))
+        )))
     }
 
-    /// An assistant image the caller holds as anything but base64 data is
-    /// refused before adaptation.
-    fn preflight_refusal(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
-        matches!(part, MediaPart::AssistantImage(image) if !matches!(image.data, DocumentSourceKind::Base64(_)))
-            .then(|| "Vertex AI assistant images must use base64 data".to_owned())
+    /// The caller's assistant images are checked before adaptation, in
+    /// Vertex's order (AG §5): a media type, one Vertex reads, base64 data,
+    /// and data that decodes.
+    fn original_media_preflight(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+        let MediaPart::AssistantImage(image) = part else {
+            return None;
+        };
+        let Some(media_type) = &image.media_type else {
+            return Some("Media type for assistant image is required for Vertex AI".to_owned());
+        };
+        if !matches!(
+            media_type,
+            ImageMediaType::JPEG
+                | ImageMediaType::PNG
+                | ImageMediaType::WEBP
+                | ImageMediaType::HEIC
+                | ImageMediaType::HEIF
+        ) {
+            return Some(format!(
+                "Unsupported Vertex AI assistant image media type {media_type:?}"
+            ));
+        }
+        let DocumentSourceKind::Base64(data) = &image.data else {
+            return Some("Vertex AI assistant images must use base64 data".to_owned());
+        };
+        BASE64
+            .decode(data)
+            .err()
+            .map(|error| format!("Invalid base64 assistant image data: {error}"))
+    }
+
+    /// Unsigned text with an invented sibling field is inspection-only text
+    /// (A48; AG §8): the turn keeps the whole part, and replay sends the
+    /// known text alone, without the `thought: false` the SDK drops, beside
+    /// the invented part.
+    fn inspected_field(&self, turn: &AssistantMessage, body: &Value) -> Option<Vec<String>> {
+        let mut problems = Vec::new();
+        let kept = turn.content.iter().any(|block| {
+            matches!(block, AssistantContent::CarriedText(carried)
+                if carried.content == CarriedTextContent::InspectionOnlyText("noted".to_owned())
+                    && carried.payload.item.get("x_rig_field").is_some())
+        });
+        if !kept {
+            problems.push(format!(
+                "the turn keeps `noted` as inspection-only text whose part holds `x_rig_field`: {:?}",
+                turn.content
+            ));
+        }
+        let parts: Vec<&Value> = body["contents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|content| content["role"] == "model")
+            .map(|content| &content["parts"])
+            .collect();
+        let expected = json!([{"text": "noted"}, {"x_rig_invented": {"id": "x_1"}}]);
+        if parts != [&expected] {
+            problems.push(format!(
+                "the model turn replays exactly {expected}: {parts:?}"
+            ));
+        }
+        Some(problems)
     }
 
     fn finish_reason_pointer(&self) -> Option<&'static str> {

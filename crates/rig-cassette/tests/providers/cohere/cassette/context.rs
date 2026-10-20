@@ -1,6 +1,7 @@
 //! Cassette-backed Cohere context-document coverage.
 
 use rig::completion::Document;
+use rig::providers::cohere::ChatRoute;
 use std::collections::HashMap;
 
 use super::super::{CASSETTE_MODEL, support::with_cohere_cassette};
@@ -12,7 +13,12 @@ async fn document_metadata_and_multiple_documents_are_accepted() {
     with_cohere_cassette(
         "context/document_metadata_and_multiple_documents_are_accepted",
         |client| async move {
-            let model = client.completion(CASSETTE_MODEL);
+            // Recorded on the Compatibility route, which sends each document as
+            // text. Documents now default to the native route
+            // (coord-a-rig-g37-1), so the test pins the route it recorded;
+            // native-route documents are covered in `native.rs`.
+            let mut model = client.completion(CASSETTE_MODEL);
+            model.wire = model.wire.with_route(ChatRoute::Compatibility);
             let request = CompletionRequest::new("Which dock is assigned beacon code amber-73?")
                 .document(Document {
                     id: "harbor-record-1".to_string(),

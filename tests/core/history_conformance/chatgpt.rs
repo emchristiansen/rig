@@ -5,6 +5,7 @@
 
 use rig_core::providers::chatgpt;
 use rig_core::providers::openai::OpenAIConfig;
+use rig_core::providers::openai::responses_api::streaming::IncompleteTerminal;
 use rig_core::providers::openai::responses_api::wire::Responses;
 
 use super::openai_responses::ResponsesHistory;
@@ -25,5 +26,8 @@ rig_history_conformance::history_conformance_suite! {
         other_model: chatgpt::GPT_5_3_CODEX,
         text_only_model: Some(chatgpt::GPT_5_3_CODEX_SPARK),
         reads_indexless: true,
+        buffered: true,
+        calls_at_terminal: true,
+        accepting: |wire| wire.with_streamed_incomplete(IncompleteTerminal::Accept),
     },
 }

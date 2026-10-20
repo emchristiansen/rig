@@ -73,7 +73,9 @@ async fn stream_raw_terminal_round_trips_provider_type() {
     .await;
 
     let terminal = captured.take();
-    let typed = chat::assert_terminal_round_trips(&terminal);
+    let (frames, terminal_frame) =
+        chat::recorded_frames_with_terminal(MISTRALRS_PROVIDER, scenario);
+    let typed = chat::assert_terminal_round_trips(&terminal, &frames);
     // mistral.rs keeps its per-second throughput counters beside the
     // OpenAI-compatible ones, so the flattened shared counts are the halves
     // the normalized usage is made of.
@@ -85,7 +87,6 @@ async fn stream_raw_terminal_round_trips_provider_type() {
     );
     assert_eq!(terminal.provider(), NORMALIZED_PROVIDER);
 
-    let (_, terminal_frame) = chat::recorded_frames_with_terminal(MISTRALRS_PROVIDER, scenario);
     let raw = &terminal.raw;
     assert_eq!(
         raw["usage"]["prompt_tokens"], terminal_frame["usage"]["prompt_tokens"],
@@ -133,7 +134,13 @@ async fn stream_raw_exposes_envelope_fields() {
         )),
         "raw.system_fingerprint must equal the recorded chunk envelope"
     );
-    assert_eq!(raw["object"], "chat.completion");
+    // The document keeps the chunk tag the stream delivered
+    // (coord-a-rig-port-chat-document-12 (1)).
+    assert_eq!(
+        raw.get("object"),
+        Some(&chat::recorded_envelope_field(&frames, "object", scenario)),
+        "raw.object must equal the recorded chunk envelope"
+    );
     // `created` is volatile: the scrubber placeholders it on disk, so only a
     // replay compares it exactly.
     let created = chat::recorded_envelope_field(&frames, "created", scenario);

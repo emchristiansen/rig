@@ -116,7 +116,18 @@ async fn responses_without_a_cache_key_does_not_hit_until_the_third_turn() {
 
     with_openai_prompt_caching_cassette("prompt_caching/responses_unkeyed_probe", |client| async move {
         let model = client.openai.completion(CACHE_MODEL);
-        let observation = run_cache_probe(model, &responses_probe()).await;
+        // The recording asked for `include: ["reasoning.encrypted_content"]`, which
+        // production no longer adds for a proven nonreasoning model
+        // (coord-a-rig-g215-1). The test asks for it explicitly, beside its existing
+        // options, as MEC132-7 treated producer 220; the production model guard and
+        // the recording stay unchanged, and this test is not about `include`.
+        let observation = run_cache_probe(
+            model,
+            &responses_probe().with_additional_params(serde_json::json!({
+                "include": ["reasoning.encrypted_content"]
+            })),
+        )
+        .await;
 
         // Not `assert_cache_conformance`: turn 2 legitimately misses here, and
         // pretending otherwise would either fail forever or force the floor
@@ -158,7 +169,18 @@ async fn responses_streaming_probe_survives_the_streaming_accumulator() {
         "prompt_caching/responses_streaming_probe",
         |client| async move {
             let model = client.openai.completion(CACHE_MODEL);
-            let observation = run_cache_probe_streaming(model, &keyed_probe()).await;
+            // The recording asked for `include: ["reasoning.encrypted_content"]`, which
+            // production no longer adds for a proven nonreasoning model
+            // (coord-a-rig-g215-1). The test asks for it explicitly, beside its existing
+            // options, as MEC132-7 treated producer 220; the production model guard and
+            // the recording stay unchanged, and this test is not about `include`.
+            let observation = run_cache_probe_streaming(
+                model,
+                &keyed_probe().with_additional_params(serde_json::json!({
+                    "include": ["reasoning.encrypted_content"]
+                })),
+            )
+            .await;
             assert_cache_conformance(
                 &observation,
                 &OPENAI_RESPONSES_KEYED_SUPPORT,

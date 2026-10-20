@@ -10,7 +10,7 @@ use rig_core::message::{
     UserContent,
 };
 use rig_core::providers::openai::wire::{
-    Chat, DEEPSEEK, Dialect, MISTRAL, OPENROUTER, OpenAIConfig,
+    Chat, DEEPSEEK, Dialect, GROQ, MISTRAL, OPENROUTER, OpenAIConfig,
 };
 use rig_core::wire::{Mode, Wire, WireFrame};
 use rig_history_conformance::{
@@ -392,7 +392,7 @@ impl HistoryFixture for ChatHistory {
     }
 
     /// A PDF named by URL is refused before adaptation.
-    fn preflight_refusal(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+    fn original_media_preflight(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
         let MediaPart::User(UserContent::Document(document)) = part else {
             return None;
         };
@@ -498,7 +498,9 @@ pub fn projection(turn: &AssistantMessage, dialect: &Dialect) -> Value {
             _ => {}
         }
     }
-    if has_parts {
+    // Groq takes an assistant turn's text as a content array
+    // (coord-a-rig-port-chat-document-12(2)).
+    if has_parts || (dialect.name == GROQ.name && !text.is_empty()) {
         message.insert("content".to_owned(), parts.into());
     } else if !text.is_empty() {
         message.insert("content".to_owned(), text.into());
@@ -515,8 +517,27 @@ pub fn projection(turn: &AssistantMessage, dialect: &Dialect) -> Value {
     if let Some(field) = dialect.quirks.reasoning_field {
         message.entry(field).or_insert_with(|| json!(""));
     }
-    if dialect.name == DEEPSEEK.name || dialect.name == MISTRAL.name {
+    if dialect.name == MISTRAL.name {
         message.entry("content").or_insert_with(|| json!(""));
     }
+    if dialect.name == DEEPSEEK.name {
+        deepseek_finalized(&mut message);
+    }
     Value::Object(message)
+}
+
+/// DeepSeek's finalization of a replayed assistant turn, the known
+/// differences from the projection every other dialect gets
+/// (mec-rig-132-dispositions-1 item 6): an assistant turn with no text
+/// sends `"content": ""`, and every call, parallel calls included, carries
+/// `"index": 0`. Its third, a forced `tool_choice` sent as `null`, is a
+/// request field no history row forces. Any other difference fails the
+/// rows that compare a replayed turn.
+fn deepseek_finalized(message: &mut Map<String, Value>) {
+    message.entry("content").or_insert_with(|| json!(""));
+    if let Some(Value::Array(calls)) = message.get_mut("tool_calls") {
+        for call in calls {
+            call["index"] = json!(0);
+        }
+    }
 }

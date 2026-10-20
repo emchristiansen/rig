@@ -81,10 +81,16 @@ async fn stream_raw_exposes_terminal_cost() {
     );
 
     // The rebuilt document states the cost where a unary body does, and
-    // carries the unary tag.
+    // keeps the chunk tag the stream delivered
+    // (coord-a-rig-port-chat-document-12 (1)).
     let raw = &terminal.raw;
     assert_eq!(raw["cost"]["usd"], json!(recorded_cost));
-    assert_eq!(raw["object"], json!("chat.completion"));
+    assert_eq!(
+        raw.get("object"),
+        Some(&chat::recorded_envelope_field(&frames, "object", SCENARIO)),
+        "raw.object must equal the recorded chunk envelope"
+    );
+    assert_eq!(raw["object"], json!("chat.completion.chunk"));
     // The normalized terminal reports it as the usage's cost.
     assert_eq!(
         terminal.usage.cost.map(|cost| cost.total),

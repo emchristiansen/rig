@@ -3,6 +3,7 @@
 
 use rig_core::providers::copilot::wire::CopilotWire;
 use rig_core::providers::copilot::{self, Copilot};
+use rig_core::providers::openai::responses_api::streaming::IncompleteTerminal;
 
 use super::openai_responses::ResponsesHistory;
 
@@ -18,5 +19,8 @@ rig_history_conformance::history_conformance_suite! {
         other_model: "gpt-5.2-codex",
         text_only_model: Some("gpt-5.3-codex-spark"),
         reads_indexless: false,
+        buffered: false,
+        calls_at_terminal: true,
+        accepting: |wire| wire.with_streamed_incomplete(IncompleteTerminal::Accept),
     },
 }

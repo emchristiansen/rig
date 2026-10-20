@@ -1,12 +1,15 @@
 //! Every recorded whole `generateContent` reply, restated as a stream,
 //! folds into the turn the whole reply folds into: one decoder writes both.
 //! The restatement sends each part in its own chunk, splits each text part
-//! in two, and ends with a chunk holding the candidate's metadata.
+//! in two, and ends with a chunk holding the candidate's metadata. A part's
+//! index within the chunk that carried it is transport-local
+//! (mec-rig-h03-carried-position-1), so the comparison leaves out exactly
+//! each block's `/payload/position/part_index`.
 
 use rig::providers::gemini::GeminiConfig;
 use rig::providers::gemini::completion::GenerateContent;
 use rig::wire::WireFrame;
-use rig_core::test_utils::history::{assert_restated_agrees, decode};
+use rig_core::test_utils::history::decode;
 use rig_core::wire::Mode;
 use serde_json::{Map, Value, json};
 
@@ -69,6 +72,47 @@ fn restated(reply: &Value) -> Vec<WireFrame> {
         .iter()
         .map(|frame| WireFrame::Text(frame.to_string()))
         .collect()
+}
+
+/// `turn` with each rig-issued call id replaced by its position, the
+/// fingerprints that cover those ids left out, and each block's
+/// transport-local `/payload/position/part_index` left out.
+fn comparable(mut turn: Value) -> Value {
+    fn walk(value: &mut Value, next: &mut usize) {
+        match value {
+            Value::Object(fields) => {
+                fields.shift_remove("fingerprint");
+                if let Some(local) = fields.get_mut("local") {
+                    *local = json!(*next);
+                    *next += 1;
+                }
+                fields.values_mut().for_each(|value| walk(value, next));
+            }
+            Value::Array(values) => values.iter_mut().for_each(|value| walk(value, next)),
+            _ => {}
+        }
+    }
+    walk(&mut turn, &mut 0);
+    if let Some(blocks) = turn.get_mut("content").and_then(Value::as_array_mut) {
+        for block in blocks {
+            if let Some(Value::Object(position)) = block.pointer_mut("/payload/position") {
+                position.shift_remove("part_index");
+            }
+        }
+    }
+    turn
+}
+
+/// Assert `whole` and `streamed` both decode on `wire` and fold into the
+/// same turn, but for transport-local part positions ([`comparable`]).
+fn assert_restated_agrees(wire: &GenerateContent, whole: Vec<WireFrame>, streamed: Vec<WireFrame>) {
+    let unary = decode(wire, Mode::Unary, whole).expect("the whole reply decodes");
+    let stream = decode(wire, Mode::Streaming, streamed).expect("its restatement decodes");
+    assert_eq!(
+        comparable(json!(unary.message())),
+        comparable(json!(stream.message())),
+        "a whole reply and its restatement as a stream fold into the same turn"
+    );
 }
 
 /// The scenarios under `directory`, relative to the Gemini cassette root.

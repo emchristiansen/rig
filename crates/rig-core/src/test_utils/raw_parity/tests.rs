@@ -1303,7 +1303,9 @@ async fn decoded(pair: &Pair) -> Result<(Value, Value), crate::error::ProviderEr
 }
 
 /// Every pair agrees whole: a streamed reply's `raw` is the unary document
-/// of the same turn.
+/// of the same turn, except that a Chat stream's document keeps the
+/// envelope fields its frames delivered ([`super::CHAT_DELIVERED_ENVELOPE`]),
+/// each checked against the recorded frames.
 #[tokio::test]
 async fn every_recorded_pair_agrees() {
     recorded_pairs_agree(PAIRS.iter().filter(|pair| pair.provider != "openrouter")).await;
@@ -1314,10 +1316,67 @@ async fn every_openrouter_recorded_pair_agrees() {
     recorded_pairs_agree(PAIRS.iter().filter(|pair| pair.provider == "openrouter")).await;
 }
 
+/// The frames a Chat pair's stream delivered, beside its recorded unary
+/// body; `None` for a pair on any other wire.
+fn chat_recording(pair: &Pair) -> Option<(Vec<Value>, Value)> {
+    let unary = Recorded::named(pair.provider, pair.unary);
+    let chat = !matches!(pair.provider, "anthropic" | "gemini" | "copilot")
+        && !unary.path.ends_with("/responses")
+        && unary.path != "/api/chat";
+    chat.then(|| {
+        let streamed = Recorded::named(pair.provider, pair.streamed).reply;
+        let body = serde_json::from_slice(&unary.reply).unwrap_or(Value::Null);
+        (super::sse_json_frames(&streamed), body)
+    })
+}
+
+/// The fields of [`super::CHAT_DELIVERED_ENVELOPE`] a Chat pair's two
+/// documents state, each checked against its own recording and then set
+/// aside, so the rest of the documents compare whole: the unary document
+/// keeps its body's value, and the streamed one the value its frames
+/// delivered (coord-a-rig-port-chat-document-12 (1)). Each disagreement is
+/// returned.
+fn set_aside_delivered_envelope(
+    pair: &Pair,
+    unary: &mut Value,
+    streamed: &mut Value,
+) -> Vec<String> {
+    let Some((frames, body)) = chat_recording(pair) else {
+        return Vec::new();
+    };
+    let mut wrong = Vec::new();
+    for key in super::CHAT_DELIVERED_ENVELOPE {
+        let delivered = super::delivered_envelope_field(&frames, key);
+        if streamed.get(key) != delivered.as_ref() {
+            wrong.push(format!(
+                "{}/{}: the streamed `{key}` is {:?}, the stream delivered {delivered:?}",
+                pair.provider,
+                pair.streamed,
+                streamed.get(key)
+            ));
+        }
+        if unary.get(key) != body.get(key) {
+            wrong.push(format!(
+                "{}/{}: the unary `{key}` is {:?}, the body states {:?}",
+                pair.provider,
+                pair.unary,
+                unary.get(key),
+                body.get(key)
+            ));
+        }
+        for document in [&mut *unary, &mut *streamed] {
+            if let Some(document) = document.as_object_mut() {
+                document.shift_remove(key);
+            }
+        }
+    }
+    wrong
+}
+
 async fn recorded_pairs_agree(pairs: impl Iterator<Item = &'static Pair>) {
     let mut wrong = Vec::new();
     for pair in pairs {
-        let (unary, streamed) = match decoded(pair).await {
+        let (mut unary, mut streamed) = match decoded(pair).await {
             Ok(pair) => pair,
             Err(error) => {
                 wrong.push(format!("{}/{}: {error}", pair.provider, pair.streamed));
@@ -1330,6 +1389,11 @@ async fn recorded_pairs_agree(pairs: impl Iterator<Item = &'static Pair>) {
             pair.provider,
             pair.unary
         );
+        wrong.extend(set_aside_delivered_envelope(
+            pair,
+            &mut unary,
+            &mut streamed,
+        ));
         let (unary, streamed) = (
             comparable(&unary, pair.minted),
             comparable(&streamed, pair.minted),

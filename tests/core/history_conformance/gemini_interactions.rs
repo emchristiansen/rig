@@ -321,7 +321,7 @@ impl HistoryFixture for InteractionsHistory {
     }
 
     /// A document of no declared type is refused before adaptation.
-    fn preflight_refusal(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+    fn original_media_preflight(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
         matches!(part, MediaPart::User(UserContent::Document(document)) if document.media_type.is_none())
             .then(|| "Media type for document is required for Gemini".to_owned())
     }
