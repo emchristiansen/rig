@@ -422,19 +422,10 @@ impl InSourceReader {
 ///
 /// As for [`read_only_cassettes`], each provider and path is a string
 /// literal or a `&str` constant declared in the same file, a function's own
-/// constants before the file's. The path argument of an
-/// [`InSourceReader::Path`] call may also be:
-/// - `f(value)`, where `f` is the file's one function of that name, it takes
-///   one parameter, and its body is a `format!` of a literal that names only
-///   that parameter;
-/// - a parameter of the enclosing function, itself the file's one function
-///   of its name, that the function never binds again, or `f(parameter)`.
-///   It reads the value that parameter takes at each same-file call
-///   `function(..)` passing a literal, a constant or `f(value)` there.
-///
-/// Nothing else counts: no other argument, no call in an `#[ignore]`d
-/// function, no path that leaves the cassette root or names no `.yaml`
-/// file, and no macro other than `include_str!` is looked into.
+/// constants before the file's. Nothing else counts: no other argument, no
+/// call in an `#[ignore]`d function, no path that leaves the cassette root
+/// or names no `.yaml` file, and no macro other than `include_str!` is
+/// looked into.
 pub fn in_source_cassettes(
     source: &str,
     readers: &[InSourceReader],
@@ -443,248 +434,25 @@ pub fn in_source_cassettes(
         return Ok(Vec::new());
     }
     let syntax = syn::parse_file(source)?;
-    let mut functions = FunctionCollector::default();
-    functions.visit_file(&syntax);
     let mut visitor = InSourceVisitor {
         readers,
         consts: Constants::of(&syntax),
-        templates: functions.templates(),
-        unique: functions.unique(),
-        enclosing: Vec::new(),
-        calls: std::collections::BTreeMap::new(),
-        forwarded: Vec::new(),
         read: Vec::new(),
     };
     visitor.visit_file(&syntax);
-    let InSourceVisitor {
-        calls,
-        forwarded,
-        mut read,
-        ..
-    } = visitor;
-    for forward in forwarded {
-        for arguments in calls.get(&forward.function).into_iter().flatten() {
-            if let Some(Some(value)) = arguments.get(forward.index)
-                && let Some(path) = match &forward.template {
-                    Some(template) => template.fill(value),
-                    None => Some(value.clone()),
-                }
-                && let Some(cassette) = cassette_at(forward.provider, &path)
-            {
-                read.push(cassette);
-            }
-        }
-    }
-    Ok(read)
-}
-
-/// A same-file function whose body is `format!` of a literal naming only
-/// its one parameter.
-#[derive(Clone)]
-struct Template {
-    parameter: String,
-    literal: String,
-}
-
-impl Template {
-    fn of(function: &ItemFn) -> Option<Self> {
-        let mut inputs = function.sig.inputs.iter();
-        let (Some(syn::FnArg::Typed(input)), None) = (inputs.next(), inputs.next()) else {
-            return None;
-        };
-        let parameter = plain_binding(&input.pat)?;
-        let body = match function.block.stmts.as_slice() {
-            [syn::Stmt::Expr(Expr::Macro(body), None)] => &body.mac,
-            [syn::Stmt::Macro(body)] if body.semi_token.is_none() => &body.mac,
-            _ => return None,
-        };
-        if !body.path.is_ident("format") {
-            return None;
-        }
-        let literal = body.parse_body::<syn::LitStr>().ok()?.value();
-        let template = Self { parameter, literal };
-        template.fill("").map(|_| template)
-    }
-
-    /// The literal with each `{parameter}` replaced by `value`, or nothing
-    /// when it holds any other placeholder.
-    fn fill(&self, value: &str) -> Option<String> {
-        let placeholder = format!("{{{}}}", self.parameter);
-        let mut filled = String::new();
-        let mut rest = self.literal.as_str();
-        while let Some(at) = rest.find(['{', '}']) {
-            filled.push_str(&rest[..at]);
-            let tail = &rest[at..];
-            if let Some(after) = tail.strip_prefix("{{") {
-                filled.push('{');
-                rest = after;
-            } else if let Some(after) = tail.strip_prefix("}}") {
-                filled.push('}');
-                rest = after;
-            } else if let Some(after) = tail.strip_prefix(placeholder.as_str()) {
-                filled.push_str(value);
-                rest = after;
-            } else {
-                return None;
-            }
-        }
-        filled.push_str(rest);
-        Some(filled)
-    }
-}
-
-/// The name a pattern binds, when it is a plain immutable binding.
-fn plain_binding(pattern: &syn::Pat) -> Option<String> {
-    match pattern {
-        syn::Pat::Ident(binding)
-            if binding.by_ref.is_none()
-                && binding.mutability.is_none()
-                && binding.subpat.is_none() =>
-        {
-            Some(binding.ident.to_string())
-        }
-        _ => None,
-    }
-}
-
-/// Every function of the file, nested ones included, by name.
-#[derive(Default)]
-struct FunctionCollector {
-    functions: std::collections::BTreeMap<String, Vec<Option<Template>>>,
-}
-
-impl FunctionCollector {
-    fn unique(&self) -> std::collections::BTreeSet<String> {
-        self.functions
-            .iter()
-            .filter(|(_, definitions)| definitions.len() == 1)
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
-    fn templates(&self) -> std::collections::BTreeMap<String, Template> {
-        self.functions
-            .iter()
-            .filter_map(|(name, definitions)| match definitions.as_slice() {
-                [Some(template)] => Some((name.clone(), template.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-}
-
-impl<'ast> Visit<'ast> for FunctionCollector {
-    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        self.functions
-            .entry(node.sig.ident.to_string())
-            .or_default()
-            .push(Template::of(node));
-        visit::visit_item_fn(self, node);
-    }
-}
-
-/// The names a function's body binds, its nested functions aside.
-#[derive(Default)]
-struct BindingCollector {
-    names: std::collections::BTreeSet<String>,
-}
-
-impl<'ast> Visit<'ast> for BindingCollector {
-    fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
-        self.names.insert(node.ident.to_string());
-        visit::visit_pat_ident(self, node);
-    }
-
-    fn visit_item_fn(&mut self, _: &'ast ItemFn) {}
-}
-
-/// A reader's path that is a parameter of its enclosing function, awaiting
-/// that function's same-file calls.
-struct Forwarded {
-    function: String,
-    index: usize,
-    template: Option<Template>,
-    provider: &'static str,
-}
-
-/// An enclosing function: its name, when it is the file's only function of
-/// that name, and each parameter that is a plain binding its body never
-/// binds again.
-struct Enclosing {
-    name: Option<String>,
-    parameters: Vec<Option<String>>,
+    Ok(visitor.read)
 }
 
 struct InSourceVisitor<'a> {
     readers: &'a [InSourceReader],
     consts: Constants,
-    templates: std::collections::BTreeMap<String, Template>,
-    unique: std::collections::BTreeSet<String>,
-    enclosing: Vec<Enclosing>,
-    /// The arguments of each same-file call by a plain function name, as
-    /// [`Self::value`] resolves them.
-    calls: std::collections::BTreeMap<String, Vec<Vec<Option<String>>>>,
-    forwarded: Vec<Forwarded>,
     read: Vec<(String, String)>,
 }
 
 impl InSourceVisitor<'_> {
-    /// A literal, a constant in scope, or a template applied to either.
-    fn value(&self, expr: &Expr) -> Option<String> {
-        self.consts.value(expr).or_else(|| {
-            let (template, argument) = self.template_call(expr)?;
-            template.fill(&self.consts.value(argument)?)
-        })
-    }
-
-    /// `f(argument)` for a same-file template `f`.
-    fn template_call<'e>(&self, expr: &'e Expr) -> Option<(&Template, &'e Expr)> {
-        let Expr::Call(call) = unwrapped(expr) else {
-            return None;
-        };
-        let Expr::Path(function) = call.func.as_ref() else {
-            return None;
-        };
-        let template = self
-            .templates
-            .get(&function.path.get_ident()?.to_string())?;
-        let mut arguments = call.args.iter();
-        match (arguments.next(), arguments.next()) {
-            (Some(argument), None) => Some((template, argument)),
-            _ => None,
-        }
-    }
-
-    /// The index of the enclosing function's parameter `expr` names.
-    fn parameter(&self, expr: &Expr) -> Option<(String, usize)> {
-        let Expr::Path(path) = unwrapped(expr) else {
-            return None;
-        };
-        let name = path.path.get_ident()?.to_string();
-        let enclosing = self.enclosing.last()?;
-        let index = enclosing
-            .parameters
-            .iter()
-            .position(|parameter| parameter.as_deref() == Some(name.as_str()))?;
-        Some((enclosing.name.clone()?, index))
-    }
-
     fn path_read(&mut self, provider: &'static str, path: &Expr) {
-        if let Some(value) = self.value(path) {
+        if let Some(value) = self.consts.value(path) {
             self.read.extend(cassette_at(provider, &value));
-            return;
-        }
-        let (template, argument) = match self.template_call(path) {
-            Some((template, argument)) => (Some(template.clone()), argument),
-            None => (None, path),
-        };
-        if let Some((function, index)) = self.parameter(argument) {
-            self.forwarded.push(Forwarded {
-                function,
-                index,
-                template,
-                provider,
-            });
         }
     }
 
@@ -713,39 +481,12 @@ impl<'ast> Visit<'ast> for InSourceVisitor<'_> {
         if is_ignored(node) {
             return;
         }
-        let mut bound = BindingCollector::default();
-        visit::visit_block(&mut bound, &node.block);
-        let name = node.sig.ident.to_string();
-        self.enclosing.push(Enclosing {
-            name: self.unique.contains(&name).then_some(name),
-            parameters: node
-                .sig
-                .inputs
-                .iter()
-                .map(|input| match input {
-                    syn::FnArg::Typed(input) => {
-                        plain_binding(&input.pat).filter(|name| !bound.names.contains(name))
-                    }
-                    syn::FnArg::Receiver(_) => None,
-                })
-                .collect(),
-        });
         self.consts.enter(node);
         visit::visit_item_fn(self, node);
         self.consts.leave();
-        self.enclosing.pop();
     }
 
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
-        if let Expr::Path(function) = node.func.as_ref()
-            && let Some(name) = function.path.get_ident()
-        {
-            let arguments = node.args.iter().map(|expr| self.value(expr)).collect();
-            self.calls
-                .entry(name.to_string())
-                .or_default()
-                .push(arguments);
-        }
         let arguments: Vec<&Expr> = node.args.iter().collect();
         if let (Some(name), [_, path]) = (cassette_wrapper_name(node), arguments.as_slice()) {
             let providers: Vec<&'static str> = self
