@@ -621,18 +621,21 @@ fn unknown_origin_history_preserves_the_existing_carried_route() {
 }
 
 #[test]
-fn actual_chat_api_keeps_the_existing_carried_text_preflight_refusal() {
+fn actual_chat_api_sends_known_responses_text_as_its_text() {
+    // Only opaque Responses parts are refused by a foreign destination; known
+    // output_text and refusal parts go as their text, as the fork's
+    // converters sent them.
     let source = received(&wire(), vec![reasoning(), answer(answer_parts())]);
     let target = OpenAIConfig::new("synthetic-test-key").chat("gpt-5.4");
-    let error = send(&source, &target, &history(&source), false, true)
+    let body = send(&source, &target, &history(&source), false, true)
         .0
-        .expect_err("Chat refuses Responses carried text");
-    let ProviderError::Request(source) = error else {
-        panic!("typed Chat Request refusal");
-    };
+        .expect("Chat sends known Responses text");
     assert_eq!(
-        source.downcast_ref::<UnrepresentableOpaqueContent>(),
-        Some(&UnrepresentableOpaqueContent::new("openai"))
+        body["messages"][1]["content"],
+        json!([
+            {"type": "text", "text": "answer"},
+            {"type": "text", "text": "declined"}
+        ])
     );
 }
 

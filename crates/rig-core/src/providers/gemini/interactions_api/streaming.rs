@@ -51,14 +51,53 @@ pub enum InteractionsEvent {
     Whole(Map<String, Value>),
 }
 
-/// A streaming event: its tag, and its other fields verbatim.
+/// A streaming event: its tag, and its other fields verbatim. A `step.start`
+/// or `step.delta` event whose step index, `step` or `delta` cannot be read
+/// does not deserialize, so its frame is a recoverable corrupt frame and the
+/// genuine terminal after it still completes the reply.
 #[derive(Debug, serde::Deserialize)]
+#[serde(try_from = "TaggedFields")]
 pub struct SseEvent {
     /// The event's `event_type`.
     pub event_type: String,
     /// Every other field.
     #[serde(flatten)]
     pub fields: Map<String, Value>,
+}
+
+/// A streaming event as the frame spells it, before its step payload is read.
+#[derive(serde::Deserialize)]
+struct TaggedFields {
+    event_type: String,
+    #[serde(flatten)]
+    fields: Map<String, Value>,
+}
+
+impl TryFrom<TaggedFields> for SseEvent {
+    type Error = String;
+
+    fn try_from(TaggedFields { event_type, fields }: TaggedFields) -> Result<Self, String> {
+        let indexed = fields
+            .get("index")
+            .and_then(Value::as_u64_lenient)
+            .and_then(|index| usize::try_from(index).ok())
+            .is_some();
+        let defect = match (event_type.as_str(), fields.get("step"), fields.get("delta")) {
+            // `step.stop` without an index stays a known event, as the fork's
+            // and upstream's `a_tagged_frame_never_passes_for_a_whole_interaction`
+            // pin; its decode refuses it.
+            ("step.start", Some(Value::Object(_)), _) if !indexed => Some("names no step index"),
+            ("step.start", Some(step), _) if !step.is_object() => Some("carries no `step` object"),
+            ("step.delta", _, Some(Value::Object(_))) if !indexed => Some("names no step index"),
+            ("step.delta", _, Some(Value::Object(_))) => None,
+            ("step.delta", _, _) => Some("carries no `delta` object"),
+            _ => None,
+        };
+        match defect {
+            Some(defect) => Err(format!("an Interactions `{event_type}` event {defect}")),
+            None => Ok(Self { event_type, fields }),
+        }
+    }
 }
 
 /// Decodes Interactions steps and preserves their original content order.

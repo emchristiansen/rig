@@ -1247,7 +1247,7 @@ fn assistant_part_in(
                 .filter(|_| part.payload.replayable_to(issuer))
             {
                 json!({"text": answer.text, "thought": false, "thoughtSignature": answer.signature.as_str()})
-            } else if let Some(text) = part.known_text_projection() {
+            } else if let Some(text) = part.foreign_text() {
                 text_part(text.to_owned())
             } else {
                 return Err(crate::message::UnrepresentableOpaqueContent::new(

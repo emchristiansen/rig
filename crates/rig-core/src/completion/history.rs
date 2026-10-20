@@ -200,18 +200,14 @@ pub trait ReplayTarget: std::fmt::Debug + WasmCompatSync {
         Ok(())
     }
 
-    /// Accept carried known-text projections without giving their payload replay
-    /// authority. Responses parts require a destination's explicit replay policy.
+    /// Accept carried known text ([`CarriedText::foreign_text`]) without giving
+    /// its payload replay authority. An opaque Responses part requires a
+    /// destination's explicit replay policy.
     fn check_carried_text(&self, part: &CarriedText) -> Result<(), UnrepresentableOpaqueContent> {
-        match &part.content {
-            CarriedTextContent::GeminiSignedAnswer(_)
-            | CarriedTextContent::InspectionOnlyText(_)
-            | CarriedTextContent::InspectionOnlyMedia(_) => Ok(()),
-            CarriedTextContent::Text(_)
-            | CarriedTextContent::Refusal(_)
-            | CarriedTextContent::Opaque(_) => {
-                Err(UnrepresentableOpaqueContent::new(self.provider()))
-            }
+        if part.foreign_text().is_some() {
+            Ok(())
+        } else {
+            Err(UnrepresentableOpaqueContent::new(self.provider()))
         }
     }
 

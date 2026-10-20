@@ -215,7 +215,7 @@ impl Chat {
             match block {
                 AssistantContent::Text(block) => text.push_str(&block.text),
                 AssistantContent::CarriedText(block) => {
-                    let Some(known) = block.known_text_projection() else {
+                    let Some(known) = block.foreign_text() else {
                         return Err(crate::message::UnrepresentableOpaqueContent::new(
                             "Ollama native chat",
                         )
@@ -523,9 +523,9 @@ impl ReplayTarget for Chat {
         match block {
             AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => true,
             AssistantContent::Text(text) => !text.text.is_empty(),
-            AssistantContent::CarriedText(text) => text
-                .known_text_projection()
-                .is_some_and(|text| !text.is_empty()),
+            AssistantContent::CarriedText(text) => {
+                text.foreign_text().is_some_and(|text| !text.is_empty())
+            }
             AssistantContent::Reasoning(reasoning) => !reasoning.text.is_empty(),
             AssistantContent::CarriedReasoning(reasoning) => !reasoning.display_text().is_empty(),
             AssistantContent::Image(_)

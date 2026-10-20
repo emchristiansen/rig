@@ -1527,9 +1527,20 @@ const UNPRICED: [&str; 3] = [
     crate::providers::ollama::PROVIDER_NAME,
 ];
 
+/// The APIs whose usage mapping reports `input_tokens` without the cache
+/// reads and writes it counts beside them: Anthropic Messages and Bedrock
+/// Converse. [`Pricing::cost`](crate::catalog::Pricing::cost) takes an
+/// input that includes them.
+const CACHE_BESIDE_INPUT: [&str; 2] = [
+    crate::providers::anthropic::wire::MESSAGES_API,
+    "bedrock.converse",
+];
+
 /// What `usage` costs at the built-in catalog's pricing for `origin`'s
 /// model, or `None` when the catalog has no price for it or the provider
-/// is one it does not price ([`UNPRICED`]).
+/// is one it does not price ([`UNPRICED`]). The counters stay unchanged;
+/// only the priced input adds back cache counts its mapping reports beside
+/// it, and an overflowing sum has no cost.
 fn catalog_cost(origin: &Origin, usage: &Usage) -> Option<crate::completion::Cost> {
     if UNPRICED.contains(&origin.provider.as_str()) {
         return None;
@@ -1541,10 +1552,20 @@ fn catalog_cost(origin: &Origin, usage: &Usage) -> Option<crate::completion::Cos
     } else {
         crate::catalog::ReasoningAccounting::IncludedInOutput
     };
+    let mut priced = *usage;
+    if CACHE_BESIDE_INPUT.contains(&origin.api.as_str())
+        && let Some(uncached) = usage.input_tokens
+    {
+        priced.input_tokens = Some(
+            uncached
+                .checked_add(usage.cached_input_tokens.unwrap_or(0))?
+                .checked_add(usage.cache_creation_input_tokens.unwrap_or(0))?,
+        );
+    }
     crate::catalog::lookup(&origin.provider, &origin.model)
         .or_else(|| crate::catalog::lookup_snapshot(&origin.provider, &origin.model))
         .and_then(|spec| spec.pricing.as_ref())
-        .and_then(|pricing| pricing.cost(usage, reasoning))
+        .and_then(|pricing| pricing.cost(&priced, reasoning))
 }
 
 /// `block` with no provider item: an opaque item no longer replays.

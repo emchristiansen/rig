@@ -321,6 +321,21 @@ impl CarriedText {
         }
     }
 
+    /// The current known text a destination that cannot replay this part's
+    /// provider shape sends in its place, as the fork's converters sent a
+    /// known Responses text or refusal part. Only an opaque Responses part
+    /// has none, and such a destination refuses it. The preserved payload
+    /// gains no outbound authority.
+    pub fn foreign_text(&self) -> Option<&str> {
+        match &self.content {
+            CarriedTextContent::Opaque(_) => None,
+            CarriedTextContent::Text(text) | CarriedTextContent::Refusal(text) => Some(text),
+            CarriedTextContent::GeminiSignedAnswer(_)
+            | CarriedTextContent::InspectionOnlyText(_)
+            | CarriedTextContent::InspectionOnlyMedia(_) => self.known_text_projection(),
+        }
+    }
+
     /// The signed answer, whose signature is independent of text edits/model.
     pub fn signed_answer(&self) -> Option<&GeminiSignedAnswer> {
         match &self.content {

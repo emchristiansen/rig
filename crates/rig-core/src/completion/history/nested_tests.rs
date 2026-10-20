@@ -204,7 +204,20 @@ fn failed_turns_keep_nested_variants_and_drop_only_upstream_failed_content() {
 #[test]
 fn user_first_nested_preflight_refuses_original_parts_before_media_adaptation() {
     let content = parts(None);
-    for block in [&content[0], &content[1], &content[2]] {
+    // Known Responses text is not opaque: the destination sends its text, as
+    // the fork's converters did (mec-rig-port-answers-1 rule; only opaque
+    // parts are refused).
+    TARGET
+        .check_nested_content(&[
+            turn(
+                vec![content[0].clone()],
+                Some(Origin::new("source.api", "source", "source-model")),
+                StopReason::Stop,
+            ),
+            Message::user("after"),
+        ])
+        .expect("known Responses text passes the foreign preflight");
+    for block in [&content[1], &content[2]] {
         let history = vec![
             turn(
                 vec![block.clone()],

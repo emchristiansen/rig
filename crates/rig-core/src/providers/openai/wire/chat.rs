@@ -598,7 +598,11 @@ impl Chat {
                     .into());
                 }
                 AssistantContent::CarriedText(block) => {
-                    match block.replay_item().map_err(EncodeError::request)? {
+                    let replay = match block.foreign_text() {
+                        Some(known) => crate::message::CarriedTextReplay::KnownText(known),
+                        None => block.replay_item().map_err(EncodeError::request)?,
+                    };
+                    match replay {
                         crate::message::CarriedTextReplay::KnownText(known) => {
                             text.push_str(known);
                             parts.push(json!({"type":"text", "text":known}));
@@ -1147,6 +1151,8 @@ fn mistral_chunk(part: &serde_json::Value) -> Result<serde_json::Value, EncodeEr
         }
         // U-native Magistral thinking is already a Mistral content chunk.
         Some("thinking") => Ok(part.clone()),
+        // A decoded Mistral `reference` chunk replays as Mistral sent it.
+        Some("reference") => Ok(part.clone()),
         Some(kind) => Err(mistral_unsupported(&format!("`{kind}` message content"))),
         // Untagged, but textual: the flattening would have taken it, so it
         // converts rather than failing.
@@ -1518,11 +1524,9 @@ impl crate::completion::ReplayTarget for Chat {
             (AssistantContent::CarriedReasoning(reasoning), _) => {
                 self.provider.dialect.quirks.reasoning_details && !reasoning.content.is_empty()
             }
-            (AssistantContent::CarriedText(text), _) => {
-                text.known_text_projection().is_some_and(|known| {
-                    !known.is_empty() || self.provider.dialect.name == super::dialects::OPENAI.name
-                })
-            }
+            (AssistantContent::CarriedText(text), _) => text.foreign_text().is_some_and(|known| {
+                !known.is_empty() || self.provider.dialect.name == super::dialects::OPENAI.name
+            }),
             (AssistantContent::ProviderItem(_), _) => false,
             (AssistantContent::Text(text), Replay::Item(item)) => {
                 !text.text.is_empty() || item.get("audio").is_some()

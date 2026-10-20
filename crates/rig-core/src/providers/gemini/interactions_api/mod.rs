@@ -1100,7 +1100,7 @@ fn assistant_step(
             );
         }
         AssistantContent::CarriedText(part) => {
-            return match part.known_text_projection() {
+            return match part.foreign_text() {
                 Some(text) => Ok(Some(
                     json!({"type": "model_output", "content": [{"type": "text", "text": text}]}),
                 )),

@@ -156,6 +156,10 @@ fn responses_categories_keep_their_exact_stored_shapes_and_replay_contract() {
         );
         let part = CarriedText::new(content, CarriedPayload::new(raw.clone(), None));
         assert!(part.known_text_projection().is_none());
+        assert_eq!(
+            part.foreign_text(),
+            (!matches!(part.content, CarriedTextContent::Opaque(_))).then_some("x")
+        );
         assert!(part.signed_answer().is_none());
         assert_eq!(
             part.replay_item(),

@@ -1635,3 +1635,107 @@ fn announced_empty_input_without_a_fragment_stays_valid() {
     assert_eq!(calls[0].function.arguments_value(), json!({}));
     assert_eq!(calls[0].function.invalid_arguments, None);
 }
+
+/// Anthropic Messages and Bedrock Converse report `input_tokens` without the
+/// cache reads and writes they count beside them: the catalog still prices
+/// that uncached input, and the counters stay as reported.
+#[test]
+fn cache_counted_beside_input_still_prices_the_uncached_input() {
+    let usage = Usage::new()
+        .input_tokens(4)
+        .output_tokens(10)
+        .cached_input_tokens(100)
+        .cache_creation_input_tokens(200)
+        .total_tokens(314);
+    for (api, provider, model) in [
+        (
+            "anthropic.messages",
+            crate::providers::anthropic::PROVIDER_NAME,
+            "claude-sonnet-4-6",
+        ),
+        (
+            "bedrock.converse",
+            "aws_bedrock",
+            "global.anthropic.claude-sonnet-4-6",
+        ),
+    ] {
+        let response = write_from(
+            crate::message::Origin::new(api, provider, model),
+            Finish {
+                usage,
+                ..Finish::default()
+            },
+            |_| Ok(()),
+        );
+        let cost = response.usage.cost.expect("the model is priced");
+        assert!(
+            cost.input.is_some_and(|part| close(part, 0.000012)),
+            "{api}: {cost:?}"
+        );
+        assert!(
+            cost.output.is_some_and(|part| close(part, 0.00015)),
+            "{api}: {cost:?}"
+        );
+        assert!(
+            cost.cache_read.is_some_and(|part| close(part, 0.00003)),
+            "{api}: {cost:?}"
+        );
+        assert!(
+            cost.cache_write.is_some_and(|part| close(part, 0.00075)),
+            "{api}: {cost:?}"
+        );
+        assert!(close(cost.total, 0.000942), "{api}: {cost:?}");
+        assert_eq!(response.usage, usage.cost(cost), "{api}");
+    }
+}
+
+/// A mapping whose input already includes its cache reads is not charged
+/// for them twice.
+#[test]
+fn cache_counted_inside_input_is_not_added_again() {
+    let usage = Usage::new()
+        .input_tokens(400)
+        .output_tokens(10)
+        .cached_input_tokens(100)
+        .total_tokens(410);
+    let response = write_from(
+        crate::message::Origin::new(
+            "openai.chat",
+            crate::providers::openai::PROVIDER_NAME,
+            "gpt-4o",
+        ),
+        Finish {
+            usage,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    let cost = response.usage.cost.expect("the model is priced");
+    assert!(
+        cost.input.is_some_and(|part| close(part, 0.00075)),
+        "{cost:?}"
+    );
+    assert_eq!(response.usage, usage.cost(cost));
+}
+
+/// An input sum that overflows has no catalog cost; the counters stay.
+#[test]
+fn an_overflowing_cache_inclusive_input_has_no_cost() {
+    let usage = Usage::new()
+        .input_tokens(u64::MAX)
+        .output_tokens(10)
+        .cache_creation_input_tokens(1);
+    let response = write_from(
+        crate::message::Origin::new(
+            "anthropic.messages",
+            crate::providers::anthropic::PROVIDER_NAME,
+            "claude-sonnet-4-6",
+        ),
+        Finish {
+            usage,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    assert_eq!(response.usage, usage);
+}

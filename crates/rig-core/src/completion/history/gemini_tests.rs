@@ -147,12 +147,30 @@ fn failed_turns_retain_signed_answers_and_raw_inspection_with_origin_and_positio
 }
 
 #[test]
-fn existing_responses_part_and_whole_item_refusals_still_precede_adaptation() {
+fn known_responses_text_and_refusal_pass_foreign_preflight_as_their_text() {
     for content in [
         CarriedTextContent::Text("known".to_owned()),
         CarriedTextContent::Refusal("refusal".to_owned()),
-        CarriedTextContent::Opaque(String::new()),
     ] {
+        let part = CarriedText::new(
+            content,
+            CarriedPayload::new(json!({"type":"future"}), Some("openai".to_owned())),
+        );
+        assert_eq!(part.foreign_text(), Some(part.text()));
+        let history = vec![
+            turn(vec![AssistantContent::CarriedText(part)], StopReason::Stop),
+            Message::user("next"),
+        ];
+        ForeignText
+            .check_nested_content(&history)
+            .expect("known Responses text needs no opaque replay");
+    }
+}
+
+#[test]
+fn existing_responses_part_and_whole_item_refusals_still_precede_adaptation() {
+    {
+        let content = CarriedTextContent::Opaque(String::new());
         let part = CarriedText::new(content, CarriedPayload::new(json!({"type":"future"}), None));
         let history = vec![
             turn(vec![AssistantContent::CarriedText(part)], StopReason::Stop),

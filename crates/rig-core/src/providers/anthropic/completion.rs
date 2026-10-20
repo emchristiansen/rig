@@ -534,7 +534,7 @@ pub(super) fn assistant_parts(
             .collect());
     }
     if let AssistantContent::CarriedText(part) = block
-        && let Some(known) = part.known_text_projection()
+        && let Some(known) = part.foreign_text()
     {
         return Ok((!known.is_empty())
             .then(|| text(known))
