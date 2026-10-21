@@ -270,11 +270,13 @@ impl NativeChat {
                     }
                     json!({"type": "thinking", "thinking": reasoning.display_text()})
                 }
-                AssistantContent::CarriedText(_) => {
-                    return Err(crate::message::UnrepresentableOpaqueContent::new(
-                        COHERE_CHAT_WIRE,
-                    )
-                    .into());
+                AssistantContent::CarriedText(part) => {
+                    match part.known_text_projection() {
+                        Some(text) => json!({"type": "text", "text": text}),
+                        None => return Err(crate::message::UnrepresentableOpaqueContent::new(
+                            COHERE_CHAT_WIRE,
+                        ).into()),
+                    }
                 }
                 AssistantContent::ProviderItem(item) => {
                     return Err(crate::message::UnreplayableProviderItem::new(
@@ -618,9 +620,9 @@ impl crate::completion::ReplayTarget for NativeChat {
             AssistantContent::Opaque(opaque) => opaque.item.get("type").is_some(),
             AssistantContent::ToolCall(_) => true,
             AssistantContent::CarriedReasoning(reasoning) => !reasoning.display_text().is_empty(),
+            AssistantContent::CarriedText(part) => part.known_text_projection().is_some(),
             AssistantContent::CustomToolCall(_) => true,
-            AssistantContent::CarriedText(_)
-            | AssistantContent::ProviderItem(_)
+            AssistantContent::ProviderItem(_)
             | AssistantContent::Image(_) => false,
         }
     }

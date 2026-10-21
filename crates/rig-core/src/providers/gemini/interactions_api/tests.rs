@@ -3,51 +3,42 @@ use crate::completion::{self, CompletionRequest, Message};
 use crate::message::{self, ToolChoice as MessageToolChoice};
 use serde_json::json;
 
+fn isolated_request_json(request: &CompletionRequest, stream: Option<bool>) -> Value {
+    let wire = Interactions::new(crate::providers::gemini::GeminiConfig::new("test-key"), "gemini-2.5-flash");
+    let body = create_request_body(&wire, request, stream).expect("request should build");
+    serde_json::to_value(body).expect("request should serialize")
+}
+
+fn isolated_result_json(call: message::CallId, name: &str, content: Vec<message::ToolResultContent>) -> Value {
+    let request = CompletionRequest::from(vec![Message::User { content:vec![message::UserContent::tool_result(
+        call, message::ToolName::new(name).expect("tool name"), content,
+    )] }]);
+    isolated_request_json(&request, None)["input"][0].clone()
+}
+
 #[test]
 fn test_create_request_body_simple() {
-    let prompt = Message::User {
-        content: vec![message::UserContent::text("Hello")],
-    };
-
-    let request = CompletionRequest {
-        record_telemetry_content: false,
-        model: None,
-        chat_history: vec![Message::system("Be precise."), prompt],
-        documents: vec![],
-        tools: vec![],
-        temperature: Some(0.7),
-        max_tokens: Some(128),
-        tool_choice: Some(MessageToolChoice::Required),
-        additional_params: None,
-        output_schema: None,
-    };
-
-    let result = create_request_body("gemini-2.5-flash".to_string(), request, Some(false))
-        .expect("request should build");
-
-    assert_eq!(result.model.as_deref(), Some("gemini-2.5-flash"));
-    assert!(result.agent.is_none());
-    assert_eq!(result.stream, Some(false));
-    assert_eq!(result.system_instruction.as_deref(), Some("Be precise."));
-
-    let config = result.generation_config.expect("generation config missing");
-    assert_eq!(config.temperature, Some(0.7));
-    assert_eq!(config.max_output_tokens, Some(128));
-    assert!(matches!(
-        config.tool_choice,
-        Some(ToolChoice::Type(ToolChoiceType::Any))
-    ));
-
-    let InteractionInput::Steps(steps) = result.input else {
-        panic!("expected steps input");
-    };
+    let mut request = CompletionRequest::new("Hello");
+    request.chat_history.insert(0, Message::system("Be precise."));
+    request.temperature = Some(0.7);
+    request.max_tokens = Some(128);
+    request.tool_choice = Some(MessageToolChoice::Required);
+    let result = isolated_request_json(&request, Some(false));
+    assert_eq!(result["model"].as_str(), Some("gemini-2.5-flash"));
+    assert!(result.get("agent").is_none());
+    assert_eq!(result["stream"].as_bool(), Some(false));
+    assert_eq!(result["system_instruction"].as_str(), Some("Be precise."));
+    let config = result.get("generation_config").expect("generation config missing");
+    assert_eq!(config["temperature"].as_f64(), Some(0.7));
+    assert_eq!(config["max_output_tokens"].as_u64(), Some(128));
+    assert_eq!(config["tool_choice"].as_str(), Some("any"));
+    let steps = result["input"].as_array().expect("expected steps input");
     assert_eq!(steps.len(), 1);
-    let Step::UserInput { content: contents } = &steps[0] else {
-        panic!("expected user input step");
-    };
+    assert_eq!(steps[0]["type"].as_str(), Some("user_input"));
+    let contents = steps[0]["content"].as_array().expect("expected user input content");
     assert_eq!(contents.len(), 1);
-    match &contents[0] {
-        Content::Text(TextContent { text, .. }) => assert_eq!(text, "Hello"),
+    match contents[0].get("text") {
+        Some(Value::String(text)) if contents[0]["type"] == "text" => assert_eq!(text, "Hello"),
         other => panic!("unexpected content: {other:?}"),
     }
 }
@@ -59,68 +50,45 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() {
     use message::{AssistantContent, ToolCall, ToolFunction, ToolResultContent};
 
     let call = |item_id: Option<&str>, call_id: &str, name: &str| {
-        let function = ToolFunction {
-            name: name.to_owned(),
-            namespace: None,
-            arguments: json!({}),
-        };
-        let tool_call = match item_id {
-            Some(item_id) => ToolCall::from_dual_wire(item_id, call_id, function),
-            None => ToolCall::from_wire(call_id, function),
-        };
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(tool_call)],
-        }
+        let function = ToolFunction::new(
+            message::ToolName::new(name).expect("tool name"),
+            json!({}),
+        );
+        let mut tool_call = ToolCall::new(message::CallId::from_wire(call_id), function);
+        tool_call.item_id = item_id.map(|id| {
+            message::ProviderItemId::new(id).expect("provider item id")
+        });
+        Message::Assistant(message::AssistantMessage::new(vec![
+            AssistantContent::ToolCall(tool_call),
+        ]))
     };
-    let result = |item_id: Option<&str>, call_id: &str, name: &str| Message::User {
-        content: vec![match item_id {
-            Some(item_id) => message::UserContent::tool_result_with_call_id(
-                item_id,
-                call_id,
-                name,
-                vec![ToolResultContent::text("out")],
-            ),
-            None => message::UserContent::tool_result_from_wire(
-                call_id,
-                name,
-                vec![ToolResultContent::text("out")],
-            ),
-        }],
+    let result = |call_id: &str, name: &str| Message::User {
+        content: vec![message::UserContent::tool_result(
+            message::CallId::from_wire(call_id),
+            message::ToolName::new(name).expect("tool name"),
+            vec![ToolResultContent::text("out")],
+        )],
     };
 
-    let request = CompletionRequest {
-        record_telemetry_content: false,
-        model: None,
-        chat_history: vec![
-            // A driver-built result carries the executed name (a repair
-            // hook renamed the call: `sum` ran, not `add`).
-            call(None, "call_1", "sum"),
-            result(None, "call_1", "sum"),
-            // An OpenAI-shaped correlator travels as the call id while
-            // the required `name` field carries the executed name —
-            // `call_abc` must never reach the wire as a name.
-            call(None, "call_abc", "get_weather"),
-            result(None, "call_abc", "get_weather"),
-            // A dual-identifier result (OpenAI Responses: item id `fc_…`
-            // + `call_id` `call_…`) keeps the correlator on the wire and
-            // the executed name in `name` — `fc_1` must never reach the
-            // wire as a name.
-            call(Some("fc_1"), "call_9", "get_time"),
-            result(Some("fc_1"), "call_9", "get_time"),
-        ],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-    };
+    let request = CompletionRequest::from(vec![
+        // A driver-built result carries the executed name (a repair
+        // hook renamed the call: `sum` ran, not `add`).
+        call(None, "call_1", "sum"),
+        result("call_1", "sum"),
+        // An OpenAI-shaped correlator travels as the call id while
+        // the required `name` field carries the executed name —
+        // `call_abc` must never reach the wire as a name.
+        call(None, "call_abc", "get_weather"),
+        result("call_abc", "get_weather"),
+        // A dual-identifier call (OpenAI Responses: item id `fc_…`
+        // + `call_id` `call_…`) keeps the correlator on the wire and
+        // the executed name in `name` — `fc_1` must never reach the
+        // wire as a name.
+        call(Some("fc_1"), "call_9", "get_time"),
+        result("call_9", "get_time"),
+    ]);
 
-    let body = create_request_body("gemini-2.5-flash".to_string(), request, None)
-        .expect("request should build");
-    let input = serde_json::to_value(&body.input).expect("input should serialize");
+    let input = isolated_request_json(&request, None)["input"].clone();
     let mut names = Vec::new();
     let mut call_ids = Vec::new();
     fn collect(value: &serde_json::Value, names: &mut Vec<String>, call_ids: &mut Vec<String>) {
@@ -168,64 +136,32 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() {
 
 #[test]
 fn test_tool_result_without_provider_id_sends_minted_call_id() {
-    // A call id is always available now: the wire gets the
-    // provider-issued id when one exists, else rig's minted handle —
-    // the old "Tool results require call_id" error is unrepresentable.
-    let call = message::ToolCallId::minted(0);
-    let content = message::UserContent::ToolResult(message::ToolResult {
-        call: call.clone(),
-        provider: None,
-        name: "get_weather".to_string(),
-        answers: crate::message::AnsweredToolCall::Function,
-        content: vec![message::ToolResultContent::text("ok")],
-    });
-
-    let converted = Content::try_from(content).expect("tool result should convert");
-    let Content::FunctionResult(result) = converted else {
-        panic!("expected function result");
-    };
-    assert_eq!(result.call_id.as_deref(), Some(call.wire_hint().as_ref()));
-    assert_eq!(result.name.as_deref(), Some("get_weather"));
+    let call = message::CallId::Local(message::LocalCallId::new());
+    let result = isolated_result_json(
+        call,
+        "get_weather",
+        vec![message::ToolResultContent::text("ok")],
+    );
+    assert_eq!(result["type"].as_str(), Some("function_result"));
+    assert_eq!(result["call_id"].as_str(), Some("tool-0"));
+    assert_eq!(result["name"].as_str(), Some("get_weather"));
 }
 
 #[test]
 fn test_tool_result_preserves_text_and_json_types() {
-    let content = message::UserContent::ToolResult(message::ToolResult {
-        call: message::ToolCallId::new_or_minted("call-123", 0),
-        provider: message::ProviderCallId::new("call-123"),
-        name: "get_weather".to_string(),
-        answers: crate::message::AnsweredToolCall::Function,
-        content: vec![
-            message::ToolResultContent::text(r#"{"status":"literal"}"#),
-            message::ToolResultContent::json(json!({ "status": "structured" })),
-        ],
-    });
-
-    let converted = Content::try_from(content).expect("tool result should convert");
-    let Content::FunctionResult(result) = converted else {
-        panic!("expected function result");
-    };
-    let expected_result = json!([
-        {
-            "type": "text",
-            "text": "{\"status\":\"literal\"}"
-        },
-        {
-            "type": "text",
-            "text": "{\"status\":\"structured\"}"
-        }
+    let result = isolated_result_json(message::CallId::from_wire("call-123"), "get_weather", vec![
+        message::ToolResultContent::text(r#"{"status":"literal"}"#),
+        message::ToolResultContent::json(json!({"status":"structured"})),
     ]);
-    assert_eq!(result.result, Some(expected_result.clone()));
-    assert_eq!(
-        serde_json::to_value(Content::FunctionResult(result))
-            .expect("function result should serialize"),
-        json!({
-            "type": "function_result",
-            "name": "get_weather",
-            "result": expected_result,
-            "call_id": "call-123"
-        })
-    );
+    assert_eq!(result["type"].as_str(), Some("function_result"));
+    let expected_result = json!([
+        {"type":"text", "text":"{\"status\":\"literal\"}"},
+        {"type":"text", "text":"{\"status\":\"structured\"}"},
+    ]);
+    assert_eq!(result.get("result"), Some(&expected_result));
+    assert_eq!(result, json!({
+        "type":"function_result", "name":"get_weather", "result":expected_result, "call_id":"call-123",
+    }));
 }
 
 #[test]
@@ -256,20 +192,9 @@ fn test_tool_result_text_and_json_singletons_remain_scalar() {
     ];
 
     for (tool_content, expected) in cases {
-        let content = message::UserContent::ToolResult(message::ToolResult {
-            call: message::ToolCallId::new_or_minted("call-123", 0),
-            provider: message::ProviderCallId::new("call-123"),
-            name: "get_weather".to_string(),
-            answers: crate::message::AnsweredToolCall::Function,
-            content: vec![tool_content],
-        });
-
-        let Content::FunctionResult(result) =
-            Content::try_from(content).expect("tool result should convert")
-        else {
-            panic!("expected function result");
-        };
-        assert_eq!(result.result, Some(expected));
+        let result = isolated_result_json(message::CallId::from_wire("call-123"), "get_weather", vec![tool_content]);
+        assert_eq!(result["type"].as_str(), Some("function_result"));
+        assert_eq!(result.get("result"), Some(&expected));
     }
 }
 
@@ -289,65 +214,24 @@ fn test_tool_result_rich_singletons_use_tagged_content() {
     )];
 
     for (tool_content, expected) in cases {
-        let content = message::UserContent::ToolResult(message::ToolResult {
-            call: message::ToolCallId::new_or_minted("call-123", 0),
-            provider: message::ProviderCallId::new("call-123"),
-            name: "get_weather".to_string(),
-            answers: crate::message::AnsweredToolCall::Function,
-            content: vec![tool_content],
-        });
-
-        let Content::FunctionResult(result) =
-            Content::try_from(content).expect("tool result should convert")
-        else {
-            panic!("expected function result");
-        };
-        assert_eq!(result.result, Some(expected));
+        let result = isolated_result_json(message::CallId::from_wire("call-123"), "get_weather", vec![tool_content]);
+        assert_eq!(result["type"].as_str(), Some("function_result"));
+        assert_eq!(result.get("result"), Some(&expected));
     }
 }
 
 #[test]
 fn test_tool_result_images_and_text_serialize_as_ordered_tagged_content() {
-    let tool_result = message::UserContent::ToolResult(message::ToolResult {
-        call: message::ToolCallId::new_or_minted("call-image", 0),
-        provider: message::ProviderCallId::new("call-image"),
-        name: "render".to_string(),
-        answers: crate::message::AnsweredToolCall::Function,
-        content: vec![
-            message::ToolResultContent::image_base64(
-                "first-image",
-                Some(message::ImageMediaType::PNG),
-                None,
-            ),
+    let content = message::UserContent::tool_result(
+        message::CallId::from_wire("call-image"), message::ToolName::new("render").expect("tool name"),
+        vec![
+            message::ToolResultContent::image_base64("first-image", Some(message::ImageMediaType::PNG), None),
             message::ToolResultContent::text("between-images"),
-            message::ToolResultContent::Image(message::Image {
-                data: message::DocumentSourceKind::Url(
-                    "https://example.com/second.jpg".to_string(),
-                ),
-                media_type: Some(message::ImageMediaType::JPEG),
-                detail: None,
-                additional_params: None,
-            }),
+            message::ToolResultContent::image_url("https://example.com/second.jpg", Some(message::ImageMediaType::JPEG), None),
         ],
-    });
-    let request = CompletionRequest {
-        record_telemetry_content: false,
-        model: None,
-        chat_history: vec![Message::User {
-            content: vec![tool_result],
-        }],
-        documents: vec![],
-        tools: vec![],
-        temperature: None,
-        max_tokens: None,
-        tool_choice: None,
-        additional_params: None,
-        output_schema: None,
-    };
-
-    let request = create_request_body("gemini-2.5-flash".to_string(), request, None)
-        .expect("request should build");
-    let serialized = serde_json::to_value(request).expect("request should serialize");
+    );
+    let request = CompletionRequest::from(vec![Message::User { content:vec![content] }]);
+    let serialized = isolated_request_json(&request, None);
 
     // The result is a step of its own on the wire (not nested in a
     // `user_input` step, which the API refuses on a round trip).
@@ -379,33 +263,40 @@ fn test_tool_result_images_and_text_serialize_as_ordered_tagged_content() {
 
 #[tokio::test]
 async fn test_response_function_call_mapping() {
-    let interaction = Interaction {
-        id: "interaction-1".to_string(),
-        steps: vec![Step::FunctionCall(FunctionCallContent {
-            name: Some("get_weather".to_string()),
-            arguments: Some(json!({"location": "Paris"})),
-            id: Some("call-123".to_string()),
-        })],
-        usage: Some(InteractionUsage {
-            total_input_tokens: Some(5),
-            total_output_tokens: Some(7),
-            total_tokens: Some(12),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let response = fold_resource(&interaction).await;
+    let interaction = json!({
+        "id": "interaction-1",
+        "steps": [{
+            "type": "function_call",
+            "name": "get_weather",
+            "arguments": {"location": "Paris"},
+            "id": "call-123"
+        }],
+        "usage": {
+            "total_input_tokens": 5,
+            "total_output_tokens": 7,
+            "total_tokens": 12
+        }
+    });
+    let wire = Interactions::new(
+        crate::providers::gemini::GeminiConfig::new("test-key"),
+        "gemini-3-flash-preview",
+    );
+    let response = crate::Model::new(wire, RecordingHttpClient::new(interaction.to_string()))
+        .call(CompletionRequest::new("probe"))
+        .await
+        .expect("the status-absent interaction resource decodes");
 
     let choice = response.choice.first();
     match choice {
-        Some(completion::AssistantContent::ToolCall(tool_call)) => {
-            assert_eq!(tool_call.function.name, "get_weather");
-            assert_eq!(tool_call.id.explicit(), Some("call-123"));
+        Some(message::AssistantContent::ToolCall(tool_call)) => {
+            assert_eq!(tool_call.function.name.as_str(), "get_weather");
+            assert!(matches!(&tool_call.id, message::CallId::Provider(_)));
             assert_eq!(
-                tool_call.provider.as_ref().expect("wire id").call_id,
+                tool_call.id.provider().expect("wire id").as_str(),
                 "call-123"
             );
+            assert_eq!(tool_call.item_id, None);
+            assert_eq!(tool_call.function.arguments_value(), json!({"location": "Paris"}));
         }
         other => panic!("unexpected content: {other:?}"),
     }
@@ -413,6 +304,12 @@ async fn test_response_function_call_mapping() {
     assert_eq!(response.usage.input_tokens, Some(5));
     assert_eq!(response.usage.output_tokens, Some(7));
     assert_eq!(response.usage.total_tokens, Some(12));
+    assert_eq!(response.response_id(), Some("interaction-1"));
+    assert_eq!(response.message_id, None);
+    assert_eq!(response.finish_reason(), None);
+    assert_eq!(response.error, None);
+    assert_eq!(response.raw, interaction);
+    assert_eq!(response.raw.get("status"), None);
 }
 
 #[test]

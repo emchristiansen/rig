@@ -393,6 +393,25 @@ fn text_response_skips_thought_parts() {
 /// signature inside the part that carried it, never merged into another.
 #[test]
 fn a_signature_on_answer_text_stays_on_that_text() {
+    use crate::proto;
+    use rig_core::message::{AssistantContent, AssistantMessage, CarriedReasoningPart, Message};
+    use rig_core::wire::{Mode, Operation, Wire};
+
+    #[derive(Clone)]
+    struct Reply(proto::GenerateContentResponse);
+
+    impl Transport<GenerateContent> for Reply {
+        fn send(
+            &self,
+            _request: GenerateContentRequest,
+            exchange: Exchange,
+        ) -> Opening<GenerateContentResponse> {
+            assert_eq!(exchange.mode, Mode::Unary);
+            let response = self.0.clone();
+            Opening::new(async move { unary(response) })
+        }
+    }
+
     let response = proto::GenerateContentResponse {
         candidates: vec![proto::Candidate {
             content: Some(proto::Content {
@@ -416,50 +435,38 @@ fn a_signature_on_answer_text_stays_on_that_text() {
         ..Default::default()
     };
 
-    let normalized: completion::CompletionResponse =
-        response.try_into().expect("payload should normalize");
+    let wire = GenerateContent::new("gemini-3-flash-preview");
+    let model = rig_core::driver::Model::new(wire.clone(), Reply(response));
+    let normalized = futures::executor::block_on(model.call(CompletionRequest::new("q")))
+        .expect("payload should normalize through the unary driver");
     assert_eq!(normalized.choice.len(), 2, "{:?}", normalized.choice);
     assert!(
         matches!(
             normalized.choice.first(),
-            Some(completion::AssistantContent::Reasoning(reasoning))
-                if reasoning.first_signature().is_none()
+            Some(AssistantContent::CarriedReasoning(reasoning))
+                if matches!(reasoning.content.as_slice(),
+                    [CarriedReasoningPart::Text { text, signature: None }] if text == "the chain")
         ),
         "the reasoning stays unsigned: {:?}",
         normalized.choice
     );
     let signature = match normalized.choice.get(1) {
-        Some(completion::AssistantContent::Text(text)) => {
-            rig_core::providers::gemini::text_thought_signature(text)
+        Some(AssistantContent::CarriedText(text)) => {
+            text.signed_answer().map(|answer| answer.signature.as_str())
         }
         _ => None,
     }
     .expect("the answer text carries its signature");
 
-    // It replays on the answer part.
-    let request = create_grpc_request(
-        "gemini-3-flash-preview",
-        CompletionRequest {
-            model: None,
-            chat_history: vec![
-                message::Message::user("q"),
-                message::Message::Assistant {
-                    id: None,
-                    content: normalized.choice.clone(),
-                },
-                message::Message::user("again"),
-            ],
-            documents: Vec::new(),
-            tools: Vec::new(),
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        },
-    )
-    .expect("request build");
+    let mut replay = CompletionRequest::new("again");
+    replay.chat_history = vec![
+        Message::user("q"),
+        Message::Assistant(AssistantMessage::new(normalized.choice.clone())),
+        Message::user("again"),
+    ];
+    let replay = rig_core::operation::Completion::prepare(replay, &wire.describe())
+        .expect("the signed canonical history prepares");
+    let request = wire.encode(replay, Mode::Unary).expect("request build");
     let answer = request
         .contents
         .get(1)

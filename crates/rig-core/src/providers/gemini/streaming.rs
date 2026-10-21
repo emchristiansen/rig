@@ -1,162 +1,471 @@
-use serde::{Deserialize, Serialize};
+//! The decoder of GenerateContent replies, a whole `generateContent` body or
+//! a stream of `streamGenerateContent` chunks, read as REST JSON. Signed
+//! answers and reasoning retain
+//! their signatures in carried parts. Inline media remains inspection data.
+//! Hosted code stays in the raw diagnostic document.
+//!
+//! ```
+//! use rig_core::providers::gemini::streaming::GenerateContentDecoder;
+//!
+//! let decoder = GenerateContentDecoder::default();
+//! # let _ = decoder;
+//! ```
 
-use super::completion::gemini_api_types::{
-    ContentCandidate, FinishReason, GenerateContentResponse, Part, PartKind, UsageMetadata,
-    map_finish_reason,
-};
-use super::completion::{
-    PROVIDER_NAME, blocked_prompt_error, function_call_finish_reason_error, part_kind_name,
-};
+use serde_json::{Map, Value};
+
+use super::completion::blocked_prompt_error;
+use super::completion::{map_google_finish_reason, usage_of};
 use crate::error::ProviderError;
-use crate::observe::ObservedError;
-use crate::operation::{AdapterOutput, Completion};
-use crate::providers::internal::wire::{self, WireEvent};
-use crate::streaming;
+use crate::json_utils::Lenient;
+use crate::message::{CallId, ToolName};
+use crate::message::{CarriedPayload, CarriedPosition, CarriedText, CarriedTextContent, CarriedReasoning, CarriedReasoningPart,
+    GeminiSignedAnswer, GeminiThoughtSignature};
+use crate::operation::{Block, Completion, Finish};
+use crate::providers::internal::wire;
 use crate::wire::{
-    AdapterEvent, AdapterUsage, AdapterVerdict, Decoder, Mode, ObservationSink, Output, WireFrame,
+    AdapterVerdict, Decoder, Flow, IncompleteEof, Mode, ObservationSink, Out, WireCitation, WireEvent,
+    WireFrame,
 };
-
-/// Part-kind interpretation shared by the Gemini wires whose payloads
-/// coincide: REST `streamGenerateContent` and the Interactions API both
-/// deliver whole function calls and identity-less thought fragments.
-pub(crate) mod shared_parts {
-    use serde_json::Value;
-
-    use crate::streaming::{BlockClose, BlockId, BlockKind, StreamEvent, ToolCallEnd};
-
-    /// Convert a whole function call into canonical start and end events.
-    pub(crate) fn function_call(
-        name: String,
-        args: Value,
-        wire_id: Option<String>,
-        signature: Option<String>,
-        tool_ids: &mut crate::streaming::SyntheticIds,
-    ) -> Vec<StreamEvent> {
-        // Id-less calls need distinct local block keys, but must replay without
-        // fabricated provider identifiers, even when they share a tool name.
-        let tool_id = wire_id.and_then(crate::streaming::non_empty_id);
-        let id = tool_id
-            .as_ref()
-            .map_or_else(|| tool_ids.mint(), |id| BlockId::wire(id.as_str()));
-        let mut end = ToolCallEnd::whole(name, args).with_signature(signature);
-        // Setting call_id as well would invent a second provider identity.
-        end.tool_id = tool_id;
-        vec![
-            StreamEvent::BlockStart {
-                id: id.clone(),
-                source_order: None,
-                kind: BlockKind::ToolCall,
-            },
-            StreamEvent::BlockEnd {
-                id,
-                end: BlockClose::ToolCall(end),
-                block: None,
-            },
-        ]
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StreamingCompletionResponse {
-    pub usage_metadata: UsageMetadata,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<FinishReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finish_message: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_id: Option<String>,
-}
-
-impl From<&StreamingCompletionResponse> for crate::completion::Usage {
-    fn from(value: &StreamingCompletionResponse) -> crate::completion::Usage {
-        (&value.usage_metadata).into()
-    }
-}
-
-impl From<StreamingCompletionResponse> for crate::completion::Usage {
-    fn from(value: StreamingCompletionResponse) -> crate::completion::Usage {
-        (&value).into()
-    }
-}
-
-fn tool_protocol_finish_reason_error(choice: &ContentCandidate) -> Option<ProviderError> {
-    let reason = choice.finish_reason.as_ref()?;
-    function_call_finish_reason_error(reason, choice.finish_message.as_deref())
-}
 
 /// The recognizability markers of a `streamGenerateContent` chunk: every
 /// genuine frame carries `candidates`, `usageMetadata` and/or
 /// `promptFeedback` (a blocked prompt's only chunk may carry nothing but
 /// the feedback), and the service's in-band abort carries only `error`. A
-/// frame with any of them must fully decode (else `Corrupt`). A valid ID-only
-/// frame is recognized separately as metadata; other JSON is `Unknown`.
+/// frame with any of them is a chunk. A valid ID-only frame is recognized
+/// separately as metadata; other JSON is `Unknown`.
 const RECOGNIZABLE_CHUNK_KEYS: &[&str] =
     &["candidates", "usageMetadata", "promptFeedback", "error"];
 
-/// Decode unary and streamed GenerateContent replies into canonical events.
-/// Hold terminal metadata until EOF because hosted-tool rounds can report
-/// intermediate finish reasons. Unary replies without assistant content fail
-/// unless a truncating finish reason permits empty output.
-pub struct GenerateContentDecoder {
-    /// Thought boundaries inferred from content transitions and signatures.
-    reasoning: crate::providers::internal::chunk_lifecycle::MintedReasoningLifecycle,
-    /// Distinct local block keys for calls without provider identifiers.
-    tool_ids: crate::streaming::SyntheticIds,
-    /// Per-reply minter for the raw-content blocks a part the stream
-    /// vocabulary cannot express rides on (see `GEMINI_RAW_CONTENT_KEY`).
-    raw_ids: crate::streaming::SyntheticIds,
-    final_usage: Option<UsageMetadata>,
-    final_finish_reason: Option<FinishReason>,
-    final_finish_message: Option<String>,
-    final_model_version: Option<String>,
-    final_response_id: Option<String>,
-    /// A provider finish reason was received, possibly before a hosted-tool round ended.
-    saw_finish_reason: bool,
-    /// At least one part mapped to assistant content.
-    delivered: bool,
-    /// Unary mode, where EOF completes the whole response document.
-    whole: bool,
-    /// A terminal error was emitted; subsequent frames must not produce output.
-    failed: bool,
-}
+/// A GenerateContent reply document in REST JSON: the whole
+/// `generateContent` body or one `streamGenerateContent` chunk.
+#[derive(Debug, Default)]
+pub struct GenerateContentChunk(pub Map<String, Value>);
 
-impl GenerateContentDecoder {
-    /// A decoder for one reply read in `mode`.
-    pub(super) fn new(mode: Mode) -> Self {
-        Self {
-            reasoning: crate::providers::internal::chunk_lifecycle::MintedReasoningLifecycle::new(
-                crate::streaming::MintKind::Reasoning,
-            ),
-            tool_ids: crate::streaming::SyntheticIds::tool(),
-            raw_ids: crate::streaming::SyntheticIds::new(crate::streaming::MintKind::Block),
-            final_usage: None,
-            final_finish_reason: None,
-            final_finish_message: None,
-            final_model_version: None,
-            final_response_id: None,
-            saw_finish_reason: false,
-            delivered: false,
-            whole: mode == Mode::Unary,
-            failed: false,
-        }
+pub(super) mod reader;
+
+impl<'de> serde::Deserialize<'de> for GenerateContentChunk {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = <Map<String, Value> as serde::Deserialize>::deserialize(deserializer)?;
+        reader::read(&fields).map_err(serde::de::Error::custom)?;
+        Ok(Self(fields))
     }
 }
 
-impl Decoder<Completion> for GenerateContentDecoder {
-    type Event = GenerateContentResponse;
+/// Decode GenerateContent replies. A text or thought part continues the
+/// block of the part before it while the kind stays the same. A thought
+/// signature closes its reasoning part. Signed answer parts stay separate. The provider's end is held until EOF because
+/// hosted-tool rounds can report intermediate finish reasons. The
+/// candidate's grounding and recitation metadata cite the text blocks when
+/// the reply ends.
+#[derive(Debug, Default)]
+pub struct GenerateContentDecoder {
+    streaming: bool,
+    /// At least one content part was emitted.
+    delivered: bool,
+    /// The latest `finishReason`.
+    finish: Option<String>,
+    /// The latest `usageMetadata`, as Gemini sent it.
+    usage: Option<Value>,
+    model_version: Option<String>,
+    response_id: Option<String>,
+    /// The text or thought run later parts continue, and whether it is
+    /// thought.
+    open: Option<(usize, bool)>,
+    /// Whether the open run holds a signature.
+    signed: bool,
+    /// The index of the block written last.
+    last: Option<usize>,
+    /// A signature sent alone before any block, which the next block takes.
+    signature: Option<String>,
+    /// The answer text written so far, which grounding segments cite.
+    answer: grounding::AnswerText,
+    /// The text block and byte offset in it of each part of the latest
+    /// chunk; `None` for a part that is not answer text.
+    placed: Vec<Option<(usize, usize)>>,
+    /// Where the part being written put its text.
+    placement: Option<(usize, usize)>,
+    /// The latest `groundingMetadata`'s citations, by block.
+    grounding: Vec<(usize, WireCitation)>,
+    /// How many chunks carried parts: a reply over more than one counts a
+    /// grounding segment's bytes in the whole answer, not in a part.
+    chunks: usize,
+    /// The `citationMetadata` sources of every chunk, by block.
+    recitations: Vec<(usize, WireCitation)>,
+    part_index: u64,
+    open_position: Option<CarriedPosition>,
+}
 
-    fn classify(&self, frame: WireFrame) -> WireEvent<GenerateContentResponse> {
+impl<'id> Decoder<'id, Completion> for GenerateContentDecoder {
+    type Event = GenerateContentChunk;
+
+    fn classify(&self, frame: WireFrame) -> WireEvent<GenerateContentChunk> {
         // ID-only metadata must not create an unknown-content truncation tail.
-        if <Self as Decoder<Completion>>::is_analysis_only(self, &frame) {
+        if GenerateContentDecoder::is_analysis_only(&frame) {
             return wire::classify_marker_keyed_frame(&frame.as_str(), &["responseId"]);
         }
         wire::classify_marker_keyed_frame(&frame.as_str(), RECOGNIZABLE_CHUNK_KEYS)
     }
 
-    fn is_analysis_only(&self, frame: &WireFrame) -> bool {
-        #[derive(Deserialize)]
+    fn decode(
+        &mut self,
+        GenerateContentChunk(data): GenerateContentChunk,
+        mut out: Out<'id, Completion>,
+    ) -> Result<Flow, ProviderError> {
+        let data = Value::Object(data);
+        // Gemini repeats both on every chunk. Record a value when it changes:
+        // every span record counts against the exporter's attribute limit.
+        let span = tracing::Span::current();
+        if let Some(id) = data.str("responseId").filter(|id| !id.is_empty())
+            && self.response_id.as_deref() != Some(id)
+        {
+            span.record("gen_ai.response.id", id);
+            self.response_id = Some(id.to_owned());
+        }
+        if let Some(model) = data.str("modelVersion").filter(|model| !model.is_empty())
+            && self.model_version.as_deref() != Some(model)
+        {
+            span.record("gen_ai.response.model", model);
+            self.model_version = Some(model.to_owned());
+        }
+        if let Some(usage) = data.get("usageMetadata") {
+            self.usage = Some(usage.clone());
+        }
+        if let Some(error) = data.at("/error") {
+            // An in-band failure is a provider error, not a truncation.
+            let body = serde_json::json!({ "error": error }).to_string();
+            let status = error
+                .get("code")
+                .and_then(Value::as_u64)
+                .and_then(|code| u16::try_from(code).ok())
+                .and_then(|code| http::StatusCode::from_u16(code).ok())
+                .filter(|status| status.is_client_error() || status.is_server_error());
+            return Err(match status {
+                Some(status) => ProviderError::from_http_response(status, body),
+                None => ProviderError::from_provider_body(body),
+            });
+        }
+        if let Some(blocked) = data.get("promptFeedback").and_then(blocked_prompt_error) {
+            return Err(blocked);
+        }
+        // The candidates, their content and its parts hold every block and
+        // the finish, so a wrongly typed one fails the reply.
+        let candidate = match data
+            .get("candidates")
+            .map(|candidates| (candidates, candidates.get(0)))
+        {
+            None | Some((Value::Null, _) | (Value::Array(_), None)) => return Ok(Flow::More),
+            Some((Value::Array(_), Some(candidate @ Value::Object(_)))) => candidate,
+            Some((Value::Array(_), Some(_))) => {
+                return Err(malformed("a candidate that is not an object"));
+            }
+            Some(_) => return Err(malformed("candidates that are not a list")),
+        };
+        // Last one wins: an intermediate `finishReason` is superseded by the
+        // reason the turn actually ended on. Proto3 JSON spells an enum
+        // value its schema does not know as its number.
+        if let Some(reason) = candidate.get("finishReason").and_then(reader::finish_reason) {
+            self.finish = Some(reason);
+        }
+        if let Some(error) = tool_protocol_finish_reason_error(candidate) {
+            return Err(error);
+        }
+        let parts = match candidate.get("content") {
+            None | Some(Value::Null) => None,
+            Some(content @ Value::Object(_)) => content.get("parts"),
+            Some(_) => return Err(malformed("candidate content that is not an object")),
+        };
+        match parts {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(parts)) => {
+                self.chunks += 1;
+                self.placed.clear();
+                let mut previous_text = false;
+                for (part_index, part) in parts.iter().enumerate() {
+                    let text = part.as_object().and_then(reader::select) == Some(reader::SelectedKind::Text)
+                        && part.bool("thought") != Some(true);
+                    if text && previous_text {
+                        self.close(&mut out)?;
+                    }
+                    previous_text = text;
+                    self.part_index = part_index as u64;
+                    self.part(part.clone(), &mut out)?;
+                    self.placed.push(self.placement.take());
+                }
+            }
+            Some(_) => return Err(malformed("candidate parts that are not a list")),
+        }
+        // Each chunk restates the grounding whole; recitation sources add up.
+        if let Some(metadata) = candidate.get("groundingMetadata") {
+            self.grounding =
+                grounding::grounding(metadata, &self.placed, &self.answer, self.chunks > 1);
+        }
+        if let Some(metadata) = candidate.get("citationMetadata") {
+            let recitations = grounding::recitations(metadata, &self.answer);
+            self.recitations.extend(recitations);
+        }
+        Ok(Flow::More)
+    }
+
+    /// Gemini ends a reply at EOF, not at its first finish reason: a
+    /// hosted-tool round can report one before more content arrives.
+    fn eof(&mut self, mut out: Out<'id, Completion>) -> Result<Flow, ProviderError> {
+        let cut_short = self.normalized_finish().is_some_and(|reason| {
+            matches!(reason, crate::completion::FinishReason::Length | crate::completion::FinishReason::ContentFilter)
+        });
+        if !self.streaming && !self.delivered && !cut_short {
+            self.close(&mut out)?;
+            return Err(ProviderError::Response(crate::message::EMPTY_RESPONSE_ERROR.to_owned()));
+        }
+        if self.finish.is_some() {
+            return self.end(out);
+        }
+        self.close(&mut out)?;
+        if self.streaming {
+            Ok(Flow::More)
+        } else {
+            Err(ProviderError::Truncated)
+        }
+    }
+
+    fn incomplete_eof(&self) -> IncompleteEof {
+        if self.streaming { IncompleteEof::KeepPartial } else { IncompleteEof::Refuse }
+    }
+
+    fn flush_before_terminal_error(
+        &mut self,
+        mut out: Out<'id, Completion>,
+    ) -> Result<(), ProviderError> {
+        self.close(&mut out)
+    }
+}
+
+impl GenerateContentDecoder {
+    pub(super) fn in_mode(mut self, mode: Mode) -> Self {
+        self.streaming = mode == Mode::Streaming;
+        self
+    }
+
+    fn normalized_finish(&self) -> Option<crate::completion::FinishReason> {
+        self.finish.as_deref()
+            .filter(|reason| *reason != "FINISH_REASON_UNSPECIFIED")
+            .map(map_google_finish_reason)
+    }
+
+    /// End the reply on the finish reason the candidate holds. Without one
+    /// the reply did not end.
+    fn end(&mut self, mut out: Out<'_, Completion>) -> Result<Flow, ProviderError> {
+        let reason = self.normalized_finish();
+        let Some(_) = self.finish.take() else {
+            return Err(ProviderError::Truncated);
+        };
+        self.close(&mut out)?;
+        let citations = std::mem::take(&mut self.grounding)
+            .into_iter()
+            .chain(std::mem::take(&mut self.recitations));
+        for (index, citation) in citations {
+            out.cite(index, citation);
+        }
+        let usage = self.usage.as_ref().map(usage_of).unwrap_or_default();
+        let model = self.model_version.take();
+        let response_id = self.response_id.take();
+        Ok(out.end(Finish {
+            usage,
+            reason,
+            response_id,
+            model,
+            ..Finish::default()
+        }))
+    }
+
+    /// Finish the open text or thought run: Gemini states each part whole.
+    fn close(&mut self, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
+        let Some((index, thought)) = self.open.take() else {
+            return Ok(());
+        };
+        let position = self.open_position.take().unwrap_or(CarriedPosition::Whole);
+        if thought {
+            let mut item = Value::Null;
+            out.edit(index, |held| item = held.clone())?;
+            let text = item.str("text").unwrap_or_default().to_owned();
+            let signature = item.str("thoughtSignature").map(str::to_owned);
+            let payload = CarriedPayload::new(item, Some(super::completion::PROVIDER_NAME.to_owned()))
+                .with_position(position);
+            return out.finish_carried_reasoning(index,
+                CarriedReasoning::new(vec![CarriedReasoningPart::Text { text, signature }], payload));
+        } else {
+            let mut item = Value::Null;
+            out.edit(index, |held| item = held.clone())?;
+            if let Some(signature) = item.str("thoughtSignature") {
+                let answer = GeminiSignedAnswer::new(item.str("text").unwrap_or_default(),
+                    GeminiThoughtSignature::new(signature));
+                let payload = CarriedPayload::new(item, Some(super::completion::PROVIDER_NAME.to_owned()))
+                    .with_position(position);
+                return out.finish_carried_text(index, CarriedText::new(
+                    CarriedTextContent::GeminiSignedAnswer(answer), payload,
+                ));
+            }
+            if item.as_object().is_some_and(|fields| fields.keys().any(|key|
+                !matches!(key.as_str(), "text" | "thought" | "thoughtSignature")
+            )) {
+                let text = item.str("text").unwrap_or_default().to_owned();
+                let payload = CarriedPayload::new(item, Some(super::completion::PROVIDER_NAME.to_owned()))
+                    .with_position(position);
+                return out.finish_carried_text(index, CarriedText::new(
+                    CarriedTextContent::InspectionOnlyText(text), payload,
+                ));
+            }
+        }
+        out.finish(index)
+    }
+
+    /// Write a block at a fresh index, closing the run before it. A text or
+    /// thought block stays open as the run later parts continue; any other
+    /// is whole.
+    fn open(
+        &mut self,
+        block: Block,
+        item: Value,
+        text: &str,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<(), ProviderError> {
+        self.close(out)?;
+        let index = out.fresh_index();
+        let mut item = item;
+        if let (Some(signature), Some(fields)) = (self.signature.take(), item.as_object_mut()) {
+            fields
+                .entry("thoughtSignature")
+                .or_insert(Value::String(signature));
+        }
+        self.delivered = true;
+        self.last = Some(index);
+        self.signed = item
+            .get("thoughtSignature")
+            .and_then(Value::as_str)
+            .is_some();
+        if matches!(block, Block::Text) {
+            self.answer.open(index, text);
+            self.placement = Some((index, 0));
+        }
+        let run = match &block {
+            Block::Text => Some(false),
+            Block::Reasoning { .. } => Some(true),
+            _ => None,
+        };
+        out.open(index, block, item)?;
+        out.push(index, text)?;
+        self.open = run.map(|thought| (index, thought));
+        self.open_position = run.map(|_| CarriedPosition::MessageContent { item_index: 0, part_index: self.part_index });
+        self.open.map_or_else(|| out.finish(index), |_| Ok(()))
+    }
+
+    /// Write one part of the candidate's content. A part this decoder does
+    /// not model is an opaque item that replays; one with no data, or that
+    /// is not an object, is kept as one that does not. A signature alone
+    /// joins the block before it, as Gemini attaches it to the part before,
+    /// or the next block when it comes first.
+    fn part(&mut self, part: Value, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
+        let Value::Object(fields) = &part else {
+            return self.open(Block::Opaque { replay: false }, part, "", out);
+        };
+        let selected = reader::select(fields);
+        let thought = part.bool("thought") == Some(true);
+        let signature = part.str("thoughtSignature");
+        if let Some(text) = part.str("text").filter(|_| selected == Some(reader::SelectedKind::Text)) {
+            // An empty part without a signature carries nothing.
+            if text.is_empty() && signature.is_none() {
+                return Ok(());
+            }
+            if !thought && signature.is_some() {
+                self.open(Block::Text, part.clone(), text, out)?;
+                return self.close(out);
+            }
+            // A second signed part starts a block of its own, so each
+            // signature stays with the part that carried it.
+            let result = match self.open {
+                Some((index, kind)) if kind == thought && !(self.signed && signature.is_some()) => {
+                    self.signed |= signature.is_some();
+                    if !thought {
+                        self.placement = self.answer.push(index, text).map(|at| (index, at));
+                    }
+                    out.push(index, text)?;
+                    out.edit(index, |item| merge_part(item, &part))
+                }
+                _ if thought => self.open(
+                    Block::Reasoning { redacted: false },
+                    part.clone(),
+                    text,
+                    out,
+                ),
+                _ => self.open(Block::Text, part.clone(), text, out),
+            };
+            result?;
+            if thought && signature.is_some() { return self.close(out); }
+            return Ok(());
+        }
+        if let Some(call) = part.obj("functionCall").filter(|_| selected == Some(reader::SelectedKind::FunctionCall)) {
+            let name = ToolName::new(
+                call.get("name").and_then(Value::as_str).unwrap_or_default(),
+            ).map_err(ProviderError::request)?;
+            // Proto3 JSON leaves out an empty `args` Struct.
+            let args = call
+                .get("args")
+                .map_or_else(|| "{}".to_owned(), Value::to_string);
+            let id = CallId::from_wire(call.get("id").and_then(Value::as_str).unwrap_or_default());
+            return self.open(Block::Call { id, name, namespace: None }, part.clone(), &args, out);
+        }
+        if selected == Some(reader::SelectedKind::InlineData) {
+            self.close(out)?;
+            self.delivered = true;
+            let index = out.fresh_index();
+            let payload = CarriedPayload::new(part.clone(), Some(super::completion::PROVIDER_NAME.to_owned()))
+                .with_position(CarriedPosition::MessageContent { item_index: 0, part_index: self.part_index });
+            out.open(index, Block::Text, Value::Null)?;
+            return out.finish_carried_text(index, CarriedText::new(
+                CarriedTextContent::InspectionOnlyMedia(String::new()), payload,
+            ));
+        }
+        match selected {
+            Some(reader::SelectedKind::ExecutableCode) => {
+                tracing::warn!(kind = "executableCode", "Gemini delivered an unmodeled hosted-code part");
+                return Ok(());
+            }
+            Some(reader::SelectedKind::CodeExecutionResult) => {
+                tracing::warn!(kind = "codeExecutionResult", "Gemini delivered an unmodeled hosted-code part");
+                return Ok(());
+            }
+            Some(reader::SelectedKind::FunctionResponse | reader::SelectedKind::FileData) => {
+                let kind = if selected == Some(reader::SelectedKind::FunctionResponse) {
+                    "functionResponse"
+                } else {
+                    "fileData"
+                };
+                return Err(ProviderError::Response(format!(
+                    "Gemini response part kind {kind} carries no assistant content rig can account for"
+                )));
+            }
+            Some(reader::SelectedKind::Text | reader::SelectedKind::InlineData | reader::SelectedKind::FunctionCall)
+                | None => {}
+        }
+        let bare = ["thought", "thoughtSignature", "partMetadata"];
+        let data = fields.keys().any(|key| !bare.contains(&key.as_str()));
+        if !data && let Some(signature) = signature {
+            let Some(index) = self.open.map(|(index, _)| index).or(self.last) else {
+                self.signature = Some(signature.to_owned());
+                return Ok(());
+            };
+            return out.edit(index, |item| {
+                if let Some(item) = item.as_object_mut() {
+                    item.insert("thoughtSignature".to_owned(), Value::from(signature));
+                }
+            });
+        }
+        self.open(Block::Opaque { replay: data }, part.clone(), "", out)
+    }
+
+    /// Whether `frame` carries a response id and nothing else, a repeated
+    /// key included.
+    pub(crate) fn is_analysis_only(frame: &WireFrame) -> bool {
+        #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct ResponseIdOnly {
             #[serde(rename = "responseId")]
@@ -168,397 +477,79 @@ impl Decoder<Completion> for GenerateContentDecoder {
         )
     }
 
-    fn interpret(&mut self, data: GenerateContentResponse, out: &mut Output<Completion>) {
-        if self.failed {
-            return;
-        }
-
-        let span = tracing::Span::current();
-        // The document defaults an absent id to the empty string, which is
-        // the same "not reported" the normalized record's setter filters.
-        if !data.response_id.is_empty() {
-            span.record("gen_ai.response.id", data.response_id.as_str());
-            self.final_response_id = Some(data.response_id.clone());
-        }
-        if let Some(model_version) = &data.model_version {
-            span.record("gen_ai.response.model", model_version.as_str());
-            self.final_model_version = Some(model_version.clone());
-        }
-        if let Some(usage) = data.usage_metadata.as_ref() {
-            // Carried for the terminal record only: the driver records usage
-            // off the folded response, so the decoder states it once.
-            self.final_usage = Some(usage.clone());
-        }
-
-        if let Some(error) = data.error {
-            // Preserve in-band failures as provider errors, not unknown-frame truncation.
-            self.failed = true;
-            // GenerateContent codes are HTTP statuses; only error statuses
-            // participate in the unary retry policy.
-            let status = error
-                .get("code")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|code| u16::try_from(code).ok())
-                .and_then(|code| http::StatusCode::from_u16(code).ok())
-                .filter(|status| status.is_client_error() || status.is_server_error());
-            let body = serde_json::json!({ "error": error }).to_string();
-            let error = match status {
-                Some(status) => ProviderError::from_http_response(status, body),
-                None => crate::error::ProviderError::from_provider_body(body),
-            };
-            out.push(Err(error));
-            return;
-        }
-
-        if let Some(blocked) = data.prompt_feedback.as_ref().and_then(blocked_prompt_error) {
-            // Preserve the refusal reason rather than reporting an unexplained truncation.
-            self.failed = true;
-            out.push(Err(blocked));
-            return;
-        }
-
-        let Some(choice) = data.candidates.into_iter().next() else {
-            tracing::debug!("There is no content candidate");
+    /// Project provider verdicts, response identity, and errors
+    /// before normalization. A field of another type is left out, and a
+    /// payload that is not JSON projects nothing.
+    pub(crate) fn project(payload: &[u8], sink: &mut ObservationSink<'_>) {
+        let Ok(reply) = serde_json::from_slice::<Value>(payload) else {
             return;
         };
-
-        if let Some(finish_reason) = &choice.finish_reason {
-            // Last one wins: an intermediate `finishReason` is superseded by
-            // the reason the turn actually ended on.
-            self.saw_finish_reason = true;
-            self.final_finish_reason = Some(finish_reason.clone());
-        }
-        if let Some(message) = &choice.finish_message {
-            self.final_finish_message = Some(message.clone());
-        }
-
-        if let Some(err) = tool_protocol_finish_reason_error(&choice) {
-            self.failed = true;
-            out.push(Err(err));
-            return;
-        }
-
-        match choice.content {
-            Some(content) => {
-                if content.parts.is_empty() {
-                    tracing::trace!(reason = ?self.final_finish_reason, "There is no part in the streaming content");
-                }
-                // Parts within one document are distinct parts; text chunks
-                // across stream events continue one part.
-                let mut previous_text = false;
-                for part in content.parts {
-                    let text = matches!(part.part, PartKind::Text(_)) && part.thought != Some(true);
-                    if text && previous_text {
-                        out.end_active_text();
-                    }
-                    previous_text = text;
-                    self.interpret_part(part, out);
-                }
-            }
-            None => {
-                // Gemini's final chunk may carry finishReason with no content.
-                tracing::debug!(finish_reason = ?self.final_finish_reason, "Streaming candidate missing content");
-            }
-        }
-    }
-
-    fn finish(&mut self, out: &mut Output<Completion>) {
-        // Empty unary replies require a truncating finish reason; stream truncation
-        // is represented by an absent terminal record instead.
-        let cut_short = self
-            .final_finish_reason
-            .as_ref()
-            .and_then(map_finish_reason)
-            .is_some_and(|reason| reason.truncated_output());
-        if self.whole && !self.delivered && !cut_short {
-            out.error(ProviderError::Response(
-                crate::message::EMPTY_RESPONSE_ERROR.to_owned(),
-            ));
-            return;
-        }
-
-        // Without a provider finish reason, a terminal would falsely report completion.
-        if !self.saw_finish_reason {
-            return;
-        }
-
-        // Deferred completion retains the final hosted-tool round and its metadata.
-        // Defaulting the raw usage shape does not imply reported usage.
-        let usage = self
-            .final_usage
-            .as_ref()
-            .map(crate::completion::Usage::from)
-            .unwrap_or_default();
-        let native = StreamingCompletionResponse {
-            usage_metadata: self.final_usage.take().unwrap_or_default(),
-            finish_reason: self.final_finish_reason.take(),
-            finish_message: self.final_finish_message.take(),
-            model_version: self.final_model_version.take(),
-            response_id: self.final_response_id.take(),
-        };
-        let raw = match serde_json::to_value(&native) {
-            Ok(raw) => raw,
-            Err(err) => {
-                out.error(err.into());
-                return;
-            }
-        };
-        let finish_reason = native.finish_reason.as_ref().and_then(map_finish_reason);
-        out.final_record(
-            streaming::StreamFinal::new(PROVIDER_NAME, usage, raw)
-                .with_optional_finish_reason(finish_reason)
-                .with_optional_response_id(native.response_id)
-                .with_optional_model(native.model_version),
-        );
-    }
-
-    fn is_finished(&self) -> bool {
-        // Stop after terminal errors so later unknown frames cannot escape the failure gate.
-        self.failed
-    }
-
-    /// Project provider verdicts, usage, response identity, and errors before normalization.
-    fn project(&self, payload: &[u8], sink: &mut dyn ObservationSink) {
-        // The observation projection must not inherit native response
-        // defaults: omitted prompt/total counts in UsageMetadata otherwise
-        // become zero. Parsing failure has no effect on the provider's
-        // authoritative decoder.
-        if let Ok(ObservedUsageOnly { usage: Some(usage) }) =
-            serde_json::from_slice::<ObservedUsageOnly>(payload)
-        {
-            sink.emit(AdapterEvent::Usage {
-                usage: AdapterUsage {
-                    input_tokens: usage.prompt_token_count,
-                    output_tokens: usage.candidates_token_count,
-                    total_tokens: usage.total_token_count,
-                    cached_input_tokens: usage.cached_content_token_count,
-                    reasoning_tokens: usage.thoughts_token_count,
-                    tool_input_tokens: usage.tool_use_prompt_token_count,
-                },
-            });
-        }
-        // Project metadata independently so malformed candidate fields cannot
-        // erase an otherwise valid usage report from a rejected response.
-        let Ok(metadata) = serde_json::from_slice::<ObservedMetadata>(payload) else {
-            return;
-        };
-        let candidate = metadata.candidates.into_iter().next().unwrap_or_default();
-        let scrub = |value: String| sink.scrub(&value);
+        let candidate = reply.arr("candidates").first().unwrap_or(&Value::Null);
+        let scrub = |value: Option<&str>| value.map(|value| sink.scrub(value));
+        let block = reply
+            .at("/promptFeedback/blockReason")
+            .and_then(Value::as_str);
         let verdict = AdapterVerdict {
-            finish_reason: candidate.finish_reason.map(scrub),
-            block_reason: metadata
-                .prompt_feedback
-                .and_then(|f| f.block_reason)
-                .map(scrub),
-            detail: candidate.finish_message.map(scrub),
-            model: metadata.model_version.map(scrub),
+            finish_reason: scrub(candidate.str("finishReason")),
+            block_reason: scrub(block),
+            detail: scrub(candidate.str("finishMessage")),
+            model: scrub(reply.str("modelVersion")),
         };
-        let response_id = metadata.response_id.map(scrub);
+        let response_id = scrub(reply.str("responseId"));
         sink.provider(verdict, response_id);
-        if let Some(error) = metadata.error {
+        if let Some(error) = crate::observe::ObservedError::of(&reply) {
             error.emit(sink);
         }
     }
 }
 
-/// The usage report alone, read off the payload before the verdict so a
-/// malformed candidate cannot erase it.
-#[derive(Deserialize)]
-struct ObservedUsageOnly {
-    #[serde(rename = "usageMetadata")]
-    usage: Option<ObservedUsage>,
+fn tool_protocol_finish_reason_error(candidate: &Value) -> Option<ProviderError> {
+    let wire_reason = reader::finish_reason(candidate.get("finishReason")?)?;
+    let reason = match wire_reason.as_str() {
+        "MALFORMED_FUNCTION_CALL" => "MalformedFunctionCall",
+        "UNEXPECTED_TOOL_CALL" => "UnexpectedToolCall",
+        "MISSING_THOUGHT_SIGNATURE" => "MissingThoughtSignature",
+        "TOO_MANY_TOOL_CALLS" => "TooManyToolCalls",
+        "MALFORMED_RESPONSE" => "MalformedResponse",
+        _ => return None,
+    };
+    let message = candidate.str("finishMessage").unwrap_or("no finish message provided");
+    Some(ProviderError::Response(format!(
+        "Gemini stopped with finish_reason={reason}: {message}"
+    )))
 }
 
-// Ignore all unrelated response fields rather than allocating another tree
-// containing the completion text, tools, signatures and media.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ObservedUsage {
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    prompt_token_count: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    candidates_token_count: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    total_token_count: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    cached_content_token_count: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    thoughts_token_count: Option<u64>,
-    #[serde(default, deserialize_with = "crate::observe::lenient_count")]
-    tool_use_prompt_token_count: Option<u64>,
+fn malformed(what: &str) -> ProviderError {
+    ProviderError::Response(format!("Gemini sent {what}"))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ObservedMetadata {
-    #[serde(default)]
-    candidates: Vec<ObservedCandidate>,
-    prompt_feedback: Option<ObservedFeedback>,
-    model_version: Option<String>,
-    response_id: Option<String>,
-    error: Option<ObservedError>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ObservedCandidate {
-    finish_reason: Option<String>,
-    finish_message: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ObservedFeedback {
-    block_reason: Option<String>,
-}
-
-impl GenerateContentDecoder {
-    fn interpret_part(&mut self, part: Part, out: &mut AdapterOutput) {
-        // Hosted code-execution parts alone do not constitute an assistant answer.
-        if !matches!(
-            part.part,
-            PartKind::ExecutableCode(_) | PartKind::CodeExecutionResult(_)
-        ) {
-            self.delivered = true;
-        }
-        match part {
-            Part {
-                part: PartKind::Text(text),
-                thought: Some(true),
-                thought_signature,
-                ..
-            } => {
-                // A signature closes accumulated reasoning or forms a signature-only block.
-                self.reasoning.emit_chunk(
-                    crate::providers::internal::chunk_lifecycle::ChunkParts {
-                        reasoning: Some(text),
-                        reasoning_signature: thought_signature,
-                        text: None,
-                        text_meta: None,
-                        tool_events: Vec::new(),
-                    },
-                    out,
-                );
-            }
-            Part {
-                part: PartKind::Text(text),
-                thought_signature,
-                ..
-            } => {
-                // A signature on answer text belongs to that text part, and
-                // must return on it: it rides on the text block's extras. A
-                // signature on its own empty part keeps its own part, and a
-                // signed part ends there.
-                let signed = thought_signature.is_some();
-                if signed && text.is_empty() {
-                    out.end_active_text();
-                }
-                self.reasoning.emit_chunk(
-                    crate::providers::internal::chunk_lifecycle::ChunkParts {
-                        reasoning: None,
-                        reasoning_signature: None,
-                        text: Some(text),
-                        text_meta: thought_signature.and_then(|signature| {
-                            super::text_signature_extras(super::GEMINI_TEXT_EXTRAS_KEY, signature)
-                        }),
-                        tool_events: Vec::new(),
-                    },
-                    out,
-                );
-                if signed {
-                    out.end_active_text();
-                }
-            }
-            Part {
-                part: PartKind::FunctionCall(function_call),
-                thought_signature,
-                ..
-            } => {
-                // Tool content interleaving an open thought block: the
-                // shared lifecycle synthesizes the boundary end.
-                self.reasoning.emit_chunk(
-                    crate::providers::internal::chunk_lifecycle::ChunkParts {
-                        reasoning: None,
-                        reasoning_signature: None,
-                        text: None,
-                        text_meta: None,
-                        tool_events: shared_parts::function_call(
-                            function_call.name,
-                            function_call.args,
-                            function_call.id,
-                            thought_signature,
-                            &mut self.tool_ids,
-                        ),
-                    },
-                    out,
-                );
-            }
-            Part {
-                part: part @ PartKind::InlineData(_),
-                thought_signature,
-                ..
-            } => {
-                // Preserve inline media in metadata because canonical stream blocks
-                // cannot represent image content.
-                let raw = Part {
-                    thought: None,
-                    thought_signature,
-                    part,
-                    additional_params: None,
-                };
-                let events = match crate::message::AdditionalParams::from_entries([(
-                    super::GEMINI_RAW_CONTENT_KEY,
-                    serde_json::json!(raw),
-                )]) {
-                    Some(params) => {
-                        let id = self.raw_ids.mint();
-                        vec![
-                            streaming::StreamEvent::BlockStart {
-                                id: id.clone(),
-                                source_order: None,
-                                kind: streaming::BlockKind::Text {
-                                    additional_params: Some(params),
-                                },
-                            },
-                            streaming::StreamEvent::BlockEnd {
-                                id,
-                                end: streaming::BlockClose::Text,
-                                block: None,
-                            },
-                        ]
-                    }
-                    None => Vec::new(),
-                };
-                // Raw media closes any open thought block before its own events.
-                self.reasoning.emit_chunk(
-                    crate::providers::internal::chunk_lifecycle::ChunkParts {
-                        reasoning: None,
-                        reasoning_signature: None,
-                        text: None,
-                        text_meta: None,
-                        tool_events: events,
-                    },
-                    out,
-                );
-            }
-            Part {
-                part: part @ (PartKind::ExecutableCode(_) | PartKind::CodeExecutionResult(_)),
-                ..
-            } => {
-                // Log only the unmodeled part's kind; hosted-tool payloads may be sensitive.
-                crate::driver::warn_unmodeled("gemini_part", &part_kind_name(&part));
-            }
-            Part { part, .. } => {
-                // Unexpected response parts must fail rather than silently discard content.
-                out.error(ProviderError::Response(format!(
-                    "Gemini response part kind {} carries no assistant content rig can account for",
-                    part_kind_name(&part)
-                )));
-                self.failed = true;
-            }
+/// Merge a streamed part into the part its block holds so far: the text
+/// appends, a non-empty `thoughtSignature` replaces the one held, and any
+/// other field replaces its namesake.
+fn merge_part(item: &mut Value, part: &Value) {
+    let (Value::Object(held), Value::Object(part)) = (&mut *item, part) else {
+        *item = part.clone();
+        return;
+    };
+    for (key, value) in part {
+        if key == "text"
+            && let (Some(Value::String(text)), Value::String(more)) = (held.get_mut("text"), value)
+        {
+            text.push_str(more);
+        } else if key != "thoughtSignature" || value.as_str() != Some("") {
+            held.insert(key.clone(), value.clone());
         }
     }
 }
 
+pub mod document;
+mod grounding;
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod decoder_tests;
+
+#[cfg(test)]
+mod upstream_tests;

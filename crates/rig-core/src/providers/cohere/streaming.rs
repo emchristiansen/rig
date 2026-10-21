@@ -583,8 +583,7 @@ fn billed_of(usage: Option<&Value>) -> Option<Usage> {
     Some(Usage::new().input_tokens(input).output_tokens(output))
 }
 
-/// Rig's usage from Cohere's: the `tokens` the model read and wrote,
-/// else the `billed_units`, with `cached_tokens` among the input.
+/// Reported token counters, with cached input only when `tokens` is present.
 pub(super) fn usage_of(usage: Option<&Value>) -> Usage {
     let count = |pointer: &str| usage?.at(pointer)?.as_u64_lenient();
     let input = count("/tokens/input_tokens");

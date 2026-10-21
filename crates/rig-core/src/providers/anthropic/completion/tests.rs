@@ -653,33 +653,30 @@ fn decoded_assistant(model: &str, content: Vec<Value>) -> message::Message {
 
 #[test]
 fn opus_4_8_preserves_system_message_after_assistant_server_tool_result() {
-    let request = completion_request_with_history(
-        vec![
-            decoded_assistant(
-                CLAUDE_OPUS_4_8,
-                vec![
-                    json!({"type":"server_tool_use","id":"srvtoolu_01","name":"web_search","input":{"query":"clear daytime sky color"}}),
-                    json!({"type":"web_search_tool_result","tool_use_id":"srvtoolu_01","content":{"type":"web_search_tool_result_error","error_code":"unavailable"}}),
-                ],
-            ),
-            message::Message::System {
-                content: "For the rest of this conversation, answer in Spanish.".to_string(),
-            },
-            message::Message::assistant("Entendido."),
-        ],
-        None,
+    let request = CompletionRequest::from(vec![
+        decoded_assistant(
+            CLAUDE_OPUS_4_8,
+            vec![
+                json!({"type":"server_tool_use","id":"srvtoolu_01","name":"web_search","input":{"query":"clear daytime sky color"}}),
+                json!({"type":"web_search_tool_result","tool_use_id":"srvtoolu_01","content":{"type":"web_search_tool_result_error","error_code":"unavailable"}}),
+            ],
+        ),
+        message::Message::System {
+            content: "For the rest of this conversation, answer in Spanish.".to_string(),
+        },
+        message::Message::assistant("Entendido."),
+    ])
+    .max_tokens(64);
+
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_OPUS_4_8);
+    let request = Completion::prepare(request, &wire.describe())
+        .expect("the hosted-result history prepares");
+    let value = json_body(
+        &wire
+            .encode(request, Mode::Unary)
+            .expect("the hosted-result history encodes")
+            .request,
     );
-
-    let request = request_body(Params {
-        model: CLAUDE_OPUS_4_8,
-        request,
-        prompt_caching: false,
-        cache: None,
-        static_prefix_cache_ttl: None,
-    })
-    .unwrap();
-
-    let value = serde_json::to_value(request).unwrap();
     assert!(value.get("system").is_none());
 
     let messages = value["messages"].as_array().unwrap();
@@ -3268,6 +3265,37 @@ fn messages_refuses_foreign_or_edited_carried_hosted_blocks_before_adaptation() 
 }
 
 #[test]
+fn messages_prepares_and_encodes_only_the_current_known_carried_text() {
+    let raw = json!({"text":"original", "executableCode":{"language":"RUST","code":"x"},
+        "arbitrary":{"retained":"inspection"}});
+    for content in [
+        message::CarriedTextContent::GeminiSignedAnswer(message::GeminiSignedAnswer {
+            text: "original".into(), signature: message::GeminiThoughtSignature::new("signature"),
+        }),
+        message::CarriedTextContent::InspectionOnlyMedia("original".into()),
+        message::CarriedTextContent::InspectionOnlyText("original".into()),
+    ] {
+        let mut part = message::CarriedText::new(content,
+            message::CarriedPayload::new(raw.clone(), Some("gemini".into()))
+                .with_position(message::CarriedPosition::MessageContent { item_index: 2, part_index: 3 }));
+        *part.text_mut() = "edited".into();
+        assert_eq!(part.payload.item, raw);
+        assert_eq!(part.payload.provider.as_deref(), Some("gemini"));
+        let body = prepared_body(vec![
+            message::Message::user("before"),
+            message::Message::Assistant(message::AssistantMessage::new(vec![
+                message::AssistantContent::CarriedText(part),
+            ])),
+            message::Message::user("continue"),
+        ]);
+        assert_eq!(body["messages"][1]["content"], json!([{"type":"text","text":"edited"}]));
+        assert!(!body.to_string().contains("executableCode"));
+        assert!(!body.to_string().contains("arbitrary"));
+        assert!(!body.to_string().contains("signature"));
+    }
+}
+
+#[test]
 fn current_provider_items_replay_verbatim() {
     let thinking = json!({"type": "thinking", "thinking": "step one", "signature": "sig-1"});
     let redacted = json!({"type": "redacted_thinking", "data": "redacted block"});
@@ -4492,4 +4520,38 @@ fn carried_hosted_results_replay_without_an_origin_or_a_matching_use() {
         message::Message::user("next"),
     ]);
     assert_eq!(body["messages"][1]["content"], json!([raw]));
+}
+
+#[test]
+fn messages_refuses_an_empty_known_projection_but_keeps_nonempty_siblings() {
+    for content in [
+        message::CarriedTextContent::GeminiSignedAnswer(message::GeminiSignedAnswer {
+            text: String::new(), signature: message::GeminiThoughtSignature::new("signature"),
+        }),
+        message::CarriedTextContent::InspectionOnlyMedia(String::new()),
+        message::CarriedTextContent::InspectionOnlyText(String::new()),
+    ] {
+        let part = message::CarriedText::new(content,
+            message::CarriedPayload::new(json!({"text":"", "arbitrary":"history only"}),
+                Some("gcp.gemini".into())));
+        let empty = message::AssistantContent::CarriedText(part);
+        let wire = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+        let request = Completion::prepare(CompletionRequest::from(vec![
+            message::Message::user("before"),
+            message::Message::Assistant(message::AssistantMessage::new(vec![empty.clone()])),
+            message::Message::user("continue"),
+        ]), &wire.describe()).expect("known empty projection preflights");
+        let error = wire.encode(request, Mode::Unary).expect_err("empty assistant cannot be sent");
+        assert_eq!(error.to_string(), "Assistant message did not contain Anthropic-compatible content");
+        let body = prepared_body(vec![
+            message::Message::user("before"),
+            message::Message::Assistant(message::AssistantMessage::new(vec![
+                empty, message::AssistantContent::text("answer"),
+            ])),
+            message::Message::user("continue"),
+        ]);
+        assert_eq!(body["messages"][1]["content"], json!([{"type":"text","text":"answer"}]));
+        assert!(!body.to_string().contains("arbitrary"));
+        assert!(!body.to_string().contains("signature"));
+    }
 }

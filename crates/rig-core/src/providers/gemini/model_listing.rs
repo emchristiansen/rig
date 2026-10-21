@@ -1,86 +1,57 @@
 use crate::error::EncodeError;
 use crate::error::ProviderError;
+use crate::wire::Flow;
 use crate::{
-    model::{Model, ModelList, listing},
-    operation::{ModelListing, Verify},
+    model::{ModelInfo, ModelList, listing},
+    operation::{ModelListing, ModelPage, Verify},
     providers::internal::{wire::classify_marker_keyed_frame, with_query_pairs},
-    wire::{Body, Decoder, Encoded, Framing, Mode, Output, Sink, Wire, WireEvent, WireFrame},
+    wire::{Body, Decoder, Descriptor, Encoded, Framing, Mode, Out, Wire, WireEvent, WireFrame},
 };
 use serde::{Deserialize, Serialize};
-use std::{convert::TryFrom, fmt};
 
-const MAX_PAGE_SIZE: usize = 1000;
-
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ListModelsResponse {
+struct ListingReply {
     #[serde(default)]
-    models: Vec<ListModelEntry>,
+    models: Vec<ModelEntry>,
     next_page_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ListModelEntry {
+struct ModelEntry {
     #[serde(default)]
     name: String,
     base_model_id: Option<String>,
     display_name: Option<String>,
     description: Option<String>,
     input_token_limit: Option<u64>,
-    /// Provider-reported maximum output tokens.
     output_token_limit: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct MissingModelIdError;
+const MAX_PAGE_SIZE: usize = 1000;
 
-impl fmt::Display for MissingModelIdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "parse_error=model entry missing usable `baseModelId` and `name` values"
-        )
-    }
-}
-
-impl std::error::Error for MissingModelIdError {}
-
-fn normalize_gemini_model_id(name: &str) -> Option<String> {
-    let trimmed = name.trim();
-    let trimmed = trimmed.strip_prefix("models/").unwrap_or(trimmed);
-
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
-impl TryFrom<ListModelEntry> for Model {
-    type Error = MissingModelIdError;
-
-    fn try_from(value: ListModelEntry) -> Result<Self, Self::Error> {
-        let id = value
-            .base_model_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_owned)
-            .or_else(|| normalize_gemini_model_id(&value.name))
-            .ok_or(MissingModelIdError)?;
-
-        let mut model = Model::from_id(id);
-        model.name = value.display_name;
-        model.description = value.description;
-        model.context_length = value
-            .input_token_limit
-            .and_then(|limit| u32::try_from(limit).ok());
-        model.max_output_tokens = value
-            .output_token_limit
-            .and_then(|limit| u32::try_from(limit).ok());
-        Ok(model)
-    }
+/// The model a listing entry names: its `baseModelId`, else its `name`
+/// without the `models/` prefix, with the limits it reports.
+fn model_of(entry: &ModelEntry) -> Option<ModelInfo> {
+    let id = entry
+        .base_model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    let name = entry.name.trim();
+    let name = name.strip_prefix("models/").unwrap_or(name);
+    let id = id.or((!name.is_empty()).then_some(name))?;
+    let mut model = ModelInfo::from_id(id.to_owned());
+    model.name = entry.display_name.clone();
+    model.description = entry.description.clone();
+    model.context_length = entry
+        .input_token_limit
+        .and_then(|limit| u32::try_from(limit).ok());
+    model.max_output_tokens = entry
+        .output_token_limit
+        .and_then(|limit| u32::try_from(limit).ok());
+    Some(model)
 }
 
 fn list_models_path(page_token: Option<&str>) -> String {
@@ -95,29 +66,45 @@ fn list_models_path(page_token: Option<&str>) -> String {
 /// A decoded model page with an optional nonempty continuation cursor.
 #[derive(Debug)]
 struct ListingPage {
-    models: Vec<Model>,
+    models: Vec<ModelInfo>,
     next_cursor: Option<String>,
 }
 
 fn parse_models_page(body: &[u8], path: &str) -> Result<ListingPage, ProviderError> {
-    let page: ListModelsResponse = serde_json::from_slice(body).map_err(|error| {
-        listing::parse_error("Gemini", path, format_args!("parse_error={error}"), body)
-    })?;
-
+    let error =
+        |details: &dyn std::fmt::Display| listing::parse_error("Gemini", path, details, body);
+    let page: ListingReply = serde_json::from_slice(body)
+        .map_err(|parse| error(&format_args!("parse_error={parse}")))?;
     let models = page
         .models
-        .into_iter()
+        .iter()
         .map(|entry| {
-            Model::try_from(entry)
-                .map_err(|error| listing::parse_error("Gemini", path, error, body))
+            model_of(entry).ok_or_else(|| {
+                error(&"parse_error=model entry missing usable `baseModelId` and `name` values")
+            })
         })
         .collect::<Result<Vec<_>, _>>()?;
-
     // Sending an empty cursor would repeatedly fetch the same page.
     Ok(ListingPage {
         models,
-        next_cursor: page.next_page_token.filter(|token| !token.is_empty()),
+        next_cursor: page
+            .next_page_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned),
     })
+}
+
+impl super::GeminiConfig {
+    /// The GenerateContent model-listing wire.
+    pub(crate) fn models(&self) -> Models {
+        Models::new(self.clone())
+    }
+
+    /// The credential-check wire.
+    pub(crate) fn verify(&self) -> VerifyKey {
+        VerifyKey::new(self.clone())
+    }
 }
 
 #[cfg(test)]
@@ -138,7 +125,7 @@ enum Auth {
 
 /// One page's request, after `page_token` when a page named one.
 fn list_models_request(
-    provider: &super::Gemini,
+    provider: &super::GeminiConfig,
     auth: Auth,
     page_token: Option<&str>,
 ) -> Result<http::Request<Body>, EncodeError> {
@@ -162,34 +149,37 @@ fn list_models_request(
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Models {
     /// The provider this wire speaks to.
-    pub provider: super::Gemini,
+    pub provider: super::GeminiConfig,
 }
 
 impl Models {
     /// Build the wire over `provider`.
-    pub fn new(provider: super::Gemini) -> Self {
+    pub fn new(provider: super::GeminiConfig) -> Self {
         Self { provider }
     }
 }
 
 impl Wire for Models {
     type Op = ModelListing;
-    type Decoder = ModelsDecoder;
+    type Payload = crate::wire::Encoded;
+    type Frame = crate::wire::WireFrame;
+    type Decoder<'id> = ModelsDecoder;
+    type Reassembler = crate::wire::document::Unreassembled;
 
-    fn name(&self) -> &str {
-        super::PROVIDER_NAME
+    fn describe(&self) -> Descriptor<'_> {
+        Descriptor::new(super::PROVIDER_NAME)
     }
 
     /// A listing never streams, so both modes send the one request.
-    fn encode(&self, _request: (), _mode: Mode) -> Result<Encoded, EncodeError> {
+    fn encode(&self, cursor: Option<String>, _mode: Mode) -> Result<Encoded, EncodeError> {
         Ok(Encoded::new(
-            list_models_request(&self.provider, Auth::Query, None)?,
+            list_models_request(&self.provider, Auth::Query, cursor.as_deref())?,
             Framing::Whole,
         ))
     }
 
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
-        ModelsDecoder::new(self.provider.clone(), Auth::Query)
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
+        ModelsDecoder
     }
 }
 
@@ -198,81 +188,68 @@ impl Wire for Models {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InteractionsModels {
     /// The provider this wire speaks to.
-    pub provider: super::Gemini,
+    pub provider: super::GeminiConfig,
 }
 
 impl InteractionsModels {
     /// Build the wire over `provider`.
-    pub fn new(provider: super::Gemini) -> Self {
+    pub fn new(provider: super::GeminiConfig) -> Self {
         Self { provider }
     }
 }
 
 impl Wire for InteractionsModels {
     type Op = ModelListing;
-    type Decoder = ModelsDecoder;
+    type Payload = crate::wire::Encoded;
+    type Frame = crate::wire::WireFrame;
+    type Decoder<'id> = ModelsDecoder;
+    type Reassembler = crate::wire::document::Unreassembled;
 
-    fn name(&self) -> &str {
-        super::PROVIDER_NAME
+    fn describe(&self) -> Descriptor<'_> {
+        Descriptor::new(super::PROVIDER_NAME)
     }
 
     /// A listing never streams, so both modes send the one request.
-    fn encode(&self, _request: (), _mode: Mode) -> Result<Encoded, EncodeError> {
+    fn encode(&self, cursor: Option<String>, _mode: Mode) -> Result<Encoded, EncodeError> {
         Ok(Encoded::new(
-            list_models_request(&self.provider, Auth::Header, None)?,
+            list_models_request(&self.provider, Auth::Header, cursor.as_deref())?,
             Framing::Whole,
         ))
     }
 
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
-        ModelsDecoder::new(self.provider.clone(), Auth::Header)
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
+        ModelsDecoder
     }
 }
 
-/// Decode model pages and follow cursors using the original authentication mode.
-pub struct ModelsDecoder {
-    provider: super::Gemini,
-    auth: Auth,
-    /// The cursor the page just interpreted named, when it named a usable one.
-    next: Option<String>,
-}
+/// Decode model pages and the cursor each names.
+#[derive(Default)]
+pub struct ModelsDecoder;
 
-impl ModelsDecoder {
-    fn new(provider: super::Gemini, auth: Auth) -> Self {
-        Self {
-            provider,
-            auth,
-            next: None,
-        }
-    }
-}
-
-impl Decoder<ModelListing> for ModelsDecoder {
+impl<'id> Decoder<'id, ModelListing> for ModelsDecoder {
     /// The page JSON, retained for model-entry error context.
     type Event = String;
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
         let payload = frame.as_str().into_owned();
-        let classified =
-            classify_marker_keyed_frame::<ListModelsResponse>(&payload, MODEL_PAGE_MARKERS);
+        let classified = classify_marker_keyed_frame::<ListingReply>(&payload, MODEL_PAGE_MARKERS);
         classified.map(|_| payload)
     }
 
-    fn interpret(&mut self, payload: Self::Event, out: &mut Output<ModelListing>) {
+    fn decode(
+        &mut self,
+        payload: Self::Event,
+        out: Out<'id, ModelListing>,
+    ) -> Result<Flow, ProviderError> {
         // Diagnostics identify the endpoint without retaining the previous page's cursor.
         let path = list_models_path(None);
         match parse_models_page(payload.as_bytes(), &path) {
-            Ok(page) => {
-                self.next = page.next_cursor;
-                out.push(Ok(ModelList::new(page.models)));
-            }
-            Err(error) => out.push(Err(error)),
+            Ok(page) => Ok(out.end(ModelPage {
+                models: ModelList::new(page.models),
+                next: page.next_cursor,
+            })),
+            Err(error) => Err(error),
         }
-    }
-
-    fn continuation(&self) -> Option<http::Request<Body>> {
-        let cursor = self.next.as_deref()?;
-        list_models_request(&self.provider, self.auth, Some(cursor)).ok()
     }
 }
 
@@ -280,22 +257,25 @@ impl Decoder<ModelListing> for ModelsDecoder {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct VerifyKey {
     /// The provider this wire speaks to.
-    pub provider: super::Gemini,
+    pub provider: super::GeminiConfig,
 }
 
 impl VerifyKey {
     /// Build the wire over `provider`.
-    pub fn new(provider: super::Gemini) -> Self {
+    pub fn new(provider: super::GeminiConfig) -> Self {
         Self { provider }
     }
 }
 
 impl Wire for VerifyKey {
     type Op = Verify;
-    type Decoder = VerifyKeyDecoder;
+    type Payload = crate::wire::Encoded;
+    type Frame = crate::wire::WireFrame;
+    type Decoder<'id> = VerifyKeyDecoder;
+    type Reassembler = crate::wire::document::Unreassembled;
 
-    fn name(&self) -> &str {
-        super::PROVIDER_NAME
+    fn describe(&self) -> Descriptor<'_> {
+        Descriptor::new(super::PROVIDER_NAME)
     }
 
     fn encode(&self, _request: (), _mode: Mode) -> Result<Encoded, EncodeError> {
@@ -308,34 +288,32 @@ impl Wire for VerifyKey {
         Ok(Encoded::new(request, Framing::Whole))
     }
 
-    fn decoder(&self, _mode: Mode) -> Self::Decoder {
-        VerifyKeyDecoder::default()
+    fn decoder<'id>(&self) -> Self::Decoder<'id> {
+        VerifyKeyDecoder
     }
 }
 
 /// Verify a successful response without normalizing model entries.
 #[derive(Default)]
-pub struct VerifyKeyDecoder {
-    answered: bool,
-}
+pub struct VerifyKeyDecoder;
 
-impl Decoder<Verify> for VerifyKeyDecoder {
+impl<'id> Decoder<'id, Verify> for VerifyKeyDecoder {
     type Event = ();
 
     fn classify(&self, frame: WireFrame) -> WireEvent<Self::Event> {
-        classify_marker_keyed_frame::<ListModelsResponse>(&frame.as_str(), MODEL_PAGE_MARKERS)
-            .map(|_| ())
+        classify_marker_keyed_frame::<ListingReply>(&frame.as_str(), MODEL_PAGE_MARKERS).map(|_| ())
     }
 
-    fn interpret(&mut self, _event: Self::Event, out: &mut Output<Verify>) {
-        self.answered = true;
-        out.push(Ok(()));
+    fn decode(
+        &mut self,
+        _event: Self::Event,
+        out: Out<'id, Verify>,
+    ) -> Result<Flow, ProviderError> {
+        Ok(out.end(()))
     }
 
-    /// Emit success if no recognized page supplied an event.
-    fn finish(&mut self, out: &mut Output<Verify>) {
-        if !self.answered {
-            out.push(Ok(()));
-        }
+    /// A success status verifies even when no recognized page arrived.
+    fn eof(&mut self, out: Out<'id, Verify>) -> Result<Flow, ProviderError> {
+        Ok(out.end(()))
     }
 }

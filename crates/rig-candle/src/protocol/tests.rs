@@ -388,7 +388,7 @@ fn qwen_protocol_rejects_wrong_delimiters_definitions_and_native_schema() {
 #[test]
 fn qwen_missing_ids_are_deterministic_distinct_and_not_provider_issued() {
     let raw = r#"<tool_call>{"name":"calculate","arguments":{"value":1}}</tool_call><tool_call>{"id":"tool-0","name":"calculate","arguments":{"value":2}}</tool_call><tool_call>{"name":"calculate","arguments":{"value":3}}</tool_call>"#;
-    let request = request(vec![Message::user("calculate")]);
+    let request = CompletionRequest::new("calculate");
     let parse = || {
         parse_assistant(raw, &request, ConversationProtocol::Qwen3)
             .expect("valid tool-call envelope")
@@ -415,17 +415,17 @@ fn qwen_missing_ids_are_deterministic_distinct_and_not_provider_issued() {
             .len(),
         3
     );
-    assert!(calls[0].provider.is_none());
-    assert_eq!(calls[1].id.explicit(), Some("tool-0"));
+    assert!(calls[0].id.provider().is_none());
+    assert_eq!(calls[1].id.provider().map(|id| id.as_str()), Some("tool-0"));
     assert_eq!(
         calls[1]
-            .provider
-            .as_ref()
+            .id
+            .provider()
             .expect("valid tool-call envelope")
-            .call_id,
+            .as_str(),
         "tool-0"
     );
-    assert!(calls[2].provider.is_none());
+    assert!(calls[2].id.provider().is_none());
 }
 
 /// Qwen has no wire-ID field, but its renderer must retain typed correlation.
@@ -562,7 +562,7 @@ fn renderer_rejects_stale_results_after_provider_handle_reuse() {
 /// ids.
 #[test]
 fn id_less_tool_call_envelopes_mint_distinct_handles_by_position() {
-    let request = request(vec![Message::user("both")]);
+    let request = CompletionRequest::new("both");
     let raw = concat!(
         r#"<tool_call>{"name":"calculate","arguments":{"value":1}}</tool_call>"#,
         r#"<tool_call>{"id":"explicit-1","name":"lookup","arguments":{}}</tool_call>"#,
@@ -582,9 +582,9 @@ fn id_less_tool_call_envelopes_mint_distinct_handles_by_position() {
     assert_eq!(
         ids,
         [
-            ToolCallId::minted(0),
-            ToolCallId::new("explicit-1").expect("explicit"),
-            ToolCallId::minted(2),
+            CallId::Local(LocalCallId::for_candle_response_position(0)),
+            CallId::from_wire("explicit-1"),
+            CallId::Local(LocalCallId::for_candle_response_position(2)),
         ]
     );
 }

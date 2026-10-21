@@ -264,3 +264,91 @@ async fn image_embeddings_non_success_preserves_status_and_body() {
     );
     assert_eq!(error.provider_response_body(), Some(body));
 }
+
+#[test]
+fn an_embedding_wire_reports_the_models_published_width() {
+    let wire = cohere().embedding("embed-english-light-v3.0", None);
+    assert_eq!(
+        wire.describe().capabilities,
+        Capabilities::embedding(96, 384)
+    );
+    assert_eq!(
+        cohere()
+            .embedding("embed-english-light-v3.0", Some(64))
+            .ndims,
+        64,
+        "a width the caller named wins over the model's table"
+    );
+}
+
+#[test]
+fn an_image_the_provider_will_not_accept_never_reaches_the_wire() {
+    let rejected = cohere()
+        .image_embedding()
+        .encode(vec![b"not an image".to_vec()], Mode::Unary);
+    let Err(error) = rejected else {
+        panic!("an unsniffable format must be rejected before the request is built");
+    };
+    assert!(matches!(
+        ProviderError::from(error),
+        ProviderError::Request(_)
+    ));
+}
+
+#[tokio::test]
+async fn image_batches_are_fully_validated_before_any_request() {
+    let http_client = RecordingHttpClient::default();
+    let model = crate::driver::Model::new(cohere().image_embedding(), http_client.clone());
+    let error = model.embed_images_response(crate::operation::CohereImageBatch::new(
+        png(b"first"), [b"not an image".to_vec()],
+    )).await.expect_err("invalid batch should fail before transport");
+    assert!(matches!(error, ProviderError::Request(_)));
+    assert!(http_client.requests().is_empty());
+}
+
+#[tokio::test]
+async fn an_image_batch_folds_its_replies_in_input_order() {
+    let http = SequencedHttpClient::new([image_reply(0.5), image_reply(0.75)]);
+    let response = crate::driver::Model::new(cohere().image_embedding(), http.clone())
+        .embed_images_response(crate::operation::CohereImageBatch::new(png(b"first"), [png(b"second")]))
+        .await.expect("both replies decode");
+    assert_eq!(http.requests().len(), 2);
+    assert_eq!(response.embeddings.iter().map(|embedding| embedding.vec.as_slice()).collect::<Vec<_>>(),
+        vec![[0.5, 1.0].as_slice(), [0.75, 1.0].as_slice()]);
+    assert_eq!(response.embeddings[0].document, crate::embeddings::image_document(&png(b"first")));
+    assert_ne!(response.embeddings[0].document, response.embeddings[1].document);
+    assert_eq!(response.usage.input_tokens, None);
+    let pages: Vec<ImageEmbeddingResponse> = serde_json::from_value(response.raw.clone()).expect("raw is the per-image array");
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages.iter().map(|page| page.id.as_deref()).collect::<Vec<_>>(), vec![Some("img-0.5"), Some("img-0.75")]);
+    assert!(pages.iter().all(|page| page.meta.as_ref().map(|meta| meta.billed_units.images) == Some(1)));
+}
+
+#[tokio::test]
+async fn a_failed_middle_image_stops_later_requests_and_returns_no_partial_batch() {
+    let http = SequencedHttpClient::new([
+        image_reply(0.5), MockHttpResponse::success(r#"{"message":"middle image failed"}"#), image_reply(0.75),
+    ]);
+    let error = crate::driver::Model::new(cohere().image_embedding(), http.clone())
+        .embed_images_response(crate::operation::CohereImageBatch::new(png(b"first"), [png(b"second"), png(b"third")]))
+        .await.expect_err("a partial success is not returned");
+    assert_eq!(http.requests().len(), 2);
+    assert_eq!(error.provider_response_body(), Some(r#"{"message":"middle image failed"}"#));
+    assert_eq!(error.provider_response_status(), Some(http::StatusCode::OK));
+}
+
+#[tokio::test]
+async fn image_batch_usage_sums_only_the_reported_counters() {
+    let reply = |id: &str, input: u32, output: u32| MockHttpResponse::success(json!({
+        "id":id,"embeddings":{"float":[[0.5,1.0]]},
+        "meta":{"api_version":{"version":"1"},"billed_units":{"input_tokens":input,"output_tokens":output,"images":1}},
+    }).to_string());
+    let http = SequencedHttpClient::new([reply("first", 3, 2), reply("second", 5, 7)]);
+    let response = crate::driver::Model::new(cohere().image_embedding(), http)
+        .embed_images_response(crate::operation::CohereImageBatch::new(png(b"first"), [png(b"second")]))
+        .await.expect("both token-bearing pages decode");
+    assert_eq!(response.usage.input_tokens, Some(8));
+    assert_eq!(response.usage.output_tokens, Some(9));
+    assert_eq!(response.usage.total_tokens, Some(17));
+    assert_eq!(response.response_id.as_deref(), Some("first"));
+}

@@ -643,29 +643,19 @@ fn the_type_key_is_the_tag_and_the_untagged_shape_does_not_load() {
 }
 
 #[test]
-fn prompt_response_roundtrip_preserves_explicit_content() {
-    // An explicitly-set `content` (e.g. the streaming surface's structured
-    // final turn) must survive a serialize/deserialize round-trip intact —
-    // `content` and `output` are independent fields.
-    let response = PromptResponse::new("visible text", Usage::default())
-        .with_content(vec![AssistantContent::text("structured")]);
-
+fn prompt_response_roundtrip_derives_output_from_content() {
+    let response = PromptResponse::from_content(vec![AssistantContent::text("structured")], Usage::default());
     let value = serde_json::to_value(&response).expect("serialize prompt response");
-    assert!(
-        value.get("content").is_some(),
-        "content is part of the serialized shape"
-    );
-
+    assert!(value.get("content").is_some(), "content is part of the serialized shape");
+    assert!(value.get("output").is_none(), "output is derived from canonical content");
+    assert_eq!(value["messages"], json!([]), "no-run history is an empty list");
     let round: PromptResponse = serde_json::from_value(value).expect("deserialize prompt response");
-    assert_eq!(round.output(), "visible text");
-    // The stored content is "structured" — distinct from `output` — so the
-    // round trip demonstrably carried `content` itself rather than anything
-    // derived from `output`. (Compare the text directly to sidestep the
-    // `Text::additional_params` serde round-trip asymmetry.)
+    assert_eq!(round.output(), "structured");
     let Some(AssistantContent::Text(text)) = round.content().first() else {
         panic!("expected text content, got {:?}", round.content().first());
     };
     assert_eq!(text.text, "structured");
+    assert!(round.messages().is_empty());
 }
 
 #[test]

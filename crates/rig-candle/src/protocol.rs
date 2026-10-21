@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use rig_core::completion::{AssistantContent, CompletionRequest, ToolDefinition};
 use rig_core::message::{
+    CallId, LocalCallId, ToolName,
     Message, Reasoning, ToolCall, ToolCallId, ToolChoice, ToolFunction, ToolResultContent,
     UserContent,
 };
@@ -819,12 +820,15 @@ fn parse_qwen3_assistant(
                 "duplicate or empty tool-call ID `{id}`"
             )));
         }
-        // The `tool_calls`-th call of the turn: an id-less envelope mints
-        // its handle at that index, so two calls never share one.
-        items.push(AssistantContent::ToolCall(ToolCall::from_wire_indexed(
-            envelope.id.unwrap_or_default(),
-            tool_calls as u64,
-            ToolFunction::new(envelope.name, envelope.arguments),
+        let name = ToolName::new(envelope.name)
+            .map_err(|error| CandleError::MalformedToolCall(error.to_string()))?;
+        let id = match envelope.id {
+            Some(id) => CallId::from_wire(id),
+            None => CallId::Local(LocalCallId::for_candle_response_position(tool_calls as u64)),
+        };
+        items.push(AssistantContent::ToolCall(ToolCall::new(
+            id,
+            ToolFunction::new(name, envelope.arguments),
         )));
         tool_calls += 1;
         remaining = after_start[end + TOOL_CALL_END.len()..].trim_start();
@@ -843,7 +847,6 @@ fn parse_qwen3_assistant(
         ));
     }
     // Preserve empty turns without inventing model output.
-    rig_core::message::normalize_missing_tool_call_ids(&mut items);
     let visible_text = canonicalize_visible_text(&mut items);
     Ok(ParsedAssistant {
         items,
@@ -898,3 +901,6 @@ fn push_text(items: &mut Vec<AssistantContent>, text: &str) {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 mod tests;
+
+#[cfg(test)]
+mod parser_identity_tests;

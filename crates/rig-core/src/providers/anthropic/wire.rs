@@ -535,9 +535,9 @@ impl crate::completion::ReplayTarget for Messages {
         &self,
         part: &crate::message::CarriedText,
     ) -> Result<(), crate::message::UnrepresentableOpaqueContent> {
-        if self.provider.dialect.name == super::PROVIDER_NAME
+        if part.known_text_projection().is_some() || (self.provider.dialect.name == super::PROVIDER_NAME
             && super::completion::carried_hosted(part)
-        {
+        ) {
             Ok(())
         } else {
             Err(crate::message::UnrepresentableOpaqueContent::new(
@@ -668,6 +668,11 @@ impl crate::completion::ReplayTarget for Messages {
 
     /// What the encoder sends for the block, so the two never disagree.
     fn sends_alone(&self, block: &crate::message::AssistantContent) -> bool {
+        if matches!(block, crate::message::AssistantContent::CarriedText(part)
+            if part.known_text_projection() == Some(""))
+        {
+            return true;
+        }
         // Keep an unrepresentable block until encoding can return its typed refusal.
         super::completion::assistant_parts(block, self, None)
             .map_or(true, |parts| !parts.is_empty())

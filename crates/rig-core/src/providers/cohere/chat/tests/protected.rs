@@ -148,8 +148,18 @@ fn usage_is_mapped_from_tokens_and_carries_cached_input() {
 async fn response_usage_matches_the_canonical_mapping() {
     const BODY: &str = r#"{"id":"abc123","finish_reason":"COMPLETE","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},"usage":{"billed_units":{"input_tokens":135,"output_tokens":24},"cached_tokens":112,"tokens":{"input_tokens":1610,"output_tokens":56}}}"#;
     let event: ChatEvent = serde_json::from_str(BODY).expect("wire response");
-    let expected = usage_of(event.fields.get("usage"));
+    let mut expected = usage_of(event.fields.get("usage"));
     let converted = unary(BODY).await;
+    assert!(
+        converted.usage.cost.is_some(),
+        "catalog prices the billed counters"
+    );
+    expected.cost = Some(crate::completion::Cost::from_parts(
+        135.0 * 2.5 / 1e6,
+        24.0 * 10.0 / 1e6,
+        0.0,
+        0.0,
+    ));
     assert_eq!(converted.usage, expected);
     assert_eq!(converted.usage.input_tokens, Some(1610));
     assert_eq!(converted.usage.cached_input_tokens, Some(112));
@@ -161,11 +171,7 @@ async fn response_usage_matches_the_canonical_mapping() {
 
 #[test]
 fn usage_without_token_counts_is_unreported() {
-    for value in [
-        json!({}),
-        json!({"cached_tokens":512}),
-        json!({"billed_units":{"input_tokens":3,"output_tokens":2},"cached_tokens":512}),
-    ] {
+    for value in [json!({}), json!({"cached_tokens":512})] {
         assert_eq!(usage_of(Some(&value)), crate::completion::Usage::default());
     }
 }

@@ -300,5 +300,46 @@ fn vertex_image_config(image_config: GeminiImageConfig) -> vertexai::model::Imag
     vertex_config
 }
 
+/// Build the shared Vertex body after checking original control types.
+/// The adjustment closure runs only after the original primitive types pass.
+pub(crate) fn request_body(
+    request: &rig_core::completion::CompletionRequest,
+    target: &dyn rig_core::completion::ReplayTarget,
+    model: &str,
+    adjust: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+) -> Result<rig_core::completion::options::FinalBody, rig_core::error::EncodeError> {
+    check_original_control_types(request)?;
+    rig_core::providers::gemini::completion::request_body_for_vertex(
+        request, target, model, None, adjust,
+    )
+}
+
+/// Check the original JSON types of controls before explicit replacements.
+/// Absent and null controls are accepted. Numeric ranges apply after replacement.
+/// Wrong types are request errors whose source retains the original JSON error.
+pub(crate) fn check_original_control_types(
+    request: &rig_core::completion::CompletionRequest,
+) -> Result<(), rig_core::error::EncodeError> {
+    use serde::Deserialize;
+    let Some(config) = request.additional_params.as_ref().and_then(|params| params.get("generationConfig")) else {
+        return Ok(());
+    };
+    for (field, value) in config.as_object().into_iter().flatten() {
+        if value.is_null() {
+            continue;
+        }
+        let checked = match field.as_str() {
+            "temperature" => f64::deserialize(value).map(|_| ()),
+            "maxOutputTokens" => u64::deserialize(value).map(|_| ()),
+            "candidateCount" => i32::deserialize(value).map(|_| ()),
+            _ => continue,
+        };
+        checked.map_err(|error| {
+            rig_core::error::EncodeError::request(ProviderError::from(error))
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

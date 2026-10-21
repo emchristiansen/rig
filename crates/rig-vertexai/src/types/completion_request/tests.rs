@@ -888,3 +888,104 @@ fn opaque_responses_parts_are_refused_before_request_content_is_discarded() {
         assert!(error.to_string().contains("opaque"));
     }
 }
+
+#[test]
+fn original_raw_control_types_refuse_before_explicit_overrides() {
+    for (field, value, expected) in [
+        ("temperature", serde_json::json!("hot"), "invalid type: string \"hot\", expected f64"),
+        ("maxOutputTokens", serde_json::json!(true), "invalid type: boolean `true`, expected u64"),
+        ("candidateCount", serde_json::json!("many"), "invalid type: string \"many\", expected i32"),
+    ] {
+        let mut config = serde_json::Map::new();
+        config.insert(field.to_owned(), value);
+        let mut request = rig_core::completion::CompletionRequest::new("question");
+        request.additional_params = Some(serde_json::json!({"generationConfig":config}));
+        request.temperature = Some(0.5);
+        request.max_tokens = Some(50);
+        let adjusted = std::cell::Cell::new(0);
+        let target = rig_core::providers::gemini::completion::GenerateContent::new(
+            rig_core::providers::gemini::GeminiConfig::new("test-key"), "gemini-2.5-flash",
+        );
+        let error = super::request_body(&request, &target, "gemini-2.5-flash", |_| {
+            adjusted.set(adjusted.get() + 1);
+        }).expect_err("original type is checked before replacement");
+        let error = ProviderError::from(error);
+        assert!(matches!(&error, ProviderError::Request(_)));
+        assert_eq!(error.to_string(), format!("RequestError: JsonError: {expected}"));
+        let json = std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<ProviderError>())
+            .expect("request error retains the typed JSON error");
+        let ProviderError::Json(json) = json else { panic!("typed JSON source: {json:?}"); };
+        assert_eq!(json.to_string(), expected);
+        assert!(std::error::Error::source(std::error::Error::source(&error).expect("JSON source"))
+            .and_then(|source| source.downcast_ref::<serde_json::Error>()).is_some());
+        assert_eq!(adjusted.get(), 0);
+    }
+}
+
+#[test]
+fn original_numeric_types_accept_overridden_ranges_and_null_or_absent_fields() {
+    for params in [
+        None,
+        Some(serde_json::json!({})),
+        Some(serde_json::json!({"generationConfig":null})),
+        Some(serde_json::json!({"generationConfig":{"temperature":null,"maxOutputTokens":null,"candidateCount":null}})),
+        Some(serde_json::json!({"generationConfig":{"temperature":999.0,"maxOutputTokens":u64::MAX,"candidateCount":-1}})),
+    ] {
+        let mut request = rig_core::completion::CompletionRequest::new("question");
+        request.additional_params = params;
+        request.temperature = Some(0.5);
+        request.max_tokens = Some(50);
+        super::check_original_control_types(&request).expect("only original types are checked here");
+    }
+}
+
+#[test]
+fn original_primitive_type_refusal_follows_received_field_order() {
+    for (raw, expected) in [
+        (r#"{"generationConfig":{"maxOutputTokens":true,"temperature":"hot"}}"#,
+         "invalid type: boolean `true`, expected u64"),
+        (r#"{"generationConfig":{"temperature":"hot","maxOutputTokens":true}}"#,
+         "invalid type: string \"hot\", expected f64"),
+        (r#"{"generationConfig":{"candidateCount":"many","maxOutputTokens":true}}"#,
+         "invalid type: string \"many\", expected i32"),
+    ] {
+        let mut request = CompletionRequest::new("question");
+        request.additional_params = Some(serde_json::from_str(raw).expect("literal input"));
+        request.temperature = Some(0.5);
+        request.max_tokens = Some(50);
+        let adjusted = std::cell::Cell::new(0);
+        let target = rig_core::providers::gemini::completion::GenerateContent::new(
+            rig_core::providers::gemini::GeminiConfig::new("test-key"), "gemini-2.5-flash",
+        );
+        let error = super::request_body(&request, &target, "gemini-2.5-flash", |_| {
+            adjusted.set(adjusted.get() + 1);
+        }).expect_err("first invalid original primitive refuses the request");
+        let error = ProviderError::from(error);
+        assert_eq!(error.to_string(), format!("RequestError: JsonError: {expected}"));
+        assert_eq!(adjusted.get(), 0);
+    }
+}
+
+#[test]
+fn vertex_request_keeps_parameters_json_schema_references_and_defaults() {
+    let schema = serde_json::json!({
+        "type":"object",
+        "properties":{"city":{"$ref":"#/$defs/City","default":"Paris"}},
+        "$defs":{"City":{"type":"string","default":"London"}},
+        "default":{"city":"Berlin"}
+    });
+    let mut request = CompletionRequest::new("question");
+    request.tools = vec![ToolDefinition::new(
+        rig_core::message::ToolName::new("weather").expect("tool name"),
+        "Weather", schema.clone(),
+    )];
+    let target = rig_core::providers::gemini::completion::GenerateContent::new(
+        rig_core::providers::gemini::GeminiConfig::new("test-key"), "gemini-2.5-flash",
+    );
+    let body = super::request_body(&request, &target, "gemini-2.5-flash", |_| {})
+        .expect("Vertex request preserves the JSON schema");
+    assert_eq!(body.pointer("/tools/0/functionDeclarations/0"), Some(&serde_json::json!({
+        "name":"weather", "description":"Weather", "parametersJsonSchema":schema
+    })));
+}

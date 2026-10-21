@@ -1,6 +1,30 @@
 use super::*;
-use crate::driver::WireDriver;
-use crate::providers::gemini::Gemini;
+use crate::providers::gemini::GeminiConfig;
+
+#[test]
+fn malformed_model_fields_are_not_silently_omitted() {
+    for body in [
+        br#"{"models":[{"name":"models/gemini-2.5-flash","displayName":7}]}"#.as_slice(),
+        br#"{"models":[{"name":"models/gemini-2.5-flash","inputTokenLimit":-1}]}"#.as_slice(),
+        br#"{"models":[],"nextPageToken":7}"#.as_slice(),
+    ] {
+        let error = parse_models_page(body, "/v1beta/models?pageSize=1000")
+            .expect_err("malformed modeled fields must fail the page");
+        let ProviderError::Response(message) = error else {
+            panic!("expected a response error");
+        };
+        assert!(message.contains("provider=Gemini"));
+        assert!(message.contains("path=/v1beta/models?pageSize=1000"));
+        assert!(message.contains("parse_error="));
+        assert!(message.contains(std::str::from_utf8(body).expect("fixture is UTF-8")));
+        assert!(matches!(
+            ModelsDecoder.classify(WireFrame::Text(
+                std::str::from_utf8(body).expect("fixture is UTF-8").to_owned()
+            )),
+            WireEvent::Corrupt(_)
+        ));
+    }
+}
 
 #[test]
 fn parse_models_page_accepts_omitted_empty_models_list() {
@@ -157,10 +181,10 @@ fn parse_models_page_returns_parse_error_when_entry_has_no_usable_id() {
 /// same reason `list_models_path` is pinned above.
 #[test]
 fn models_sends_the_credential_as_the_last_query_pair() {
-    let encoded = Models::new(Gemini::new("test-key"))
-        .encode((), Mode::Unary)
+    let encoded = Models::new(GeminiConfig::new("test-key"))
+        .encode(None, Mode::Unary)
         .expect("the request encodes");
-    let request = encoded.requests.first().expect("one request");
+    let request = &encoded.request;
 
     assert_eq!(encoded.framing, Framing::Whole);
     assert_eq!(encoded.request_id_header, None);
@@ -174,10 +198,10 @@ fn models_sends_the_credential_as_the_last_query_pair() {
 /// header instead, and must not also leak it into the query.
 #[test]
 fn interactions_models_sends_the_credential_as_a_header_only() {
-    let encoded = InteractionsModels::new(Gemini::new("test-key"))
-        .encode((), Mode::Unary)
+    let encoded = InteractionsModels::new(GeminiConfig::new("test-key"))
+        .encode(None, Mode::Unary)
         .expect("the request encodes");
-    let request = encoded.requests.first().expect("one request");
+    let request = &encoded.request;
 
     assert_eq!(encoded.framing, Framing::Whole);
     assert_eq!(request.uri().path(), "/v1beta/models");
@@ -200,31 +224,34 @@ fn a_paged_listing_folds_in_order_and_follows_the_cursor() {
     const PAGE_ONE: &str = r#"{"models":[{"description":"Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.","displayName":"Gemini 2.5 Flash","inputTokenLimit":1048576,"maxTemperature":2,"name":"models/gemini-2.5-flash","outputTokenLimit":65536,"supportedGenerationMethods":["generateContent","countTokens","createCachedContent","batchGenerateContent"],"temperature":1,"thinking":true,"topK":64,"topP":0.95,"version":"001"},{"description":"Stable release (June 17th, 2025) of Gemini 2.5 Pro","displayName":"Gemini 2.5 Pro","inputTokenLimit":1048576,"maxTemperature":2,"name":"models/gemini-2.5-pro","outputTokenLimit":65536,"supportedGenerationMethods":["generateContent","countTokens","createCachedContent","batchGenerateContent"],"temperature":1,"thinking":true,"topK":64,"topP":0.95,"version":"2.5"}],"nextPageToken":"page-two"}"#;
     const PAGE_TWO: &str = r#"{"models":[{"displayName":"Gemini 2.5 Flash-Lite","inputTokenLimit":1048576,"name":"models/gemini-2.5-flash-lite","outputTokenLimit":65536}]}"#;
 
-    let wire = Models::new(Gemini::new("test-key"));
-    let ids = |driver: &mut WireDriver<ModelListing, ModelsDecoder>, page: &str| {
-        driver.push(WireFrame::Text(page.to_owned()));
-        driver
-            .drain()
-            .flat_map(|item| {
-                item.expect("the recorded page decodes")
-                    .iter()
-                    .map(|model| model.id.clone())
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
+    let wire = Models::new(GeminiConfig::new("test-key"));
+    let page = |page: &str| {
+        let page = crate::test_utils::decode_reply(
+            &wire,
+            &None,
+            crate::wire::Mode::Unary,
+            [WireFrame::Text(page.to_owned())],
+            serde_json::Value::Null,
+        )
+        .expect("the recorded page decodes");
+        let ids: Vec<_> = page.models.iter().map(|model| model.id.clone()).collect();
+        (ids, page.next)
     };
 
-    let mut first = WireDriver::<ModelListing, _>::new(wire.decoder(crate::wire::Mode::Unary));
-    let mut listed = ids(&mut first, PAGE_ONE);
-    let continuation = first.continuation().expect("page one named a cursor");
+    let (mut listed, cursor) = page(PAGE_ONE);
+    let cursor = cursor.expect("page one named a cursor");
+    let continuation = wire
+        .encode(Some(cursor), crate::wire::Mode::Unary)
+        .expect("the next page encodes");
+    let continuation = &continuation.request;
     assert_eq!(continuation.uri().path(), "/v1beta/models");
     assert_eq!(
         continuation.uri().query(),
         Some("pageSize=1000&pageToken=page-two&key=test-key"),
     );
 
-    let mut second = WireDriver::<ModelListing, _>::new(wire.decoder(crate::wire::Mode::Unary));
-    listed.extend(ids(&mut second, PAGE_TWO));
+    let (second, next) = page(PAGE_TWO);
+    listed.extend(second);
 
     assert_eq!(
         listed,
@@ -234,8 +261,5 @@ fn a_paged_listing_folds_in_order_and_follows_the_cursor() {
             "gemini-2.5-flash-lite"
         ],
     );
-    assert!(
-        second.continuation().is_none(),
-        "a page naming no cursor ends the listing",
-    );
+    assert!(next.is_none(), "a page naming no cursor ends the listing");
 }

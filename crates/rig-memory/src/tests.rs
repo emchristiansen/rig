@@ -1,7 +1,7 @@
 use super::*;
 use rig_core::message::{
-    AssistantContent, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
-    UserContent,
+    AssistantContent, AssistantMessage, CallId, CustomToolCall, ToolCall, ToolFunction,
+    ToolName, ToolResult, ToolResultContent, UserContent,
 };
 use rig_core::transcript::validate_canonical;
 use std::sync::Mutex;
@@ -15,21 +15,18 @@ fn assistant(text: &str) -> Message {
 }
 
 fn tool_call_msg() -> Message {
-    Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::ToolCall(ToolCall::new(
-            ToolCallId::new_or_minted("call_1", 0),
-            ToolFunction::new("t".into(), serde_json::json!({})),
-        ))],
-    }
+    Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+        CallId::from_wire("call_1"),
+        ToolFunction::new(ToolName::new("t").unwrap(), serde_json::json!({})),
+    ))]))
 }
 
 fn tool_result_msg() -> Message {
     Message::User {
         content: vec![UserContent::ToolResult(ToolResult {
-            call: ToolCallId::new_or_minted("call_1", 0),
-            provider: None,
-            name: "t".into(),
+            call: CallId::from_wire("call_1"),
+            is_error: false,
+            name: ToolName::new("t").unwrap(),
             answers: rig_core::message::AnsweredToolCall::Function,
             content: vec![ToolResultContent::text("ok")],
         })],
@@ -116,14 +113,14 @@ fn token_window_drops_leading_orphan_tool_result() {
 }
 
 fn mixed_tool_exchange() -> Vec<Message> {
-    let ids = ["call_1", "call_2"].map(|id| ToolCallId::new_or_minted(id, 0));
+    let ids = ["call_1", "call_2"].map(CallId::from_wire);
     let calls = ids
         .iter()
         .cloned()
         .map(|id| {
             AssistantContent::ToolCall(ToolCall::new(
                 id,
-                ToolFunction::new("t".into(), serde_json::json!({})),
+                ToolFunction::new(ToolName::new("t").unwrap(), serde_json::json!({})),
             ))
         })
         .collect();
@@ -131,19 +128,15 @@ fn mixed_tool_exchange() -> Vec<Message> {
     // Canonical results may be interleaved with text and answer calls in
     // a different order, but all calls must be answered in one user message.
     for id in ids.into_iter().rev() {
-        results.push(UserContent::tool_result_for(
+        results.push(UserContent::tool_result(
             id,
-            None,
-            "t",
+            ToolName::new("t").unwrap(),
             vec![ToolResultContent::text("ok")],
         ));
         results.push(UserContent::text("Result received."));
     }
     vec![
-        Message::Assistant {
-            id: None,
-            content: calls,
-        },
+        Message::Assistant(AssistantMessage::new(calls)),
         Message::User { content: results },
     ]
 }
@@ -206,10 +199,9 @@ fn window_policies_demote_all_neighboring_orphan_result_messages() {
     history.push(Message::User {
         content: vec![
             UserContent::text("Another result:"),
-            UserContent::tool_result_for(
-                ToolCallId::new_or_minted("call_2", 0),
-                None,
-                "t",
+            UserContent::tool_result(
+                CallId::from_wire("call_2"),
+                ToolName::new("t").unwrap(),
                 vec![ToolResultContent::text("second result")],
             ),
         ],
@@ -1922,19 +1914,141 @@ async fn template_compactor_caps_summary_with_multiline_header() {
 #[test]
 fn heuristic_counter_charges_a_custom_call_by_its_raw_input_bytes() {
     let counter = HeuristicTokenCounter::default();
-    let custom = Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::custom_tool_call(
-            "ctc_1",
-            "call_1",
-            "abc",
-            None,
+    let custom = Message::Assistant(AssistantMessage::new(vec![
+        AssistantContent::CustomToolCall(CustomToolCall::new(
+            CallId::from_wire("call_1"),
+            ToolName::new("abc").unwrap(),
             "0123456789abc",
-        )],
-    };
+        )),
+    ]));
     // "abc" + 13 input bytes = 16 bytes.
     assert_eq!(
         counter.count(&custom),
         counter.count(&Message::assistant("0123456789abcdef"))
     );
+}
+
+#[test]
+fn heuristic_counter_charges_retained_nonobject_arguments_as_serialized_values() {
+    let counter = HeuristicTokenCounter::new(1.0, 0, 0);
+    let function = ToolFunction::new(ToolName::new("n").expect("tool name"), serde_json::json!(12345));
+    assert_eq!(function.invalid_arguments.as_deref(), Some("12345"));
+    assert_eq!(1 + function.arguments_value().to_string().len(), 3);
+    let message = Message::Assistant(AssistantMessage::new(vec![
+        AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_1"), function)),
+    ]));
+    assert_eq!(counter.count(&message), 6);
+
+    for (raw, expected) in [(" \n12345\t", 6), (" [1, 2] ", 6), (" false ", 6), (r#" "x" "#, 4)] {
+        let mut function = ToolFunction::new(ToolName::new("n").expect("tool name"), serde_json::json!({}));
+        function.invalid_arguments = Some(raw.to_owned());
+        let message = Message::Assistant(AssistantMessage::new(vec![
+            AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_1"), function)),
+        ]));
+        let before = message.clone();
+        assert_eq!(counter.count(&message), expected, "retained {raw:?}");
+        assert_eq!(message, before);
+    }
+}
+
+#[test]
+fn heuristic_counter_charges_retained_null_without_reconstructing_discarded_null() {
+    let counter = HeuristicTokenCounter::new(1.0, 0, 0);
+    let mut retained = ToolFunction::new(ToolName::new("n").expect("tool name"), serde_json::json!({}));
+    retained.invalid_arguments = Some(" \nnull\t".to_owned());
+    assert_eq!(1 + retained.arguments_value().to_string().len(), 3);
+    let message = Message::Assistant(AssistantMessage::new(vec![
+        AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_1"), retained)),
+    ]));
+    let before = message.clone();
+    assert_eq!(counter.count(&message), 5);
+    assert_eq!(message, before);
+
+    let discarded = ToolFunction::new(ToolName::new("n").expect("tool name"), serde_json::Value::Null);
+    assert_eq!(discarded.invalid_arguments, None);
+    let message = Message::Assistant(AssistantMessage::new(vec![
+        AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_2"), discarded)),
+    ]));
+    assert_eq!(counter.count(&message), 3);
+}
+
+#[test]
+fn heuristic_counter_keeps_canonical_arguments_for_malformed_blank_and_object_raw() {
+    let counter = HeuristicTokenCounter::new(1.0, 0, 0);
+    for raw in [None, Some(r#"{"x":1,"#), Some(""), Some(" \n\t"), Some(r#"{"other":12345}"#)] {
+        let mut function = ToolFunction::new(ToolName::new("n").expect("tool name"), serde_json::json!({"x": 1}));
+        function.invalid_arguments = raw.map(str::to_owned);
+        let message = Message::Assistant(AssistantMessage::new(vec![
+            AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_1"), function)),
+        ]));
+        let before = message.clone();
+        assert_eq!(counter.count(&message), 8, "retained {raw:?}");
+        assert_eq!(message, before);
+    }
+}
+
+#[test]
+fn heuristic_counter_counts_namespaces_and_verbatim_custom_input() {
+    let counter = HeuristicTokenCounter::new(1.0, 0, 0);
+    let custom = CustomToolCall::new(
+        CallId::from_wire("call_1"),
+        ToolName::new("abc").unwrap(),
+        "0123456789abc",
+    ).with_namespace(Some("é".into()));
+    let message = Message::Assistant(AssistantMessage::new(vec![
+        AssistantContent::CustomToolCall(custom),
+    ]));
+    assert_eq!(counter.count(&message), 18);
+
+    let mut function = ToolFunction::new(ToolName::new("abc").unwrap(), serde_json::json!({}));
+    function.namespace = Some("é".into());
+    let message = Message::Assistant(AssistantMessage::new(vec![
+        AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_2"), function)),
+    ]));
+    assert_eq!(counter.count(&message), 7);
+}
+
+#[test]
+fn heuristic_counter_charges_provider_item_json_without_provenance_envelope() {
+    let message = Message::Assistant(AssistantMessage::new(vec![
+        AssistantContent::ProviderItem(rig_core::message::ProviderItem::new(
+            serde_json::json!({"a": "é\n"}),
+            "provider/provenance-is-not-part-of-the-item",
+        )),
+    ]));
+    let counter = HeuristicTokenCounter::new(1.0, 0, 0);
+    assert_eq!(counter.count(&message), "{\"a\":\"é\\n\"}".len());
+}
+
+#[test]
+fn heuristic_counter_preserves_carried_visible_text_projection() {
+    use rig_core::message::{CarriedPayload, CarriedReasoning, CarriedReasoningPart};
+    let reasoning = CarriedReasoning::new(
+        vec![
+            CarriedReasoningPart::Text { text: "ab".into(), signature: Some("signature".into()) },
+            CarriedReasoningPart::Encrypted("encrypted payload".into()),
+            CarriedReasoningPart::Summary("cd".into()),
+            CarriedReasoningPart::Redacted { data: "é".into() },
+        ],
+        CarriedPayload::new(serde_json::json!({"type": "reasoning"}), None),
+    );
+    let message = Message::Assistant(AssistantMessage::new(vec![
+        AssistantContent::CarriedReasoning(reasoning),
+    ]));
+    assert_eq!(HeuristicTokenCounter::new(1.0, 0, 0).count(&message), 8);
+}
+
+#[test]
+fn template_compactor_preserves_custom_marker_and_carried_plaintext() {
+    use rig_core::message::{CarriedPayload, CarriedText, CarriedTextContent};
+    let message = Message::Assistant(AssistantMessage::new(vec![
+        AssistantContent::CustomToolCall(CustomToolCall::new(
+            CallId::from_wire("call_1"), ToolName::new("abc").unwrap(), "raw input",
+        )),
+        AssistantContent::CarriedText(CarriedText::new(
+            CarriedTextContent::Text("visible".into()),
+            CarriedPayload::new(serde_json::json!({"text": "old raw text"}), None),
+        )),
+    ]));
+    assert_eq!(render_message_line(&message), "assistant: [custom tool call: abc] visible");
 }

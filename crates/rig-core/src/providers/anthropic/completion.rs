@@ -348,6 +348,13 @@ fn message_json(
                 .collect(),
         ),
     };
+    if content.is_empty() && matches!(message, Message::Assistant(turn)
+        if turn.content.iter().any(|block| matches!(block,
+            AssistantContent::CarriedText(part) if part.known_text_projection() == Some("")
+        )))
+    {
+        return Err(EncodeError::request("Assistant message did not contain Anthropic-compatible content"));
+    }
     Ok((!content.is_empty()).then(|| json!({ "role": role, "content": content })))
 }
 
@@ -521,6 +528,9 @@ pub(super) fn assistant_parts(
             );
         }
         AssistantContent::CarriedText(part) => {
+            if let Some(known) = part.known_text_projection() {
+                return Ok((!known.is_empty()).then(|| text(known)).into_iter().collect());
+            }
             if target.provider.dialect.name != super::PROVIDER_NAME || !carried_hosted(part) {
                 return Err(
                     message::UnrepresentableOpaqueContent::new(ANTHROPIC_MESSAGES_WIRE).into(),
