@@ -542,6 +542,14 @@ impl CodexWebSocketSession {
         self.session.next_event().await
     }
 
+    /// Reads the next server event with its original payload for the current
+    /// in-flight turn. Returns the same errors as [`Self::next_event`].
+    pub async fn next_event_with_payload(
+        &mut self,
+    ) -> Result<(ResponsesWebSocketEvent, String), ProviderError> {
+        self.session.next_event_with_payload().await
+    }
+
     /// Service the idle connection between turns. See
     /// [`ResponsesWebSocketSession::keepalive`].
     pub async fn keepalive(&mut self) -> KeepaliveDrain {

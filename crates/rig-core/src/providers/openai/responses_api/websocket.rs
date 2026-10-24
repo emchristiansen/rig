@@ -930,7 +930,7 @@ impl ResponsesWebSocketSession {
 
     /// Reads the next lifecycle event and retains its payload for content decoding
     /// by [`ResponsesDecoder`]. Returns the same session errors as [`Self::next_event`].
-    async fn next_event_with_payload(
+    pub async fn next_event_with_payload(
         &mut self,
     ) -> Result<(ResponsesWebSocketEvent, String), ProviderError> {
         self.ensure_open()?;
