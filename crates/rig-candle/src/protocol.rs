@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use rig_core::completion::{AssistantContent, CompletionRequest, ToolDefinition};
 use rig_core::message::{
-    CallId, Message, Reasoning, ToolCall, ToolChoice, ToolFunction, ToolName, ToolResultContent,
-    UserContent,
+    CallId, CarriedText, CarriedTextContent, Message, Reasoning, ToolCall, ToolChoice,
+    ToolFunction, ToolName, ToolResultContent, UserContent,
 };
 use serde::Deserialize;
 
@@ -120,6 +120,12 @@ fn validate_protocol_inputs(
                     match item {
                         AssistantContent::Text(text) => {
                             validate_protocol_text(&text.text, "assistant text", protocol)?;
+                        }
+                        AssistantContent::CarriedText(CarriedText {
+                            content: CarriedTextContent::Text(text),
+                            ..
+                        }) => {
+                            validate_protocol_text(text, "assistant text", protocol)?;
                         }
                         AssistantContent::Reasoning(reasoning) => validate_protocol_text(
                             &reasoning.text,
@@ -424,6 +430,10 @@ fn render_plain_message(message: &Message) -> Result<(&'static str, String), Can
             for item in turn.content.iter() {
                 match item {
                     AssistantContent::Text(text) => parts.push(text.text.clone()),
+                    AssistantContent::CarriedText(CarriedText {
+                        content: CarriedTextContent::Text(text),
+                        ..
+                    }) => parts.push(text.clone()),
                     AssistantContent::ToolCall(_) | AssistantContent::CustomToolCall(_) => {
                         return Err(CandleError::UnsupportedPromptContent("tool calls"));
                     }
@@ -580,6 +590,10 @@ fn render_qwen_message(
             for item in turn.content.iter() {
                 match item {
                     AssistantContent::Text(text) => rendered.push_str(&text.text),
+                    AssistantContent::CarriedText(CarriedText {
+                        content: CarriedTextContent::Text(text),
+                        ..
+                    }) => rendered.push_str(text),
                     AssistantContent::Reasoning(_) => {
                         // Official Qwen guidance omits historical thinking. The
                         // final answer and tool calls remain in history.

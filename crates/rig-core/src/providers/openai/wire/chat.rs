@@ -248,7 +248,7 @@ impl Chat {
         }
         rewrites.push(Rewrite::ChatDialect {
             kind: quirks.rewrite,
-            reasoning_field: self.listed_reasoning_field(&self.request_model(&request)),
+            dialect: self.provider.dialect.name,
         });
         if quirks.rewrite == BodyRewrite::OpenRouter && self.prompt_caching {
             rewrites.push(Rewrite::OpenRouterPromptCaching);
@@ -309,7 +309,7 @@ impl Chat {
             .quirks
             .reasoning_field
             .or(deepseek.then_some("reasoning_content"))
-            .or_else(|| self.listed_reasoning_field(model))
+            .or_else(|| Self::listed_reasoning_field(self.provider.dialect.name, model))
     }
 
     /// The reasoning field a catalog entry names for `model`: the entry on
@@ -317,14 +317,14 @@ impl Chat {
     /// OpenRouter's under the full id. A dialect's history rewrite keeps
     /// this field on assistant messages, as upstream sends it
     /// (mec-rig-bodies-answers-1 Q3).
-    fn listed_reasoning_field(&self, model: &str) -> Option<&'static str> {
+    pub(crate) fn listed_reasoning_field(dialect: &str, model: &str) -> Option<&'static str> {
         use crate::providers::openai::wire::{MOONSHOT, OPENROUTER};
         let name = model.rsplit('/').next().unwrap_or(model);
         let field = |vendor: &str, id: &str| {
             crate::catalog::lookup(vendor, id)
                 .and_then(|spec| spec.compat.reasoning_field.as_deref())
         };
-        field(self.provider.dialect.name, model)
+        field(dialect, model)
             .or_else(|| field(MOONSHOT.name, name))
             .or_else(|| field(OPENROUTER.name, model))
     }
@@ -726,7 +726,7 @@ impl Chat {
 /// content shapes. It runs after the merge and reads the merged body.
 ///
 /// `reasoning_field` is the assistant reasoning field the catalog names for
-/// the request's model (`Chat::listed_reasoning_field`). The plain-text
+/// the merged body's model (`Chat::listed_reasoning_field`). The plain-text
 /// history rewrites (Perplexity, Mira, Hyperbolic) and Mistral keep it on
 /// assistant messages, as upstream sends it for such a model on any gateway;
 /// for every other model they remove `reasoning_content` as before. Groq's

@@ -96,6 +96,78 @@ fn an_ended_text_that_disagrees_with_its_fragments_is_a_mismatch() {
 }
 
 #[test]
+fn an_ended_carried_text_is_checked_against_its_fragments() {
+    let ended = |text: &str| {
+        event(json!({
+            "event": "end",
+            "part": 0,
+            "content": {
+                "type": "carried_text",
+                "content": {"type": "text", "text": text},
+                "payload": {
+                    "item": {
+                        "annotations": [],
+                        "logprobs": [],
+                        "text": "Ready.",
+                        "type": "output_text",
+                    },
+                    "position": {
+                        "kind": "message_content",
+                        "item_index": 0,
+                        "part_index": 0,
+                    },
+                },
+                "item_id": "msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62",
+            },
+        }))
+    };
+    for (fragments, final_text, mismatches) in [
+        (["Rea", "dy."], "Ready.", 0),
+        (["Rea", "dy."], "Different.", 1),
+        (["Edi", "ted."], "Edited.", 0),
+    ] {
+        let head = log(
+            vec![
+                start(0, "text"),
+                text(0, fragments[0]),
+                text(0, fragments[1]),
+                ended(final_text),
+            ],
+            vec![],
+            vec![(1, 4)],
+        );
+        let found = audit(None, &head);
+        assert_eq!(found.parts, 1);
+        assert_eq!(found.mismatches.len(), mismatches, "{found:?}");
+    }
+}
+
+#[test]
+fn opaque_and_unsupported_carried_text_are_not_fragment_checks() {
+    for kind in ["opaque", "unsupported"] {
+        let head = log(
+            vec![
+                start(0, "text"),
+                text(0, "fragments"),
+                event(json!({
+                    "event": "end",
+                    "part": 0,
+                    "content": {
+                        "type": "carried_text",
+                        "content": {"type": kind, "text": "different"},
+                    },
+                })),
+            ],
+            vec![],
+            vec![(1, 3)],
+        );
+        let found = audit(None, &head);
+        assert_eq!(found.parts, 0, "{kind}");
+        assert!(found.mismatches.is_empty(), "{found:?}");
+    }
+}
+
+#[test]
 fn an_ended_call_whose_arguments_disagree_with_its_json_is_a_mismatch() {
     let arguments = |json: &str| event(json!({"event": "arguments", "part": 0, "json": json}));
     let ended = |content| event(json!({"event": "end", "part": 0, "content": content}));

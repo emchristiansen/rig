@@ -203,9 +203,8 @@ pub enum Rewrite {
     ChatDialect {
         /// The dialect's rewrite.
         kind: BodyRewrite,
-        /// The assistant reasoning field the catalog names for the
-        /// request's model, which the dialect's history rewrite keeps.
-        reasoning_field: Option<&'static str>,
+        /// The catalog provider used to look up the merged body's model.
+        dialect: &'static str,
     },
     /// Mark the selected OpenRouter chat wire's system-prompt cache boundary.
     ///
@@ -1101,11 +1100,11 @@ fn apply(
                 body.insert("generate".to_owned(), Value::Bool(generate));
             }
         }
-        Rewrite::ChatDialect {
-            kind,
-            reasoning_field,
-        } => {
-            crate::providers::openai::wire::chat::rewrite_body(*kind, *reasoning_field, body)?;
+        Rewrite::ChatDialect { kind, dialect } => {
+            let reasoning_field = body.get("model").and_then(Value::as_str).and_then(|model| {
+                crate::providers::openai::wire::Chat::listed_reasoning_field(dialect, model)
+            });
+            crate::providers::openai::wire::chat::rewrite_body(*kind, reasoning_field, body)?;
             if *kind == BodyRewrite::GroqCompoundTools {
                 crate::providers::openai::wire::chat::fold_groq_native_tools(
                     body,

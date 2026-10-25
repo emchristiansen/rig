@@ -220,9 +220,10 @@ pub const READ_ONLY_READERS: &[&str] = &[
 
 /// The `(provider, scenario)` pairs `source` reads through a
 /// [`READ_ONLY_READERS`] call whose first two arguments are string literals
-/// or `&str` constants declared in the same file, a function's own
-/// constants before the file's. A call with any other argument is not
-/// counted, and neither is a call in an `#[ignore]`d function, as for
+/// or `&str` constants declared in the same module or an enclosing
+/// function in this file. Function parameters do not count as constants.
+/// A call with any other argument is not counted, and neither is a call
+/// in an `#[ignore]`d function, as for
 /// [`cassette_scenarios`].
 pub fn read_only_cassettes(source: &str) -> Result<Vec<(String, String)>, ScenarioError> {
     let syntax = syn::parse_file(source)?;
@@ -234,13 +235,11 @@ pub fn read_only_cassettes(source: &str) -> Result<Vec<(String, String)>, Scenar
     Ok(visitor.read)
 }
 
-/// String constants by name; a name declared twice with different values is
-/// ambiguous and resolves to nothing.
+/// Constants by name; nonliteral initializers and conflicting declarations
+/// have no known string value.
 #[derive(Default)]
 struct ConstCollector {
     values: std::collections::BTreeMap<String, Option<String>>,
-    /// Whether to stop at nested functions, which hold their own constants.
-    outer_only: bool,
 }
 
 impl ConstCollector {
@@ -254,56 +253,73 @@ impl ConstCollector {
 
 impl<'ast> Visit<'ast> for ConstCollector {
     fn visit_item_const(&mut self, node: &'ast syn::ItemConst) {
-        if let Expr::Lit(ExprLit {
-            lit: Lit::Str(value),
-            ..
-        }) = node.expr.as_ref()
-        {
-            let value = value.value();
-            self.values
-                .entry(node.ident.to_string())
-                .and_modify(|known| {
-                    if known.as_deref() != Some(value.as_str()) {
-                        *known = None;
-                    }
-                })
-                .or_insert(Some(value));
-        }
-        visit::visit_item_const(self, node);
+        let value = match node.expr.as_ref() {
+            Expr::Lit(ExprLit {
+                lit: Lit::Str(value),
+                ..
+            }) => Some(value.value()),
+            _ => None,
+        };
+        self.values
+            .entry(node.ident.to_string())
+            .and_modify(|known| {
+                if *known != value {
+                    *known = None;
+                }
+            })
+            .or_insert(value);
     }
 
-    fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        if !self.outer_only {
-            visit::visit_item_fn(self, node);
-        }
+    fn visit_item_fn(&mut self, _node: &'ast ItemFn) {}
+
+    fn visit_item_mod(&mut self, _node: &'ast syn::ItemMod) {}
+}
+
+struct ParameterShadows<'a>(&'a mut std::collections::BTreeMap<String, Option<String>>);
+
+impl<'ast> Visit<'ast> for ParameterShadows<'_> {
+    fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+        self.0.insert(node.ident.to_string(), None);
+        visit::visit_pat_ident(self, node);
     }
 }
 
-/// The string constants in scope: the file's, and those of each enclosing
-/// function, innermost last.
+/// The string constants in scope: the module's, and those of each enclosing
+/// function, innermost last. Unresolved local names block outer lookup.
 struct Constants {
     file: std::collections::BTreeMap<String, String>,
-    local: Vec<std::collections::BTreeMap<String, String>>,
+    local: Vec<std::collections::BTreeMap<String, Option<String>>>,
 }
 
 impl Constants {
     fn of(syntax: &syn::File) -> Self {
+        Self::of_items(&syntax.items)
+    }
+
+    fn of_items(items: &[syn::Item]) -> Self {
         let mut file = ConstCollector::default();
-        file.visit_file(syntax);
+        for item in items {
+            if let syn::Item::Const(item) = item {
+                file.visit_item_const(item);
+            }
+        }
         Self {
             file: file.unambiguous(),
             local: Vec::new(),
         }
     }
 
-    /// Enter `function`, whose own constants shadow the file's.
+    /// Enter `function`, whose constants and parameters shadow the module's.
     fn enter(&mut self, function: &ItemFn) {
-        let mut consts = ConstCollector {
-            outer_only: true,
-            ..ConstCollector::default()
-        };
+        let mut consts = ConstCollector::default();
         visit::visit_block(&mut consts, &function.block);
-        self.local.push(consts.unambiguous());
+        let mut parameters = ParameterShadows(&mut consts.values);
+        for argument in &function.sig.inputs {
+            if let syn::FnArg::Typed(argument) = argument {
+                parameters.visit_pat(&argument.pat);
+            }
+        }
+        self.local.push(consts.values);
     }
 
     fn leave(&mut self) {
@@ -320,12 +336,10 @@ impl Constants {
             }) => Some(value.value()),
             Expr::Path(path) if path.qself.is_none() => {
                 let name = path.path.get_ident()?.to_string();
-                self.local
-                    .iter()
-                    .rev()
-                    .find_map(|scope| scope.get(&name))
-                    .or_else(|| self.file.get(&name))
-                    .cloned()
+                match self.local.iter().rev().find_map(|scope| scope.get(&name)) {
+                    Some(value) => value.clone(),
+                    None => self.file.get(&name).cloned(),
+                }
             }
             _ => None,
         }
@@ -354,6 +368,14 @@ struct ReaderVisitor {
 }
 
 impl<'ast> Visit<'ast> for ReaderVisitor {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if let Some((_, items)) = &node.content {
+            let outer = std::mem::replace(&mut self.consts, Constants::of_items(items));
+            visit::visit_item_mod(self, node);
+            self.consts = outer;
+        }
+    }
+
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         if is_ignored(node) {
             return;
@@ -421,9 +443,10 @@ impl InSourceReader {
 /// readers is not parsed.
 ///
 /// As for [`read_only_cassettes`], each provider and path is a string
-/// literal or a `&str` constant declared in the same file, a function's own
-/// constants before the file's. Nothing else counts: no other argument, no
-/// call in an `#[ignore]`d function, no path that leaves the cassette root
+/// literal or a `&str` constant declared in the same module or an enclosing
+/// function in this file. Function parameters do not count as constants.
+/// Nothing else counts: no other argument, no call in an `#[ignore]`d
+/// function, no path that leaves the cassette root
 /// or names no `.yaml` file, and no macro other than `include_str!` is
 /// looked into.
 pub fn in_source_cassettes(
@@ -477,6 +500,14 @@ impl InSourceVisitor<'_> {
 }
 
 impl<'ast> Visit<'ast> for InSourceVisitor<'_> {
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        if let Some((_, items)) = &node.content {
+            let outer = std::mem::replace(&mut self.consts, Constants::of_items(items));
+            visit::visit_item_mod(self, node);
+            self.consts = outer;
+        }
+    }
+
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
         if is_ignored(node) {
             return;

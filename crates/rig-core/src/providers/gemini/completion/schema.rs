@@ -55,22 +55,7 @@ fn schema_error(path: &str, reason: impl std::fmt::Display) -> EncodeError {
 /// Annotations a `$ref` site states for its own use of the definition.
 const REF_SITE_ANNOTATIONS: [&str; 4] = ["title", "description", "default", "example"];
 
-/// What resolving a `$ref` does with the keywords beside it.
-#[derive(Clone, Copy)]
-enum RefSiblings {
-    /// They join the definition, as the projection reads them; a keyword
-    /// whose value differs from the definition's is refused.
-    Join,
-    /// The definition replaces them, as the numeric-enum route detection
-    /// has always read a reference.
-    Replace,
-}
-
-fn flatten_schema(
-    mut schema: Value,
-    path: &str,
-    siblings: RefSiblings,
-) -> Result<Value, EncodeError> {
+fn flatten_schema(mut schema: Value, path: &str) -> Result<Value, EncodeError> {
     let defs = schema
         .as_object()
         .and_then(|obj| obj.get("$defs").or_else(|| obj.get("definitions")))
@@ -96,7 +81,7 @@ fn flatten_schema(
         return Err(schema_error(&path, "$defs must be an object"));
     };
 
-    resolve_refs(&mut schema, defs_obj, path, siblings)?;
+    resolve_refs(&mut schema, defs_obj, path)?;
 
     if let Some(obj) = schema.as_object_mut() {
         obj.shift_remove("$defs");
@@ -110,7 +95,6 @@ fn resolve_refs(
     value: &mut Value,
     defs: &Map<String, Value>,
     path: &str,
-    siblings: RefSiblings,
 ) -> Result<(), EncodeError> {
     match value {
         Value::Object(obj) => {
@@ -129,19 +113,17 @@ fn resolve_refs(
                 })?;
 
                 let mut resolved = def.clone();
-                resolve_refs(&mut resolved, defs, path, siblings)?;
+                resolve_refs(&mut resolved, defs, path)?;
                 // A keyword beside `$ref` joins the definition. An
                 // annotation there (title, description, default, example)
                 // documents this use of the definition and takes its place;
                 // a validation keyword that would replace a different value
                 // is refused.
-                let joined = obj.iter().filter(|(keyword, _)| {
-                    matches!(siblings, RefSiblings::Join) && keyword.as_str() != "$ref"
-                });
+                let joined = obj.iter().filter(|(keyword, _)| keyword.as_str() != "$ref");
                 for (keyword, sibling) in joined {
                     let sibling_path = schema_path(path, keyword);
                     let mut sibling = sibling.clone();
-                    resolve_refs(&mut sibling, defs, &sibling_path, siblings)?;
+                    resolve_member_refs(keyword, &mut sibling, defs, &sibling_path)?;
                     let target = resolved.as_object_mut().ok_or_else(|| {
                         schema_error(
                             &sibling_path,
@@ -169,17 +151,70 @@ fn resolve_refs(
             }
 
             for (name, v) in obj.iter_mut() {
-                resolve_refs(v, defs, &schema_path(path, name), siblings)?;
+                resolve_member_refs(name, v, defs, &schema_path(path, name))?;
             }
         }
         Value::Array(arr) => {
             for (index, item) in arr.iter_mut().enumerate() {
-                resolve_refs(item, defs, &schema_path(path, &index.to_string()), siblings)?;
+                resolve_refs(item, defs, &schema_path(path, &index.to_string()))?;
             }
         }
         _ => {}
     }
 
+    Ok(())
+}
+
+enum SchemaMember {
+    Map,
+    Schema,
+}
+
+/// Schema positions shared by reference resolution and raw-route detection.
+/// Annotation, `const` and `enum` values are instance data.
+fn schema_member(keyword: &str) -> Option<SchemaMember> {
+    match keyword {
+        "$defs" | "definitions" | "properties" | "patternProperties" | "dependentSchemas"
+        | "dependencies" => Some(SchemaMember::Map),
+        "items"
+        | "additionalItems"
+        | "additionalProperties"
+        | "contains"
+        | "propertyNames"
+        | "unevaluatedItems"
+        | "unevaluatedProperties"
+        | "not"
+        | "if"
+        | "then"
+        | "else"
+        | "contentSchema"
+        | "anyOf"
+        | "oneOf"
+        | "allOf"
+        | "prefixItems" => Some(SchemaMember::Schema),
+        _ => None,
+    }
+}
+
+fn resolve_member_refs(
+    keyword: &str,
+    value: &mut Value,
+    defs: &Map<String, Value>,
+    path: &str,
+) -> Result<(), EncodeError> {
+    match schema_member(keyword) {
+        Some(SchemaMember::Map) => {
+            if let Some(schemas) = value.as_object_mut() {
+                for (name, schema) in schemas {
+                    resolve_refs(schema, defs, &schema_path(path, name))?;
+                }
+            }
+        }
+        Some(SchemaMember::Schema) => {
+            resolve_refs(value, defs, path)?;
+        }
+        None => {}
+    }
     Ok(())
 }
 
@@ -217,7 +252,7 @@ fn explicitly_string_only(obj: &Map<String, Value>) -> bool {
 }
 
 fn requires_json_schema(value: &Value, path: &str) -> Result<bool, EncodeError> {
-    let flattened = flatten_schema(value.clone(), path, RefSiblings::Replace)?;
+    let flattened = flatten_schema(value.clone(), path)?;
     let Some(obj) = flattened.as_object() else {
         return Ok(false);
     };
@@ -231,31 +266,27 @@ fn requires_json_schema(value: &Value, path: &str) -> Result<bool, EncodeError> 
                 .get("enum")
                 .and_then(Value::as_array)
                 .is_some_and(|values| values.iter().any(Value::is_number));
-    if let Some(properties) = obj.get("properties").and_then(Value::as_object) {
-        for (name, value) in properties {
-            if value.is_object() {
-                required |= requires_json_schema(
-                    value,
-                    &schema_path(&schema_path(path, "properties"), name),
-                )?;
-            }
-        }
-    }
-    if let Some(value) = obj.get("items")
-        && value.is_object()
-    {
-        required |= requires_json_schema(value, &schema_path(path, "items"))?;
-    }
-    for keyword in ["anyOf", "oneOf", "allOf"] {
-        if let Some(alternatives) = obj.get(keyword).and_then(Value::as_array) {
-            for (index, value) in alternatives.iter().enumerate() {
-                if value.is_object() {
-                    required |= requires_json_schema(
-                        value,
-                        &schema_path(&schema_path(path, keyword), &index.to_string()),
-                    )?;
+    for (keyword, value) in obj {
+        let at = schema_path(path, keyword);
+        match schema_member(keyword) {
+            Some(SchemaMember::Map) => {
+                if let Some(schemas) = value.as_object() {
+                    for (name, schema) in schemas {
+                        required |= requires_json_schema(schema, &schema_path(&at, name))?;
+                    }
                 }
             }
+            Some(SchemaMember::Schema) => {
+                if let Some(schemas) = value.as_array() {
+                    for (index, schema) in schemas.iter().enumerate() {
+                        required |=
+                            requires_json_schema(schema, &schema_path(&at, &index.to_string()))?;
+                    }
+                } else {
+                    required |= requires_json_schema(value, &at)?;
+                }
+            }
+            None => {}
         }
     }
     Ok(required)
@@ -381,7 +412,7 @@ fn child_schema(value: &Value, path: &str) -> Result<Value, EncodeError> {
 /// documented subset is carried under its REST name, a named loss is
 /// dropped, and anything else is refused with its path.
 fn schema_value(value: Value, path: &str) -> Result<Value, EncodeError> {
-    let flattened = flatten_schema(value, path, RefSiblings::Join)?;
+    let flattened = flatten_schema(value, path)?;
     let obj = flattened
         .as_object()
         .ok_or_else(|| schema_error(path, "Expected a JSON object for Schema"))?;

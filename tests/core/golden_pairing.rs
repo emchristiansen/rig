@@ -269,7 +269,7 @@ const HISTORICAL_GOLDENS: &[HistoricalGolden] = &[
     },
     HistoricalGolden {
         path: "crates/rig-cassette/fixtures/effects/gemini_tool_call_turns.effects.json",
-        retired: "mec-rig-132-dispositions-1 item 5 gemini::cassette::hook_stress::tool_call_turns_effect_log_is_the_golden_fixture",
+        retired: "mec-rig-golden-ninth-1; mec-rig-132-dispositions-1 item 5 gemini::cassette::hook_stress::tool_call_turns_effect_log_is_the_golden_fixture",
         reader: HistoricalReader {
             source: "crates/rig-cassette/tests/golden_replay.rs",
             module: "golden_replay",
