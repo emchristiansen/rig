@@ -46,20 +46,24 @@ pub(crate) fn shape_body(
 }
 
 fn base_instructions(text: &str, identity: Option<&CodexIdentity>) -> Value {
-    let mut item = json!({
-        "type": "message",
-        "role": "developer",
-        "content": [{"type": "input_text", "text": text}],
-        "internal_chat_message_metadata_passthrough": {
-            "content_item_kinds": ["model.base_instructions"],
-        },
-    });
+    let mut item = Map::from_iter([
+        ("type".to_owned(), json!("message")),
+        ("role".to_owned(), json!("developer")),
+        (
+            "content".to_owned(),
+            json!([{"type": "input_text", "text": text}]),
+        ),
+        (
+            "internal_chat_message_metadata_passthrough".to_owned(),
+            json!({"content_item_kinds": ["model.base_instructions"]}),
+        ),
+    ]);
     if let Some(identity) = identity {
         let namespace = Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.thread_id().as_bytes());
         let id = Uuid::new_v5(&namespace, text.as_bytes());
-        item["id"] = Value::String(format!("msg_{id}"));
+        item.insert("id".to_owned(), Value::String(format!("msg_{id}")));
     }
-    item
+    Value::Object(item)
 }
 
 /// Serialize existing routing fields ahead of the potentially large input.
