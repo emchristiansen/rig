@@ -235,8 +235,9 @@ fn merge_delta(message: &mut Map<String, Value>, delta: &Map<String, Value>) {
 /// Fold one tool-call fragment into the call it continues, told apart as
 /// the decoder tells calls apart. A fragment with an `index` goes to the
 /// latest call holding that index, unless it states a new id and that call
-/// already has whole arguments or the fragment names a tool: then it starts
-/// a new call. A fragment without one goes to the call that states its id,
+/// already has whole arguments or a named fragment opens another call.
+/// A same-name function fragment carrying arguments continues an incomplete
+/// function call. A fragment without an index goes to the call that states its id,
 /// or, stating none, continues the latest call while that call is opaque,
 /// its arguments are not yet a whole object, or the fragment brings nothing
 /// new; otherwise it starts a new call.
@@ -271,7 +272,31 @@ fn merge_call(message: &mut Map<String, Value>, fragment: &Value) {
                             .and_then(stated_id)
                             .is_some_and(|held| held != *id)
                     });
-                    !(replaced && (arguments_complete(held) || names))
+                    let opens = if let Some(name) = fragment
+                        .get("function")
+                        .and_then(|function| function.get("name"))
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.is_empty())
+                        .filter(|_| {
+                            matches!(
+                                fragment.get("type").and_then(Value::as_str),
+                                None | Some("function")
+                            )
+                        }) {
+                        let arguments = fragment
+                            .get("function")
+                            .and_then(|function| function.get("arguments"))
+                            .map(crate::json_utils::value_to_json_string);
+                        arguments.as_deref().is_none_or(str::is_empty)
+                            || CallKind::of(held) != CallKind::Function
+                            || held
+                                .pointer("/function/name")
+                                .and_then(Value::as_str)
+                                .is_none_or(|held| held.is_empty() || held != name)
+                    } else {
+                        names
+                    };
+                    !(replaced && (arguments_complete(held) || opens))
                 })
             }),
         None => match &id {

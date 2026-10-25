@@ -2505,11 +2505,12 @@ impl<'id> Out<'id, Completion> {
     /// the argument text held until then, and its end states its id. Calls
     /// are told apart by `index` when the wire gives one. A new id under an
     /// index starts a new call once the held call's arguments are a complete
-    /// object or when it names a tool: some providers send a fresh id, and
-    /// no name, with every chunk of one call. Without an index (`None`, or
-    /// the wire's `null`), a fragment with an unseen id opens a call, and one
-    /// with no id continues the latest call while its arguments are
-    /// incomplete.
+    /// object or a named fragment opens another call. A same-name fragment
+    /// carrying arguments continues an incomplete function call. Some providers
+    /// send a fresh id and no name with every chunk of one call. Without an
+    /// index (`None`, or the wire's `null`), a fragment with an unseen id
+    /// opens a call, and one with no id continues the latest call while its
+    /// arguments are incomplete.
     pub fn fragment(
         &mut self,
         index: Option<usize>,
@@ -2560,16 +2561,25 @@ impl<'id> Out<'id, Completion> {
                 let held = turn.open.get(&index).and_then(|draft| match &draft.body {
                     Body::Call {
                         id: Some(id),
+                        name,
                         arguments,
                         ..
                     } if new_id.is_some_and(|new| id.wire() != new)
                         && draft.tool_slot_state != Some(ToolSlotState::PendingName) =>
                     {
-                        Some(arguments.complete())
+                        let opens = names
+                            && (fragment.arguments.is_none_or(str::is_empty)
+                                || draft.item.get("type").and_then(serde_json::Value::as_str)
+                                    == Some("custom")
+                                || name.is_empty()
+                                || fragment
+                                    .name
+                                    .is_some_and(|incoming| incoming != name.as_str()));
+                        Some((arguments.complete(), opens))
                     }
                     _ => None,
                 });
-                if let Some(complete) = held.filter(|complete| *complete || names) {
+                if let Some((complete, _)) = held.filter(|(complete, opens)| *complete || *opens) {
                     // Another call took over the index: the one it held ends.
                     let moved = turn.fresh_index();
                     if let Some(draft) = turn.open.remove(&index) {

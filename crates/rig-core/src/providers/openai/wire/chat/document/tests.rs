@@ -186,6 +186,181 @@ fn a_new_id_under_an_index_continues_a_call_whose_arguments_are_incomplete() {
     );
 }
 
+/// These synthetic fragments pin the adopted call boundary independently of
+/// any provider recording, including the original same-name continuation.
+#[test]
+fn changed_ids_distinguish_function_openings_from_argument_continuations() {
+    for (name, arguments) in [
+        ("get_time", Some("{}")),
+        ("get_weather", None),
+        ("get_weather", Some("")),
+    ] {
+        let first = call(Some(0), "call_a", "get_weather", r#"{"cut":"#);
+        let mut second = json!({"index": 0, "id": "call_b", "type": "function",
+            "function": {"name": name}});
+        if let Some(arguments) = arguments {
+            second["function"]["arguments"] = json!(arguments);
+        }
+        let calls = rebuilt_calls(&[json!([first.clone()]), json!([second.clone()])]);
+        let mut first = first;
+        first
+            .as_object_mut()
+            .expect("call object")
+            .shift_remove("index");
+        second
+            .as_object_mut()
+            .expect("call object")
+            .shift_remove("index");
+        assert_eq!(calls, json!([first, second]));
+    }
+    for (held, incoming, name) in [
+        ("", r#"{"city":"#, Some("get_weather")),
+        (r#"{"city":"#, r#""Oslo"}"#, Some("get_weather")),
+        (r#"{"city":"#, r#""Oslo"}"#, None),
+    ] {
+        let mut second = json!({"index": 0, "id": "call_b",
+            "function": {"arguments": incoming}});
+        if let Some(name) = name {
+            second["function"]["name"] = json!(name);
+        }
+        let mut frames = vec![
+            json!([call(Some(0), "call_a", "get_weather", held)]),
+            json!([second]),
+        ];
+        if held.is_empty() {
+            frames.push(json!([{"index": 0,
+                "function": {"arguments": r#""Oslo"}"#}}]));
+        }
+        assert_eq!(
+            rebuilt_calls(&frames),
+            json!([call(None, "call_b", "get_weather", r#"{"city":"Oslo"}"#)])
+        );
+    }
+}
+
+/// Call kind follows `type`; unrelated extra fields do not split functions.
+#[test]
+fn a_custom_extra_field_keeps_same_named_function_fragments_together() {
+    for kind in [Some("function"), None] {
+        let extra = json!({"name": "unrelated", "input": "retained extra"});
+        let mut first = json!({"index": 0, "id": "call_a", "custom": extra,
+            "function": {"name": "get_weather", "arguments": r#"{"city":"#}});
+        if let Some(kind) = kind {
+            first["type"] = json!(kind);
+        }
+        let mut expected = json!({"id": "call_b", "custom": extra,
+            "function": {"name": "get_weather", "arguments": r#"{"city":"Oslo"}"#}});
+        if let Some(kind) = kind {
+            expected["type"] = json!(kind);
+        }
+        assert_eq!(
+            rebuilt_calls(&[
+                json!([first]),
+                json!([{"index": 0, "id": "call_b",
+                    "function": {"name": "get_weather", "arguments": r#""Oslo"}"#}}]),
+            ]),
+            json!([expected])
+        );
+    }
+}
+
+/// Completeness alone closes the held call, even without a new name.
+#[test]
+fn whole_arguments_split_on_a_changed_id_without_a_named_opening() {
+    let calls = rebuilt_calls(&[
+        json!([call(Some(0), "call_a", "get_weather", "{}")]),
+        json!([{"index": 0, "id": "call_b", "function": {"arguments": "{}"}}]),
+    ]);
+    assert_eq!(
+        calls,
+        json!([
+            call(None, "call_a", "get_weather", "{}"),
+            {"id": "call_b", "function": {"arguments": "{}"}}
+        ])
+    );
+}
+
+/// Missing identities and names keep the pre-existing merge boundary.
+#[test]
+fn changed_id_controls_keep_unstated_ids_and_unnamed_calls() {
+    for id in [None, Some(""), Some("null")] {
+        let mut first = json!({"index": 0, "type": "function",
+            "function": {"name": "get_weather", "arguments": r#"{"city":"#}});
+        if let Some(id) = id {
+            first["id"] = json!(id);
+        }
+        assert_eq!(
+            rebuilt_calls(&[
+                json!([first]),
+                json!([call(Some(0), "call_b", "get_time", r#""Oslo"}"#)]),
+            ]),
+            json!([call(None, "call_b", "get_time", r#"{"city":"Oslo"}"#)])
+        );
+    }
+    assert_eq!(
+        rebuilt_calls(&[
+            json!([{"index": 0, "id": "call_a", "function": {"arguments": "{"}}]),
+            json!([call(Some(0), "call_b", "get_weather", "{}")]),
+        ]),
+        json!([
+            {"id": "call_a", "function": {"arguments": "{"}},
+            call(None, "call_b", "get_weather", "{}")
+        ])
+    );
+}
+
+/// Custom input stays on its existing boundary; names never cross parts.
+#[test]
+fn custom_fragments_keep_their_changed_id_boundary() {
+    let custom = |id: &str, input: &str| {
+        json!({"index": 0, "id": id, "type": "custom",
+        "custom": {"name": "get_weather", "input": input}})
+    };
+    assert_eq!(
+        rebuilt_calls(&[
+            json!([custom("call_a", "first")]),
+            json!([custom("call_b", "second")]),
+        ]),
+        json!([
+            {"id": "call_a", "type": "custom",
+                "custom": {"name": "get_weather", "input": "first"}},
+            {"id": "call_b", "type": "custom",
+                "custom": {"name": "get_weather", "input": "second"}}
+        ])
+    );
+    assert_eq!(
+        rebuilt_calls(&[
+            json!([custom("call_a", "first")]),
+            json!([{"index": 0, "id": "call_b", "custom": {"input": "second"}}]),
+        ]),
+        json!([{"id": "call_b", "type": "custom",
+            "custom": {"name": "get_weather", "input": "firstsecond"}}])
+    );
+    let mut first = custom("call_a", "first");
+    first
+        .as_object_mut()
+        .expect("call object")
+        .shift_remove("index");
+    assert_eq!(
+        rebuilt_calls(&[
+            json!([custom("call_a", "first")]),
+            json!([call(Some(0), "call_b", "get_weather", "{}")]),
+        ]),
+        json!([first, call(None, "call_b", "get_weather", "{}")])
+    );
+    assert_eq!(
+        rebuilt_calls(&[
+            json!([call(Some(0), "call_a", "get_weather", r#"{"cut":"#)]),
+            json!([custom("call_b", "second")]),
+        ]),
+        json!([
+            call(None, "call_a", "get_weather", r#"{"cut":"#),
+            {"id": "call_b", "type": "custom",
+                "custom": {"name": "get_weather", "input": "second"}}
+        ])
+    );
+}
+
 #[test]
 fn index_less_fragments_with_new_ids_are_new_calls() {
     let calls = rebuilt_calls(&[
