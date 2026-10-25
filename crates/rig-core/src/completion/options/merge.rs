@@ -153,6 +153,13 @@ pub enum Rewrite {
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
     ResponsesCodex,
+    /// Move effective Standard Codex instructions into the merged input.
+    ///
+    /// For rig's own crates; not covered by semver.
+    #[doc(hidden)]
+    ResponsesCodexInstructions(
+        Option<crate::providers::openai::responses_api::codex_identity::CodexIdentity>,
+    ),
     /// Ask for ciphertext only alongside non-null reasoning.
     ///
     /// For rig's own crates; not covered by semver.
@@ -1012,6 +1019,12 @@ fn apply(
         Rewrite::ResponsesTypedControls => {}
         Rewrite::ResponsesCodex => {
             crate::providers::openai::responses_api::wire::shape_codex_body(body)?;
+        }
+        Rewrite::ResponsesCodexInstructions(identity) => {
+            crate::providers::openai::responses_api::codex_request::shape_body(
+                body,
+                identity.as_ref(),
+            )?;
         }
         Rewrite::ResponsesReasoningCiphertext => {
             let wanted = body.get("reasoning").is_some_and(|value| !value.is_null())

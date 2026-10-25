@@ -523,6 +523,55 @@ async fn standard_codex_prefix_and_routing_survive_full_and_incremental_sends() 
     }
 }
 
+#[tokio::test]
+async fn standard_codex_provider_overrides_shape_the_full_prefix_before_a_delta() {
+    let identity =
+        CodexIdentity::from_ids("session-derived", "thread-derived").expect("Codex identity");
+    let script = Script::new()
+        .turn([completed("resp_override")])
+        .turn([completed("resp_delta")]);
+    let mut session =
+        CodexWebSocketSession::from_connection(codex_wire(), identity, script.connection(), None)
+            .expect("Codex session");
+    let user = json!({
+        "type":"message", "role":"user", "content":[{"type":"input_text", "text":"replacement input"}],
+    });
+    session.completion(user_request("superseded input")
+        .preamble("superseded base")
+        .provider_options(serde_json::from_value(json!({
+            "chatgpt": {"openai.responses": {"instructions":"replacement", "input":[user.clone()]}},
+        })).expect("provider options")))
+        .await.expect("full turn completes");
+    session
+        .send_incremental(delta("second"))
+        .await
+        .expect("delta sends");
+    let frames = script.sent_json();
+    assert_eq!(frames.len(), 2);
+    assert_eq!(
+        frames[0]["input"],
+        json!([
+            {
+                "type":"message", "role":"developer",
+                "id":"msg_1a335eab-ab49-5936-ad27-19394011fcaa",
+                "content":[{"type":"input_text", "text":"replacement"}],
+                "internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]},
+            },
+            user,
+        ])
+    );
+    assert_eq!(
+        frames[1]["input"],
+        json!([
+            {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"second"}]},
+        ])
+    );
+    assert_eq!(frames[1]["previous_response_id"], "resp_override");
+    for frame in frames {
+        assert!(frame.get("instructions").is_none());
+    }
+}
+
 /// Lite full sends carry one deterministic prefix and the per-frame marker;
 /// incremental sends carry the marker and delta only.
 #[tokio::test]

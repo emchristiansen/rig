@@ -1194,6 +1194,84 @@ fn standard_codex_routes_first_after_identity_and_service_tier_merging() {
 }
 
 #[test]
+fn standard_codex_moves_the_effective_provider_instruction_override() {
+    let wire = muninn_configured_chatgpt()
+        .with_codex_identity(derived_identity())
+        .expect("Codex identity");
+    for instructions in [
+        serde_json::json!("replacement"),
+        serde_json::json!(""),
+        serde_json::Value::Null,
+    ] {
+        let request = CompletionRequest::new("hello")
+            .preamble("superseded base")
+            .provider_options(
+                serde_json::from_value(serde_json::json!({
+                    "chatgpt": {"openai.responses": {"instructions": instructions}},
+                }))
+                .expect("provider options"),
+            );
+        for mode in [Mode::Unary, Mode::Streaming] {
+            let body = encoded_body_of(&wire, request.clone(), mode);
+            assert!(body.get("instructions").is_none());
+            let user = serde_json::json!({
+                "type":"message", "role":"user", "content":[{"type":"input_text", "text":"hello"}],
+            });
+            let expected = if instructions == "replacement" {
+                serde_json::json!([
+                    {
+                        "type":"message", "role":"developer",
+                        "id":"msg_1a335eab-ab49-5936-ad27-19394011fcaa",
+                        "content":[{"type":"input_text", "text":"replacement"}],
+                        "internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]},
+                    },
+                    user,
+                ])
+            } else {
+                serde_json::json!([user])
+            };
+            assert_eq!(body["input"], expected);
+        }
+    }
+}
+
+#[test]
+fn standard_codex_preserves_instructions_when_provider_options_replace_input() {
+    let wire = muninn_configured_chatgpt();
+    let user = serde_json::json!({
+        "type":"message", "role":"user", "content":[{"type":"input_text", "text":"replacement input"}],
+    });
+    for input in [
+        serde_json::json!([user.clone()]),
+        serde_json::json!("replacement input"),
+    ] {
+        let request = CompletionRequest::new("superseded input")
+            .preamble("base")
+            .provider_options(
+                serde_json::from_value(serde_json::json!({
+                    "chatgpt": {"openai.responses": {"input": input}},
+                }))
+                .expect("provider options"),
+            );
+        for mode in [Mode::Unary, Mode::Streaming] {
+            let body = encoded_body_of(&wire, request.clone(), mode);
+            assert!(body.get("instructions").is_none());
+            assert_eq!(
+                body["input"],
+                serde_json::json!([
+                    {
+                        "type":"message", "role":"developer",
+                        "content":[{"type":"input_text", "text":"base"}],
+                        "internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]},
+                    },
+                    user,
+                ])
+            );
+        }
+    }
+}
+
+#[test]
 fn standard_codex_without_base_instructions_keeps_only_the_original_input() {
     let bytes = encoded_bytes(
         &muninn_configured_chatgpt(),

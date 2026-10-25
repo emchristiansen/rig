@@ -27,7 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value, json};
 
 pub mod codex_identity;
-mod codex_request;
+pub(crate) mod codex_request;
 /// Caller-held observation custody for one Responses operation.
 #[cfg(feature = "completion-observations")]
 pub mod observation;
@@ -1057,6 +1057,9 @@ impl wire::Responses {
         }
         if codex {
             rewrites.push(Rewrite::ResponsesCodex);
+            if self.codex_request_shape.is_standard() {
+                rewrites.push(Rewrite::ResponsesCodexInstructions(identity.cloned()));
+            }
         }
         rewrites.push(Rewrite::ResponsesLite {
             shape: self.codex_request_shape,
@@ -1075,7 +1078,6 @@ impl wire::Responses {
                 self.base(
                     request,
                     codex,
-                    identity,
                     input_requirement,
                     layers,
                     #[cfg(feature = "websocket")]
@@ -1100,7 +1102,6 @@ impl wire::Responses {
         &self,
         request: &completion::CompletionRequest,
         codex: bool,
-        identity: Option<&codex_identity::CodexIdentity>,
         input_requirement: InputRequirement,
         layers: &mut BaseInput<'_>,
         #[cfg(feature = "websocket")] delta_context: Option<&mut Option<DeltaContext>>,
@@ -1238,14 +1239,6 @@ impl wire::Responses {
                 Some(format!("{gateway}\n\n{lifted}"))
             }
             _ => (!lifted.is_empty()).then_some(lifted),
-        };
-        let instructions = if codex && self.codex_request_shape.is_standard() {
-            if let Some(text) = instructions.as_deref().filter(|text| !text.is_empty()) {
-                items.insert(0, codex_request::base_instructions(text, identity));
-            }
-            None
-        } else {
-            instructions
         };
         let text = request
             .output_schema

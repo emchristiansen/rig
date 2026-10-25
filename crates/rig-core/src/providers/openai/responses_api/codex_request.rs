@@ -6,10 +6,46 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::completion::options::FinalBody;
+use crate::error::EncodeError;
 
 use super::codex_identity::CodexIdentity;
 
-pub(super) fn base_instructions(text: &str, identity: Option<&CodexIdentity>) -> Value {
+/// Move the effective instructions after all option layers have merged.
+pub(crate) fn shape_body(
+    body: &mut Map<String, Value>,
+    identity: Option<&CodexIdentity>,
+) -> Result<(), EncodeError> {
+    let text = match body.shift_remove("instructions") {
+        None | Some(Value::Null) => return Ok(()),
+        Some(Value::String(text)) if text.is_empty() => return Ok(()),
+        Some(Value::String(text)) => text,
+        Some(_) => {
+            return Err(EncodeError::request(
+                "Standard Codex instructions must be a string or null",
+            ));
+        }
+    };
+    let input = body.get_mut("input").ok_or_else(|| {
+        EncodeError::request("Standard Codex instructions require an input array or string")
+    })?;
+    match input {
+        Value::Array(items) => items.insert(0, base_instructions(&text, identity)),
+        Value::String(user) => {
+            *input = json!([
+                base_instructions(&text, identity),
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": user}]},
+            ]);
+        }
+        _ => {
+            return Err(EncodeError::request(
+                "Standard Codex instructions require an input array or string",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn base_instructions(text: &str, identity: Option<&CodexIdentity>) -> Value {
     let mut item = json!({
         "type": "message",
         "role": "developer",
