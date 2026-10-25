@@ -45,6 +45,33 @@ async fn stream_to_stdout_returns_the_final_response() {
     assert_eq!(response.messages().len(), 2);
 }
 
+/// Carried reasoning, as Responses providers finish it, prints its visible
+/// text before the answer, as plain reasoning does.
+#[tokio::test]
+async fn stream_to_stdout_prints_carried_reasoning_and_text() {
+    let model = MockCompletionModel::from_stream_turns([[
+        MockStreamEvent::Reasoning {
+            id: "rs_1".to_string(),
+            content: rig_core::message::CarriedReasoningPart::Summary("Thinking.".to_string()),
+        },
+        MockStreamEvent::text(" done"),
+        MockStreamEvent::final_response(Usage::default()),
+    ]]);
+    let agent = AgentBuilder::new(model).build();
+
+    let mut stream = agent.prompt("go").stream();
+    let mut printed = Vec::new();
+    let response = stream_to(&mut stream, &mut printed)
+        .await
+        .expect("the run succeeds");
+
+    assert_eq!(
+        String::from_utf8(printed).expect("utf-8"),
+        "Response: Thinking. done"
+    );
+    assert_eq!(response.output(), " done");
+}
+
 #[tokio::test]
 async fn text_only_stream_without_terminal_record_is_rejected_as_truncated() {
     let model = MockCompletionModel::from_stream_turns([[MockStreamEvent::text("partial answer")]]);
@@ -57,10 +84,8 @@ async fn text_only_stream_without_terminal_record_is_rejected_as_truncated() {
         match item {
             Err(error) => {
                 assert!(
-                    error
-                        .to_string()
-                        .contains("the reply ended before the provider ended it"),
-                    "truncation should surface as a truncated reply, got: {error}"
+                    error.to_string().contains("terminal record"),
+                    "truncation should surface as a terminal-record error, got: {error}"
                 );
                 saw_error = true;
                 break;

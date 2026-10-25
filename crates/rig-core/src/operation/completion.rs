@@ -1527,17 +1527,52 @@ const UNPRICED: [&str; 3] = [
     crate::providers::ollama::PROVIDER_NAME,
 ];
 
+/// The APIs whose usage mapping reports `input_tokens` without the cache
+/// reads and writes it counts beside them: Anthropic Messages and Bedrock
+/// Converse. [`Pricing::cost`](crate::catalog::Pricing::cost) takes an
+/// input that includes them.
+const CACHE_BESIDE_INPUT: [&str; 2] = [
+    crate::providers::anthropic::wire::MESSAGES_API,
+    "bedrock.converse",
+];
+
 /// What `usage` costs at the built-in catalog's pricing for `origin`'s
 /// model, or `None` when the catalog has no price for it or the provider
-/// is one it does not price ([`UNPRICED`]).
+/// is one it does not price ([`UNPRICED`]). The counters stay unchanged;
+/// only the priced input adds back the counts its mapping reports beside
+/// it (cache reads and writes for [`CACHE_BESIDE_INPUT`], the hosted-tool
+/// prompt for Gemini Interactions), and an overflowing sum has no cost.
 fn catalog_cost(origin: &Origin, usage: &Usage) -> Option<crate::completion::Cost> {
     if UNPRICED.contains(&origin.provider.as_str()) {
         return None;
     }
+    // The native Gemini Interactions mapping reports thought and tool-use
+    // prompt tokens beside its output and input counters, where
+    // GenerateContent folds them into those counters.
+    let interactions = origin.provider == crate::providers::gemini::completion::PROVIDER_NAME
+        && origin.api.as_str() == "gemini.interactions";
+    let reasoning = if interactions {
+        crate::catalog::ReasoningAccounting::SeparateFromOutput
+    } else {
+        crate::catalog::ReasoningAccounting::IncludedInOutput
+    };
+    let mut priced = *usage;
+    if interactions && let Some(input) = usage.input_tokens {
+        priced.input_tokens = Some(input.checked_add(usage.tool_use_prompt_tokens.unwrap_or(0))?);
+    }
+    if CACHE_BESIDE_INPUT.contains(&origin.api.as_str())
+        && let Some(uncached) = usage.input_tokens
+    {
+        priced.input_tokens = Some(
+            uncached
+                .checked_add(usage.cached_input_tokens.unwrap_or(0))?
+                .checked_add(usage.cache_creation_input_tokens.unwrap_or(0))?,
+        );
+    }
     crate::catalog::lookup(&origin.provider, &origin.model)
         .or_else(|| crate::catalog::lookup_snapshot(&origin.provider, &origin.model))
         .and_then(|spec| spec.pricing.as_ref())
-        .and_then(|pricing| pricing.cost(usage))
+        .and_then(|pricing| pricing.cost(&priced, reasoning))
 }
 
 /// `block` with no provider item: an opaque item no longer replays.
@@ -2089,16 +2124,14 @@ impl<'id> Out<'id, Completion> {
         let Some(draft) = fold.open.get(&index) else {
             return not_open(index);
         };
-        let Body::Call { .. } = &draft.body else {
+        let Body::Call { id, name, .. } = &draft.body else {
             return ProviderError::Response(format!(
                 "the reply refused item {index} as a malformed function call, but it is not a function call"
             ));
         };
+        let (id, name) = (id.clone(), name.clone());
         let Some(draft) = fold.open.remove(&index) else {
             return not_open(index);
-        };
-        let Body::Call { id, name, .. } = draft.body else {
-            unreachable!("the open item's function kind was checked under the same lock")
         };
         if fold.run == Some(index) {
             fold.run = None;
@@ -2746,3 +2779,6 @@ mod anthropic_pause_tests;
 
 #[cfg(test)]
 mod gemini_signature_tests;
+
+#[cfg(test)]
+mod coverage_tests;

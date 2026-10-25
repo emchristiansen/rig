@@ -5,16 +5,6 @@
       {
         "text": "{\"total\": 5} {\"type\": \"object\", \"properties\": {\"total\": {\"type\": \"integer\", \"format\": \"int64\"}}, \"required\": [\"total\"], \"title\": \"SumReport\", \"additionalProperties\": false}",
         "native": null
-      },
-      {
-        "tool_call": {
-          "id": "aVbxHpPgC",
-          "name": "add",
-          "arguments": {
-            "x": 2
-          },
-          "native": null
-        }
       }
     ],
     "usage": {
@@ -104,7 +94,8 @@
       "created": 0,
       "id": "chatcmpl-REDACTED_1",
       "model": "mistral-small-latest",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
+      "p": "abcdefghijklmno",
       "usage": {
         "completion_tokens": 8,
         "prompt_tokens": 20,
@@ -174,7 +165,8 @@
       "created": 0,
       "id": "2b244bc2e0ab4f2bb663dc5f948d8559",
       "model": "mistral-small-latest",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
+      "p": "abc",
       "usage": {
         "completion_tokens": 17,
         "prompt_tokens": 381,
@@ -265,7 +257,8 @@
       "created": 0,
       "id": "chatcmpl-REDACTED_1",
       "model": "voxtral-small-latest",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
+      "p": "abcdefghijklmnopqrstuvwxyz01234567",
       "usage": {
         "completion_tokens": 15,
         "prompt_audio_seconds": 5,
@@ -311,7 +304,8 @@
       "created": 0,
       "id": "86fdadeb7da147cfa4650139ff2d0faf",
       "model": "mistral-large-latest",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
+      "p": "abcdefghi",
       "usage": {
         "completion_tokens": 4,
         "prompt_tokens": 1783,
@@ -386,7 +380,8 @@
       "created": 0,
       "id": "chatcmpl-REDACTED_1",
       "model": "mistral-small-latest",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
+      "p": "abcdefghijklmnopqrstuvwxyz0123456789",
       "usage": {
         "completion_tokens": 25,
         "prompt_tokens": 88,
@@ -515,7 +510,8 @@
       "created": 0,
       "id": "chatcmpl-REDACTED_1",
       "model": "ministral-3b-latest",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
+      "p": "ab",
       "usage": {
         "completion_tokens": 1,
         "prompt_tokens": 18,
@@ -567,7 +563,8 @@
       "created": 0,
       "id": "chatcmpl-REDACTED_1",
       "model": "mistral-small-latest",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
+      "p": "abc",
       "usage": {
         "completion_tokens": 2,
         "prompt_tokens": 30,
@@ -650,26 +647,7 @@
   },
   "tool_truncation_matrix/streaming_ministral_3b_low_model.yaml#0": {
     "mode": "streaming",
-    "choice": [
-      {
-        "tool_call": {
-          "id": "28MDcpEFf",
-          "name": "file_report",
-          "arguments": {},
-          "native": {
-            "item": {
-              "function": {
-                "arguments": "",
-                "name": "file_report"
-              },
-              "id": "28MDcpEFf",
-              "type": "function"
-            },
-            "fingerprint": "f803e9b79a60d643"
-          }
-        }
-      }
-    ],
+    "choice": [],
     "usage": {
       "input_tokens": 125,
       "output_tokens": 4,
@@ -704,7 +682,8 @@
       "created": 0,
       "id": "112ceb9c68b54ab4ae4ff26489777dd9",
       "model": "ministral-3b-latest",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
+      "p": "a",
       "usage": {
         "completion_tokens": 4,
         "prompt_tokens": 125,

@@ -195,6 +195,12 @@ async fn depth_two_resumed() {
     corpus::resume_reproduces(&DEPTH_TWO).await;
 }
 
+/// Resume the streamed causal program after its first tool turn.
+#[tokio::test]
+async fn completion_streamed_resumed() {
+    corpus::resume_reproduces(&COMPLETION_STREAMED).await;
+}
+
 /// The parent of every record, by position.
 fn parents(fixture: &str) -> Vec<Option<usize>> {
     let log = corpus::golden(fixture);

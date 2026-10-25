@@ -500,7 +500,7 @@ fn azure_refuses_what_its_default_api_version_predates() {
 }
 
 #[test]
-fn dialect_cells() {
+fn openrouter_dialect_cells() {
     let body = sent(
         &chat(&OPENROUTER, "openai/gpt-5.2"),
         GenerationOptions::default()
@@ -527,7 +527,10 @@ fn dialect_cells() {
         body["cache_control"],
         json!({"type": "ephemeral", "ttl": "1h"})
     );
+}
 
+#[test]
+fn dialect_cells() {
     let body = sent(
         &chat(&DEEPSEEK, "deepseek-v4-flash"),
         GenerationOptions::default().reasoning(Reasoning::Off),
@@ -826,6 +829,22 @@ mod responses {
     }
 
     #[test]
+    fn openrouter_dialect_cells() {
+        let openrouter = responses(&OPENROUTER, "anthropic/claude-sonnet-4.5");
+        let body = sent(
+            &openrouter,
+            with(
+                GenerationOptions::default()
+                    .cache(CacheRetention::Short)
+                    .service_tier(ServiceTier::Flex),
+            ),
+        )
+        .expect("OpenRouter Responses");
+        assert_eq!(body["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(body["service_tier"], "flex");
+    }
+
+    #[test]
     fn dialect_cells() {
         let xai = responses(&crate::providers::xai::DIALECT, "grok-4.7");
         let body = sent(
@@ -854,19 +873,6 @@ mod responses {
             )),
             Some("reasoning")
         );
-
-        let openrouter = responses(&OPENROUTER, "anthropic/claude-sonnet-4.5");
-        let body = sent(
-            &openrouter,
-            with(
-                GenerationOptions::default()
-                    .cache(CacheRetention::Short)
-                    .service_tier(ServiceTier::Flex),
-            ),
-        )
-        .expect("OpenRouter Responses");
-        assert_eq!(body["cache_control"], json!({"type": "ephemeral"}));
-        assert_eq!(body["service_tier"], "flex");
 
         let copilot = responses(&crate::providers::copilot::wire::DIALECT, "gpt-5.3-codex");
         let body = sent(

@@ -104,11 +104,24 @@ fn write(
     })
 }
 
-fn write_part(out: &mut Out<'_, Completion>, part: &AssistantContent) -> Result<(), ProviderError> {
+enum CarriedFixturePart<'a> {
+    Text(&'a CarriedText),
+    Reasoning(&'a CarriedReasoning),
+}
+
+fn carried_fixture_part(part: &AssistantContent) -> CarriedFixturePart<'_> {
     match part {
-        AssistantContent::CarriedText(text) => out.carried_text(text.clone()),
-        AssistantContent::CarriedReasoning(reasoning) => out.carried_reasoning(reasoning.clone()),
+        AssistantContent::CarriedText(text) => CarriedFixturePart::Text(text),
+        AssistantContent::CarriedReasoning(reasoning) => CarriedFixturePart::Reasoning(reasoning),
         other => panic!("the fixture contains a carried part, got {other:?}"),
+    }
+}
+
+fn write_part(out: &mut Out<'_, Completion>, part: &AssistantContent) -> Result<(), ProviderError> {
+    let part = carried_fixture_part(part);
+    match part {
+        CarriedFixturePart::Text(text) => out.carried_text(text.clone()),
+        CarriedFixturePart::Reasoning(reasoning) => out.carried_reasoning(reasoning.clone()),
     }
 }
 

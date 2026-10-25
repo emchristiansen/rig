@@ -1,6 +1,6 @@
 mod harness_switch {
-    //! One `GenerationOptions` value, applied to five providers by a harness
-    //! that switches between them, encodes to each provider's own JSON. The
+    //! One `GenerationOptions` value, applied to four providers by a harness
+    //! and separately to OpenRouter, encodes to each provider's own JSON. The
     //! request carries no provider JSON: no `additional_params`.
     //!
     //! Encode-only: what these bodies send is pinned here against the
@@ -118,9 +118,9 @@ mod harness_switch {
     }
 
     #[test]
-    fn one_options_value_drives_five_wires() {
+    fn one_options_value_drives_four_wires() {
         let capture = TraceCapture::default();
-        let (anthropic, responses, gemini, bedrock, openrouter) =
+        let (anthropic, responses, gemini, bedrock) =
             tracing::subscriber::with_default(capture.subscriber(), || {
                 let encode_one = |result: Result<Value, ProviderError>| {
                     result.expect("the request encodes under Ignore")
@@ -130,7 +130,6 @@ mod harness_switch {
                     encode_one(encode(&openai_responses(), request(OnUnsupported::Ignore))),
                     encode_one(encode(&gemini(), request(OnUnsupported::Ignore))),
                     encode_one(bedrock(request(OnUnsupported::Ignore))),
-                    encode_one(encode(&openrouter(), request(OnUnsupported::Ignore))),
                 )
             });
 
@@ -186,6 +185,23 @@ mod harness_switch {
             Some("1h")
         );
 
+        let skipped: Vec<String> = capture
+            .warnings()
+            .into_iter()
+            .filter(|warning| warning.contains("option=cache"))
+            .collect();
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert!(skipped[0].contains("provider=gcp.gemini"), "{skipped:?}");
+    }
+
+    #[test]
+    fn one_options_value_drives_openrouter() {
+        let capture = TraceCapture::default();
+        let openrouter = tracing::subscriber::with_default(capture.subscriber(), || {
+            encode(&openrouter(), request(OnUnsupported::Ignore))
+                .expect("the request encodes under Ignore")
+        });
+
         // OpenRouter's documented top-level marker, not a system-message one.
         assert_eq!(text(&openrouter, "/reasoning/effort"), Some("high"));
         assert_eq!(text(&openrouter, "/cache_control/type"), Some("ephemeral"));
@@ -197,8 +213,7 @@ mod harness_switch {
             .into_iter()
             .filter(|warning| warning.contains("option=cache"))
             .collect();
-        assert_eq!(skipped.len(), 1, "{skipped:?}");
-        assert!(skipped[0].contains("provider=gcp.gemini"), "{skipped:?}");
+        assert!(skipped.is_empty(), "{skipped:?}");
     }
 
     #[test]
@@ -1070,9 +1085,8 @@ mod option_matrix {
         }
     }
 
-    #[test]
-    fn every_option_alone_gives_its_section_6_cell() {
-        for (wire, encode, row) in cells() {
+    fn assert_option_cells(rows: impl IntoIterator<Item = (&'static str, Encode, [Cell; 8])>) {
+        for (wire, encode, row) in rows {
             let baseline = encode(request(GenerationOptions::default()))
                 .unwrap_or_else(|error| panic!("{wire}: the baseline encodes: {error}"));
             for ((field, options), cell) in one_field_each().into_iter().zip(row) {
@@ -1104,6 +1118,24 @@ mod option_matrix {
                 assert_eq!(body, expected, "{wire}: `{field}`");
             }
         }
+    }
+
+    #[test]
+    fn every_option_alone_gives_its_section_6_cell() {
+        assert_option_cells(
+            cells()
+                .into_iter()
+                .filter(|(wire, _, _)| *wire != "openrouter"),
+        );
+    }
+
+    #[test]
+    fn openrouter_every_option_alone_gives_its_section_6_cell() {
+        assert_option_cells(
+            cells()
+                .into_iter()
+                .filter(|(wire, _, _)| *wire == "openrouter"),
+        );
     }
 }
 
@@ -1218,7 +1250,10 @@ mod precedence {
         )
         .expect("the request encodes");
         assert_eq!(tool_names(&sent), ["lookup", "web_search"], "{sent}");
+    }
 
+    #[test]
+    fn openrouter_raw_tools_are_appended_to_rig_tools() {
         let function = json!({"type": "function", "function": {
             "name": "raw_lookup", "parameters": {"type": "object", "properties": {}},
         }});
@@ -1233,7 +1268,7 @@ mod precedence {
     }
 
     #[test]
-    fn null_is_sent() {
+    fn openrouter_null_is_sent() {
         let sent = encode(
             &openrouter(),
             request().additional_params(json!({"top_p": null, "user": null})),
@@ -1241,7 +1276,10 @@ mod precedence {
         .expect("the request encodes");
         assert_eq!(sent.get("top_p"), Some(&Value::Null), "{sent}");
         assert_eq!(sent.get("user"), Some(&Value::Null), "{sent}");
+    }
 
+    #[test]
+    fn null_is_sent() {
         // Responses skips a raw `null` today; it is now sent as on Chat.
         let sent = encode(
             &openai_responses(),
@@ -1492,7 +1530,7 @@ mod typed_extras_unary {
     }
 
     #[tokio::test]
-    async fn openrouter_and_deepseek_extras_from_unary_recordings() {
+    async fn openrouter_extras_from_unary_recordings() {
         let openrouter_reply = unary(
             openrouter(),
             recorded_body("openrouter", OPENROUTER_UNARY, 0),
@@ -1507,7 +1545,10 @@ mod typed_extras_unary {
         assert_eq!(extras.cost, Some(2.7e-6));
         assert_eq!(extras.native_finish_reason.as_deref(), Some("stop"));
         assert!(openrouter_reply.extras::<DeepSeekExt>().is_none());
+    }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn deepseek_extras_from_unary_recordings() {
         let deepseek_reply = unary(
             deepseek(),
             recorded_body("deepseek", DEEPSEEK_UNARY, 0),
@@ -1663,8 +1704,8 @@ mod typed_extras_streamed {
         stream.finish().await.expect("the recorded stream ends")
     }
 
-    #[tokio::test]
-    async fn the_same_extras_from_streamed_recordings() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn openrouter_extras_from_streamed_recordings() {
         let from_stream = streamed(
             openrouter(),
             recorded_body("openrouter", OPENROUTER_STREAMED, 0),
@@ -1687,7 +1728,10 @@ mod typed_extras_streamed {
         assert_eq!(from_stream.cost, Some(2.7e-6));
         assert_eq!(from_stream.native_finish_reason.as_deref(), Some("stop"));
         assert_eq!(from_stream, from_body);
+    }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn deepseek_extras_from_streamed_recordings() {
         let deepseek_reply = streamed(
             deepseek(),
             recorded_body("deepseek", DEEPSEEK_STREAMED, 0),
@@ -1783,7 +1827,7 @@ mod citations_and_cost {
     }
 
     #[tokio::test]
-    async fn reported_cost_wins() {
+    async fn openrouter_reported_cost_wins() {
         for reply in [
             unary(
                 openrouter(),

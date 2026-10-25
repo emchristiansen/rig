@@ -117,19 +117,12 @@ fn transcription_thinking(budget: u32, include: bool) -> Value {
 /// are the turn's text parts, and a part boundary is not a separator the
 /// provider sent.
 fn choice_text(choice: &[AssistantContent]) -> String {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
+    rig_test_support::support::assistant_text(choice)
 }
 
+/// The port decodes Gemini thought runs as carried reasoning.
 fn has_reasoning(choice: &[AssistantContent]) -> bool {
-    choice
-        .iter()
-        .any(|content| matches!(content, AssistantContent::Reasoning(_)))
+    choice.iter().any(rig_test_support::support::is_reasoning)
 }
 
 /// A cell that expected thought parts must prove its fixture still carries
@@ -523,7 +516,10 @@ fn text_signatures(choice: &[AssistantContent]) -> Vec<&str> {
 
 mod unit {
     use rig::completion::CompletionResponse;
-    use rig::message::AssistantContent;
+    use rig::message::{
+        AssistantContent, CarriedPayload, CarriedPosition, CarriedReasoning, CarriedReasoningPart,
+        CarriedText, CarriedTextContent, GeminiSignedAnswer, GeminiThoughtSignature,
+    };
     use rig::providers::gemini::GeminiConfig;
     use rig::providers::gemini::transcription::transcript_of;
     use rig::test_utils::RecordingHttpClient;
@@ -574,14 +570,50 @@ mod unit {
     }
 
     fn choice_text(response: &CompletionResponse) -> String {
-        response
-            .choice
-            .iter()
-            .filter_map(|content| match content {
-                AssistantContent::Text(text) => Some(text.text.as_str()),
-                _ => None,
-            })
-            .collect()
+        rig_test_support::support::assistant_text(&response.choice)
+    }
+
+    /// A thought part as the port decodes it: carried reasoning holding the
+    /// exact part, issued by Gemini, at its position in the candidate.
+    fn carried_thought(
+        text: &str,
+        signature: Option<&str>,
+        part: Value,
+        part_index: u64,
+    ) -> AssistantContent {
+        AssistantContent::CarriedReasoning(CarriedReasoning::new(
+            vec![CarriedReasoningPart::Text {
+                text: text.to_owned(),
+                signature: signature.map(str::to_owned),
+            }],
+            carried_payload(part, part_index),
+        ))
+    }
+
+    /// A signed answer part as the port decodes it: carried text whose
+    /// signature stays independent of the text.
+    fn signed_answer(
+        text: &str,
+        signature: &str,
+        part: Value,
+        part_index: u64,
+    ) -> AssistantContent {
+        AssistantContent::CarriedText(CarriedText::new(
+            CarriedTextContent::GeminiSignedAnswer(GeminiSignedAnswer::new(
+                text,
+                GeminiThoughtSignature::new(signature),
+            )),
+            carried_payload(part, part_index),
+        ))
+    }
+
+    fn carried_payload(part: Value, part_index: u64) -> CarriedPayload {
+        CarriedPayload::new(part, Some("gcp.gemini".to_owned())).with_position(
+            CarriedPosition::MessageContent {
+                item_index: 0,
+                part_index,
+            },
+        )
     }
 
     /// Not a recording: a live turn produces one part layout, and the claim
@@ -724,13 +756,15 @@ mod unit {
             "",
             "a candidate with no visible text has no text"
         );
-        assert!(
-            response
-                .choice
-                .iter()
-                .any(|content| matches!(content, AssistantContent::Reasoning(_))),
-            "the thought reaches the caller as reasoning, got {:?}",
-            response.choice
+        assert_eq!(
+            response.choice,
+            vec![carried_thought(
+                "Still working it out...",
+                None,
+                json!({ "text": "Still working it out...", "thought": true }),
+                0,
+            )],
+            "the thought reaches the caller as reasoning"
         );
     }
 
@@ -752,10 +786,18 @@ mod unit {
         assert_eq!(
             response.choice,
             vec![
-                AssistantContent::reasoning("the chain")
-                    .with_native(json!({ "text": "the chain", "thought": true })),
-                AssistantContent::text("answer")
-                    .with_native(json!({ "text": "answer", "thoughtSignature": "sig-trailing" })),
+                carried_thought(
+                    "the chain",
+                    None,
+                    json!({ "text": "the chain", "thought": true }),
+                    0,
+                ),
+                signed_answer(
+                    "answer",
+                    "sig-trailing",
+                    json!({ "text": "answer", "thoughtSignature": "sig-trailing" }),
+                    1,
+                ),
             ],
             "the chain-of-thought block stays unsigned"
         );
@@ -773,8 +815,11 @@ mod unit {
         assert_eq!(response.choice.len(), 1, "{:?}", response.choice);
         assert_eq!(
             response.choice,
-            vec![AssistantContent::text("17 squared is 289.").with_native(
-                json!({ "text": "17 squared is 289.", "thoughtSignature": "sig-trailing" })
+            vec![signed_answer(
+                "17 squared is 289.",
+                "sig-trailing",
+                json!({ "text": "17 squared is 289.", "thoughtSignature": "sig-trailing" }),
+                0,
             )]
         );
     }
@@ -794,8 +839,11 @@ mod unit {
         assert_eq!(response.choice.len(), 2, "one reasoning block, one text");
         assert_eq!(
             response.choice.first(),
-            Some(&AssistantContent::reasoning("thinking").with_native(
-                json!({ "text": "thinking", "thought": true, "thoughtSignature": "sig-own" })
+            Some(&carried_thought(
+                "thinking",
+                Some("sig-own"),
+                json!({ "text": "thinking", "thought": true, "thoughtSignature": "sig-own" }),
+                0,
             ))
         );
     }

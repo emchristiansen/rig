@@ -665,5 +665,223 @@ fn direct_native_encoding_keeps_originless_canonical_reasoning_ungated() {
     );
 }
 
+/// A turn of empty reasoning, an image, an opaque item and carried
+/// reasoning with no visible text has no content, thinking or calls, so it
+/// is no message.
+#[test]
+fn a_turn_with_nothing_to_send_is_no_message() {
+    use crate::message::{CarriedPayload, CarriedReasoning, CarriedReasoningPart, Opaque};
+    let turn = AssistantMessage {
+        content: vec![
+            AssistantContent::Reasoning(Reasoning::new("")),
+            AssistantContent::Image(Image {
+                data: DocumentSourceKind::Base64("aW1hZ2U=".to_owned()),
+                media_type: Some(ImageMediaType::PNG),
+                detail: None,
+                native: None,
+            }),
+            AssistantContent::Opaque(Opaque {
+                item: json!({"type": "x"}),
+                replay: true,
+            }),
+            AssistantContent::CarriedReasoning(CarriedReasoning::new(
+                vec![CarriedReasoningPart::Encrypted("sealed".to_owned())],
+                CarriedPayload::new(json!({"type": "reasoning"}), Some("foreign".to_owned())),
+            )),
+        ],
+        origin: None,
+        stop: None,
+    };
+    assert_eq!(
+        wire()
+            .assistant(&turn, 0, &super::WireIds::default())
+            .expect("the turn encodes"),
+        None
+    );
+}
+
+/// A whole provider item cannot be replayed on `/api/chat`: the encoder
+/// refuses it with the item's issuer and type.
+#[test]
+fn a_provider_item_is_refused() {
+    use crate::message::{ProviderItem, UnreplayableProviderItem};
+    use std::error::Error as _;
+    let turn = AssistantMessage {
+        content: vec![AssistantContent::ProviderItem(ProviderItem::new(
+            json!({"type": "future_item", "id": "item_1"}),
+            "openai",
+        ))],
+        origin: None,
+        stop: None,
+    };
+    let error = crate::error::ProviderError::from(
+        wire()
+            .assistant(&turn, 0, &super::WireIds::default())
+            .expect_err("a provider item is refused"),
+    );
+    assert_eq!(error.kind(), crate::error::ErrorKind::Request);
+    assert_eq!(
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<UnreplayableProviderItem>()),
+        Some(&UnreplayableProviderItem {
+            wire: "Ollama native chat".to_owned(),
+            issuer: Some("openai".to_owned()),
+            item_type: Some("future_item".to_owned()),
+        })
+    );
+}
+
+/// An unprepared text document is user text, joined with the message's
+/// other text.
+#[test]
+fn a_text_document_is_user_text() {
+    let mut request = CompletionRequest::new("hi");
+    request.chat_history = vec![Message::User {
+        content: vec![
+            UserContent::text("look"),
+            UserContent::document_text("notes", Some(crate::message::DocumentMediaType::TXT)),
+        ],
+    }];
+    let encoded = wire()
+        .encode(request, Mode::Unary)
+        .expect("the request encodes");
+    assert_eq!(
+        json_body(&encoded.request)["messages"],
+        json!([{"role": "user", "content": "look\nnotes"}])
+    );
+}
+
+/// A current call item whose `function` is not an object gets one holding
+/// the canonical name and arguments, keeping the item's other fields.
+#[test]
+fn a_call_item_without_a_function_object_gets_one() {
+    let turn = AssistantMessage {
+        content: vec![
+            AssistantContent::tool_call("call_1", name("lookup"), json!({"q": "x"}))
+                .with_native(json!({"function": "broken", "index": 3})),
+        ],
+        origin: None,
+        stop: None,
+    };
+    let ids = super::WireIds::for_target(&[Message::Assistant(turn.clone())], &wire(), MODEL)
+        .expect("the call history plans");
+    assert_eq!(
+        wire().assistant(&turn, 0, &ids).expect("the turn encodes"),
+        Some(json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_1", "index": 3,
+                "function": {"name": "lookup", "arguments": {"q": "x"}}}],
+        }))
+    );
+}
+
+/// Carried text sends alone when its known text is not empty, carried
+/// reasoning when its visible text is not empty, and an image, an opaque
+/// item or a provider item never.
+#[test]
+fn carried_parts_send_alone_only_with_text() {
+    use crate::completion::ReplayTarget;
+    use crate::message::{
+        CarriedPayload, CarriedReasoning, CarriedReasoningPart, CarriedText, CarriedTextContent,
+        Opaque, ProviderItem,
+    };
+    let wire = wire();
+    let payload = || CarriedPayload::new(json!({"type": "x"}), Some("foreign".to_owned()));
+    let text = |content| AssistantContent::CarriedText(CarriedText::new(content, payload()));
+    let reasoning =
+        |part| AssistantContent::CarriedReasoning(CarriedReasoning::new(vec![part], payload()));
+    assert!(wire.sends_alone(&text(CarriedTextContent::Text("hi".to_owned()))));
+    assert!(!wire.sends_alone(&text(CarriedTextContent::Text(String::new()))));
+    assert!(!wire.sends_alone(&text(CarriedTextContent::Opaque("hi".to_owned()))));
+    assert!(wire.sends_alone(&reasoning(CarriedReasoningPart::Summary("hi".to_owned()))));
+    assert!(
+        !wire.sends_alone(&reasoning(CarriedReasoningPart::Encrypted(
+            "sealed".to_owned()
+        )))
+    );
+    assert!(!wire.sends_alone(&AssistantContent::Image(Image {
+        data: DocumentSourceKind::Base64("aW1hZ2U=".to_owned()),
+        media_type: Some(ImageMediaType::PNG),
+        detail: None,
+        native: None,
+    })));
+    assert!(!wire.sends_alone(&AssistantContent::Opaque(Opaque {
+        item: json!({"type": "x"}),
+        replay: true,
+    })));
+    assert!(
+        !wire.sends_alone(&AssistantContent::ProviderItem(ProviderItem::new(
+            json!({"type": "x"}),
+            "foreign",
+        )))
+    );
+}
+
+/// What `/api/chat` maps `reasoning` and `cache` to, with every other
+/// option unset.
+fn mapped(
+    reasoning: crate::completion::Reasoning,
+    cache: crate::completion::CacheRetention,
+) -> crate::completion::options::OptionMap {
+    crate::completion::ReplayTarget::map_options(
+        &wire(),
+        &CompletionRequest::new("hi"),
+        crate::completion::options::OptionFields {
+            reasoning: Some(&reasoning),
+            cache: Some(&cache),
+            service_tier: None,
+            verbosity: None,
+            parallel_tool_calls: None,
+            top_p: None,
+            seed: None,
+            stop: &[],
+        },
+    )
+}
+
+/// `/api/chat` refuses a thinking level it has no word for, a token budget
+/// and any prompt cache retention, and honours `cache: None` by sending
+/// nothing.
+#[test]
+fn options_refuse_what_the_daemon_cannot_take() {
+    use crate::completion::options::{Mapping, OptionMap};
+    use crate::completion::{CacheRetention, Effort, Reasoning as Thinking};
+    let expected = |reasoning: Mapping, cache: Mapping| OptionMap {
+        reasoning,
+        cache,
+        service_tier: Mapping::Nothing,
+        verbosity: Mapping::Nothing,
+        parallel_tool_calls: Mapping::Nothing,
+        top_p: Mapping::Nothing,
+        seed: Mapping::Nothing,
+        stop: Mapping::Nothing,
+    };
+    const RETENTION: &str =
+        "Ollama has no prompt cache retention; `keep_alive` keeps the model loaded";
+    assert_eq!(
+        mapped(Thinking::Effort(Effort::Minimal), CacheRetention::None),
+        expected(
+            Mapping::Unsupported("Ollama has no `minimal` thinking level".to_owned()),
+            Mapping::Omit("Ollama keeps no prompt cache to stop"),
+        )
+    );
+    assert_eq!(
+        mapped(Thinking::Effort(Effort::XHigh), CacheRetention::Short),
+        expected(
+            Mapping::Unsupported("Ollama has no `xhigh` thinking level".to_owned()),
+            Mapping::Unsupported(RETENTION.to_owned()),
+        )
+    );
+    assert_eq!(
+        mapped(Thinking::Budget { tokens: 256 }, CacheRetention::Long),
+        expected(
+            Mapping::Unsupported("Ollama takes a thinking level, not a budget".to_owned()),
+            Mapping::Unsupported(RETENTION.to_owned()),
+        )
+    );
+}
+
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod streaming_grammar_originals;

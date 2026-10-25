@@ -167,9 +167,17 @@ fn server_tool_assistant_message_from_response(response: &RigCompletionResponse)
 }
 
 /// The Anthropic block type of an opaque provider item.
+/// The Anthropic type of a block the reply keeps verbatim: an opaque item, or
+/// a hosted server-tool block, which the port carries as opaque carried text
+/// holding the exact block.
 fn content_raw_type(content: &AssistantContent) -> Option<&str> {
     match content {
         AssistantContent::Opaque(opaque) => opaque.kind(),
+        AssistantContent::CarriedText(text)
+            if matches!(text.content, rig::message::CarriedTextContent::Opaque(_)) =>
+        {
+            text.payload.item_type()
+        }
         _ => None,
     }
 }

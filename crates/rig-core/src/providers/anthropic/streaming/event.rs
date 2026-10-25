@@ -298,23 +298,28 @@ pub(super) enum ToolResultPart {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum Delta {
-    TextDelta {
+    #[serde(rename = "text_delta")]
+    Text {
         #[serde(rename = "text")]
         _text: String,
     },
-    ThinkingDelta {
+    #[serde(rename = "thinking_delta")]
+    Thinking {
         #[serde(rename = "thinking")]
         _thinking: String,
     },
-    SignatureDelta {
+    #[serde(rename = "signature_delta")]
+    Signature {
         #[serde(rename = "signature")]
         _signature: String,
     },
-    InputJsonDelta {
+    #[serde(rename = "input_json_delta")]
+    InputJson {
         #[serde(rename = "partial_json")]
         _partial_json: String,
     },
-    CitationsDelta {
+    #[serde(rename = "citations_delta")]
+    Citations {
         #[serde(rename = "citation")]
         _citation: Citation,
     },

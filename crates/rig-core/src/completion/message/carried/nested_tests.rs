@@ -402,3 +402,88 @@ fn nested_refusal_owns_the_exact_destination_and_fork_display() {
         "destination cannot replay the `future` item issued by foreign; drop it with retain_replayable_provider_items to switch providers deliberately"
     );
 }
+
+#[test]
+fn carried_position_indices_read_whole_store_numbers_and_serialize_as_integers() {
+    for (number, index) in [
+        (json!(0.0), 0),
+        (json!(-0.0), 0),
+        (json!(1.0), 1),
+        (json!(42.0), 42),
+        (json!(9_007_199_254_740_992.0), 9_007_199_254_740_992),
+        (json!(9_007_199_254_740_993_u64), 9_007_199_254_740_993),
+        (
+            json!(18_446_744_073_709_549_568.0),
+            18_446_744_073_709_549_568,
+        ),
+        (json!(u64::MAX), u64::MAX),
+    ] {
+        for (stored, expected, encoded) in [
+            (
+                json!({"kind":"message_content", "item_index":number.clone(), "part_index":0}),
+                CarriedPosition::MessageContent {
+                    item_index: index,
+                    part_index: 0,
+                },
+                json!({"kind":"message_content", "item_index":index, "part_index":0}),
+            ),
+            (
+                json!({"kind":"message_content", "item_index":0, "part_index":number.clone()}),
+                CarriedPosition::MessageContent {
+                    item_index: 0,
+                    part_index: index,
+                },
+                json!({"kind":"message_content", "item_index":0, "part_index":index}),
+            ),
+            (
+                json!({"kind":"reasoning_summary", "part_index":number.clone()}),
+                CarriedPosition::ReasoningSummary { part_index: index },
+                json!({"kind":"reasoning_summary", "part_index":index}),
+            ),
+            (
+                json!({"kind":"reasoning_content", "part_index":number.clone()}),
+                CarriedPosition::ReasoningContent { part_index: index },
+                json!({"kind":"reasoning_content", "part_index":index}),
+            ),
+        ] {
+            let position: CarriedPosition = serde_json::from_value(stored.clone())
+                .unwrap_or_else(|error| panic!("stored coordinate {stored}: {error}"));
+            assert_eq!(position, expected, "{stored}");
+            assert_eq!(
+                serde_json::to_value(position).expect("write integer coordinates"),
+                encoded,
+                "{stored}"
+            );
+        }
+    }
+}
+
+#[test]
+fn carried_position_indices_reject_fractional_negative_overflow_and_non_numbers() {
+    for value in [
+        json!(-1),
+        json!(-1.0),
+        json!(-0.5),
+        json!(0.5),
+        json!(18_446_744_073_709_551_616.0),
+        json!(1e100),
+        json!("0"),
+        json!("1.0"),
+        json!(null),
+        json!(true),
+        json!([]),
+        json!({}),
+    ] {
+        for stored in [
+            json!({"kind":"message_content", "item_index":value.clone(), "part_index":0}),
+            json!({"kind":"message_content", "item_index":0, "part_index":value.clone()}),
+            json!({"kind":"reasoning_summary", "part_index":value.clone()}),
+            json!({"kind":"reasoning_content", "part_index":value.clone()}),
+        ] {
+            assert!(
+                serde_json::from_value::<CarriedPosition>(stored.clone()).is_err(),
+                "invalid stored coordinate was accepted: {stored}"
+            );
+        }
+    }
+}

@@ -35,17 +35,14 @@
 //! terminal `raw` and the normalized terminal legitimately disagree — `raw`
 //! must keep the wire spelling and the terminal must report the upgrade.
 
-use futures::StreamExt;
-use rig::completion::FinishReason;
-use rig::message::{AssistantContent, ToolCall, ToolChoice};
-use rig::providers::gemini::extension::GeminiExt;
-use rig::streaming::Item;
-use rig::streaming::StreamEvent;
+use rig::message::ToolChoice;
 use rig::tool::Tool;
 use serde_json::Value;
 
-use super::super::support::with_gemini_cassette;
-use crate::support::{Adder, Observed};
+use super::super::request_witness_support::{
+    NamedCase, model_stream_result, with_gemini_request_witness_cassette,
+};
+use crate::support::Adder;
 use rig::completion::CompletionRequest;
 
 const PROVIDER: &str = "gemini";
@@ -66,49 +63,6 @@ fn forced_tool_request() -> rig::completion::CompletionRequest {
         .tool_choice(ToolChoice::Specific {
             function_names: vec![rig_core::message::ToolName::new(Adder::NAME).expect("tool name")],
         })
-}
-
-/// What a drained model stream carried: its tool calls and its single
-/// terminal record.
-struct Drained {
-    tool_calls: Vec<ToolCall>,
-    terminal: rig::completion::CompletionResponse,
-}
-
-/// Drain a model stream, keeping every tool call it yielded.
-///
-/// Local rather than one of the shared `raw_capture::capture_*` stream
-/// helpers: cell 3 is about a streamed `functionCall`, so it needs the tool
-/// calls the stream yielded *beside* the terminal record, which no shared
-/// helper parks. The sole-terminal claim it makes is the same one
-/// [`capture_text_and_terminal`](crate::raw_capture::capture_text_and_terminal)
-/// makes for this file's text-only cells.
-async fn drain_stream<
-    W: rig_core::wire::Wire<Op = rig_core::operation::Completion>,
-    T: rig_core::driver::Transport<W>,
->(
-    model: &rig_core::driver::Model<W, T>,
-    request: rig::completion::CompletionRequest,
-) -> Drained {
-    let mut stream = model.stream(request).expect("stream should open");
-    let mut tool_calls = Vec::new();
-    while let Some(item) = stream.next().await {
-        if let Item::Event(StreamEvent::End {
-            content: AssistantContent::ToolCall(tool_call),
-            ..
-        }) = item.expect("stream item should succeed")
-        {
-            tool_calls.push(tool_call)
-        }
-    }
-    let terminal = stream
-        .finish()
-        .await
-        .expect("stream should yield a terminal record");
-    Drained {
-        tool_calls,
-        terminal,
-    }
 }
 
 /// The premise of the forced-tool cell: the recorded stream carries a
@@ -153,111 +107,37 @@ fn last_usage_frame_of_function_call_stream(scenario: &str) -> Value {
 // 3: a forced tool call keeps the wire's STOP while the terminal says ToolCalls
 // ---------------------------------------------------------------------------
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declaration 0's recorded `parametersJsonSchema`
+/// is sent, value unchanged, as `parameters`, and replay refuses interaction
+/// 0. The recorded premise (a frame with a `functionCall` naming `add`, a
+/// `"STOP"` finish, a last usage frame with a non-empty `finishMessage`) is
+/// still read from the fixture. Named losses, all read from the refused
+/// stream: the typed `add(2, 3)` call; the terminal `raw` carrying the
+/// streamed call part, the response id, `"STOP"`, the last frame's usage and
+/// `finishMessage`; the normalized `ToolCalls` terminal; and the typed
+/// `GeminiExt` extras equalling the unary recording's.
 #[tokio::test]
-async fn raw_terminal_keeps_stop_on_forced_function_call() {
+async fn raw_terminal_keeps_stop_on_forced_function_call() -> anyhow::Result<()> {
     const SCENARIO: &str =
         "raw_stream_capture_matrix/raw_terminal_keeps_stop_on_forced_function_call";
-    let observed: Observed<Drained> = Observed::default();
-    let sink = observed.clone();
-    with_gemini_cassette(
+    with_gemini_request_witness_cassette(
         "raw_stream_capture_matrix/raw_terminal_keeps_stop_on_forced_function_call",
-        |client| async move {
-            let model = client.completion(MODEL);
-            sink.put(drain_stream(&model, forced_tool_request()).await);
+        NamedCase::RawStreamForcedFunctionCall,
+        |client, _clock| async move {
+            model_stream_result(client.completion(MODEL).stream(forced_tool_request())).await
         },
     )
-    .await;
-
-    let drained = observed.take();
-
-    // The stream carried the forced call as a typed ToolCall.
-    let call = drained
-        .tool_calls
-        .iter()
-        .find(|call| call.function.name == Adder::NAME)
-        .expect("the stream should carry the forced add call");
-    assert_eq!(
-        call.function.arguments_value(),
-        serde_json::json!({ "x": 2, "y": 3 })
-    );
-
-    let terminal = &drained.terminal;
-    let raw = &terminal.raw;
-    let candidate = raw
-        .pointer("/candidates/0")
-        .expect("raw is the unary document, with its candidate");
-    let called: Vec<&Value> = candidate
-        .pointer("/content/parts")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|part| part.get("functionCall"))
-        .collect();
-    assert_eq!(
-        called,
-        [&serde_json::json!({ "name": "add", "args": { "x": 2, "y": 3 } })],
-        "raw carries the streamed call part"
-    );
-    assert_eq!(
-        raw.get("responseId").and_then(Value::as_str),
-        terminal.response_id()
-    );
-
-    // The normalized terminal reports the reconciled ToolCalls …
-    assert_eq!(terminal.finish_reason(), Some(FinishReason::ToolCalls));
-    // … while raw keeps Gemini's own STOP.
-    assert_eq!(
-        candidate.get("finishReason"),
-        Some(&Value::String("STOP".to_string())),
-        "raw keeps Gemini's finishReason spelling on a call-only turn"
-    );
+    .await?;
 
     let last = last_usage_frame_of_function_call_stream(SCENARIO);
-    assert_eq!(
-        raw.get("usageMetadata"),
-        last.get("usageMetadata"),
-        "{SCENARIO}: the captured usage must be the last frame's"
-    );
-    assert_eq!(
-        raw.pointer("/usageMetadata/totalTokenCount")
-            .and_then(Value::as_u64),
-        terminal.usage.total_tokens
-    );
-    // Gemini annotates a call-only STOP with a `finishMessage`, which the
-    // normalized terminal has no home for.
-    assert!(
+    // Gemini annotates a call-only STOP with a `finishMessage`.
+    anyhow::ensure!(
         last.pointer("/candidates/0/finishMessage")
             .and_then(Value::as_str)
             .is_some_and(|message| !message.is_empty()),
         "{SCENARIO}: the recorded call-only turn should carry Gemini's finishMessage"
     );
-    assert_eq!(
-        candidate.get("finishMessage"),
-        last.pointer("/candidates/0/finishMessage"),
-        "raw must carry the wire's finishMessage untouched"
-    );
-
-    // The typed extras read the streamed document as they read the unary
-    // recording of the same prompt; only the minted response id differs.
-    let extras = |raw: Value| {
-        let mut response = terminal.clone();
-        response.raw = raw;
-        response
-            .extras::<GeminiExt>()
-            .expect("a Gemini API reply has Gemini extras")
-            .expect("the document holds the extras' shape")
-    };
-    let streamed = extras(raw.clone());
-    let mut unary = extras(crate::cassettes::recorded_json_response(
-        PROVIDER,
-        "raw_capture_matrix/raw_exposes_forced_function_call",
-    ));
-    assert_eq!(streamed.response_id.as_deref(), terminal.response_id());
-    assert_eq!(
-        streamed.finish_message.as_deref(),
-        Some("Model generated function call(s).")
-    );
-    assert_eq!(streamed.service_tier.as_deref(), Some("standard"));
-    unary.response_id = streamed.response_id.clone();
-    assert_eq!(streamed, unary);
+    Ok(())
 }

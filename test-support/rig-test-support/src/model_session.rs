@@ -425,13 +425,7 @@ fn last_text(history: &[Message]) -> String {
         .rev()
         .find_map(|message| match message {
             Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
-                let text: String = content
-                    .iter()
-                    .filter_map(|part| match part {
-                        AssistantContent::Text(text) => Some(text.text.as_str()),
-                        _ => None,
-                    })
-                    .collect();
+                let text = rig_core::transcript::assistant_text_from_choice(content);
                 (!text.is_empty()).then_some(text)
             }
             _ => None,
@@ -443,7 +437,10 @@ fn last_text(history: &[Message]) -> String {
 fn has_reasoning(history: &[Message], from: usize) -> bool {
     history[from..].iter().any(|message| {
         matches!(message, Message::Assistant(rig_core::message::AssistantMessage { content, .. })
-            if content.iter().any(|part| matches!(part, AssistantContent::Reasoning(_))))
+        if content.iter().any(|part| matches!(
+            part,
+            AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_)
+        )))
     })
 }
 
@@ -775,6 +772,7 @@ pub async fn anthropic(
             Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 content.iter().any(|part| match part {
                     AssistantContent::Text(text) => !text.citations().is_empty(),
+                    AssistantContent::CarriedText(text) => !text.citations().is_empty(),
                     _ => false,
                 })
             }
@@ -1001,11 +999,25 @@ pub async fn anthropic(
     let mut raw_types = Vec::new();
     use futures::StreamExt;
     while let Some(item) = stream.next().await {
+        // A hosted server-tool block arrives carried, as opaque `CarriedText`
+        // holding the exact block (FA-ANTH-HOSTED-AS-CARRIED); an unmodelled
+        // one stays `Opaque`.
         if let rig_core::streaming::Item::Event(rig_core::streaming::StreamEvent::End {
-            content: AssistantContent::Opaque(opaque),
+            content,
             ..
         }) = item.unwrap_or_else(|error| panic!("{}: web search item: {error}", session.run))
-            && let Some(kind) = opaque.kind()
+            && let Some(kind) = match &content {
+                AssistantContent::Opaque(opaque) => opaque.kind(),
+                AssistantContent::CarriedText(text)
+                    if matches!(
+                        text.content,
+                        rig_core::message::CarriedTextContent::Opaque(_)
+                    ) =>
+                {
+                    text.payload.item_type()
+                }
+                _ => None,
+            }
         {
             raw_types.push(kind.to_owned());
         }
@@ -1056,13 +1068,7 @@ pub async fn anthropic(
 }
 
 fn text_of(choice: &[AssistantContent]) -> String {
-    choice
-        .iter()
-        .filter_map(|part| match part {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
+    rig_core::transcript::assistant_text_from_choice(choice)
 }
 
 /// Native structured output through the agent's typed prompt.

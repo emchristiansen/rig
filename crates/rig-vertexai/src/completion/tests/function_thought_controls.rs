@@ -42,12 +42,21 @@ fn canonical() -> CompletionRequest {
     )
 }
 
+/// The rebuilt call Vertex AI receives: no `id`, which its v1
+/// `FunctionCall` does not declare, though the call has a provider handle.
 fn canonical_part() -> Value {
-    json!({"functionCall":{"name":"lookup","args":{"q":"x"},"id":"call_1"}})
+    json!({"functionCall":{"name":"lookup","args":{"q":"x"}}})
 }
 
+/// The part Vertex AI returned, `id` included.
 fn native_part() -> Value {
     json!({"functionCall":{"name":"lookup","args":{"q":"x"},"id":"call_1"},
+        "thought":true,"thoughtSignature":"c2ln","partMetadata":{"keep":"raw"}})
+}
+
+/// The returned part as replay sends it: whole, but for the call's `id`.
+fn native_part_sent() -> Value {
+    json!({"functionCall":{"name":"lookup","args":{"q":"x"}},
         "thought":true,"thoughtSignature":"c2ln","partMetadata":{"keep":"raw"}})
 }
 
@@ -92,7 +101,7 @@ fn shared_vertex_json_has_false_but_real_sdk_request_json_omits_the_bool_default
                     {"role":"user","parts":[{"text":"q"}]},
                     {"role":"model","parts":[canonical_part()]},
                     {"role":"user","parts":[{"functionResponse":{
-                        "name":"lookup","id":"call_1","response":{"output":"done"}
+                        "name":"lookup","response":{"output":"done"}
                     }}]},
                 ],
                 "tools":[{"functionDeclarations":[{
@@ -107,7 +116,7 @@ fn shared_vertex_json_has_false_but_real_sdk_request_json_omits_the_bool_default
 }
 
 #[test]
-fn actual_vertex_native_call_replays_true_signature_metadata_and_whole_part_unchanged() {
+fn actual_vertex_native_call_replays_true_signature_metadata_and_whole_part_but_its_id() {
     let incoming: google_cloud_aiplatform_v1::model::GenerateContentResponse =
         serde_json::from_value(received()).expect("fixture read by existing SDK serde");
     let whole = serde_json::to_value(&incoming).expect("received SDK JSON");
@@ -144,12 +153,15 @@ fn actual_vertex_native_call_replays_true_signature_metadata_and_whole_part_unch
             request
         };
         let actual = serde_json::to_value(
-            &wire
-                .encode(request, Mode::Unary)
+            wire.encode(request, Mode::Unary)
                 .expect("real Vertex encode"),
         )
         .expect("encoded SDK request JSON");
-        assert_eq!(actual["contents"][1]["parts"], json!([native_part()]));
+        assert_eq!(actual["contents"][1]["parts"], json!([native_part_sent()]));
+        assert_eq!(
+            actual["contents"][2]["parts"][0]["functionResponse"],
+            json!({"name":"lookup","response":{"output":"done"}})
+        );
     }
     assert_eq!(response.raw, before_raw);
     assert_eq!(response.choice[0].native_item(), Some(&native_part()));

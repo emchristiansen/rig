@@ -42,7 +42,7 @@ fn the_total_fallback_counts_thinking_and_tool_use() {
     let mut wire = recorded();
     wire.as_object_mut()
         .expect("usage object")
-        .remove("total_tokens");
+        .shift_remove("total_tokens");
     wire["total_tool_use_tokens"] = json!(5);
     assert_eq!(usage_of(&wire).total_tokens, Some(14 + 34 + 222 + 5));
 }

@@ -4,12 +4,12 @@
 
 use rig_core::completion::CompletionRequest;
 use rig_core::error::EncodeError;
-use rig_core::message::{AssistantContent, Message};
+use rig_core::message::{AssistantContent, DocumentMediaType, Message, StopReason, UserContent};
 use rig_core::providers::anthropic::completion::{CLAUDE_HAIKU_4_5, CLAUDE_SONNET_4_6};
 use rig_core::providers::anthropic::{ANTHROPIC, AnthropicConfig, Dialect, Messages};
 use rig_core::wire::{Mode, Wire, WireFrame};
 use rig_history_conformance::{
-    Ablation, CallShape, Ending, HistoryFixture, Rng, Shape, decode, http_body, replies,
+    Ablation, CallShape, Ending, HistoryFixture, MediaPart, Rng, Shape, decode, http_body, replies,
 };
 use serde_json::{Value, json};
 
@@ -334,6 +334,32 @@ impl HistoryFixture for MessagesHistory {
         Some("/stop_reason")
     }
 
+    /// A whole message with no content is refused unless it ended on
+    /// `end_turn` or a reported stop sequence; a stream that ended cleanly
+    /// is a successful empty turn.
+    fn refuses_empty_whole(&self) -> bool {
+        true
+    }
+
+    /// CSV and Markdown documents, and a document of no declared type, are
+    /// refused before adaptation.
+    fn original_media_preflight(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+        let MediaPart::User(UserContent::Document(document)) = part else {
+            return None;
+        };
+        let refused = match &document.media_type {
+            Some(DocumentMediaType::CSV) => {
+                "Anthropic only supports PDF and plain text documents, got: text/csv"
+            }
+            Some(DocumentMediaType::MARKDOWN) => {
+                "Anthropic only supports PDF and plain text documents, got: text/markdown"
+            }
+            None => "Anthropic cannot receive this media in its form",
+            Some(_) => return None,
+        };
+        Some(refused.to_owned())
+    }
+
     fn error_frame(&self) -> Option<WireFrame> {
         Some(WireFrame::Text(
             json!({"type": "error", "error": {"type": "overloaded_error", "message": "busy"}})
@@ -346,6 +372,89 @@ impl HistoryFixture for MessagesHistory {
     fn combines_same_role(&self) -> bool {
         true
     }
+
+    /// Anthropic proper refuses an aborted turn's unresolved server call
+    /// before new user input (HC001; AG §6); its other dialects do not.
+    fn aborted_hosted_refusal(&self) -> Option<fn(&[Message]) -> Option<(usize, String)>> {
+        (self.dialect.name == ANTHROPIC.name).then_some(unresolved_aborted_hosted)
+    }
+}
+
+/// A carried Anthropic hosted block's side and non-empty id: `true` for a
+/// `server_tool_use`, `false` for a `*_tool_result`.
+fn hosted(block: &AssistantContent) -> Option<(bool, String)> {
+    let AssistantContent::CarriedText(part) = block else {
+        return None;
+    };
+    if part.payload.provider.as_deref() != Some(rig_core::providers::anthropic::PROVIDER_NAME) {
+        return None;
+    }
+    let item = &part.payload.item;
+    let kind = item.get("type")?.as_str()?;
+    let (side, key) = if kind == "server_tool_use" {
+        (true, "id")
+    } else if kind.ends_with("_tool_result") {
+        (false, "tool_use_id")
+    } else {
+        return None;
+    };
+    let id = item.get(key)?.as_str()?;
+    (!id.is_empty()).then(|| (side, id.to_owned()))
+}
+
+/// The first aborted turn of `history` holding a carried `server_tool_use`
+/// that a later user message with non-blank text, or any part but a tool
+/// result, follows before a same-id result resolves it (a result after the
+/// id is used again resolves nothing), and Anthropic's exact refusal.
+fn unresolved_aborted_hosted(history: &[Message]) -> Option<(usize, String)> {
+    for (index, message) in history.iter().enumerate() {
+        let Message::Assistant(turn) = message else {
+            continue;
+        };
+        if !matches!(turn.stop, Some(StopReason::Aborted(_))) {
+            continue;
+        }
+        for (at, block) in turn.content.iter().enumerate() {
+            let Some((true, id)) = hosted(block) else {
+                continue;
+            };
+            let mut reused = false;
+            'later: for (later_index, later) in history.iter().enumerate().skip(index) {
+                match later {
+                    Message::Assistant(next) => {
+                        let after = if later_index == index { at + 1 } else { 0 };
+                        for next in next.content.iter().skip(after) {
+                            match hosted(next) {
+                                Some((true, next_id)) if next_id == id => reused = true,
+                                Some((false, next_id)) if next_id == id && !reused => {
+                                    break 'later;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Message::User { content }
+                        if content.iter().any(|part| match part {
+                            UserContent::Text(text) => !text.text.trim().is_empty(),
+                            UserContent::ToolResult(_) => false,
+                            _ => true,
+                        }) =>
+                    {
+                        return Some((
+                            index,
+                            format!(
+                                "Cannot continue Anthropic Messages: an aborted turn's unresolved \
+                                 server call `{id}` must be resolved or removed from history before \
+                                 continuing"
+                            ),
+                        ));
+                    }
+                    Message::User { .. } | Message::System { .. } => {}
+                }
+            }
+        }
+    }
+    None
 }
 
 rig_history_conformance::history_conformance_suite! {

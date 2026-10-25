@@ -967,7 +967,7 @@ fn edited_away_nonempty_reasoning_content_neither_replays_stale_text_nor_mints_e
     expected
         .as_object_mut()
         .expect("reasoning object")
-        .remove("content");
+        .shift_remove("content");
     for stored in [false, true] {
         assert_content_presence_request(history.clone(), expected.clone(), stored);
         assert_eq!(response, before);

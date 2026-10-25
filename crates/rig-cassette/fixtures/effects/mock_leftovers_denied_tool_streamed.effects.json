@@ -1,5 +1,74 @@
 {
   "header": {
+    "stream_done": {
+      "1": [
+        {
+          "item": 3,
+          "response": {
+            "choice": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "provider": "call-1"
+                },
+                "function": {
+                  "name": "add",
+                  "arguments": {
+                    "x": 17,
+                    "y": 25
+                  }
+                }
+              }
+            ],
+            "usage": {
+              "total_tokens": 1
+            },
+            "origin": {
+              "api": "mock.script",
+              "provider": "mock",
+              "model": "mock-model"
+            },
+            "finish_reason": null,
+            "raw": {
+              "usage": {
+                "total_tokens": 1
+              },
+              "response_id": null,
+              "model": null
+            }
+          }
+        }
+      ],
+      "3": [
+        {
+          "item": 3,
+          "response": {
+            "choice": [
+              {
+                "type": "text",
+                "text": "I could not add them."
+              }
+            ],
+            "usage": {
+              "total_tokens": 1
+            },
+            "origin": {
+              "api": "mock.script",
+              "provider": "mock",
+              "model": "mock-model"
+            },
+            "finish_reason": null,
+            "raw": {
+              "usage": {
+                "total_tokens": 1
+              },
+              "response_id": null,
+              "model": null
+            }
+          }
+        }
+      ]
+    },
     "run_spec": 3116083730441856965,
     "handlers": [
       {

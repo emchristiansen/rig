@@ -34,7 +34,6 @@ pub(crate) fn provider_error_envelope(data: &str) -> Option<ProviderError> {
 /// `function_call`, and the spellings compatible servers use for the same
 /// endings (`end`, `eos`, `end_turn`, `stop_sequence`, `max_tokens`,
 /// Mistral's `model_length`).
-#[cfg(test)]
 pub(crate) const CHAT_FINISHES: &[(&str, FinishReason)] = &[
     ("stop", FinishReason::Stop),
     ("end", FinishReason::Stop),

@@ -333,7 +333,7 @@ fn carried_refusals_keep_their_real_typed_sources_as_request_failures() {
         Some(&refusal)
     );
     assert_eq!(error.clone().report(), error.report());
-    assert_eq!(error.report().source_chain, [expected.clone()]);
+    assert_eq!(error.report().source_chain, std::slice::from_ref(&expected));
     assert_eq!(error.to_string(), format!("RequestError: {expected}"));
     assert_eq!(error.report().detail, None);
 
@@ -355,7 +355,7 @@ fn carried_refusals_keep_their_real_typed_sources_as_request_failures() {
             .downcast_ref::<crate::message::UnreplayableProviderItem>(),
         Some(&refusal)
     );
-    assert_eq!(error.report().source_chain, [expected.clone()]);
+    assert_eq!(error.report().source_chain, std::slice::from_ref(&expected));
     assert_eq!(error.to_string(), format!("RequestError: {expected}"));
     assert_eq!(error.report().detail, None);
 }

@@ -205,6 +205,7 @@ fn sanitize_plain_text_history_strips_tool_exchange_and_keeps_alternation() {
     let mut body = json!({"messages": messages});
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
         body.as_object_mut().expect("body object"),
     )
     .expect("existing Perplexity rewrite");
@@ -239,6 +240,7 @@ fn sanitize_plain_text_history_merges_consecutive_user_messages() {
     let mut body = json!({"messages": messages});
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
         body.as_object_mut().expect("body object"),
     )
     .expect("existing Perplexity rewrite");
@@ -260,6 +262,7 @@ fn flatten_text_content_parts_treats_refusals_as_text() {
     let mut body = json!({"messages": [{"role": "user", "content": content}]});
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
         body.as_object_mut().expect("body object"),
     )
     .expect("existing Perplexity rewrite");
@@ -279,6 +282,7 @@ fn sanitize_plain_text_history_merges_consecutive_assistant_messages() {
     let mut body = json!({"messages": messages});
     crate::providers::openai::wire::chat::rewrite_body(
         crate::providers::openai::wire::BodyRewrite::Perplexity,
+        None,
         body.as_object_mut().expect("body object"),
     )
     .expect("existing Perplexity rewrite");
@@ -417,8 +421,7 @@ fn tool_choice_is_dropped_when_no_tool_is_advertised() {
         let encoded = target
             .encode(request, Mode::Unary)
             .expect("the original request encodes");
-        let body = crate::test_utils::json_body(&encoded.request);
-        body
+        crate::test_utils::json_body(&encoded.request)
     };
 
     let without_tools = convert(request(vec![]));
@@ -1030,7 +1033,7 @@ fn request_body_moves_nothing_but_the_cap() {
     let cap = renamed
         .as_object_mut()
         .expect("object body")
-        .remove("max_completion_tokens")
+        .shift_remove("max_completion_tokens")
         .expect("renamed cap");
     renamed["max_tokens"] = cap;
     // The admitted real-model coordinate is the only other body difference.
@@ -1787,8 +1790,7 @@ fn pdf_url_document_returns_conversion_error() {
     let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
     let error = target
         .encode(request, Mode::Unary)
-        .err()
-        .expect("conversion refused");
+        .expect_err("conversion refused");
     let error = ProviderError::from(error);
     let ProviderError::Request(cause) = error else {
         panic!("expected Request category");
@@ -1816,8 +1818,7 @@ fn pdf_raw_document_returns_conversion_error() {
     let target = crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
     let error = target
         .encode(request, Mode::Unary)
-        .err()
-        .expect("conversion refused");
+        .expect_err("conversion refused");
     let error = ProviderError::from(error);
     let ProviderError::Request(cause) = error else {
         panic!("expected Request category");
@@ -2036,8 +2037,7 @@ fn chat_completions_refuses_namespaced_and_custom_calls() {
             crate::providers::openai::wire::OpenAIConfig::new("test-key").chat("gpt-4o-mini");
         let error = target
             .encode(CoreCompletionRequest::from(vec![turn]), Mode::Unary)
-            .err()
-            .expect("refused, not dropped");
+            .expect_err("refused, not dropped");
         // New pin: the actual direct Chat encode refusal has Request category.
         let ProviderError::Request(source) = ProviderError::from(error) else {
             panic!("expected concrete Request refusal");

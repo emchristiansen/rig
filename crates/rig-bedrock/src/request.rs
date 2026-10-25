@@ -285,6 +285,10 @@ fn assistant(
         }
         AssistantContent::Image(image) => Some(json!({ "image": self::image(image)? })),
         AssistantContent::Opaque(_) => None,
+        AssistantContent::CarriedText(part) if part.foreign_text().is_some() => part
+            .foreign_text()
+            .filter(|text| !text.is_empty())
+            .map(|text| json!({ "text": text })),
         _ => {
             return Err(EncodeError::request(
                 "Converse has no form for this assistant block",

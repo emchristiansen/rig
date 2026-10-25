@@ -1,5 +1,175 @@
 {
   "header": {
+    "stream_done": {
+      "1": [
+        {
+          "item": 4,
+          "response": {
+            "choice": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "provider": "toolu_015iwaRaVEkyyiQRanv5FCvv"
+                },
+                "function": {
+                  "name": "lookup",
+                  "arguments": {
+                    "q": "What is the capital of France?"
+                  }
+                },
+                "native": {
+                  "item": {
+                    "caller": {
+                      "type": "direct"
+                    },
+                    "id": "toolu_015iwaRaVEkyyiQRanv5FCvv",
+                    "input": {
+                      "q": "What is the capital of France?"
+                    },
+                    "name": "lookup",
+                    "type": "tool_use"
+                  },
+                  "fingerprint": "ee62d10cfca39fd3"
+                }
+              }
+            ],
+            "usage": {
+              "input_tokens": 624,
+              "output_tokens": 58,
+              "total_tokens": 682,
+              "cached_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cost": {
+                "input": 0.001872,
+                "output": 0.00087,
+                "cache_read": 0.0,
+                "cache_write": 0.0,
+                "total": 0.002742
+              }
+            },
+            "message_id": "msg_011CfikL6G55Y4u1MuKdc5xu",
+            "origin": {
+              "api": "anthropic.messages",
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "response_model": "claude-sonnet-4-6",
+              "response_id": "msg_011CfikL6G55Y4u1MuKdc5xu"
+            },
+            "provider_request_id": "req_011CfikL54eG6mF2d5J5x9N2",
+            "finish_reason": "tool_calls",
+            "raw": {
+              "container": null,
+              "content": [
+                {
+                  "caller": {
+                    "type": "direct"
+                  },
+                  "id": "toolu_015iwaRaVEkyyiQRanv5FCvv",
+                  "input": {
+                    "q": "What is the capital of France?"
+                  },
+                  "name": "lookup",
+                  "type": "tool_use"
+                }
+              ],
+              "diagnostics": null,
+              "id": "msg_011CfikL6G55Y4u1MuKdc5xu",
+              "model": "claude-sonnet-4-6",
+              "role": "assistant",
+              "stop_details": null,
+              "stop_reason": "tool_use",
+              "stop_sequence": null,
+              "type": "message",
+              "usage": {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "inference_geo": "global",
+                "input_tokens": 624,
+                "output_tokens": 58,
+                "service_tier": "standard"
+              }
+            }
+          }
+        }
+      ],
+      "4": [
+        {
+          "item": 3,
+          "response": {
+            "choice": [
+              {
+                "type": "text",
+                "text": "Paris",
+                "native": {
+                  "item": {
+                    "text": "Paris",
+                    "type": "text"
+                  },
+                  "fingerprint": "7693826edb17268a"
+                }
+              }
+            ],
+            "usage": {
+              "input_tokens": 695,
+              "output_tokens": 4,
+              "total_tokens": 699,
+              "cached_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cost": {
+                "input": 0.002085,
+                "output": 0.00006,
+                "cache_read": 0.0,
+                "cache_write": 0.0,
+                "total": 0.002145
+              }
+            },
+            "message_id": "msg_011CfikLFJHmvE4YSMeuCeRJ",
+            "origin": {
+              "api": "anthropic.messages",
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "response_model": "claude-sonnet-4-6",
+              "response_id": "msg_011CfikLFJHmvE4YSMeuCeRJ"
+            },
+            "provider_request_id": "req_011CfikLEtFHKifwbDLHpxRN",
+            "finish_reason": "stop",
+            "raw": {
+              "container": null,
+              "content": [
+                {
+                  "text": "Paris",
+                  "type": "text"
+                }
+              ],
+              "diagnostics": null,
+              "id": "msg_011CfikLFJHmvE4YSMeuCeRJ",
+              "model": "claude-sonnet-4-6",
+              "role": "assistant",
+              "stop_details": null,
+              "stop_reason": "end_turn",
+              "stop_sequence": null,
+              "type": "message",
+              "usage": {
+                "cache_creation": {
+                  "ephemeral_1h_input_tokens": 0,
+                  "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "inference_geo": "global",
+                "input_tokens": 695,
+                "output_tokens": 4,
+                "service_tier": "standard"
+              }
+            }
+          }
+        }
+      ]
+    },
     "run_spec": 9389567249194015575,
     "handlers": [
       {
@@ -147,6 +317,7 @@
               "total": 0.002742
             }
           },
+          "message_id": "msg_011CfikL6G55Y4u1MuKdc5xu",
           "origin": {
             "api": "anthropic.messages",
             "provider": "anthropic",
@@ -201,6 +372,10 @@
             "event": "start",
             "part": 0,
             "kind": "tool_call",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            },
             "name": "lookup"
           }
         },
@@ -347,6 +522,7 @@
               "total": 0.00012
             }
           },
+          "message_id": "msg_011CfikLBuQfcJohUeqrsLBt",
           "origin": {
             "api": "anthropic.messages",
             "provider": "anthropic",
@@ -531,6 +707,7 @@
               "total": 0.002145
             }
           },
+          "message_id": "msg_011CfikLFJHmvE4YSMeuCeRJ",
           "origin": {
             "api": "anthropic.messages",
             "provider": "anthropic",
@@ -577,7 +754,11 @@
           "value": {
             "event": "start",
             "part": 0,
-            "kind": "text"
+            "kind": "text",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            }
           }
         },
         {

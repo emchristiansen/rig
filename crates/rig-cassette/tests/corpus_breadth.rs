@@ -156,9 +156,11 @@ const OPENAI_MEMORY_TWO_RUNS: Program = Program {
     ..BASIC
 };
 
-/// A Responses request that stores nothing.
+/// A Responses request that stores nothing, with the explicit ciphertext
+/// include its producer sends beside `store: false` (MEC132-7, producer 220),
+/// so this program runs under the producer's run spec.
 fn stateless() -> serde_json::Value {
-    serde_json::json!({ "store": false })
+    serde_json::json!({ "store": false, "include": ["reasoning.encrypted_content"] })
 }
 
 both_interpreters! {

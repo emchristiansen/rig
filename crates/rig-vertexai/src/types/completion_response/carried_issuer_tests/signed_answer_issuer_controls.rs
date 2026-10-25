@@ -290,9 +290,8 @@ fn g227_vertex_unknown_issuer_and_opaque_canonical_controls_keep_existing_routes
         ),
     )]));
     let wire = crate::completion::GenerateContent::new(GEMINI_2_5_FLASH);
-    let error = ProviderError::from(
-        Completion::prepare(history(opaque), &wire.describe()).expect_err("opaque stays refused"),
-    );
+    let error =
+        Completion::prepare(history(opaque), &wire.describe()).expect_err("opaque stays refused");
     assert!(matches!(&error,ProviderError::Request(inner)
         if inner.downcast_ref::<UnrepresentableOpaqueContent>().is_some_and(|error|error.wire==wire.describe().name)));
 }

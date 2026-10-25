@@ -3,6 +3,7 @@ use crate::{
     completion::Usage,
     test_utils::{MockCompletionModel, MockStreamEvent, MockTurn, mock_final},
 };
+use anyhow::{Context, ensure};
 use rig_core::message::{ToolCall, ToolFunction};
 
 fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> AssistantContent {
@@ -276,27 +277,71 @@ async fn decoded_carried_only_paris_matches_actual_stream_text() -> anyhow::Resu
     let buffered = model
         .call(CompletionRequest::new("probe the synthetic answer"))
         .await?;
-    assert_eq!(buffered.raw, body);
-    assert!(
+    ensure!(
+        buffered.raw == body,
+        "buffered raw differs: {:?}",
+        buffered.raw
+    );
+    ensure!(
         matches!(buffered.choice.as_slice(), [AssistantContent::CarriedText(text)]
         if text.text() == "Paris" && text.phase.as_deref() == Some("final_answer")
-            && text.payload.item == body["output"][0]["content"][0]
-            && text.payload.provider.as_deref() == Some("openai"))
+            && text.payload.item == *body.get("output")
+                .and_then(|value| value.get(0))
+                .and_then(|value| value.get("content"))
+                .and_then(|value| value.get(0))
+                .unwrap_or(&serde_json::Value::Null)
+            && text.payload.provider.as_deref() == Some("openai")),
+        "carried answer differs: {buffered:?}"
     );
-    assert_eq!(buffered.text(), "Paris");
-    assert_eq!(buffered.usage.input_tokens, Some(4));
-    assert_eq!(buffered.usage.output_tokens, Some(2));
-    assert_eq!(buffered.usage.total_tokens, Some(6));
+    ensure!(
+        buffered.text() == "Paris",
+        "buffered answer differs: {buffered:?}"
+    );
+    ensure!(
+        buffered.usage.input_tokens == Some(4),
+        "input usage differs: {:?}",
+        buffered.usage
+    );
+    ensure!(
+        buffered.usage.output_tokens == Some(2),
+        "output usage differs: {:?}",
+        buffered.usage
+    );
+    ensure!(
+        buffered.usage.total_tokens == Some(6),
+        "total usage differs: {:?}",
+        buffered.usage
+    );
 
     let report = buffered_streaming_text_parity(model, |request| request).await?;
-    assert_eq!(report.name, "buffered_streaming_text_parity");
-    assert_eq!(report.response, "Paris");
-    assert_eq!(report.prompt_tokens, 4);
-    assert_eq!(report.generated_tokens, 2);
-    assert_eq!(report.tool_calls, 0);
-    assert_eq!(report.history_messages, 0);
-    assert_eq!(http.requests().len(), 3);
-    assert_eq!(http.remaining_responses(), 0);
+    ensure!(
+        report.name == "buffered_streaming_text_parity",
+        "scenario differs: {report:?}"
+    );
+    ensure!(
+        report.response == "Paris",
+        "reported answer differs: {report:?}"
+    );
+    ensure!(
+        report.prompt_tokens == 4,
+        "reported input usage differs: {report:?}"
+    );
+    ensure!(
+        report.generated_tokens == 2,
+        "reported output usage differs: {report:?}"
+    );
+    ensure!(
+        report.tool_calls == 0,
+        "tool-call count differs: {report:?}"
+    );
+    ensure!(
+        report.history_messages == 0,
+        "history count differs: {report:?}"
+    );
+    let requests = http.requests();
+    ensure!(requests.len() == 3, "expected three requests: {requests:?}");
+    let remaining = http.remaining_responses();
+    ensure!(remaining == 0, "unconsumed mock responses: {remaining}");
     Ok(())
 }
 
@@ -337,32 +382,75 @@ async fn decoded_mixed_carried_and_plain_paris_matches_actual_stream_text() -> a
     let buffered = model
         .call(CompletionRequest::new("probe the synthetic answer"))
         .await?;
-    assert_eq!(buffered.raw, body);
-    assert!(matches!(buffered.choice.as_slice(),
+    ensure!(
+        buffered.raw == body,
+        "buffered raw differs: {:?}",
+        buffered.raw
+    );
+    ensure!(
+        matches!(buffered.choice.as_slice(),
         [AssistantContent::CarriedText(carried), AssistantContent::Text(plain)]
         if carried.text() == "Pa" && plain.text == "ris"
-            && carried.payload.item == body["candidates"][0]["content"]["parts"][0]
-            && carried.payload.provider.as_deref() == Some("gcp.gemini")));
-    let AssistantContent::CarriedText(carried) = &buffered.choice[0] else {
+            && carried.payload.item == *body.get("candidates")
+                .and_then(|value| value.get(0))
+                .and_then(|value| value.get("content"))
+                .and_then(|value| value.get("parts"))
+                .and_then(|value| value.get(0))
+                .unwrap_or(&serde_json::Value::Null)
+            && carried.payload.provider.as_deref() == Some("gcp.gemini")),
+        "mixed carried/plain answer differs: {buffered:?}"
+    );
+    let first = buffered
+        .choice
+        .first()
+        .with_context(|| format!("first response content is missing: {:?}", buffered.choice))?;
+    let AssistantContent::CarriedText(carried) = first else {
         anyhow::bail!("the signed received prefix must be carried");
     };
-    assert_eq!(
+    ensure!(
         carried
             .signed_answer()
-            .map(|answer| answer.signature.as_str()),
-        Some("synthetic-signed-pa")
+            .map(|answer| answer.signature.as_str())
+            == Some("synthetic-signed-pa"),
+        "carried signature differs: {carried:?}"
     );
-    assert_eq!(buffered.text(), "Paris");
-    assert_eq!(buffered.usage.input_tokens, Some(4));
-    assert_eq!(buffered.usage.output_tokens, Some(2));
-    assert_eq!(buffered.usage.total_tokens, Some(6));
+    ensure!(
+        buffered.text() == "Paris",
+        "buffered answer differs: {buffered:?}"
+    );
+    ensure!(
+        buffered.usage.input_tokens == Some(4),
+        "input usage differs: {:?}",
+        buffered.usage
+    );
+    ensure!(
+        buffered.usage.output_tokens == Some(2),
+        "output usage differs: {:?}",
+        buffered.usage
+    );
+    ensure!(
+        buffered.usage.total_tokens == Some(6),
+        "total usage differs: {:?}",
+        buffered.usage
+    );
 
     let report = buffered_streaming_text_parity(model, |request| request).await?;
-    assert_eq!(report.response, "Paris");
-    assert_eq!(report.prompt_tokens, 4);
-    assert_eq!(report.generated_tokens, 2);
-    assert_eq!(http.requests().len(), 3);
-    assert_eq!(http.remaining_responses(), 0);
+    ensure!(
+        report.response == "Paris",
+        "reported answer differs: {report:?}"
+    );
+    ensure!(
+        report.prompt_tokens == 4,
+        "reported input usage differs: {report:?}"
+    );
+    ensure!(
+        report.generated_tokens == 2,
+        "reported output usage differs: {report:?}"
+    );
+    let requests = http.requests();
+    ensure!(requests.len() == 3, "expected three requests: {requests:?}");
+    let remaining = http.remaining_responses();
+    ensure!(remaining == 0, "unconsumed mock responses: {remaining}");
     Ok(())
 }
 
@@ -386,17 +474,36 @@ async fn decoded_plain_paris_keeps_the_existing_conformance_premise() -> anyhow:
     let buffered = model
         .call(CompletionRequest::new("probe the synthetic answer"))
         .await?;
-    assert_eq!(buffered.raw, body);
-    assert!(
-        matches!(buffered.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "Paris")
+    ensure!(
+        buffered.raw == body,
+        "buffered raw differs: {:?}",
+        buffered.raw
     );
-    assert_eq!(buffered.text(), "Paris");
+    ensure!(
+        matches!(buffered.choice.as_slice(), [AssistantContent::Text(text)] if text.text == "Paris"),
+        "plain answer differs: {buffered:?}"
+    );
+    ensure!(
+        buffered.text() == "Paris",
+        "buffered answer differs: {buffered:?}"
+    );
     let report = buffered_streaming_text_parity(model, |request| request).await?;
-    assert_eq!(report.response, "Paris");
-    assert_eq!(report.prompt_tokens, 4);
-    assert_eq!(report.generated_tokens, 2);
-    assert_eq!(http.requests().len(), 3);
-    assert_eq!(http.remaining_responses(), 0);
+    ensure!(
+        report.response == "Paris",
+        "reported answer differs: {report:?}"
+    );
+    ensure!(
+        report.prompt_tokens == 4,
+        "reported input usage differs: {report:?}"
+    );
+    ensure!(
+        report.generated_tokens == 2,
+        "reported output usage differs: {report:?}"
+    );
+    let requests = http.requests();
+    ensure!(requests.len() == 3, "expected three requests: {requests:?}");
+    let remaining = http.remaining_responses();
+    ensure!(remaining == 0, "unconsumed mock responses: {remaining}");
     Ok(())
 }
 
@@ -421,17 +528,40 @@ async fn an_empty_decoded_answer_stays_empty_and_refuses_the_paris_premise() -> 
     let buffered = model
         .call(CompletionRequest::new("probe the synthetic empty answer"))
         .await?;
-    assert_eq!(buffered.raw, body);
-    assert!(buffered.choice.is_empty());
-    assert_eq!(buffered.text(), "");
-    assert!(buffered.usage.is_reported());
+    ensure!(
+        buffered.raw == body,
+        "buffered raw differs: {:?}",
+        buffered.raw
+    );
+    ensure!(
+        buffered.choice.is_empty(),
+        "empty answer gained content: {:?}",
+        buffered.choice
+    );
+    ensure!(
+        buffered.text().is_empty(),
+        "empty answer gained text: {buffered:?}"
+    );
+    ensure!(
+        buffered.usage.is_reported(),
+        "usage is missing: {:?}",
+        buffered.usage
+    );
     let error = buffered_streaming_text_parity(model, |request| request).await;
     let Err(ScenarioError::Contract { scenario, details }) = error else {
         anyhow::bail!("empty canonical text must fail the existing Paris premise");
     };
-    assert_eq!(scenario, "buffered_streaming_text_parity");
-    assert!(details.starts_with("buffered=\"\", streamed=\"\", buffered_usage="));
-    assert_eq!(http.requests().len(), 3);
-    assert_eq!(http.remaining_responses(), 0);
+    ensure!(
+        scenario == "buffered_streaming_text_parity",
+        "scenario differs: {scenario}"
+    );
+    ensure!(
+        details.starts_with("buffered=\"\", streamed=\"\", buffered_usage="),
+        "contract details differ: {details}"
+    );
+    let requests = http.requests();
+    ensure!(requests.len() == 3, "expected three requests: {requests:?}");
+    let remaining = http.remaining_responses();
+    ensure!(remaining == 0, "unconsumed mock responses: {remaining}");
     Ok(())
 }

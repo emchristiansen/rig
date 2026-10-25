@@ -619,13 +619,16 @@ fn opus_4_8_hoists_leading_system_message_when_documents_are_present() {
 
     let value = serde_json::to_value(request).unwrap();
     assert_eq!(value["system"][0]["text"], "Global history instruction.");
-    assert_eq!(value["system"][1]["text"], "Mid-conversation instruction.");
+    assert_eq!(value["system"].as_array().map(Vec::len), Some(1));
 
+    // The misplaced mid-conversation instruction moves after the next user
+    // turn instead of into `system`.
     let messages = value["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.len(), 4);
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[1]["role"], "assistant");
     assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[3]["role"], "system");
     assert!(
         messages[0].to_string().contains("<file id: doc>"),
         "document message should follow top-level system: {messages:?}"
@@ -638,10 +641,12 @@ fn opus_4_8_hoists_leading_system_message_when_documents_are_present() {
         1,
         "document message should appear exactly once: {messages:?}"
     );
-    assert!(
+    assert_eq!(
         messages
             .iter()
-            .all(|message| message["role"].as_str() != Some("system"))
+            .filter(|message| message["role"].as_str() == Some("system"))
+            .count(),
+        1
     );
 }
 
@@ -757,8 +762,11 @@ fn opus_4_8_preserves_system_message_after_assistant_server_tool_use() {
     assert_eq!(messages[2]["role"], "assistant");
 }
 
+/// A system message before a user turn moves after that turn, the next slot
+/// Anthropic takes one in, rather than into `system`, which would change the
+/// prompt prefix.
 #[test]
-fn opus_4_8_hoists_system_message_in_invalid_mid_conversation_position() {
+fn opus_4_8_defers_system_message_in_invalid_mid_conversation_position() {
     let request = completion_request_with_history(
         vec![
             message::Message::user("Review this code."),
@@ -780,15 +788,17 @@ fn opus_4_8_hoists_system_message_in_invalid_mid_conversation_position() {
     .unwrap();
 
     let value = serde_json::to_value(request).unwrap();
-    assert_eq!(
-        value["system"][0]["text"],
-        "From now on, require explicit type annotations."
-    );
+    assert!(value.get("system").is_none(), "{value}");
 
     let messages = value["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 3);
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[2]["role"], "system");
+    assert_eq!(
+        messages[2]["content"][0]["text"],
+        "From now on, require explicit type annotations."
+    );
 }
 
 #[test]
@@ -2376,6 +2386,10 @@ fn stop_reason_maps_onto_the_normalized_vocabulary() {
         ("end_turn", completion::FinishReason::Stop),
         ("stop_sequence", completion::FinishReason::Stop),
         ("max_tokens", completion::FinishReason::Length),
+        (
+            "model_context_window_exceeded",
+            completion::FinishReason::Length,
+        ),
         ("tool_use", completion::FinishReason::ToolCalls),
         ("refusal", completion::FinishReason::ContentFilter),
     ] {
@@ -2388,15 +2402,13 @@ fn stop_reason_maps_onto_the_normalized_vocabulary() {
 
 #[test]
 fn unknown_stop_reason_is_preserved_verbatim() {
-    for reason in ["pause_turn", "model_context_window_exceeded"] {
-        let mut response = empty_response_with(Some(reason), None);
-        response["content"] = json!([{"type": "text", "text": "answer"}]);
-        let parsed = fold_reply(&response).expect("the response folds");
-        assert_eq!(
-            parsed.finish_reason(),
-            Some(completion::FinishReason::Other(reason.to_owned()))
-        );
-    }
+    let mut response = empty_response_with(Some("pause_turn"), None);
+    response["content"] = json!([{"type": "text", "text": "answer"}]);
+    let parsed = fold_reply(&response).expect("the response folds");
+    assert_eq!(
+        parsed.finish_reason(),
+        Some(completion::FinishReason::Other("pause_turn".to_owned()))
+    );
 }
 
 #[test]
@@ -5166,7 +5178,7 @@ fn hc001_same_and_later_assistant_results_admit_exact_received_bodies() {
             ])
         );
     }
-    let first = hc001_prefix(&wire, &[used.clone()], true);
+    let first = hc001_prefix(&wire, std::slice::from_ref(&used), true);
     let later = hc001_complete(&wire, vec![result.clone()], "end_turn");
     let request = CompletionRequest::from(vec![
         message::Message::user("q"),
@@ -5405,7 +5417,7 @@ fn hc001_non_aborted_stops_and_an_open_hosted_input_preserve_the_existing_routes
 fn hc001_ordinary_client_calls_and_non_hosted_carried_text_do_not_become_server_uses() {
     let wire = hc001_wire();
     let client = json!({"type":"tool_use", "id":"toolu_hc001", "name":"lookup", "input":{}});
-    let source = hc001_prefix(&wire, &[client.clone()], true);
+    let source = hc001_prefix(&wire, std::slice::from_ref(&client), true);
     let request = hc001_request(&source, Some(message::Message::user("next")));
     assert_eq!(
         hc001_encode(&wire, &request, &[&source], false)
@@ -5751,5 +5763,292 @@ fn hc001_provider_document_and_json_call_checks_keep_priority_over_hosted_policy
         matches!(cause.downcast_ref::<message::UnrepresentableToolCall>(),
         Some(message::UnrepresentableToolCall::Namespace { wire, name, namespace })
             if *wire == ANTHROPIC_MESSAGES_WIRE && name.as_str() == "lookup" && namespace == "synthetic namespace clone")
+    );
+}
+
+/// The `Request` cause of an encode refusal.
+fn request_cause(error: EncodeError) -> crate::error::SharedError {
+    let ProviderError::Request(cause) = ProviderError::from(error) else {
+        panic!("the refusal is a typed request failure");
+    };
+    cause
+}
+
+#[test]
+fn a_custom_call_result_in_a_user_turn_is_refused_typed() {
+    let name = message::ToolName::new("shell").expect("tool name");
+    let result = message::ToolResult {
+        call: message::CallId::from_wire("toolu_custom"),
+        name: name.clone(),
+        answers: message::AnsweredToolCall::Custom,
+        content: vec![],
+        is_error: false,
+    };
+    let error = user_wire(message::UserContent::ToolResult(result))
+        .expect_err("a custom call's result cannot ride a JSON-only wire");
+    assert_eq!(
+        request_cause(error).downcast_ref::<message::UnrepresentableToolCall>(),
+        Some(&message::UnrepresentableToolCall::CustomCall {
+            wire: ANTHROPIC_MESSAGES_WIRE,
+            name,
+        })
+    );
+}
+
+#[test]
+fn malformed_document_citations_are_refused() {
+    let error = user_wire(message::UserContent::Document(message::Document {
+        data: DocumentData::Text("cited text".into()),
+        media_type: Some(DocumentMediaType::TXT),
+        additional_params: Some(json!({"citations": {"enabled": "yes"}})),
+    }))
+    .expect_err("`citations` must hold a boolean `enabled`");
+    assert_eq!(
+        request_cause(error).to_string(),
+        "Document `additional_params.citations` must be `{\"enabled\": bool}`"
+    );
+}
+
+#[test]
+fn raw_and_unknown_image_sources_are_unsendable() {
+    for data in [
+        DocumentSourceKind::Raw(vec![0x89, 0x50, 0x4e, 0x47]),
+        DocumentSourceKind::Unknown,
+    ] {
+        let error = user_wire(message::UserContent::Image(message::Image {
+            data,
+            media_type: Some(ImageMediaType::PNG),
+            ..message::Image::default()
+        }))
+        .expect_err("Anthropic takes no image source of this form");
+        assert_eq!(
+            request_cause(error).to_string(),
+            "Anthropic cannot receive this media in its form"
+        );
+    }
+}
+
+#[test]
+fn a_specific_tool_choice_names_exactly_one_tool() {
+    let name = |name: &str| message::ToolName::new(name).expect("tool name");
+    for function_names in [vec![], vec![name("lookup"), name("search")]] {
+        let error = tool_choice(message::ToolChoice::Specific { function_names })
+            .expect_err("Claude takes one specific tool");
+        assert_eq!(
+            request_cause(error).to_string(),
+            "Only one tool may be specified to be used by Claude"
+        );
+    }
+}
+
+#[test]
+fn a_provider_item_block_is_refused_and_kept_until_encoding() {
+    use crate::completion::ReplayTarget;
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+    let item =
+        message::ProviderItem::new(json!({"type": "future_item", "payload": [1]}), "anthropic");
+    let block = message::AssistantContent::ProviderItem(item.clone());
+    let error = assistant_parts(&block, &wire, None).expect_err("a provider item never replays");
+    assert_eq!(
+        request_cause(error).downcast_ref::<message::UnreplayableProviderItem>(),
+        Some(&message::UnreplayableProviderItem::new(
+            ANTHROPIC_MESSAGES_WIRE,
+            &item
+        ))
+    );
+    assert!(wire.sends_alone(&block));
+}
+
+#[test]
+fn a_rebuilt_tool_call_without_a_planned_wire_id_is_refused() {
+    use crate::completion::ReplayTarget;
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+    let block = message::AssistantContent::tool_call(
+        "toolu_1",
+        message::ToolName::new("add").expect("tool name"),
+        json!({"x": 1}),
+    );
+    let error = assistant_parts(&block, &wire, None).expect_err("a call needs its wire ID");
+    assert_eq!(
+        request_cause(error).to_string(),
+        "Anthropic tool call has no planned wire ID"
+    );
+    assert!(wire.sends_alone(&block));
+}
+
+#[test]
+fn carried_reasoning_with_an_opaque_part_is_refused_at_its_part() {
+    use crate::completion::ReplayTarget;
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_SONNET_4_6);
+    let opaque = message::CarriedPayload::new(
+        json!({"type": "future_content", "payload": [1, 2]}),
+        Some("anthropic".to_owned()),
+    );
+    for part in [
+        message::CarriedReasoningPart::OpaqueSummary(opaque.clone()),
+        message::CarriedReasoningPart::OpaqueContent(opaque.clone()),
+    ] {
+        let reasoning = message::CarriedReasoning::new(
+            vec![
+                message::CarriedReasoningPart::Text {
+                    text: "step one".to_owned(),
+                    signature: Some("sig-1".to_owned()),
+                },
+                part,
+            ],
+            message::CarriedPayload::new(
+                json!({"type": "reasoning"}),
+                Some("anthropic".to_owned()),
+            ),
+        );
+        let block = message::AssistantContent::CarriedReasoning(reasoning);
+        let error = assistant_parts(&block, &wire, None).expect_err("an opaque part never replays");
+        assert_eq!(
+            request_cause(error).downcast_ref::<message::UnrepresentableOpaqueContent>(),
+            Some(&message::UnrepresentableOpaqueContent::new(
+                ANTHROPIC_MESSAGES_WIRE
+            ))
+        );
+        assert!(wire.sends_alone(&block));
+    }
+}
+
+#[test]
+fn carried_reasoning_with_no_parts_is_refused() {
+    let reasoning = message::CarriedReasoning::new(
+        Vec::new(),
+        message::CarriedPayload::new(json!({"type": "reasoning"}), None),
+    );
+    let error = convert(message::Message::Assistant(message::AssistantMessage::new(
+        vec![message::AssistantContent::CarriedReasoning(reasoning)],
+    )))
+    .expect_err("empty reasoning has nothing to send");
+    assert_eq!(
+        request_cause(error).to_string(),
+        "Cannot convert empty reasoning content to Anthropic format"
+    );
+}
+
+/// A system message after another system message, or after an assistant
+/// turn with no blocks, is in no valid position: it moves to the next slot,
+/// joined with the others deferred there.
+#[test]
+fn system_messages_after_a_system_message_or_an_empty_assistant_turn_are_deferred() {
+    let wire = AnthropicConfig::new("test-key").completion(CLAUDE_OPUS_4_8);
+    let system = |content: &str| message::Message::System {
+        content: content.to_owned(),
+    };
+    let split = |history: &[message::Message]| -> (Vec<Value>, Vec<(usize, message::Message)>) {
+        let (hoisted, remaining) = split_system(history, true, &wire);
+        let remaining = remaining
+            .into_iter()
+            .map(|(index, turn)| (index, turn.into_owned()))
+            .collect();
+        (hoisted, remaining)
+    };
+
+    let first = message::Message::user("Review this code.");
+    let next = message::Message::user("Now review this other file.");
+    let after_system = [
+        first.clone(),
+        system("Require type annotations."),
+        system("Prefer early returns."),
+        next.clone(),
+    ];
+    let expected: Vec<(usize, message::Message)> = vec![
+        (0, first.clone()),
+        (3, next.clone()),
+        (
+            1,
+            system("Require type annotations.\n\nPrefer early returns."),
+        ),
+    ];
+    assert_eq!(split(&after_system), (Vec::new(), expected));
+
+    let empty = message::Message::Assistant(message::AssistantMessage::new(Vec::new()));
+    let after_empty_turn = [
+        first.clone(),
+        empty.clone(),
+        system("Require type annotations."),
+        next.clone(),
+    ];
+    let expected: Vec<(usize, message::Message)> = vec![
+        (0, first),
+        (1, empty),
+        (3, next),
+        (2, system("Require type annotations.")),
+    ];
+    assert_eq!(split(&after_empty_turn), (Vec::new(), expected));
+}
+
+#[test]
+fn drop_unbound_thinking_leaves_a_non_object_thinking_alone() {
+    let Value::Object(mut body) = json!({"model": CLAUDE_OPUS_4_8, "thinking": "enabled"}) else {
+        unreachable!("an object literal");
+    };
+    drop_unbound_thinking(&mut body);
+    assert_eq!(
+        Value::Object(body),
+        json!({"model": CLAUDE_OPUS_4_8, "thinking": "enabled"})
+    );
+}
+
+/// A root `allOf` that is not an array stays as guidance; a nested schema
+/// with properties but no `type` is an object; definitions that are not an
+/// object stay as guidance.
+#[test]
+fn strict_schema_keeps_malformed_root_keywords_as_guidance() {
+    let mut schema = json!({
+        "type": "object",
+        "$defs": "bad",
+        "properties": {
+            "a": {"properties": {"b": {"type": "string"}}}
+        },
+        "allOf": "not-an-array"
+    });
+    sanitize_strict_tool_schema(&mut schema);
+    assert_eq!(
+        schema,
+        json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "additionalProperties": false
+                }
+            },
+            "additionalProperties": false,
+            "description": "{rootAllOfConstraints: {\"allOf\":\"not-an-array\"}, $defs: bad}"
+        })
+    );
+}
+
+/// Root `allOf` branches that are not objects, conflict with the root, or
+/// hold `properties` or `required` of the wrong shape stay as guidance or
+/// leave the root's own keyword in place.
+#[test]
+fn strict_schema_merges_irregular_root_all_of_branches() {
+    let mut schema = json!({
+        "type": "object",
+        "minProperties": 1,
+        "allOf": [
+            true,
+            {"minProperties": 2},
+            {"properties": "bad"},
+            {"required": "bad"},
+            {"properties": {"x": {"type": "string"}}},
+            {"required": ["x"]}
+        ]
+    });
+    sanitize_strict_tool_schema(&mut schema);
+    assert_eq!(
+        schema,
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+            "description": "{minProperties: 1, rootRefSiblingConstraints: {\"minProperties\":2}, rootAllOfConstraints: {\"allOf\":[true]}}"
+        })
     );
 }

@@ -1,53 +1,7 @@
 {
   "content_matrix/empty_answer_with_stop.yaml#0": {
     "mode": "unary",
-    "choice": [],
-    "usage": {
-      "input_tokens": 18,
-      "output_tokens": 1,
-      "total_tokens": 19,
-      "cached_input_tokens": 0
-    },
-    "response_id": "chatcmpl-1ymtIOythZktwrZYkUnZgPPMnN04U0OI",
-    "finish_reason": "stop",
-    "model": "/REDACTED_PATH/Qwen3-1.7B-Q4_K_M.gguf",
-    "provider_request_id": null,
-    "raw": {
-      "choices": [
-        {
-          "finish_reason": "stop",
-          "index": 0,
-          "message": {
-            "content": "",
-            "role": "assistant"
-          }
-        }
-      ],
-      "created": 0,
-      "id": "chatcmpl-1ymtIOythZktwrZYkUnZgPPMnN04U0OI",
-      "model": "/REDACTED_PATH/Qwen3-1.7B-Q4_K_M.gguf",
-      "object": "chat.completion",
-      "system_fingerprint": "b10964-b29c606e2",
-      "timings": {
-        "cache_n": 0,
-        "predicted_ms": 0.001,
-        "predicted_n": 1,
-        "predicted_per_second": 0.0,
-        "predicted_per_token_ms": 0.0,
-        "prompt_ms": 24.985,
-        "prompt_n": 18,
-        "prompt_per_second": 720.4322593556134,
-        "prompt_per_token_ms": 1.3880555555555556
-      },
-      "usage": {
-        "completion_tokens": 1,
-        "prompt_tokens": 18,
-        "prompt_tokens_details": {
-          "cached_tokens": 0
-        },
-        "total_tokens": 19
-      }
-    }
+    "error": "response"
   },
   "model_family_matrix/llama_blocking_tool_call.yaml#0": {
     "mode": "unary",
@@ -131,74 +85,6 @@
       }
     }
   },
-  "permission_control/permission_control_prompt_example.yaml#1": {
-    "mode": "unary",
-    "choice": [
-      {
-        "reasoning": {
-          "text": "Okay, the user asked to read test.txt using the available tools. I tried calling both read_file_head and read_file_tail, but the first one was unavailable. Then I used the second one, and got \"hello world\" as the response. So the content of the file is just that line. I need to report that the file's content is \"hello world\".\n",
-          "redacted": false,
-          "native": {
-            "item": {
-              "reasoning_content": "Okay, the user asked to read test.txt using the available tools. I tried calling both read_file_head and read_file_tail, but the first one was unavailable. Then I used the second one, and got \"hello world\" as the response. So the content of the file is just that line. I need to report that the file's content is \"hello world\".\n"
-            },
-            "fingerprint": "86b028386c957c0e"
-          }
-        }
-      },
-      {
-        "text": "The content of test.txt is:  \nhello world",
-        "native": null
-      }
-    ],
-    "usage": {
-      "input_tokens": 302,
-      "output_tokens": 90,
-      "total_tokens": 392,
-      "cached_input_tokens": 226
-    },
-    "response_id": "chatcmpl-c30V0KY4DuEZo6KxT3q4xmf1lAS3u59S",
-    "finish_reason": "stop",
-    "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
-    "provider_request_id": null,
-    "raw": {
-      "choices": [
-        {
-          "finish_reason": "stop",
-          "index": 0,
-          "message": {
-            "content": "The content of test.txt is:  \nhello world",
-            "reasoning_content": "Okay, the user asked to read test.txt using the available tools. I tried calling both read_file_head and read_file_tail, but the first one was unavailable. Then I used the second one, and got \"hello world\" as the response. So the content of the file is just that line. I need to report that the file's content is \"hello world\".\n",
-            "role": "assistant"
-          }
-        }
-      ],
-      "created": 0,
-      "id": "chatcmpl-c30V0KY4DuEZo6KxT3q4xmf1lAS3u59S",
-      "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
-      "object": "chat.completion",
-      "system_fingerprint": "b10964-b29c606e2",
-      "timings": {
-        "cache_n": 226,
-        "predicted_ms": 494.105,
-        "predicted_n": 90,
-        "predicted_per_second": 180.12365792695883,
-        "predicted_per_token_ms": 5.551741573033708,
-        "prompt_ms": 43.802,
-        "prompt_n": 76,
-        "prompt_per_second": 1735.0805899274008,
-        "prompt_per_token_ms": 0.5763421052631579
-      },
-      "usage": {
-        "completion_tokens": 90,
-        "prompt_tokens": 302,
-        "prompt_tokens_details": {
-          "cached_tokens": 226
-        },
-        "total_tokens": 392
-      }
-    }
-  },
   "prompt_caching/streaming_probe.yaml#1": {
     "mode": "streaming",
     "choice": [
@@ -231,7 +117,7 @@
       "created": 0,
       "id": "chatcmpl-rHft0iMmnqsVLvgp1yLzwrGfCSgEbZw9",
       "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "b10964-b29c606e2",
       "timings": {
         "cache_n": 2824,
@@ -295,7 +181,7 @@
       "created": 0,
       "id": "chatcmpl-Re9gUrqq8OES0XQyd2cskl5mO7CnJjOw",
       "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "b10964-b29c606e2",
       "timings": {
         "cache_n": 2825,
@@ -998,7 +884,7 @@
       "created": 0,
       "id": "chatcmpl-4LOJAjQP8ZNin8PMKl7pfCrpUqIMxOe3",
       "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "b10964-b29c606e2",
       "timings": {
         "cache_n": 0,
@@ -1066,7 +952,7 @@
       "created": 0,
       "id": "chatcmpl-lu0sOBxcVx9e5BsgqaePkqABDZvIgcjf",
       "model": "models/Qwen3-1.7B-Q4_K_M.gguf",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "b10964-b29c606e2",
       "timings": {
         "cache_n": 402,
@@ -1145,7 +1031,7 @@
       "created": 0,
       "id": "chatcmpl-hLKTTWVjOcENnxYsRVJsbypYy6vVa2JV",
       "model": "Qwen3-1.7B-Q4_K_M.gguf",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "b10964-b29c606e2",
       "timings": {
         "cache_n": 0,
@@ -1168,20 +1054,77 @@
       }
     }
   },
-  "truncation_matrix/streaming_tool_call_cut_mid_arguments.yaml#0": {
-    "mode": "streaming",
+  "tools/tools_roundtrip.yaml#1": {
+    "mode": "unary",
     "choice": [
       {
-        "tool_call": {
-          "id": "V4qB8yCqUhYSSntX6H2qqe5Ak1rfrQgE",
-          "name": "record",
-          "arguments": {
-            "note": "The"
-          },
-          "native": null
+        "reasoning": {
+          "text": "Okay, the user asked to calculate 2 minus 5. I used the subtract function with x=2 and y=5. The result was -3. Let me check if that's correct. 2 minus 5 is indeed -3. So the answer is correct.\n",
+          "redacted": false,
+          "native": {
+            "item": {
+              "reasoning_content": "Okay, the user asked to calculate 2 minus 5. I used the subtract function with x=2 and y=5. The result was -3. Let me check if that's correct. 2 minus 5 is indeed -3. So the answer is correct.\n"
+            },
+            "fingerprint": "3b81296809e8bfd0"
+          }
         }
+      },
+      {
+        "text": "The result of $ 2 - 5 $ is $-3$.\n\n$$\n\\boxed{-3}\n$$",
+        "native": null
       }
     ],
+    "usage": {
+      "input_tokens": 403,
+      "output_tokens": 86,
+      "total_tokens": 489,
+      "cached_input_tokens": 387
+    },
+    "response_id": "chatcmpl-5gGHSxZ42CmnN5JtXq3nmLLx5xyQ9ans",
+    "finish_reason": "stop",
+    "model": "/REDACTED_PATH/Qwen3-1.7B-Q4_K_M.gguf",
+    "provider_request_id": null,
+    "raw": {
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "The result of $ 2 - 5 $ is $-3$.\n\n$$\n\\boxed{-3}\n$$",
+            "reasoning_content": "Okay, the user asked to calculate 2 minus 5. I used the subtract function with x=2 and y=5. The result was -3. Let me check if that's correct. 2 minus 5 is indeed -3. So the answer is correct.\n",
+            "role": "assistant"
+          }
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-5gGHSxZ42CmnN5JtXq3nmLLx5xyQ9ans",
+      "model": "/REDACTED_PATH/Qwen3-1.7B-Q4_K_M.gguf",
+      "object": "chat.completion",
+      "system_fingerprint": "b10964-b29c606e2",
+      "timings": {
+        "cache_n": 387,
+        "predicted_ms": 489.722,
+        "predicted_n": 86,
+        "predicted_per_second": 173.5678609496817,
+        "predicted_per_token_ms": 5.761435294117647,
+        "prompt_ms": 25.024,
+        "prompt_n": 16,
+        "prompt_per_second": 639.386189258312,
+        "prompt_per_token_ms": 1.564
+      },
+      "usage": {
+        "completion_tokens": 86,
+        "prompt_tokens": 403,
+        "prompt_tokens_details": {
+          "cached_tokens": 387
+        },
+        "total_tokens": 489
+      }
+    }
+  },
+  "truncation_matrix/streaming_tool_call_cut_mid_arguments.yaml#0": {
+    "mode": "streaming",
+    "choice": [],
     "usage": {
       "input_tokens": 165,
       "output_tokens": 20,
@@ -1216,7 +1159,7 @@
       "created": 0,
       "id": "chatcmpl-16YXiKe3zNgt7YOsOvGsZIRTiYqd1fAZ",
       "model": "/REDACTED_PATH/Qwen3-8B-Q4_K_M.gguf",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "b10964-b29c606e2",
       "timings": {
         "cache_n": 164,
@@ -1241,18 +1184,7 @@
   },
   "truncation_matrix/tool_call_cut_mid_arguments.yaml#0": {
     "mode": "unary",
-    "choice": [
-      {
-        "tool_call": {
-          "id": "P8cAuvqvhak0DtJC6YtnuIc1ZqLNx0fe",
-          "name": "record",
-          "arguments": {
-            "note": "The"
-          },
-          "native": null
-        }
-      }
-    ],
+    "choice": [],
     "usage": {
       "input_tokens": 165,
       "output_tokens": 20,
@@ -1342,7 +1274,7 @@
       "created": 0,
       "id": "chatcmpl-MwP38YZD42vYV8XzTwqGVnPtig0ansNs",
       "model": "/REDACTED_PATH/Qwen3-8B-Q4_K_M.gguf",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "system_fingerprint": "b10964-b29c606e2",
       "timings": {
         "cache_n": 34,

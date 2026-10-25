@@ -306,7 +306,9 @@ impl EffectLogReplayer {
                     .windows(2)
                     .any(|pair| matches!(pair, [first, second] if first.item >= second.item))
                 || done.iter().any(|response| response.item >= total)
-                || done.windows(2).any(|pair| pair[0].item >= pair[1].item)
+                || done
+                    .windows(2)
+                    .any(|pair| matches!(pair, [first, second] if first.item >= second.item))
                 || errors.iter().any(|error| {
                     done.binary_search_by_key(&error.item, |response| response.item)
                         .is_ok()

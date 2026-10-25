@@ -57,11 +57,15 @@ fn reply_frame(arguments: Value) -> WireFrame {
 
 fn reply_result(arguments: Value) -> Result<ToolCall, crate::error::ProviderError> {
     let response = decode(&wire(), Mode::Unary, vec![reply_frame(arguments)])?;
+    Ok(single_reply_call(response))
+}
+
+fn single_reply_call(response: crate::completion::CompletionResponse) -> ToolCall {
     let calls: Vec<ToolCall> = response.tool_calls().cloned().collect();
     let [call] = calls.as_slice() else {
         panic!("the call is kept: {:?}", response.choice);
     };
-    Ok(call.clone())
+    call.clone()
 }
 
 fn reply(arguments: Value) -> ToolCall {

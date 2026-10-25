@@ -13,8 +13,8 @@ use crate::providers::internal::wire;
 use crate::streaming::{DiscardReason, ReasoningAuthority, SourceOrder};
 use crate::wire::{Decoder, Flow, IncompleteEof, Out, WireCitation, WireEvent, WireFrame};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 
 mod reader;
 #[cfg(feature = "websocket")]
@@ -22,6 +22,32 @@ pub(crate) use reader::websocket_done;
 
 /// The protected accumulator's per-call fragment bound.
 const MAX_TOOL_INPUT_BYTES: usize = 32 * 1024 * 1024;
+/// Call state slots for distinct call items at a reused output index; no
+/// output index reaches them.
+const REUSED_CALL_SLOTS: u64 = 1 << 63;
+/// Reasoning state slots for distinct reasoning items at a reused output
+/// index; no output index reaches them.
+const REUSED_REASONING_SLOTS: u64 = 1 << 62;
+/// Order slots for distinct provider items at a reused output index; no
+/// output index reaches them.
+const REUSED_PROVIDER_SLOTS: u64 = 1 << 61;
+/// Message state slots for distinct message items at a reused output index;
+/// no output index reaches them.
+const REUSED_MESSAGE_SLOTS: u64 = 1 << 60;
+/// Where items at a reused output index sort within it: beyond every content
+/// position of the item that first used the index.
+const REUSED_ORDER_BASE: u64 = 1 << 32;
+
+/// How an output item reached the decoder.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arrival {
+    /// `response.output_item.added`.
+    Added,
+    /// `response.output_item.done`.
+    Done,
+    /// The terminal response's `output`.
+    Restated,
+}
 
 const ITEM_EVENTS: &str = "output_item.added output_item.done content_part.added content_part.done \
     output_text.delta output_text.done refusal.delta refusal.done function_call_arguments.delta \
@@ -315,7 +341,7 @@ struct ReasoningState {
     id: Option<String>,
     summary: BTreeMap<u64, Value>,
     content: BTreeMap<u64, Value>,
-    item: Option<Value>,
+    item: Option<Map<String, Value>>,
     complete: bool,
     encrypted: Option<String>,
     signature: Option<String>,
@@ -323,11 +349,10 @@ struct ReasoningState {
 
 impl ReasoningState {
     fn raw(&self) -> Value {
-        let mut item = self
+        let mut fields = self
             .item
             .clone()
-            .unwrap_or_else(|| json!({"type":"reasoning"}));
-        let fields = item.as_object_mut().expect("reasoning item is an object");
+            .unwrap_or_else(|| Map::from_iter([("type".to_owned(), json!("reasoning"))]));
         if let Some(id) = &self.id {
             fields.insert("id".into(), json!(id));
         }
@@ -346,7 +371,7 @@ impl ReasoningState {
                 json!(self.content.values().collect::<Vec<_>>()),
             );
         } else {
-            fields.remove("content");
+            fields.shift_remove("content");
         }
         if let Some(encrypted) = &self.encrypted {
             fields.insert("encrypted_content".into(), json!(encrypted));
@@ -354,7 +379,7 @@ impl ReasoningState {
         if let Some(signature) = &self.signature {
             fields.insert("signature".into(), json!(signature));
         }
-        item
+        Value::Object(fields)
     }
 
     fn carried(&self) -> bool {
@@ -443,12 +468,26 @@ pub struct ResponsesDecoder {
     messages: BTreeMap<u64, MessageState>,
     message_ids: HashMap<String, u64>,
     reasoning: BTreeMap<u64, ReasoningState>,
+    /// The state slot each identified reasoning item owns.
+    reasoning_ids: HashMap<String, u64>,
+    /// The slot of the latest distinct reasoning item at a reused output index.
+    reused_reasoning_slots: HashMap<u64, u64>,
+    /// Where each call, reasoning or provider-item slot opened at an output
+    /// index an earlier item already used sorts: after every earlier item
+    /// there.
+    reused_orders: HashMap<u64, SourceOrder>,
     calls: BTreeMap<u64, CallState>,
     parents: HashMap<u64, Parent>,
     undecided: BTreeMap<(u64, u64), Vec<UndecidedPart>>,
     provider_items: HashSet<u64>,
+    /// The identified provider items already emitted. An output index is
+    /// not a provider item's identity: ChatGPT's envelope repair fills
+    /// every missing index with 0.
+    provider_item_ids: HashSet<String>,
     finished_calls: HashSet<u64>,
     call_items: HashMap<String, u64>,
+    /// The slot of the latest distinct call item at a reused output index.
+    reused_call_slots: HashMap<u64, u64>,
     last_message_id: Option<String>,
     /// The real text Draft last activated by a provider event. Interleaving
     /// resets this without closing that Part or duplicating canonical content.
@@ -471,12 +510,17 @@ impl ResponsesDecoder {
             messages: BTreeMap::new(),
             message_ids: HashMap::new(),
             reasoning: BTreeMap::new(),
+            reasoning_ids: HashMap::new(),
+            reused_reasoning_slots: HashMap::new(),
+            reused_orders: HashMap::new(),
             calls: BTreeMap::new(),
             parents: HashMap::new(),
             undecided: BTreeMap::new(),
             provider_items: HashSet::new(),
+            provider_item_ids: HashSet::new(),
             finished_calls: HashSet::new(),
             call_items: HashMap::new(),
+            reused_call_slots: HashMap::new(),
             last_message_id: None,
             active_message_part: None,
             pending_flush_error: None,
@@ -552,9 +596,43 @@ impl ResponsesDecoder {
                 .then_some(*slot)
             })
         });
-        let slot = anonymous.unwrap_or(index);
+        let slot = match anonymous {
+            Some(slot) => slot,
+            // A distinct message at an index a reasoning, call or provider
+            // item already holds gets its own slot, as those items do. A
+            // second message id there still joins the index's message:
+            // Copilot names one message by different ids.
+            None if self.reasoning_ids.values().any(|slot| *slot == index)
+                || self.reasoning.contains_key(&index)
+                || self.calls.contains_key(&index)
+                || self.call_items.values().any(|slot| *slot == index)
+                || self.provider_items.contains(&index) =>
+            {
+                let slot = REUSED_MESSAGE_SLOTS
+                    + self
+                        .reused_orders
+                        .keys()
+                        .filter(|slot| {
+                            (REUSED_MESSAGE_SLOTS..REUSED_PROVIDER_SLOTS).contains(*slot)
+                        })
+                        .count() as u64;
+                self.reuse(index, slot);
+                slot
+            }
+            None => index,
+        };
         self.message_ids.insert(id.to_owned(), slot);
         slot
+    }
+
+    /// Where content part `part` of message slot `slot` sorts among the
+    /// reply's blocks. A message at a reused index sorts after every earlier
+    /// item there; its parts keep arrival order.
+    fn message_order(&self, slot: u64, part: u64) -> SourceOrder {
+        self.reused_orders
+            .get(&slot)
+            .copied()
+            .unwrap_or(SourceOrder::new(slot, part))
     }
 
     fn relocate_terminal_messages(&mut self, output: &[Value]) -> Result<(), ProviderError> {
@@ -735,6 +813,7 @@ impl ResponsesDecoder {
         let index = self.message_slot(index, id, None);
         self.check_message_kind(index, part_index, false, id)?;
         self.bind(index, Parent::Message, id, out)?;
+        let order = self.message_order(index, part_index);
         let message = self.messages.entry(index).or_default();
         if message.id.is_none() {
             message.id = nonempty(id);
@@ -743,7 +822,7 @@ impl ResponsesDecoder {
         // deltas do not revoke the phase an actual message snapshot supplied.
         let part = message.parts.entry(part_index).or_default();
         part.refusal |= refusal;
-        let at = text_at(part, index, part_index, out)?;
+        let at = text_at(part, order, out)?;
         activate_text(
             &mut self.active_message_part,
             at,
@@ -810,6 +889,7 @@ impl ResponsesDecoder {
         let kind = raw.str("type");
         let opaque = !matches!(kind, Some("output_text" | "refusal"));
         self.check_message_kind(index, part_index, opaque, id)?;
+        let order = self.message_order(index, part_index);
         let message = self.messages.entry(index).or_default();
         if message.id.is_none() {
             message.id = nonempty(id);
@@ -821,7 +901,7 @@ impl ResponsesDecoder {
             let stated = raw
                 .str(if part.refusal { "refusal" } else { "text" })
                 .unwrap_or_default();
-            let at = text_at(part, index, part_index, out)?;
+            let at = text_at(part, order, out)?;
             let metadata_changed = message_activation_metadata(part.raw.as_ref())
                 != message_activation_metadata(Some(&raw));
             let phase_changed =
@@ -879,7 +959,15 @@ impl ResponsesDecoder {
             )?;
         }
         let message = self.messages.entry(index).or_default();
-        if message.id.is_none() {
+        // The first completed item states the message's identity; an id an
+        // announcement or delta stated first only stands in until then, and a
+        // later terminal restatement never replaces it.
+        if completed
+            && message.item.is_none()
+            && let Some(id) = nonempty(item.str("id"))
+        {
+            message.id = Some(id);
+        } else if message.id.is_none() {
             message.id = nonempty(item.str("id"));
         }
         message.phase = item.str("phase").map(str::to_owned);
@@ -908,6 +996,7 @@ impl ResponsesDecoder {
                 "conflicting Responses parent kind at output {index}, content {part}: a reasoning_text part in a message"
             )));
         }
+        let order = self.reasoning_order(index);
         self.parents.entry(index).or_insert(Parent::Reasoning);
         let reasoning = self.reasoning.entry(index).or_default();
         if reasoning.id.is_none() {
@@ -923,7 +1012,7 @@ impl ResponsesDecoder {
             let stored = reasoning_opaque(old, summary);
             if stored != opaque {
                 return Err(conflicting_kind(
-                    index,
+                    order.primary,
                     if summary { "summary" } else { "content" },
                     part,
                     stored,
@@ -948,22 +1037,21 @@ impl ResponsesDecoder {
             parts.insert(part, raw);
         }
         if let Some(delta) = delta {
-            self.reasoning_delta(index, &delta, out)?;
+            self.active_message_part = None;
+            Self::reasoning_delta(reasoning, order, &delta, out)?;
         }
         Ok(())
     }
 
     fn reasoning_delta(
-        &mut self,
-        index: u64,
+        reasoning: &mut ReasoningState,
+        order: SourceOrder,
         delta: &str,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
-        self.active_message_part = None;
-        let reasoning = self.reasoning.get_mut(&index).expect("reasoning state");
         if reasoning.at.is_none() {
             let at = out.fresh_index();
-            out.in_source_order(SourceOrder::new(index, 0), |out| {
+            out.in_source_order(order, |out| {
                 out.open(at, Block::Reasoning { redacted: false }, Value::Null)
             })?;
             reasoning.at = Some(at);
@@ -981,6 +1069,12 @@ impl ResponsesDecoder {
         completed: bool,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
+        let index = if completed {
+            self.reasoning_slot(index, item.str("id"))
+        } else {
+            self.opened_reasoning_slot(index, item.str("id"))
+        };
+        let order = self.reasoning_order(index);
         self.bind(index, Parent::Reasoning, item.str("id"), out)?;
         // All kind contradictions are checked before changing either array.
         if let Some(state) = self.reasoning.get(&index) {
@@ -994,7 +1088,7 @@ impl ResponsesDecoder {
                         let opaque = reasoning_opaque(raw, summary);
                         if was_opaque != opaque {
                             return Err(conflicting_kind(
-                                index,
+                                order.primary,
                                 array,
                                 part as u64,
                                 was_opaque,
@@ -1025,7 +1119,7 @@ impl ResponsesDecoder {
             state.signature = nonempty(item.str("signature")).or_else(|| state.signature.clone());
         }
         if state.item.is_none() || !state.complete {
-            state.item = Some(item.clone());
+            state.item = Some(serde_json::from_value(item.clone())?);
         }
         state.complete |= completed;
         Ok(())
@@ -1043,42 +1137,56 @@ impl ResponsesDecoder {
             return Ok(());
         }
         self.active_message_part = None;
+        let source = index;
+        let index = self.call_slot(index, item.str("id"));
         if self.finished_calls.contains(&index) {
             return Ok(());
         }
         if let Some(id) = item.str("id").filter(|id| !id.is_empty()) {
             self.call_items.entry(id.to_owned()).or_insert(index);
         }
-        if let Some(call) = self.calls.get_mut(&index) {
-            if call.name.is_empty()
-                && let Some(name) = item.str("name").filter(|name| !name.is_empty())
-            {
-                name.clone_into(&mut call.name);
-                if let Some(id) = item.str("call_id").filter(|id| !id.is_empty()) {
-                    call.id = CallId::from_wire(id);
-                }
-                if call.item_id.is_none() {
-                    call.item_id = nonempty(item.str("id"));
-                }
-                call.namespace = item.str("namespace").map(str::to_owned);
-                out.qualify(call.at, call.namespace.clone())?;
-                out.fragment(
-                    Some(call.at),
-                    CallFragment {
-                        id: item.str("call_id").filter(|id| !id.is_empty()),
-                        name: Some(&call.name),
-                        arguments: None,
-                    },
-                )?;
+        let order = self.slot_order(index, source);
+        let call = Self::call_state(self.calls.entry(index), order, item, out)?;
+        if call.name.is_empty()
+            && let Some(name) = item.str("name").filter(|name| !name.is_empty())
+        {
+            name.clone_into(&mut call.name);
+            if let Some(id) = item.str("call_id").filter(|id| !id.is_empty()) {
+                call.id = CallId::from_wire(id);
             }
-            return Ok(());
+            if call.item_id.is_none() {
+                call.item_id = nonempty(item.str("id"));
+            }
+            call.namespace = item.str("namespace").map(str::to_owned);
+            out.qualify(call.at, call.namespace.clone())?;
+            out.fragment(
+                Some(call.at),
+                CallFragment {
+                    id: item.str("call_id").filter(|id| !id.is_empty()),
+                    name: Some(&call.name),
+                    arguments: None,
+                },
+            )?;
         }
+        Ok(())
+    }
+
+    fn call_state<'a>(
+        entry: Entry<'a, u64, CallState>,
+        order: SourceOrder,
+        item: &Value,
+        out: &mut Out<'_, Completion>,
+    ) -> Result<&'a mut CallState, ProviderError> {
+        let entry = match entry {
+            Entry::Occupied(entry) => return Ok(entry.into_mut()),
+            Entry::Vacant(entry) => entry,
+        };
         let at = out.fresh_index();
         let id = CallId::from_wire(item.str("call_id").unwrap_or_default());
         let name = item.str("name").unwrap_or_default().to_owned();
         let namespace = item.str("namespace").map(str::to_owned);
         // Fragmented calls allow the first delta to precede an announced name.
-        out.in_source_order(SourceOrder::new(index, 0), |out| {
+        out.in_source_order(order, |out| {
             let fragment = CallFragment {
                 id: item.str("call_id").filter(|id| !id.is_empty()),
                 name: None,
@@ -1098,21 +1206,17 @@ impl ResponsesDecoder {
                 ..CallFragment::default()
             },
         )?;
-        self.calls.insert(
-            index,
-            CallState {
-                at,
-                id,
-                item_id: nonempty(item.str("id")),
-                name,
-                namespace,
-                arguments: String::new(),
-                sent: String::new(),
-                overflowed: false,
-                ending: CallEnding::Pending,
-            },
-        );
-        Ok(())
+        Ok(entry.insert(CallState {
+            at,
+            id,
+            item_id: nonempty(item.str("id")),
+            name,
+            namespace,
+            arguments: String::new(),
+            sent: String::new(),
+            overflowed: false,
+            ending: CallEnding::Pending,
+        }))
     }
 
     fn call_delta(
@@ -1123,6 +1227,8 @@ impl ResponsesDecoder {
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
         self.active_message_part = None;
+        let source = index;
+        let index = self.call_slot(index, id);
         if self.finished_calls.contains(&index)
             || self
                 .calls
@@ -1131,14 +1237,19 @@ impl ResponsesDecoder {
         {
             return Ok(());
         }
-        if !self.calls.contains_key(&index) {
-            self.call_added(
-                index,
-                &json!({"type":"function_call", "id":id.unwrap_or_default()}),
-                out,
-            )?;
+        let order = self.slot_order(index, source);
+        let entry = self.calls.entry(index);
+        if matches!(&entry, Entry::Vacant(_))
+            && let Some(id) = id.filter(|id| !id.is_empty())
+        {
+            self.call_items.entry(id.to_owned()).or_insert(index);
         }
-        let call = self.calls.get_mut(&index).expect("call state");
+        let call = Self::call_state(
+            entry,
+            order,
+            &json!({"type":"function_call", "id":id.unwrap_or_default()}),
+            out,
+        )?;
         // Mirror the accumulator's bounded fragment rule, including the
         // gateway's replaceable standalone null placeholder.
         if call.arguments.trim() == "null" && !delta.trim().is_empty() {
@@ -1166,11 +1277,8 @@ impl ResponsesDecoder {
         item: &Value,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
-        let index = item
-            .str("id")
-            .filter(|id| !id.is_empty())
-            .and_then(|id| self.call_items.get(id).copied())
-            .unwrap_or(index);
+        let source = index;
+        let index = self.call_slot(index, item.str("id"));
         if self.finished_calls.contains(&index)
             || self
                 .calls
@@ -1190,8 +1298,10 @@ impl ResponsesDecoder {
             let name =
                 ToolName::new(name).map_err(|error| ProviderError::Response(error.to_string()))?;
             let namespace = item.str("namespace").map(str::to_owned);
-            let input = item.str("input").expect("strict custom input");
-            out.in_source_order(SourceOrder::new(index, 0), |out| {
+            let custom: reader::CustomFields = reader::fields(item)?;
+            let input = custom.input.as_str();
+            let order = self.slot_order(index, source);
+            out.in_source_order(order, |out| {
                 out.open(
                     at,
                     Block::CustomCall {
@@ -1218,10 +1328,12 @@ impl ResponsesDecoder {
                 },
             );
         } else {
-            if !self.calls.contains_key(&index) {
-                self.call_added(index, item, out)?;
+            let order = self.slot_order(index, source);
+            let entry = self.calls.entry(index);
+            if matches!(&entry, Entry::Vacant(_)) {
+                self.active_message_part = None;
             }
-            let call = self.calls.get_mut(&index).expect("call state");
+            let call = Self::call_state(entry, order, item, out)?;
             if call.name.is_empty() {
                 call.name = item.str("name").unwrap_or_default().to_owned();
             }
@@ -1241,7 +1353,8 @@ impl ResponsesDecoder {
                     arguments: None,
                 },
             )?;
-            let stated = item.str("arguments").expect("strict function arguments");
+            let function: reader::FunctionFields = reader::fields(item)?;
+            let stated = function.arguments.as_str();
             // Empty and whitespace arguments mean the parameterless object.
             let arguments = if stated.trim().is_empty() {
                 "{}"
@@ -1252,10 +1365,11 @@ impl ResponsesDecoder {
                 Ok(_) => FunctionInput::Parsed,
                 Err(error) => FunctionInput::Malformed {
                     error,
-                    confidence: match item.str("status") {
-                        Some("incomplete") => CallConfidence::Incomplete,
-                        Some("completed" | "in_progress") => CallConfidence::Asserted,
-                        _ => unreachable!("strict function-item status"),
+                    confidence: match function.status {
+                        reader::ToolStatus::Incomplete => CallConfidence::Incomplete,
+                        reader::ToolStatus::Completed | reader::ToolStatus::InProgress => {
+                            CallConfidence::Asserted
+                        }
                     },
                 },
             });
@@ -1272,6 +1386,128 @@ impl ResponsesDecoder {
             self.finish_call(index, FlushBoundary::Partial, out)?;
         }
         Ok(())
+    }
+
+    /// The state slot for call item `id` at output `index`. An output index
+    /// is not a call's identity: a known item keeps its slot, and a distinct
+    /// item at an index another call item already holds gets its own slot
+    /// beyond every output index, so it is neither merged into nor dropped as
+    /// the earlier call. Id-less events follow the index's latest item.
+    fn call_slot(&mut self, index: u64, id: Option<&str>) -> u64 {
+        let current = self.reused_call_slots.get(&index).copied().unwrap_or(index);
+        let Some(id) = id.filter(|id| !id.is_empty()) else {
+            return current;
+        };
+        if let Some(slot) = self.call_items.get(id) {
+            return *slot;
+        }
+        if !self.call_items.values().any(|slot| *slot == current)
+            && !self.reasoning_ids.values().any(|slot| *slot == current)
+            && !self.provider_items.contains(&current)
+            && !self.message_ids.values().any(|slot| *slot == current)
+        {
+            return current;
+        }
+        let slot = self
+            .call_items
+            .values()
+            .copied()
+            .filter(|slot| *slot >= REUSED_CALL_SLOTS)
+            .max()
+            .map_or(REUSED_CALL_SLOTS, |slot| slot + 1);
+        self.reuse(index, slot);
+        self.reused_call_slots.insert(index, slot);
+        self.call_items.insert(id.to_owned(), slot);
+        slot
+    }
+
+    /// The state slot a reasoning event at output `index` reaches without
+    /// claiming one: a known item's own slot; for an id-less event, the
+    /// index's latest reasoning item; otherwise the index itself.
+    fn reasoning_slot_of(&self, index: u64, id: Option<&str>) -> u64 {
+        match id.filter(|id| !id.is_empty()) {
+            Some(id) => self.reasoning_ids.get(id).copied().unwrap_or(index),
+            None => self
+                .reused_reasoning_slots
+                .get(&index)
+                .copied()
+                .unwrap_or(index),
+        }
+    }
+
+    /// The state slot a reasoning event other than `output_item.added`
+    /// reaches: a known item's own slot, else the index's latest reasoning
+    /// item. Only an added item opens a slot. Copilot names one item by a
+    /// different id at `added`, at `done` and in the terminal restatement;
+    /// those ids join the slot the index holds, as upstream addresses them.
+    fn reasoning_slot(&mut self, index: u64, id: Option<&str>) -> u64 {
+        let current = self.reasoning_slot_of(index, None);
+        let Some(id) = id.filter(|id| !id.is_empty()) else {
+            return current;
+        };
+        *self.reasoning_ids.entry(id.to_owned()).or_insert(current)
+    }
+
+    /// The state slot an `output_item.added` reasoning item opens, keyed by
+    /// item id as call slots are. An output index is not a reasoning item's
+    /// identity: ChatGPT's envelope repair fills every missing index with 0.
+    /// A known item keeps its slot, and a distinct item added at an index
+    /// another reasoning item already holds gets its own slot beyond every
+    /// output index, so the two are never merged.
+    fn opened_reasoning_slot(&mut self, index: u64, id: Option<&str>) -> u64 {
+        let current = self.reasoning_slot_of(index, None);
+        let Some(id) = id.filter(|id| !id.is_empty()) else {
+            return current;
+        };
+        if let Some(slot) = self.reasoning_ids.get(id) {
+            return *slot;
+        }
+        if !self.reasoning_ids.values().any(|slot| *slot == current)
+            && !self.call_items.values().any(|slot| *slot == current)
+            && !self.provider_items.contains(&current)
+            && !self.message_ids.values().any(|slot| *slot == current)
+        {
+            self.reasoning_ids.insert(id.to_owned(), current);
+            return current;
+        }
+        let slot = REUSED_REASONING_SLOTS
+            + self
+                .reused_orders
+                .keys()
+                .filter(|slot| (REUSED_REASONING_SLOTS..REUSED_CALL_SLOTS).contains(*slot))
+                .count() as u64;
+        self.reuse(index, slot);
+        self.reused_reasoning_slots.insert(index, slot);
+        self.reasoning_ids.insert(id.to_owned(), slot);
+        slot
+    }
+
+    /// Record that `slot` opened at output `index` after another item of
+    /// either kind used it. A reused index cannot order its items by
+    /// position, so each later item sorts after the earlier ones there.
+    fn reuse(&mut self, index: u64, slot: u64) {
+        let later = self
+            .reused_orders
+            .values()
+            .filter(|order| order.primary == index)
+            .count() as u64
+            + 1;
+        self.reused_orders
+            .insert(slot, SourceOrder::new(index, REUSED_ORDER_BASE + later));
+    }
+
+    /// Where the block of state slot `slot`, reached at output `index`,
+    /// sorts among the reply's blocks.
+    fn slot_order(&self, slot: u64, index: u64) -> SourceOrder {
+        self.reused_orders
+            .get(&slot)
+            .copied()
+            .unwrap_or(SourceOrder::new(index, 0))
+    }
+
+    /// Where reasoning slot `slot`'s block sorts among the reply's blocks.
+    fn reasoning_order(&self, slot: u64) -> SourceOrder {
+        self.slot_order(slot, slot)
     }
 
     fn finish_call(
@@ -1362,13 +1598,44 @@ impl ResponsesDecoder {
         &mut self,
         index: u64,
         item: &Value,
+        arrival: Arrival,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
-        if !self.provider_items.insert(index) {
+        // A streamed item is known by its id, else by its index. A terminal
+        // restatement's index is its real position, so an item restated
+        // under an id the stream did not use is still the one streamed there.
+        let id = item.str("id").filter(|id| !id.is_empty());
+        let seen = id.is_some_and(|id| self.provider_item_ids.contains(id))
+            || (id.is_none() || arrival == Arrival::Restated)
+                && self.provider_items.contains(&index);
+        if seen {
             return Ok(());
         }
+        // A distinct item at an index another item already holds sorts
+        // after every earlier item there, as reused call and reasoning
+        // slots do.
+        let held = self.provider_items.contains(&index)
+            || self.call_items.values().any(|slot| *slot == index)
+            || self.reasoning_ids.values().any(|slot| *slot == index)
+            || self.message_ids.values().any(|slot| *slot == index);
+        let order = if held {
+            let slot = REUSED_PROVIDER_SLOTS
+                + self
+                    .reused_orders
+                    .keys()
+                    .filter(|slot| (REUSED_PROVIDER_SLOTS..REUSED_REASONING_SLOTS).contains(*slot))
+                    .count() as u64;
+            self.reuse(index, slot);
+            self.slot_order(slot, index)
+        } else {
+            SourceOrder::new(index, 0)
+        };
+        self.provider_items.insert(index);
+        if let Some(id) = id {
+            self.provider_item_ids.insert(id.to_owned());
+        }
         let at = out.fresh_index();
-        out.in_source_order(SourceOrder::new(index, 0), |out| {
+        out.in_source_order(order, |out| {
             out.whole(at, Block::ProviderItem { provider: None }, item.clone(), "")
         })
     }
@@ -1377,9 +1644,10 @@ impl ResponsesDecoder {
         &mut self,
         index: u64,
         item: &Value,
-        completed: bool,
+        arrival: Arrival,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
+        let completed = arrival != Arrival::Added;
         match item.str("type") {
             Some("message") => self.message_item(index, item, completed, out),
             Some("reasoning") => self.reasoning_item(index, item, completed, out),
@@ -1387,7 +1655,7 @@ impl ResponsesDecoder {
                 self.call_done(index, item, out)
             }
             Some("function_call" | "custom_tool_call") => self.call_added(index, item, out),
-            _ if completed => self.provider_item(index, item, out),
+            _ if completed => self.provider_item(index, item, arrival, out),
             _ => Ok(()),
         }
     }
@@ -1398,7 +1666,7 @@ impl ResponsesDecoder {
         frame: Value,
         out: &mut Out<'_, Completion>,
     ) -> Result<(), ProviderError> {
-        let index = frame.u64("output_index").expect("strict output index");
+        let index = reader::fields::<reader::ItemEnvelope>(&frame)?.output_index;
         let id = frame.str("item_id");
         let index = id
             .and_then(|id| self.message_ids.get(id))
@@ -1406,21 +1674,31 @@ impl ResponsesDecoder {
             .unwrap_or(index);
         let part = frame.u64("content_index").unwrap_or(0);
         match kind {
-            "response.output_item.added" => self.output(index, &frame["item"], false, out),
+            "response.output_item.added" => self.output(
+                index,
+                frame.get("item").unwrap_or(&Value::Null),
+                Arrival::Added,
+                out,
+            ),
             "response.output_item.done" => {
                 self.active_message_part = None;
-                self.output(index, &frame["item"], true, out)
+                self.output(
+                    index,
+                    frame.get("item").unwrap_or(&Value::Null),
+                    Arrival::Done,
+                    out,
+                )
             }
             "response.output_text.delta" | "response.refusal.delta" => self.message_delta(
                 index,
                 part,
                 id,
-                frame.str("delta").expect("strict delta"),
+                &reader::fields::<reader::Delta>(&frame)?.delta,
                 kind == "response.refusal.delta",
                 out,
             ),
             "response.content_part.added" | "response.content_part.done" => {
-                let raw = frame["part"].clone();
+                let raw = frame.get("part").unwrap_or(&Value::Null).clone();
                 match raw.str("type") {
                     Some("output_text" | "refusal") => {
                         let index = self.message_slot(index, id, None);
@@ -1429,40 +1707,46 @@ impl ResponsesDecoder {
                         self.message_part(index, part, id, raw, out)
                     }
                     Some("summary_text") => {
+                        let index = self.reasoning_slot(index, id);
                         self.bind(index, Parent::Reasoning, id, out)?;
                         self.reasoning_part(index, part, true, id, raw, false, out)
                     }
                     Some("reasoning_text") => {
+                        let index = self.reasoning_slot(index, id);
                         self.bind(index, Parent::Reasoning, id, out)?;
                         self.reasoning_part(index, part, false, id, raw, false, out)
                     }
-                    _ => match self.parents.get(&index) {
-                        Some(Parent::Message) => self.message_part(index, part, id, raw, out),
-                        Some(Parent::Reasoning) => {
-                            self.reasoning_part(index, part, false, id, raw, false, out)
-                        }
-                        None => {
-                            let waiting = UndecidedPart {
-                                id: id.map(str::to_owned),
-                                raw,
-                            };
-                            let parts = self.undecided.entry((index, part)).or_default();
-                            if !parts.contains(&waiting) {
-                                parts.push(waiting);
+                    _ => {
+                        let index = self.reasoning_slot_of(index, id);
+                        match self.parents.get(&index) {
+                            Some(Parent::Message) => self.message_part(index, part, id, raw, out),
+                            Some(Parent::Reasoning) => {
+                                self.reasoning_part(index, part, false, id, raw, false, out)
                             }
-                            Ok(())
+                            None => {
+                                let waiting = UndecidedPart {
+                                    id: id.map(str::to_owned),
+                                    raw,
+                                };
+                                let parts = self.undecided.entry((index, part)).or_default();
+                                if !parts.contains(&waiting) {
+                                    parts.push(waiting);
+                                }
+                                Ok(())
+                            }
                         }
-                    },
+                    }
                 }
             }
             "response.reasoning_summary_part.added" | "response.reasoning_summary_part.done" => {
+                let index = self.reasoning_slot(index, id);
                 self.bind(index, Parent::Reasoning, id, out)?;
                 self.reasoning_part(
                     index,
-                    frame.u64("summary_index").expect("strict summary index"),
+                    reader::fields::<reader::SummaryEnvelope>(&frame)?.summary_index,
                     true,
                     id,
-                    frame["part"].clone(),
+                    frame.get("part").unwrap_or(&Value::Null).clone(),
                     false,
                     out,
                 )
@@ -1474,20 +1758,23 @@ impl ResponsesDecoder {
                 let summary = kind.starts_with("response.reasoning_summary");
                 let append = kind.ends_with(".delta");
                 let part = if summary {
-                    frame.u64("summary_index").expect("strict summary index")
+                    reader::fields::<reader::SummaryEnvelope>(&frame)?.summary_index
                 } else {
                     part
                 };
-                let text = frame
-                    .str(if append { "delta" } else { "text" })
-                    .expect("strict reasoning text");
+                let text = if append {
+                    reader::fields::<reader::Delta>(&frame)?.delta
+                } else {
+                    reader::fields::<reader::Text>(&frame)?.text
+                };
+                let index = self.reasoning_slot(index, id);
                 self.bind(index, Parent::Reasoning, id, out)?;
                 self.reasoning_part(index, part, summary, id, json!({"type":if summary { "summary_text" } else { "reasoning_text" }, "text":text}), append, out)
             }
             "response.function_call_arguments.delta" => self.call_delta(
                 index,
                 id,
-                frame.str("delta").expect("strict arguments delta"),
+                &reader::fields::<reader::Delta>(&frame)?.delta,
                 out,
             ),
             // These done text/argument fields are typed observations but their
@@ -1501,6 +1788,8 @@ impl ResponsesDecoder {
 
     fn flush_messages(&mut self, out: &mut Out<'_, Completion>) -> Result<(), ProviderError> {
         for (index, message) in std::mem::take(&mut self.messages) {
+            // A message still in a reused slot is carried at its output index.
+            let position = self.message_order(index, 0).primary;
             let unknown_fields = message
                 .item
                 .as_ref()
@@ -1530,16 +1819,19 @@ impl ResponsesDecoder {
                         || json!({"type":if part.refusal {"refusal"} else {"output_text"}}),
                     );
                     if !part.opaque {
-                        raw[if part.refusal { "refusal" } else { "text" }] = json!(part.text);
+                        let mut fields: Map<String, Value> = serde_json::from_value(raw)?;
+                        let key = if part.refusal { "refusal" } else { "text" };
+                        fields.insert(key.to_owned(), json!(part.text));
+                        raw = Value::Object(fields);
                     }
                     let item = json!({"content":[raw], "id":message.id, "phase":message.phase});
-                    let mut text = super::carried_message_parts(&item, index, None)?.remove(0);
+                    let mut text = super::carried_message_parts(&item, position, None)?.remove(0);
                     text = text.with_unknown_message_fields(unknown_fields.clone());
                     text.payload.position = CarriedPosition::MessageContent {
-                        item_index: index,
+                        item_index: position,
                         part_index,
                     };
-                    let at = text_at(&mut part, index, part_index, out)?;
+                    let at = text_at(&mut part, self.message_order(index, part_index), out)?;
                     if !part.opaque {
                         out.set_citations(
                             at,
@@ -1597,47 +1889,19 @@ impl ResponsesDecoder {
                     .is_some_and(|value| value.trim().is_empty())
                     && let Some(fields) = projection.as_object_mut()
                 {
-                    fields.remove("signature");
+                    fields.shift_remove("signature");
                 }
                 let mut reasoning = super::carried_reasoning(&projection, None)?;
                 reasoning.payload.item = item.clone();
-                let known_root = item.as_object().is_some_and(|fields| {
-                    fields.keys().all(|key| {
-                        matches!(
-                            key.as_str(),
-                            "type"
-                                | "id"
-                                | "summary"
-                                | "content"
-                                | "encrypted_content"
-                                | "signature"
-                                | "status"
-                        )
-                    })
-                });
-                let empty_known = reasoning.id.as_deref().is_some_and(|id| !id.is_empty())
-                    && known_root
-                    && reasoning.content.iter().all(|part| match part {
-                        crate::message::CarriedReasoningPart::Summary(text) => text.is_empty(),
-                        crate::message::CarriedReasoningPart::Text { text, signature } => {
-                            text.is_empty()
-                                && signature
-                                    .as_deref()
-                                    .is_none_or(|signature| signature.trim().is_empty())
-                        }
-                        _ => false,
-                    });
-                if empty_known {
-                    if let Some(at) = state.at {
-                        out.close(at)?;
-                    }
-                    continue;
-                }
+                // A known, identified, wholly empty item (Copilot's and xAI's
+                // contentless reasoning) is a reasoning block like any other,
+                // as in F, so the next request replays it (G165 reopened by
+                // mec-rig-port-answers-1 Q5).
                 let at = match state.at {
                     Some(at) => at,
                     None => {
                         let at = out.fresh_index();
-                        out.in_source_order(SourceOrder::new(index, 0), |out| {
+                        out.in_source_order(self.reasoning_order(index), |out| {
                             out.open(at, Block::Reasoning { redacted: false }, Value::Null)
                         })?;
                         at
@@ -1815,11 +2079,11 @@ impl ResponsesDecoder {
                 }
             }
             // Other streamed terminal calls retain their existing route; only
-            // whole-body decoding supplies new or unannounced whole calls.
-            if whole || !matches!(item.str("type"), Some("function_call" | "custom_tool_call")) {
-                if let Err(error) = self.output(index as u64, item, true, &mut out) {
-                    first_error.get_or_insert(error);
-                }
+            // whole-body decoding supplies new or unannounced whole calls (G195).
+            if (whole || !matches!(item.str("type"), Some("function_call" | "custom_tool_call")))
+                && let Err(error) = self.output(index as u64, item, Arrival::Restated, &mut out)
+            {
+                first_error.get_or_insert(error);
             }
         }
         if let Some(error) = first_error {
@@ -1887,17 +2151,14 @@ fn part_matches(part: &MessagePart, raw: &Value) -> bool {
 
 fn text_at(
     part: &mut MessagePart,
-    index: u64,
-    part_index: u64,
+    order: SourceOrder,
     out: &mut Out<'_, Completion>,
 ) -> Result<usize, ProviderError> {
     if let Some(at) = part.at {
         return Ok(at);
     }
     let at = out.fresh_index();
-    out.in_source_order(SourceOrder::new(index, part_index), |out| {
-        out.open(at, Block::Text, Value::Null)
-    })?;
+    out.in_source_order(order, |out| out.open(at, Block::Text, Value::Null))?;
     part.at = Some(at);
     Ok(at)
 }
@@ -2012,16 +2273,23 @@ impl<'id> Decoder<'id, Completion> for ResponsesDecoder {
         }
         match event {
             ResponsesEvent::Frame { kind, frame, raw } => match kind.as_str() {
-                "response.completed" => self.terminal(frame["response"].clone(), false, out),
+                "response.completed" => self.terminal(
+                    frame.get("response").unwrap_or(&Value::Null).clone(),
+                    false,
+                    out,
+                ),
                 "response.incomplete" if self.options.incomplete == IncompleteTerminal::Accept => {
-                    let mut response = frame["response"].clone();
-                    response["status"] = json!("incomplete");
-                    self.terminal(response, false, out)
+                    let mut response: Map<String, Value> =
+                        reader::fields(frame.get("response").unwrap_or(&Value::Null))?;
+                    response.insert("status".to_owned(), json!("incomplete"));
+                    self.terminal(Value::Object(response), false, out)
                 }
                 "response.incomplete" | "response.failed" => {
                     // Refused terminals retain only already observed content,
                     // complete calls and their final reasoning authority.
-                    if let Err(error) = self.merge_reasoning(&frame["response"], &mut out) {
+                    if let Err(error) = self
+                        .merge_reasoning(frame.get("response").unwrap_or(&Value::Null), &mut out)
+                    {
                         self.pending_flush_error = Some(error);
                     }
                     if let Err(error) = self.flush(FlushBoundary::Partial, &mut out) {

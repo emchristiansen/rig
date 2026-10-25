@@ -3,8 +3,10 @@
 //! `tests/common/corpus_matrix/long_loop.rs`'s; this file holds the scenario
 //! literals and the wire's model.
 
-use super::super::support::with_gemini_cassette;
-use crate::corpus_matrix::{Wire, cells, long_loop};
+use super::super::request_witness_support::{
+    NamedCase, attempt_cell, with_gemini_request_witness_cassette,
+};
+use crate::corpus_matrix::{Wire, cells};
 use rig_test_support::cassette_models::GeminiModels;
 
 // gemini-2.5-flash, not flash-lite: at temperature 0 flash-lite answered the
@@ -28,8 +30,16 @@ fn wire(
     }
 }
 
-crate::matrix::golden_matrix! {
-    wrapper: with_gemini_cassette, wire: wire, run: long_loop::run_agent, oracle: crate::goldens::golden_effects;
-    #[tokio::test]
-    long_streamed: ("long_loop_matrix/long_streamed", long_loop::LONG_STREAMED, "gemini_long_loop_long_streamed");
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn long_streamed() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
+        "long_loop_matrix/long_streamed",
+        NamedCase::LongStreamed,
+        |client, _clock| async move {
+            let wire = wire(&client);
+            attempt_cell(&wire, NamedCase::LongStreamed).await
+        },
+    )
+    .await
 }

@@ -1,5 +1,392 @@
 {
   "header": {
+    "stream_done": {
+      "1": [
+        {
+          "item": 11,
+          "response": {
+            "choice": [
+              {
+                "type": "toolcall",
+                "id": {
+                  "provider": "call_oGgQAeg7HiDegO9MUuOvJexg"
+                },
+                "function": {
+                  "name": "subtract",
+                  "arguments": {
+                    "x": 2,
+                    "y": 5
+                  }
+                },
+                "native": {
+                  "item": {
+                    "arguments": "{\"x\":2,\"y\":5}",
+                    "call_id": "call_oGgQAeg7HiDegO9MUuOvJexg",
+                    "id": "fc_02396dbad274c2d0006ab396a50e9c87d0a86ddfc4cd2734e3",
+                    "name": "subtract",
+                    "status": "completed",
+                    "type": "function_call"
+                  },
+                  "fingerprint": "5dd17383bb6f729f"
+                }
+              }
+            ],
+            "usage": {
+              "input_tokens": 120,
+              "output_tokens": 18,
+              "total_tokens": 138,
+              "cached_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "reasoning_tokens": 0,
+              "cost": {
+                "input": 0.0003,
+                "output": 0.00018,
+                "cache_read": 0.0,
+                "cache_write": 0.0,
+                "total": 0.00047999999999999996
+              }
+            },
+            "origin": {
+              "api": "openai.responses",
+              "provider": "openai",
+              "model": "gpt-4o",
+              "response_model": "gpt-4o-2024-08-06",
+              "response_id": "resp_02396dbad274c2d0006ab396a4756887d0baafdcc641fe3455"
+            },
+            "provider_request_id": "req_86e2b3d19c0e4103b70c474cdbf6328b",
+            "finish_reason": "tool_calls",
+            "raw": {
+              "access_programs": null,
+              "background": false,
+              "completed_at": 0,
+              "created_at": 0,
+              "error": null,
+              "frequency_penalty": 0.0,
+              "id": "resp_02396dbad274c2d0006ab396a4756887d0baafdcc641fe3455",
+              "incomplete_details": null,
+              "instructions": "You are a calculator. Use the provided tools before answering arithmetic questions.",
+              "max_output_tokens": null,
+              "max_tool_calls": null,
+              "metadata": {},
+              "model": "gpt-4o-2024-08-06",
+              "moderation": null,
+              "object": "response",
+              "output": [
+                {
+                  "arguments": "{\"x\":2,\"y\":5}",
+                  "call_id": "call_oGgQAeg7HiDegO9MUuOvJexg",
+                  "id": "fc_02396dbad274c2d0006ab396a50e9c87d0a86ddfc4cd2734e3",
+                  "name": "subtract",
+                  "status": "completed",
+                  "type": "function_call"
+                }
+              ],
+              "parallel_tool_calls": true,
+              "presence_penalty": 0.0,
+              "previous_response_id": null,
+              "prompt_cache_key": null,
+              "prompt_cache_retention": "in_memory",
+              "reasoning": {
+                "context": null,
+                "effort": null,
+                "summary": null
+              },
+              "safety_identifier": null,
+              "service_tier": "default",
+              "status": "completed",
+              "store": true,
+              "temperature": 0.0,
+              "text": {
+                "format": {
+                  "type": "text"
+                },
+                "verbosity": "medium"
+              },
+              "tool_choice": "auto",
+              "tool_usage": {
+                "image_gen": {
+                  "input_tokens": 0,
+                  "input_tokens_details": {
+                    "image_tokens": 0,
+                    "text_tokens": 0
+                  },
+                  "output_tokens": 0,
+                  "output_tokens_details": {
+                    "image_tokens": 0,
+                    "text_tokens": 0
+                  },
+                  "total_tokens": 0
+                },
+                "web_search": {
+                  "num_requests": 0
+                }
+              },
+              "tools": [
+                {
+                  "description": "Add x and y together",
+                  "name": "add",
+                  "output_schema": null,
+                  "parameters": {
+                    "properties": {
+                      "x": {
+                        "description": "The first number to add",
+                        "type": "number"
+                      },
+                      "y": {
+                        "description": "The second number to add",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "x",
+                      "y"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description": "Subtract y from x (i.e.: x - y)",
+                  "name": "subtract",
+                  "output_schema": null,
+                  "parameters": {
+                    "properties": {
+                      "x": {
+                        "description": "The number to subtract from",
+                        "type": "number"
+                      },
+                      "y": {
+                        "description": "The number to subtract",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "x",
+                      "y"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "top_logprobs": 0,
+              "top_p": 1.0,
+              "truncation": "disabled",
+              "usage": {
+                "input_tokens": 120,
+                "input_tokens_details": {
+                  "cache_write_tokens": 0,
+                  "cached_tokens": 0
+                },
+                "output_tokens": 18,
+                "output_tokens_details": {
+                  "reasoning_tokens": 0
+                },
+                "total_tokens": 138
+              },
+              "user": null
+            }
+          }
+        }
+      ],
+      "3": [
+        {
+          "item": 18,
+          "response": {
+            "choice": [
+              {
+                "type": "carried_text",
+                "content": {
+                  "type": "text",
+                  "text": "The result of \\(2 - 5\\) is \\(-3\\)."
+                },
+                "payload": {
+                  "item": {
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": "The result of \\(2 - 5\\) is \\(-3\\).",
+                    "type": "output_text"
+                  },
+                  "provider": "openai",
+                  "position": {
+                    "kind": "message_content",
+                    "item_index": 0,
+                    "part_index": 0
+                  }
+                },
+                "item_id": "msg_02396dbad274c2d0006ab396a6606087d09f88f5935db0edbf"
+              }
+            ],
+            "usage": {
+              "input_tokens": 147,
+              "output_tokens": 18,
+              "total_tokens": 165,
+              "cached_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "reasoning_tokens": 0,
+              "cost": {
+                "input": 0.0003675,
+                "output": 0.00018,
+                "cache_read": 0.0,
+                "cache_write": 0.0,
+                "total": 0.0005475
+              }
+            },
+            "message_id": "msg_02396dbad274c2d0006ab396a6606087d09f88f5935db0edbf",
+            "origin": {
+              "api": "openai.responses",
+              "provider": "openai",
+              "model": "gpt-4o",
+              "response_model": "gpt-4o-2024-08-06",
+              "response_id": "resp_02396dbad274c2d0006ab396a5998487d0b2cad08d761444c2"
+            },
+            "provider_request_id": "req_3d19b4030b74421d8625892d31d8160c",
+            "finish_reason": "stop",
+            "raw": {
+              "access_programs": null,
+              "background": false,
+              "completed_at": 0,
+              "created_at": 0,
+              "error": null,
+              "frequency_penalty": 0.0,
+              "id": "resp_02396dbad274c2d0006ab396a5998487d0b2cad08d761444c2",
+              "incomplete_details": null,
+              "instructions": "You are a calculator. Use the provided tools before answering arithmetic questions.",
+              "max_output_tokens": null,
+              "max_tool_calls": null,
+              "metadata": {},
+              "model": "gpt-4o-2024-08-06",
+              "moderation": null,
+              "object": "response",
+              "output": [
+                {
+                  "content": [
+                    {
+                      "annotations": [],
+                      "logprobs": [],
+                      "text": "The result of \\(2 - 5\\) is \\(-3\\).",
+                      "type": "output_text"
+                    }
+                  ],
+                  "id": "msg_02396dbad274c2d0006ab396a6606087d09f88f5935db0edbf",
+                  "role": "assistant",
+                  "status": "completed",
+                  "type": "message"
+                }
+              ],
+              "parallel_tool_calls": true,
+              "presence_penalty": 0.0,
+              "previous_response_id": null,
+              "prompt_cache_key": null,
+              "prompt_cache_retention": "in_memory",
+              "reasoning": {
+                "context": null,
+                "effort": null,
+                "summary": null
+              },
+              "safety_identifier": null,
+              "service_tier": "default",
+              "status": "completed",
+              "store": true,
+              "temperature": 0.0,
+              "text": {
+                "format": {
+                  "type": "text"
+                },
+                "verbosity": "medium"
+              },
+              "tool_choice": "auto",
+              "tool_usage": {
+                "image_gen": {
+                  "input_tokens": 0,
+                  "input_tokens_details": {
+                    "image_tokens": 0,
+                    "text_tokens": 0
+                  },
+                  "output_tokens": 0,
+                  "output_tokens_details": {
+                    "image_tokens": 0,
+                    "text_tokens": 0
+                  },
+                  "total_tokens": 0
+                },
+                "web_search": {
+                  "num_requests": 0
+                }
+              },
+              "tools": [
+                {
+                  "description": "Add x and y together",
+                  "name": "add",
+                  "output_schema": null,
+                  "parameters": {
+                    "properties": {
+                      "x": {
+                        "description": "The first number to add",
+                        "type": "number"
+                      },
+                      "y": {
+                        "description": "The second number to add",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "x",
+                      "y"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                },
+                {
+                  "description": "Subtract y from x (i.e.: x - y)",
+                  "name": "subtract",
+                  "output_schema": null,
+                  "parameters": {
+                    "properties": {
+                      "x": {
+                        "description": "The number to subtract from",
+                        "type": "number"
+                      },
+                      "y": {
+                        "description": "The number to subtract",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "x",
+                      "y"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": false,
+                  "type": "function"
+                }
+              ],
+              "top_logprobs": 0,
+              "top_p": 1.0,
+              "truncation": "disabled",
+              "usage": {
+                "input_tokens": 147,
+                "input_tokens_details": {
+                  "cache_write_tokens": 0,
+                  "cached_tokens": 0
+                },
+                "output_tokens": 18,
+                "output_tokens_details": {
+                  "reasoning_tokens": 0
+                },
+                "total_tokens": 165
+              },
+              "user": null
+            }
+          }
+        }
+      ]
+    },
     "run_spec": 1469597572221338331,
     "handlers": [
       {
@@ -351,6 +738,10 @@
             "event": "start",
             "part": 0,
             "kind": "tool_call",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            },
             "name": "subtract"
           }
         },
@@ -556,6 +947,7 @@
                     "provider": "call_oGgQAeg7HiDegO9MUuOvJexg"
                   },
                   "name": "subtract",
+                  "answers": "function",
                   "content": [
                     {
                       "type": "json",
@@ -624,25 +1016,26 @@
           "outcome": "completion",
           "choice": [
             {
-              "type": "text",
-              "text": "The result of \\(2 - 5\\) is \\(-3\\).",
-              "native": {
+              "type": "carried_text",
+              "content": {
+                "type": "text",
+                "text": "The result of \\(2 - 5\\) is \\(-3\\)."
+              },
+              "payload": {
                 "item": {
-                  "content": [
-                    {
-                      "annotations": [],
-                      "logprobs": [],
-                      "text": "The result of \\(2 - 5\\) is \\(-3\\).",
-                      "type": "output_text"
-                    }
-                  ],
-                  "id": "msg_02396dbad274c2d0006ab396a6606087d09f88f5935db0edbf",
-                  "role": "assistant",
-                  "status": "completed",
-                  "type": "message"
+                  "annotations": [],
+                  "logprobs": [],
+                  "text": "The result of \\(2 - 5\\) is \\(-3\\).",
+                  "type": "output_text"
                 },
-                "fingerprint": "4716af56a76dd426"
-              }
+                "provider": "openai",
+                "position": {
+                  "kind": "message_content",
+                  "item_index": 0,
+                  "part_index": 0
+                }
+              },
+              "item_id": "msg_02396dbad274c2d0006ab396a6606087d09f88f5935db0edbf"
             }
           ],
           "usage": {
@@ -660,6 +1053,7 @@
               "total": 0.0005475
             }
           },
+          "message_id": "msg_02396dbad274c2d0006ab396a6606087d09f88f5935db0edbf",
           "origin": {
             "api": "openai.responses",
             "provider": "openai",
@@ -816,7 +1210,11 @@
           "value": {
             "event": "start",
             "part": 0,
-            "kind": "text"
+            "kind": "text",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            }
           }
         },
         {
@@ -953,25 +1351,25 @@
             "event": "end",
             "part": 0,
             "content": {
-              "type": "text",
-              "text": "The result of \\(2 - 5\\) is \\(-3\\).",
-              "native": {
+              "type": "carried_text",
+              "content": {
+                "type": "text",
+                "text": "The result of \\(2 - 5\\) is \\(-3\\)."
+              },
+              "payload": {
                 "item": {
-                  "content": [
-                    {
-                      "annotations": [],
-                      "logprobs": [],
-                      "text": "The result of \\(2 - 5\\) is \\(-3\\).",
-                      "type": "output_text"
-                    }
-                  ],
-                  "id": "msg_02396dbad274c2d0006ab396a6606087d09f88f5935db0edbf",
-                  "role": "assistant",
-                  "status": "completed",
-                  "type": "message"
+                  "annotations": [],
+                  "logprobs": [],
+                  "text": "The result of \\(2 - 5\\) is \\(-3\\).",
+                  "type": "output_text"
                 },
-                "fingerprint": "4716af56a76dd426"
-              }
+                "position": {
+                  "kind": "message_content",
+                  "item_index": 0,
+                  "part_index": 0
+                }
+              },
+              "item_id": "msg_02396dbad274c2d0006ab396a6606087d09f88f5935db0edbf"
             }
           }
         }

@@ -247,3 +247,18 @@ async fn the_device_sign_in_carries_no_caller_identity() {
         assert!(request.headers.get("version").is_none(), "{request:?}");
     }
 }
+
+/// An OAuth source shows the caller identity its refresh carries.
+#[test]
+fn an_oauth_source_debugs_as_its_caller_identity() {
+    let identity = crate::providers::openai::wire::CallerIdentity::new(
+        "client_exec",
+        "client_exec/1.2.3",
+        Some("1.2.3".to_owned()),
+    )
+    .expect("a valid identity");
+    assert_eq!(
+        format!("{:?}", AuthSource::OAuth { identity }),
+        r#"OAuth { identity: CallerIdentity { originator: "client_exec", user_agent: "client_exec/1.2.3", version: Some("1.2.3") } }"#
+    );
+}

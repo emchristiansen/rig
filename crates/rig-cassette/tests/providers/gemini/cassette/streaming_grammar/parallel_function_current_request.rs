@@ -58,7 +58,7 @@ async fn parallel_function_calls_stay_distinct_on_current_schema_projection() {
             .expect("the recorded declaration");
         assert!(!object.contains_key("parameters"));
         let parameters = object
-            .remove("parametersJsonSchema")
+            .shift_remove("parametersJsonSchema")
             .expect("the recorded JSON Schema");
         object.insert("parameters".to_owned(), parameters);
     }

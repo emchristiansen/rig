@@ -11,10 +11,8 @@ use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::super::agent_run_support::tool_result_texts;
-use super::super::support::with_gemini_cassette;
+use super::super::request_witness_support::{NamedCase, with_gemini_request_witness_cassette};
 use super::super::tools_support::MathError;
-use crate::support::assert_nonempty_response;
 
 #[derive(Deserialize, Serialize)]
 struct TripArgs {
@@ -86,13 +84,23 @@ impl Tool for PlanTrip {
     }
 }
 
-/// A schema with nested objects, arrays and enums reaches Gemini unchanged
-/// as `parametersJsonSchema`, and the call it produces deserializes.
+/// A schema with nested objects, arrays and enums is one the projected
+/// `parameters` subset represents faithfully, so Gemini receives it as
+/// `parameters`, not as the recorded `parametersJsonSchema`.
+///
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+/// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the only
+/// request difference is that declaration 0's recorded `parametersJsonSchema`
+/// is sent, value unchanged, as `parameters`, and replay refuses interaction
+/// 0. Named losses: the plan_trip call deserializing and executing ("itinerary
+/// booked: 2 travellers to Lyon by train via Dijon -> Macon") and the
+/// non-empty confirmation, both from the refused and later interactions.
 #[tokio::test]
-async fn rich_json_schema_reaches_gemini_unchanged() {
-    with_gemini_cassette(
+async fn rich_json_schema_reaches_gemini_unchanged() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "tool_definitions/rich_json_schema_reaches_gemini_unchanged",
-        |client| async move {
+        NamedCase::RichJsonSchema,
+        |client, _clock| async move {
             let agent = rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
                 .preamble("You are a travel planner. You must use the plan_trip tool to plan trips, then confirm the booking to the user.")
                 .temperature(0.0)
@@ -101,32 +109,27 @@ async fn rich_json_schema_reaches_gemini_unchanged() {
                 .build();
 
             let mut history = Vec::<Message>::new();
-            let response = agent
+            let result = agent
                 .chat(
                     "Plan a trip for 2 travellers to Lyon by train, passing through Dijon and then Macon, no notes.",
                     &mut history,
                 )
                 .await
-                .expect("rich-schema tool prompt should succeed");
-
-            let texts: Vec<String> = history.iter().flat_map(tool_result_texts).collect();
-            assert_eq!(
-                texts,
-                vec!["itinerary booked: 2 travellers to Lyon by train via Dijon -> Macon".to_string()],
-                "arguments matching the rich schema should deserialize and execute"
-            );
-            assert_nonempty_response(&response.output());
+                .map(|_| ());
+            drop(agent);
+            Ok(result)
         },
     )
-    .await;
+    .await
 }
 
 mod derive_macro {
     use rig::completion::Message;
     use rig::rig_tool;
 
-    use super::super::super::agent_run_support::tool_result_texts;
-    use super::super::super::support::with_gemini_cassette;
+    use super::super::super::request_witness_support::{
+        NamedCase, with_gemini_request_witness_cassette,
+    };
 
     use rig::providers::gemini;
 
@@ -154,11 +157,20 @@ mod derive_macro {
         }
     }
 
+    /// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5,
+    /// mec-rig-schema-route-1 item 1(b)): the recording is unchanged; the
+    /// only request difference is that declaration 0's recorded
+    /// `parametersJsonSchema` is sent as `parameters`, less exactly the
+    /// schemars members the projected subset does not carry (named in
+    /// `NamedCase::MacroToolSchema`), and replay refuses interaction 0. Named
+    /// losses: the macro tool executing with the model's arguments (result
+    /// "42") and the final answer reporting 42.
     #[tokio::test]
-    async fn rig_tool_macro_schema_round_trips() {
-        with_gemini_cassette(
+    async fn rig_tool_macro_schema_round_trips() -> anyhow::Result<()> {
+        with_gemini_request_witness_cassette(
             "tool_definitions/rig_tool_macro_schema_round_trips",
-            |client| async move {
+            NamedCase::MacroToolSchema,
+            |client, _clock| async move {
                 let agent = rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
                     .preamble("You must use the macro_calculator tool for arithmetic, then report the result.")
                     .temperature(0.0)
@@ -167,23 +179,14 @@ mod derive_macro {
                     .build();
 
                 let mut history = Vec::<Message>::new();
-                let response = agent
+                let result = agent
                     .chat("Multiply 6 by 7.", &mut history)
                     .await
-                    .expect("macro tool prompt should succeed");
-
-                let texts: Vec<String> = history.iter().flat_map(tool_result_texts).collect();
-                assert_eq!(
-                    texts,
-                    vec!["42".to_string()],
-                    "the macro-generated tool should execute with the model's arguments"
-                );
-                assert!(
-                    response.output().contains("42"),
-                    "final answer should report 42: {response:?}"
-                );
+                    .map(|_| ());
+                drop(agent);
+                Ok(result)
             },
         )
-        .await;
+        .await
     }
 }

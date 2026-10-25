@@ -769,8 +769,9 @@ async fn grounding_and_recitations_cite_the_answer_unary_or_streamed() {
 }
 
 #[test]
-fn default_grpc_keeps_all_five_inline_image_mimes_as_exact_inspection()
--> Result<(), Box<dyn std::error::Error>> {
+fn default_grpc_keeps_all_five_inline_image_mimes_as_exact_inspection() -> anyhow::Result<()> {
+    use anyhow::{Context, ensure};
+
     for mime in [
         "image/jpeg",
         "image/png",
@@ -791,33 +792,40 @@ fn default_grpc_keeps_all_five_inline_image_mimes_as_exact_inspection()
         let raw = crate::rest::to_rest(&received)?;
         let expected = raw
             .pointer("/candidates/0/content/parts/0")
-            .ok_or("received protobuf image missing")?;
+            .context("received protobuf image missing")?;
         let decoded = complete(received)?;
         let [AssistantContent::CarriedText(media)] = decoded.choice.as_slice() else {
-            return Err("default gRPC inline media must remain inspection data".into());
+            anyhow::bail!("default gRPC inline media must remain inspection data");
         };
-        assert_eq!(
-            media.content,
-            rig_core::message::CarriedTextContent::InspectionOnlyMedia(String::new())
+        ensure!(
+            media.content
+                == rig_core::message::CarriedTextContent::InspectionOnlyMedia(String::new()),
+            "inline media category differs: {media:?}"
         );
-        assert_eq!(&media.payload.item, expected);
-        assert_eq!(
-            decoded.raw.pointer("/candidates/0/content/parts/0"),
-            Some(expected)
+        ensure!(
+            media.payload.item == *expected,
+            "inline media differs: {media:?}"
         );
-        assert_eq!(
-            media.payload.provider.as_deref(),
-            Some(rig_core::providers::gemini::completion::PROVIDER_NAME)
+        ensure!(
+            decoded.raw.pointer("/candidates/0/content/parts/0") == Some(expected),
+            "protobuf image raw differs: {:?}",
+            decoded.raw
+        );
+        ensure!(
+            media.payload.provider.as_deref()
+                == Some(rig_core::providers::gemini::completion::PROVIDER_NAME),
+            "inline media provider differs: {media:?}"
         );
         let data = media
             .payload
             .item
             .pointer("/inlineData/data")
             .and_then(serde_json::Value::as_str)
-            .ok_or("received protobuf image bytes missing")?;
-        assert_eq!(
-            base64::prelude::BASE64_STANDARD.decode(data)?,
-            [0, 1, 2, 255]
+            .context("received protobuf image bytes missing")?;
+        let bytes = base64::prelude::BASE64_STANDARD.decode(data)?;
+        ensure!(
+            bytes == [0, 1, 2, 255],
+            "decoded image bytes differ: {bytes:?}"
         );
     }
     Ok(())

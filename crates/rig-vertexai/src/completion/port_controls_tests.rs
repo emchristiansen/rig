@@ -8,7 +8,7 @@ use rig_core::message::{
 use serde_json::{Value, json};
 use std::error::Error;
 
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult = anyhow::Result<()>;
 
 fn minimal_request() -> CompletionRequest {
     CompletionRequest::new("test")
@@ -52,17 +52,19 @@ fn vertex_refuses_namespaced_and_custom_calls() -> TestResult {
     ] {
         let mut request = minimal_request();
         request.chat_history = vec![Message::Assistant(AssistantMessage::new(vec![content]))];
-        let error = sdk_request(request).err().ok_or("refused, not dropped")?;
+        let error = sdk_request(request)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("refused, not dropped"))?;
         let ProviderError::Request(reason) = &error else {
-            return Err(format!("a request refusal, got {error:?}").into());
+            return Err(anyhow::anyhow!("a request refusal, got {error:?}"));
         };
         let reason = reason.to_string();
-        assert!(reason.starts_with("Gemini generateContent "), "{reason}");
-        assert!(reason.contains(refusal), "{reason}");
+        anyhow::ensure!(reason.starts_with("Gemini generateContent "), "{reason}");
+        anyhow::ensure!(reason.contains(refusal), "{reason}");
         let typed = error
             .source()
             .and_then(|source| source.downcast_ref::<UnrepresentableToolCall>())
-            .ok_or("the request failure retains the typed refusal")?;
+            .ok_or_else(|| anyhow::anyhow!("the request failure retains the typed refusal"))?;
         match (kind, typed) {
             (
                 "namespace",
@@ -72,18 +74,23 @@ fn vertex_refuses_namespaced_and_custom_calls() -> TestResult {
                     namespace,
                 },
             ) => {
-                assert_eq!(
-                    (*wire, name.as_str(), namespace.as_str()),
-                    ("Gemini generateContent", "add", "math")
+                anyhow::ensure!(
+                    (*wire, name.as_str(), namespace.as_str())
+                        == ("Gemini generateContent", "add", "math"),
+                    "typed namespace refusal changed"
                 );
             }
             ("custom", UnrepresentableToolCall::CustomCall { wire, name }) => {
-                assert_eq!(
-                    (*wire, name.as_str()),
-                    ("Gemini generateContent", "apply_patch")
+                anyhow::ensure!(
+                    (*wire, name.as_str()) == ("Gemini generateContent", "apply_patch"),
+                    "typed custom-call refusal changed"
                 );
             }
-            _ => return Err(format!("expected the {kind} refusal, got {typed:?}").into()),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "expected the {kind} refusal, got {typed:?}"
+                ));
+            }
         }
     }
     Ok(())
@@ -125,13 +132,14 @@ fn tool_result_serializes_the_executed_name_not_an_identifier() -> TestResult {
         .flat_map(|content| content.parts.iter())
         .filter_map(|part| part.function_response().map(|fr| fr.name.clone()))
         .collect();
-    assert_eq!(
-        response_names,
-        vec![
-            "sum".to_owned(),
-            "get_weather".to_owned(),
-            "get_time".to_owned(),
-        ]
+    anyhow::ensure!(
+        response_names
+            == vec![
+                "sum".to_owned(),
+                "get_weather".to_owned(),
+                "get_time".to_owned(),
+            ],
+        "executed tool response names changed"
     );
     Ok(())
 }
@@ -143,13 +151,19 @@ fn test_system_instruction_from_preamble() -> TestResult {
         .chat_history
         .insert(0, Message::system("You are a helpful assistant."));
     let system_instruction = sdk_request(request)?.system_instruction;
-    assert!(system_instruction.is_some());
-    let content = system_instruction.ok_or("system instruction exists")?;
-    assert_eq!(content.role.as_str(), "user");
-    assert_eq!(content.parts.len(), 1);
-    assert_eq!(
-        content.parts[0].text(),
-        Some(&"You are a helpful assistant.".to_string())
+    anyhow::ensure!(system_instruction.is_some(), "system instruction missing");
+    let content = system_instruction.ok_or_else(|| anyhow::anyhow!("system instruction exists"))?;
+    anyhow::ensure!(
+        content.role.as_str() == "user",
+        "system instruction role changed"
+    );
+    anyhow::ensure!(
+        content.parts.len() == 1,
+        "system instruction part count changed"
+    );
+    anyhow::ensure!(
+        content.parts[0].text() == Some(&"You are a helpful assistant.".to_string()),
+        "system instruction text changed"
     );
     Ok(())
 }
@@ -164,15 +178,19 @@ fn test_no_tool_choice_when_not_specified() -> TestResult {
         parameters: json!({"type": "object", "properties": {}}),
     }];
     let tool_config = sdk_request(request)?.tool_config;
-    assert!(tool_config.is_some());
-    let config = tool_config.ok_or("tool config exists")?;
+    anyhow::ensure!(tool_config.is_some(), "tool config missing");
+    let config = tool_config.ok_or_else(|| anyhow::anyhow!("tool config exists"))?;
     let function_calling_config = config.function_calling_config.as_ref();
-    assert!(function_calling_config.is_some());
-    assert_eq!(
+    anyhow::ensure!(
+        function_calling_config.is_some(),
+        "function calling config missing"
+    );
+    anyhow::ensure!(
         function_calling_config
-            .ok_or("function calling config exists")?
-            .mode,
-        vertexai::model::function_calling_config::Mode::Auto
+            .ok_or_else(|| anyhow::anyhow!("function calling config exists"))?
+            .mode
+            == vertexai::model::function_calling_config::Mode::Auto,
+        "default function calling mode changed"
     );
     Ok(())
 }
@@ -192,11 +210,14 @@ fn generation_config_maps_thinking_levels() -> TestResult {
         }));
         let config = sdk_request(request)?
             .generation_config
-            .ok_or("generation config exists")?;
+            .ok_or_else(|| anyhow::anyhow!("generation config exists"))?;
         let thinking = config
             .thinking_config
-            .ok_or("thinking config should be mapped")?;
-        assert_eq!(thinking.thinking_level, Some(expected));
+            .ok_or_else(|| anyhow::anyhow!("thinking config should be mapped"))?;
+        anyhow::ensure!(
+            thinking.thinking_level == Some(expected),
+            "thinking level changed"
+        );
     }
     Ok(())
 }
@@ -208,27 +229,37 @@ fn generation_config_rejects_audio_response_modality() -> TestResult {
         Some(json!({"generationConfig": {"responseModalities": ["AUDIO"]}}));
     let error = sdk_request(request)
         .err()
-        .ok_or("audio output must fail before the API call")?;
-    assert!(matches!(&error, ProviderError::Request(_)));
-    assert!(error.to_string().contains("responseModalities AUDIO"));
-    assert_eq!(
+        .ok_or_else(|| anyhow::anyhow!("audio output must fail before the API call"))?;
+    anyhow::ensure!(
+        matches!(&error, ProviderError::Request(_)),
+        "expected request error"
+    );
+    anyhow::ensure!(
+        error.to_string().contains("responseModalities AUDIO"),
+        "audio modality refusal context missing"
+    );
+    anyhow::ensure!(
         error
             .source()
-            .ok_or("the original leaf is retained")?
-            .to_string(),
-        "responseModalities AUDIO is unsupported because Rig cannot represent assistant audio responses"
+            .ok_or_else(|| anyhow::anyhow!("the original leaf is retained"))?
+            .to_string()
+            == "responseModalities AUDIO is unsupported because Rig cannot represent assistant audio responses",
+        "audio modality refusal source changed"
     );
     Ok(())
 }
 
 fn assert_sdk_data_error(error: &ProviderError, expected: &str) -> TestResult {
-    assert!(matches!(error, ProviderError::Request(_)));
+    anyhow::ensure!(
+        matches!(error, ProviderError::Request(_)),
+        "expected request error"
+    );
     let source = error
         .source()
         .and_then(|source| source.downcast_ref::<serde_json::Error>())
-        .ok_or("actual SDK serde error retained")?;
-    assert!(source.is_data());
-    assert!(source.to_string().contains(expected), "{source}");
+        .ok_or_else(|| anyhow::anyhow!("actual SDK serde error retained"))?;
+    anyhow::ensure!(source.is_data(), "expected SDK data error");
+    anyhow::ensure!(source.to_string().contains(expected), "{source}");
     Ok(())
 }
 
@@ -238,13 +269,13 @@ fn generation_config_rejects_out_of_f32_range_typed_and_provider_values() -> Tes
     typed_request.temperature = Some(f64::MAX);
     let typed_error = sdk_request(typed_request)
         .err()
-        .ok_or("typed temperature beyond f32 must fail")?;
+        .ok_or_else(|| anyhow::anyhow!("typed temperature beyond f32 must fail"))?;
     assert_sdk_data_error(&typed_error, "a 32-bit float in ProtoJSON format")?;
     let mut provider_request = minimal_request();
     provider_request.additional_params = Some(json!({"generationConfig": {"topP": f64::MAX}}));
     let provider_error = sdk_request(provider_request)
         .err()
-        .ok_or("provider top_p beyond f32 must fail")?;
+        .ok_or_else(|| anyhow::anyhow!("provider top_p beyond f32 must fail"))?;
     assert_sdk_data_error(&provider_error, "a 32-bit float in ProtoJSON format")?;
     Ok(())
 }
@@ -256,13 +287,13 @@ fn generation_config_rejects_out_of_range_max_output_tokens_without_typed_overri
         Some(json!({"generationConfig": {"maxOutputTokens": 2_147_483_648_u64}}));
     let provider_error = sdk_request(provider_request)
         .err()
-        .ok_or("provider max output tokens beyond i32 must fail")?;
+        .ok_or_else(|| anyhow::anyhow!("provider max output tokens beyond i32 must fail"))?;
     assert_sdk_data_error(&provider_error, "a 32-bit signed integer")?;
     let mut typed_request = minimal_request();
     typed_request.max_tokens = Some(2_147_483_648);
     let typed_error = sdk_request(typed_request)
         .err()
-        .ok_or("typed max output tokens beyond i32 must fail")?;
+        .ok_or_else(|| anyhow::anyhow!("typed max output tokens beyond i32 must fail"))?;
     assert_sdk_data_error(&typed_error, "a 32-bit signed integer")?;
     Ok(())
 }
@@ -276,19 +307,24 @@ fn generation_config_rejects_conflicting_response_schema_forms() -> TestResult {
         }}));
         let error = sdk_request(request)
             .err()
-            .ok_or("response schema forms cannot be combined")?;
-        assert!(matches!(&error, ProviderError::Request(_)));
-        assert!(
+            .ok_or_else(|| anyhow::anyhow!("response schema forms cannot be combined"))?;
+        anyhow::ensure!(
+            matches!(&error, ProviderError::Request(_)),
+            "expected request error"
+        );
+        anyhow::ensure!(
             error
                 .to_string()
-                .contains("responseSchema cannot be combined")
+                .contains("responseSchema cannot be combined"),
+            "schema conflict refusal context missing"
         );
-        assert_eq!(
+        anyhow::ensure!(
             error
                 .source()
-                .ok_or("the original leaf is retained")?
-                .to_string(),
-            "responseSchema cannot be combined with responseJsonSchema or _responseJsonSchema"
+                .ok_or_else(|| anyhow::anyhow!("the original leaf is retained"))?
+                .to_string()
+                == "responseSchema cannot be combined with responseJsonSchema or _responseJsonSchema",
+            "schema conflict refusal source changed"
         );
     }
     Ok(())
@@ -302,19 +338,24 @@ fn generation_config_rejects_both_response_json_schema_aliases() -> TestResult {
     }}));
     let error = sdk_request(request)
         .err()
-        .ok_or("JSON schema aliases cannot be combined")?;
-    assert!(matches!(&error, ProviderError::Request(_)));
-    assert!(
+        .ok_or_else(|| anyhow::anyhow!("JSON schema aliases cannot be combined"))?;
+    anyhow::ensure!(
+        matches!(&error, ProviderError::Request(_)),
+        "expected request error"
+    );
+    anyhow::ensure!(
         error
             .to_string()
-            .contains("responseJsonSchema cannot be combined with _responseJsonSchema")
+            .contains("responseJsonSchema cannot be combined with _responseJsonSchema"),
+        "schema alias conflict refusal context missing"
     );
-    assert_eq!(
+    anyhow::ensure!(
         error
             .source()
-            .ok_or("the original leaf is retained")?
-            .to_string(),
-        "responseJsonSchema cannot be combined with _responseJsonSchema"
+            .ok_or_else(|| anyhow::anyhow!("the original leaf is retained"))?
+            .to_string()
+            == "responseJsonSchema cannot be combined with _responseJsonSchema",
+        "schema alias conflict refusal source changed"
     );
     Ok(())
 }
@@ -325,26 +366,34 @@ fn generation_config_rejects_invalid_thinking_config() -> TestResult {
     malformed_request.additional_params = Some(json!({"generationConfig": {
         "thinkingConfig": {"thinkingBudget": "invalid"},
     }}));
-    assert!(sdk_request(malformed_request).is_err());
+    anyhow::ensure!(
+        sdk_request(malformed_request).is_err(),
+        "malformed thinking config must fail"
+    );
     let mut conflicting_request = minimal_request();
     conflicting_request.additional_params = Some(json!({"generationConfig": {
         "thinkingConfig": {"thinkingBudget": 1024, "thinkingLevel": "high"},
     }}));
     let error = sdk_request(conflicting_request)
         .err()
-        .ok_or("mutually exclusive thinking values must fail")?;
-    assert!(
+        .ok_or_else(|| anyhow::anyhow!("mutually exclusive thinking values must fail"))?;
+    anyhow::ensure!(
         error
             .to_string()
-            .contains("thinking_budget and thinking_level cannot both be set")
+            .contains("thinking_budget and thinking_level cannot both be set"),
+        "thinking conflict refusal context missing"
     );
-    assert!(matches!(&error, ProviderError::Request(_)));
-    assert_eq!(
+    anyhow::ensure!(
+        matches!(&error, ProviderError::Request(_)),
+        "expected request error"
+    );
+    anyhow::ensure!(
         error
             .source()
-            .ok_or("the original leaf is retained")?
-            .to_string(),
-        "thinking_budget and thinking_level cannot both be set"
+            .ok_or_else(|| anyhow::anyhow!("the original leaf is retained"))?
+            .to_string()
+            == "thinking_budget and thinking_level cannot both be set",
+        "thinking conflict refusal source changed"
     );
     Ok(())
 }
@@ -379,9 +428,17 @@ fn opaque_responses_parts_are_refused_before_request_content_is_discarded() -> T
             AssistantContent::text("known"),
             part,
         ]))];
-        let error = sdk_request(request).err().ok_or("opaque content refused")?;
-        assert!(matches!(&error, ProviderError::Request(_)));
-        assert!(error.to_string().contains("opaque"));
+        let error = sdk_request(request)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("opaque content refused"))?;
+        anyhow::ensure!(
+            matches!(&error, ProviderError::Request(_)),
+            "expected request error"
+        );
+        anyhow::ensure!(
+            error.to_string().contains("opaque"),
+            "opaque refusal context missing"
+        );
     }
     Ok(())
 }
@@ -389,18 +446,25 @@ fn opaque_responses_parts_are_refused_before_request_content_is_discarded() -> T
 #[test]
 fn vertex_base_defaults_preserve_raw_only_and_raw_override_controls() -> TestResult {
     let encoded = sdk_request(minimal_request())?;
-    assert!(encoded.system_instruction.is_none());
-    assert!(encoded.tool_config.is_none());
+    anyhow::ensure!(
+        encoded.system_instruction.is_none(),
+        "unexpected default system instruction"
+    );
+    anyhow::ensure!(
+        encoded.tool_config.is_none(),
+        "unexpected default tool config"
+    );
     let mut raw_system = minimal_request();
     raw_system.additional_params = Some(json!({"systemInstruction": {
         "role": "model", "parts": [{"text": "You are a helpful assistant."}],
     }}));
-    assert_eq!(
+    anyhow::ensure!(
         sdk_request(raw_system)?
             .system_instruction
-            .ok_or("raw system exists")?
-            .role,
-        "model"
+            .ok_or_else(|| anyhow::anyhow!("raw system exists"))?
+            .role
+            == "model",
+        "raw system instruction role changed"
     );
     let mut raw_choice = minimal_request();
     raw_choice.tools = vec![ToolDefinition {
@@ -410,14 +474,15 @@ fn vertex_base_defaults_preserve_raw_only_and_raw_override_controls() -> TestRes
     }];
     raw_choice.additional_params =
         Some(json!({"toolConfig": {"functionCallingConfig": {"mode": "NONE"}}}));
-    assert_eq!(
+    anyhow::ensure!(
         sdk_request(raw_choice)?
             .tool_config
-            .ok_or("raw choice exists")?
+            .ok_or_else(|| anyhow::anyhow!("raw choice exists"))?
             .function_calling_config
-            .ok_or("function calling config exists")?
-            .mode,
-        vertexai::model::function_calling_config::Mode::None
+            .ok_or_else(|| anyhow::anyhow!("function calling config exists"))?
+            .mode
+            == vertexai::model::function_calling_config::Mode::None,
+        "raw function calling mode override changed"
     );
     Ok(())
 }
@@ -428,14 +493,15 @@ fn portable_effort_reaches_known_sdk_thinking_level() -> TestResult {
         minimal_request().reasoning(rig_core::completion::Effort::High),
         Mode::Unary,
     )?;
-    assert_eq!(
+    anyhow::ensure!(
         encoded
             .generation_config
-            .ok_or("config exists")?
+            .ok_or_else(|| anyhow::anyhow!("config exists"))?
             .thinking_config
-            .ok_or("thinking exists")?
-            .thinking_level,
-        Some(vertexai::model::generation_config::thinking_config::ThinkingLevel::High)
+            .ok_or_else(|| anyhow::anyhow!("thinking exists"))?
+            .thinking_level
+            == Some(vertexai::model::generation_config::thinking_config::ThinkingLevel::High),
+        "portable reasoning effort mapping changed"
     );
     Ok(())
 }
@@ -447,12 +513,15 @@ fn future_thinking_level_remains_sdk_owned() -> TestResult {
         Some(json!({"generationConfig": {"thinkingConfig": {"thinkingLevel": "future"}}}));
     let level = sdk_request(request)?
         .generation_config
-        .ok_or("config exists")?
+        .ok_or_else(|| anyhow::anyhow!("config exists"))?
         .thinking_config
-        .ok_or("thinking exists")?
+        .ok_or_else(|| anyhow::anyhow!("thinking exists"))?
         .thinking_level
-        .ok_or("level exists")?;
-    assert_eq!(serde_json::to_value(level)?, json!("future"));
+        .ok_or_else(|| anyhow::anyhow!("level exists"))?;
+    anyhow::ensure!(
+        serde_json::to_value(level)? == json!("future"),
+        "SDK future thinking level changed"
+    );
     Ok(())
 }
 
@@ -463,10 +532,14 @@ fn standalone_schema_alias_preserves_the_exact_schema() -> TestResult {
         Some(json!({"generationConfig": {"_responseJsonSchema": {"type": "object"}}}));
     let config = sdk_request(request)?
         .generation_config
-        .ok_or("config exists")?;
-    assert_eq!(
-        serde_json::to_value(config.response_json_schema.ok_or("JSON schema exists")?)?,
-        json!({"type": "object"})
+        .ok_or_else(|| anyhow::anyhow!("config exists"))?;
+    anyhow::ensure!(
+        serde_json::to_value(
+            config
+                .response_json_schema
+                .ok_or_else(|| anyhow::anyhow!("JSON schema exists"))?
+        )? == json!({"type": "object"}),
+        "standalone response schema alias changed"
     );
     Ok(())
 }
@@ -492,11 +565,18 @@ fn portable_reasoning_and_opposite_raw_field_meet_vertex_exclusion() -> TestResu
             .encode(request, Mode::Unary)
             .err()
             .map(ProviderError::from)
-            .ok_or("both thinking values refused")?;
-        assert!(matches!(&error, ProviderError::Request(_)));
-        assert_eq!(
-            error.source().ok_or("exact leaf")?.to_string(),
-            "thinking_budget and thinking_level cannot both be set"
+            .ok_or_else(|| anyhow::anyhow!("both thinking values refused"))?;
+        anyhow::ensure!(
+            matches!(&error, ProviderError::Request(_)),
+            "expected request error"
+        );
+        anyhow::ensure!(
+            error
+                .source()
+                .ok_or_else(|| anyhow::anyhow!("exact leaf"))?
+                .to_string()
+                == "thinking_budget and thinking_level cannot both be set",
+            "portable and raw thinking conflict refusal source changed"
         );
     }
     Ok(())

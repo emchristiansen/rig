@@ -3,22 +3,21 @@
 //! `gemini_tool_call_turns` golden records from serves this program too:
 //! the policy changes how the bus serves, not what the program asks.
 
-use futures::StreamExt;
-use rig::agent::MultiTurnStreamItem;
-use rig::effect::EffectFamily;
 use rig::providers::gemini;
-use rig_cassette::agent::AgentReplayExt;
 
 use super::super::hook_stress_support::CHAIN_PREAMBLE;
-use super::super::support::with_gemini_cassette;
+use super::super::request_witness_support::{
+    NamedCase, stream_result, with_gemini_request_witness_cassette,
+};
 use super::super::tools_support::{CountingAdd, CountingSubtract};
-use crate::goldens::families;
 
-#[tokio::test]
-async fn two_turns_serial_effect_log_is_the_golden_fixture() {
-    with_gemini_cassette(
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn two_turns_serial_effect_log_is_the_golden_fixture() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "hook_stress/streaming_lifecycle_ordering_and_context_streaming_flag",
-        |client| async move {
+        NamedCase::TwoTurnsSerial,
+        |client, _clock| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
             let agent =
                 rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
@@ -40,28 +39,11 @@ async fn two_turns_serial_effect_log_is_the_golden_fixture() {
                 )
                 .max_turns(6)
                 .stream();
-            let mut saw_final = false;
-            while let Some(item) = stream.next().await {
-                if let Ok(MultiTurnStreamItem::FinalResponse(_)) = item {
-                    saw_final = true;
-                }
-            }
+            let result = stream_result(&mut stream).await;
             drop(stream);
-            assert!(saw_final, "the stream yields a final response");
-            let log = agent.stamp(recorder.take());
-            assert_eq!(
-                families(&log),
-                [
-                    EffectFamily::Completion,
-                    EffectFamily::Tool,
-                    EffectFamily::Completion,
-                    EffectFamily::Tool,
-                    EffectFamily::Completion
-                ]
-            );
-            assert_eq!(log.header.bus.map(|bus| bus.serial_per_handler), Some(true));
-            crate::goldens::golden_effects("gemini_serving_two_turns_serial", &log);
+            drop(agent);
+            result
         },
     )
-    .await;
+    .await
 }

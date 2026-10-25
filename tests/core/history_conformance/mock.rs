@@ -6,7 +6,7 @@ use rig_core::error::EncodeError;
 use rig_core::message::{AssistantContent, Message, Opaque, Origin, Reasoning, Text};
 use rig_core::test_utils::{MockFrame, MockScript, MockStreamEvent, mock_final};
 use rig_core::wire::{Mode, Wire};
-use rig_history_conformance::{Ending, HistoryFixture, Shape, decode};
+use rig_history_conformance::{Ending, HistoryFixture, RefusedArguments, Shape, decode};
 use serde_json::{Value, json};
 
 pub struct MockHistory;
@@ -153,6 +153,13 @@ impl HistoryFixture for MockHistory {
                 Some(vec![MockFrame::Response(Box::new(response))])
             }
         }
+    }
+
+    /// A streamed call whose argument text is not JSON fails with its
+    /// malformed input, so no whole reply restates it.
+    fn refused_arguments(&self, arguments: &str, mode: Mode) -> Option<RefusedArguments> {
+        (mode == Mode::Streaming && serde_json::from_str::<Value>(arguments).is_err())
+            .then_some(RefusedArguments::MalformedToolInput)
     }
 
     fn finishes(&self) -> Vec<(&'static str, Vec<MockFrame>, Ending)> {

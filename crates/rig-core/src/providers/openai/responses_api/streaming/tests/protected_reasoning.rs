@@ -214,14 +214,19 @@ fn empty_encrypted_reasoning_is_not_emitted() {
             signature: None
         }]
     );
-    let empty = drive(&[done(
-        json!({"type":"reasoning","id":"rs_1","summary":[],"content":[],"encrypted_content":""}),
-    )]);
+    // F's restatement said nothing at the boundary for an entirely empty
+    // done item, while F's response still kept the item. The port has no
+    // separate boundary: the End is the block, so the item is one empty
+    // block holding exactly what was received (mec-rig-port-answers-1 Q5).
+    let item =
+        json!({"type":"reasoning","id":"rs_1","summary":[],"content":[],"encrypted_content":""});
+    let empty = drive(&[done(item.clone())]);
     assert!(empty.errors.is_empty());
-    assert!(
-        reasoning_ends(&empty.items).is_empty(),
-        "an entirely empty done item says nothing at the boundary"
-    );
+    let ends = reasoning_ends(&empty.items);
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].0.id.as_deref(), Some("rs_1"));
+    assert!(ends[0].0.content.is_empty(), "{:?}", ends[0].0.content);
+    assert_eq!(ends[0].0.payload.item, item);
 }
 
 // F streaming/tests.rs:885
@@ -267,16 +272,23 @@ fn multi_block_reasoning_done_item_yields_one_part() {
     );
 }
 
-/// G165: canonical absence does not discard the provider's exact raw item.
+/// mec-rig-port-answers-1 Q5 (G165 reopened): a known, identified, wholly
+/// empty item is one empty reasoning block, as in F. Blank signature
+/// metadata adds no content, and the provider's exact raw item stays both
+/// its payload and the response evidence.
 #[test]
-fn blank_signature_and_empty_known_reasoning_keep_raw_without_a_canonical_end() {
+fn blank_signature_and_empty_known_reasoning_keep_raw_and_one_empty_block() {
     for signature in ["", " "] {
         let item = json!({"type":"reasoning","id":"rs_1","summary":[],"content":[],
             "signature":signature,"encrypted_content":""});
         let driven = drive(&[done(item.clone())]);
         assert!(driven.errors.is_empty());
-        assert!(reasoning_ends(&driven.items).is_empty());
-        assert!(driven.response.choice.is_empty());
+        let ends = reasoning_ends(&driven.items);
+        assert_eq!(ends.len(), 1, "{signature:?}");
+        assert_eq!(ends[0].0.id.as_deref(), Some("rs_1"));
+        assert!(ends[0].0.content.is_empty(), "{:?}", ends[0].0.content);
+        assert_eq!(ends[0].0.payload.item, item);
+        assert_eq!(reasoning_items(&driven.response.choice).len(), 1);
         assert_eq!(driven.response.raw["output"][0], item);
     }
 }
@@ -330,8 +342,9 @@ fn synthetic_reasoning_raw_state_preserves_only_received_empty_content_arrays() 
             received["content"] = content.clone();
         }
         // An explicitly synthetic empty current state, retaining received evidence.
+        let received_fields = received.as_object().expect("reasoning object").clone();
         let state = super::super::ReasoningState {
-            item: Some(received.clone()),
+            item: Some(received_fields.clone()),
             ..Default::default()
         };
         let mut expected = received.clone();
@@ -339,10 +352,13 @@ fn synthetic_reasoning_raw_state_preserves_only_received_empty_content_arrays() 
             .as_ref()
             .is_some_and(|parts| !parts.as_array().expect("array").is_empty())
         {
-            expected.as_object_mut().expect("object").remove("content");
+            expected
+                .as_object_mut()
+                .expect("object")
+                .shift_remove("content");
         }
         assert_eq!(state.raw(), expected);
-        assert_eq!(state.item.as_ref(), Some(&received));
+        assert_eq!(state.item.as_ref(), Some(&received_fields));
         assert!(state.content.is_empty());
     }
 }

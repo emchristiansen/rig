@@ -696,3 +696,121 @@ fn two_signed_thought_parts_keep_both_signatures() {
 }
 
 mod signature_media_controls;
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[tokio::test]
+async fn prompt_feedback_without_a_block_reason_is_not_an_error() {
+    // Gemini also attaches `promptFeedback` (safety ratings only, no
+    // `blockReason`) to ordinary answers. Only a set `blockReason` is a
+    // refusal; the ratings alone must not fail a completed turn.
+    let frames = [
+        r#"{"promptFeedback":{"safetyRatings":[{"category":"HARM_CATEGORY_HARASSMENT","probability":"NEGLIGIBLE"}]},"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"index":0}]}"#,
+        r#"{"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}"#,
+    ];
+    let (items, finished) = collect_stream(&frames).await;
+    assert!(items.iter().all(Result::is_ok), "{items:?}");
+    assert!(finished, "the turn completed normally");
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[tokio::test]
+async fn each_block_reason_classifies_the_same_on_the_stream_as_unary() {
+    // The refusal reasons are final; `OTHER` and a reason this crate has
+    // never seen are transient. Both wires agree.
+    for (reason, retryable) in [
+        ("SAFETY", false),
+        ("BLOCKLIST", false),
+        ("PROHIBITED_CONTENT", false),
+        ("OTHER", true),
+        ("SOMETHING_NEW", true),
+    ] {
+        let frame = format!(r#"{{"promptFeedback":{{"blockReason":"{reason}"}}}}"#);
+        let (items, finished) = collect_stream(&[frame.as_str()]).await;
+        assert_eq!(items.len(), 1, "{reason}: {items:?}");
+        let [Err(report)] = items.as_slice() else {
+            panic!("{reason}: {items:?}");
+        };
+        assert_eq!(report.retryable, retryable, "{reason}: {report:?}");
+        assert_eq!(
+            report.kind,
+            crate::error::ErrorKind::ProviderResponse,
+            "{reason}: {report:?}"
+        );
+        assert_eq!(
+            report.refusal, !retryable,
+            "a block on the content is a refusal, an unknown one is not: {reason}: {report:?}"
+        );
+        assert!(
+            report.message.contains(&format!("block_reason={reason}")),
+            "{reason}: {}",
+            report.message
+        );
+        assert!(
+            !finished,
+            "{reason}: a blocked prompt has no terminal record"
+        );
+    }
+}
+
+#[test]
+fn test_streaming_completion_response_has_finish_reason_and_model_version() {
+    use crate::completion::{CompletionResponse, ReplayTarget};
+
+    let model = "gemini-2.5-pro-preview-05-06";
+    let wire = crate::providers::gemini::GeminiConfig::new("test-key").completion(model);
+    let mut origin = crate::message::Origin::new(wire.api(), wire.provider(), wire.model());
+    origin.response_model = Some(model.to_string());
+    // Constructed metadata only; this is not a decoded provider reply.
+    let raw = json!({
+        "usageMetadata": {"promptTokenCount": 0, "totalTokenCount": 0},
+        "finishReason": "STOP",
+        "modelVersion": model
+    });
+    let usage = crate::providers::gemini::completion::usage_of(&raw["usageMetadata"]);
+    let response = CompletionResponse::new(Vec::new(), usage, origin, raw)
+        .with_finish_reason(FinishReason::Stop);
+
+    assert!(matches!(response.finish_reason(), Some(FinishReason::Stop)));
+    assert_eq!(response.model(), Some("gemini-2.5-pro-preview-05-06"));
+
+    let json = serde_json::to_string(&response).expect("serialize normalized response");
+    let deserialized: CompletionResponse =
+        serde_json::from_str(&json).expect("deserialize normalized response");
+    assert!(matches!(
+        deserialized.finish_reason(),
+        Some(FinishReason::Stop)
+    ));
+    assert_eq!(deserialized.model(), Some("gemini-2.5-pro-preview-05-06"));
+}
+
+#[test]
+fn test_streaming_completion_response_token_usage() {
+    use crate::completion::{CompletionResponse, ReplayTarget};
+
+    let model = "gemini-2.0-flash-001";
+    let wire = crate::providers::gemini::GeminiConfig::new("test-key").completion(model);
+    let mut origin = crate::message::Origin::new(wire.api(), wire.provider(), wire.model());
+    origin.response_model = Some(model.to_string());
+    // Constructed metadata only; this is not a decoded provider reply.
+    let raw = json!({
+        "usageMetadata": {
+            "promptTokenCount": 75,
+            "candidatesTokenCount": 75,
+            "totalTokenCount": 150
+        },
+        "finishReason": "STOP",
+        "modelVersion": model
+    });
+    let usage = crate::providers::gemini::completion::usage_of(&raw["usageMetadata"]);
+    let response = CompletionResponse::new(Vec::new(), usage, origin, raw)
+        .with_finish_reason(FinishReason::Stop);
+
+    let token_usage = &response.usage;
+    assert_eq!(token_usage.input_tokens, Some(75));
+    assert_eq!(token_usage.output_tokens, Some(75));
+    assert_eq!(token_usage.reasoning_tokens, None);
+    assert_eq!(token_usage.cached_input_tokens, None);
+    assert_eq!(token_usage.total_tokens, Some(150));
+    assert!(matches!(response.finish_reason(), Some(FinishReason::Stop)));
+    assert_eq!(response.model(), Some("gemini-2.0-flash-001"));
+}

@@ -383,11 +383,6 @@ fn every_dialects_listing_and_verify_urls_match_the_recorded_paths() {
             Some("https://api.mistral.ai/v1/models"),
         ),
         (
-            &OPENROUTER,
-            "https://openrouter.ai/api/v1/models",
-            Some("https://openrouter.ai/api/v1/key"),
-        ),
-        (
             &VENICE,
             "https://api.venice.ai/api/v1/models",
             Some("https://api.venice.ai/api/v1/models"),
@@ -422,6 +417,21 @@ fn every_dialects_listing_and_verify_urls_match_the_recorded_paths() {
         ),
     ];
 
+    assert_listing_and_verify_urls(expected);
+}
+
+#[test]
+fn openrouter_listing_and_verify_urls_match_the_recorded_paths() {
+    let expected: &[(&Dialect, &str, Option<&str>)] = &[(
+        &OPENROUTER,
+        "https://openrouter.ai/api/v1/models",
+        Some("https://openrouter.ai/api/v1/key"),
+    )];
+
+    assert_listing_and_verify_urls(expected);
+}
+
+fn assert_listing_and_verify_urls(expected: &[(&Dialect, &str, Option<&str>)]) {
     for (dialect, models, verify) in expected {
         let provider = OpenAIConfig::with_key(dialect, "k");
         assert_eq!(

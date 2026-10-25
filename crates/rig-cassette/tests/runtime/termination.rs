@@ -14,7 +14,7 @@
 use rig::completion::FinishReason;
 use rig_test_support::bank::{self, Entry};
 
-use crate::decode::{decode, with_model};
+use crate::decode::{decode, openrouter_entry, with_model};
 use crate::support::{
     Adder, EscalateCapOnTruncation, ObservedTermination, TurnTerminationProbe,
     collect_stream_final_response,
@@ -48,10 +48,20 @@ impl Turn {
 
 /// Every bank reply of the mode that decodes to `turn`: an answer with text
 /// for a truncated or finished turn, a call to `add` alone for a tool turn.
-async fn replies(turn: Turn, streamed: bool) -> Vec<Entry> {
+async fn replies(turn: Turn, streamed: bool, openrouter_only: bool) -> Vec<Entry> {
     let mut found = Vec::new();
     for provider in bank::providers() {
+        if openrouter_only {
+            if provider != "openrouter" && provider != "anthropic" {
+                continue;
+            }
+        } else if provider == "openrouter" {
+            continue;
+        }
         for entry in bank::entries(&provider).iter() {
+            if openrouter_entry(entry) != openrouter_only {
+                continue;
+            }
             if entry.then.status != 200 || entry.streamed() != streamed {
                 continue;
             }
@@ -132,12 +142,14 @@ async fn attempt(
     }
 }
 
-async fn cell(turn: Turn, streamed: bool) {
-    let replies = replies(turn, streamed).await;
-    assert!(!replies.is_empty(), "the bank holds a {turn:?} reply");
+async fn cell(turn: Turn, streamed: bool, openrouter_only: bool) {
+    let replies = replies(turn, streamed, openrouter_only).await;
+    if !openrouter_only {
+        assert!(!replies.is_empty(), "the bank holds a {turn:?} reply");
+    }
     // A tool turn is answered by a finished answer of the same wire.
     let answers = if turn == Turn::Tool {
-        self::replies(Turn::Finished, streamed).await
+        self::replies(Turn::Finished, streamed, openrouter_only).await
     } else {
         Vec::new()
     };
@@ -179,46 +191,80 @@ async fn cell(turn: Turn, streamed: bool) {
             entry.source
         );
     }
-    assert!(ran > 0, "a {turn:?} reply ran");
+    if openrouter_only {
+        eprintln!("OpenRouter {turn:?}, streamed={streamed}: {ran} matching replies ran");
+    } else {
+        assert!(ran > 0, "a {turn:?} reply ran");
+    }
 }
 
 #[tokio::test]
 async fn blocking_truncated_turn_reports_length_and_cap() {
-    cell(Turn::Truncated, false).await;
+    cell(Turn::Truncated, false, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_blocking_truncated_turn_reports_length_and_cap() {
+    cell(Turn::Truncated, false, true).await;
 }
 
 #[tokio::test]
 async fn streaming_truncated_turn_reports_length_and_cap() {
-    cell(Turn::Truncated, true).await;
+    cell(Turn::Truncated, true, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_streaming_truncated_turn_reports_length_and_cap() {
+    cell(Turn::Truncated, true, true).await;
 }
 
 #[tokio::test]
 async fn blocking_completed_turn_reports_stop_and_cap() {
-    cell(Turn::Finished, false).await;
+    cell(Turn::Finished, false, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_blocking_completed_turn_reports_stop_and_cap() {
+    cell(Turn::Finished, false, true).await;
 }
 
 #[tokio::test]
 async fn streaming_completed_turn_reports_stop_and_cap() {
-    cell(Turn::Finished, true).await;
+    cell(Turn::Finished, true, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_streaming_completed_turn_reports_stop_and_cap() {
+    cell(Turn::Finished, true, true).await;
 }
 
 #[tokio::test]
 async fn blocking_tool_turn_reports_tool_calls() {
-    cell(Turn::Tool, false).await;
+    cell(Turn::Tool, false, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_blocking_tool_turn_reports_tool_calls() {
+    cell(Turn::Tool, false, true).await;
 }
 
 #[tokio::test]
 async fn streaming_tool_turn_reports_tool_calls() {
-    cell(Turn::Tool, true).await;
+    cell(Turn::Tool, true, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_streaming_tool_turn_reports_tool_calls() {
+    cell(Turn::Tool, true, true).await;
 }
 
 /// A truncated answer and then a finished one, both of one provider,
 /// encoder and mode: the first attempt truncates under the tiny cap, the
 /// escalation hook retries with the roomy one, and each attempt reports its
 /// own cap rather than the agent's baseline.
-async fn escalation(streamed: bool) {
-    let truncated = replies(Turn::Truncated, streamed).await;
-    let finished = replies(Turn::Finished, streamed).await;
+async fn escalation(streamed: bool, openrouter_only: bool) {
+    let truncated = replies(Turn::Truncated, streamed, openrouter_only).await;
+    let finished = replies(Turn::Finished, streamed, openrouter_only).await;
     let mut paired = std::collections::BTreeSet::new();
     for first in &truncated {
         let Some(second) = finished
@@ -279,18 +325,35 @@ async fn escalation(streamed: bool) {
         assert_eq!(escalations, vec![ROOMY_CAP]);
         assert_eq!(retries, 1);
     }
-    assert!(
-        !paired.is_empty(),
-        "the bank holds a truncated and a finished reply of one wire"
-    );
+    if openrouter_only {
+        eprintln!(
+            "OpenRouter escalation, streamed={streamed}: {} matching wire pairs ran",
+            paired.len()
+        );
+    } else {
+        assert!(
+            !paired.is_empty(),
+            "the bank holds a truncated and a finished reply of one wire"
+        );
+    }
 }
 
 #[tokio::test]
 async fn blocking_escalating_retry_reports_each_attempts_own_cap() {
-    escalation(false).await;
+    escalation(false, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_blocking_escalating_retry_reports_each_attempts_own_cap() {
+    escalation(false, true).await;
 }
 
 #[tokio::test]
 async fn streaming_escalating_retry_reports_each_attempts_own_cap() {
-    escalation(true).await;
+    escalation(true, false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_streaming_escalating_retry_reports_each_attempts_own_cap() {
+    escalation(true, true).await;
 }

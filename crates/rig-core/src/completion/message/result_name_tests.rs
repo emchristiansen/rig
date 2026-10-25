@@ -219,6 +219,36 @@ fn result_kind_matches_and_consumes_only_the_same_call_kind() {
 }
 
 #[test]
+fn a_prior_result_that_answers_no_outstanding_call_consumes_nothing() {
+    let call = function(CallId::from_wire("one"), "lookup");
+    let orphan = function(CallId::from_wire("never_called"), "lookup")
+        .result(vec![ToolResultContent::text("stray")]);
+    let prefix = vec![Message::from(call.clone()), Message::from(orphan)];
+    assert_eq!(
+        infer(&prefix, call.id.clone(), AnsweredToolCall::Function),
+        Ok(call.result(vec![ToolResultContent::text("out")]))
+    );
+}
+
+#[test]
+fn a_prior_result_matching_several_same_named_calls_consumes_none_of_them() {
+    let id = CallId::from_wire("same");
+    let first = function(id.clone(), "lookup");
+    let second = function(id.clone(), "lookup");
+    let prefix = vec![
+        assistant(vec![
+            AssistantContent::ToolCall(first.clone()),
+            AssistantContent::ToolCall(second),
+        ]),
+        Message::from(first.result(vec![ToolResultContent::text("out")])),
+    ];
+    assert_eq!(
+        infer(&prefix, id.clone(), AnsweredToolCall::Function),
+        Err(ToolResultNameError::Ambiguous(id))
+    );
+}
+
+#[test]
 fn consumed_identity_cannot_supply_a_second_result_name() {
     let call = function(CallId::from_wire("one"), "lookup");
     let prefix = vec![

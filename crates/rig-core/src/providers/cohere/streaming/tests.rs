@@ -988,7 +988,7 @@ fn reported_cache_without_token_totals_is_retained() {
             let reply = json!({"id":"abc123", "finish_reason":"COMPLETE",
                 "message":{"role":"assistant", "content":[{"type":"text", "text":"hi"}]},
                 "usage":usage.clone()});
-            let response = command_a(&[reply.clone()], mode);
+            let response = command_a(std::slice::from_ref(&reply), mode);
             assert_eq!(response.usage.input_tokens, None);
             assert_eq!(response.usage.output_tokens, None);
             assert_eq!(response.usage.total_tokens, None);
@@ -1014,7 +1014,7 @@ fn billed_only_reply_keeps_cost_and_raw_without_model_token_totals() {
         "usage":{"billed_units":{"input_tokens":3, "output_tokens":4}}});
     let expected = crate::completion::Cost::from_parts(3.0 * 2.5 / 1e6, 4.0 * 10.0 / 1e6, 0.0, 0.0);
     for mode in [crate::wire::Mode::Unary, crate::wire::Mode::Streaming] {
-        let response = command_a(&[reply.clone()], mode);
+        let response = command_a(std::slice::from_ref(&reply), mode);
         assert_eq!(response.usage.input_tokens, None);
         assert_eq!(response.usage.output_tokens, None);
         assert_eq!(response.usage.total_tokens, None);

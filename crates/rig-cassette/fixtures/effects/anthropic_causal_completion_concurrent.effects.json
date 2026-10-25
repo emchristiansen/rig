@@ -147,6 +147,7 @@
               "total": 0.002742
             }
           },
+          "message_id": "msg_011CfinkxNkJgScMBCRkgHvN",
           "origin": {
             "api": "anthropic.messages",
             "provider": "anthropic",
@@ -282,6 +283,7 @@
               "total": 0.00012
             }
           },
+          "message_id": "msg_011Cfinm3xqbmVXx34x6JiF1",
           "origin": {
             "api": "anthropic.messages",
             "provider": "anthropic",
@@ -466,6 +468,7 @@
               "total": 0.002145
             }
           },
+          "message_id": "msg_011Cfinm79qKJ4kp8AMfkHua",
           "origin": {
             "api": "anthropic.messages",
             "provider": "anthropic",

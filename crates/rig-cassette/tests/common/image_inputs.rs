@@ -29,13 +29,7 @@ fn media_type(bytes: &[u8]) -> ImageMediaType {
 }
 
 fn text(choice: &[AssistantContent]) -> String {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.to_ascii_lowercase()),
-            _ => None,
-        })
-        .collect()
+    rig_test_support::support::assistant_text(choice).to_ascii_lowercase()
 }
 
 fn request(

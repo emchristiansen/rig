@@ -4,12 +4,18 @@
 
 #![allow(clippy::expect_used)]
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use google_cloud_aiplatform_v1::model::GenerateContentResponse;
 use rig_core::completion::CompletionRequest;
 use rig_core::error::EncodeError;
-use rig_core::message::{AssistantContent, AssistantMessage};
+use rig_core::message::{
+    AssistantContent, AssistantMessage, CarriedTextContent, DocumentSourceKind, ImageMediaType,
+};
 use rig_core::wire::{Mode, Wire};
-use rig_history_conformance::{Ablation, CallShape, Ending, HistoryFixture, Rng, Shape, replies};
+use rig_history_conformance::{
+    Ablation, CallShape, Ending, HistoryFixture, MediaPart, Refusal, Rng, Shape, replies,
+};
 use rig_vertexai::completion::GenerateContent;
 use serde_json::{Value, json};
 
@@ -178,6 +184,7 @@ impl HistoryFixture for VertexHistory {
                 "/candidates",
                 "/candidates/0/content",
                 "/candidates/0/content/parts",
+                "/candidates/0/content/parts/4/functionCall/name",
                 "/candidates/0/finishReason",
             ],
             frames: |mut document| {
@@ -216,26 +223,135 @@ impl HistoryFixture for VertexHistory {
         Some(vec![frame(reply_document(json!([]), "STOP"))])
     }
 
+    /// A reply with no part is refused in both modes, since a streamed call
+    /// re-emits the unary reply.
+    fn refuses_empty_reply(&self, _mode: Mode) -> bool {
+        true
+    }
+
+    /// Gemini's tool-protocol finishes fail the reply.
+    fn refused_finish(&self, name: &str) -> Option<Refusal> {
+        let reason = match name {
+            "MALFORMED_FUNCTION_CALL" => "MalformedFunctionCall",
+            "UNEXPECTED_TOOL_CALL" => "UnexpectedToolCall",
+            _ => return None,
+        };
+        Some(Refusal::Response(format!(
+            "Gemini stopped with finish_reason={reason}: no finish message provided"
+        )))
+    }
+
+    /// The caller's assistant images are checked before adaptation, in
+    /// Vertex's order (AG §5): a media type, one Vertex reads, base64 data,
+    /// and data that decodes.
+    fn original_media_preflight(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+        let MediaPart::AssistantImage(image) = part else {
+            return None;
+        };
+        let Some(media_type) = &image.media_type else {
+            return Some("Media type for assistant image is required for Vertex AI".to_owned());
+        };
+        if !matches!(
+            media_type,
+            ImageMediaType::JPEG
+                | ImageMediaType::PNG
+                | ImageMediaType::WEBP
+                | ImageMediaType::HEIC
+                | ImageMediaType::HEIF
+        ) {
+            return Some(format!(
+                "Unsupported Vertex AI assistant image media type {media_type:?}"
+            ));
+        }
+        let DocumentSourceKind::Base64(data) = &image.data else {
+            return Some("Vertex AI assistant images must use base64 data".to_owned());
+        };
+        BASE64
+            .decode(data)
+            .err()
+            .map(|error| format!("Invalid base64 assistant image data: {error}"))
+    }
+
+    /// Unsigned text with an invented sibling field is inspection-only text
+    /// (A48; AG §8): the turn keeps the whole part, and replay sends the
+    /// known text alone, without the `thought: false` the SDK drops, beside
+    /// the invented part.
+    fn inspected_field(&self, turn: &AssistantMessage, body: &Value) -> Option<Vec<String>> {
+        let mut problems = Vec::new();
+        let kept = turn.content.iter().any(|block| {
+            matches!(block, AssistantContent::CarriedText(carried)
+                if carried.content == CarriedTextContent::InspectionOnlyText("noted".to_owned())
+                    && carried.payload.item.get("x_rig_field").is_some())
+        });
+        if !kept {
+            problems.push(format!(
+                "the turn keeps `noted` as inspection-only text whose part holds `x_rig_field`: {:?}",
+                turn.content
+            ));
+        }
+        let parts: Vec<&Value> = body["contents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|content| content["role"] == "model")
+            .map(|content| &content["parts"])
+            .collect();
+        let expected = json!([{"text": "noted"}, {"x_rig_invented": {"id": "x_1"}}]);
+        if parts != [&expected] {
+            problems.push(format!(
+                "the model turn replays exactly {expected}: {parts:?}"
+            ));
+        }
+        Some(problems)
+    }
+
     fn finish_reason_pointer(&self) -> Option<&'static str> {
         Some("/candidates/0/finishReason")
     }
 
     /// Each provider part as the SDK sends it: its JSON read into the SDK's
-    /// `Part`, which spells enums by number.
+    /// `Part`, which spells enums by number, without a call's `id`, which
+    /// Vertex AI's v1 `FunctionCall` does not declare. The interleaved shape
+    /// includes its carried reasoning.
     fn replayed(&self, turn: &AssistantMessage) -> Vec<Value> {
         let sdk = |item: &Value| {
-            serde_json::from_value::<google_cloud_aiplatform_v1::model::Part>(item.clone())
+            let mut item = item.clone();
+            if let Some(call) = item.get_mut("functionCall").and_then(Value::as_object_mut) {
+                call.shift_remove("id");
+            }
+            serde_json::from_value::<google_cloud_aiplatform_v1::model::Part>(item)
                 .ok()
                 .and_then(|part| serde_json::to_value(part).ok())
         };
-        turn.content
+        let interleaved = matches!(
+            turn.content.as_slice(),
+            [
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_),
+                AssistantContent::Text(_),
+                AssistantContent::Reasoning(_) | AssistantContent::CarriedReasoning(_),
+                AssistantContent::ToolCall(_),
+            ]
+        );
+        let replayed: Vec<Value> = turn
+            .content
             .iter()
             .filter_map(|block| match block {
                 AssistantContent::Opaque(opaque) if opaque.replay => sdk(&opaque.item),
                 AssistantContent::Opaque(_) => None,
+                AssistantContent::CarriedReasoning(reasoning) if interleaved => {
+                    sdk(&reasoning.payload.item)
+                }
                 block => block.native_item().and_then(sdk),
             })
-            .collect()
+            .collect();
+        if interleaved {
+            assert_eq!(
+                replayed.len(),
+                4,
+                "the interleaved reply supplies all four outbound items: {turn:?} gives {replayed:?}"
+            );
+        }
+        replayed
     }
 }
 
@@ -260,6 +376,45 @@ fn fitted(value: &mut Value, typed: &Value) {
             values.retain_mut(|value| fits(value, types.next()));
         }
         _ => {}
+    }
+}
+
+/// A call without a name, or with a `null` or retyped one, is refused with
+/// the exact empty tool name error, so H5 takes the name as required.
+#[test]
+fn h05_vertex_missing_function_call_name_is_refused() {
+    use rig_core::error::ProviderError;
+    use rig_core::message::EmptyToolName;
+
+    const NAME: &str = "/candidates/0/content/parts/4/functionCall/name";
+    let fixture = VertexHistory;
+    let ablation = fixture
+        .ablation()
+        .expect("the Vertex ablation fixture exists");
+    assert_eq!(ablation.document.pointer(NAME), Some(&json!("lookup")));
+    for change in [None, Some(Value::Null), Some(json!(7))] {
+        let mut document = ablation.document.clone();
+        match &change {
+            Some(value) => *document.pointer_mut(NAME).expect("the call's name") = value.clone(),
+            None => {
+                document
+                    .pointer_mut("/candidates/0/content/parts/4/functionCall")
+                    .and_then(Value::as_object_mut)
+                    .expect("the fifth part's call")
+                    .shift_remove("name");
+            }
+        }
+        let result = rig_core::test_utils::history::decode(
+            &fixture.wire(MODEL),
+            Mode::Unary,
+            (ablation.frames)(document),
+        );
+        assert!(
+            matches!(&result, Err(ProviderError::Request(error))
+                if error.downcast_ref::<EmptyToolName>() == Some(&EmptyToolName)
+                    && error.to_string() == EmptyToolName.to_string()),
+            "the name changed to {change:?} reports the exact empty tool name error: {result:?}"
+        );
     }
 }
 

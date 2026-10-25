@@ -4,8 +4,8 @@
 //! [`crate::error`]'s types and [`CallerIdentity`] is
 //! [`openai::wire::CallerIdentity`](crate::providers::openai::wire::CallerIdentity).
 //! There is no second error or identity hierarchy, so a value obtained through
-//! either path is the same type. Configuration is the
-//! [`OpenAI`](crate::providers::openai::wire::OpenAI) provider value, which
+//! either path is the same type. The
+//! [`OpenAI`](crate::providers::openai::OpenAI) client is what
 //! [`LiveCalls::new`](crate::providers::chatgpt::realtime::LiveCalls::new) and
 //! [`PublicLiveSessions::new`](crate::providers::openai::live::PublicLiveSessions::new)
 //! take, and their `create_call` and `create_session` send the creation

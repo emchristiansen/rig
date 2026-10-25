@@ -16,13 +16,13 @@ use crate::operation::Completion;
 use crate::providers::openai::wire::OpenAIConfig;
 pub(crate) use crate::providers::openai::wire::ResponsesContract;
 use crate::wire::{
-    AdapterUsage, AdapterVerdict, Body, Capabilities, Descriptor, Encoded, Framing, Mode,
+    AdapterUsage, AdapterVerdict, Capabilities, Descriptor, Encoded, Framing, Mode,
     ObservationSink, UsageObservation, Wire,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::request_compression::RequestCompression;
+use super::request_compression::{BodyOrder, RequestCompression};
 use super::request_headers::RequestHeaders;
 use super::responses_lite::{CodexRequestShape, ResponsesLiteError};
 use super::streaming::{IncompleteTerminal, ResponsesDecoder, ResponsesStreamOptions};
@@ -123,15 +123,15 @@ impl Responses {
             "Responses completion request",
             &body,
         );
-        let bytes = if codex && self.codex_request_shape.is_standard() {
-            serde_json::to_vec(&super::codex_request::RoutingFirst(&body))?
+        let order = if codex && self.codex_request_shape.is_standard() {
+            BodyOrder::RoutingFirst
         } else {
-            serde_json::to_vec(&body)?
+            BodyOrder::Original
         };
-        let (builder, body) = self.request_compression.apply(builder, bytes)?;
+        let (builder, body) = self.request_compression.apply(builder, body, order)?;
         let request = builder
             .header(http::header::CONTENT_TYPE, "application/json")
-            .body(Body::Bytes(body))?;
+            .body(body.into_body())?;
 
         let framing = if streaming {
             Framing::Sse

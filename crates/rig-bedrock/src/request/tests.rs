@@ -866,3 +866,108 @@ fn adversarial_histories_encode_to_requests_converse_takes() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A leading system message with no text adds no system block, and a user
+/// turn whose only text is blank sends the placeholder text Converse
+/// requires in place of an empty content list.
+#[test]
+fn empty_system_prompt_is_dropped_and_blank_user_turn_sends_placeholder() {
+    let body = unprepared(vec![Message::system(""), Message::user("   ")]).expect("encodes");
+    assert_eq!(body.get("system"), None, "{body}");
+    assert_eq!(
+        body["messages"],
+        json!([{ "role": "user", "content": [{ "text": "<empty>" }] }])
+    );
+}
+
+/// Carried text from another provider's reply sends its known text and
+/// refusal as Converse text, never its payload; carried text whose known
+/// text is empty sends nothing.
+#[test]
+fn foreign_carried_text_sends_its_known_text() {
+    use rig_core::message::{CarriedPayload, CarriedText, CarriedTextContent};
+    let carried = |content| {
+        AssistantContent::CarriedText(CarriedText::new(
+            content,
+            CarriedPayload::new(
+                json!({ "type": "output_text", "text": "payload-not-sent" }),
+                Some("openai".to_owned()),
+            ),
+        ))
+    };
+    let body = unprepared(vec![
+        Message::user("q"),
+        Message::Assistant(AssistantMessage::new(vec![
+            carried(CarriedTextContent::Text("the answer".to_owned())),
+            carried(CarriedTextContent::Refusal("I can't help".to_owned())),
+            carried(CarriedTextContent::Text(String::new())),
+        ])),
+    ])
+    .expect("encodes");
+    assert_eq!(
+        body["messages"][1],
+        json!({
+            "role": "assistant",
+            "content": [{ "text": "the answer" }, { "text": "I can't help" }],
+        })
+    );
+}
+
+/// An image on an assistant turn, rebuilt from its canonical fields, sends
+/// a Converse image block.
+#[test]
+fn assistant_image_sends_an_image_block() {
+    let image = AssistantContent::Image(Image {
+        data: DocumentSourceKind::base64("aGVsbG8="),
+        media_type: Some(rig_core::message::ImageMediaType::PNG),
+        ..Image::default()
+    });
+    let body = unprepared(vec![
+        Message::user("q"),
+        Message::Assistant(AssistantMessage::new(vec![image])),
+    ])
+    .expect("encodes");
+    assert_eq!(
+        body["messages"][1],
+        json!({
+            "role": "assistant",
+            "content": [{ "image": { "format": "png", "source": { "bytes": "aGVsbG8=" } } }],
+        })
+    );
+}
+
+/// Reasoning the provider withheld has no text to send on either family's
+/// form, so the encoder sends no block for it.
+#[test]
+fn redacted_reasoning_sends_no_block() {
+    let block = AssistantContent::Reasoning(rig_core::message::Reasoning {
+        text: String::new(),
+        redacted: true,
+        native: None,
+    });
+    for model in [CLAUDE, NOVA] {
+        let wire = Converse::new(model);
+        assert_eq!(
+            assistant(&block, &wire, wire.family(model), None).expect("the block lowers"),
+            None,
+            "{model}"
+        );
+    }
+}
+
+/// A cache checkpoint has no message to follow when the history is empty:
+/// the request carries no messages and no checkpoint.
+#[test]
+fn message_cache_checkpoint_needs_a_message() {
+    let mut request = CompletionRequest::new("unused").cache(CacheRetention::Short);
+    request.chat_history = Vec::new();
+    let body = serde_json::to_value(
+        Converse::new(CLAUDE)
+            .encode(request, Mode::Unary)
+            .expect("encodes")
+            .body,
+    )
+    .expect("serializes");
+    assert_eq!(body["messages"], json!([]), "{body}");
+    assert_eq!(body.get("system"), None, "{body}");
+}

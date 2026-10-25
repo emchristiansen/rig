@@ -168,11 +168,13 @@ fn streaming_request_keeps_documents_after_leading_system_messages() {
         .expect("streaming request body should build");
 
     assert_eq!(body["system"][0]["text"], "System prompt");
-    assert_eq!(body["system"][1]["text"], "Mid-conversation instruction");
+    assert_eq!(body["system"].as_array().map(Vec::len), Some(1));
     let messages = body["messages"]
         .as_array()
         .expect("messages should be array");
-    assert_eq!(messages.len(), 3);
+    // The misplaced mid-conversation instruction follows the user turn.
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[3]["role"], "system");
     assert_eq!(messages[0]["role"], "user");
     assert!(
         messages[0].to_string().contains("<file id: doc1>"),
@@ -2205,4 +2207,103 @@ fn a_context_window_terminal_retains_an_explicitly_finished_valid_call() {
         .expect("the completed call is kept");
     assert_eq!(call.function.arguments_value(), json!({"x":1,"y":2}));
     assert!(call.native.is_some());
+}
+
+/// An `error` event closes what is still open: a protected server use whose
+/// input never completed is withheld, and an open hosted result is
+/// published whole before the error surfaces.
+#[test]
+fn an_error_withholds_an_open_server_use_and_publishes_an_open_hosted_result() {
+    const ENVELOPE: &str = r#"{"error":{"message":"Overloaded","type":"overloaded_error"},"request_id":"req_011CXYZ","type":"error"}"#;
+    let result = json!({"type": "web_search_tool_result", "tool_use_id": "srvtoolu_01",
+        "content": [{"type": "web_search_result", "url": "https://example.com/shannon",
+            "title": "Claude Shannon", "encrypted_content": "encrypted-content"}]});
+    let mut frames = reply(Vec::new(), "end_turn");
+    frames.truncate(1);
+    frames.extend([
+        json!({"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use",
+            "id": "srvtoolu_01", "name": "web_search", "input": {}}}),
+        json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"query\":"}}),
+        json!({"type": "content_block_start", "index": 1, "content_block": result.clone()}),
+    ]);
+    let decoded = decode(
+        frames
+            .iter()
+            .map(|frame| classified(&frame.to_string()))
+            .chain([classified(ENVELOPE)]),
+    );
+    let payload =
+        crate::message::CarriedPayload::new(result, Some(super::super::PROVIDER_NAME.to_owned()))
+            .with_position(crate::message::CarriedPosition::MessageContent {
+                item_index: 0,
+                part_index: 1,
+            });
+    assert_eq!(
+        decoded.ended(),
+        vec![AssistantContent::CarriedText(
+            crate::message::CarriedText::new(
+                crate::message::CarriedTextContent::Opaque(String::new()),
+                payload,
+            )
+        )]
+    );
+    assert_eq!(
+        decoded.outcome.unwrap_err().provider_response_body(),
+        Some(ENVELOPE)
+    );
+}
+
+/// Input to an unmodelled block that is not a JSON object never completes
+/// it: the block closes unfinished, kept but never replayed.
+#[test]
+fn an_opaque_block_whose_input_is_not_an_object_closes_unfinished() {
+    let invented = json!({"type": "frobnicate", "payload": {"x": 1}});
+    for input in ["[1]", "{\"x\":"] {
+        let decoded = decode(
+            reply(
+                vec![block(
+                    0,
+                    invented.clone(),
+                    &[json!({"type": "input_json_delta", "partial_json": input})],
+                )],
+                "end_turn",
+            )
+            .iter()
+            .map(|frame| classified(&frame.to_string())),
+        );
+        assert_eq!(
+            decoded.ended(),
+            vec![AssistantContent::Opaque(Opaque {
+                item: invented.clone(),
+                replay: false,
+            })],
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn only_a_streamed_reply_keeps_partial_content_at_an_unfinished_eof() {
+    use crate::wire::IncompleteEof;
+    assert_eq!(adapter().incomplete_eof(), IncompleteEof::Refuse);
+    assert_eq!(
+        adapter().in_mode(Mode::Unary).incomplete_eof(),
+        IncompleteEof::Refuse
+    );
+    assert_eq!(
+        adapter().in_mode(Mode::Streaming).incomplete_eof(),
+        IncompleteEof::KeepPartial
+    );
+}
+
+#[test]
+fn a_second_start_of_an_open_call_fails_the_reply() {
+    let start = json!({"type": "content_block_start", "index": 0,
+        "content_block": {"type": "tool_use", "id": "toolu_1", "name": "add", "input": {}}});
+    let frames = reply(vec![vec![start.clone(), start]], "tool_use");
+    let Err(ProviderError::Response(message)) = streamed(&frames) else {
+        panic!("a call opened twice is a corrupt reply");
+    };
+    assert_eq!(message, "the reply opened item 0 twice");
 }

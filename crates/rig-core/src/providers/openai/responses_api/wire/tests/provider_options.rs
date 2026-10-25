@@ -117,7 +117,9 @@ fn shared_store_reaches_the_body_and_shapes_history_stateless() {
         turn(history).provider_options(shared(OpenAiShared::default().store(false))),
     );
 
-    assert_eq!(reasoning_ids(&stored), Vec::<Value>::new());
+    // mec-rig-port-answers-1 Q5: the empty reasoning item is a block again,
+    // so a stored turn replays it, as U asserts.
+    assert_eq!(reasoning_ids(&stored), vec![json!("rs_1")]);
     assert_eq!(stateless["store"], json!(false));
     assert_eq!(stateless["include"], json!(["reasoning.encrypted_content"]));
     assert!(reasoning_ids(&stateless).is_empty(), "{stateless}");

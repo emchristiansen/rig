@@ -310,7 +310,13 @@ fn input(
                                 .iter()
                                 .find(|group| group.contains(item_index, text));
                             if let Some(group) = group {
-                                let content = items[group.input_index]
+                                let item = items.get_mut(group.input_index).ok_or_else(|| {
+                                    EncodeError::request(format!(
+                                        "internal Responses carried-message group refers to missing input item at index {}",
+                                        group.input_index
+                                    ))
+                                })?;
+                                let content = item
                                     .get_mut("content")
                                     .and_then(Value::as_array_mut)
                                     .ok_or_else(|| {
@@ -561,9 +567,10 @@ pub(crate) fn include_ciphertext(body: &mut Map<String, Value>) {
     body.insert("include".to_owned(), Value::Array(include));
 }
 
-/// The fork's recognized raw fields, independently of newer typed options.
-/// This projection is private; the U canonical request and FinalBody are the
-/// only request representations used by the operation and transports.
+/// The fork's recognized raw fields, independently of newer typed options,
+/// and every other raw key as written. This projection is private; the U
+/// canonical request and FinalBody are the only request representations used
+/// by the operation and transports.
 #[derive(Deserialize, Serialize, Default)]
 #[serde(rename = "AdditionalParameters")]
 struct RawParameterProjection {
@@ -602,6 +609,35 @@ struct RawParameterProjection {
     store: Option<bool>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     client_metadata: std::collections::BTreeMap<String, String>,
+    /// The raw keys the fork's reader does not recognize, as written.
+    #[serde(flatten)]
+    unrecognized: Map<String, Value>,
+}
+
+/// The raw keys the fork's reader does not recognize that Codex still
+/// carries to its refusal ([`UnrecognizedRaw::Codex`]).
+const CODEX_REFUSED_RAW: [&str; 2] = ["max_output_tokens", "temperature"];
+
+/// What reaches the request of the raw keys the fork's reader does not
+/// recognize, and of explicit raw nulls, which that reader read as absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnrecognizedRaw {
+    /// Codex keeps the fork's reader, which sends none of them and no raw
+    /// null, except a non-null raw `max_output_tokens` or `temperature`: it
+    /// reaches the merged body, where the Codex contract refuses it with the
+    /// same [`wire::UnsupportedCodexControl`] a typed one gets, rather than
+    /// being dropped unseen (mec-rig-bodies-answers-1 Q6).
+    Codex,
+    /// Every other contract sends them as written (mec-rig-port-answers-1
+    /// Q7), but never a raw `model` (the request names the model, G132), and
+    /// a raw `max_output_tokens` or `temperature` only where the request
+    /// leaves that typed field unset, so a typed value wins.
+    Sent {
+        /// The request sets its typed output cap (`max_tokens`).
+        typed_output_cap: bool,
+        /// The request sets its typed `temperature`.
+        typed_temperature: bool,
+    },
 }
 
 fn raw_metadata<'de, D: Deserializer<'de>>(
@@ -702,7 +738,12 @@ enum RawInclude {
 }
 
 /// Apply the fork's raw-field reader before the U option layers merge.
-pub(crate) fn project_raw_parameters(raw: &Value) -> Result<Map<String, Value>, EncodeError> {
+/// Recognized keys keep its decode validation and are sent as it decodes
+/// them; `unrecognized` decides the rest.
+pub(crate) fn project_raw_parameters(
+    raw: &Value,
+    unrecognized: UnrecognizedRaw,
+) -> Result<Map<String, Value>, EncodeError> {
     if raw.is_null() || raw.is_boolean() {
         return Ok(Map::new());
     }
@@ -728,7 +769,7 @@ pub(crate) fn project_raw_parameters(raw: &Value) -> Result<Map<String, Value>, 
                 "`additional_params[\"__rig_tolerate_incomplete\"]` is no longer read: select the incomplete-terminal policy on the Responses wire with `Responses::with_streamed_incomplete`",
             ));
         }
-        let tools = fields.remove("tools");
+        let tools = fields.shift_remove("tools");
         if let Some(tools) = &tools {
             declared_tools(tools.clone()).map_err(|error| {
                 EncodeError::request(format!(
@@ -736,20 +777,48 @@ pub(crate) fn project_raw_parameters(raw: &Value) -> Result<Map<String, Value>, 
                 ))
             })?;
         }
-        fields.remove("stream");
+        fields.shift_remove("stream");
         tools
     } else {
         None
     };
-    let parameters = serde_json::from_value::<RawParameterProjection>(raw).map_err(|error| {
-        EncodeError::request(format!(
-            "Invalid OpenAI Responses additional_params payload: {error}"
-        ))
-    })?;
-    let mut fields = match serde_json::to_value(parameters)? {
-        Value::Object(fields) => fields,
-        _ => unreachable!("the raw parameter projection serializes a struct"),
-    };
+    let nulls = raw
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, value)| value.is_null())
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let mut parameters =
+        serde_json::from_value::<RawParameterProjection>(raw).map_err(|error| {
+            EncodeError::request(format!(
+                "Invalid OpenAI Responses additional_params payload: {error}"
+            ))
+        })?;
+    if unrecognized == UnrecognizedRaw::Codex {
+        parameters
+            .unrecognized
+            .retain(|key, value| CODEX_REFUSED_RAW.contains(&key.as_str()) && !value.is_null());
+    }
+    let mut fields =
+        serde_json::from_value::<Map<String, Value>>(serde_json::to_value(parameters)?)?;
+    if let UnrecognizedRaw::Sent {
+        typed_output_cap,
+        typed_temperature,
+    } = unrecognized
+    {
+        // A recognized key the reader decoded from `null` is sent as `null`.
+        for key in nulls {
+            fields.entry(key).or_insert(Value::Null);
+        }
+        fields.shift_remove("model");
+        if typed_output_cap {
+            fields.shift_remove("max_output_tokens");
+        }
+        if typed_temperature {
+            fields.shift_remove("temperature");
+        }
+    }
     if let Some(tools) = tools {
         fields.insert("tools".to_owned(), tools);
     }
@@ -1540,11 +1609,15 @@ mod opaque_content_tests;
 #[cfg(test)]
 mod openapi_schema;
 #[cfg(test)]
+mod raw_projection_tests;
+#[cfg(test)]
 mod stateless_replay_tests;
 #[cfg(test)]
 mod streaming_conformance;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod websocket_context_tests;
 #[cfg(all(test, feature = "websocket"))]
 mod websocket_delta_tests;
 
@@ -1810,10 +1883,9 @@ fn carried_reasoning_item(
     item.insert("type".to_owned(), json!("reasoning"));
     item.insert("id".to_owned(), json!(id));
     item.insert("summary".to_owned(), Value::Array(summary));
-    item.remove("status");
-    item.remove("content");
-    item.remove("encrypted_content");
-    item.remove("signature");
+    item.shift_remove("content");
+    item.shift_remove("encrypted_content");
+    item.shift_remove("signature");
     if !content.is_empty() || raw_content.is_some_and(Vec::is_empty) {
         item.insert("content".to_owned(), Value::Array(content));
     }

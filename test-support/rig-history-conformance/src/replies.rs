@@ -11,7 +11,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use serde_json::{Value, json};
 
-use rig_core::completion::CompletionRequest;
+use rig_core::completion::{CompletionRequest, FinishReason};
+use rig_core::error::ProviderError;
+use rig_core::message::{AssistantContent, EMPTY_RESPONSE_ERROR};
 use rig_core::operation::Completion;
 use rig_core::wire::{Mode, Wire};
 
@@ -101,6 +103,50 @@ pub fn disagreement<W: Wire<Op = Completion>>(
     wire: &W,
     frames: Frames<W::Frame>,
 ) -> Option<String> {
+    disagreement_of(wire, frames, Agreement::default())
+}
+
+/// What a wire's whole and streamed folds may differ in and still agree
+/// (row H18), beyond rig-issued call ids.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Agreement {
+    /// The wire refuses a whole reply with no content with
+    /// [`EMPTY_RESPONSE_ERROR`], and only a whole one.
+    pub refuses_empty_whole: bool,
+    /// JSON pointers into each block of fields that are transport-local,
+    /// which the comparison leaves out.
+    pub transport_local: &'static [&'static str],
+    /// The stream splits a signed answer whose signature arrives on a
+    /// trailing empty part: unsigned text of the whole run, then an empty
+    /// signed answer holding exactly `{"text":"","thoughtSignature":sig}`
+    /// (Gemini). The whole reply keeps one signed block.
+    pub splits_trailing_signature: bool,
+}
+
+/// [`disagreement`] with what `agreement` lets differ. Where the wire
+/// refuses a whole reply with no content with [`EMPTY_RESPONSE_ERROR`],
+/// that refusal agrees with a stream that folds to a turn holding no
+/// content but blank text, whatever its stop, and with nothing else.
+pub fn disagreement_of<W: Wire<Op = Completion>>(
+    wire: &W,
+    frames: Frames<W::Frame>,
+    agreement: Agreement,
+) -> Option<String> {
+    disagreement_withholding(wire, frames, agreement, &[])
+}
+
+/// [`disagreement_of`] for a stream that publishes none of `withheld`, the
+/// wire ids of the function and custom calls its terminal response states
+/// for the first time (G195): the streamed fold must equal the whole fold
+/// with exactly those calls taken out, its finish reconciled against the
+/// calls that remain. Every other difference disagrees, and so does a
+/// withheld id that the whole fold does not hold exactly once.
+pub fn disagreement_withholding<W: Wire<Op = Completion>>(
+    wire: &W,
+    frames: Frames<W::Frame>,
+    agreement: Agreement,
+    withheld: &[String],
+) -> Option<String> {
     let request = CompletionRequest::new("restate");
     let Frames { whole, streamed } = frames;
     let unary = quiet(|| decode(wire, &request, Mode::Unary, whole));
@@ -115,19 +161,70 @@ pub fn disagreement<W: Wire<Op = Completion>>(
     };
     match (&unary, &stream) {
         (Ok(Ok(unary)), Ok(Ok(stream))) => {
+            let is_withheld = |block: &AssistantContent, id: &str| match block {
+                AssistantContent::ToolCall(call) => call.id.wire() == id,
+                AssistantContent::CustomToolCall(call) => call.id.wire() == id,
+                _ => false,
+            };
+            for id in withheld {
+                let held = unary
+                    .choice
+                    .iter()
+                    .filter(|block| is_withheld(block, id))
+                    .count();
+                if held != 1 {
+                    return Some(format!(
+                        "the whole fold holds the terminal-only call {id} {held} times: {}",
+                        json!(unary.message())
+                    ));
+                }
+            }
+            let mut kept = unary.clone();
+            if !withheld.is_empty() {
+                kept.choice
+                    .retain(|block| !withheld.iter().any(|id| is_withheld(block, id)));
+                // The finish is reconciled again against the calls that
+                // remain: a Responses status states no tool-call finish, so
+                // `ToolCalls` there is only that reconciliation of `Stop`.
+                let stated = match unary.finish_reason() {
+                    Some(FinishReason::ToolCalls) => Some(FinishReason::Stop),
+                    stated => stated,
+                };
+                kept = kept.with_optional_finish_reason(stated);
+            }
+            let local = |turn: Value| transport_local(turn, agreement.transport_local);
             let (whole, streamed) = (
-                numbered(json!(unary.message())),
-                numbered(json!(stream.message())),
+                local(numbered(json!(kept.message()))),
+                local(numbered(json!(stream.message()))),
             );
-            if whole != streamed {
+            if whole != streamed
+                && !(agreement.splits_trailing_signature && split_agrees(&whole, &streamed))
+            {
                 return Some(format!(
                     "the folds differ\nwhole:    {whole}\nstreamed: {streamed}"
                 ));
             }
-            (unary.stop() != stream.stop()).then(|| {
+            (kept.stop() != stream.stop()).then(|| {
                 format!(
                     "the stops differ: whole {:?}, streamed {:?}",
-                    unary.stop(),
+                    kept.stop(),
+                    stream.stop()
+                )
+            })
+        }
+        (Ok(Err(ProviderError::Response(message))), Ok(Ok(stream)))
+            if agreement.refuses_empty_whole && message == EMPTY_RESPONSE_ERROR =>
+        {
+            let empty = stream.choice.iter().all(|block| {
+                matches!(block, AssistantContent::Text(text) if text.text.trim().is_empty())
+            });
+            // The whole reply's refusal is unary-only, whatever the stop:
+            // the stream agrees when it folds to no content, even when its
+            // stop is a failure (an empty refusal ends as an error).
+            (!empty).then(|| {
+                format!(
+                    "the whole reply is refused as empty, but the stream folds to {} ({:?})",
+                    json!(stream.message()),
                     stream.stop()
                 )
             })
@@ -139,6 +236,81 @@ pub fn disagreement<W: Wire<Op = Completion>>(
                 .then(|| format!("whole {unary}, streamed {stream}"))
         }
     }
+}
+
+/// `turn` without the fields at `pointers` in each of its blocks.
+fn transport_local(mut turn: Value, pointers: &[&str]) -> Value {
+    if let Some(blocks) = turn.get_mut("content").and_then(Value::as_array_mut) {
+        for block in blocks {
+            for pointer in pointers {
+                crate::remove_pointer(block, pointer);
+            }
+        }
+    }
+    turn
+}
+
+/// Whether `streamed` is `whole` with any of its signed answers split as
+/// a signature on a trailing empty part splits it
+/// ([`Agreement::splits_trailing_signature`]), all else equal.
+fn split_agrees(whole: &Value, streamed: &Value) -> bool {
+    let blocks = |turn: &Value| {
+        turn.get("content")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let rest = |turn: &Value| {
+        let mut turn = turn.clone();
+        if let Some(fields) = turn.as_object_mut() {
+            fields.shift_remove("content");
+        }
+        turn
+    };
+    if rest(whole) != rest(streamed) {
+        return false;
+    }
+    let (whole, streamed) = (blocks(whole), blocks(streamed));
+    let mut at = 0;
+    for block in &whole {
+        if streamed.get(at) == Some(block) {
+            at += 1;
+            continue;
+        }
+        let Some(split) = split_signed(block) else {
+            return false;
+        };
+        if streamed.get(at..at + 2) != Some(split.as_slice()) {
+            return false;
+        }
+        at += 2;
+    }
+    at == streamed.len()
+}
+
+/// A signed answer `block` holding text as the stream folds it when the
+/// signature arrives on a trailing empty part: unsigned text of the run,
+/// then an empty signed answer.
+fn split_signed(block: &Value) -> Option<[Value; 2]> {
+    if block.get("type")? != "carried_text"
+        || block.pointer("/content/type")? != "gemini_signed_answer"
+    {
+        return None;
+    }
+    let text = block.pointer("/content/text/text")?.as_str()?;
+    let signature = block.pointer("/content/text/signature")?.clone();
+    if text.is_empty()
+        || *block.pointer("/payload/item")? != json!({"text": text, "thoughtSignature": signature})
+    {
+        return None;
+    }
+    let mut signed = block.clone();
+    *signed.pointer_mut("/content/text/text")? = json!("");
+    *signed.pointer_mut("/payload/item")? = json!({"text": "", "thoughtSignature": signature});
+    Some([
+        json!({"type": "text", "text": text, "native": {"item": {"text": text}}}),
+        signed,
+    ])
 }
 
 /// The smallest spec that still `fails`: blocks dropped one at a time, then,
@@ -378,20 +550,25 @@ fn responses_response(output: &[Value], finish: &str) -> Value {
     response
 }
 
-pub fn responses_build(spec: &Spec) -> (Vec<String>, Vec<String>) {
+/// `spec` as a whole Responses reply and its stream. Only a dialect that
+/// reads item events without a numeric `output_index` (`indexless`) gets
+/// streams that leave it out.
+pub fn responses_build(spec: &Spec, indexless: bool) -> (Vec<String>, Vec<String>) {
     let mut rng = Rng::new(spec.seed);
     let whole = responses_response(&spec.blocks, &spec.finish).to_string();
-    let mut events = vec![
-        json!({"type": "response.created", "response": {"id": "resp_1", "object": "response", "status": "in_progress", "output": []}}),
-    ];
+    let started = json!({"id": "resp_1", "object": "response", "created_at": 1_700_000_000,
+        "model": "the-model", "status": "in_progress", "output": []});
+    let mut events = vec![json!({"type": "response.created", "response": started})];
     if rng.chance(50) {
-        events.push(json!({"type": "response.in_progress", "response": {"id": "resp_1", "object": "response", "status": "in_progress", "output": []}}));
+        events.push(json!({"type": "response.in_progress", "response": started}));
     }
-    // 0: standard; 1: no output_index on any event; 2: some items only in
-    // the terminal response; 3: calls with no argument deltas.
+    // 0: standard; 1: no output_index on any event, only where the dialect
+    // reads that; 2: some items only in the terminal response; 3: calls with
+    // no argument deltas.
     let variant = match rng.below(100) {
         0..=59 => 0,
-        60..=74 => 1,
+        60..=74 if indexless => 1,
+        60..=74 => 0,
         75..=89 => 2,
         _ => 3,
     };

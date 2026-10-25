@@ -1423,11 +1423,11 @@ async fn a_declared_tool_reaches_the_response_create_frame_as_written() {
         "the namespace reaches the frame verbatim"
     );
     let mut untouched = tools[1].as_object().expect("a tool is an object").clone();
-    assert_eq!(untouched.remove("strict"), Some(json!(true)));
-    untouched.remove("parameters");
+    assert_eq!(untouched.shift_remove("strict"), Some(json!(true)));
+    untouched.shift_remove("parameters");
     let mut expected = function.as_object().expect("fixture is an object").clone();
-    expected.remove("strict");
-    expected.remove("parameters");
+    expected.shift_remove("strict");
+    expected.shift_remove("parameters");
     assert_eq!(
         untouched, expected,
         "every other declared member is as written"

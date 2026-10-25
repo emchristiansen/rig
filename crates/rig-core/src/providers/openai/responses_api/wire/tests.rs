@@ -524,6 +524,24 @@ fn the_chatgpt_dialect_refuses_caller_set_controls_by_name() {
             UnsupportedCodexControl::Store,
             "`store: true`",
         ),
+        // mec-rig-bodies-answers-1 Q6: a raw cap or temperature gets the
+        // typed field's refusal.
+        (
+            CompletionRequest {
+                additional_params: Some(serde_json::json!({ "max_output_tokens": 64 })),
+                ..prompt()
+            },
+            UnsupportedCodexControl::MaxOutputTokens,
+            "`max_output_tokens`",
+        ),
+        (
+            CompletionRequest {
+                additional_params: Some(serde_json::json!({ "temperature": 0.25 })),
+                ..prompt()
+            },
+            UnsupportedCodexControl::Temperature,
+            "`temperature`",
+        ),
     ];
     for (request, control, spelling) in cases {
         let (refused, rendered) = refused_codex_control(request);
@@ -535,6 +553,42 @@ fn the_chatgpt_dialect_refuses_caller_set_controls_by_name() {
             "{control:?}: {rendered}"
         );
     }
+}
+
+/// A raw `null` cap or temperature is neither sent nor refused on Codex
+/// (mec-rig-bodies-answers-1 Q6).
+#[test]
+fn the_chatgpt_dialect_drops_a_raw_null_cap_or_temperature() {
+    let request = CompletionRequest {
+        additional_params: Some(serde_json::json!({
+            "max_output_tokens": null,
+            "temperature": null,
+        })),
+        ..prompt()
+    };
+    let body = encoded_body_of(&chatgpt(), request, Mode::Unary);
+    assert_eq!(body.get("max_output_tokens"), None, "{body}");
+    assert_eq!(body.get("temperature"), None, "{body}");
+}
+
+/// A typed `top_p` never reaches the Codex body: the ChatGPT option mapping
+/// refuses it first, as an option the backend does not take, under the
+/// request's default policy.
+#[test]
+fn the_chatgpt_dialect_refuses_a_typed_top_p_as_an_unsupported_option() {
+    let error = chatgpt()
+        .encode(prompt().top_p(0.5), Mode::Unary)
+        .expect_err("the Codex contract must refuse a typed top_p");
+    assert_eq!(
+        error.unsupported_option(),
+        Some(&crate::completion::options::UnsupportedOption::new(
+            "top_p",
+            "chatgpt",
+            "gpt-5.4",
+            "the ChatGPT backend does not take it",
+        )),
+        "{error}"
+    );
 }
 
 /// The generic OpenAI Responses contract is unchanged: it sends `top_p` and

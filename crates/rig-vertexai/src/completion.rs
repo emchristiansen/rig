@@ -18,7 +18,7 @@ use crate::types::completion_response::{PROVIDER_NAME, VertexDecoder, rest_chunk
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE};
 use google_cloud_aiplatform_v1 as vertexai;
-use rig_core::completion::CompletionRequest;
+use rig_core::completion::{CompletionRequest, Replay};
 use rig_core::driver::{Exchange, Opened, Opening, Transport};
 use rig_core::error::{EncodeError, ProviderError};
 use rig_core::operation::Completion;
@@ -71,7 +71,7 @@ impl Wire for GenerateContent {
         {
             return Err(EncodeError::request("Vertex AI temperature must be finite"));
         }
-        check_original_assistant_images(&request)?;
+        check_original_assistant_images(&request, self)?;
         let model = request.model.clone().unwrap_or_else(|| self.model.clone());
         let body = rest::request_body_for_vertex(&request, self, &model, None, |body| {
             if let Some(system) = body
@@ -125,12 +125,15 @@ impl Wire for GenerateContent {
 
 /// Check only caller/rebuilt assistant images. A current Native item's exact
 /// received bytes remain under the existing replay custody.
-fn check_original_assistant_images(request: &CompletionRequest) -> Result<(), EncodeError> {
+fn check_original_assistant_images(
+    request: &CompletionRequest,
+    target: &GenerateContent,
+) -> Result<(), EncodeError> {
     for message in &request.chat_history {
         if let rig_core::message::Message::Assistant(turn) = message {
             for block in &turn.content {
                 if let rig_core::message::AssistantContent::Image(image) = block
-                    && block.native_item().is_none()
+                    && !matches!(block.replay(target, None), Replay::Item(_))
                 {
                     check_assistant_image(image)?;
                 }
@@ -183,7 +186,7 @@ fn standard_signatures(content: &mut serde_json::Value) {
             .is_some_and(|text| BASE64.decode(text).is_err() && URL_SAFE.decode(text).is_err());
         if invalid {
             if let Some(fields) = part.as_object_mut() {
-                fields.remove("thoughtSignature");
+                fields.shift_remove("thoughtSignature");
             }
         } else if let Some(signature) = part.get_mut("thoughtSignature")
             && let Some(text) = signature.as_str()
@@ -266,7 +269,7 @@ impl rig_core::completion::ReplayTarget for GenerateContent {
                 }
             }
         }
-        check_original_assistant_images(request)
+        check_original_assistant_images(request, self)
     }
 
     fn api(&self) -> rig_core::message::Api {

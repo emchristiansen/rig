@@ -5,6 +5,8 @@ mod corpus_matrix;
 #[path = "cassette/corpus_matrix_checkpoint.rs"]
 mod corpus_matrix_checkpoint;
 mod prompt_caching;
+mod request_mismatch;
+mod request_witness;
 mod support;
 #[path = "cassette/turn_termination_matrix.rs"]
 mod turn_termination_matrix;

@@ -169,6 +169,8 @@ fn rebuilt<R: Reassemble<WireFrame>>(
 
 /// Each route rebuilds a streamed reply with its own wire's reassembler,
 /// and a default one is the chat route's, as the default route is.
+/// The Responses frame carries the `created_at` and `model` the strict
+/// Responses reader requires; without them its reassembler rebuilds nothing.
 #[test]
 fn each_route_rebuilds_its_own_document() {
     let chunk = serde_json::json!({
@@ -181,7 +183,14 @@ fn each_route_rebuilds_its_own_document() {
     let completed = serde_json::json!({
         "type": "response.completed",
         "sequence_number": 0,
-        "response": {"id": "resp_1", "object": "response", "status": "completed", "output": []}
+        "response": {
+            "id": "resp_1",
+            "object": "response",
+            "created_at": 1,
+            "model": "model",
+            "status": "completed",
+            "output": []
+        }
     });
     for (provider, frame) in [(chat(), &chunk), (responses(), &completed)] {
         let wire = OpenAiWire::new(provider, "model");
@@ -203,4 +212,52 @@ fn each_route_rebuilds_its_own_document() {
         rebuilt(OpenAiReassembler::default(), std::slice::from_ref(&chunk)),
         rebuilt(<Chat as Wire>::Reassembler::default(), &[chunk]),
     );
+}
+
+/// Each route answers with its own wire's decoder when the driver asks for
+/// one without naming a mode, as it does for its reassembler.
+#[test]
+fn each_route_decodes_with_its_own_decoder() {
+    assert!(matches!(
+        OpenAiWire::new(chat(), "model").decoder(),
+        OpenAiDecoder::Chat(_)
+    ));
+    assert!(matches!(
+        OpenAiWire::new(responses(), "model").decoder(),
+        OpenAiDecoder::Responses(_)
+    ));
+}
+
+/// An event classified by the other route's decoder is not this route's to
+/// read: it neither ends nor fails the reply and writes nothing into it,
+/// even when it is an end or a failure on its own route.
+#[test]
+fn a_decoder_passes_over_the_other_routes_event() {
+    let cases = [
+        (
+            chat(),
+            OpenAiEvent::Responses(ResponsesEvent::Failure("other route".to_owned())),
+        ),
+        (chat(), OpenAiEvent::Responses(ResponsesEvent::Sentinel)),
+        (responses(), OpenAiEvent::Chat(ChatEvent::Done)),
+        (
+            responses(),
+            OpenAiEvent::Chat(ChatEvent::BareText("other route".to_owned())),
+        ),
+    ];
+    for (provider, event) in cases {
+        let wire = OpenAiWire::new(provider, "model");
+        let request = CompletionRequest::new("probe");
+        let shared = std::sync::Mutex::new(crate::wire::Shared::<Completion>::new(
+            crate::test_utils::fold_for(&request, &wire, Mode::Streaming),
+        ));
+        let mut decoder = wire.decoder_in(Mode::Streaming);
+        let flow = decoder
+            .decode(event, Out::new(&shared))
+            .expect("the other route's event is no error on this one");
+        assert!(matches!(flow, Flow::More), "{flow:?}");
+        let shared = shared.lock().expect("reply state");
+        assert!(shared.items.is_empty());
+        assert!(shared.end.is_none());
+    }
 }

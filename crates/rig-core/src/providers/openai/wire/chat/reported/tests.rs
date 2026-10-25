@@ -204,28 +204,37 @@ fn annotated() -> Vec<Citation> {
 /// Hand-built: no Chat recording carries an annotation.
 #[tokio::test]
 async fn url_citations_cite_the_whole_text_on_both_reply_shapes() {
-    for dialect in [&OPENAI, &OPENROUTER, &XIAOMIMIMO] {
-        let unary = reply_of(
-            wire(dialect, "model"),
-            chat_reply(json!({"choices": [{"message": {"content": "Rig is a crate",
-                "annotations": annotations()}}]})),
-        )
-        .await;
-        assert_eq!(citations(&unary), vec![annotated()], "{}", dialect.name);
-
-        // OpenAI streams the annotations on a delta after the text.
-        let stream = chat_stream(&[
-            json!({"id": "c", "object": "chat.completion.chunk", "model": "m",
-                "choices": [{"index": 0, "delta": {"content": "Rig is "}}]}),
-            json!({"id": "c", "object": "chat.completion.chunk", "model": "m",
-                "choices": [{"index": 0, "delta": {"content": "a crate"}}]}),
-            json!({"id": "c", "object": "chat.completion.chunk", "model": "m",
-                "choices": [{"index": 0, "delta": {"annotations": annotations()},
-                    "finish_reason": "stop"}]}),
-        ]);
-        let streamed = streamed_and_refolded(wire(dialect, "model"), stream).await;
-        assert_eq!(citations(&streamed), citations(&unary), "{}", dialect.name);
+    for dialect in [&OPENAI, &XIAOMIMIMO] {
+        assert_url_citations_on_both_reply_shapes(dialect).await;
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_url_citations_cite_the_whole_text_on_both_reply_shapes() {
+    assert_url_citations_on_both_reply_shapes(&OPENROUTER).await;
+}
+
+async fn assert_url_citations_on_both_reply_shapes(dialect: &'static Dialect) {
+    let unary = reply_of(
+        wire(dialect, "model"),
+        chat_reply(json!({"choices": [{"message": {"content": "Rig is a crate",
+            "annotations": annotations()}}]})),
+    )
+    .await;
+    assert_eq!(citations(&unary), vec![annotated()], "{}", dialect.name);
+
+    // OpenAI streams the annotations on a delta after the text.
+    let stream = chat_stream(&[
+        json!({"id": "c", "object": "chat.completion.chunk", "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "Rig is "}}]}),
+        json!({"id": "c", "object": "chat.completion.chunk", "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "a crate"}}]}),
+        json!({"id": "c", "object": "chat.completion.chunk", "model": "m",
+            "choices": [{"index": 0, "delta": {"annotations": annotations()},
+                "finish_reason": "stop"}]}),
+    ]);
+    let streamed = streamed_and_refolded(wire(dialect, "model"), stream).await;
+    assert_eq!(citations(&streamed), citations(&unary), "{}", dialect.name);
 }
 
 /// Hand-built: no Mistral recording carries a `reference` chunk. Each cites

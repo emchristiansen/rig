@@ -24,13 +24,7 @@ fn request(history: Vec<Message>) -> CompletionRequest {
 }
 
 fn text(choice: &[AssistantContent]) -> String {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
+    rig_test_support::support::assistant_text(choice)
 }
 
 #[tokio::test]

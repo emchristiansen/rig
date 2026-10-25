@@ -46,11 +46,17 @@ pub(super) fn flatten_text_content_parts(
 /// Optionally strip names and flatten content using the supplied separator and
 /// text-only guard. With `merge_same_role`, join adjacent user or assistant text
 /// messages of the same role with newlines.
+///
+/// `reasoning_field` is the reasoning field the catalog names for the model.
+/// Assistant `reasoning_content` is kept when it is that field (upstream sends
+/// it for such a model on any gateway) and removed otherwise. A kept field
+/// survives a same-role merge: the non-empty values are joined with newlines.
 pub(super) fn sanitize_plain_text_history(
     messages: &mut Vec<serde_json::Value>,
     flatten: Option<(&str, bool)>,
     strip_names: bool,
     merge_same_role: bool,
+    reasoning_field: Option<&str>,
 ) {
     messages
         .retain(|message| message.get("role").and_then(serde_json::Value::as_str) != Some("tool"));
@@ -60,11 +66,13 @@ pub(super) fn sanitize_plain_text_history(
             continue;
         };
         if object.get("role").and_then(serde_json::Value::as_str) == Some("assistant") {
-            object.remove("tool_calls");
-            object.remove("reasoning_content");
+            object.shift_remove("tool_calls");
+            if reasoning_field != Some("reasoning_content") {
+                object.shift_remove("reasoning_content");
+            }
         }
         if strip_names {
-            object.remove("name");
+            object.shift_remove("name");
         }
         if let Some((separator, only_if_all_text)) = flatten
             && let Some(content) = object.get_mut("content")
@@ -108,6 +116,16 @@ pub(super) fn sanitize_plain_text_history(
             && let Some(previous) = merged.last_mut().and_then(serde_json::Value::as_object_mut)
         {
             previous.insert("content".to_string(), serde_json::Value::String(text));
+            if let Some(field) = reasoning_field
+                && let Some(reasoning) = message.get(field).and_then(serde_json::Value::as_str)
+                && !reasoning.is_empty()
+            {
+                let joined = match previous.get(field).and_then(serde_json::Value::as_str) {
+                    Some(earlier) if !earlier.is_empty() => format!("{earlier}\n{reasoning}"),
+                    _ => reasoning.to_owned(),
+                };
+                previous.insert(field.to_owned(), serde_json::Value::String(joined));
+            }
             continue;
         }
         merged.push(message);
@@ -150,24 +168,19 @@ pub(crate) fn fold_groq_native_tools(
     Ok(())
 }
 
-/// The fork's direct finish vocabulary, plus explicit upstream dialect extensions.
+/// The shared Chat finish vocabulary (the fork's direct spellings plus the
+/// `end`, `eos`, `end_turn` and `stop_sequence` compatible servers send for a
+/// natural stop), then explicit dialect extensions. Anything else is
+/// [`FinishReason::Other`].
 pub(super) fn carried_finish_reason(reason: &str, quirks: &Quirks) -> FinishReason {
-    let known = match reason {
-        "stop" => Some(FinishReason::Stop),
-        "length" | "max_tokens" | "model_length" => Some(FinishReason::Length),
-        "tool_calls" | "function_call" => Some(FinishReason::ToolCalls),
-        "content_filter" => Some(FinishReason::ContentFilter),
-        _ => None,
-    };
-    known
-        .or_else(|| {
-            quirks
-                .finishes
-                .iter()
-                .find(|(name, _)| *name == reason)
-                .map(|(_, finish)| finish.clone())
-        })
-        .unwrap_or_else(|| FinishReason::Other(reason.to_owned()))
+    crate::providers::internal::openai_chat_completions_compatible::CHAT_FINISHES
+        .iter()
+        .chain(quirks.finishes.iter())
+        .find(|(name, _)| *name == reason)
+        .map_or_else(
+            || FinishReason::Other(reason.to_owned()),
+            |(_, finish)| finish.clone(),
+        )
 }
 
 /// Known carried blocks replay with F's ordered indices and exact signatures.
@@ -231,10 +244,10 @@ pub(super) fn prepare_whole_calls(
             // keep the malformed reply loud, too.
             let mut probe = calls.clone();
             for call in &mut probe {
-                if incomplete(call) {
-                    if let Some(arguments) = call.pointer_mut("/function/arguments") {
-                        *arguments = Value::String("{}".to_owned());
-                    }
+                if incomplete(call)
+                    && let Some(arguments) = call.pointer_mut("/function/arguments")
+                {
+                    *arguments = Value::String("{}".to_owned());
                 }
             }
             if let Err(error) =
@@ -256,7 +269,6 @@ pub(super) fn prepare_whole_calls(
             let parsed = crate::json_utils::parse_tool_arguments(raw);
             let incomplete = raw.trim().is_empty() || parsed.is_err();
             let function_shape = call.str("type").is_none_or(|kind| kind == "function")
-                && call.str("id").is_some()
                 && call
                     .pointer("/function/name")
                     .and_then(Value::as_str)
@@ -280,10 +292,11 @@ pub(super) fn prepare_whole_calls(
 
 // Private validation shapes for F's budget-repair probe; output stays the
 // original value, never this parse. No retired provider DTO is reintroduced.
+// The call `id` is not required: the decoder accepts an id-less call on
+// every other path (streamed, and whole without a length cut), so the cut
+// path discards it the same way rather than failing the reply.
 #[derive(serde::Deserialize)]
 struct BudgetFunctionCall {
-    #[serde(rename = "id")]
-    _id: String,
     #[serde(default, rename = "type")]
     _kind: BudgetFunctionKind,
     #[serde(rename = "function")]
@@ -322,14 +335,13 @@ pub(super) fn check_choice_list(
     if frame
         .get("choices")
         .is_some_and(|choices| !choices.is_null() && !choices.is_array())
+        && let Err(error) = serde_json::from_str::<Choices>(source)
     {
-        if let Err(error) = serde_json::from_str::<Choices>(source) {
-            return Err(crate::error::CorruptFrame::text(
-                frame.str("object").map(str::to_owned),
-                source,
-                error,
-            ));
-        }
+        return Err(crate::error::CorruptFrame::text(
+            frame.str("object").map(str::to_owned),
+            source,
+            error,
+        ));
     }
     Ok(())
 }

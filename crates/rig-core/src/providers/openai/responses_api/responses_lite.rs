@@ -221,8 +221,8 @@ pub(crate) fn shape_body(
         }));
     }
     input.splice(0..0, prefix);
-    body.remove("tools");
-    body.remove("instructions");
+    body.shift_remove("tools");
+    body.shift_remove("instructions");
     Ok(())
 }
 

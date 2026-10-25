@@ -160,17 +160,21 @@ pub(super) fn folded_body_with(
         )
         .outcome
     } else {
-        assert!(
-            !options.immediate_tool_calls,
-            "EOF fixture uses the real default OpenAI wire"
-        );
-        let mut driven = drive(frames);
+        let mut driven = drive_eof(options, frames);
         if driven.errors.is_empty() {
             Ok(driven.response)
         } else {
             Err(driven.errors.remove(0))
         }
     }
+}
+
+fn drive_eof(options: super::super::ResponsesStreamOptions, frames: &[Value]) -> Driven {
+    assert!(
+        !options.immediate_tool_calls,
+        "EOF fixture uses the real default OpenAI wire"
+    );
+    drive(frames)
 }
 
 pub(super) fn response_choice_labels(choice: &[AssistantContent]) -> Vec<&str> {

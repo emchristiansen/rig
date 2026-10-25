@@ -4,7 +4,6 @@ use rig_core::message::{
     AssistantContent, AssistantMessage, CallId, Message, Text, ToolCall, ToolChoice, ToolFunction,
     ToolName, ToolResult, ToolResultContent, UserContent,
 };
-use rig_core::wire::Wire as _;
 
 fn name(value: &str) -> ToolName {
     ToolName::new(value).expect("the fixture tool name is nonempty")
@@ -416,7 +415,7 @@ fn generation_config_maps_supported_fields_and_typed_fields_take_precedence() {
         "generationConfig": {
             "temperature": 0.2,
             "maxOutputTokens": 20,
-            "candidateCount": 2,
+            "candidateCount": 1,
             "stopSequences": ["END"],
             "responseMimeType": "application/json",
             "responseJsonSchema": { "type": "object" },
@@ -469,6 +468,43 @@ fn generation_config_maps_supported_fields_and_typed_fields_take_precedence() {
     let image = config.image_config.expect("image config should be mapped");
     assert_eq!(image.aspect_ratio.as_deref(), Some("16:9"));
     assert_eq!(image.image_size.as_deref(), Some("1K"));
+}
+
+#[test]
+fn a_caller_candidate_count_above_one_is_refused_on_the_actual_sdk_wire() {
+    for (raw, spelling, count) in [
+        (
+            serde_json::json!({"generationConfig": {"candidateCount": 2}}),
+            "candidateCount",
+            serde_json::json!(2),
+        ),
+        (
+            serde_json::json!({"generationConfig": {"candidate_count": "3"}}),
+            "candidate_count",
+            serde_json::json!("3"),
+        ),
+    ] {
+        let mut request = minimal_request();
+        request.additional_params = Some(raw);
+        let error = ProviderError::from(
+            sdk_request(request).expect_err("a count above 1 is refused, not lowered to 1"),
+        );
+        let ProviderError::Request(source) = &error else {
+            panic!("a request refusal, got {error:?}")
+        };
+        let refusal = source
+            .downcast_ref::<rest::UnsupportedVertexCandidateCount>()
+            .expect("the refusal is typed");
+        assert_eq!((refusal.spelling, &refusal.count), (spelling, &count));
+    }
+    let mut request = minimal_request();
+    request.additional_params =
+        Some(serde_json::json!({"generationConfig": {"candidateCount": 1}}));
+    let config = sdk_request(request)
+        .expect("one candidate encodes")
+        .generation_config
+        .expect("generation config should exist");
+    assert_eq!(config.candidate_count, Some(1));
 }
 
 #[test]
@@ -535,8 +571,7 @@ fn generation_config_typed_temperature_overrides_out_of_range_provider_temperatu
 
 /// This exact original reply has no finish reason and cannot finish a unary turn.
 #[test]
-fn test_assistant_image_response_round_trips_through_history_in_order()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_assistant_image_response_round_trips_through_history_in_order() -> anyhow::Result<()> {
     let raw_image = vec![0, 1, 2, 255];
     let response = vertexai::model::GenerateContentResponse::new().set_candidates([
         vertexai::model::Candidate::new().set_content(
@@ -555,55 +590,81 @@ fn test_assistant_image_response_round_trips_through_history_in_order()
     ]);
     let received =
         serde_json::Value::Object(crate::types::completion_response::rest_chunk(&response)?);
-    assert!(received.pointer("/candidates/0/finishReason").is_none());
+    anyhow::ensure!(
+        received.pointer("/candidates/0/finishReason").is_none(),
+        "the original response must have no finish reason"
+    );
     let wire = GenerateContent::new(GEMINI_2_5_FLASH);
     let (partial, ended) =
         rig_core::test_utils::history_conformance::partial(&wire, Mode::Unary, [response.clone()]);
-    assert!(!ended);
-    assert!(partial.stop().is_failure());
-    assert_eq!(partial.choice.len(), 3);
+    anyhow::ensure!(!ended, "the original incomplete response must not end");
+    anyhow::ensure!(
+        partial.stop().is_failure(),
+        "the incomplete partial must have a failed stop"
+    );
+    anyhow::ensure!(partial.choice.len() == 3, "partial content count changed");
     let [
         AssistantContent::Text(before),
         AssistantContent::Image(image),
         AssistantContent::Text(after),
     ] = partial.choice.as_slice()
     else {
-        return Err("the original partial must retain before/image/after in order".into());
+        return Err(anyhow::anyhow!(
+            "the original partial must retain before/image/after in order"
+        ));
     };
-    assert_eq!(before.text.as_str(), "before");
-    assert_eq!(after.text.as_str(), "after");
-    assert_eq!(
-        image.media_type,
-        Some(rig_core::message::ImageMediaType::PNG)
+    anyhow::ensure!(
+        before.text.as_str() == "before",
+        "partial leading text changed"
     );
-    assert!(
+    anyhow::ensure!(
+        after.text.as_str() == "after",
+        "partial trailing text changed"
+    );
+    anyhow::ensure!(
+        image.media_type == Some(rig_core::message::ImageMediaType::PNG),
+        "partial image media type changed"
+    );
+    anyhow::ensure!(
         image.native.is_none(),
         "a failed turn exposes canonical partial content"
     );
     let rig_core::message::DocumentSourceKind::Base64(encoded) = &image.data else {
-        return Err("the received partial image must retain base64 bytes".into());
+        return Err(anyhow::anyhow!(
+            "the received partial image must retain base64 bytes"
+        ));
     };
-    assert_eq!(base64::Engine::decode(&BASE64, encoded)?, raw_image);
-    assert_eq!(
+    anyhow::ensure!(
+        base64::Engine::decode(&BASE64, encoded)? == raw_image,
+        "partial image bytes changed"
+    );
+    anyhow::ensure!(
         received
             .pointer("/candidates/0/content/parts/1/inlineData/mimeType")
-            .and_then(serde_json::Value::as_str),
-        Some("image/png")
+            .and_then(serde_json::Value::as_str)
+            == Some("image/png"),
+        "received image MIME type changed"
     );
     let received_data = received
         .pointer("/candidates/0/content/parts/1/inlineData/data")
         .and_then(serde_json::Value::as_str)
-        .ok_or("received image bytes missing")?;
-    assert_eq!(encoded, received_data);
+        .ok_or_else(|| anyhow::anyhow!("received image bytes missing"))?;
+    anyhow::ensure!(
+        encoded == received_data,
+        "partial image source differs from received data"
+    );
 
     let unary = rig_core::test_utils::history::decode(&wire, Mode::Unary, [response]);
-    assert!(matches!(unary, Err(ProviderError::Truncated)));
+    anyhow::ensure!(
+        matches!(unary, Err(ProviderError::Truncated)),
+        "incomplete unary response must be truncated"
+    );
     Ok(())
 }
 
 #[test]
 fn completed_assistant_image_replays_all_three_received_parts_through_prepared_history()
--> Result<(), Box<dyn std::error::Error>> {
+-> anyhow::Result<()> {
     use rig_core::wire::Operation as _;
     let raw_image = vec![0, 1, 2, 255];
     let parts = vec![
@@ -633,26 +694,35 @@ fn completed_assistant_image_replays_all_three_received_parts_through_prepared_h
         AssistantContent::Text(after),
     ] = response.choice.as_slice()
     else {
-        return Err("the completed turn must contain before/image/after".into());
+        return Err(anyhow::anyhow!(
+            "the completed turn must contain before/image/after"
+        ));
     };
-    assert_eq!(before.text, "before");
-    assert_eq!(after.text, "after");
-    assert_eq!(
-        image.media_type,
-        Some(rig_core::message::ImageMediaType::PNG)
+    anyhow::ensure!(before.text == "before", "completed leading text changed");
+    anyhow::ensure!(after.text == "after", "completed trailing text changed");
+    anyhow::ensure!(
+        image.media_type == Some(rig_core::message::ImageMediaType::PNG),
+        "completed image media type changed"
     );
-    assert_eq!(
-        content.native_item(),
-        Some(&serde_json::to_value(&parts[1])?)
+    anyhow::ensure!(
+        content.native_item() == Some(&serde_json::to_value(&parts[1])?),
+        "completed native image part changed"
     );
     let rig_core::message::DocumentSourceKind::Base64(data) = &image.data else {
-        return Err("the completed image must retain base64 source".into());
+        return Err(anyhow::anyhow!(
+            "the completed image must retain base64 source"
+        ));
     };
-    assert_eq!(base64::Engine::decode(&BASE64, data)?, raw_image);
+    anyhow::ensure!(
+        base64::Engine::decode(&BASE64, data)? == raw_image,
+        "completed image bytes changed"
+    );
     let request = rig_core::operation::Completion::prepare(
         CompletionRequest::from(vec![
             Message::user("inspect"),
-            response.message().ok_or("completed message missing")?,
+            response
+                .message()
+                .ok_or_else(|| anyhow::anyhow!("completed message missing"))?,
             Message::user("continue"),
         ]),
         &wire.describe(),
@@ -661,23 +731,34 @@ fn completed_assistant_image_replays_all_three_received_parts_through_prepared_h
     let replayed = encoded
         .contents
         .get(1)
-        .ok_or("replayed model turn missing")?;
-    assert_eq!(replayed.role, "model");
-    assert_eq!(replayed.parts.len(), 3);
-    assert_eq!(replayed.parts, parts);
-    assert_eq!(replayed.parts[0].text(), Some(&"before".to_owned()));
-    assert_eq!(replayed.parts[2].text(), Some(&"after".to_owned()));
+        .ok_or_else(|| anyhow::anyhow!("replayed model turn missing"))?;
+    anyhow::ensure!(replayed.role == "model", "replayed role changed");
+    anyhow::ensure!(replayed.parts.len() == 3, "replayed part count changed");
+    anyhow::ensure!(replayed.parts == parts, "replayed parts changed");
+    anyhow::ensure!(
+        replayed.parts[0].text() == Some(&"before".to_owned()),
+        "replayed leading text changed"
+    );
+    anyhow::ensure!(
+        replayed.parts[2].text() == Some(&"after".to_owned()),
+        "replayed trailing text changed"
+    );
     let blob = replayed.parts[1]
         .inline_data()
-        .ok_or("replayed inline image missing")?;
-    assert_eq!(blob.mime_type, "image/png");
-    assert_eq!(blob.data.as_ref(), raw_image.as_slice());
+        .ok_or_else(|| anyhow::anyhow!("replayed inline image missing"))?;
+    anyhow::ensure!(
+        blob.mime_type == "image/png",
+        "replayed image MIME type changed"
+    );
+    anyhow::ensure!(
+        blob.data.as_ref() == raw_image.as_slice(),
+        "replayed image bytes changed"
+    );
     Ok(())
 }
 
 #[test]
-fn real_vertex_decoder_selects_all_five_closed_image_mimes()
--> Result<(), Box<dyn std::error::Error>> {
+fn real_vertex_decoder_selects_all_five_closed_image_mimes() -> anyhow::Result<()> {
     use rig_core::message::{DocumentSourceKind, ImageMediaType};
     for (mime, expected) in [
         ("image/jpeg", ImageMediaType::JPEG),
@@ -706,22 +787,35 @@ fn real_vertex_decoder_selects_all_five_closed_image_mimes()
             [response],
         )?;
         let [content @ AssistantContent::Image(image)] = decoded.choice.as_slice() else {
-            return Err("real Vertex decoder must select each admitted image mime".into());
+            return Err(anyhow::anyhow!(
+                "real Vertex decoder must select each admitted image mime"
+            ));
         };
-        assert_eq!(image.media_type, Some(expected));
-        let DocumentSourceKind::Base64(data) = &image.data else {
-            return Err("real Vertex image must retain base64 source".into());
-        };
-        assert_eq!(base64::Engine::decode(&BASE64, data)?, [0, 1, 2, 255]);
-        let received_part = serde_json::to_value(&part)?;
-        assert_eq!(content.native_item(), Some(&received_part));
-        assert_eq!(
-            decoded.raw.pointer("/candidates/0/content/parts/0"),
-            Some(&received_part)
+        anyhow::ensure!(
+            image.media_type == Some(expected),
+            "decoded image media type changed"
         );
-        assert_eq!(
-            decoded.origin.provider,
-            crate::types::completion_response::PROVIDER_NAME
+        let DocumentSourceKind::Base64(data) = &image.data else {
+            return Err(anyhow::anyhow!(
+                "real Vertex image must retain base64 source"
+            ));
+        };
+        anyhow::ensure!(
+            base64::Engine::decode(&BASE64, data)? == [0, 1, 2, 255],
+            "decoded image bytes changed"
+        );
+        let received_part = serde_json::to_value(&part)?;
+        anyhow::ensure!(
+            content.native_item() == Some(&received_part),
+            "native image part changed"
+        );
+        anyhow::ensure!(
+            decoded.raw.pointer("/candidates/0/content/parts/0") == Some(&received_part),
+            "raw received image part changed"
+        );
+        anyhow::ensure!(
+            decoded.origin.provider == crate::types::completion_response::PROVIDER_NAME,
+            "decoded image provider changed"
         );
     }
     Ok(())
@@ -729,7 +823,7 @@ fn real_vertex_decoder_selects_all_five_closed_image_mimes()
 
 #[test]
 fn real_vertex_decoder_keeps_unselected_media_and_sdk_unknown_fields_inspection()
--> Result<(), Box<dyn std::error::Error>> {
+-> anyhow::Result<()> {
     let ordinary = || {
         vertexai::model::Part::new().set_inline_data(
             vertexai::model::Blob::new()
@@ -760,9 +854,8 @@ fn real_vertex_decoder_keeps_unselected_media_and_sdk_unknown_fields_inspection(
         serde_json::json!({"inlineData":{"mimeType":"image/png","data":"AAEC/w==","displayName":"original.png"}}),
     ] {
         let part: vertexai::model::Part = serde_json::from_value(raw.clone())?;
-        assert_eq!(
-            serde_json::to_value(&part)?,
-            raw,
+        anyhow::ensure!(
+            serde_json::to_value(&part)? == raw,
             "the actual SDK retains unknown fields"
         );
         parts.push(part);
@@ -784,20 +877,27 @@ fn real_vertex_decoder_keeps_unselected_media_and_sdk_unknown_fields_inspection(
             [response],
         )?;
         let [AssistantContent::CarriedText(media)] = decoded.choice.as_slice() else {
-            return Err("unselected SDK media must retain its inspection carrier".into());
+            return Err(anyhow::anyhow!(
+                "unselected SDK media must retain its inspection carrier"
+            ));
         };
-        assert_eq!(
-            media.content,
-            rig_core::message::CarriedTextContent::InspectionOnlyMedia(String::new())
+        anyhow::ensure!(
+            media.content
+                == rig_core::message::CarriedTextContent::InspectionOnlyMedia(String::new()),
+            "unselected media inspection content changed"
         );
-        assert_eq!(media.payload.item, received_part);
-        assert_eq!(
-            decoded.raw.pointer("/candidates/0/content/parts/0"),
-            Some(&received_part)
+        anyhow::ensure!(
+            media.payload.item == received_part,
+            "inspection payload changed"
         );
-        assert_eq!(
-            media.payload.provider.as_deref(),
-            Some(crate::types::completion_response::PROVIDER_NAME)
+        anyhow::ensure!(
+            decoded.raw.pointer("/candidates/0/content/parts/0") == Some(&received_part),
+            "raw received inspection part changed"
+        );
+        anyhow::ensure!(
+            media.payload.provider.as_deref()
+                == Some(crate::types::completion_response::PROVIDER_NAME),
+            "inspection provider changed"
         );
     }
     Ok(())

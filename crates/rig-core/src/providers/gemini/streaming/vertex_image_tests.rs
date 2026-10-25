@@ -1,6 +1,6 @@
 use super::*;
 use crate::completion::{CompletionRequest, CompletionResponse, ProviderResponseHeaders};
-use crate::message::{AssistantContent, CarriedTextContent};
+use crate::message::{AssistantContent, CarriedText, CarriedTextContent};
 use crate::wire::{Call, Operation as _, Reply, Shared, Wire as _};
 use base64::Engine as _;
 use std::sync::Mutex;
@@ -55,6 +55,11 @@ fn assert_inspection(response: &CompletionResponse, part: &Value) -> TestResult 
     let [AssistantContent::CarriedText(media)] = response.choice.as_slice() else {
         return Err("unselected inline media must retain its inspection carrier".into());
     };
+    assert_inspection_fields(response, part, media);
+    Ok(())
+}
+
+fn assert_inspection_fields(response: &CompletionResponse, part: &Value, media: &CarriedText) {
     assert_eq!(
         media.content,
         CarriedTextContent::InspectionOnlyMedia(String::new())
@@ -68,11 +73,10 @@ fn assert_inspection(response: &CompletionResponse, part: &Value) -> TestResult 
         media.payload.provider.as_deref(),
         Some(super::super::completion::PROVIDER_NAME)
     );
-    Ok(())
 }
 
 #[test]
-fn closed_vertex_selection_accepts_each_of_the_five_image_mimes() -> TestResult {
+fn closed_vertex_selection_accepts_each_of_the_five_image_mimes() {
     for (mime, expected) in [
         ("image/jpeg", ImageMediaType::JPEG),
         ("image/png", ImageMediaType::PNG),
@@ -85,17 +89,19 @@ fn closed_vertex_selection_accepts_each_of_the_five_image_mimes() -> TestResult 
             if explicit_false {
                 part["thought"] = Value::Bool(false);
             }
-            let response = selected(part.clone())?;
+            let response = selected(part.clone()).expect("selected inline image decodes");
             let [content @ AssistantContent::Image(image)] = response.choice.as_slice() else {
-                return Err("selected ordinary inline part must produce an image".into());
+                panic!("selected ordinary inline part must produce an image");
             };
             assert_eq!(image.media_type, Some(expected.clone()));
             let DocumentSourceKind::Base64(data) = &image.data else {
-                return Err("selected image must retain base64 source".into());
+                panic!("selected image must retain base64 source");
             };
             assert_eq!(data, "AAEC/w==");
             assert_eq!(
-                base64::prelude::BASE64_STANDARD.decode(data)?,
+                base64::prelude::BASE64_STANDARD
+                    .decode(data)
+                    .expect("selected image retains valid base64"),
                 [0, 1, 2, 255]
             );
             assert_eq!(content.native_item(), Some(&part));
@@ -105,11 +111,10 @@ fn closed_vertex_selection_accepts_each_of_the_five_image_mimes() -> TestResult 
             );
         }
     }
-    Ok(())
 }
 
 #[test]
-fn default_rest_keeps_all_five_image_mimes_as_exact_inspection() -> TestResult {
+fn default_rest_keeps_all_five_image_mimes_as_exact_inspection() {
     let wire = super::super::completion::GenerateContent::new(
         super::super::GeminiConfig::new("test-key"),
         "gemini-2.5-flash",
@@ -127,10 +132,10 @@ fn default_rest_keeps_all_five_image_mimes_as_exact_inspection() -> TestResult {
             &wire,
             Mode::Unary,
             [WireFrame::Text(body(part.clone()).to_string())],
-        )?;
-        assert_inspection(&response, &part)?;
+        )
+        .expect("ordinary REST inline media decodes");
+        assert_inspection(&response, &part).expect("inline media retains exact inspection");
     }
-    Ok(())
 }
 
 #[test]
@@ -184,14 +189,18 @@ fn vertex_selection_keeps_other_nested_metadata_inspection() -> TestResult {
 }
 
 #[test]
-fn vertex_selection_keeps_an_unselected_modeled_sibling_inspection() -> TestResult {
+fn vertex_selection_keeps_an_unselected_modeled_sibling_inspection() {
     let mut part = inline("image/png");
     // preserve_order keeps inlineData selected; the unselected modeled sibling
     // remains exact inspection evidence rather than becoming an image payload.
     part["functionCall"] = serde_json::json!({"unselected":[0,1,2,255]});
     assert_eq!(
-        reader::select(part.as_object().ok_or("part object missing")?),
+        reader::select(part.as_object().expect("part object missing")),
         Some(reader::SelectedKind::InlineData)
     );
-    assert_inspection(&selected(part.clone())?, &part)
+    assert_inspection(
+        &selected(part.clone()).expect("unselected modeled sibling decodes"),
+        &part,
+    )
+    .expect("unselected modeled sibling retains exact inspection");
 }

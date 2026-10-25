@@ -430,7 +430,7 @@ fn a_stream_without_nested_type_infers_only_the_unary_document_tag() {
     let mut expected = opened["message"].clone();
     assert!(expected.get("type").is_none());
     expected["type"] = json!("message");
-    assert_eq!(rebuilt(&[opened.clone()]), expected);
+    assert_eq!(rebuilt(std::slice::from_ref(&opened)), expected);
     assert!(opened["message"].get("type").is_none());
     assert_eq!(
         serde_json::from_str::<Value>(OPEN).expect("unchanged received start"),

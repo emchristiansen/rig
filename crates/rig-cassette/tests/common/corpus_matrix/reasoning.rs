@@ -110,12 +110,11 @@ pub(crate) fn assert_log(cell: &Cell, wire: ThinkingWire, log: &EffectLog) {
         let parts = &response.choice;
         let thinking = cell.thinking == Thinking::On
             || (cell.thinking == Thinking::SecondTurnOnly && index == 1);
+        // The port decodes Responses reasoning items and Gemini thought runs
+        // as carried reasoning.
         let reasoning: Vec<_> = parts
             .iter()
-            .filter_map(|part| match part {
-                AssistantContent::Reasoning(block) => Some(block),
-                _ => None,
-            })
+            .filter(|part| rig_test_support::support::is_reasoning(part))
             .collect();
         // Row 2 requires reasoning on the tool turn. Its final answer may
         // need no further thinking; preserve any reasoning the wire does send.
@@ -130,17 +129,16 @@ pub(crate) fn assert_log(cell: &Cell, wire: ThinkingWire, log: &EffectLog) {
                 "{}: visible reasoning: {parts:?}",
                 cell.name
             );
-            assert!(matches!(
-                parts.first(),
-                Some(AssistantContent::Reasoning(_))
-            ));
+            assert!(
+                parts
+                    .first()
+                    .is_some_and(rig_test_support::support::is_reasoning)
+            );
             match wire {
                 ThinkingWire::OpenAiResponses => {
-                    let item = |block: &&rig_core::message::Reasoning, key: &str| {
-                        block
-                            .native
-                            .as_ref()
-                            .and_then(|native| native.item.get(key))
+                    let item = |block: &&AssistantContent, key: &str| {
+                        rig_test_support::support::provider_item(block)
+                            .and_then(|item| item.get(key))
                             .and_then(serde_json::Value::as_str)
                             .is_some_and(|value| !value.is_empty())
                     };
@@ -155,10 +153,11 @@ pub(crate) fn assert_log(cell: &Cell, wire: ThinkingWire, log: &EffectLog) {
                     // A signature stays on the part that carried it: its
                     // provider item holds it.
                     assert!(
-                        parts.iter().any(|part| part
-                            .native_item()
-                            .and_then(|item| item.get("thoughtSignature"))
-                            .is_some()),
+                        parts.iter().any(|part| {
+                            rig_test_support::support::provider_item(part)
+                                .and_then(|item| item.get("thoughtSignature"))
+                                .is_some()
+                        }),
                         "{}: the Gemini signature is preserved",
                         cell.name
                     );
@@ -224,17 +223,15 @@ pub(crate) fn assert_log(cell: &Cell, wire: ThinkingWire, log: &EffectLog) {
             assert!(
                 !parts
                     .iter()
-                    .any(|part| matches!(part, AssistantContent::Text(_))),
+                    .any(|part| rig_test_support::support::block_text(part).is_some()),
                 "{}: the tool turn has no prose",
                 cell.name
             );
         } else {
             assert!(calls.is_empty());
-            assert!(
-                parts.iter().any(
-                    |part| matches!(part, AssistantContent::Text(text) if !text.text.is_empty())
-                )
-            );
+            assert!(parts.iter().any(|part| {
+                rig_test_support::support::block_text(part).is_some_and(|text| !text.is_empty())
+            }));
         }
     }
     let tools = log

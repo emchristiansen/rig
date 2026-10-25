@@ -307,7 +307,7 @@ fn synthetic_reasoning_provider_and_identity_boundaries_keep_old_no_tools_bodies
                     .item
                     .as_object_mut()
                     .expect("raw object")
-                    .remove("id");
+                    .shift_remove("id");
             }
             "wrong_kind" => reason.payload.item["type"] = json!("synthetic_wrong_kind"),
             "absent_raw_cipher" => {
@@ -316,7 +316,7 @@ fn synthetic_reasoning_provider_and_identity_boundaries_keep_old_no_tools_bodies
                     .item
                     .as_object_mut()
                     .expect("raw object")
-                    .remove("encrypted_content");
+                    .shift_remove("encrypted_content");
             }
             "cipher_mismatch" => {
                 for part in &mut reason.content {
@@ -344,11 +344,11 @@ fn synthetic_reasoning_provider_and_identity_boundaries_keep_old_no_tools_bodies
                     .item
                     .as_object_mut()
                     .expect("raw object")
-                    .remove("encrypted_content");
+                    .shift_remove("encrypted_content");
                 projected
                     .as_object_mut()
                     .expect("expected object")
-                    .remove("encrypted_content");
+                    .shift_remove("encrypted_content");
             }
             _ => unreachable!("listed synthetic boundary"),
         }
@@ -465,11 +465,11 @@ fn synthetic_carried_follower_boundaries_omit_only_qualified_reasoning() {
             "foreign_provider" => text.payload.provider = Some("synthetic-foreign".to_owned()),
             "no_id" => {
                 text.item_id = None;
-                sent.as_object_mut().expect("message").remove("id");
+                sent.as_object_mut().expect("message").shift_remove("id");
             }
             "empty_id" => {
                 text.item_id = Some(String::new());
-                sent.as_object_mut().expect("message").remove("id");
+                sent.as_object_mut().expect("message").shift_remove("id");
             }
             "wrong_kind" => {
                 text.payload.item["type"] = json!("refusal");
@@ -498,7 +498,7 @@ fn synthetic_carried_follower_boundaries_omit_only_qualified_reasoning() {
         if matches!(boundary, "inspection_text" | "inspection_media" | "signed") {
             sent.as_object_mut()
                 .expect("projected known text")
-                .remove("phase");
+                .shift_remove("phase");
         }
         assert_eq!(
             send(&source, &target, &input, false, true)
@@ -567,7 +567,7 @@ fn wrong_position_and_edited_opaque_followers_keep_their_original_errors() {
 }
 
 #[test]
-fn gateway_reasoning_keeps_the_existing_no_tools_route() {
+fn openrouter_gateway_reasoning_keeps_the_existing_no_tools_route() {
     let target = OpenAIConfig::with_key(
         &crate::providers::openai::wire::OPENROUTER,
         "synthetic-test-key",
@@ -621,18 +621,21 @@ fn unknown_origin_history_preserves_the_existing_carried_route() {
 }
 
 #[test]
-fn actual_chat_api_keeps_the_existing_carried_text_preflight_refusal() {
+fn actual_chat_api_sends_known_responses_text_as_its_text() {
+    // Only opaque Responses parts are refused by a foreign destination; known
+    // output_text and refusal parts go as their text, as the fork's
+    // converters sent them.
     let source = received(&wire(), vec![reasoning(), answer(answer_parts())]);
     let target = OpenAIConfig::new("synthetic-test-key").chat("gpt-5.4");
-    let error = send(&source, &target, &history(&source), false, true)
+    let body = send(&source, &target, &history(&source), false, true)
         .0
-        .expect_err("Chat refuses Responses carried text");
-    let ProviderError::Request(source) = error else {
-        panic!("typed Chat Request refusal");
-    };
+        .expect("Chat sends known Responses text");
     assert_eq!(
-        source.downcast_ref::<UnrepresentableOpaqueContent>(),
-        Some(&UnrepresentableOpaqueContent::new("openai"))
+        body["messages"][1]["content"],
+        json!([
+            {"type": "text", "text": "answer"},
+            {"type": "text", "text": "declined"}
+        ])
     );
 }
 

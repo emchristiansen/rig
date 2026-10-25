@@ -200,18 +200,14 @@ pub trait ReplayTarget: std::fmt::Debug + WasmCompatSync {
         Ok(())
     }
 
-    /// Accept carried known-text projections without giving their payload replay
-    /// authority. Responses parts require a destination's explicit replay policy.
+    /// Accept carried known text ([`CarriedText::foreign_text`]) without giving
+    /// its payload replay authority. An opaque Responses part requires a
+    /// destination's explicit replay policy.
     fn check_carried_text(&self, part: &CarriedText) -> Result<(), UnrepresentableOpaqueContent> {
-        match &part.content {
-            CarriedTextContent::GeminiSignedAnswer(_)
-            | CarriedTextContent::InspectionOnlyText(_)
-            | CarriedTextContent::InspectionOnlyMedia(_) => Ok(()),
-            CarriedTextContent::Text(_)
-            | CarriedTextContent::Refusal(_)
-            | CarriedTextContent::Opaque(_) => {
-                Err(UnrepresentableOpaqueContent::new(self.provider()))
-            }
+        if part.foreign_text().is_some() {
+            Ok(())
+        } else {
+            Err(UnrepresentableOpaqueContent::new(self.provider()))
         }
     }
 
@@ -592,12 +588,8 @@ impl AssistantContent {
                 remove_pointer(item.to_mut(), slot);
                 Replay::Item(item)
             }
-            Replay::Identity(identity) => {
-                let mut value = serde_json::Value::Object(identity);
-                remove_pointer(&mut value, slot);
-                let serde_json::Value::Object(identity) = value else {
-                    unreachable!("removing a field preserves the identity object");
-                };
+            Replay::Identity(mut identity) => {
+                remove_map_pointer(&mut identity, slot);
                 if identity.is_empty() {
                     Replay::Rebuild
                 } else {
@@ -621,8 +613,41 @@ fn remove_pointer(item: &mut serde_json::Value, pointer: &str) {
     else {
         return;
     };
+    remove_pointer_field(fields, key);
+}
+
+/// Remove one field while keeping the identity's object root typed.
+fn remove_map_pointer(identity: &mut serde_json::Map<String, serde_json::Value>, pointer: &str) {
+    let Some((parent, key)) = pointer.rsplit_once('/') else {
+        return;
+    };
+    if parent.is_empty() {
+        remove_pointer_field(identity, key);
+        return;
+    }
+    let Some(parent) = parent.strip_prefix('/') else {
+        return;
+    };
+    let (first, rest) = parent
+        .split_once('/')
+        .map_or((parent, None), |(first, rest)| (first, Some(rest)));
+    let first = first.replace("~1", "/").replace("~0", "~");
+    let Some(value) = identity.get_mut(&first) else {
+        return;
+    };
+    let parent = match rest {
+        Some(rest) => value.pointer_mut(&format!("/{rest}")),
+        None => Some(value),
+    };
+    let Some(fields) = parent.and_then(serde_json::Value::as_object_mut) else {
+        return;
+    };
+    remove_pointer_field(fields, key);
+}
+
+fn remove_pointer_field(fields: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
     let key = key.replace("~1", "/").replace("~0", "~");
-    fields.remove(&key);
+    fields.shift_remove(&key);
 }
 
 /// Set the value at `pointer` in `item`, creating objects on the way.
@@ -874,14 +899,24 @@ fn tools_as_text(history: Vec<Message>) -> Vec<Message> {
         .map(|message| match message {
             Message::Assistant(mut turn) => {
                 for block in &mut turn.content {
-                    if let AssistantContent::ToolCall(call) = block {
-                        *block = AssistantContent::Text(Text::new(format!(
-                            "[called tool {} with {}]",
-                            call.function.name,
-                            crate::json_utils::to_canonical_string(
-                                &call.function.arguments_value()
-                            )
-                        )));
+                    match block {
+                        AssistantContent::ToolCall(call) => {
+                            *block = AssistantContent::Text(Text::new(format!(
+                                "[called tool {} with {}]",
+                                call.function.name,
+                                crate::json_utils::to_canonical_string(
+                                    &call.function.arguments_value()
+                                )
+                            )));
+                        }
+                        // A custom call's raw input is its whole argument.
+                        AssistantContent::CustomToolCall(call) => {
+                            *block = AssistantContent::Text(Text::new(format!(
+                                "[called tool {} with {}]",
+                                call.name, call.input
+                            )));
+                        }
+                        _ => {}
                     }
                 }
                 Message::Assistant(turn)
@@ -1973,3 +2008,6 @@ mod image_preflight_tests;
 
 #[cfg(test)]
 mod carried_pairing_tests;
+
+#[cfg(test)]
+mod branch_tests;

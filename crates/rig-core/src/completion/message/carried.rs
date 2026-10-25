@@ -17,18 +17,22 @@ pub enum CarriedPosition {
     /// One content part of one output message.
     MessageContent {
         /// The containing output item's original index.
+        #[serde(deserialize_with = "position_index")]
         item_index: u64,
         /// The original content array index.
+        #[serde(deserialize_with = "position_index")]
         part_index: u64,
     },
     /// One part of a reasoning item's summary array.
     ReasoningSummary {
         /// The original summary array index.
+        #[serde(deserialize_with = "position_index")]
         part_index: u64,
     },
     /// One part of a reasoning item's content array.
     ReasoningContent {
         /// The original reasoning-content array index.
+        #[serde(deserialize_with = "position_index")]
         part_index: u64,
     },
 }
@@ -38,6 +42,24 @@ impl CarriedPosition {
     pub fn is_whole(&self) -> bool {
         matches!(self, Self::Whole)
     }
+}
+
+/// Read a stored coordinate as an integer, including a whole-number float.
+fn position_index<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    // u64::MAX rounds up to 2^64 as f64, so the floating bound is exclusive.
+    const U64_END: f64 = 18_446_744_073_709_551_616.0;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if let serde_json::Value::Number(number) = &value
+        && number.is_f64()
+        && let Some(float) = number.as_f64()
+        && float.is_finite()
+        && float >= 0.0
+        && float.fract() == 0.0
+        && float < U64_END
+    {
+        return Ok(float as u64);
+    }
+    u64::deserialize(value).map_err(serde::de::Error::custom)
 }
 
 /// Exact provider data with its independent issuer and original position.
@@ -296,6 +318,21 @@ impl CarriedText {
             CarriedTextContent::Text(_)
             | CarriedTextContent::Refusal(_)
             | CarriedTextContent::Opaque(_) => None,
+        }
+    }
+
+    /// The current known text a destination that cannot replay this part's
+    /// provider shape sends in its place, as the fork's converters sent a
+    /// known Responses text or refusal part. Only an opaque Responses part
+    /// has none, and such a destination refuses it. The preserved payload
+    /// gains no outbound authority.
+    pub fn foreign_text(&self) -> Option<&str> {
+        match &self.content {
+            CarriedTextContent::Opaque(_) => None,
+            CarriedTextContent::Text(text) | CarriedTextContent::Refusal(text) => Some(text),
+            CarriedTextContent::GeminiSignedAnswer(_)
+            | CarriedTextContent::InspectionOnlyText(_)
+            | CarriedTextContent::InspectionOnlyMedia(_) => self.known_text_projection(),
         }
     }
 

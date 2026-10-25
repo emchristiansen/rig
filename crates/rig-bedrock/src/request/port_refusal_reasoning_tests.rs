@@ -1,6 +1,5 @@
 use super::*;
 use crate::completion::{AMAZON_NOVA_LITE, ANTHROPIC_CLAUDE_SONNET_4_5, PROVIDER_NAME};
-use base64::Engine as _;
 use rig_core::completion::ToolDefinition;
 use rig_core::error::ProviderError;
 use rig_core::message::{

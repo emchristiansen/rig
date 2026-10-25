@@ -29,26 +29,27 @@
 //! - **Single in-flight custody**, inherited from the shared session.
 //!
 //! The handshake carries the wire's credential as it stands when the session
-//! connects: [`OpenAI::api_key`](crate::providers::openai::OpenAI::api_key),
+//! connects: [`OpenAIConfig::api_key`](crate::providers::openai::OpenAIConfig::api_key),
 //! or, when the wire has a
-//! [credential source](crate::providers::openai::OpenAI::with_credential_source),
+//! [credential source](crate::providers::openai::OpenAIConfig::with_credential_source),
 //! what that source supplies at connect. An open connection keeps the
 //! credential it was opened with; a rotated credential takes effect at the
 //! next session's connect.
 //!
 //! ```no_run
 //! use rig_core::providers::chatgpt;
-//! use rig_core::providers::openai::OpenAI;
+//! use rig_core::providers::openai::OpenAIConfig;
+//! use rig_core::providers::openai::responses_api::wire::Responses;
 //! use rig_core::providers::openai::responses_api::websocket::codex::CodexWebSocketSessionBuilder;
 //!
 //! # async fn example(
 //! #     backend: &impl rig_core::ws_client::WebSocketClientExt,
 //! #     identity: rig_core::providers::openai::wire::CallerIdentity,
 //! # ) -> Result<(), rig_core::error::ProviderError> {
-//! let wire = OpenAI::with_key(&chatgpt::DIALECT, "access-token")
+//! let provider = OpenAIConfig::with_key(&chatgpt::DIALECT, "access-token")
 //!     .with_caller_identity(identity)
-//!     .with_account_id("account-id")
-//!     .responses(chatgpt::GPT_5_3_CODEX);
+//!     .with_account_id("account-id");
+//! let wire = Responses::new(provider, chatgpt::GPT_5_3_CODEX);
 //! let mut session = CodexWebSocketSessionBuilder::new(wire)?
 //!     .connect_with(backend)
 //!     .await?;

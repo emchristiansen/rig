@@ -867,3 +867,6 @@ pub type Request<W> = <<W as Wire>::Op as Operation>::Request;
 pub type Response<W> = <<W as Wire>::Op as Operation>::Response;
 /// A wire's event type.
 pub type Event<W> = <<W as Wire>::Op as Operation>::Event;
+
+#[cfg(test)]
+mod tests;

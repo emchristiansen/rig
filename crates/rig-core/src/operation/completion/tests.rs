@@ -1013,6 +1013,304 @@ fn a_reported_cost_wins_over_the_catalog() {
     assert_eq!(response.usage.cost, Some(Cost::from_total(0.5)));
 }
 
+#[test]
+fn gemini_interactions_prices_reasoning_without_changing_counters() {
+    let usage = Usage::new()
+        .input_tokens(102)
+        .output_tokens(20)
+        .reasoning_tokens(75)
+        .total_tokens(197)
+        .cached_input_tokens(0)
+        .tool_use_prompt_tokens(0);
+    let end = Finish {
+        usage,
+        model: Some("gemini-2.0-flash".to_owned()),
+        ..Finish::default()
+    };
+    let response = write_from(
+        crate::message::Origin::new(
+            "gemini.interactions",
+            crate::providers::gemini::completion::PROVIDER_NAME,
+            "gemini-2.5-flash",
+        ),
+        end,
+        |_| Ok(()),
+    );
+    let cost = response.usage.cost.expect("the requested model is priced");
+    assert!(
+        cost.input.is_some_and(|part| close(part, 0.0000306)),
+        "{cost:?}"
+    );
+    assert!(
+        cost.output.is_some_and(|part| close(part, 0.0002375)),
+        "{cost:?}"
+    );
+    assert_eq!(cost.cache_read, Some(0.0));
+    assert_eq!(cost.cache_write, Some(0.0));
+    assert!(close(cost.total, 0.0002681), "{cost:?}");
+    assert_eq!(response.usage, usage.cost(cost));
+    assert_eq!(response.origin.model, "gemini-2.5-flash");
+    assert_eq!(
+        response.origin.response_model.as_deref(),
+        Some("gemini-2.0-flash")
+    );
+}
+
+/// Interactions reports the hosted-tool prompt beside its input counter;
+/// the price charges it as input, as GenerateContent does by folding it
+/// into input, while the counters stay as reported. The counts are the
+/// `code_execution_usage` recording's.
+#[test]
+fn gemini_interactions_prices_the_tool_use_prompt_as_input_without_changing_counters() {
+    let usage = Usage::new()
+        .input_tokens(135)
+        .output_tokens(171)
+        .reasoning_tokens(182)
+        .tool_use_prompt_tokens(526)
+        .cached_input_tokens(0)
+        .total_tokens(1014);
+    let response = write_from(
+        crate::message::Origin::new(
+            "gemini.interactions",
+            crate::providers::gemini::completion::PROVIDER_NAME,
+            "gemini-2.5-flash",
+        ),
+        Finish {
+            usage,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    let cost = response.usage.cost.expect("the requested model is priced");
+    // (135 + 526) input tokens at 0.30 USD and (171 + 182) output tokens
+    // at 2.50 USD per million.
+    assert!(
+        cost.input.is_some_and(|part| close(part, 0.0001983)),
+        "{cost:?}"
+    );
+    assert!(
+        cost.output.is_some_and(|part| close(part, 0.0008825)),
+        "{cost:?}"
+    );
+    assert_eq!(cost.cache_read, Some(0.0));
+    assert_eq!(cost.cache_write, Some(0.0));
+    assert!(close(cost.total, 0.0010808), "{cost:?}");
+    assert_eq!(response.usage, usage.cost(cost), "the counters stay");
+
+    // The same turn as GenerateContent's mapping counts it, tool-use prompt
+    // in input and thinking in output, costs the same.
+    let folded = Usage::new()
+        .input_tokens(661)
+        .output_tokens(353)
+        .reasoning_tokens(182)
+        .tool_use_prompt_tokens(526)
+        .cached_input_tokens(0)
+        .total_tokens(1014);
+    let generate_content = write_from(
+        crate::message::Origin::new(
+            "gemini.generate_content",
+            crate::providers::gemini::completion::PROVIDER_NAME,
+            "gemini-2.5-flash",
+        ),
+        Finish {
+            usage: folded,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    assert_eq!(generate_content.usage.cost, Some(cost));
+}
+
+#[test]
+fn gemini_interactions_has_no_cost_when_priced_input_overflows() {
+    let usage = Usage::new()
+        .input_tokens(u64::MAX)
+        .output_tokens(20)
+        .tool_use_prompt_tokens(1);
+    let response = write_from(
+        crate::message::Origin::new(
+            "gemini.interactions",
+            crate::providers::gemini::completion::PROVIDER_NAME,
+            "gemini-2.5-flash",
+        ),
+        Finish {
+            usage,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    assert_eq!(response.usage, usage);
+    assert_eq!(response.usage.cost, None);
+}
+
+#[test]
+fn inclusive_output_is_not_charged_for_reasoning_twice() {
+    for (api, provider, model, usage, output_cost, total_cost) in [
+        (
+            "gemini.generate_content",
+            crate::providers::gemini::completion::PROVIDER_NAME,
+            "gemini-2.5-flash",
+            Usage::new()
+                .input_tokens(175)
+                .output_tokens(64)
+                .reasoning_tokens(34)
+                .cached_input_tokens(40)
+                .tool_use_prompt_tokens(75)
+                .total_tokens(239),
+            0.00016,
+            0.0002017,
+        ),
+        (
+            "anthropic.messages",
+            crate::providers::anthropic::PROVIDER_NAME,
+            "claude-sonnet-4-6",
+            Usage::new()
+                .input_tokens(102)
+                .output_tokens(95)
+                .reasoning_tokens(75)
+                .total_tokens(197),
+            0.001425,
+            0.001731,
+        ),
+        (
+            "openai.responses",
+            crate::providers::openai::PROVIDER_NAME,
+            "gpt-4o",
+            Usage::new()
+                .input_tokens(102)
+                .output_tokens(95)
+                .reasoning_tokens(75)
+                .total_tokens(197),
+            0.00095,
+            0.001205,
+        ),
+        (
+            "openai.chat",
+            crate::providers::openai::PROVIDER_NAME,
+            "gpt-4o",
+            Usage::new()
+                .input_tokens(102)
+                .output_tokens(95)
+                .reasoning_tokens(75)
+                .total_tokens(197),
+            0.00095,
+            0.001205,
+        ),
+        (
+            "gemini.interactions",
+            crate::providers::openai::PROVIDER_NAME,
+            "gpt-4o",
+            Usage::new()
+                .input_tokens(102)
+                .output_tokens(95)
+                .reasoning_tokens(75)
+                .total_tokens(197),
+            0.00095,
+            0.001205,
+        ),
+    ] {
+        let response = write_from(
+            crate::message::Origin::new(api, provider, model),
+            Finish {
+                usage,
+                ..Finish::default()
+            },
+            |_| Ok(()),
+        );
+        let cost = response.usage.cost.expect("each model is priced");
+        assert!(
+            cost.output.is_some_and(|part| close(part, output_cost)),
+            "{api}: {cost:?}"
+        );
+        assert!(close(cost.total, total_cost), "{api}: {cost:?}");
+        assert_eq!(response.usage, usage.cost(cost), "{api}");
+    }
+}
+
+#[test]
+fn gemini_interactions_keeps_absent_and_zero_reasoning_costs() {
+    for reasoning in [None, Some(0)] {
+        let usage = tokens(102, 20).reasoning_tokens(reasoning);
+        let response = write_from(
+            crate::message::Origin::new("gemini.interactions", "gcp.gemini", "gemini-2.5-flash"),
+            Finish {
+                usage,
+                ..Finish::default()
+            },
+            |_| Ok(()),
+        );
+        let cost = response.usage.cost.expect("base counters exist");
+        assert!(
+            cost.output.is_some_and(|part| close(part, 0.00005)),
+            "{cost:?}"
+        );
+        assert!(close(cost.total, 0.0000806), "{cost:?}");
+        assert_eq!(response.usage, usage.cost(cost));
+    }
+}
+
+#[test]
+fn gemini_interactions_keeps_a_reported_cost_before_output_accounting() {
+    let usage = Usage::new()
+        .input_tokens(102)
+        .output_tokens(u64::MAX)
+        .reasoning_tokens(75)
+        .cost(Cost::from_total(0.5));
+    let response = write_from(
+        crate::message::Origin::new("gemini.interactions", "gcp.gemini", "gemini-2.5-flash"),
+        Finish {
+            usage,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    assert_eq!(response.usage, usage);
+}
+
+#[test]
+fn gemini_interactions_has_no_cost_without_base_counts_or_a_price() {
+    for (model, usage) in [
+        (
+            "gemini-2.5-flash",
+            Usage::new().input_tokens(102).reasoning_tokens(75),
+        ),
+        (
+            "gemini-2.5-flash",
+            Usage::new().output_tokens(20).reasoning_tokens(75),
+        ),
+        ("not-in-the-catalog", tokens(102, 20).reasoning_tokens(75)),
+    ] {
+        let response = write_from(
+            crate::message::Origin::new("gemini.interactions", "gcp.gemini", model),
+            Finish {
+                usage,
+                ..Finish::default()
+            },
+            |_| Ok(()),
+        );
+        assert_eq!(response.usage, usage);
+        assert_eq!(response.usage.cost, None);
+    }
+}
+
+#[test]
+fn gemini_interactions_has_no_cost_when_billed_output_overflows() {
+    let usage = Usage::new()
+        .input_tokens(102)
+        .output_tokens(u64::MAX)
+        .reasoning_tokens(75);
+    let response = write_from(
+        crate::message::Origin::new("gemini.interactions", "gcp.gemini", "gemini-2.5-flash"),
+        Finish {
+            usage,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    assert_eq!(response.usage, usage);
+    assert_eq!(response.usage.cost, None);
+}
+
 /// Without a reported cost the counters are priced at the catalog's
 /// prices for the requested model: cache reads and writes at their own
 /// prices, the rest of the input at the input price.
@@ -1423,4 +1721,108 @@ fn announced_empty_input_without_a_fragment_stays_valid() {
     assert_eq!(calls[0].function.namespace, None);
     assert_eq!(calls[0].function.arguments_value(), json!({}));
     assert_eq!(calls[0].function.invalid_arguments, None);
+}
+
+/// Anthropic Messages and Bedrock Converse report `input_tokens` without the
+/// cache reads and writes they count beside them: the catalog still prices
+/// that uncached input, and the counters stay as reported.
+#[test]
+fn cache_counted_beside_input_still_prices_the_uncached_input() {
+    let usage = Usage::new()
+        .input_tokens(4)
+        .output_tokens(10)
+        .cached_input_tokens(100)
+        .cache_creation_input_tokens(200)
+        .total_tokens(314);
+    for (api, provider, model) in [
+        (
+            "anthropic.messages",
+            crate::providers::anthropic::PROVIDER_NAME,
+            "claude-sonnet-4-6",
+        ),
+        (
+            "bedrock.converse",
+            "aws_bedrock",
+            "global.anthropic.claude-sonnet-4-6",
+        ),
+    ] {
+        let response = write_from(
+            crate::message::Origin::new(api, provider, model),
+            Finish {
+                usage,
+                ..Finish::default()
+            },
+            |_| Ok(()),
+        );
+        let cost = response.usage.cost.expect("the model is priced");
+        assert!(
+            cost.input.is_some_and(|part| close(part, 0.000012)),
+            "{api}: {cost:?}"
+        );
+        assert!(
+            cost.output.is_some_and(|part| close(part, 0.00015)),
+            "{api}: {cost:?}"
+        );
+        assert!(
+            cost.cache_read.is_some_and(|part| close(part, 0.00003)),
+            "{api}: {cost:?}"
+        );
+        assert!(
+            cost.cache_write.is_some_and(|part| close(part, 0.00075)),
+            "{api}: {cost:?}"
+        );
+        assert!(close(cost.total, 0.000942), "{api}: {cost:?}");
+        assert_eq!(response.usage, usage.cost(cost), "{api}");
+    }
+}
+
+/// A mapping whose input already includes its cache reads is not charged
+/// for them twice.
+#[test]
+fn cache_counted_inside_input_is_not_added_again() {
+    let usage = Usage::new()
+        .input_tokens(400)
+        .output_tokens(10)
+        .cached_input_tokens(100)
+        .total_tokens(410);
+    let response = write_from(
+        crate::message::Origin::new(
+            "openai.chat",
+            crate::providers::openai::PROVIDER_NAME,
+            "gpt-4o",
+        ),
+        Finish {
+            usage,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    let cost = response.usage.cost.expect("the model is priced");
+    assert!(
+        cost.input.is_some_and(|part| close(part, 0.00075)),
+        "{cost:?}"
+    );
+    assert_eq!(response.usage, usage.cost(cost));
+}
+
+/// An input sum that overflows has no catalog cost; the counters stay.
+#[test]
+fn an_overflowing_cache_inclusive_input_has_no_cost() {
+    let usage = Usage::new()
+        .input_tokens(u64::MAX)
+        .output_tokens(10)
+        .cache_creation_input_tokens(1);
+    let response = write_from(
+        crate::message::Origin::new(
+            "anthropic.messages",
+            crate::providers::anthropic::PROVIDER_NAME,
+            "claude-sonnet-4-6",
+        ),
+        Finish {
+            usage,
+            ..Finish::default()
+        },
+        |_| Ok(()),
+    );
+    assert_eq!(response.usage, usage);
 }

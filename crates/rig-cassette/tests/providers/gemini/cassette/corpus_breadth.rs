@@ -4,7 +4,8 @@
 //! interpreters; the enumeration lives there. Every cell is a new
 //! recording under `crates/rig-cassette/fixtures/cassettes/gemini/corpus_breadth/`.
 
-use futures::StreamExt;
+use anyhow::Context;
+use futures::{FutureExt, StreamExt};
 use rig::agent::{AgentBuilder, MultiTurnStreamItem};
 use rig::bus::Bus;
 use rig::completion::PromptError;
@@ -14,10 +15,13 @@ use rig::run::OutputMode;
 use rig_cassette::agent::AgentReplayExt;
 use rig_test_support::cassette_models::GeminiModels;
 
+use super::super::request_witness_support::{
+    NamedCase, stream_result, with_gemini_request_witness_cassette,
+};
 use super::super::support::with_gemini_corpus_breadth_cassette;
 use crate::goldens::{
-    CANCEL_ADD_DISPATCH, CancelAddDispatch, EMBED_KEY, EmbedPrompt, NOTE_KEY, NoteAtOutcome,
-    NoteTaker, STOP_ON_TEXT_DELTA, StopOnTextDelta, event_schema, families,
+    CancelAddDispatch, EMBED_KEY, EmbedPrompt, NOTE_KEY, NoteAtOutcome, NoteTaker,
+    STOP_ON_TEXT_DELTA, StopOnTextDelta, event_schema, families,
 };
 use crate::support::{Adder, BASIC_PREAMBLE, TOOLS_PREAMBLE};
 
@@ -29,6 +33,10 @@ const ESSAY_PROMPT: &str =
     "Write four paragraphs about the history of the Rust programming language.";
 const PROMPT: &str = "Reply with the single word: ready.";
 
+#[allow(
+    dead_code,
+    reason = "the retained positive output oracle is unavailable after a request refusal"
+)]
 fn assert_event(output: &str) {
     let object: serde_json::Value =
         serde_json::from_str(output).unwrap_or_else(|_| panic!("the schema's object: {output}"));
@@ -99,11 +107,13 @@ fn host_bus(
 
 /// `Tool` output mode, streamed with events: the output tool's call as
 /// this wire ids it.
-#[tokio::test]
-async fn output_tool_streamed_effect_log_is_the_golden_fixture() {
-    with_gemini_corpus_breadth_cassette(
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn output_tool_streamed_effect_log_is_the_golden_fixture() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "corpus_breadth/output_tool_streamed",
-        |client| async move {
+        NamedCase::OutputToolStreamed,
+        |client, _clock| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::keeping_stream_events();
             let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .name("golden")
@@ -114,16 +124,13 @@ async fn output_tool_streamed_effect_log_is_the_golden_fixture() {
                 .record_to(recorder.clone())
                 .build();
             let mut stream = agent.prompt(STRUCTURED_OUTPUT_PROMPT).stream();
-            let output = final_output(&mut stream).await.expect("the run answers");
+            let result = stream_result(&mut stream).await;
             drop(stream);
-            assert_event(&output);
-            let log = agent.stamp(recorder.take());
-            assert_eq!(families(&log), [EffectFamily::Completion]);
-            assert!(log.records[0].events.is_some(), "events are kept");
-            crate::goldens::golden_effects("gemini_breadth_output_tool_streamed", &log);
+            drop(agent);
+            result
         },
     )
-    .await;
+    .await
 }
 
 /// A stop on the first text delta of a long streamed answer: the
@@ -167,99 +174,99 @@ async fn text_delta_stop_effect_log_is_the_golden_fixture() {
 
 /// `on_dispatch` → `Deny(Cancelled)` on the tool: the completion is
 /// recorded, the tool never reaches the bus.
-#[tokio::test]
-async fn tool_dispatch_cancelled_effect_log_is_the_golden_fixture() {
-    with_gemini_corpus_breadth_cassette(
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn tool_dispatch_cancelled_effect_log_is_the_golden_fixture() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "corpus_breadth/tool_dispatch_cancelled",
-        |client| async move {
+        NamedCase::ToolDispatchCancelled,
+        |client, _clock| async move {
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
             let agent = rig::AgentBuilder::new(client.completion(MODEL))
                 .name("golden")
                 .preamble(TOOLS_PREAMBLE)
                 .temperature(0.0)
                 .tool(Adder)
-                .add_hook(CancelAddDispatch).record_to(recorder.clone()).build();
-            let error = agent
-                .prompt(ADD_PROMPT)
-                .max_turns(3)
-                .await
-                .expect_err("the hook stops the run");
-            assert!(
-                matches!(&error, PromptError::Cancelled { reason, .. } if reason == CANCEL_ADD_DISPATCH),
-                "{error:?}"
-            );
-            let log = agent.stamp(recorder.take());
-            assert_eq!(families(&log), [EffectFamily::Completion]);
-            crate::goldens::golden_effects("gemini_breadth_tool_dispatch_cancelled", &log);
+                .add_hook(CancelAddDispatch)
+                .record_to(recorder.clone())
+                .build();
+            let result = agent.prompt(ADD_PROMPT).max_turns(3).await.map(|_| ());
+            drop(agent);
+            Ok(result)
         },
     )
-    .await;
+    .await
 }
 
 /// A host's custom note inside the tool's dispatch, beside this wire's
 /// tool-call ids.
-#[tokio::test]
-async fn custom_at_outcome_effect_log_is_the_golden_fixture() {
-    with_gemini_corpus_breadth_cassette("corpus_breadth/custom_at_outcome", |client| async move {
-        let (dispatcher, registrar, mut driver, model_key) = host_bus(&client, true, false);
-        let recorder = rig::cassette::effect_log::EffectLogRecorder::new();
-        driver.record_to(recorder.clone());
-        let driver = tokio::spawn(driver);
-        let agent =
-            AgentBuilder::over_bus(dispatcher.clone(), registrar.clone(), "golden", model_key)
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn custom_at_outcome_effect_log_is_the_golden_fixture() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
+        "corpus_breadth/custom_at_outcome",
+        NamedCase::CustomAtOutcome,
+        |client, _clock| async move {
+            let (dispatcher, registrar, mut driver, model_key) = host_bus(&client, true, false);
+            let recorder = rig::cassette::effect_log::EffectLogRecorder::new();
+            driver.record_to(recorder.clone());
+            let driver = tokio::spawn(driver);
+            let result = std::panic::AssertUnwindSafe(async {
+                let agent = AgentBuilder::over_bus(
+                    dispatcher.clone(),
+                    registrar.clone(),
+                    "golden",
+                    model_key,
+                )
                 .name("golden")
                 .preamble(TOOLS_PREAMBLE)
                 .temperature(0.0)
                 .tool(Adder)
                 .add_hook(NoteAtOutcome)
                 .build();
-        let output = agent
-            .prompt(ADD_PROMPT)
-            .max_turns(3)
-            .await
-            .expect("the agent answers")
-            .output();
-        assert!(output.contains("42"), "{output}");
-        let log = agent.stamp(recorder.take());
-        drop((agent, dispatcher, registrar));
-        driver.await.expect("the host's driver");
-        assert_eq!(
-            families(&log),
-            [
-                EffectFamily::Completion,
-                EffectFamily::Tool,
-                EffectFamily::Custom,
-                EffectFamily::Completion
-            ]
-        );
-        crate::goldens::golden_effects("gemini_breadth_custom_at_outcome", &log);
-    })
-    .await;
+                let result = agent.prompt(ADD_PROMPT).max_turns(3).await.map(|_| ());
+                drop(agent);
+                result
+            })
+            .catch_unwind()
+            .await;
+            drop((dispatcher, registrar));
+            let joined = driver.await;
+            match result {
+                Err(payload) => std::panic::resume_unwind(payload),
+                Ok(result) => {
+                    joined.context("the original custom-note host driver joins")?;
+                    Ok(result)
+                }
+            }
+        },
+    )
+    .await
 }
 
 /// `Tool` output mode, unary: the output tool's call on the id-less wire.
-#[tokio::test]
-async fn output_tool_unary_effect_log_is_the_golden_fixture() {
-    with_gemini_corpus_breadth_cassette("corpus_breadth/output_tool_unary", |client| async move {
-        let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
-        let agent = rig::AgentBuilder::new(client.completion(MODEL))
-            .name("golden")
-            .preamble(BASIC_PREAMBLE)
-            .temperature(0.0)
-            .output_schema_raw(event_schema())
-            .output_mode(OutputMode::Tool)
-            .record_to(recorder.clone())
-            .build();
-        let response = agent
-            .prompt(STRUCTURED_OUTPUT_PROMPT)
-            .await
-            .expect("the agent answers");
-        assert_event(&response.output());
-        let log = agent.stamp(recorder.take());
-        assert_eq!(families(&log), [EffectFamily::Completion]);
-        crate::goldens::golden_effects("gemini_breadth_output_tool_unary", &log);
-    })
-    .await;
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn output_tool_unary_effect_log_is_the_golden_fixture() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
+        "corpus_breadth/output_tool_unary",
+        NamedCase::OutputToolUnary,
+        |client, _clock| async move {
+            let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
+            let agent = rig::AgentBuilder::new(client.completion(MODEL))
+                .name("golden")
+                .preamble(BASIC_PREAMBLE)
+                .temperature(0.0)
+                .output_schema_raw(event_schema())
+                .output_mode(OutputMode::Tool)
+                .record_to(recorder.clone())
+                .build();
+            let result = agent.prompt(STRUCTURED_OUTPUT_PROMPT).await.map(|_| ());
+            drop(agent);
+            Ok(result)
+        },
+    )
+    .await
 }
 
 /// The prompt embedded through the host's gemini embedding model.

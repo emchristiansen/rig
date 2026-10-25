@@ -222,49 +222,72 @@ fn codex() -> Responses {
     OpenAIConfig::with_key(&crate::providers::chatgpt::DIALECT, "test-key").responses("gpt-5.4")
 }
 
+/// A raw `max_output_tokens` or `temperature` in `additional_params` is
+/// refused on Codex with exactly the error the typed field gets, whatever its
+/// value, rather than dropped unseen (mec-rig-bodies-answers-1 Q6). A raw
+/// `null` sets nothing: it is neither sent nor refused.
 #[test]
-fn responses_raw_outer_controls_are_ignored_but_typed_codex_controls_are_refused() {
+fn raw_and_typed_codex_output_caps_and_temperatures_are_refused_alike() {
     use super::super::Delivery;
     use crate::error::ProviderError;
     use crate::wire::Mode;
 
-    let request =
-        codex_request(json!({"max_output_tokens":"ignored","temperature":{"ignored":true}}));
+    let refusal = |request: &crate::completion::CompletionRequest| {
+        let error = ProviderError::from(
+            codex()
+                .responses_request(request, Delivery::Http(Mode::Unary))
+                .expect_err("a caller-set control is refused"),
+        );
+        let typed = error
+            .source()
+            .expect("typed source")
+            .downcast_ref::<super::UnsupportedCodexControl>()
+            .copied();
+        (typed, error.to_string())
+    };
+    let mut typed_cap = codex_request(json!({}));
+    typed_cap.max_tokens = Some(64);
+    let mut typed_temperature = codex_request(json!({}));
+    typed_temperature.temperature = Some(0.5);
+    for (typed, expected, raws) in [
+        (
+            typed_cap,
+            super::UnsupportedCodexControl::MaxOutputTokens,
+            [
+                json!({"max_output_tokens":64}),
+                json!({"max_output_tokens":"ignored"}),
+            ],
+        ),
+        (
+            typed_temperature,
+            super::UnsupportedCodexControl::Temperature,
+            [
+                json!({"temperature":0.5}),
+                json!({"temperature":{"ignored":true}}),
+            ],
+        ),
+    ] {
+        let typed = refusal(&typed);
+        assert_eq!(typed.0, Some(expected));
+        for raw in raws {
+            assert_eq!(refusal(&codex_request(raw.clone())), typed, "{raw}");
+        }
+    }
+
+    let request = codex_request(json!({"max_output_tokens":null,"temperature":null,
+        "unrecognized":"dropped"}));
     let body = codex()
         .responses_request(&request, Delivery::Http(Mode::Unary))
-        .expect("raw outer controls are not fork additional parameters");
+        .expect("a raw null sets nothing");
     assert!(body.get("max_output_tokens").is_none());
     assert!(body.get("temperature").is_none());
+    assert!(body.get("unrecognized").is_none());
     assert_eq!(body.get("store"), Some(&json!(false)));
     assert_eq!(
         body.get("include"),
         Some(&json!(["reasoning.encrypted_content"])),
         "store:false keeps reasoning available for stateless replay"
     );
-    for (max_tokens, temperature, expected) in [
-        (
-            Some(1),
-            None,
-            super::UnsupportedCodexControl::MaxOutputTokens,
-        ),
-        (None, Some(0.5), super::UnsupportedCodexControl::Temperature),
-    ] {
-        let mut request = request.clone();
-        request.max_tokens = max_tokens;
-        request.temperature = temperature;
-        let error = ProviderError::from(
-            codex()
-                .responses_request(&request, Delivery::Http(Mode::Unary))
-                .expect_err("typed outer choice refused"),
-        );
-        assert_eq!(
-            error
-                .source()
-                .expect("typed source")
-                .downcast_ref::<super::UnsupportedCodexControl>(),
-            Some(&expected)
-        );
-    }
 }
 
 #[test]
@@ -324,17 +347,25 @@ fn standard_body(raw: Value) -> crate::completion::options::FinalBody {
     .expect("recognized raw fields encode")
 }
 
+/// mec-rig-port-answers-1 Q7: off Codex, raw keys the fork's reader does not
+/// recognize, outer request keys included, are sent as written and outrank
+/// the typed provider options, as raw params do on every wire. A raw `model`
+/// is never sent (G132), and the typed output cap and temperature win over
+/// raw ones, which are sent only where the typed field is unset. Codex keeps
+/// the fork's reader and sends none of them.
 #[test]
-fn raw_projection_ignores_outer_and_unknown_keys_without_changing_typed_options() {
+fn raw_projection_sends_unknown_keys_but_not_model_or_raw_cap_and_temperature_over_typed() {
     use crate::providers::openai::extension::OpenAiOptions;
     let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
-    let mut request = codex_request(json!({
-        "input":[{"role":"developer","content":"ignored"}],
-        "model":"ignored-model", "instructions":"ignored", "tool_choice":"required",
+    let raw = json!({
+        "input":[{"role":"developer","content":"raw"}],
+        "model":"ignored-model", "instructions":"raw", "tool_choice":"required",
         "max_output_tokens":999, "temperature":0.99,
-        "conversation":"ignored-raw-conversation", "future_parameter":{"keep":false}
-    }))
-    .provider_option(OpenAiOptions::default().conversation("typed-conversation"));
+        "conversation":"raw-conversation", "future_parameter":{"keep":false},
+        "top_logprobs":2, "user":null
+    });
+    let mut request = codex_request(raw.clone())
+        .provider_option(OpenAiOptions::default().conversation("typed-conversation"));
     request.max_tokens = Some(7);
     request.temperature = Some(0.25);
     let body = wire
@@ -344,17 +375,38 @@ fn raw_projection_ignores_outer_and_unknown_keys_without_changing_typed_options(
         )
         .expect("typed options survive raw projection");
     assert_eq!(body.get("model"), Some(&json!("gpt-5.4")));
-    assert_eq!(
-        body.get("input"),
-        Some(
-            &json!([{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}])
-        )
-    );
     assert_eq!(body.get("max_output_tokens"), Some(&json!(7)));
     assert_eq!(body.get("temperature"), Some(&json!(0.25)));
-    assert_eq!(body.get("conversation"), Some(&json!("typed-conversation")));
-    for key in ["instructions", "tool_choice", "future_parameter"] {
-        assert!(body.get(key).is_none(), "unrecognized raw {key} is absent");
+    for key in [
+        "input",
+        "instructions",
+        "tool_choice",
+        "conversation",
+        "future_parameter",
+        "top_logprobs",
+        "user",
+    ] {
+        assert_eq!(body.get(key), raw.get(key), "raw {key} is sent as written");
+    }
+
+    let untyped = wire
+        .responses_request(
+            &codex_request(raw.clone()),
+            super::super::Delivery::Http(crate::wire::Mode::Unary),
+        )
+        .expect("raw cap and temperature encode where the typed fields are unset");
+    assert_eq!(untyped.get("model"), Some(&json!("gpt-5.4")));
+    assert_eq!(untyped.get("max_output_tokens"), Some(&json!(999)));
+    assert_eq!(untyped.get("temperature"), Some(&json!(0.99)));
+
+    let codex_body = codex()
+        .responses_request(
+            &codex_request(json!({"future_parameter":{"keep":false},"top_logprobs":2,"user":null})),
+            super::super::Delivery::Http(crate::wire::Mode::Unary),
+        )
+        .expect("Codex keeps the fork's reader");
+    for key in ["future_parameter", "top_logprobs", "user"] {
+        assert!(codex_body.get(key).is_none(), "Codex sends no raw {key}");
     }
 }
 
@@ -405,11 +457,15 @@ fn recognized_raw_projection_keeps_fork_nested_defaults_and_string_service_tiers
         body.get("tools"),
         Some(&json!([{"type":"web_search","future":{"nested":[null,1]}}]))
     );
-    assert!(body.get("top_p").is_none());
+    // mec-rig-port-answers-1 Q7: an explicit raw null is sent as null.
+    assert_eq!(body.get("top_p"), Some(&Value::Null));
 }
 
+/// A null or boolean `additional_params` is empty. Off Codex, an explicit raw
+/// null for a key is sent as null (mec-rig-port-answers-1 Q7); nothing else
+/// emits these keys.
 #[test]
-fn raw_null_and_boolean_are_empty_and_nullable_fields_are_omitted() {
+fn raw_null_and_boolean_are_empty_and_explicit_null_fields_are_sent_as_null() {
     for raw in [
         Value::Null,
         json!(false),
@@ -417,7 +473,7 @@ fn raw_null_and_boolean_are_empty_and_nullable_fields_are_omitted() {
         json!({"stream":"ignored"}),
         json!({"metadata":null,"text":null,"reasoning":null,"include":null,"store":null}),
     ] {
-        let body = standard_body(raw);
+        let body = standard_body(raw.clone());
         for key in [
             "stream",
             "metadata",
@@ -427,9 +483,10 @@ fn raw_null_and_boolean_are_empty_and_nullable_fields_are_omitted() {
             "store",
             "client_metadata",
         ] {
-            assert!(
-                body.get(key).is_none(),
-                "empty/null raw does not emit {key}"
+            assert_eq!(
+                body.get(key),
+                raw.get(key).filter(|value| value.is_null()),
+                "raw {raw} emits {key} only as its explicit null"
             );
         }
     }
@@ -490,8 +547,10 @@ fn raw_projection_refuses_malformed_roots_nested_known_fields_and_tools() {
     }
 }
 
+/// Off Codex an unrecognised raw key is sent as written beside the exact
+/// recognised value (mec-rig-port-answers-1 Q7).
 #[test]
-fn recognized_raw_prompt_cache_options_keep_exact_values_without_unknown_passthrough() {
+fn recognized_raw_prompt_cache_options_keep_exact_values_and_unknown_keys_are_sent() {
     let wire = OpenAIConfig::new("test-key").responses("gpt-5.4");
     for value in [
         json!({"ttl":"30m","comparison_response_id":"resp_0","future":[null,7]}),
@@ -505,6 +564,41 @@ fn recognized_raw_prompt_cache_options_keep_exact_values_without_unknown_passthr
             )
             .expect("existing request merge");
         assert_eq!(body.get("prompt_cache_options"), Some(&value));
-        assert!(body.get("unknown_outer").is_none());
+        assert_eq!(body.get("unknown_outer"), Some(&json!([null, 9])));
+    }
+}
+
+/// A provider-options entry read back from JSON carries no typed options and
+/// is sent as written, so the raw-field reader never decodes the `top_p` or
+/// `store` it sets. Final Codex shaping decodes them itself: a malformed one
+/// is refused there with the error a malformed raw one gets, and the request
+/// is never built.
+#[test]
+fn malformed_codex_controls_from_untyped_provider_options_are_refused_at_shaping() {
+    use super::super::Delivery;
+    use crate::completion::ProviderOptions;
+    use crate::wire::Mode;
+
+    for (field, value, expected) in [
+        (
+            "store",
+            json!("bad"),
+            "RequestError: Invalid OpenAI Responses additional_params payload: invalid type: string \"bad\", expected a boolean",
+        ),
+        (
+            "top_p",
+            json!("bad"),
+            "RequestError: Invalid OpenAI Responses additional_params payload: invalid type: string \"bad\", expected f64",
+        ),
+    ] {
+        let mut request = codex_request(json!({}));
+        request.provider_options = serde_json::from_value::<ProviderOptions>(
+            json!({ (crate::providers::chatgpt::PROVIDER_NAME): { "*": { (field): value } } }),
+        )
+        .expect("an object of object sections");
+        let error = codex()
+            .responses_request(&request, Delivery::Http(Mode::Unary))
+            .expect_err("a malformed Codex control is refused at shaping");
+        assert_eq!(error.to_string(), expected, "{field}");
     }
 }

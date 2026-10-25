@@ -3698,6 +3698,8 @@ pub fn owned_headers(headers: &http_client::HeaderMap) -> Vec<(String, String)> 
 }
 
 #[cfg(test)]
+mod direct_session_tests;
+#[cfg(test)]
 mod explicit_destination_tests;
 #[cfg(test)]
 mod paths;

@@ -160,10 +160,17 @@ async fn chat_stream_raw_round_trips_typed() {
 
     // `raw` is there to read at all: it is the terminal response object.
     captured_raw(SCENARIO, &terminal);
-    // It is the rebuilt `chat.completion`, read as JSON. It agrees with the
+    // It is the document the stream rebuilt, read as JSON. It agrees with the
     // normalized terminal on identity, model, finish reason and the
-    // accounting it normalized: two views of one record.
-    let typed = chat::assert_terminal_round_trips(&terminal);
+    // accounting it normalized: two views of one record. Its envelope is the
+    // stream's: OpenAI's chunk tag and `obfuscation` padding, as delivered
+    // (coord-a-rig-port-chat-document-12 (1)).
+    let typed = chat::assert_terminal_round_trips(&terminal, &frames);
+    assert_eq!(typed["object"], "chat.completion.chunk");
+    assert!(
+        typed["obfuscation"].is_string(),
+        "{SCENARIO}: OpenAI's delivered padding is kept"
+    );
     // The captured value is *this* stream's terminal.
     assert_matches_recorded_token(
         typed["id"].as_str(),
@@ -302,7 +309,8 @@ async fn chat_tool_call_stream_raw_round_trips_typed() {
     // Two views of one reply. The wire already said `tool_calls`, so the
     // `Stop -> ToolCalls` reconciliation the normalized stream layers on has
     // nothing to change and the round trip's comparison stays exact.
-    let typed = chat::assert_terminal_round_trips(&terminal);
+    let typed = chat::assert_terminal_round_trips(&terminal, &frames);
+    assert_eq!(typed["object"], "chat.completion.chunk");
     assert_matches_recorded_token(
         typed["id"].as_str(),
         last_chunk_field(&frames, "id").as_str(),

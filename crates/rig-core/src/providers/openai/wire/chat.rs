@@ -246,7 +246,10 @@ impl Chat {
             }
             rewrites.push(Rewrite::Stream(true));
         }
-        rewrites.push(Rewrite::ChatDialect(quirks.rewrite));
+        rewrites.push(Rewrite::ChatDialect {
+            kind: quirks.rewrite,
+            reasoning_field: self.listed_reasoning_field(&self.request_model(&request)),
+        });
         if quirks.rewrite == BodyRewrite::OpenRouter && self.prompt_caching {
             rewrites.push(Rewrite::OpenRouterPromptCaching);
         }
@@ -269,11 +272,10 @@ impl Chat {
             body,
             crate::providers::openai::options::Endpoint::ChatCompletions,
         )?;
-        let traced_body = body.deserialize::<Value>()?;
         crate::providers::internal::trace_json(
             crate::providers::internal::LogTarget::Completions,
             "OpenAI Chat Completions request",
-            &traced_body,
+            &body,
         );
         let request = builder.body(body.into_body())?;
         let framing = match mode {
@@ -297,26 +299,45 @@ impl Chat {
     /// gateway). Each lookup is asked for the field, not just the entry, so a
     /// gateway's own row without one does not hide the vendor's.
     fn reasoning_field(&self, model: &str) -> Option<&'static str> {
-        use crate::providers::openai::wire::{MOONSHOT, OPENROUTER};
         let deepseek = self
             .provider
             .base_url
             .to_ascii_lowercase()
             .contains("deepseek.com");
-        let name = model.rsplit('/').next().unwrap_or(model);
-        let field = |vendor: &str, id: &str| {
-            crate::catalog::lookup(vendor, id)
-                .and_then(|spec| spec.compat.reasoning_field.as_deref())
-        };
-        let listed = field(self.provider.dialect.name, model)
-            .or_else(|| field(MOONSHOT.name, name))
-            .or_else(|| field(OPENROUTER.name, model));
         self.provider
             .dialect
             .quirks
             .reasoning_field
             .or(deepseek.then_some("reasoning_content"))
-            .or(listed)
+            .or_else(|| self.listed_reasoning_field(model))
+    }
+
+    /// The reasoning field a catalog entry names for `model`: the entry on
+    /// this dialect, Moonshot's under the id's last path segment, or
+    /// OpenRouter's under the full id. A dialect's history rewrite keeps
+    /// this field on assistant messages, as upstream sends it
+    /// (mec-rig-bodies-answers-1 Q3).
+    fn listed_reasoning_field(&self, model: &str) -> Option<&'static str> {
+        use crate::providers::openai::wire::{MOONSHOT, OPENROUTER};
+        let name = model.rsplit('/').next().unwrap_or(model);
+        let field = |vendor: &str, id: &str| {
+            crate::catalog::lookup(vendor, id)
+                .and_then(|spec| spec.compat.reasoning_field.as_deref())
+        };
+        field(self.provider.dialect.name, model)
+            .or_else(|| field(MOONSHOT.name, name))
+            .or_else(|| field(OPENROUTER.name, model))
+    }
+
+    /// The model id the body names: the request's model or the wire's,
+    /// qualified for a Hugging Face router sub-provider that demands it.
+    fn request_model(&self, request: &CompletionRequest) -> String {
+        let model = request.model.clone().unwrap_or_else(|| self.model.clone());
+        if self.provider.dialect.quirks.rewrite == BodyRewrite::HuggingFaceRouter {
+            // Some sub-providers (Fireworks) address models by a qualified id.
+            return self.provider.route().model_identifier(&model);
+        }
+        model
     }
 
     /// The wire for `model` on `provider`, with every option off.
@@ -357,11 +378,7 @@ impl Chat {
         input: &mut BaseInput<'_>,
     ) -> Result<Map<String, Value>, EncodeError> {
         let quirks = &self.provider.dialect.quirks;
-        let mut model = request.model.clone().unwrap_or_else(|| self.model.clone());
-        if quirks.rewrite == BodyRewrite::HuggingFaceRouter {
-            // Some sub-providers (Fireworks) address models by a qualified id.
-            model = self.provider.route().model_identifier(&model);
-        }
+        let model = self.request_model(request);
         let passthrough = input.raw_tools()?;
         let groq_native = quirks.rewrite == BodyRewrite::GroqCompoundTools;
         // A call to a custom tool the request declares is a custom call (pi).
@@ -599,7 +616,11 @@ impl Chat {
                     .into());
                 }
                 AssistantContent::CarriedText(block) => {
-                    match block.replay_item().map_err(EncodeError::request)? {
+                    let replay = match block.foreign_text() {
+                        Some(known) => crate::message::CarriedTextReplay::KnownText(known),
+                        None => block.replay_item().map_err(EncodeError::request)?,
+                    };
+                    match replay {
                         crate::message::CarriedTextReplay::KnownText(known) => {
                             text.push_str(known);
                             parts.push(json!({"type":"text", "text":known}));
@@ -651,8 +672,12 @@ impl Chat {
                 AssistantContent::Opaque(_) | AssistantContent::Image(_) => {}
             }
         }
+        // Groq rejects `reasoning_content` on an assistant message (HTTP 400,
+        // "property 'reasoning_content' is unsupported") but takes reasoning
+        // back under `reasoning`, the field it delivers it in, as upstream's
+        // live Groq recordings replay it.
         if self.provider.dialect.quirks.rewrite == BodyRewrite::GroqCompoundTools {
-            reasoning.clear();
+            reasoning.retain(|(field, _)| field.as_str() != "reasoning_content");
         }
         let mut message = Map::from_iter([("role".to_owned(), Value::from("assistant"))]);
         if has_parts {
@@ -699,8 +724,16 @@ impl Chat {
 /// where the provider would answer with an error or silently do something
 /// else, Moonshot's steering for `required`, and each dialect's spellings and
 /// content shapes. It runs after the merge and reads the merged body.
+///
+/// `reasoning_field` is the assistant reasoning field the catalog names for
+/// the request's model (`Chat::listed_reasoning_field`). The plain-text
+/// history rewrites (Perplexity, Mira, Hyperbolic) and Mistral keep it on
+/// assistant messages, as upstream sends it for such a model on any gateway;
+/// for every other model they remove `reasoning_content` as before. Groq's
+/// removal does not depend on the model: Groq rejects the field.
 pub(crate) fn rewrite_body(
     kind: BodyRewrite,
+    reasoning_field: Option<&str>,
     map: &mut Map<String, Value>,
 ) -> Result<(), EncodeError> {
     let forced = map
@@ -746,14 +779,22 @@ pub(crate) fn rewrite_body(
         BodyRewrite::Perplexity | BodyRewrite::Mira | BodyRewrite::Hyperbolic => {
             if let Some(Value::Array(messages)) = map.get_mut("messages") {
                 match kind {
-                    BodyRewrite::Perplexity => {
-                        sanitize_plain_text_history(messages, Some(("\n", true)), false, true)
-                    }
-                    BodyRewrite::Mira => {
-                        sanitize_plain_text_history(messages, Some(("\n", false)), true, false)
-                    }
+                    BodyRewrite::Perplexity => sanitize_plain_text_history(
+                        messages,
+                        Some(("\n", true)),
+                        false,
+                        true,
+                        reasoning_field,
+                    ),
+                    BodyRewrite::Mira => sanitize_plain_text_history(
+                        messages,
+                        Some(("\n", false)),
+                        true,
+                        false,
+                        reasoning_field,
+                    ),
                     BodyRewrite::Hyperbolic => {
-                        sanitize_plain_text_history(messages, None, false, false)
+                        sanitize_plain_text_history(messages, None, false, false, reasoning_field)
                     }
                     _ => {}
                 }
@@ -762,15 +803,19 @@ pub(crate) fn rewrite_body(
         BodyRewrite::GroqCompoundTools => {
             for message in messages_mut(map) {
                 if message.get("role").and_then(Value::as_str) == Some("assistant") {
-                    message.remove("reasoning_content");
+                    message.shift_remove("reasoning_content");
                 }
             }
         }
         BodyRewrite::DeepSeek => finalize_deepseek(map),
-        BodyRewrite::Mistral => finalize_mistral(map)?,
+        BodyRewrite::Mistral => finalize_mistral(map, reasoning_field)?,
         BodyRewrite::Ollama => finalize_ollama(map)?,
-        BodyRewrite::OpenRouter => finalize_openrouter(map, false),
-        BodyRewrite::None | BodyRewrite::HuggingFaceRouter => {}
+        // OpenRouter takes assistant `reasoning_content` and an image part's
+        // `detail` as the shared encoder writes them, as upstream sends and
+        // re-recorded them (mec-rig-bodies-answers-1 Q4). Its routing
+        // preferences reach the body through `additional_params` as
+        // `{"provider": …}`.
+        BodyRewrite::OpenRouter | BodyRewrite::None | BodyRewrite::HuggingFaceRouter => {}
     }
     Ok(())
 }
@@ -928,21 +973,21 @@ fn finalize_deepseek(map: &mut serde_json::Map<String, serde_json::Value>) {
     }
 }
 
-/// Mistral's wire-level differences: its own spelling for a forced tool
-/// choice, the relaxation that lets a structured format ride beside tools,
-/// and its assistant-message schema.
+/// Mistral's wire-level differences: the relaxation that lets a structured
+/// format ride beside tools, its content chunks, and the reasoning field its
+/// assistant messages refuse.
+///
+/// A forced tool choice goes as the shared encoder spells it (`required`),
+/// and assistant messages carry no `prefix` and no inserted empty
+/// `content`, as upstream's live re-recordings send them. Assistant
+/// `reasoning_content` is removed unless it is the field the catalog names
+/// for the model (`reasoning_field`), which upstream sends.
 ///
 /// Its multimodal content mapping is [`mistral_content`].
 fn finalize_mistral(
     map: &mut serde_json::Map<String, serde_json::Value>,
+    reasoning_field: Option<&str>,
 ) -> Result<(), EncodeError> {
-    // Mistral spells the "must call some tool" mode `any`, not `required`.
-    if let Some(tool_choice) = map.get_mut("tool_choice")
-        && tool_choice.as_str() == Some("required")
-    {
-        *tool_choice = serde_json::Value::String("any".to_owned());
-    }
-
     // Mistral rejects forced tool calls beside JSON response formats.
     // Relax the choice rather than discard the requested schema; text formats are exempt.
     let forces_a_tool_call = map
@@ -978,28 +1023,18 @@ fn finalize_mistral(
         let is_assistant =
             message.get("role").and_then(serde_json::Value::as_str) == Some("assistant");
 
-        // Mistral takes text-only message `content` as a plain string and
-        // carries images, audio and documents as its own chunk array.
-        // Content it has no chunk for fails here rather than reaching the API
-        // with the part removed.
+        // Mistral carries text, images, audio and documents as its own
+        // chunk array; a part of a type it has no chunk for is forwarded as
+        // it is, never removed.
         if let Some(content) = message.get_mut("content") {
             mistral_content(content)?;
         }
 
-        if is_assistant {
-            if !message.contains_key("content") {
-                message.insert(
-                    "content".to_owned(),
-                    serde_json::Value::String(String::new()),
-                );
-            }
-            // `prefix` is part of Mistral's assistant message schema.
-            message
-                .entry("prefix")
-                .or_insert(serde_json::Value::Bool(false));
+        if is_assistant && reasoning_field != Some("reasoning_content") {
             // Mistral rejects unknown assistant fields; hidden reasoning
-            // cannot be echoed back.
-            message.remove("reasoning_content");
+            // cannot be echoed back, except under the field the catalog
+            // names for the model.
+            message.shift_remove("reasoning_content");
         }
     }
     Ok(())
@@ -1027,16 +1062,6 @@ fn mistral_part_text(part: &serde_json::Value) -> Option<&str> {
             part.get(MISTRAL_REFUSAL)
                 .and_then(serde_json::Value::as_str)
         })
-}
-
-/// Identify text and refusal parts by tag, falling back to payload keys without a tag.
-/// An explicit nontext tag prevents flattening even when a text key is present.
-fn is_mistral_text_part(part: &serde_json::Value) -> bool {
-    match part.get("type").and_then(serde_json::Value::as_str) {
-        Some(MISTRAL_TEXT | MISTRAL_REFUSAL) => true,
-        Some(_) => false,
-        None => mistral_part_text(part).is_some(),
-    }
 }
 
 fn mistral_unsupported(what: &str) -> EncodeError {
@@ -1109,7 +1134,10 @@ fn mistral_audio_chunk(part: &serde_json::Value) -> Result<serde_json::Value, En
 ///
 /// Dispatched on the `type` tag, which the shared conversion always emits, so
 /// a part naming a chunk kind is converted as that kind regardless of what
-/// other keys it carries.
+/// other keys it carries. A part of any other type (Magistral `thinking`, a
+/// decoded `reference`, or content Mistral has no chunk for), and an
+/// untagged part carrying no text, is forwarded verbatim, as upstream
+/// forwards it.
 fn mistral_chunk(part: &serde_json::Value) -> Result<serde_json::Value, EncodeError> {
     /// Text and refusal parts are both re-tagged `text`: Mistral's schema has
     /// no `refusal` field and every chunk forbids unknown keys.
@@ -1142,80 +1170,26 @@ fn mistral_chunk(part: &serde_json::Value) -> Result<serde_json::Value, EncodeEr
                 None => serde_json::json!({"type": MISTRAL_DOCUMENT, MISTRAL_DOCUMENT: url}),
             })
         }
-        // U-native Magistral thinking is already a Mistral content chunk.
-        Some("thinking") => Ok(part.clone()),
-        Some(kind) => Err(mistral_unsupported(&format!("`{kind}` message content"))),
-        // Untagged, but textual: the flattening would have taken it, so it
-        // converts rather than failing.
+        // Any other type, whether a Mistral chunk already (Magistral
+        // `thinking`, a decoded `reference`) or one Mistral has no chunk
+        // for, is forwarded as it is rather than refused or removed.
+        Some(_) => Ok(part.clone()),
+        // Untagged, but textual: it converts as text.
         None if mistral_part_text(part).is_some() => text_chunk(part),
-        None => Err(mistral_unsupported("untyped message content")),
+        // Untagged and not textual: forwarded as it is, as upstream does.
+        None => Ok(part.clone()),
     }
 }
 
-/// Flatten text-only arrays and convert mixed arrays to Mistral content chunks.
-/// Nonarrays remain unchanged. Unsupported mixed content returns a conversion
-/// error; text-only parts without string payloads are omitted.
+/// Convert every part of an array `content` to its Mistral content chunk
+/// ([`mistral_chunk`]); a text-only array stays an array, as upstream sends
+/// it. Nonarrays remain unchanged. A part of a known chunk type missing its
+/// payload returns a conversion error.
 fn mistral_content(content: &mut serde_json::Value) -> Result<(), EncodeError> {
-    let Some(parts) = content.as_array() else {
-        return Ok(());
-    };
-
-    if parts.iter().all(is_mistral_text_part) {
-        // The tag-based guard is authoritative even for text parts missing their payload.
-        flatten_text_content_parts(content, "", false);
-        return Ok(());
+    for part in content.as_array_mut().into_iter().flatten() {
+        *part = mistral_chunk(part)?;
     }
-
-    if let Some(parts) = content.as_array_mut() {
-        for part in parts {
-            *part = mistral_chunk(part)?;
-        }
-    }
-
     Ok(())
-}
-
-/// OpenRouter's body rewrites.
-///
-/// OpenRouter's routing preferences (`ProviderPreferences`) need no rewrite:
-/// they reach the body through the request's `additional_params` as
-/// `{"provider": …}`.
-fn finalize_openrouter(map: &mut serde_json::Map<String, serde_json::Value>, prompt_caching: bool) {
-    if prompt_caching {
-        apply_openrouter_prompt_caching(map);
-    }
-
-    let Some(messages) = map.get_mut("messages").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for message in messages {
-        let Some(message) = message.as_object_mut() else {
-            continue;
-        };
-        // The shared assistant message serializes hidden reasoning under the
-        // llama.cpp/DeepSeek key `reasoning_content`; OpenRouter's documented
-        // assistant field is `reasoning`.
-        if message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
-            && let Some(reasoning) = message.remove("reasoning_content")
-        {
-            message.insert("reasoning".to_owned(), reasoning);
-        }
-
-        // OpenRouter image parts omit the shared fidelity hint.
-        for part in message
-            .get_mut("content")
-            .and_then(Value::as_array_mut)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(image) = part
-                .get_mut("image_url")
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                image.remove("detail");
-            }
-        }
-    }
 }
 
 pub(crate) fn apply_openrouter_prompt_caching(
@@ -1488,10 +1462,6 @@ impl crate::completion::ReplayTarget for Chat {
             .unwrap_or_default()
     }
 
-    fn states_finish_reason(&self) -> bool {
-        false
-    }
-
     fn call_id_slot(&self) -> Option<&'static str> {
         Some("/id")
     }
@@ -1515,11 +1485,9 @@ impl crate::completion::ReplayTarget for Chat {
             (AssistantContent::CarriedReasoning(reasoning), _) => {
                 self.provider.dialect.quirks.reasoning_details && !reasoning.content.is_empty()
             }
-            (AssistantContent::CarriedText(text), _) => {
-                text.known_text_projection().is_some_and(|known| {
-                    !known.is_empty() || self.provider.dialect.name == super::dialects::OPENAI.name
-                })
-            }
+            (AssistantContent::CarriedText(text), _) => text.foreign_text().is_some_and(|known| {
+                !known.is_empty() || self.provider.dialect.name == super::dialects::OPENAI.name
+            }),
             (AssistantContent::ProviderItem(_), _) => false,
             (AssistantContent::Text(text), Replay::Item(item)) => {
                 !text.text.is_empty() || item.get("audio").is_some()
@@ -2237,17 +2205,18 @@ impl ChatDecoder {
                 waiting.push(call);
                 continue;
             }
-            if named && input.is_none() {
-                if let Some((raw, error)) = malformed {
-                    let provider =
-                        call.id
-                            .and_then(crate::message::ProviderCallId::new)
-                            .map(|call_id| crate::error::ProviderCallEvidence {
-                                call_id,
-                                item_id: None,
-                            });
-                    return Err(out.malformed_call_error(call.at, raw, error, provider));
-                }
+            if named
+                && input.is_none()
+                && let Some((raw, error)) = malformed
+            {
+                let provider =
+                    call.id
+                        .and_then(crate::message::ProviderCallId::new)
+                        .map(|call_id| crate::error::ProviderCallEvidence {
+                            call_id,
+                            item_id: None,
+                        });
+                return Err(out.malformed_call_error(call.at, raw, error, provider));
             }
             if let Some(input) = input {
                 out.announce(call.at, json!({ "input": input }))?;
@@ -2326,9 +2295,9 @@ impl ChatDecoder {
                 }
             };
             if structured || signed {
-                message.remove(REASONING_DETAILS);
+                message.shift_remove(REASONING_DETAILS);
                 for field in REASONING_TEXT_KEYS {
-                    message.remove(field);
+                    message.shift_remove(field);
                 }
             }
         }
@@ -2399,15 +2368,14 @@ impl ChatDecoder {
     /// The `[DONE]` sentinel. A dialect whose streams omit the finish reason
     /// ends a turn that streamed a chunk as pi does without
     /// `supportsFinishReason`: a tool call when it holds one, else a stop.
+    /// Any other `[DONE]` before a finish reason was cut short.
     fn done(&mut self, out: Out<'_, Completion>) -> Result<Flow, ProviderError> {
-        if self.chunked {
-            if self.quirks.done_without_finish_reason && self.finish.is_none() {
-                self.finish = Some(if self.calls.is_empty() {
-                    FinishReason::Stop
-                } else {
-                    FinishReason::ToolCalls
-                });
-            }
+        if !self.ended && self.chunked && self.quirks.done_without_finish_reason {
+            self.finish = Some(if self.calls.is_empty() {
+                FinishReason::Stop
+            } else {
+                FinishReason::ToolCalls
+            });
             self.ended = true;
         }
         self.finish(out)
@@ -2564,22 +2532,29 @@ impl<'id> Decoder<'id, Completion> for ChatDecoder {
             return WireEvent::Known(ChatEvent::BareText(text));
         }
         let classified = classify_chat_completions_frame::<Value>(&data).map(|mut frame| {
-            if let Err(error) = carried::check_choice_list(&frame, &data) {
-                return Err(error);
-            }
-            // The `object` tag decides when the dialect sends one: stream
-            // chunks may carry whole messages. Several gateways omit it.
-            let whole = match frame.str("object") {
-                Some(object) => object == "chat.completion",
-                None => frame
-                    .arr("choices")
-                    .iter()
-                    .any(|choice| choice.obj("message").is_some()),
-            };
+            carried::check_choice_list(&frame, &data)?;
+            // Reassembled unary documents retain the stream's object tag, so
+            // in unary mode a first frame carrying a message is the whole
+            // reply unless it is a chunk: one with a delta and no finish yet
+            // (Perplexity streams the message so far beside each delta).
+            // Once a chunk has been read, and on a stream, the tag still
+            // distinguishes cumulative messages from deltas so their text is
+            // not repeated.
+            let choices = frame.arr("choices");
+            let has_message = choices.iter().any(|choice| choice.obj("message").is_some());
+            let chunk_shaped = choices.iter().any(|choice| choice.obj("delta").is_some())
+                && !choices.iter().any(|choice| {
+                    choice
+                        .str("finish_reason")
+                        .is_some_and(|reason| !reason.is_empty())
+                });
+            let whole = (self.unary && !self.chunked && has_message && !chunk_shaped)
+                || match frame.str("object") {
+                    Some(object) => object == "chat.completion",
+                    None => has_message,
+                };
             if whole {
-                if let Err(error) = carried::prepare_whole_calls(&mut frame, &data, &self.quirks) {
-                    return Err(error);
-                }
+                carried::prepare_whole_calls(&mut frame, &data, &self.quirks)?;
                 Ok(ChatEvent::Whole(frame))
             } else {
                 Ok(ChatEvent::Chunk(frame))
@@ -2610,6 +2585,7 @@ impl<'id> Decoder<'id, Completion> for ChatDecoder {
             // reply that names no reason.
             ChatEvent::BareText(text) => {
                 self.ended = true;
+                self.finish = Some(FinishReason::Stop);
                 if !text.is_empty() {
                     self.write(Writing::Text, &text, &mut out)?;
                 }

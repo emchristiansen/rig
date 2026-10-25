@@ -8,7 +8,7 @@ use crate::completion::{CompletionRequest, GenerationOptions};
 use crate::error::{EncodeError, ProviderError};
 use crate::message::{ToolChoice, ToolName};
 use crate::providers::gemini::GeminiConfig;
-use crate::providers::gemini::completion::GenerateContent;
+use crate::providers::gemini::completion::{GenerateContent, UnsupportedVertexCandidateCount};
 use crate::providers::gemini::interactions_api::Interactions;
 
 fn merged(request: &CompletionRequest, base: Value, rewrites: &[Rewrite]) -> FinalBody {
@@ -44,7 +44,7 @@ fn vertex_controls_preserve_single_candidate_and_do_not_apply_schema() {
             serde_json::from_value::<schemars::Schema>(json!({"type":"object"})).expect("schema"),
         )
         .additional_params(json!({"generationConfig": {
-            "temperature":0.9, "maxOutputTokens":900, "candidateCount":4,
+            "temperature":0.9, "maxOutputTokens":900, "candidateCount":1,
             "responseMimeType":"text/plain", "responseJsonSchema":{"type":"number"},
             "unmodeled":{"kept":true}
         }}));
@@ -87,6 +87,26 @@ fn vertex_without_legacy_controls_still_requests_one_candidate() {
     let target = GenerateContent::new(GeminiConfig::new("test-key"), "gemini-3-flash-preview");
     let request = CompletionRequest::new("hi")
         .additional_params(json!({"generationConfig":{"candidateCount":4,"temperature":0.9}}));
+    let error = crate::providers::gemini::completion::request_body_for_vertex(
+        &request,
+        &target,
+        "gemini-3-flash-preview",
+        None,
+        |_| {},
+    )
+    .expect_err("a raw count above 1 is refused, not lowered to 1");
+    let ProviderError::Request(source) = ProviderError::from(error) else {
+        panic!("a request refusal")
+    };
+    let refusal = source
+        .downcast_ref::<UnsupportedVertexCandidateCount>()
+        .expect("the refusal is typed");
+    assert_eq!(
+        (refusal.spelling, &refusal.count),
+        ("candidateCount", &json!(4))
+    );
+    let request = CompletionRequest::new("hi")
+        .additional_params(json!({"generationConfig":{"temperature":0.9}}));
     let body = crate::providers::gemini::completion::request_body_for_vertex(
         &request,
         &target,

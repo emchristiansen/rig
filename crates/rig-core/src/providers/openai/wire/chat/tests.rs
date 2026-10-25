@@ -196,7 +196,7 @@ fn the_mode_decides_whether_the_body_asks_for_a_stream() {
 /// `[DONE]` before any finish reason fails the turn, as pi's
 /// `openai-completions` throws: the provider never said the turn ended.
 #[tokio::test]
-async fn the_done_sentinel_emits_the_deferred_terminal() {
+async fn the_done_sentinel_without_a_finish_fails() {
     const BODY: &str = concat!(
         "data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl-1\",",
         "\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
@@ -210,16 +210,11 @@ async fn the_done_sentinel_emits_the_deferred_terminal() {
     );
     let mut response = bound.stream(prompt("hi")).expect("the stream opens");
     while response.next().await.is_some() {}
-    let folded = response
+    let error = response
         .finish()
         .await
-        .expect("the sentinel ends the reply");
-    assert_eq!(
-        canonical(&folded.choice),
-        vec![AssistantContent::text("hi")]
-    );
-    assert_eq!(folded.finish_reason(), None);
-    assert_eq!(folded.response_id(), Some("chatcmpl-1"));
+        .expect_err("a stream the provider never finished has no response");
+    assert!(matches!(error, ProviderError::Truncated), "{error:?}");
 }
 
 /// Drive `body` through a gateway whose quirks end a `[DONE]` stream that
@@ -393,26 +388,9 @@ async fn an_in_band_envelope_with_a_status_code_is_classified_by_it() -> anyhow:
 /// for a document carrying only one; every other dialect sends the id.
 #[test]
 fn openrouter_gets_a_placeholder_for_a_file_id_document() {
-    use crate::message::{Document, DocumentSourceKind, Message, UserContent};
     use crate::providers::openai::wire::OPENROUTER;
 
-    let body = |chat: Chat| {
-        let mut request = prompt("read this");
-        request.chat_history = vec![Message::User {
-            content: vec![UserContent::Document(Document {
-                data: DocumentSourceKind::FileId("file-abc".to_owned()).into(),
-                media_type: None,
-                additional_params: None,
-            })],
-        }];
-        let request = <crate::operation::Completion as crate::wire::Operation>::prepare(
-            request,
-            &chat.describe(),
-        )
-        .expect("the request prepares");
-        json_body(&chat.encode(request, Mode::Unary).expect("encodes").request).to_string()
-    };
-    let openrouter = body(
+    let openrouter = file_id_document_body(
         OpenAIConfig::new("k")
             .with_dialect(&OPENROUTER)
             .chat("openai/gpt-4o"),
@@ -422,8 +400,31 @@ fn openrouter_gets_a_placeholder_for_a_file_id_document() {
             && !openrouter.contains("file-abc"),
         "{openrouter}"
     );
-    let openai = body(wire());
+}
+
+#[test]
+fn openai_keeps_a_file_id_document() {
+    let openai = file_id_document_body(wire());
     assert!(openai.contains("\"file_id\":\"file-abc\""), "{openai}");
+}
+
+fn file_id_document_body(chat: Chat) -> String {
+    use crate::message::{Document, DocumentSourceKind, Message, UserContent};
+
+    let mut request = prompt("read this");
+    request.chat_history = vec![Message::User {
+        content: vec![UserContent::Document(Document {
+            data: DocumentSourceKind::FileId("file-abc".to_owned()).into(),
+            media_type: None,
+            additional_params: None,
+        })],
+    }];
+    let request = <crate::operation::Completion as crate::wire::Operation>::prepare(
+        request,
+        &chat.describe(),
+    )
+    .expect("the request prepares");
+    json_body(&chat.encode(request, Mode::Unary).expect("encodes").request).to_string()
 }
 
 /// A stream's `raw` is the `chat.completion` its chunks add up to, read by
@@ -509,8 +510,9 @@ async fn a_gateway_may_answer_with_a_bare_string() {
         response.choice.first().map(AssistantContent::canonical),
         Some(AssistantContent::text("the whole answer"))
     );
-    // F retains the absence of a reported reason on a bare-string reply.
-    assert_eq!(response.finish_reason(), None);
+    // No metadata and no terminal reason: the whole answer is a stop, as
+    // pi ends a reply on a wire that states none.
+    assert_eq!(response.finish_reason(), Some(FinishReason::Stop));
     assert_eq!(response.usage, crate::completion::Usage::default());
     assert_eq!(response.response_id(), None);
 
@@ -671,7 +673,7 @@ fn an_invented_call_field_replays_and_an_invented_message_field_does_not() {
 /// block keeps each detail's id, format and kind as the provider sent them,
 /// the encrypted entry whole beside the merged summary.
 #[test]
-fn a_streamed_reasoning_detail_keeps_its_id_format_and_kind() {
+fn openrouter_a_streamed_reasoning_detail_keeps_its_id_format_and_kind() {
     use crate::wire::Mode;
 
     let summary = |text: &str| {

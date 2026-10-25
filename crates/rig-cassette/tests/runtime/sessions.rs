@@ -26,6 +26,21 @@ mod support {
         let config = OpenAIConfig::with_key(&GROQ, "bank").with_base_url("http://bank.invalid");
         test_body(OpenAiModels::new(config, bank::client(&replies))).await
     }
+
+    /// The request-witness wrapper the session file names, over the bank.
+    /// The bank serves `scenario`'s recorded replies whatever is sent, so
+    /// the named request difference (coord-a-rig-port-chat-document-12 (2))
+    /// cannot reach this target; the Groq target refuses it exactly.
+    pub(super) async fn with_groq_request_witness_result<F, Fut, E>(
+        scenario: &str,
+        test_body: F,
+    ) -> Result<(), E>
+    where
+        F: FnOnce(OpenAiModels) -> Fut,
+        Fut: Future<Output = Result<(), E>>,
+    {
+        with_groq_cassette_result(scenario, test_body).await
+    }
 }
 
 // The session file names helpers only its own target uses.

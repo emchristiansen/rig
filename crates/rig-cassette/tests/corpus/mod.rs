@@ -1611,6 +1611,7 @@ impl Lookup {
                     .iter()
                     .filter_map(|content| match content {
                         AssistantContent::Text(text) => Some(text.text.trim().to_owned()),
+                        AssistantContent::CarriedText(text) => Some(text.text().trim().to_owned()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -2323,14 +2324,7 @@ pub fn golden_answer(log: &EffectLog) -> String {
                     _ => None,
                 });
                 Some(output_call.unwrap_or_else(|| {
-                    response
-                        .choice
-                        .iter()
-                        .filter_map(|content| match content {
-                            AssistantContent::Text(text) => Some(text.text.clone()),
-                            _ => None,
-                        })
-                        .collect::<String>()
+                    rig_core::transcript::assistant_text_from_choice(&response.choice)
                 }))
             }
             _ => None,
@@ -3181,7 +3175,8 @@ fn head_end_id(log: &EffectLog, tool_turns: usize) -> u64 {
     records[end].id.as_u64()
 }
 
-/// The golden's records after `tool_turns` tool turns, under its header.
+/// The golden's records after `tool_turns` tool turns, with recorded
+/// delivery metadata restricted to those records.
 fn tail_after(log: &EffectLog, tool_turns: usize) -> EffectLog {
     let head_end = head_end_id(log, tool_turns);
     EffectLog {
@@ -3193,6 +3188,34 @@ fn tail_after(log: &EffectLog, tool_turns: usize) -> EffectLog {
             .cloned()
             .collect(),
     }
+    .tail(0)
+}
+
+#[test]
+fn causal_streamed_tail_retains_only_its_recorded_done_responses() {
+    let log = golden("anthropic_causal_completion_streamed");
+    let first = rig_core::effect::EffectId::from_raw(1);
+    let last = rig_core::effect::EffectId::from_raw(4);
+    assert_eq!(
+        log.header.stream_done.keys().copied().collect::<Vec<_>>(),
+        vec![first, last],
+    );
+    let tail = tail_after(&log, 1);
+    assert_eq!(
+        tail.records
+            .iter()
+            .map(|record| record.id.as_u64())
+            .collect::<Vec<_>>(),
+        vec![3, 4],
+    );
+    assert_eq!(
+        tail.header.stream_done.keys().copied().collect::<Vec<_>>(),
+        vec![last],
+    );
+    assert_eq!(
+        tail.header.stream_done.get(&last),
+        log.header.stream_done.get(&last),
+    );
 }
 
 /// `Resume::Never` never suspends, so no tail is ever asked for it.

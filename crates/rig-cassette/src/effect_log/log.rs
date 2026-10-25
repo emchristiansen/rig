@@ -460,3 +460,6 @@ mod stable_hash_tests;
 
 #[cfg(test)]
 mod canonical_args_tests;
+
+#[cfg(test)]
+mod conversions_tests;

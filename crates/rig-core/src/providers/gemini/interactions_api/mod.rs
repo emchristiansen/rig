@@ -417,30 +417,26 @@ pub(crate) fn create_request_body(
     request: &CompletionRequest,
     stream: Option<bool>,
 ) -> Result<crate::completion::options::FinalBody, EncodeError> {
-    check_original_fields(request)?;
-    let request = with_original_omissions(request)?;
-    let mut rewrites: Vec<_> = stream
-        .map(crate::completion::options::Rewrite::Stream)
-        .into_iter()
-        .collect();
+    let mut rewrites =
+        vec![crate::completion::options::Rewrite::GeminiInteractionsOriginalParameters];
+    rewrites.extend(stream.map(crate::completion::options::Rewrite::Stream));
     rewrites.push(crate::completion::options::Rewrite::GeminiInteractionsTypedControls);
     crate::completion::options::request_params(
         wire,
-        &request,
-        |input| create_base(wire, &request, input),
+        request,
+        |input| create_base(wire, request, input),
         crate::completion::options::RawAt::Top,
         &rewrites,
     )
 }
 
 /// Project the original generation fields and omit absent original parameters.
-fn with_original_omissions(request: &CompletionRequest) -> Result<CompletionRequest, EncodeError> {
-    let mut input = request.clone();
-    if let Some(params) = input
-        .additional_params
-        .as_mut()
-        .and_then(Value::as_object_mut)
-    {
+pub(crate) fn project_original_parameters(
+    original: Option<&Value>,
+) -> Result<Option<Value>, EncodeError> {
+    check_original_fields(original)?;
+    let mut projected = original.cloned();
+    if let Some(params) = projected.as_mut().and_then(Value::as_object_mut) {
         for field in ["store", "background"] {
             if params.get(field).is_some_and(Value::is_null) {
                 params.shift_remove(field);
@@ -461,7 +457,7 @@ fn with_original_omissions(request: &CompletionRequest) -> Result<CompletionRequ
             params.shift_remove("agent_config");
         }
     }
-    Ok(input)
+    Ok(projected)
 }
 
 /// Read only the original tool-choice union and its allowed-tools configuration.
@@ -791,13 +787,9 @@ fn project_original_speech_config(value: &Value) -> Result<Value, EncodeError> {
 }
 
 /// Check the named original fields before merging explicit controls.
-fn check_original_fields(request: &CompletionRequest) -> Result<(), EncodeError> {
+fn check_original_fields(original: Option<&Value>) -> Result<(), EncodeError> {
     use serde::Deserialize as _;
-    let Some(params) = request
-        .additional_params
-        .as_ref()
-        .and_then(Value::as_object)
-    else {
+    let Some(params) = original.and_then(Value::as_object) else {
         return Ok(());
     };
     for (field, value) in params {
@@ -1108,7 +1100,7 @@ fn assistant_step(
             );
         }
         AssistantContent::CarriedText(part) => {
-            return match part.known_text_projection() {
+            return match part.foreign_text() {
                 Some(text) => Ok(Some(
                     json!({"type": "model_output", "content": [{"type": "text", "text": text}]}),
                 )),
@@ -1150,14 +1142,14 @@ fn assistant_step(
                     (!text.is_empty()).then(|| json!({"type":"text", "text":text}))
                 })
                 .collect();
-            let mut step = json!({"type":"thought"});
+            let mut step = Map::from_iter([("type".to_owned(), json!("thought"))]);
             if !summary.is_empty() {
-                step["summary"] = json!(summary);
+                step.insert("summary".to_owned(), json!(summary));
             }
             if let Some(signature) = signature {
-                step["signature"] = json!(signature);
+                step.insert("signature".to_owned(), json!(signature));
             }
-            return Ok(Some(step));
+            return Ok(Some(Value::Object(step)));
         }
         AssistantContent::Text(_)
         | AssistantContent::Reasoning(_)
@@ -1230,3 +1222,6 @@ mod interaction_usage_tests;
 
 #[cfg(test)]
 mod document_tests;
+
+#[cfg(test)]
+mod original_parameters_tests;

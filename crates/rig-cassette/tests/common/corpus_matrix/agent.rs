@@ -111,7 +111,7 @@ fn expect_ending(result: Result<String, RunFailure>, ending: Ending, fixture: &s
 
 /// The program's builder settings, as the corpus's `build_agent` applies
 /// them; the wire's model is already the builder's.
-fn configure<S>(
+pub(crate) fn configure<S>(
     mut builder: AgentBuilder<S>,
     program: &Program,
     settlement: Option<&super::reasoning::SettlementCapture>,
@@ -239,7 +239,7 @@ fn typed_tool(
 }
 
 /// The cell's tools on the builder, then [`finish`].
-fn grant<W, T>(
+pub(crate) fn grant<W, T>(
     builder: AgentBuilder<NoToolConfig>,
     wire: &Wire<rig::driver::Model<W, T>>,
     cell: &Cell,

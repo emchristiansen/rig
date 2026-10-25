@@ -150,7 +150,11 @@ async fn stream_reasoning_raw_round_trips_terminal_type() {
         .terminal
         .as_ref()
         .expect("the cell should observe a terminal record");
-    chat::assert_terminal_round_trips(terminal);
+    let frames = crate::cassettes::recorded_sse_json_frames(PROVIDER, SCENARIO);
+    // The document keeps DeepSeek's delivered chunk tag
+    // (coord-a-rig-port-chat-document-12 (1)).
+    let typed = chat::assert_terminal_round_trips(terminal, &frames);
+    assert_eq!(typed["object"], "chat.completion.chunk");
     let frame = chat::recorded_sole_usage_frame(PROVIDER, SCENARIO);
     chat::assert_terminal_reproduces_frame(terminal, PROVIDER, &frame, "the recorded frame");
     assert_no_request_id(terminal.provider_request_id.as_deref(), PROVIDER);

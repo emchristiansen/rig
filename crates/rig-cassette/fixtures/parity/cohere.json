@@ -85,7 +85,7 @@
       "created": 0,
       "id": "43da33bd-da34-4183-b6b0-4f39c3f6d3b7",
       "model": "command-a-03-2025",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "usage": {
         "completion_tokens": 63,
         "completion_tokens_details": {
@@ -137,7 +137,7 @@
       "created": 0,
       "id": "28556a08-7b5b-44d5-b840-74975eb4f984",
       "model": "command-a-03-2025",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "usage": {
         "completion_tokens": 1,
         "completion_tokens_details": {
@@ -215,7 +215,7 @@
       "created": 0,
       "id": "3c48dacd-e4c5-4de0-a3bc-c0d0e60f5498",
       "model": "command-a-03-2025",
-      "object": "chat.completion",
+      "object": "chat.completion.chunk",
       "usage": {
         "completion_tokens": 24,
         "completion_tokens_details": {

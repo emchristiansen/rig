@@ -535,7 +535,7 @@ impl crate::completion::ReplayTarget for Messages {
         &self,
         part: &crate::message::CarriedText,
     ) -> Result<(), crate::message::UnrepresentableOpaqueContent> {
-        if part.known_text_projection().is_some()
+        if part.foreign_text().is_some()
             || (self.provider.dialect.name == super::PROVIDER_NAME
                 && super::completion::carried_hosted(part))
         {

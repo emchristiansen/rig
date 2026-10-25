@@ -202,17 +202,7 @@ pub(super) fn body(
         }
     }
     check_aborted_hosted_replay(wire, &request.chat_history)?;
-    if request.options.cache == Some(completion::CacheRetention::Long)
-        && let Some(raw) = request
-            .additional_params
-            .as_ref()
-            .and_then(|params| params.get("cache_control"))
-        && raw.str("ttl") != Some("1h")
-    {
-        return Err(EncodeError::request(
-            "Raw top-level cache_control conflicts with the typed automatic caching TTL",
-        ));
-    }
+    crate::completion::options::check_anthropic_cache_control(request)?;
     let model = request.model.clone().unwrap_or_else(|| wire.model.clone());
     // A request that addresses another model gets that model's default; the
     // wire's own model keeps the one it was built with.
@@ -323,8 +313,11 @@ fn base(
     let strict = wire.strict_tools && wire.provider.dialect.quirks.strict_tool_schemas;
     let eager = wire.tool_input_streaming == super::wire::ToolInputStreaming::Eager;
     let mut tools = tools(request.tools.clone(), input.raw_tools()?, strict, eager);
-    let (mut system, history) =
-        split_system(&request.chat_history, takes_mid_conversation_system(model));
+    let (mut system, history) = split_system(
+        &request.chat_history,
+        takes_mid_conversation_system(model),
+        wire,
+    );
     let ids =
         WireIds::for_target(&request.chat_history, wire, model).map_err(EncodeError::request)?;
     let mut messages: Vec<Value> = Vec::new();
@@ -541,7 +534,7 @@ pub(super) fn assistant_parts(
             .collect());
     }
     if let AssistantContent::CarriedText(part) = block
-        && let Some(known) = part.known_text_projection()
+        && let Some(known) = part.foreign_text()
     {
         return Ok((!known.is_empty())
             .then(|| text(known))
@@ -760,32 +753,86 @@ fn tools(
     rig.chain(extra).collect()
 }
 
-/// Split systems from conversation turns while retaining their original indices.
-/// Invalid system positions are hoisted separately; valid neighbors stay in place.
-pub(super) fn split_system(history: &[Message], mid: bool) -> (Vec<Value>, Vec<(usize, &Message)>) {
+/// Split `history` into the top-level `system` blocks and the messages, each
+/// message with the index it had in `history`.
+///
+/// The system messages that lead the history are the prompt. On a model that
+/// takes mid-conversation system messages, one in a valid position stays in
+/// place, and one in a position Anthropic rejects (after an assistant turn,
+/// or before a user turn) moves to the next valid slot: right after the next
+/// user turn that ends the array or precedes an assistant turn. Hoisting it
+/// into `system` instead would change the prompt prefix, which misses the
+/// cache from the first token and, on models that bind thinking blocks to
+/// their conversation, turns every earlier thinking block into a 400. It is
+/// hoisted only when no such slot exists. The system messages deferred to one
+/// slot are joined into one, in history order, which carries the index of the
+/// first of them.
+pub(super) fn split_system<'a>(
+    history: &'a [Message],
+    mid: bool,
+    target: &Messages,
+) -> (Vec<Value>, Vec<(usize, std::borrow::Cow<'a, Message>)>) {
     let mut system = Vec::new();
     let mut remaining = Vec::new();
+    let mut deferred: Vec<(usize, &str)> = Vec::new();
+    let lead = history
+        .iter()
+        .take_while(|message| matches!(message, Message::System { .. }))
+        .count();
     for (index, message) in history.iter().enumerate() {
         match message {
             Message::System { content } if content.is_empty() => {}
-            Message::System { .. } if mid && valid_system_message(history, index) => {
-                remaining.push((index, message));
+            Message::System { content } if index < lead => system.push(text(content)),
+            Message::System { .. } if mid && valid_system_message(history, index, target) => {
+                remaining.push((index, std::borrow::Cow::Borrowed(message)));
+            }
+            Message::System { content }
+                if mid && (index + 1..history.len()).any(|slot| system_slot(history, slot)) =>
+            {
+                deferred.push((index, content.as_str()));
             }
             Message::System { content } => system.push(text(content)),
-            other => remaining.push((index, other)),
+            other => {
+                remaining.push((index, std::borrow::Cow::Borrowed(other)));
+                if let Some(&(first, _)) = deferred.first()
+                    && system_slot(history, index)
+                {
+                    let content = deferred
+                        .drain(..)
+                        .map(|(_, content)| content)
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    remaining.push((first, std::borrow::Cow::Owned(Message::System { content })));
+                }
+            }
         }
     }
     (system, remaining)
 }
 
+/// Whether a system message may sit right after `history[index]`: it is a
+/// user turn, and the next turn that is not a system message is an
+/// assistant turn or there is none, since Anthropic takes several system
+/// messages in a row there.
+fn system_slot(history: &[Message], index: usize) -> bool {
+    matches!(history.get(index), Some(Message::User { .. }))
+        && history
+            .get(index + 1..)
+            .into_iter()
+            .flatten()
+            .find(|message| !matches!(message, Message::System { .. }))
+            .is_none_or(|message| matches!(message, Message::Assistant(_)))
+}
+
 /// A system message follows one valid immediate turn and precedes an
 /// assistant turn or the end. Intervening system messages do not share a slot.
-fn valid_system_message(history: &[Message], index: usize) -> bool {
+fn valid_system_message(history: &[Message], index: usize, target: &Messages) -> bool {
     let follows = index
         .checked_sub(1)
         .and_then(|previous| history.get(previous))
         .is_some_and(|message| {
-            matches!(message, Message::User { .. }) || assistant_ends_in_server_tool_block(message)
+            matches!(message, Message::User { .. })
+                || assistant_ends_in_server_tool_block(message, target)
         });
     follows
         && history
@@ -793,7 +840,7 @@ fn valid_system_message(history: &[Message], index: usize) -> bool {
             .is_none_or(|message| matches!(message, Message::Assistant(_)))
 }
 
-fn assistant_ends_in_server_tool_block(message: &Message) -> bool {
+fn assistant_ends_in_server_tool_block(message: &Message, target: &Messages) -> bool {
     let Message::Assistant(turn) = message else {
         return false;
     };
@@ -801,16 +848,23 @@ fn assistant_ends_in_server_tool_block(message: &Message) -> bool {
         return false;
     };
     let raw = match block {
-        AssistantContent::Opaque(opaque) => Some(&opaque.item),
-        AssistantContent::CarriedText(part) if carried_hosted(part) => Some(&part.payload.item),
-        block => block.native_item(),
+        AssistantContent::Opaque(opaque) => Some(std::borrow::Cow::Borrowed(&opaque.item)),
+        AssistantContent::CarriedText(part) if carried_hosted(part) => {
+            Some(std::borrow::Cow::Borrowed(&part.payload.item))
+        }
+        block => match block.replay(target, None) {
+            Replay::Item(item) => Some(item),
+            Replay::Identity(_) | Replay::Rebuild => None,
+        },
     };
-    raw.and_then(|item| item.str("type")).is_some_and(|kind| {
-        matches!(
-            kind,
-            "server_tool_use" | "web_search_tool_result" | "code_execution_tool_result"
-        )
-    })
+    raw.as_deref()
+        .and_then(|item| item.str("type"))
+        .is_some_and(|kind| {
+            matches!(
+                kind,
+                "server_tool_use" | "web_search_tool_result" | "code_execution_tool_result"
+            )
+        })
 }
 
 /// The id of the container the last turn holding one ran in. Anthropic

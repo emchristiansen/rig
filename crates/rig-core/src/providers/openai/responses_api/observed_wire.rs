@@ -779,7 +779,7 @@ impl<'de> Deserialize<'de> for Output {
                 let Value::Object(mut map) = value else {
                     return Ok(Output::Unknown(value));
                 };
-                map.remove("type");
+                map.shift_remove("type");
                 Ok(Output::Compaction(map))
             }
             _ => Ok(Output::Unknown(value)),
@@ -999,7 +999,7 @@ impl<'de> Deserialize<'de> for AssistantContent {
                 // OutputText flattens sibling fields; the tag belongs to the enum.
                 let mut value = value;
                 if let Some(fields) = value.as_object_mut() {
-                    fields.remove("type");
+                    fields.shift_remove("type");
                 }
                 serde_json::from_value(value)
                     .map(Self::OutputText)
@@ -1113,7 +1113,7 @@ pub(crate) fn stamp_phase(text: &mut Text, phase: Option<&str>) {
         Some(Value::Object(entries)) => entries,
         _ => Map::new(),
     };
-    let mut extras = match entries.remove(OPENAI_RESPONSES_EXTRAS_KEY) {
+    let mut extras = match entries.shift_remove(OPENAI_RESPONSES_EXTRAS_KEY) {
         Some(Value::Object(extras)) => extras,
         _ => Map::new(),
     };

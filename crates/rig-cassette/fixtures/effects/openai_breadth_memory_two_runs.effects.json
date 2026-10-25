@@ -1,6 +1,6 @@
 {
   "header": {
-    "run_spec": 2087178272077569848,
+    "run_spec": 17862429522637928200,
     "handlers": [
       {
         "key": "golden/memory",
@@ -83,7 +83,10 @@
           "max_tokens": null,
           "tool_choice": null,
           "additional_params": {
-            "store": false
+            "store": false,
+            "include": [
+              "reasoning.encrypted_content"
+            ]
           },
           "output_schema": null
         },
@@ -94,25 +97,26 @@
           "outcome": "completion",
           "choice": [
             {
-              "type": "text",
-              "text": "Ready.",
-              "native": {
+              "type": "carried_text",
+              "content": {
+                "type": "text",
+                "text": "Ready."
+              },
+              "payload": {
                 "item": {
-                  "content": [
-                    {
-                      "annotations": [],
-                      "logprobs": [],
-                      "text": "Ready.",
-                      "type": "output_text"
-                    }
-                  ],
-                  "id": "msg_08cbc9beb3793494016abf498d74fc87d0bf85b6ff2be5cffe",
-                  "role": "assistant",
-                  "status": "completed",
-                  "type": "message"
+                  "annotations": [],
+                  "logprobs": [],
+                  "text": "Ready.",
+                  "type": "output_text"
                 },
-                "fingerprint": "d69d08f702e303b6"
-              }
+                "provider": "openai",
+                "position": {
+                  "kind": "message_content",
+                  "item_index": 0,
+                  "part_index": 0
+                }
+              },
+              "item_id": "msg_08cbc9beb3793494016abf498d74fc87d0bf85b6ff2be5cffe"
             }
           ],
           "usage": {
@@ -130,6 +134,7 @@
               "total": 0.00009999999999999999
             }
           },
+          "message_id": "msg_08cbc9beb3793494016abf498d74fc87d0bf85b6ff2be5cffe",
           "origin": {
             "api": "openai.responses",
             "provider": "openai",
@@ -258,25 +263,26 @@
               "role": "assistant",
               "content": [
                 {
-                  "type": "text",
-                  "text": "Ready.",
-                  "native": {
+                  "type": "carried_text",
+                  "content": {
+                    "type": "text",
+                    "text": "Ready."
+                  },
+                  "payload": {
                     "item": {
-                      "content": [
-                        {
-                          "annotations": [],
-                          "logprobs": [],
-                          "text": "Ready.",
-                          "type": "output_text"
-                        }
-                      ],
-                      "id": "msg_08cbc9beb3793494016abf498d74fc87d0bf85b6ff2be5cffe",
-                      "role": "assistant",
-                      "status": "completed",
-                      "type": "message"
+                      "annotations": [],
+                      "logprobs": [],
+                      "text": "Ready.",
+                      "type": "output_text"
                     },
-                    "fingerprint": "d69d08f702e303b6"
-                  }
+                    "provider": "openai",
+                    "position": {
+                      "kind": "message_content",
+                      "item_index": 0,
+                      "part_index": 0
+                    }
+                  },
+                  "item_id": "msg_08cbc9beb3793494016abf498d74fc87d0bf85b6ff2be5cffe"
                 }
               ],
               "origin": {
@@ -327,25 +333,26 @@
               "role": "assistant",
               "content": [
                 {
-                  "type": "text",
-                  "text": "Ready.",
-                  "native": {
+                  "type": "carried_text",
+                  "content": {
+                    "type": "text",
+                    "text": "Ready."
+                  },
+                  "payload": {
                     "item": {
-                      "content": [
-                        {
-                          "annotations": [],
-                          "logprobs": [],
-                          "text": "Ready.",
-                          "type": "output_text"
-                        }
-                      ],
-                      "id": "msg_08cbc9beb3793494016abf498d74fc87d0bf85b6ff2be5cffe",
-                      "role": "assistant",
-                      "status": "completed",
-                      "type": "message"
+                      "annotations": [],
+                      "logprobs": [],
+                      "text": "Ready.",
+                      "type": "output_text"
                     },
-                    "fingerprint": "d69d08f702e303b6"
-                  }
+                    "provider": "openai",
+                    "position": {
+                      "kind": "message_content",
+                      "item_index": 0,
+                      "part_index": 0
+                    }
+                  },
+                  "item_id": "msg_08cbc9beb3793494016abf498d74fc87d0bf85b6ff2be5cffe"
                 }
               ],
               "origin": {
@@ -387,25 +394,26 @@
               "role": "assistant",
               "content": [
                 {
-                  "type": "text",
-                  "text": "Ready.",
-                  "native": {
+                  "type": "carried_text",
+                  "content": {
+                    "type": "text",
+                    "text": "Ready."
+                  },
+                  "payload": {
                     "item": {
-                      "content": [
-                        {
-                          "annotations": [],
-                          "logprobs": [],
-                          "text": "Ready.",
-                          "type": "output_text"
-                        }
-                      ],
-                      "id": "msg_08cbc9beb3793494016abf498d74fc87d0bf85b6ff2be5cffe",
-                      "role": "assistant",
-                      "status": "completed",
-                      "type": "message"
+                      "annotations": [],
+                      "logprobs": [],
+                      "text": "Ready.",
+                      "type": "output_text"
                     },
-                    "fingerprint": "d69d08f702e303b6"
-                  }
+                    "provider": "openai",
+                    "position": {
+                      "kind": "message_content",
+                      "item_index": 0,
+                      "part_index": 0
+                    }
+                  },
+                  "item_id": "msg_08cbc9beb3793494016abf498d74fc87d0bf85b6ff2be5cffe"
                 }
               ],
               "origin": {
@@ -433,7 +441,10 @@
           "max_tokens": null,
           "tool_choice": null,
           "additional_params": {
-            "store": false
+            "store": false,
+            "include": [
+              "reasoning.encrypted_content"
+            ]
           },
           "output_schema": null
         },
@@ -444,25 +455,26 @@
           "outcome": "completion",
           "choice": [
             {
-              "type": "text",
-              "text": "Again.",
-              "native": {
+              "type": "carried_text",
+              "content": {
+                "type": "text",
+                "text": "Again."
+              },
+              "payload": {
                 "item": {
-                  "content": [
-                    {
-                      "annotations": [],
-                      "logprobs": [],
-                      "text": "Again.",
-                      "type": "output_text"
-                    }
-                  ],
-                  "id": "msg_08cbc9beb3793494016abf498e602887d0b62b7d89fdb374a2",
-                  "role": "assistant",
-                  "status": "completed",
-                  "type": "message"
+                  "annotations": [],
+                  "logprobs": [],
+                  "text": "Again.",
+                  "type": "output_text"
                 },
-                "fingerprint": "ec5d868384d693f7"
-              }
+                "provider": "openai",
+                "position": {
+                  "kind": "message_content",
+                  "item_index": 0,
+                  "part_index": 0
+                }
+              },
+              "item_id": "msg_08cbc9beb3793494016abf498e602887d0b62b7d89fdb374a2"
             }
           ],
           "usage": {
@@ -480,6 +492,7 @@
               "total": 0.0001475
             }
           },
+          "message_id": "msg_08cbc9beb3793494016abf498e602887d0b62b7d89fdb374a2",
           "origin": {
             "api": "openai.responses",
             "provider": "openai",
@@ -608,25 +621,26 @@
               "role": "assistant",
               "content": [
                 {
-                  "type": "text",
-                  "text": "Again.",
-                  "native": {
+                  "type": "carried_text",
+                  "content": {
+                    "type": "text",
+                    "text": "Again."
+                  },
+                  "payload": {
                     "item": {
-                      "content": [
-                        {
-                          "annotations": [],
-                          "logprobs": [],
-                          "text": "Again.",
-                          "type": "output_text"
-                        }
-                      ],
-                      "id": "msg_08cbc9beb3793494016abf498e602887d0b62b7d89fdb374a2",
-                      "role": "assistant",
-                      "status": "completed",
-                      "type": "message"
+                      "annotations": [],
+                      "logprobs": [],
+                      "text": "Again.",
+                      "type": "output_text"
                     },
-                    "fingerprint": "ec5d868384d693f7"
-                  }
+                    "provider": "openai",
+                    "position": {
+                      "kind": "message_content",
+                      "item_index": 0,
+                      "part_index": 0
+                    }
+                  },
+                  "item_id": "msg_08cbc9beb3793494016abf498e602887d0b62b7d89fdb374a2"
                 }
               ],
               "origin": {

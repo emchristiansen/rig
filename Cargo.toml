@@ -99,6 +99,7 @@ features = [
     "typesafeai",
     "vectorize",
     "vertexai",
+    "webrtc",
     "websocket",
     "websocket-native-tls",
     "websocket-rustls",

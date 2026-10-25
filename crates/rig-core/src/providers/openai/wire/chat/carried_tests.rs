@@ -120,6 +120,20 @@ fn openrouter_refuses_a_document_that_is_only_a_file_id() {
             .to_string()
             .contains("Provider file IDs are not supported for OpenRouter document inputs")
     );
+}
+
+#[test]
+fn openai_accepts_a_document_that_is_only_a_file_id() {
+    let request = || {
+        let mut request = prompt("read this");
+        request.chat_history = vec![Message::User {
+            content: vec![UserContent::Document(crate::message::Document {
+                data: DocumentData::File(Source::FileId("file-abc".to_owned())),
+                ..Default::default()
+            })],
+        }];
+        request
+    };
     assert!(wire().encode(request(), Mode::Unary).is_ok());
 }
 
@@ -179,15 +193,141 @@ fn groq_native_tools_refuse_a_nonarray() {
 #[test]
 fn hyperbolic_removes_tool_remnants_and_retains_image_arrays() {
     let image = json!({"type":"image_url","image_url":{"url":"https://x.invalid/a.png"}});
-    let mut body = json!({"messages":[{"role":"tool","content":"answer"},
-        {"role":"assistant","content":null,"tool_calls":[{}]},
-        {"role":"user","content":[{"type":"text","text":"look"},image]},
-        {"role":"assistant","content":"answer","tool_calls":[{}],"reasoning_content":"private"}]});
-    rewrite_body(BodyRewrite::Hyperbolic, body.as_object_mut().expect("map")).expect("rewrite");
-    assert_eq!(body["messages"].as_array().expect("messages").len(), 2);
-    assert_eq!(body["messages"][0]["content"][1], image);
-    assert!(body["messages"][1].get("tool_calls").is_none());
-    assert!(body["messages"][1].get("reasoning_content").is_none());
+    // `reasoning_content` stays only for a model whose catalog entry names
+    // it, as upstream sends it (mec-rig-bodies-answers-1 Q3).
+    for (reasoning_field, kept) in [
+        (None, None),
+        (Some("reasoning_content"), Some(json!("private"))),
+    ] {
+        let mut body = json!({"messages":[{"role":"tool","content":"answer"},
+            {"role":"assistant","content":null,"tool_calls":[{}]},
+            {"role":"user","content":[{"type":"text","text":"look"},image]},
+            {"role":"assistant","content":"answer","tool_calls":[{}],"reasoning_content":"private"}]});
+        rewrite_body(
+            BodyRewrite::Hyperbolic,
+            reasoning_field,
+            body.as_object_mut().expect("map"),
+        )
+        .expect("rewrite");
+        assert_eq!(body["messages"].as_array().expect("messages").len(), 2);
+        assert_eq!(body["messages"][0]["content"][1], image);
+        assert!(body["messages"][1].get("tool_calls").is_none());
+        assert_eq!(
+            body["messages"][1].get("reasoning_content"),
+            kept.as_ref(),
+            "{reasoning_field:?}"
+        );
+    }
+}
+
+/// Perplexity, Mira, Hyperbolic and Mistral keep assistant
+/// `reasoning_content` for a model whose catalog entry names it, and remove
+/// it for every other model (mec-rig-bodies-answers-1 Q3).
+#[test]
+fn plain_text_gateways_and_mistral_keep_only_a_catalog_reasoning_field() {
+    for kind in [
+        BodyRewrite::Perplexity,
+        BodyRewrite::Mira,
+        BodyRewrite::Hyperbolic,
+        BodyRewrite::Mistral,
+    ] {
+        for (reasoning_field, kept) in [
+            (None, None),
+            (Some("reasoning"), None),
+            (Some("reasoning_content"), Some(json!("private"))),
+        ] {
+            let mut body = json!({"messages":[{"role":"user","content":"q"},
+                {"role":"assistant","content":"answer","reasoning_content":"private"},
+                {"role":"user","content":"next"}]});
+            rewrite_body(kind, reasoning_field, body.as_object_mut().expect("map"))
+                .expect("rewrite");
+            assert_eq!(body["messages"][1]["content"], "answer", "{kind:?}");
+            assert_eq!(
+                body["messages"][1].get("reasoning_content"),
+                kept.as_ref(),
+                "{kind:?}/{reasoning_field:?}: {body}"
+            );
+        }
+    }
+}
+
+/// Perplexity's same-role merge keeps a catalog reasoning field: the
+/// non-empty values join with a newline, as the merged text does.
+#[test]
+fn perplexity_merge_joins_a_kept_reasoning_field() {
+    for (first, second, joined) in [
+        ("a", "b", "a\nb"),
+        ("", "b", "b"),
+        ("a", "", "a"),
+        ("", "", ""),
+    ] {
+        let mut body = json!({"messages":[
+            {"role":"assistant","content":"First.","reasoning_content":first},
+            {"role":"tool","tool_call_id":"c","content":"x"},
+            {"role":"assistant","content":"Second.","reasoning_content":second}]});
+        rewrite_body(
+            BodyRewrite::Perplexity,
+            Some("reasoning_content"),
+            body.as_object_mut().expect("map"),
+        )
+        .expect("rewrite");
+        assert_eq!(
+            body["messages"],
+            json!([{"role":"assistant","content":"First.\nSecond.","reasoning_content":joined}]),
+            "{first:?}/{second:?}"
+        );
+    }
+}
+
+/// A Kimi model, whose catalog entry names `reasoning_content`, sends it on
+/// every assistant turn through Perplexity, Mira, Hyperbolic and Mistral as
+/// upstream does on any gateway: the replayed reasoning, or empty when the
+/// turn has none (mec-rig-bodies-answers-1 Q3).
+#[test]
+fn kimi_reasoning_content_reaches_the_plain_text_gateways_and_mistral() {
+    use crate::message::Reasoning;
+    use crate::providers::openai::wire::{HYPERBOLIC, MIRA, MISTRAL, PERPLEXITY};
+
+    let history = || {
+        let mut request = CompletionRequest::new("and then?");
+        request.chat_history = vec![
+            Message::user("think first"),
+            Message::Assistant(AssistantMessage {
+                content: vec![
+                    AssistantContent::Reasoning(Reasoning::new("private chain")),
+                    AssistantContent::text("visible answer"),
+                ],
+                ..Default::default()
+            }),
+            Message::user("go on"),
+            Message::Assistant(AssistantMessage {
+                content: vec![AssistantContent::text("second answer")],
+                ..Default::default()
+            }),
+            Message::user("and then?"),
+        ];
+        request
+    };
+    for dialect in [&PERPLEXITY, &MIRA, &HYPERBOLIC, &MISTRAL] {
+        for model in ["kimi-k3", "moonshotai/kimi-k2.6"] {
+            let encoded = OpenAIConfig::with_key(dialect, "k")
+                .chat(model)
+                .encode(history(), Mode::Unary)
+                .expect("encodes");
+            let body = json_body(&encoded.request);
+            let context = format!("{}/{model}: {body}", dialect.name);
+            assert_eq!(
+                body["messages"][1]["content"], "visible answer",
+                "{context}"
+            );
+            assert_eq!(
+                body["messages"][1]["reasoning_content"], "private chain",
+                "{context}"
+            );
+            assert_eq!(body["messages"][3]["content"], "second answer", "{context}");
+            assert_eq!(body["messages"][3]["reasoning_content"], "", "{context}");
+        }
+    }
 }
 
 #[test]
@@ -396,7 +536,7 @@ fn opaque_nested_reasoning_is_refused_before_adaptation() {
 }
 
 #[test]
-fn gateway_details_keep_distinct_blocks_signatures_and_upstream_issuer() {
+fn openrouter_gateway_details_keep_distinct_blocks_signatures_and_upstream_issuer() {
     let chat = OpenAIConfig::with_key(&super::super::OPENROUTER, "k").chat("anthropic/claude-test");
     let details = json!([{"type":"reasoning.text","id":"r1","text":"first","signature":"sig"},
         {"type":"reasoning.summary","id":"r2","summary":"second"},
@@ -443,7 +583,7 @@ fn gateway_details_keep_distinct_blocks_signatures_and_upstream_issuer() {
 }
 
 #[test]
-fn carried_reasoning_replays_every_part_with_ordered_indices() {
+fn openrouter_carried_reasoning_replays_every_part_with_ordered_indices() {
     let chat = OpenAIConfig::with_key(&super::super::OPENROUTER, "k").chat("anthropic/claude-test");
     let block = CarriedReasoning::new(
         vec![
@@ -476,7 +616,7 @@ fn carried_reasoning_replays_every_part_with_ordered_indices() {
 }
 
 #[test]
-fn signed_plaintext_survives_canonicalizing_and_editing_before_replay() {
+fn openrouter_signed_plaintext_survives_canonicalizing_and_editing_before_replay() {
     let chat = OpenAIConfig::with_key(&super::super::OPENROUTER, "k").chat("anthropic/claude-test");
     let message = json!({"role":"assistant","reasoning":"thinking","content":"answer",
         "reasoning_details":[{"type":"reasoning.text","text":"","signature":"sig-f","index":0}]});
@@ -516,7 +656,7 @@ fn signed_plaintext_survives_canonicalizing_and_editing_before_replay() {
 }
 
 #[tokio::test]
-async fn late_signature_finishes_the_original_part_without_repeating_text() {
+async fn openrouter_late_signature_finishes_the_original_part_without_repeating_text() {
     use crate::streaming::{Item, PartKind, StreamEvent};
     let deltas = [
         json!({"reasoning":"thinking"}),
@@ -1465,9 +1605,21 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
             })
     };
 
-    // Text-only content keeps the plain-string form it always took.
+    // A lone text part is the plain string the shared encoder sends.
     let body = encode(vec![UserContent::text("just words")]).expect("encodes");
     assert_eq!(body["messages"][0]["content"], "just words");
+
+    // A text-only array stays an array of text chunks, as upstream sends it,
+    // rather than being flattened into one string.
+    let body = encode(vec![
+        UserContent::text("first"),
+        UserContent::text("second"),
+    ])
+    .expect("encodes");
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([{"type": "text", "text": "first"}, {"type": "text", "text": "second"}])
+    );
 
     // An image rides as Mistral's own `image_url` chunk, in an array \u2014 not
     // flattened away.
@@ -1488,19 +1640,23 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
     assert_eq!(parts[0]["type"], "text");
     assert_eq!(parts[1]["type"], "image_url");
 
-    // Content Mistral has no chunk for fails here rather than being removed.
-    let refused = encode(vec![
+    // A part of a type Mistral has no chunk for is forwarded verbatim, as
+    // upstream forwards it, rather than refused or removed.
+    let body = encode(vec![
         UserContent::text("watch"),
         UserContent::Video(crate::message::Video {
             data: crate::message::DocumentSourceKind::Url("https://x.invalid/a.mp4".to_owned()),
             media_type: None,
             ..Default::default()
         }),
-    ]);
-    let error = refused.expect_err("Mistral carries no video chunk");
-    assert!(
-        error.to_string().contains("Mistral cannot carry"),
-        "the error names the constraint: {error}"
+    ])
+    .expect("an unknown part type is forwarded, not refused");
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([
+            {"type": "text", "text": "watch"},
+            {"type": "video_url", "video_url": {"url": "https://x.invalid/a.mp4"}}
+        ])
     );
 
     // A document with inline bytes becomes `document_url`, carrying its name
@@ -1547,7 +1703,7 @@ fn the_mistral_body_rebuilds_content_as_its_own_chunks() {
     );
     assert_eq!(
         body["messages"][0]["content"][0]["image_url"]["detail"], "auto",
-        "the carried OpenRouter detail rewrite does not change OpenAI"
+        "OpenAI keeps the shared detail level"
     );
 }
 
@@ -2001,9 +2157,10 @@ fn presealed_openrouter_cache_marks_the_raw_system_override_in_both_modes() {
                 let mut expected = json!({"model":"openai/gpt-4o", "messages":[
                     {"role":"system","content":if caching { &cached_system } else { &system }},
                     {"role":"system","content":"second system"},
-                    {"role":"assistant","content":"before","reasoning":"plan"},
+                    {"role":"assistant","content":"before","reasoning_content":"plan"},
                     {"role":"user","content":[{"type":"text","text":"raw user"},
-                        {"type":"image_url","image_url":{"url":"https://x.invalid/a.png"}}]}
+                        {"type":"image_url","image_url":{"url":"https://x.invalid/a.png",
+                            "detail":"high"}}]}
                 ], "raw_marker":"kept"});
                 if mode == Mode::Streaming {
                     expected["stream"] = json!(true);
@@ -2026,7 +2183,6 @@ fn presealed_openrouter_cache_flag_is_limited_to_its_dialect_and_system_content(
     let router = OpenAIConfig::with_key(&super::super::OPENROUTER, "k")
         .chat("openai/gpt-4o")
         .with_prompt_caching();
-    let openai = OpenAIConfig::new("k").chat("gpt-4o").with_prompt_caching();
     for (chat, messages) in [
         (
             router.clone(),
@@ -2042,139 +2198,161 @@ fn presealed_openrouter_cache_flag_is_limited_to_its_dialect_and_system_content(
             json!([{"role":"system","content":[]},
             {"role":"user","content":"empty system"}]),
         ),
-        (
-            openai,
-            json!([{"role":"system","content":"plain rules"},
-            {"role":"user","content":"openai"}]),
-        ),
     ] {
-        for mode in [Mode::Unary, Mode::Streaming] {
-            let mut request = CompletionRequest::new("canonical prompt");
-            request.additional_params = Some(json!({"messages":messages}));
-            let encoded = chat.encode(request, mode).expect("encodes");
-            let mut expected = json!({"model":chat.model,"messages":messages});
+        assert_presealed_chat_cache_flag_body(chat, messages);
+    }
+}
+
+#[test]
+fn presealed_openai_cache_flag_is_limited_to_its_dialect_and_system_content() {
+    let openai = OpenAIConfig::new("k").chat("gpt-4o").with_prompt_caching();
+    assert_presealed_chat_cache_flag_body(
+        openai,
+        json!([{"role":"system","content":"plain rules"},
+        {"role":"user","content":"openai"}]),
+    );
+}
+
+fn assert_presealed_chat_cache_flag_body(chat: Chat, messages: Value) {
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let mut request = CompletionRequest::new("canonical prompt");
+        request.additional_params = Some(json!({"messages":messages}));
+        let encoded = chat.encode(request, mode).expect("encodes");
+        let mut expected = json!({"model":chat.model,"messages":messages});
+        if mode == Mode::Streaming {
+            expected["stream"] = json!(true);
+            if chat.provider.dialect.quirks.stream_include_usage {
+                expected["stream_options"] = json!({"include_usage":true});
+            }
+        }
+        assert_eq!(json_body(&encoded.request), expected, "{mode:?}");
+    }
+}
+
+#[test]
+fn presealed_chat_direct_headers_are_built_once_and_keep_the_same_final_body() {
+    assert_direct_headers_preserve_final_body(OpenAIConfig::with_key(&GROQ, "k").chat("compound"));
+}
+
+#[test]
+fn openrouter_presealed_chat_direct_headers_are_built_once_and_keep_the_same_final_body() {
+    assert_direct_headers_preserve_final_body(
+        OpenAIConfig::with_key(&super::super::OPENROUTER, "k")
+            .chat("openai/gpt-4o")
+            .with_prompt_caching(),
+    );
+}
+
+fn assert_direct_headers_preserve_final_body(chat: Chat) {
+    let raw = json!({"messages":[{"role":"system","content":"rules"},
+        {"role":"user","content":"search"}],
+        "tools":[{"type":"browser_search"}],
+        "compound_custom":{"limit":3}});
+    let mut request = CompletionRequest::new("canonical prompt");
+    request.additional_params = Some(raw.clone());
+    for mode in [Mode::Unary, Mode::Streaming] {
+        let calls = std::cell::Cell::new(0);
+        let direct = chat
+            .encode_with_headers(request.clone(), mode, |provider, original, builder| {
+                calls.set(calls.get() + 1);
+                assert_eq!(provider, &chat.provider);
+                assert_eq!(original.additional_params.as_ref(), Some(&raw));
+                Ok(provider
+                    .completion_headers(original, builder)?
+                    .header("x-g233-stage", "direct"))
+            })
+            .expect("direct headers encode");
+        let ordinary = chat.encode(request.clone(), mode).expect("ordinary encode");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            header(direct.request.headers(), "x-g233-stage"),
+            Some("direct")
+        );
+        assert_eq!(header(ordinary.request.headers(), "x-g233-stage"), None);
+        assert_eq!(
+            header(direct.request.headers(), "authorization"),
+            Some("Bearer k")
+        );
+        assert_eq!(
+            header(direct.request.headers(), "content-type"),
+            Some("application/json")
+        );
+        assert_eq!(direct.request.method(), ordinary.request.method());
+        assert_eq!(direct.request.uri(), ordinary.request.uri());
+        assert_eq!(direct.route, ordinary.route);
+        assert_eq!(direct.framing, ordinary.framing);
+        assert_eq!(direct.request_id_header, ordinary.request_id_header);
+        assert_eq!(
+            direct.response_header_prefix,
+            ordinary.response_header_prefix
+        );
+        assert_eq!(json_body(&direct.request), json_body(&ordinary.request));
+    }
+}
+
+#[test]
+fn presealed_chat_catalog_policy_checks_the_effective_model_and_keeps_raw_overrides() {
+    assert_catalog_policy_preserves_raw_overrides(
+        OpenAIConfig::with_key(&GROQ, "k").chat("compound"),
+    );
+}
+
+#[test]
+fn openrouter_presealed_chat_catalog_policy_checks_the_effective_model_and_keeps_raw_overrides() {
+    assert_catalog_policy_preserves_raw_overrides(
+        OpenAIConfig::with_key(&super::super::OPENROUTER, "k")
+            .chat("openai/gpt-4o")
+            .with_prompt_caching(),
+    );
+}
+
+fn assert_catalog_policy_preserves_raw_overrides(chat: Chat) {
+    use crate::completion::OnUnsupported;
+    let model = crate::providers::openai::GPT_6_SOL;
+    let rules = json!([{"role":"system","content":"rules"},
+        {"role":"user","content":"search"}]);
+    for mode in [Mode::Unary, Mode::Streaming] {
+        for raw_top_p in [false, true] {
+            let mut raw = json!({"model":model,"messages":rules,
+                "tools":[{"type":"browser_search"}],
+                "compound_custom":{"limit":3}});
+            if raw_top_p {
+                raw["top_p"] = json!(0.7);
+            }
+            let mut request = CompletionRequest::new("canonical prompt").top_p(0.9);
+            request.additional_params = Some(raw);
+            let error = chat
+                .encode(request.clone().on_unsupported(OnUnsupported::Error), mode)
+                .expect_err("the effective model refuses sampling");
+            let refusal = error.unsupported_option().expect("typed catalog refusal");
+            assert_eq!(refusal.option, "top_p");
+            let encoded = chat
+                .encode(request.on_unsupported(OnUnsupported::Ignore), mode)
+                .expect("Ignore encodes");
+            let mut expected = json!({"model":model,"messages":rules,
+                "compound_custom":{"limit":3}});
+            if chat.provider.dialect.quirks.rewrite == BodyRewrite::GroqCompoundTools {
+                expected["compound_custom"]["enabled_tools"] = json!([{"type":"browser_search"}]);
+            } else {
+                expected["tools"] = json!([{"type":"browser_search"}]);
+                expected["messages"][0]["content"] = json!([
+                    {"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}
+                ]);
+            }
+            if raw_top_p {
+                expected["top_p"] = json!(0.7);
+            }
             if mode == Mode::Streaming {
                 expected["stream"] = json!(true);
                 if chat.provider.dialect.quirks.stream_include_usage {
                     expected["stream_options"] = json!({"include_usage":true});
                 }
             }
-            assert_eq!(json_body(&encoded.request), expected, "{mode:?}");
-        }
-    }
-}
-
-#[test]
-fn presealed_chat_direct_headers_are_built_once_and_keep_the_same_final_body() {
-    for chat in [
-        OpenAIConfig::with_key(&GROQ, "k").chat("compound"),
-        OpenAIConfig::with_key(&super::super::OPENROUTER, "k")
-            .chat("openai/gpt-4o")
-            .with_prompt_caching(),
-    ] {
-        let raw = json!({"messages":[{"role":"system","content":"rules"},
-            {"role":"user","content":"search"}],
-            "tools":[{"type":"browser_search"}],
-            "compound_custom":{"limit":3}});
-        let mut request = CompletionRequest::new("canonical prompt");
-        request.additional_params = Some(raw.clone());
-        for mode in [Mode::Unary, Mode::Streaming] {
-            let calls = std::cell::Cell::new(0);
-            let direct = chat
-                .encode_with_headers(request.clone(), mode, |provider, original, builder| {
-                    calls.set(calls.get() + 1);
-                    assert_eq!(provider, &chat.provider);
-                    assert_eq!(original.additional_params.as_ref(), Some(&raw));
-                    Ok(provider
-                        .completion_headers(original, builder)?
-                        .header("x-g233-stage", "direct"))
-                })
-                .expect("direct headers encode");
-            let ordinary = chat.encode(request.clone(), mode).expect("ordinary encode");
-            assert_eq!(calls.get(), 1);
             assert_eq!(
-                header(direct.request.headers(), "x-g233-stage"),
-                Some("direct")
+                json_body(&encoded.request),
+                expected,
+                "{raw_top_p}/{mode:?}"
             );
-            assert_eq!(header(ordinary.request.headers(), "x-g233-stage"), None);
-            assert_eq!(
-                header(direct.request.headers(), "authorization"),
-                Some("Bearer k")
-            );
-            assert_eq!(
-                header(direct.request.headers(), "content-type"),
-                Some("application/json")
-            );
-            assert_eq!(direct.request.method(), ordinary.request.method());
-            assert_eq!(direct.request.uri(), ordinary.request.uri());
-            assert_eq!(direct.route, ordinary.route);
-            assert_eq!(direct.framing, ordinary.framing);
-            assert_eq!(direct.request_id_header, ordinary.request_id_header);
-            assert_eq!(
-                direct.response_header_prefix,
-                ordinary.response_header_prefix
-            );
-            assert_eq!(json_body(&direct.request), json_body(&ordinary.request));
-        }
-    }
-}
-
-#[test]
-fn presealed_chat_catalog_policy_checks_the_effective_model_and_keeps_raw_overrides() {
-    use crate::completion::OnUnsupported;
-    let model = crate::providers::openai::GPT_6_SOL;
-    let rules = json!([{"role":"system","content":"rules"},
-        {"role":"user","content":"search"}]);
-    for chat in [
-        OpenAIConfig::with_key(&GROQ, "k").chat("compound"),
-        OpenAIConfig::with_key(&super::super::OPENROUTER, "k")
-            .chat("openai/gpt-4o")
-            .with_prompt_caching(),
-    ] {
-        for mode in [Mode::Unary, Mode::Streaming] {
-            for raw_top_p in [false, true] {
-                let mut raw = json!({"model":model,"messages":rules,
-                    "tools":[{"type":"browser_search"}],
-                    "compound_custom":{"limit":3}});
-                if raw_top_p {
-                    raw["top_p"] = json!(0.7);
-                }
-                let mut request = CompletionRequest::new("canonical prompt").top_p(0.9);
-                request.additional_params = Some(raw);
-                let error = chat
-                    .encode(request.clone().on_unsupported(OnUnsupported::Error), mode)
-                    .expect_err("the effective model refuses sampling");
-                let refusal = error.unsupported_option().expect("typed catalog refusal");
-                assert_eq!(refusal.option, "top_p");
-                let encoded = chat
-                    .encode(request.on_unsupported(OnUnsupported::Ignore), mode)
-                    .expect("Ignore encodes");
-                let mut expected = json!({"model":model,"messages":rules,
-                    "compound_custom":{"limit":3}});
-                if chat.provider.dialect.quirks.rewrite == BodyRewrite::GroqCompoundTools {
-                    expected["compound_custom"]["enabled_tools"] =
-                        json!([{"type":"browser_search"}]);
-                } else {
-                    expected["tools"] = json!([{"type":"browser_search"}]);
-                    expected["messages"][0]["content"] = json!([
-                        {"type":"text","text":"rules","cache_control":{"type":"ephemeral"}}
-                    ]);
-                }
-                if raw_top_p {
-                    expected["top_p"] = json!(0.7);
-                }
-                if mode == Mode::Streaming {
-                    expected["stream"] = json!(true);
-                    if chat.provider.dialect.quirks.stream_include_usage {
-                        expected["stream_options"] = json!({"include_usage":true});
-                    }
-                }
-                assert_eq!(
-                    json_body(&encoded.request),
-                    expected,
-                    "{raw_top_p}/{mode:?}"
-                );
-            }
         }
     }
 }

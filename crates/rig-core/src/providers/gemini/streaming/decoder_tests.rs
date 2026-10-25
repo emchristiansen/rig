@@ -212,6 +212,33 @@ fn a_trailing_thought_signature_stays_on_the_part_that_carried_it() {
 }
 
 #[test]
+fn a_signature_on_the_last_piece_of_an_answer_signs_the_whole_answer() {
+    use crate::message::AssistantContent;
+    let buffered = decoded(json!({"candidates":[{"content":{"parts":[
+        {"text":"x y z", "thoughtSignature":"c2lnLTE="}
+    ]}, "finishReason":"STOP"}]}))
+    .expect("whole answer decodes");
+    let frames = [
+        json!({"candidates":[{"content":{"parts":[{"text":"x"}]}}]}),
+        json!({"candidates":[{"content":{"parts":[{"text":" y z", "thoughtSignature":"c2lnLTE="}]}, "finishReason":"STOP"}]}),
+    ].map(|frame| WireFrame::Text(frame.to_string()));
+    let streamed = crate::test_utils::history::decode(&wire(), Mode::Streaming, frames)
+        .expect("stream decodes");
+    for (mode, response) in [("whole", &buffered), ("streamed", &streamed)] {
+        let [AssistantContent::CarriedText(text)] = response.choice.as_slice() else {
+            panic!("{mode}: one signed answer block: {:?}", response.choice);
+        };
+        assert_eq!(text.text(), "x y z", "{mode}");
+        assert_eq!(
+            text.signed_answer().map(|answer| answer.signature.as_str()),
+            Some("c2lnLTE="),
+            "{mode}"
+        );
+    }
+    assert_eq!(buffered.finish_reason(), streamed.finish_reason());
+}
+
+#[test]
 fn an_inline_data_part_survives_as_a_raw_content_block() {
     use crate::message::AssistantContent;
     let response = decoded(json!({"candidates":[{"content":{"parts":[
@@ -271,6 +298,7 @@ fn a_signed_answer_text_round_trips_and_replays_edits_on_another_model() {
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[path = "decoder_tests/terminal_emission_tests.rs"]
 mod terminal_emission;
 
 #[test]

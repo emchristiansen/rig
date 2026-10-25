@@ -814,10 +814,10 @@ async fn an_incremental_send_chains_the_tip_and_reuses_the_captured_envelope() {
 
         // Every other field is the root envelope's, byte for byte.
         let mut rest = frame.clone();
-        rest.remove("input");
-        rest.remove("previous_response_id");
+        rest.shift_remove("input");
+        rest.shift_remove("previous_response_id");
         let mut root_rest = root.clone();
-        root_rest.remove("input");
+        root_rest.shift_remove("input");
         assert_eq!(
             rest, root_rest,
             "the delta must reuse the captured envelope"
@@ -1796,7 +1796,7 @@ async fn the_codex_prewarm_sequence_is_a_warmup_then_an_incremental_first_turn()
             "generate",
             "client_metadata",
         ] {
-            frame.remove(key);
+            frame.shift_remove(key);
         }
         frame
     };
@@ -2177,8 +2177,7 @@ fn bundled_connect_has_current_session_signature() {
 
 #[cfg(all(feature = "tungstenite", not(target_family = "wasm")))]
 #[tokio::test]
-async fn bundled_connect_matches_explicit_tungstenite_backend()
--> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn bundled_connect_matches_explicit_tungstenite_backend() {
     use futures::{SinkExt, StreamExt};
     use rig_tungstenite::tokio_tungstenite::{
         accept_hdr_async,
@@ -2192,15 +2191,25 @@ async fn bundled_connect_matches_explicit_tungstenite_backend()
         Duration::from_secs(10),
         tokio::net::TcpListener::bind("127.0.0.1:0"),
     )
-    .await??;
-    let base_url = format!("http://{}/v1", listener.local_addr()?);
-    let identity = CodexIdentity::from_ids("session-bundled", "thread-bundled")?;
+    .await
+    .expect("the local listener bind finishes before its timeout")
+    .expect("the local listener binds");
+    let base_url = format!(
+        "http://{}/v1",
+        listener
+            .local_addr()
+            .expect("the local listener has an address")
+    );
+    let identity = CodexIdentity::from_ids("session-bundled", "thread-bundled")
+        .expect("the fixture session and thread IDs are valid");
     let wire = OpenAIConfig::with_key(&chatgpt::DIALECT, ACCESS_TOKEN)
         .with_base_url(base_url)
         .with_caller_identity(crate::test_utils::test_caller_identity())
         .with_account_id(ACCOUNT_ID)
         .responses(chatgpt::GPT_5_3_CODEX);
-    let expected_handshake = identity.handshake_request(&wire)?;
+    let expected_handshake = identity
+        .handshake_request(&wire)
+        .expect("the fixture identity creates its handshake");
     let builder = || {
         CodexWebSocketSessionBuilder::new(wire.clone())
             .expect("the current ChatGPT wire supports Codex sessions")
@@ -2266,8 +2275,12 @@ async fn bundled_connect_matches_explicit_tungstenite_backend()
         tokio::time::timeout(Duration::from_secs(10), server),
         tokio::time::timeout(Duration::from_secs(10), clients),
     );
-    let received = server_result??;
-    let (bundled_response, explicit_response) = client_result??;
+    let received = server_result
+        .expect("the local server finishes before its timeout")
+        .expect("the local server completes both upgrades and turns");
+    let (bundled_response, explicit_response) = client_result
+        .expect("both clients finish before their timeout")
+        .expect("both clients complete their turns and close");
     assert_eq!(received.len(), 2);
     for (headers, _) in &received {
         for (name, value) in expected_handshake.headers() {
@@ -2299,10 +2312,10 @@ async fn bundled_connect_matches_explicit_tungstenite_backend()
         );
         assert_eq!(
             response.raw,
-            serde_json::from_str::<serde_json::Value>(&completed_frame)?["response"]
+            serde_json::from_str::<serde_json::Value>(&completed_frame)
+                .expect("the completed fixture is valid JSON")["response"]
         );
     }
     assert_eq!(bundled_response.usage, explicit_response.usage);
     assert_eq!(bundled_response.model(), explicit_response.model());
-    Ok(())
 }

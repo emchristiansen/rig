@@ -139,8 +139,11 @@ pub enum Rewrite {
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
     CodexStore,
-    /// Validate recognized raw Responses controls; its output cap and
-    /// temperature come from the typed request, not this raw layer.
+    /// Validate recognized raw Responses controls. Off Codex, other raw keys
+    /// and explicit nulls are sent as written, except `model`, and the
+    /// typed request's output cap and temperature win over raw ones. On
+    /// Codex, a raw output cap or temperature reaches the body only to be
+    /// refused there as the typed one is.
     ///
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
@@ -190,7 +193,13 @@ pub enum Rewrite {
     ///
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
-    ChatDialect(BodyRewrite),
+    ChatDialect {
+        /// The dialect's rewrite.
+        kind: BodyRewrite,
+        /// The assistant reasoning field the catalog names for the
+        /// request's model, which the dialect's history rewrite keeps.
+        reasoning_field: Option<&'static str>,
+    },
     /// Mark the selected OpenRouter chat wire's system-prompt cache boundary.
     ///
     /// For rig's own crates; not covered by semver.
@@ -212,6 +221,7 @@ pub enum Rewrite {
     GeminiTypedControls,
     /// Vertex AI: explicit legacy temperature and output cap replace their
     /// fields after the raw merge, and every request asks for one candidate.
+    /// A merged candidate count above 1 is refused, never overwritten.
     ///
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
@@ -222,6 +232,13 @@ pub enum Rewrite {
     /// For rig's own crates; not covered by semver.
     #[doc(hidden)]
     GeminiInteractionsTypedControls,
+    /// Gemini Interactions create: check and project the original
+    /// `additional_params` before any layer is formed. It writes nothing
+    /// after the merge.
+    ///
+    /// For rig's own crates; not covered by semver.
+    #[doc(hidden)]
+    GeminiInteractionsOriginalParameters,
 }
 
 /// The non-object, non-null JSON kinds a typed Gemini control cannot overwrite.
@@ -664,6 +681,25 @@ fn unserialized(request: &CompletionRequest) -> Result<(), EncodeError> {
     }
 }
 
+/// Check the original typed retention against the literal raw Anthropic marker.
+/// The wire calls this before selecting its output cap, preserving refusal order.
+pub(crate) fn check_anthropic_cache_control(
+    request: &CompletionRequest,
+) -> Result<(), EncodeError> {
+    if request.options.cache == Some(CacheRetention::Long)
+        && let Some(raw) = request
+            .additional_params
+            .as_ref()
+            .and_then(|params| params.get("cache_control"))
+        && raw.get("ttl").and_then(Value::as_str) != Some("1h")
+    {
+        return Err(EncodeError::request(
+            "Raw top-level cache_control conflicts with the typed automatic caching TTL",
+        ));
+    }
+    Ok(())
+}
+
 /// `additional_params` as an object, or empty.
 fn raw_layer(request: &CompletionRequest) -> Result<Map<String, Value>, EncodeError> {
     match &request.additional_params {
@@ -792,6 +828,19 @@ pub fn request_params(
     raw_at: RawAt,
     rewrites: &[Rewrite],
 ) -> Result<FinalBody, EncodeError> {
+    let projected_request = if rewrites.contains(&Rewrite::GeminiInteractionsOriginalParameters) {
+        let additional_params =
+            crate::providers::gemini::interactions_api::project_original_parameters(
+                request.additional_params.as_ref(),
+            )?;
+        Some(CompletionRequest {
+            additional_params,
+            ..request.clone()
+        })
+    } else {
+        None
+    };
+    let request = projected_request.as_ref().unwrap_or(request);
     #[cfg(feature = "websocket")]
     if let [rewrite @ Rewrite::ResponsesWebSocketCreate(create)] = rewrites
         && let crate::providers::openai::responses_api::websocket::WebSocketCreateInput::Delta {
@@ -823,8 +872,17 @@ pub fn request_params(
     }
     let provider = provider.fields;
     let mut raw = if rewrites.contains(&Rewrite::ResponsesTypedControls) {
+        use crate::providers::openai::responses_api::UnrecognizedRaw;
         crate::providers::openai::responses_api::project_raw_parameters(
             request.additional_params.as_ref().unwrap_or(&Value::Null),
+            if rewrites.contains(&Rewrite::ResponsesCodex) {
+                UnrecognizedRaw::Codex
+            } else {
+                UnrecognizedRaw::Sent {
+                    typed_output_cap: request.max_tokens.is_some(),
+                    typed_temperature: request.temperature.is_some(),
+                }
+            },
         )?
     } else {
         raw_layer(request)?
@@ -929,6 +987,8 @@ fn apply(
         Rewrite::NoBackground => {
             body.shift_remove("background");
         }
+        // Its projection ran before the layers were formed.
+        Rewrite::GeminiInteractionsOriginalParameters => {}
         Rewrite::StreamUsage => {
             if let Some(options) = body
                 .entry("stream_options")
@@ -1028,8 +1088,11 @@ fn apply(
                 body.insert("generate".to_owned(), Value::Bool(generate));
             }
         }
-        Rewrite::ChatDialect(kind) => {
-            crate::providers::openai::wire::chat::rewrite_body(*kind, body)?;
+        Rewrite::ChatDialect {
+            kind,
+            reasoning_field,
+        } => {
+            crate::providers::openai::wire::chat::rewrite_body(*kind, *reasoning_field, body)?;
             if *kind == BodyRewrite::GroqCompoundTools {
                 crate::providers::openai::wire::chat::fold_groq_native_tools(
                     body,
@@ -1060,6 +1123,7 @@ fn apply(
                 typed.insert("responseJsonSchema".to_owned(), schema.clone().to_value());
             }
             if matches!(rewrite, Rewrite::VertexTypedControls) {
+                crate::providers::gemini::completion::refuse_vertex_candidate_counts_but_one(body)?;
                 typed.insert("candidateCount".to_owned(), Value::from(1));
             }
             if let Some(temperature) = request.temperature {
@@ -1155,3 +1219,6 @@ fn apply(
 
 #[cfg(test)]
 mod gemini_controls_tests;
+
+#[cfg(test)]
+mod rewrite_tests;

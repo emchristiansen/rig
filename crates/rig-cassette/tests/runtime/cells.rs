@@ -10,10 +10,20 @@
 //! per-provider goldens are replaced by those assertions over the same
 //! replies.
 
+use anyhow::{bail, ensure};
+use futures::StreamExt;
 use rig::http_client::DynHttpClient;
+use rig::{ErrorKind, ErrorReport};
+use rig_agent::agent::{AgentBuilder, MultiTurnStreamItem};
+use rig_agent::completion::PromptError;
 use rig_test_support::bank;
 
+use crate::corpus_matrix::agent::{configure, grant};
+use crate::corpus_matrix::cells::{Bus, ReasoningCase};
+use crate::corpus_matrix::corpus::Unhandled;
+use crate::corpus_matrix::reasoning::SettlementCapture;
 use crate::corpus_matrix::{Wire, agent::run_agent, cells, cells::Cell};
+use crate::decode::{incomplete_frame_data, incomplete_refusal};
 
 /// Run `cell` on rig-agent over `replies`, with every assertion the
 /// producer makes.
@@ -26,6 +36,130 @@ pub(crate) async fn produce<W, T>(
     T: rig::driver::Transport<W>,
 {
     run_agent(&wire(bank::client(&replies)), cell, |_| {}).await;
+}
+
+/// The report a streamed run of `cell` on `wire` fails with: the run's first
+/// error item, as the runner reports it. `Err` when the run answers, fails
+/// in another way, or the cell is not one streamed prompt on the agent's own
+/// bus.
+pub(crate) async fn stream_failure<W, T>(
+    wire: &Wire<rig::driver::Model<W, T>>,
+    cell: &Cell,
+) -> anyhow::Result<ErrorReport>
+where
+    W: rig::wire::Wire<Op = rig::operation::Completion>,
+    T: rig::driver::Transport<W>,
+{
+    let program = wire.program(cell);
+    ensure!(
+        program.streamed
+            && program.second_prompt.is_none()
+            && program.late_route.is_none()
+            && cell.image.is_none()
+            && cell.bus.declared(),
+        "{}: one streamed prompt on the agent's own bus, with no late route",
+        cell.name
+    );
+    let settlement: Option<SettlementCapture> =
+        (cell.reasoning == Some(ReasoningCase::Capped)).then(Default::default);
+    let mut builder = AgentBuilder::new(wire.model.clone());
+    if cell.bus != Bus::Own {
+        builder = builder.configure_bus(cell.bus.policy());
+    }
+    let builder = configure(builder, &program, settlement.as_ref());
+    let agent = grant(builder, wire, cell, &program);
+    let mut runner = agent.prompt(rig::message::Message::user(program.prompt));
+    if let Some(history) = program.history {
+        runner = runner.history(history());
+    }
+    if let Some(max_turns) = program.max_turns {
+        runner = runner.max_turns(max_turns);
+    }
+    if let Some(concurrency) = program.tool_concurrency {
+        runner = runner.tool_concurrency(concurrency);
+    }
+    runner = runner.unhandled_invalid_tool_call(match program.unhandled {
+        Unhandled::Fail => rig_agent::run::UnhandledInvalidToolCall::Fail,
+        Unhandled::Ignore => rig_agent::run::UnhandledInvalidToolCall::Ignore,
+    });
+    let mut stream = runner.stream();
+    let first_error = tokio::time::timeout(std::time::Duration::from_secs(180), async {
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(MultiTurnStreamItem::FinalResponse(_)) => {
+                    return Err(anyhow::anyhow!("{}: the run answered", cell.name));
+                }
+                Ok(_) => {}
+                Err(error) => return Ok(error),
+            }
+        }
+        Err(anyhow::anyhow!(
+            "{}: the stream ended without an error item",
+            cell.name
+        ))
+    })
+    .await??;
+    match first_error {
+        PromptError::Report(report) => Ok(report),
+        other => bail!("{}: the run failed with {other:?}, not a report", cell.name),
+    }
+}
+
+/// The report a run fails with when its default Responses stream refuses a
+/// `response.incomplete` terminal whose data is `body` (G193,
+/// coord-a-rig-g191-g195-1): the provider's reply, not retryable, with no
+/// status, no code and the reply's request id.
+pub(crate) fn incomplete_report(body: String, request_id: Option<&str>) -> ErrorReport {
+    let message = match request_id {
+        Some(id) => format!("ProviderResponseError: {body} (request id: {id})"),
+        None => format!("ProviderResponseError: {body}"),
+    };
+    ErrorReport {
+        kind: ErrorKind::ProviderResponse,
+        retryable: false,
+        message,
+        code: None,
+        http_status: None,
+        refusal: false,
+        source_chain: Vec::new(),
+        request_id: request_id.map(str::to_owned),
+        provider_response: Some(incomplete_refusal(body, request_id)),
+        detail: None,
+    }
+}
+
+/// The capped streamed cell's Responses reply ends in `response.incomplete`
+/// (reason `max_output_tokens`). A default Responses stream refuses that
+/// terminal (G193): the run fails with exactly [`incomplete_report`] of the
+/// frame's data and the reply's request id. The default run reaches none of
+/// the cell's record, reasoning, settled-history or header assertions; the
+/// wire that opts in (`IncompleteTerminal::Accept`) runs the cell again
+/// with every assertion the producer makes.
+#[tokio::test]
+async fn reasoning_capped_streamed_openai_responses() -> anyhow::Result<()> {
+    let replies = bank::script("openai", "reasoning_matrix_responses/capped_streamed");
+    let [reply] = replies.as_slice() else {
+        bail!(
+            "the capped streamed cell is one reply, not {}",
+            replies.len()
+        );
+    };
+    let frames = crate::stream_faults::sse_frames(&String::from_utf8_lossy(&reply.body()));
+    let body = incomplete_frame_data(&frames).map_err(anyhow::Error::msg)?;
+    let wire = crate::wires::openai_responses(bank::client(&replies));
+    let failure = stream_failure(&wire, &cells::REASONING_CAPPED_STREAMED).await?;
+    let expected = incomplete_report(body, Some("req_754c1faf9b714535a2165baef9aa63e3"));
+    ensure!(
+        failure == expected,
+        "the default stream's refusal is {failure:?}, not {expected:?}"
+    );
+    produce(
+        crate::wires::openai_responses_accepting_incomplete,
+        replies,
+        &cells::REASONING_CAPPED_STREAMED,
+    )
+    .await;
+    Ok(())
 }
 
 /// A row runs its cell over the bank replies of the shapes its wire
@@ -165,7 +299,6 @@ cells! {
     reasoning_capped_venice: (venice, "venice", "reasoning_matrix/capped", cells::REASONING_CAPPED);
     shaping_thinking_second_turn_doubleword: (doubleword, "doubleword", "corpus_matrix/shaping_thinking_second_turn", cells::SHAPING_THINKING_SECOND_TURN);
     reasoning_capped_streamed_gemini: recorded (gemini, "gemini", "reasoning_matrix/capped_streamed", cells::REASONING_CAPPED_STREAMED);
-    reasoning_capped_streamed_openai_responses: (openai_responses, "openai", "reasoning_matrix_responses/capped_streamed", cells::REASONING_CAPPED_STREAMED);
 }
 
 // The image cells (`tests/common/corpus_matrix/image.rs`): the image in every

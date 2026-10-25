@@ -382,6 +382,245 @@ const PAIRS: &[Pair] = &[
         streamed: "chat_terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_plain_two.yaml",
         minted: &[],
     },
+    // The fork's OpenAI Chat matrix recordings restored by fd978c5e.
+    Pair {
+        provider: "openai",
+        unary: "chat_history_roundtrip_matrix/blocking_gpt_4_1_mini_normalized_text.yaml",
+        streamed: "chat_history_roundtrip_matrix/streaming_gpt_4_1_mini_normalized_text.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_history_roundtrip_matrix/blocking_gpt_4o_mini_normalized_text.yaml",
+        streamed: "chat_history_roundtrip_matrix/streaming_gpt_4o_mini_normalized_text.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_history_roundtrip_originals/blocking_gpt_4_1_mini_normalized_parallel_tool.yaml",
+        streamed: "chat_history_roundtrip_originals/streaming_gpt_4_1_mini_normalized_parallel_tool.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_history_roundtrip_originals/blocking_gpt_4_1_mini_normalized_single_tool.yaml",
+        streamed: "chat_history_roundtrip_originals/streaming_gpt_4_1_mini_normalized_single_tool.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_history_roundtrip_originals/blocking_gpt_4o_mini_normalized_parallel_tool.yaml",
+        streamed: "chat_history_roundtrip_originals/streaming_gpt_4o_mini_normalized_parallel_tool.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_history_roundtrip_originals/blocking_gpt_4o_mini_normalized_single_tool.yaml",
+        streamed: "chat_history_roundtrip_originals/streaming_gpt_4o_mini_normalized_single_tool.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_absent.yaml",
+        streamed: "chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_absent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_length_top_two.yaml",
+        streamed: "chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_length_top_two.yaml",
+        // Each answer samples its own second alternative.
+        minted: &["/choices/0/logprobs/content/0/top_logprobs/1"],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_stop_top_two.yaml",
+        streamed: "chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_stop_top_two.yaml",
+        // Each answer scores its second alternative itself.
+        minted: &["/choices/0/logprobs/content/0/top_logprobs/1/logprob"],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_streaming_logprobs_matrix/blocking_gpt_4_1_mini_stop_top_zero.yaml",
+        streamed: "chat_streaming_logprobs_matrix/streaming_gpt_4_1_mini_stop_top_zero.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_length_top_absent.yaml",
+        streamed: "chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_length_top_absent.yaml",
+        // Each answer scores its first token itself.
+        minted: &["/choices/0/logprobs/content/0/logprob"],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_length_top_two.yaml",
+        streamed: "chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_length_top_two.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_length_top_zero.yaml",
+        streamed: "chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_length_top_zero.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_stop_top_absent.yaml",
+        streamed: "chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_stop_top_absent.yaml",
+        // Each answer scores its first token itself.
+        minted: &["/choices/0/logprobs/content/0/logprob"],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_stop_top_two.yaml",
+        streamed: "chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_stop_top_two.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_streaming_logprobs_matrix/blocking_gpt_4o_mini_stop_top_zero.yaml",
+        streamed: "chat_streaming_logprobs_matrix/streaming_gpt_4o_mini_stop_top_zero.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_plain_one.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_plain_one.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_plain_two.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_plain_two.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_roomy_tool.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_roomy_tool.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_plain_one.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_tiny_plain_one.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_plain_two.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_tiny_plain_two.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4_1_mini_tiny_tool.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4_1_mini_tiny_tool.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4o_mini_roomy_plain_one.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4o_mini_roomy_plain_one.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4o_mini_roomy_plain_two.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4o_mini_roomy_plain_two.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4o_mini_roomy_tool.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4o_mini_roomy_tool.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_plain_one.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_plain_one.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_terminal_metadata_matrix/blocking_gpt_4o_mini_tiny_tool.yaml",
+        streamed: "chat_terminal_metadata_matrix/streaming_gpt_4o_mini_tiny_tool.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_lifecycle_matrix/blocking_gpt41_nested_agent.yaml",
+        streamed: "chat_tool_lifecycle_matrix/streaming_gpt41_nested_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_lifecycle_matrix/blocking_gpt41_parallel_agent.yaml",
+        streamed: "chat_tool_lifecycle_matrix/streaming_gpt41_parallel_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_lifecycle_matrix/blocking_gpt41_zero_agent.yaml",
+        streamed: "chat_tool_lifecycle_matrix/streaming_gpt41_zero_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_lifecycle_matrix/blocking_gpt4o_nested_agent.yaml",
+        streamed: "chat_tool_lifecycle_matrix/streaming_gpt4o_nested_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_lifecycle_matrix/blocking_gpt4o_parallel_agent.yaml",
+        streamed: "chat_tool_lifecycle_matrix/streaming_gpt4o_parallel_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_lifecycle_matrix/blocking_gpt4o_zero_agent.yaml",
+        streamed: "chat_tool_lifecycle_matrix/streaming_gpt4o_zero_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_truncation_matrix/blocking_gpt41_complete_agent.yaml",
+        streamed: "chat_tool_truncation_matrix/streaming_gpt41_complete_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_truncation_matrix/blocking_gpt41_low_agent.yaml",
+        streamed: "chat_tool_truncation_matrix/streaming_gpt41_low_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_truncation_matrix/blocking_gpt41_mid_agent.yaml",
+        streamed: "chat_tool_truncation_matrix/streaming_gpt41_mid_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_truncation_matrix/blocking_gpt4o_complete_agent.yaml",
+        streamed: "chat_tool_truncation_matrix/streaming_gpt4o_complete_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_truncation_matrix/blocking_gpt4o_low_agent.yaml",
+        streamed: "chat_tool_truncation_matrix/streaming_gpt4o_low_agent.yaml",
+        minted: &[],
+    },
+    Pair {
+        provider: "openai",
+        unary: "chat_tool_truncation_matrix/blocking_gpt4o_mid_agent.yaml",
+        streamed: "chat_tool_truncation_matrix/streaming_gpt4o_mid_agent.yaml",
+        minted: &[],
+    },
     Pair {
         provider: "openrouter",
         unary: "reasoning_tool_order_matrix/blocking_single.yaml",
@@ -1064,12 +1303,80 @@ async fn decoded(pair: &Pair) -> Result<(Value, Value), crate::error::ProviderEr
 }
 
 /// Every pair agrees whole: a streamed reply's `raw` is the unary document
-/// of the same turn.
+/// of the same turn, except that a Chat stream's document keeps the
+/// envelope fields its frames delivered ([`super::CHAT_DELIVERED_ENVELOPE`]),
+/// each checked against the recorded frames.
 #[tokio::test]
 async fn every_recorded_pair_agrees() {
+    recorded_pairs_agree(PAIRS.iter().filter(|pair| pair.provider != "openrouter")).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn every_openrouter_recorded_pair_agrees() {
+    recorded_pairs_agree(PAIRS.iter().filter(|pair| pair.provider == "openrouter")).await;
+}
+
+/// The frames a Chat pair's stream delivered, beside its recorded unary
+/// body; `None` for a pair on any other wire.
+fn chat_recording(pair: &Pair) -> Option<(Vec<Value>, Value)> {
+    let unary = Recorded::named(pair.provider, pair.unary);
+    let chat = !matches!(pair.provider, "anthropic" | "gemini" | "copilot")
+        && !unary.path.ends_with("/responses")
+        && unary.path != "/api/chat";
+    chat.then(|| {
+        let streamed = Recorded::named(pair.provider, pair.streamed).reply;
+        let body = serde_json::from_slice(&unary.reply).unwrap_or(Value::Null);
+        (super::sse_json_frames(&streamed), body)
+    })
+}
+
+/// The fields of [`super::CHAT_DELIVERED_ENVELOPE`] a Chat pair's two
+/// documents state, each checked against its own recording and then set
+/// aside, so the rest of the documents compare whole: the unary document
+/// keeps its body's value, and the streamed one the value its frames
+/// delivered (coord-a-rig-port-chat-document-12 (1)). Each disagreement is
+/// returned.
+fn set_aside_delivered_envelope(
+    pair: &Pair,
+    unary: &mut Value,
+    streamed: &mut Value,
+) -> Vec<String> {
+    let Some((frames, body)) = chat_recording(pair) else {
+        return Vec::new();
+    };
     let mut wrong = Vec::new();
-    for pair in PAIRS {
-        let (unary, streamed) = match decoded(pair).await {
+    for key in super::CHAT_DELIVERED_ENVELOPE {
+        let delivered = super::delivered_envelope_field(&frames, key);
+        if streamed.get(key) != delivered.as_ref() {
+            wrong.push(format!(
+                "{}/{}: the streamed `{key}` is {:?}, the stream delivered {delivered:?}",
+                pair.provider,
+                pair.streamed,
+                streamed.get(key)
+            ));
+        }
+        if unary.get(key) != body.get(key) {
+            wrong.push(format!(
+                "{}/{}: the unary `{key}` is {:?}, the body states {:?}",
+                pair.provider,
+                pair.unary,
+                unary.get(key),
+                body.get(key)
+            ));
+        }
+        for document in [&mut *unary, &mut *streamed] {
+            if let Some(document) = document.as_object_mut() {
+                document.shift_remove(key);
+            }
+        }
+    }
+    wrong
+}
+
+async fn recorded_pairs_agree(pairs: impl Iterator<Item = &'static Pair>) {
+    let mut wrong = Vec::new();
+    for pair in pairs {
+        let (mut unary, mut streamed) = match decoded(pair).await {
             Ok(pair) => pair,
             Err(error) => {
                 wrong.push(format!("{}/{}: {error}", pair.provider, pair.streamed));
@@ -1082,6 +1389,11 @@ async fn every_recorded_pair_agrees() {
             pair.provider,
             pair.unary
         );
+        wrong.extend(set_aside_delivered_envelope(
+            pair,
+            &mut unary,
+            &mut streamed,
+        ));
         let (unary, streamed) = (
             comparable(&unary, pair.minted),
             comparable(&streamed, pair.minted),

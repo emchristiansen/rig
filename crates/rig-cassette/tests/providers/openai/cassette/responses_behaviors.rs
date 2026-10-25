@@ -8,7 +8,6 @@
 
 use rig::agent::AgentBuilder;
 use rig::completion::{FinishReason, Message};
-use rig::message::AssistantContent;
 use rig::providers::openai;
 use rig_test_support::cassette_models::MapWire;
 
@@ -58,14 +57,8 @@ async fn incomplete_response_surfaces_partial_output() {
                 Some(FinishReason::Length),
                 "the incomplete/max_output_tokens pair should normalize to a length stop"
             );
-            let text: String = response
-                .choice
-                .iter()
-                .filter_map(|content| match content {
-                    AssistantContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect();
+            // The port decodes the partial message part as carried text.
+            let text = response.text();
             assert!(
                 !text.trim().is_empty(),
                 "partial output text should still be surfaced"
@@ -88,9 +81,17 @@ async fn system_messages_as_input_items_mid_conversation() {
                 .openai
                 .responses(openai::GPT_4O)
                 .map_wire(|wire| wire.with_system_instructions_as_messages());
+            // The recording asked for `include: ["reasoning.encrypted_content"]`, which
+            // production no longer adds for a proven nonreasoning model
+            // (coord-a-rig-g215-1). The test asks for it explicitly, beside its existing
+            // options, as MEC132-7 treated producer 220; the production model guard and
+            // the recording stay unchanged, and this test is not about `include`.
             let agent = AgentBuilder::new(model)
                 .preamble("You are a concise assistant.")
                 .provider_options(stateless())
+                .additional_params(serde_json::json!({
+                    "include": ["reasoning.encrypted_content"]
+                }))
                 .build();
             let mut history = vec![
                 Message::user("Hello!"),

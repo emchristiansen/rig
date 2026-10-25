@@ -113,12 +113,11 @@ async fn stream_raw_exposes_terminal_usage_and_object() {
         recorded_usage["completion_tokens"]
     );
     assert_eq!(raw["usage"]["total_tokens"], recorded_usage["total_tokens"]);
-    // The rebuilt document carries the unary tag in place of the chunks'.
-    assert!(
-        recorded_object.starts_with("chat.completion."),
-        "{recorded_object}"
-    );
-    assert_eq!(raw["object"], json!("chat.completion"));
+    // The rebuilt document keeps the tag the stream delivered, Perplexity's
+    // `chat.completion.done`, not the unary tag
+    // (coord-a-rig-port-chat-document-12 (1); mec-rig-132-dispositions-1 item 2).
+    assert_eq!(recorded_object, "chat.completion.done");
+    assert_eq!(raw["object"], json!(recorded_object));
     // The normalized terminal has no slot for the tag. The usage block, by
     // contrast, is the dialect's own: the document keeps the fields no
     // OpenAI-compatible shape names, so Perplexity's `cost` reaches a caller

@@ -412,11 +412,10 @@ impl Transcript {
                         None => {}
                         Some(
                             ReasoningAuthority::Partial | ReasoningAuthority::ProviderRestated,
-                        ) => {
-                            if kind != PartKind::Reasoning {
-                                return Err(SequenceError::WrongKind(position));
-                            }
+                        ) if kind != PartKind::Reasoning => {
+                            return Err(SequenceError::WrongKind(position));
                         }
+                        Some(_) => {}
                     }
                     Some(kind)
                 }

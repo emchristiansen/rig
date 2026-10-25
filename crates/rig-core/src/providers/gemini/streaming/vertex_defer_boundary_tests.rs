@@ -17,8 +17,7 @@ fn body(part: Value, terminal: bool) -> Value {
 }
 
 #[test]
-fn g237_direct_raw_vertex_selection_remains_immediate_before_corrupt_or_unknown()
--> Result<(), Box<dyn std::error::Error>> {
+fn g237_direct_raw_vertex_selection_remains_immediate_before_corrupt_or_unknown() {
     for corrupt in [false, true] {
         let wire = super::super::completion::GenerateContent::new(
             super::super::GeminiConfig::new("test-key"),
@@ -88,10 +87,11 @@ fn g237_direct_raw_vertex_selection_remains_immediate_before_corrupt_or_unknown(
                 panic!("unknown remains after emitted image");
             };
             assert_eq!(value.value(), &middle);
-            let response = decoded.outcome?;
+            let response = decoded
+                .outcome
+                .expect("unknown frame leaves a successful reply");
             assert!(matches!(&response.choice[0], AssistantContent::Image(_)));
             assert_eq!(response.text(), "answer");
         }
     }
-    Ok(())
 }

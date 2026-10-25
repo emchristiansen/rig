@@ -1766,7 +1766,9 @@ fn an_unknown_reasoning_summary_supplies_no_text() {
     assert_eq!(raw.item, json!({"type":"future_summary","list":[1]}));
 }
 
-// D08 / G202: known nonempty categories survive; known empty reasoning keeps raw.
+// D08 / G202, narrowed by mec-rig-port-answers-1 Q5 (G165 reopened): known
+// nonempty categories survive; known empty reasoning keeps raw and is one
+// empty reasoning block that replays exactly.
 #[test]
 fn known_tags_keep_nonempty_categories_and_empty_reasoning_keeps_raw() {
     for (item, kind) in [
@@ -1781,15 +1783,21 @@ fn known_tags_keep_nonempty_categories_and_empty_reasoning_keeps_raw() {
         (json!({"type":"reasoning","id":"r1","summary":[]}), 2),
     ] {
         let response = fold_items(vec![item.clone()]);
+        assert_eq!(response.choice.len(), 1);
+        assert!(matches!(
+            (&response.choice[0], kind),
+            (CoreContent::CarriedText(_), 0)
+                | (CoreContent::ToolCall(_), 1)
+                | (CoreContent::CarriedReasoning(_), 2)
+        ));
         if kind == 2 {
-            // G202: the original known empty item retains raw, not a canonical part.
-            assert!(response.choice.is_empty());
-        } else {
-            assert_eq!(response.choice.len(), 1);
-            assert!(matches!(
-                (&response.choice[0], kind),
-                (CoreContent::CarriedText(_), 0) | (CoreContent::ToolCall(_), 1)
-            ));
+            // Q5: the original known empty item is an empty reasoning block.
+            let reasoning = reasoning_of(&response);
+            assert_eq!(reasoning.id.as_deref(), Some("r1"));
+            assert!(reasoning.content.is_empty());
+            assert_eq!(reasoning.payload.item, item);
+            let replay = input_items(response.message().expect("received turn")).expect("replay");
+            assert_eq!(replay, vec![item.clone()]);
         }
         assert_eq!(response.raw["output"][0], item);
     }
@@ -1955,16 +1963,24 @@ fn a_signature_only_reasoning_item_round_trips_without_text() {
         vec![],
         vec![json!({"type":"summary_text","text":"a summary"})],
     ] {
-        let raw = json!({"type":"reasoning","id":"rs_1","summary":summary,"content":[],"encrypted_content":null,"signature":"signed"});
-        let reasoning =
-            carried_reasoning(&raw, None).expect("existing carried reader keeps signature");
-        assert!(reasoning.content.iter().any(|part|matches!(part,Part::Text{text,signature:Some(signature)} if text.is_empty()&&signature=="signed")));
-        let item = carried_reasoning_item(&reasoning)
-            .expect("identified reasoning encodes")
-            .expect("reasoning item");
-        assert_eq!(item["signature"], "signed");
-        assert_eq!(item["summary"], Value::Array(summary));
-        assert!(item.get("content").is_none(), "{item}");
+        for received_content in [None, Some(json!([]))] {
+            let mut raw = json!({"type":"reasoning","id":"rs_1","summary":summary,"encrypted_content":null,"signature":"signed"});
+            if let Some(content) = &received_content {
+                raw.as_object_mut()
+                    .expect("reasoning fixture is an object")
+                    .insert("content".to_owned(), content.clone());
+            }
+            let reasoning =
+                carried_reasoning(&raw, None).expect("existing carried reader keeps signature");
+            assert!(reasoning.content.iter().any(|part|matches!(part,Part::Text{text,signature:Some(signature)} if text.is_empty()&&signature=="signed")));
+            let item = carried_reasoning_item(&reasoning)
+                .expect("identified reasoning encodes")
+                .expect("reasoning item");
+            assert_eq!(item["signature"], "signed");
+            assert_eq!(item["summary"], Value::Array(summary.clone()));
+            // A signature does not invent text or change received member presence.
+            assert_eq!(item.get("content"), received_content.as_ref(), "{item}");
+        }
     }
 }
 
@@ -3132,11 +3148,11 @@ fn strict_tools_apply_only_their_own_transformation_to_declared_tools() {
         json!(false)
     );
     let mut untouched = rewritten.clone();
-    untouched.remove("strict");
-    untouched.remove("parameters");
+    untouched.shift_remove("strict");
+    untouched.shift_remove("parameters");
     let mut expected = function.as_object().expect("fixture is an object").clone();
-    expected.remove("strict");
-    expected.remove("parameters");
+    expected.shift_remove("strict");
+    expected.shift_remove("parameters");
     assert_eq!(
         untouched, expected,
         "strict mode must leave the empty description, the explicit null and \
@@ -3211,11 +3227,9 @@ fn carried_reasoning_object_preserves_root_and_known_part_siblings() {
     let encoded = carried_reasoning_item(&reasoning)
         .expect("object reasoning encodes")
         .expect("identified reasoning");
-    let mut expected = raw.clone();
-    expected.as_object_mut().expect("object").remove("status");
     assert_eq!(
-        encoded, expected,
-        "only the existing status omission applies; siblings stay exact"
+        encoded, raw,
+        "the received root, its status and known-part siblings stay exact"
     );
 }
 

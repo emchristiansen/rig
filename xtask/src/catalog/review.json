@@ -931,8 +931,8 @@
   "cohere": {
     "models": {
       "command-a-plus-05-2026": {
-        "source": "https://docs.cohere.com/docs/models",
-        "note": "Cohere's model page says it does not reason; models.dev lists a toggle and budget"
+        "source": "https://docs.cohere.com/docs/command-a-plus",
+        "note": "Cohere documents reasoning, a thinking toggle and token budget; minimum 1 remains unverified"
       },
       "embed-english-light-v3.0": {
         "source": "https://docs.cohere.com/docs/models",

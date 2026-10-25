@@ -262,9 +262,12 @@ impl CacheWire {
     }
 
     /// The call's usage from its response body (JSON, or SSE frames), as rig
-    /// reports it: input (cache reads and writes included), cached reads,
-    /// cache writes, output (reasoning included) and their total, plus
-    /// Gemini's thoughts on their own (already inside that output).
+    /// reports it: input, cached reads, cache writes, output (reasoning
+    /// included) and their total, plus Gemini's thoughts on their own
+    /// (already inside that output). Input includes cache reads and writes on
+    /// every wire but Anthropic's, whose counters are independent: input is
+    /// the uncached count and the total adds the cache counters
+    /// (G225; MEC132-1 item 3; mec-rig-132-dispositions-2 item 1).
     fn usage(self, response: &str) -> Option<(Usage, u64)> {
         let frames: Vec<Value> = match serde_json::from_str::<Value>(response) {
             Ok(value) => vec![value],
@@ -296,7 +299,8 @@ impl CacheWire {
             // A stream's `message_start` carries the input counters and its
             // `message_delta` the final output (and repeats the cache
             // counters); later frames win. Anthropic counts cache reads and
-            // writes beside `input_tokens`; rig's input includes them.
+            // writes beside `input_tokens`, and rig keeps them beside it: its
+            // input is the uncached count, and its total is every counter.
             Self::Anthropic => {
                 let mut found = false;
                 let mut usage = Usage::default();
@@ -321,11 +325,16 @@ impl CacheWire {
                     );
                     pick("output_tokens", &mut usage.output_tokens);
                 }
-                usage.input_tokens = usage.input_tokens.map(|uncached| {
-                    uncached
-                        + usage.cached_input_tokens.unwrap_or(0)
-                        + usage.cache_creation_input_tokens.unwrap_or(0)
-                });
+                usage.total_tokens =
+                    usage
+                        .input_tokens
+                        .zip(usage.output_tokens)
+                        .map(|(uncached, output)| {
+                            uncached
+                                + usage.cached_input_tokens.unwrap_or(0)
+                                + usage.cache_creation_input_tokens.unwrap_or(0)
+                                + output
+                        });
                 found.then_some((usage, 0))
             }
             Self::OpenAiChat => frames
@@ -365,12 +374,29 @@ impl CacheWire {
                 }),
         };
         read.map(|(mut usage, thoughts)| {
-            usage.total_tokens = usage
-                .input_tokens
-                .zip(usage.output_tokens)
-                .map(|(input, output)| input + output);
+            if self != Self::Anthropic {
+                usage.total_tokens = usage
+                    .input_tokens
+                    .zip(usage.output_tokens)
+                    .map(|(input, output)| input + output);
+            }
             (usage, thoughts)
         })
+    }
+
+    /// How a call's `usage` (as [`Self::usage`] reads it) was billed. On
+    /// Anthropic the input is already the uncached count; every other wire's
+    /// input includes its cache reads and writes.
+    fn billed(self, usage: &Usage) -> CacheCost {
+        match self {
+            Self::Anthropic => CacheCost {
+                uncached_input: usage.input_tokens.unwrap_or(0),
+                cache_reads: usage.cached_input_tokens.unwrap_or(0),
+                cache_writes: usage.cache_creation_input_tokens.unwrap_or(0),
+                ..CacheCost::default()
+            },
+            Self::Gemini | Self::OpenAiChat | Self::OpenAiResponses => CacheCost::from_usage(usage),
+        }
     }
 
     /// The request's (or a Gemini cache's) messages.
@@ -869,7 +895,7 @@ fn figures(
     let billed: Vec<CacheCost> = recording
         .calls
         .iter()
-        .map(|call| CacheCost::from_usage(&call.usage))
+        .map(|call| recording.wire.billed(&call.usage))
         .collect();
     let calls: CacheCost = billed.iter().copied().sum();
     let total = calls + resources;
@@ -1066,7 +1092,8 @@ pub fn check(
 /// reads, cache writes, output and total. The recording may hold more
 /// successful calls than rig reported, but only in a run that retried a
 /// turn: a turn that failed after a successful call reports none of its
-/// calls. Reads and writes never exceed input.
+/// calls. Reads and writes never exceed input on a wire whose input includes
+/// them.
 fn assert_usage_matches_wire(recording: &Recording, log: &RunLog) {
     let key = |usage: &Usage| {
         (
@@ -1104,13 +1131,17 @@ fn assert_usage_matches_wire(recording: &Recording, log: &RunLog) {
         "{} recorded calls have no usage in rig's report, and no turn was retried: {wire:?}",
         wire.len()
     );
-    for call in &recording.calls {
-        let (input, cached, written, _, _) = key(&call.usage);
-        assert!(
-            cached + written <= input,
-            "interaction {}: cached {cached} + written {written} > input {input}",
-            call.index
-        );
+    // Anthropic's input is the uncached count beside the cache counters, so
+    // only the other wires' input contains its reads and writes.
+    if recording.wire != CacheWire::Anthropic {
+        for call in &recording.calls {
+            let (input, cached, written, _, _) = key(&call.usage);
+            assert!(
+                cached + written <= input,
+                "interaction {}: cached {cached} + written {written} > input {input}",
+                call.index
+            );
+        }
     }
 }
 
@@ -1120,7 +1151,7 @@ fn assert_no_collapse(recording: &Recording) {
     let billed: Vec<CacheCost> = recording
         .calls
         .iter()
-        .map(|call| CacheCost::from_usage(&call.usage))
+        .map(|call| recording.wire.billed(&call.usage))
         .collect();
     for (call, billed) in after_first_read(recording, &billed) {
         assert!(
@@ -1138,7 +1169,7 @@ fn assert_call_share(recording: &Recording, floor: f64) {
     let billed: Vec<CacheCost> = recording
         .calls
         .iter()
-        .map(|call| CacheCost::from_usage(&call.usage))
+        .map(|call| recording.wire.billed(&call.usage))
         .collect();
     assert!(
         billed.iter().any(|call| call.cache_reads > 0),

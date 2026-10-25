@@ -70,7 +70,14 @@ async fn positioned_done_responses_replay_with_events_and_errors_in_both_lookup_
 -> TestResult<()> {
     let log = kept_log();
     let restored: EffectLog = serde_json::from_value(serde_json::to_value(&log)?)?;
-    assert_eq!(restored.header, log.header);
+    if restored.header != log.header {
+        return Err(anyhow::anyhow!(
+            "restored header differs: actual {:?}, expected {:?}",
+            restored.header,
+            log.header
+        )
+        .into());
+    }
     let id = log.records[0].id;
     let expected = vec![
         Err(ErrorReport::new(ErrorKind::Response, "first")),
@@ -81,20 +88,24 @@ async fn positioned_done_responses_replay_with_events_and_errors_in_both_lookup_
         Err(ErrorReport::new(ErrorKind::Provider, "late")),
         Ok(Relayed::Done(Box::new(response("second response")))),
     ];
-    assert_eq!(
-        log.header.stream_errors[&id]
-            .iter()
-            .map(|e| e.item)
-            .collect::<Vec<_>>(),
-        vec![0, 3]
-    );
-    assert_eq!(
-        log.header.stream_done[&id]
-            .iter()
-            .map(|d| d.item)
-            .collect::<Vec<_>>(),
-        vec![1, 4]
-    );
+    let errors = log
+        .header
+        .stream_errors
+        .get(&id)
+        .ok_or_else(|| anyhow::anyhow!("missing stream errors for {id:?}: {:?}", log.header))?;
+    let positions = errors.iter().map(|e| e.item).collect::<Vec<_>>();
+    if positions != vec![0, 3] {
+        return Err(anyhow::anyhow!("stream error positions differ: {positions:?}").into());
+    }
+    let done = log
+        .header
+        .stream_done
+        .get(&id)
+        .ok_or_else(|| anyhow::anyhow!("missing stream done for {id:?}: {:?}", log.header))?;
+    let positions = done.iter().map(|d| d.item).collect::<Vec<_>>();
+    if positions != vec![1, 4] {
+        return Err(anyhow::anyhow!("stream done positions differ: {positions:?}").into());
+    }
     for replay in [
         EffectLogReplayer::for_key(&restored, &log.records[0].key)?,
         EffectLogReplayer::for_key_by_id(&restored, &log.records[0].key)?,
@@ -105,12 +116,20 @@ async fn positioned_done_responses_replay_with_events_and_errors_in_both_lookup_
             .into_stream()
             .collect::<Vec<_>>()
             .await;
-        assert_eq!(items, expected);
+        if items != expected {
+            return Err(anyhow::anyhow!(
+                "positioned replay differs: actual {items:?}, expected {expected:?}"
+            )
+            .into());
+        }
     }
-    assert_eq!(
-        log.records[0].outcome.as_ref().err(),
-        Some(&ErrorReport::new(ErrorKind::Response, "first"))
-    );
+    if log.records[0].outcome.as_ref().err()
+        != Some(&ErrorReport::new(ErrorKind::Response, "first"))
+    {
+        return Err(
+            anyhow::anyhow!("recorded outcome differs: {:?}", log.records[0].outcome).into(),
+        );
+    }
     Ok(())
 }
 
@@ -127,37 +146,100 @@ fn done_metadata_follows_snapshots_checkpoint_tails_take_and_discard() -> TestRe
     recorder.stream_error(id, &ErrorReport::new(ErrorKind::Provider, "late"));
     recorder.stream_done(pending, &response("pending"));
     let snapshot = recorder.log();
-    assert_eq!(snapshot.records.len(), 1);
-    assert_eq!(snapshot.header.stream_done[&id][0].response, complete);
-    assert!(!snapshot.header.stream_done.contains_key(&pending));
-    assert!(recorder.header().stream_done.contains_key(&pending));
+    if snapshot.records.len() != 1 {
+        return Err(anyhow::anyhow!("expected one snapshot record: {:?}", snapshot.records).into());
+    }
+    let done = snapshot
+        .header
+        .stream_done
+        .get(&id)
+        .and_then(|items| items.first())
+        .ok_or_else(|| {
+            anyhow::anyhow!("missing snapshot done for {id:?}: {:?}", snapshot.header)
+        })?;
+    if done.response != complete {
+        return Err(anyhow::anyhow!(
+            "snapshot done differs: actual {:?}, expected {complete:?}",
+            done.response
+        )
+        .into());
+    }
+    if snapshot.header.stream_done.contains_key(&pending) {
+        return Err(anyhow::anyhow!(
+            "snapshot contains pending done metadata: {:?}",
+            snapshot.header
+        )
+        .into());
+    }
+    if !recorder.header().stream_done.contains_key(&pending) {
+        return Err(anyhow::anyhow!("recorder lost pending done metadata").into());
+    }
     let (checkpoint, tail) = snapshot.checkpoint(0, ());
-    assert_eq!(
-        EffectLog::from_checkpoint(&checkpoint, tail)?.header,
-        snapshot.header
-    );
+    let restored_header = EffectLog::from_checkpoint(&checkpoint, tail)?.header;
+    if restored_header != snapshot.header {
+        return Err(anyhow::anyhow!(
+            "checkpoint header differs: actual {restored_header:?}, expected {:?}",
+            snapshot.header
+        )
+        .into());
+    }
     let (_, empty) = snapshot.checkpoint(1, ());
-    assert!(empty.header.stream_done.is_empty() && empty.header.stream_errors.is_empty());
+    if !(empty.header.stream_done.is_empty() && empty.header.stream_errors.is_empty()) {
+        return Err(
+            anyhow::anyhow!("checkpoint tail has stream metadata: {:?}", empty.header).into(),
+        );
+    }
     let taken = recorder.take();
-    assert_eq!(taken.header, snapshot.header);
-    assert!(!recorder.header().stream_done.contains_key(&id));
-    assert!(!recorder.header().stream_errors.contains_key(&id));
-    assert_eq!(
-        recorder.header().stream_done[&pending][0].response,
-        response("pending")
-    );
+    if taken.header != snapshot.header {
+        return Err(anyhow::anyhow!(
+            "taken header differs: actual {:?}, expected {:?}",
+            taken.header,
+            snapshot.header
+        )
+        .into());
+    }
+    if recorder.header().stream_done.contains_key(&id) {
+        return Err(anyhow::anyhow!("resolved done metadata reappeared").into());
+    }
+    if recorder.header().stream_errors.contains_key(&id) {
+        return Err(anyhow::anyhow!("resolved error metadata reappeared").into());
+    }
+    let pending_header = recorder.header();
+    let pending_done = pending_header
+        .stream_done
+        .get(&pending)
+        .and_then(|items| items.first())
+        .ok_or_else(|| {
+            anyhow::anyhow!("missing pending done for {pending:?}: {pending_header:?}")
+        })?;
+    let expected_pending = response("pending");
+    if pending_done.response != expected_pending {
+        return Err(anyhow::anyhow!(
+            "pending response differs: actual {:?}, expected {expected_pending:?}",
+            pending_done.response
+        )
+        .into());
+    }
     recorder.stream_done(id, &response("after take"));
     recorder.stream_error(id, &ErrorReport::new(ErrorKind::Provider, "after take"));
-    assert!(!recorder.header().stream_done.contains_key(&id));
-    assert!(!recorder.header().stream_errors.contains_key(&id));
+    if recorder.header().stream_done.contains_key(&id) {
+        return Err(anyhow::anyhow!("resolved done metadata reappeared").into());
+    }
+    if recorder.header().stream_errors.contains_key(&id) {
+        return Err(anyhow::anyhow!("resolved error metadata reappeared").into());
+    }
     recorder.discard(pending);
     recorder.stream_done(pending, &response("after discard"));
     recorder.stream_error(
         pending,
         &ErrorReport::new(ErrorKind::Provider, "after discard"),
     );
-    assert!(recorder.header().stream_done.is_empty() && recorder.header().stream_errors.is_empty());
-    assert!(recorder.log().records.is_empty());
+    if !(recorder.header().stream_done.is_empty() && recorder.header().stream_errors.is_empty()) {
+        return Err(anyhow::anyhow!("discarded stream metadata remains").into());
+    }
+    if !recorder.log().records.is_empty() {
+        return Err(anyhow::anyhow!("discarded recorder still has records").into());
+    }
     Ok(())
 }
 
@@ -201,11 +283,20 @@ fn kept_stream_positions_require_matching_records_and_distinct_ordered_positions
             6 => invalid.header.stream_done.get_mut(&id).unwrap()[0].item = 0,
             7 => invalid.header.stream_done.get_mut(&id).unwrap().reverse(),
             8 => invalid.header.stream_errors.get_mut(&id).unwrap().reverse(),
-            _ => unreachable!(),
+            _ => return Err(anyhow::anyhow!("unknown kept-stream fixture case {case}").into()),
         }
-        let error =
-            EffectLogReplayer::check_header(&invalid).expect_err("invalid kept-stream metadata");
-        assert_eq!(error.kind, ErrorKind::Divergence, "case {case}");
+        let error = match EffectLogReplayer::check_header(&invalid) {
+            Ok(()) => {
+                return Err(anyhow::anyhow!(
+                    "invalid kept-stream metadata accepted in case {case}: {invalid:?}"
+                )
+                .into());
+            }
+            Err(error) => error,
+        };
+        if error.kind != ErrorKind::Divergence {
+            return Err(anyhow::anyhow!("case {case}: {error:?}").into());
+        }
     }
     Ok(())
 }
@@ -225,7 +316,11 @@ async fn absent_done_metadata_keeps_legacy_success_and_error_inference() -> Test
         }],
     );
     let serialized = serde_json::to_value(&log)?;
-    assert!(serialized.pointer("/header/stream_done").is_none());
+    if serialized.pointer("/header/stream_done").is_some() {
+        return Err(
+            anyhow::anyhow!("legacy serialization gained done metadata: {serialized:?}").into(),
+        );
+    }
     let restored: EffectLog = serde_json::from_value(serialized)?;
     let replay = EffectLogReplayer::for_key(&restored, &log.records[0].key)?;
     let items = replay
@@ -234,21 +329,28 @@ async fn absent_done_metadata_keeps_legacy_success_and_error_inference() -> Test
         .into_stream()
         .collect::<Vec<_>>()
         .await;
-    assert_eq!(
-        items,
-        vec![
-            Ok(Relayed::Done(Box::new(response("legacy")))),
-            Err(ErrorReport::new(ErrorKind::Provider, "late")),
-        ]
-    );
+    let expected = vec![
+        Ok(Relayed::Done(Box::new(response("legacy")))),
+        Err(ErrorReport::new(ErrorKind::Provider, "late")),
+    ];
+    if items != expected {
+        return Err(anyhow::anyhow!(
+            "legacy replay differs: actual {items:?}, expected {expected:?}"
+        )
+        .into());
+    }
     Ok(())
 }
 
 #[test]
 fn canonical_local_ids_changes_only_typed_done_response_leaves() -> TestResult<()> {
     let (request, ids) = fresh_local_correlation_request()?;
-    let Message::Assistant(turn) = &request.chat_history[0] else {
-        panic!("assistant fixture");
+    let message = request
+        .chat_history
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("assistant fixture is missing: {request:?}"))?;
+    let Message::Assistant(turn) = message else {
+        return Err(anyhow::anyhow!("assistant fixture: {message:?}").into());
     };
     let text = ids[0].wire().into_owned();
     let opaque = json!({"local": text, "nested": {"local": ids[1].wire()}, "text": format!("before-{text}-after")});
@@ -338,17 +440,26 @@ fn canonical_local_ids_changes_only_typed_done_response_leaves() -> TestResult<(
         ),
     ] {
         for path in paths {
-            *expected
-                .pointer_mut(path)
-                .unwrap_or_else(|| panic!("missing typed location {path}")) = canonical.into();
+            let Some(value) = expected.pointer_mut(path) else {
+                return Err(anyhow::anyhow!("missing typed location {path}: {expected:?}").into());
+            };
+            *value = canonical.into();
         }
     }
     let normalized = canonical_local_ids(original);
-    assert_eq!(
-        normalized, expected,
-        "every nonidentity value remains exact"
-    );
+    if normalized != expected {
+        return Err(anyhow::anyhow!(
+            "every nonidentity value remains exact: actual {normalized:?}, expected {expected:?}"
+        )
+        .into());
+    }
     let _: EffectLog = serde_json::from_value(normalized.clone())?;
-    assert_eq!(canonical_local_ids(normalized.clone()), normalized);
+    let again = canonical_local_ids(normalized.clone());
+    if again != normalized {
+        return Err(anyhow::anyhow!(
+            "canonicalization is not idempotent: actual {again:?}, expected {normalized:?}"
+        )
+        .into());
+    }
     Ok(())
 }

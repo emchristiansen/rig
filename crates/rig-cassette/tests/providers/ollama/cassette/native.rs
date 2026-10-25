@@ -1,7 +1,8 @@
 //! What only Ollama's native `/api/chat` (`Ollama::native_completion`)
 //! carries: model `options` such as `num_ctx`, `think` as a level,
-//! `keep_alive`, content that only a leading `<think>` tag splits, and tool
-//! calls streamed as NDJSON records.
+//! `keep_alive`, content that a leading `<think>` tag splits (or, in a
+//! terminal qwen3 record, G33's narrow full-body fallback), and tool calls
+//! streamed as NDJSON records.
 //!
 //! Replays by default; record with a local daemon serving `qwen3:4b`:
 //! `cargo xtask cassette record ollama/native/<scenario>.yaml`.
@@ -173,11 +174,22 @@ async fn a_thinking_level_returns_reasoning() {
 }
 
 /// With thinking off, `qwen3:4b` writes its reasoning into the content with
-/// no opening `<think>` tag, closed by a bare `</think>`. Only a leading
-/// `<think>` tag opens a block, so all of it is text, whole and streamed,
-/// and nothing is reasoning. Leave `think` on to get the native `thinking`.
+/// no opening `<think>` tag, closed by a bare `</think>`. A whole reply is
+/// one terminal record, so the narrow full-body fallback (G33:
+/// coord-a-rig-g33-2, coord-a-rig-g33-g34-1, restoring the fork's) applies:
+/// a terminal qwen3 record with no native `thinking` and no leading
+/// `<think>` splits at the first `\n</think>\n\n`, the trimmed part before
+/// it being reasoning and the rest text. Leave `think` on to get the native
+/// `thinking`.
+///
+/// Named known-issue (G33): the streamed twin,
+/// `reasoning_without_an_opening_tag_is_text_streamed`, stays all text,
+/// because closing-only legacy `done:false` chunks still become text, as in
+/// the fork, and no NDJSON content is buffered for this boundary. The same
+/// model output therefore reads as reasoning plus text whole and as text
+/// alone streamed.
 #[tokio::test]
-async fn reasoning_without_an_opening_tag_is_text_whole() {
+async fn reasoning_without_an_opening_tag_is_reasoning_then_text_whole() {
     let scenario = "native/inline_think_whole";
     with_ollama_cassette("native/inline_think_whole", |client| async move {
         let response = client
@@ -190,9 +202,22 @@ async fn reasoning_without_an_opening_tag_is_text_whole() {
             )
             .await
             .expect("the request succeeds");
+        let content = recorded_content(scenario);
+        let (thought, answer) = content
+            .trim_start()
+            .split_once("\n</think>\n\n")
+            .expect("the recorded content closes its block");
         let (text, reasoning) = texts(&response.choice);
-        assert!(reasoning.is_empty(), "{reasoning}");
-        assert_eq!(text, recorded_content(scenario));
+        assert_eq!(reasoning, thought.trim());
+        assert_eq!(text, answer.trim_start());
+        assert!(
+            matches!(
+                response.choice.first(),
+                Some(AssistantContent::Reasoning(_))
+            ),
+            "{:?}",
+            response.choice
+        );
         assert_eq!(
             counted(&response),
             (Some("stop".to_owned()), Some(23), Some(246))

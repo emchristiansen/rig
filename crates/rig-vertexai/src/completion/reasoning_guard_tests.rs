@@ -1,6 +1,6 @@
 use super::*;
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = anyhow::Result<()>;
 
 fn encoded(
     request: CompletionRequest,
@@ -13,11 +13,17 @@ fn generation_config_rejects_non_finite_typed_values() -> TestResult {
     let mut request = CompletionRequest::new("test");
     request.temperature = Some(f64::NAN);
     let error = match encoded(request) {
-        Ok(_) => return Err("non-finite typed temperature must fail".into()),
+        Ok(_) => return Err(anyhow::anyhow!("non-finite typed temperature must fail")),
         Err(error) => ProviderError::from(error),
     };
-    assert!(matches!(&error, ProviderError::Request(_)));
-    assert!(error.to_string().contains("temperature"));
+    anyhow::ensure!(
+        matches!(&error, ProviderError::Request(_)),
+        "expected request error"
+    );
+    anyhow::ensure!(
+        error.to_string().contains("temperature"),
+        "temperature context missing"
+    );
     Ok(())
 }
 
@@ -27,12 +33,21 @@ fn positive_and_negative_infinite_legacy_temperatures_are_refused() -> TestResul
         let mut request = CompletionRequest::new("test");
         request.temperature = Some(temperature);
         let error = match encoded(request) {
-            Ok(_) => return Err("infinite typed temperature must fail".into()),
+            Ok(_) => return Err(anyhow::anyhow!("infinite typed temperature must fail")),
             Err(error) => ProviderError::from(error),
         };
-        assert!(matches!(&error, ProviderError::Request(_)));
-        assert!(error.to_string().contains("temperature"));
-        assert_eq!(error.report().kind, rig_core::error::ErrorKind::Request);
+        anyhow::ensure!(
+            matches!(&error, ProviderError::Request(_)),
+            "expected request error"
+        );
+        anyhow::ensure!(
+            error.to_string().contains("temperature"),
+            "temperature context missing"
+        );
+        anyhow::ensure!(
+            error.report().kind == rig_core::error::ErrorKind::Request,
+            "request error kind changed"
+        );
     }
     Ok(())
 }
@@ -45,10 +60,13 @@ fn finite_vertex_temperatures_keep_the_original_generation_controls() -> TestRes
         request.max_tokens = Some(100);
         let config = encoded(request)?
             .generation_config
-            .ok_or("generation config missing")?;
-        assert_eq!(config.temperature, Some(expected));
-        assert_eq!(config.max_output_tokens, Some(100));
-        assert_eq!(config.candidate_count, Some(1));
+            .ok_or_else(|| anyhow::anyhow!("generation config missing"))?;
+        anyhow::ensure!(config.temperature == Some(expected), "temperature changed");
+        anyhow::ensure!(
+            config.max_output_tokens == Some(100),
+            "max output tokens changed"
+        );
+        anyhow::ensure!(config.candidate_count == Some(1), "candidate count changed");
     }
     Ok(())
 }
@@ -61,18 +79,28 @@ fn finite_typed_controls_override_raw_values_without_changing_candidate_or_schem
     request.additional_params = Some(serde_json::json!({"generationConfig": {
         "temperature": f64::MAX,
         "maxOutputTokens": 2_147_483_648_u64,
-        "candidateCount": 2,
+        "candidateCount": 1,
         "responseJsonSchema": {"type": "object"},
     }}));
     let config = encoded(request)?
         .generation_config
-        .ok_or("generation config missing")?;
-    assert_eq!(config.temperature, Some(0.7));
-    assert_eq!(config.max_output_tokens, Some(100));
-    assert_eq!(config.candidate_count, Some(1));
-    assert_eq!(
-        serde_json::to_value(config.response_json_schema.ok_or("JSON schema missing")?)?,
-        serde_json::json!({"type": "object"}),
+        .ok_or_else(|| anyhow::anyhow!("generation config missing"))?;
+    anyhow::ensure!(
+        config.temperature == Some(0.7),
+        "typed temperature override changed"
+    );
+    anyhow::ensure!(
+        config.max_output_tokens == Some(100),
+        "typed max output tokens override changed"
+    );
+    anyhow::ensure!(config.candidate_count == Some(1), "candidate count changed");
+    anyhow::ensure!(
+        serde_json::to_value(
+            config
+                .response_json_schema
+                .ok_or_else(|| anyhow::anyhow!("JSON schema missing"))?
+        )? == serde_json::json!({"type": "object"}),
+        "response JSON schema changed"
     );
     Ok(())
 }
@@ -130,23 +158,27 @@ fn only_vertex_reasoning_is_replayed() -> TestResult {
         .into_iter()
         .map(|(text, _)| text)
         .collect();
-    assert_eq!(texts, ["vertex thought"]);
-    assert_eq!(
-        thoughts(&request),
-        [("vertex thought".to_owned(), b"signature".to_vec())]
+    anyhow::ensure!(
+        texts == ["vertex thought"],
+        "replayed thought texts changed"
+    );
+    anyhow::ensure!(
+        thoughts(&request) == [("vertex thought".to_owned(), b"signature".to_vec())],
+        "replayed thoughts or signatures changed"
     );
     let parts = &request
         .contents
         .get(1)
-        .ok_or("assistant content missing")?
+        .ok_or_else(|| anyhow::anyhow!("assistant content missing"))?
         .parts;
-    assert_eq!(parts.len(), 2);
-    assert_eq!(
+    anyhow::ensure!(parts.len() == 2, "assistant part count changed");
+    anyhow::ensure!(
         parts
             .get(1)
             .and_then(|part| part.text())
-            .map(String::as_str),
-        Some("4")
+            .map(String::as_str)
+            == Some("4"),
+        "assistant answer text changed"
     );
     Ok(())
 }
@@ -157,9 +189,9 @@ fn genuine_vertex_reasoning_keeps_its_signature() -> TestResult {
         "vertex thought",
         Some(PROVIDER_NAME),
     )]))?;
-    assert_eq!(
-        thoughts(&request),
-        [("vertex thought".to_owned(), b"signature".to_vec())]
+    anyhow::ensure!(
+        thoughts(&request) == [("vertex thought".to_owned(), b"signature".to_vec())],
+        "Vertex thought or signature changed"
     );
     Ok(())
 }
@@ -167,9 +199,9 @@ fn genuine_vertex_reasoning_keeps_its_signature() -> TestResult {
 #[test]
 fn unknown_provenance_reasoning_keeps_its_signature() -> TestResult {
     let request = encoded(reasoning_request(vec![signed("vertex thought", None)]))?;
-    assert_eq!(
-        thoughts(&request),
-        [("vertex thought".to_owned(), b"signature".to_vec())]
+    anyhow::ensure!(
+        thoughts(&request) == [("vertex thought".to_owned(), b"signature".to_vec())],
+        "unknown-provenance thought or signature changed"
     );
     Ok(())
 }
@@ -192,12 +224,13 @@ fn a_turn_emptied_only_by_foreign_reasoning_is_omitted() -> TestResult {
             (content.role.clone(), texts)
         })
         .collect();
-    assert_eq!(
-        contents,
-        [
-            ("user".to_owned(), vec!["What is 2 + 2?".to_owned()]),
-            ("user".to_owned(), vec!["And 3 + 3?".to_owned()]),
-        ]
+    anyhow::ensure!(
+        contents
+            == [
+                ("user".to_owned(), vec!["What is 2 + 2?".to_owned()]),
+                ("user".to_owned(), vec!["And 3 + 3?".to_owned()]),
+            ],
+        "remaining conversation contents changed"
     );
     Ok(())
 }
@@ -207,7 +240,10 @@ fn ordinary_canonical_reasoning_remains_unscoped() -> TestResult {
     let request = encoded(reasoning_request(vec![AssistantContent::reasoning(
         "ordinary",
     )]))?;
-    assert_eq!(thoughts(&request), [("ordinary".to_owned(), Vec::new())]);
+    anyhow::ensure!(
+        thoughts(&request) == [("ordinary".to_owned(), Vec::new())],
+        "canonical reasoning changed"
+    );
     Ok(())
 }
 
@@ -232,11 +268,17 @@ fn foreign_opaque_reasoning_is_refused_and_not_filtered_out() -> TestResult {
             AssistantContent::CarriedReasoning(reasoning),
         ]))];
         let error = match encoded(request) {
-            Ok(_) => return Err("foreign opaque reasoning must be refused".into()),
+            Ok(_) => return Err(anyhow::anyhow!("foreign opaque reasoning must be refused")),
             Err(error) => ProviderError::from(error),
         };
-        assert!(matches!(&error, ProviderError::Request(_)));
-        assert!(error.to_string().contains("opaque"));
+        anyhow::ensure!(
+            matches!(&error, ProviderError::Request(_)),
+            "expected request error"
+        );
+        anyhow::ensure!(
+            error.to_string().contains("opaque"),
+            "opaque refusal context missing"
+        );
     }
     Ok(())
 }

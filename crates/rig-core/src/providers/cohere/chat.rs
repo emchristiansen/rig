@@ -276,7 +276,7 @@ impl NativeChat {
                     json!({"type": "thinking", "thinking": thinking})
                 }
                 AssistantContent::CarriedText(text) => {
-                    let Some(text) = text.known_text_projection() else {
+                    let Some(text) = text.foreign_text() else {
                         return Err(crate::message::UnrepresentableOpaqueContent::new(
                             "Cohere native chat",
                         )
@@ -655,9 +655,9 @@ impl crate::completion::ReplayTarget for NativeChat {
     fn sends_alone(&self, block: &AssistantContent) -> bool {
         match block {
             AssistantContent::Text(text) => !text.text.is_empty(),
-            AssistantContent::CarriedText(text) => text
-                .known_text_projection()
-                .is_some_and(|text| !text.is_empty()),
+            AssistantContent::CarriedText(text) => {
+                text.foreign_text().is_some_and(|text| !text.is_empty())
+            }
             AssistantContent::Reasoning(reasoning) => {
                 !reasoning.text.is_empty() && kind(block, self).as_deref() != Some(PLAN)
             }

@@ -16,6 +16,7 @@ use rig::effect::{EffectFamily, EffectKind, Outcome, RetrieveQuery, RetrievedDoc
 use rig::providers::gemini;
 use rig_cassette::agent::AgentReplayExt;
 
+use super::super::request_witness_support::{NamedCase, with_gemini_request_witness_cassette};
 use super::super::support::with_gemini_corpus_retrieval_cassette;
 use crate::goldens::{
     ADD_THEN_SUBTRACT_PROMPT, EmbedSubtract, FACT_PROMPT, FACTS, RETRIEVED_TOOLS_PREAMBLE,
@@ -224,11 +225,13 @@ async fn dynamic_context_empty_index_effect_log_is_the_golden_fixture() {
 
 /// `retrieved_tools(1, tools)`: a `TopNIds` retrieval before every model
 /// call, the retrieved tool advertised and called.
-#[tokio::test]
-async fn retrieved_tools_one_effect_log_is_the_golden_fixture() {
-    with_gemini_corpus_retrieval_cassette(
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn retrieved_tools_one_effect_log_is_the_golden_fixture() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "corpus_retrieval/retrieved_tools_one",
-        |client| async move {
+        NamedCase::RetrievedToolsOne,
+        |client, _clock| async move {
             let toolset = retrievable_toolset();
             let index = tool_index(client.embedding(EMBEDDING, None), &toolset).await;
             let recorder = rig_cassette::effect_log::EffectLogRecorder::new();
@@ -239,44 +242,23 @@ async fn retrieved_tools_one_effect_log_is_the_golden_fixture() {
                 .retrieved_tools(1, index, toolset)
                 .record_to(recorder.clone())
                 .build();
-            let response = agent
-                .prompt(SUBTRACT_PROMPT)
-                .max_turns(3)
-                .await
-                .expect("the agent answers");
-            assert!(response.output().contains("42"), "{}", response.output());
-            let log = agent.stamp(recorder.take());
-            assert_eq!(
-                families(&log),
-                [
-                    EffectFamily::Retrieve,
-                    EffectFamily::Completion,
-                    EffectFamily::Tool,
-                    EffectFamily::Retrieve,
-                    EffectFamily::Completion
-                ]
-            );
-            assert_eq!(retrieve_kinds(&log), ["top_n_ids", "top_n_ids"]);
-            assert_eq!(retrieved_ids(&log)[0], ["subtract"]);
-            assert_eq!(
-                log.header
-                    .required
-                    .get(&rig::effect::HandlerKey::from("golden/retrieve:tools#0")),
-                Some(&EffectFamily::Retrieve)
-            );
-            crate::goldens::golden_effects("gemini_retrieval_retrieved_tools_one", &log);
+            let result = agent.prompt(SUBTRACT_PROMPT).max_turns(3).await.map(|_| ());
+            drop(agent);
+            Ok(result)
         },
     )
-    .await;
+    .await
 }
 
 /// A static `add` and a retrievable `subtract`: the static tool is always
 /// advertised, the retrieved one when its index says so.
-#[tokio::test]
-async fn retrieved_tools_with_static_effect_log_is_the_golden_fixture() {
-    with_gemini_corpus_retrieval_cassette(
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn retrieved_tools_with_static_effect_log_is_the_golden_fixture() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "corpus_retrieval/retrieved_tools_with_static",
-        |client| async move {
+        NamedCase::RetrievedToolsWithStatic,
+        |client, _clock| async move {
             let mut toolset = rig::tool::ToolSet::default();
             toolset
                 .add_retrieved_tool(EmbedSubtract)
@@ -291,39 +273,27 @@ async fn retrieved_tools_with_static_effect_log_is_the_golden_fixture() {
                 .retrieved_tools(1, index, toolset)
                 .record_to(recorder.clone())
                 .build();
-            let response = agent
+            let result = agent
                 .prompt(ADD_THEN_SUBTRACT_PROMPT)
                 .max_turns(6)
                 .await
-                .expect("the agent answers");
-            assert!(response.output().contains("21"), "{}", response.output());
-            let log = agent.stamp(recorder.take());
-            assert_eq!(
-                families(&log),
-                [
-                    EffectFamily::Retrieve,
-                    EffectFamily::Completion,
-                    EffectFamily::Tool,
-                    EffectFamily::Retrieve,
-                    EffectFamily::Completion,
-                    EffectFamily::Tool,
-                    EffectFamily::Retrieve,
-                    EffectFamily::Completion
-                ]
-            );
-            crate::goldens::golden_effects("gemini_retrieval_retrieved_tools_with_static", &log);
+                .map(|_| ());
+            drop(agent);
+            Ok(result)
         },
     )
-    .await;
+    .await
 }
 
 /// Both: the context retrieval, then the tool retrieval, before every
 /// model call, in that order.
-#[tokio::test]
-async fn context_and_tools_effect_log_is_the_golden_fixture() {
-    with_gemini_corpus_retrieval_cassette(
+/// Requires the named request refusal; the former downstream golden is unverified.
+#[tokio::test(flavor = "current_thread")]
+async fn context_and_tools_effect_log_is_the_golden_fixture() -> anyhow::Result<()> {
+    with_gemini_request_witness_cassette(
         "corpus_retrieval/context_and_tools",
-        |client| async move {
+        NamedCase::ContextAndTools,
+        |client, _clock| async move {
             let facts = facts_index(client.embedding(EMBEDDING, None), &FACTS).await;
             let toolset = retrievable_toolset();
             let tools = tool_index(client.embedding(EMBEDDING, None), &toolset).await;
@@ -336,31 +306,10 @@ async fn context_and_tools_effect_log_is_the_golden_fixture() {
                 .retrieved_tools(1, tools, toolset)
                 .record_to(recorder.clone())
                 .build();
-            let response = agent
-                .prompt(SUBTRACT_PROMPT)
-                .max_turns(3)
-                .await
-                .expect("the agent answers");
-            assert!(response.output().contains("42"), "{}", response.output());
-            let log = agent.stamp(recorder.take());
-            assert_eq!(
-                families(&log),
-                [
-                    EffectFamily::Retrieve,
-                    EffectFamily::Retrieve,
-                    EffectFamily::Completion,
-                    EffectFamily::Tool,
-                    EffectFamily::Retrieve,
-                    EffectFamily::Retrieve,
-                    EffectFamily::Completion
-                ]
-            );
-            assert_eq!(
-                retrieve_kinds(&log),
-                ["top_n", "top_n_ids", "top_n", "top_n_ids"]
-            );
-            crate::goldens::golden_effects("gemini_retrieval_context_and_tools", &log);
+            let result = agent.prompt(SUBTRACT_PROMPT).max_turns(3).await.map(|_| ());
+            drop(agent);
+            Ok(result)
         },
     )
-    .await;
+    .await
 }

@@ -12,6 +12,12 @@
 //! `ministral-3b-latest`: it drives the normalized stream and asserts its
 //! request, finish reason, and accumulated argument bytes from the fixture.
 //!
+//! Upstream kept a cut call with what its arguments state. The port instead
+//! discards a Chat call cut at an explicit `length` finish
+//! (coord-a-rig-port-discard-15): the stream yields no canonical call for it,
+//! closes its Part with the typed `Discard` reason `Length`, and leaves the
+//! argument fragments it delivered visible as `Arguments` events.
+//!
 //! | dimension | values |
 //! |---|---|
 //! | transport | blocking, streaming |
@@ -27,7 +33,7 @@
 //! |---|---|
 //! | 1 of 24 | `crates/rig-cassette/fixtures/cassettes/mistral/tool_truncation_matrix/streaming_ministral_3b_low_model.yaml` |
 
-use rig::streaming::Item;
+use rig::streaming::{DiscardReason, Item, PartKind};
 use rig_test_support::cassette_models::OpenAiModels;
 use std::sync::{Arc, Mutex};
 
@@ -76,6 +82,9 @@ struct Cell {
 struct Observation {
     finish_reason: Option<FinishReason>,
     arguments: Vec<Value>,
+    /// Each call the stream closed with a typed `Discard`: the tool its Part
+    /// started under, the reason, and the argument fragments it delivered.
+    discarded: Vec<(Option<String>, DiscardReason, String)>,
     errors: Vec<String>,
 }
 
@@ -138,6 +147,9 @@ async fn run_model(client: OpenAiModels, cell: Cell) -> Observation {
             };
             let mut stream = raw;
             let mut observation = Observation::default();
+            let mut names = std::collections::HashMap::new();
+            let mut fragments: std::collections::HashMap<_, String> =
+                std::collections::HashMap::new();
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(Item::Event(StreamEvent::End {
@@ -147,6 +159,24 @@ async fn run_model(client: OpenAiModels, cell: Cell) -> Observation {
                         observation
                             .arguments
                             .push(tool_call.function.arguments_value());
+                    }
+                    Ok(Item::Event(StreamEvent::Start {
+                        part,
+                        kind: PartKind::ToolCall,
+                        name,
+                        ..
+                    })) => {
+                        names.insert(part, name.map(|name| name.as_str().to_owned()));
+                    }
+                    Ok(Item::Event(StreamEvent::Arguments { part, json })) => {
+                        fragments.entry(part).or_default().push_str(&json);
+                    }
+                    Ok(Item::Event(StreamEvent::Discard { part, reason })) => {
+                        observation.discarded.push((
+                            names.get(&part).cloned().flatten(),
+                            reason,
+                            fragments.remove(&part).unwrap_or_default(),
+                        ));
                     }
                     Ok(_) => {}
                     Err(error) => observation.errors.push(error.to_string()),
@@ -282,6 +312,11 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
             );
             assert_eq!(observation.arguments.len(), 1, "{scenario}");
             assert_eq!(observation.arguments[0]["summary"], PROMPT, "{scenario}");
+            assert!(
+                observation.discarded.is_empty(),
+                "{scenario}: a complete call is never discarded: {:?}",
+                observation.discarded
+            );
         }
         Surface::Model => {
             assert!(
@@ -294,20 +329,21 @@ fn assert_cell(scenario: &str, cell: Cell, observed: SharedObservation) {
                 Some(FinishReason::Length),
                 "{scenario}"
             );
-            // A cut call is kept with what its arguments state, as pi's
-            // tolerant parse reads them; the agent never runs it.
-            assert_eq!(
-                observation.arguments.len(),
-                1,
-                "{scenario}: the cut call is kept"
-            );
-            let summary = observation.arguments[0]["summary"]
-                .as_str()
-                .unwrap_or_default();
+            // A call cut at Length is discarded: no canonical call, the
+            // typed reason Length, and its delivered fragments visible.
             assert!(
-                PROMPT.starts_with(summary) && summary != PROMPT,
-                "{scenario}: the cut call states a prefix: {:?}",
+                observation.arguments.is_empty(),
+                "{scenario}: the cut call yields no canonical call: {:?}",
                 observation.arguments
+            );
+            assert_eq!(
+                observation.discarded,
+                vec![(
+                    Some("file_report".to_owned()),
+                    DiscardReason::Length,
+                    wire_arguments[0].clone(),
+                )],
+                "{scenario}: the cut call is discarded with reason Length, its fragments visible"
             );
         }
     }

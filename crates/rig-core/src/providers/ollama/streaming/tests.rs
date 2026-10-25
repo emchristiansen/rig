@@ -686,7 +686,8 @@ fn qwen_prefilled_full_content_separates_reasoning_from_answer() {
                 json!({"role":"assistant", "content":content}),
                 "stop",
             );
-            let response = decode("qwen3:4b", mode, &[reply.clone()]).expect("full reply decodes");
+            let response =
+                decode("qwen3:4b", mode, std::slice::from_ref(&reply)).expect("full reply decodes");
             assert_eq!(
                 blocks(&response),
                 [

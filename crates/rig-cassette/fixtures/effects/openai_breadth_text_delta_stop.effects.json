@@ -79,7 +79,11 @@
           "value": {
             "event": "start",
             "part": 0,
-            "kind": "text"
+            "kind": "text",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            }
           }
         },
         {

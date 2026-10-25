@@ -82,3 +82,6 @@ pub trait Recorder: WasmCompatSend + WasmCompatSync + 'static {
     /// The outcome of `id`.
     fn resolve(&self, id: EffectId, outcome: Result<Outcome, ErrorReport>);
 }
+
+#[cfg(test)]
+mod tests;

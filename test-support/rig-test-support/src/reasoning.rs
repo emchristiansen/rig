@@ -392,17 +392,11 @@ pub async fn run_reasoning_roundtrip_nonstreaming(agent: ReasoningRoundtripAgent
 
     let response = agent.model.call(request).await.expect("Turn 1 completion");
 
-    let mut text_parts = String::new();
-
-    for content in response.choice.iter() {
-        match content {
-            AssistantContent::Reasoning(_) => {}
-            AssistantContent::Text(text) => {
-                text_parts.push_str(&text.text);
-            }
-            _ => {}
-        }
-    }
+    let text_parts: String = response
+        .choice
+        .iter()
+        .filter_map(crate::support::block_text)
+        .collect();
 
     assert!(
         !text_parts.is_empty(),
@@ -435,10 +429,7 @@ pub async fn run_reasoning_roundtrip_nonstreaming(agent: ReasoningRoundtripAgent
     let turn2_text: String = response2
         .choice
         .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
+        .filter_map(crate::support::block_text)
         .collect();
 
     assert!(

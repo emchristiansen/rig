@@ -279,7 +279,7 @@ fn incomplete_custom_calls_keep_raw_input_and_namespace_without_a_native() {
             )
             .with_namespace(namespace.clone()),
         );
-        assert_eq!(response.choice, [expected.clone()]);
+        assert_eq!(response.choice, std::slice::from_ref(&expected));
         assert_eq!(
             response
                 .choice
@@ -326,7 +326,7 @@ fn provider_items_keep_their_exact_issuer_item_and_turn_origin_on_every_path() {
             }, StreamEvent::End { content, .. }] if content == &expected
         ));
         let response = decoded.outcome.expect("the provider-item reply ends");
-        assert_eq!(response.choice, [expected.clone()]);
+        assert_eq!(response.choice, std::slice::from_ref(&expected));
         assert_eq!(response.origin, origin());
         assert_eq!(
             response.choice.first().expect("the item").canonical(),
@@ -345,7 +345,7 @@ fn provider_items_keep_their_exact_issuer_item_and_turn_origin_on_every_path() {
         let failure = ProviderError::Response("the reply was interrupted".to_owned());
         for reason in [None, Some(&failure)] {
             let partial = turn.partial(None, &reply(), reason);
-            assert_eq!(partial.choice, [expected.clone()]);
+            assert_eq!(partial.choice, std::slice::from_ref(&expected));
             assert_eq!(partial.origin, origin());
             assert_eq!(partial.error, reason.map(ToString::to_string));
         }
@@ -373,7 +373,7 @@ fn an_incomplete_provider_item_remains_exact_instead_of_becoming_opaque() {
     let response = decoded
         .outcome
         .expect("the carried item survives an incomplete close");
-    assert_eq!(response.choice, [expected.clone()]);
+    assert_eq!(response.choice, std::slice::from_ref(&expected));
     let partial = relayed(&streamed).partial(None, &reply(), None);
     assert_eq!(partial.choice, [expected]);
     assert_eq!(partial.origin, response.origin);

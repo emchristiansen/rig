@@ -1,7 +1,8 @@
-//! Focused tool-turn checkpoint matrix on DeepSeek: deepseek-flash.
+//! The original DeepSeek checkpoint batch is refused for empty assistant
+//! content and three zero call indexes. Its completed golden trace is unavailable.
 
 use crate::corpus_matrix::{Wire, cells, checkpoint};
-use crate::deepseek::support::with_deepseek_cassette;
+use crate::deepseek::request_mismatch::{NamedCase, with_deepseek_request_mismatch};
 use rig_test_support::cassette_models::OpenAiModels;
 
 fn wire(client: &OpenAiModels) -> Wire<rig::Model<rig::providers::openai::wire::OpenAiWire>> {
@@ -20,8 +21,13 @@ fn wire(client: &OpenAiModels) -> Wire<rig::Model<rig::providers::openai::wire::
     }
 }
 
-crate::matrix::golden_matrix! {
-    wrapper: with_deepseek_cassette, wire: wire, run: checkpoint::run_agent, oracle: crate::goldens::golden_effects;
-    #[tokio::test]
-    parallel_batch: ("checkpoint_matrix/parallel_batch", checkpoint::PARALLEL_BATCH, "deepseek_checkpoint_parallel_batch");
+#[tokio::test(flavor = "current_thread")]
+async fn parallel_batch() -> anyhow::Result<()> {
+    with_deepseek_request_mismatch(
+        "checkpoint_matrix/parallel_batch",
+        NamedCase::ParallelBatch,
+        wire,
+        &checkpoint::PARALLEL_BATCH,
+    )
+    .await
 }

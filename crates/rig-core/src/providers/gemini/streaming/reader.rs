@@ -144,7 +144,8 @@ struct HostedResult {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum FinishReason {
-    FinishReasonUnspecified,
+    #[serde(rename = "FINISH_REASON_UNSPECIFIED")]
+    Unspecified,
     Stop,
     MaxTokens,
     Safety,
@@ -166,7 +167,8 @@ enum FinishReason {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum BlockReason {
-    BlockReasonUnspecified,
+    #[serde(rename = "BLOCK_REASON_UNSPECIFIED")]
+    Unspecified,
     Safety,
     Other,
     Blocklist,
@@ -178,18 +180,30 @@ enum BlockReason {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum HarmCategory {
-    HarmCategoryUnspecified,
-    HarmCategoryDerogatory,
-    HarmCategoryToxicity,
-    HarmCategoryViolence,
-    HarmCategorySexually,
-    HarmCategoryMedical,
-    HarmCategoryDangerous,
-    HarmCategoryHarassment,
-    HarmCategoryHateSpeech,
-    HarmCategorySexuallyExplicit,
-    HarmCategoryDangerousContent,
-    HarmCategoryCivicIntegrity,
+    #[serde(rename = "HARM_CATEGORY_UNSPECIFIED")]
+    Unspecified,
+    #[serde(rename = "HARM_CATEGORY_DEROGATORY")]
+    Derogatory,
+    #[serde(rename = "HARM_CATEGORY_TOXICITY")]
+    Toxicity,
+    #[serde(rename = "HARM_CATEGORY_VIOLENCE")]
+    Violence,
+    #[serde(rename = "HARM_CATEGORY_SEXUALLY")]
+    Sexually,
+    #[serde(rename = "HARM_CATEGORY_MEDICAL")]
+    Medical,
+    #[serde(rename = "HARM_CATEGORY_DANGEROUS")]
+    Dangerous,
+    #[serde(rename = "HARM_CATEGORY_HARASSMENT")]
+    Harassment,
+    #[serde(rename = "HARM_CATEGORY_HATE_SPEECH")]
+    HateSpeech,
+    #[serde(rename = "HARM_CATEGORY_SEXUALLY_EXPLICIT")]
+    SexuallyExplicit,
+    #[serde(rename = "HARM_CATEGORY_DANGEROUS_CONTENT")]
+    DangerousContent,
+    #[serde(rename = "HARM_CATEGORY_CIVIC_INTEGRITY")]
+    CivicIntegrity,
     #[serde(untagged)]
     Unknown(String),
 }
@@ -197,7 +211,8 @@ enum HarmCategory {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum HarmProbability {
-    HarmProbabilityUnspecified,
+    #[serde(rename = "HARM_PROBABILITY_UNSPECIFIED")]
+    Unspecified,
     Negligible,
     Low,
     Medium,
@@ -260,7 +275,8 @@ fn unknown_metadata_label<'de, D: serde::Deserializer<'de>>(
 #[derive(Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum Modality {
-    ModalityUnspecified,
+    #[serde(rename = "MODALITY_UNSPECIFIED")]
+    Unspecified,
     Text,
     Image,
     Video,
@@ -273,7 +289,8 @@ enum Modality {
 #[derive(Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 enum Traffic {
-    TrafficTypeUnspecified,
+    #[serde(rename = "TRAFFIC_TYPE_UNSPECIFIED")]
+    Unspecified,
     OnDemand,
     ProvisionedThroughput,
     #[serde(untagged)]

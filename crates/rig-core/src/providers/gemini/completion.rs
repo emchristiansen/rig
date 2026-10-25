@@ -464,15 +464,17 @@ pub fn request_body(
 
 /// Build the Vertex AI SDK request body using the shared GenerateContent
 /// encoding. Explicit legacy temperature and output cap take precedence
-/// after merging; the request always asks for one candidate.
+/// after merging; the request always asks for one candidate. Function calls
+/// and responses carry no `id`, which Vertex AI's v1 types do not declare.
 /// `adjust` supplies the SDK transport's base spellings before merging.
 ///
 /// Solely for rig-vertexai; not covered by semver.
 ///
 /// # Errors
 ///
-/// When the shared encoding or merge refuses the request, or the merged
-/// generation configuration cannot receive the Vertex controls.
+/// When the shared encoding or merge refuses the request, the merged
+/// generation configuration cannot receive the Vertex controls, or it asks
+/// for more than one candidate.
 #[doc(hidden)]
 pub fn request_body_for_vertex(
     request: &CompletionRequest,
@@ -506,16 +508,83 @@ pub fn request_body_for_vertex(
     )
 }
 
+/// A Vertex AI request whose merged `generationConfig` asks for more than
+/// one candidate.
+///
+/// Refused at encode rather than lowered to one: rig reads only the first
+/// candidate of a reply, and overwriting the count the caller set would make
+/// the request that left differ from the one the caller built, with nothing
+/// to say so. The typed `CandidateCount` can ask only for one, so the count
+/// comes from `additional_params`. An unset count sends 1 and raises nothing.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[error(
+    "this adapter refuses Vertex AI `generationConfig.{spelling}` {count}: rig reads one \
+     candidate of a reply, so leave the candidate count unset or send 1"
+)]
+pub struct UnsupportedVertexCandidateCount {
+    /// The spelling the merged `generationConfig` carries: `candidateCount`
+    /// or `candidate_count`.
+    pub spelling: &'static str,
+    /// The count as merged, exactly as the caller set it.
+    pub count: Value,
+}
+
+/// Refuse a merged Vertex AI `generationConfig` whose candidate count is
+/// set to anything but 1, in either proto3 JSON spelling, as a number or a
+/// decimal string (both of which Vertex AI reads) or any other value.
+pub(crate) fn refuse_vertex_candidate_counts_but_one(
+    body: &Map<String, Value>,
+) -> Result<(), EncodeError> {
+    let Some(config) = body.get("generationConfig").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for spelling in ["candidateCount", "candidate_count"] {
+        let Some(count) = config.get(spelling) else {
+            continue;
+        };
+        // Null is an unset count; any count but one is refused, so no
+        // caller value is overwritten.
+        let one = match count {
+            Value::Null => true,
+            Value::Number(number) => number.as_f64() == Some(1.0),
+            Value::String(text) => text.parse::<f64>().is_ok_and(|number| number == 1.0),
+            Value::Bool(_) | Value::Array(_) | Value::Object(_) => false,
+        };
+        if !one {
+            return Err(EncodeError::request(UnsupportedVertexCandidateCount {
+                spelling,
+                count: count.clone(),
+            }));
+        }
+    }
+    Ok(())
+}
+
 enum ReasoningScope {
     GenerateContent,
     TargetIssuer,
 }
 
 /// One closed internal selection; only request_body_for_vertex chooses Vertex.
+/// It selects the Vertex tool-result lowering and the Vertex call ids.
 #[derive(Clone, Copy)]
 enum ToolResultStyle {
     GenerateContent,
     Vertex,
+}
+
+impl ToolResultStyle {
+    /// Whether a call's provider handle travels as `functionCall.id` and
+    /// `functionResponse.id`. Gemini REST and gRPC send it. Vertex AI's v1
+    /// `FunctionCall` and `FunctionResponse` declare no `id`, so the Vertex
+    /// route sends none and its responses correlate by name.
+    fn sends_call_ids(self) -> bool {
+        match self {
+            Self::GenerateContent => true,
+            Self::Vertex => false,
+        }
+    }
 }
 
 struct RequestEncoding {
@@ -687,10 +756,10 @@ fn base_in(
     ]))
 }
 
-/// A typed tool as a function declaration with projected `parameters`.
+/// A typed tool with projected parameters or an exact numeric-enum JSON Schema.
 /// Reference definitions must be acyclic. Conversion errors name the tool.
 fn declaration(tool: crate::completion::ToolDefinition) -> Result<Value, EncodeError> {
-    let parameters = schema::parameters(tool.parameters).map_err(|error| {
+    let parameters = schema::declaration_parameters(tool.parameters).map_err(|error| {
         let reason = std::error::Error::source(&error)
             .map_or_else(|| error.to_string(), ToString::to_string);
         EncodeError::request(format!(
@@ -698,10 +767,16 @@ fn declaration(tool: crate::completion::ToolDefinition) -> Result<Value, EncodeE
             tool.name
         ))
     })?;
+    let (member, parameters) = match parameters {
+        schema::DeclarationParameters::Projected(parameters) => ("parameters", parameters),
+        schema::DeclarationParameters::JsonSchema(parameters) => {
+            ("parametersJsonSchema", Some(parameters))
+        }
+    };
     Ok(Value::Object(object([
         ("name", Some(json!(tool.name))),
         ("description", Some(json!(tool.description))),
-        ("parameters", parameters),
+        (member, parameters),
     ])))
 }
 
@@ -754,7 +829,7 @@ fn calling_config(choice: ToolChoice) -> Value {
 /// its other parts go in contents of their own, in order, as pi sends
 /// them: Gemini answers text that shares a content with function responses
 /// poorly. Provider handles stay exact; local call identities have no
-/// optional ID field.
+/// optional ID field, and on the Vertex route no call or response has one.
 #[cfg(test)]
 fn contents(
     history: Vec<Message>,
@@ -793,10 +868,9 @@ fn contents_in(
                 for part in content {
                     let is_result = matches!(&part, UserContent::ToolResult(_));
                     let id = match &part {
-                        UserContent::ToolResult(result) => match &result.call {
-                            crate::message::CallId::Provider(id) => Some(id.as_str().to_owned()),
-                            crate::message::CallId::Local(_) => None,
-                        },
+                        UserContent::ToolResult(result) if tool_results.sends_call_ids() => {
+                            result.call.provider().map(|id| id.as_str().to_owned())
+                        }
                         _ => None,
                     };
                     if is_result != responses {
@@ -816,7 +890,7 @@ fn contents_in(
                 let parts = turn
                     .content
                     .iter()
-                    .map(|block| assistant_part_in(block, target, model, issuer));
+                    .map(|block| assistant_part_in(block, target, model, issuer, tool_results));
                 push(
                     "model",
                     parts
@@ -1142,17 +1216,24 @@ fn user_part(part: UserContent, id: Option<&str>) -> Result<Value, EncodeError> 
 
 /// One assistant block as a Gemini part: its provider item while that is
 /// current, else a part rebuilt from its canonical fields, or `None` when
-/// it has nothing to send. Calls carry only actual provider-issued IDs. A
-/// rebuilt call on Gemini 3 carries Google's placeholder signature, since
-/// Gemini 3 rejects a call it did not sign without one ("Function call is
-/// missing a thought_signature in functionCall parts").
+/// it has nothing to send. Calls carry only actual provider-issued IDs, and
+/// none where `style` sends no call ids. A rebuilt call on Gemini 3 carries
+/// Google's placeholder signature, since Gemini 3 rejects a call it did not
+/// sign without one ("Function call is missing a thought_signature in
+/// functionCall parts").
 #[cfg(test)]
 fn assistant_part(
     block: &AssistantContent,
     target: &dyn ReplayTarget,
     model: &str,
 ) -> Result<Option<Value>, EncodeError> {
-    assistant_part_in(block, target, model, PROVIDER_NAME)
+    assistant_part_in(
+        block,
+        target,
+        model,
+        PROVIDER_NAME,
+        ToolResultStyle::GenerateContent,
+    )
 }
 
 fn assistant_part_in(
@@ -1160,14 +1241,17 @@ fn assistant_part_in(
     target: &dyn ReplayTarget,
     model: &str,
     issuer: &str,
+    style: ToolResultStyle,
 ) -> Result<Option<Value>, EncodeError> {
     crate::message::json_only_wire_tool_call("Gemini generateContent", block)?;
     let replay = match block {
         AssistantContent::ToolCall(call) => match &call.id {
-            crate::message::CallId::Provider(id) => {
+            crate::message::CallId::Provider(id) if style.sends_call_ids() => {
                 block.replay_optional_call_id(target, OptionalCallId::ProviderHandle(id))
             }
-            crate::message::CallId::Local(_) => {
+            // A route that takes no call id omits a provider handle exactly
+            // as it omits a local identity: the item loses only its id slot.
+            crate::message::CallId::Provider(_) | crate::message::CallId::Local(_) => {
                 block.replay_optional_call_id(target, OptionalCallId::OmitLocal)
             }
         },
@@ -1217,8 +1301,10 @@ fn assistant_part_in(
         }
         AssistantContent::ToolCall(call) => {
             let id = match &call.id {
-                crate::message::CallId::Provider(id) => Some(Value::from(id.as_str())),
-                crate::message::CallId::Local(_) => None,
+                crate::message::CallId::Provider(id) if style.sends_call_ids() => {
+                    Some(Value::from(id.as_str()))
+                }
+                crate::message::CallId::Provider(_) | crate::message::CallId::Local(_) => None,
             };
             let name = Some(json!(call.function.name));
             let args = Some(json!(call.function.arguments));
@@ -1241,7 +1327,7 @@ fn assistant_part_in(
                 .filter(|_| part.payload.replayable_to(issuer))
             {
                 json!({"text": answer.text, "thought": false, "thoughtSignature": answer.signature.as_str()})
-            } else if let Some(text) = part.known_text_projection() {
+            } else if let Some(text) = part.foreign_text() {
                 text_part(text.to_owned())
             } else {
                 return Err(crate::message::UnrepresentableOpaqueContent::new(
@@ -1441,3 +1527,6 @@ mod checked_usage_tests;
 
 #[cfg(test)]
 mod signed_answer_issuer_tests;
+
+#[cfg(test)]
+mod encode_refusal_tests;

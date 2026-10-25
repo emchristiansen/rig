@@ -1,5 +1,4 @@
 use super::*;
-use base64::Engine as _;
 use rig_core::message::{
     AssistantContent, AssistantMessage, CallId, CarriedPayload, CarriedReasoning,
     CarriedReasoningPart, DocumentSourceKind, Image, ImageMediaType, Message, Text, ToolName,
@@ -646,28 +645,34 @@ fn failed_raw_and_url_images_keep_the_existing_typed_refusal() {
     }
 }
 
+/// Vertex AI's v1 `FunctionResponse` declares no `id`: a provider handle,
+/// like a local identity, never reaches the wire, on success or failure.
 #[test]
-fn successful_function_response_keeps_exact_provider_and_optional_local_ids() {
-    for (call, expected) in [
-        (CallId::from_wire("call_1"), Some("call_1")),
-        (CallId::from_wire(""), None),
-    ] {
-        let body = direct_content(Message::User {
-            content: vec![UserContent::ToolResult(ToolResult {
-                call,
-                name: name("add"),
-                answers: rig_core::message::AnsweredToolCall::Function,
-                content: vec![ToolResultContent::text("8")],
-                is_error: false,
-            })],
-        })
-        .expect("success encodes");
-        let encoded = serde_json::to_value(&body).expect("SDK content serializes");
-        assert_eq!(
-            encoded
-                .pointer("/parts/0/functionResponse/id")
-                .and_then(Value::as_str),
-            expected
-        );
+fn function_responses_send_no_call_id_for_provider_or_local_identities() {
+    for call in [CallId::from_wire("call_1"), CallId::from_wire("")] {
+        for is_error in [false, true] {
+            let body = direct_content(Message::User {
+                content: vec![UserContent::ToolResult(ToolResult {
+                    call: call.clone(),
+                    name: name("add"),
+                    answers: rig_core::message::AnsweredToolCall::Function,
+                    content: vec![ToolResultContent::text("8")],
+                    is_error,
+                })],
+            })
+            .expect("the result encodes");
+            let encoded = serde_json::to_value(&body).expect("SDK content serializes");
+            assert_eq!(
+                encoded.pointer("/parts/0/functionResponse/id"),
+                None,
+                "{call:?} is_error={is_error}"
+            );
+            assert_eq!(
+                encoded
+                    .pointer("/parts/0/functionResponse/name")
+                    .and_then(Value::as_str),
+                Some("add")
+            );
+        }
     }
 }

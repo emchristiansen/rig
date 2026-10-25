@@ -118,13 +118,12 @@ fn aws_content_block_to_assistant_content() {
 
 /// The original assistant/text/EndTurn fixture through the current whole-frame fold.
 #[test]
-fn aws_converse_output_to_completion_response() -> Result<(), Box<dyn std::error::Error>> {
+fn aws_converse_output_to_completion_response() {
     let completion = decoded(vec![json!({"text": "txt"})], None);
     assert!(completion.is_ok());
-    let completion = completion?;
+    let completion = completion.expect("the original whole-frame fixture decodes");
     assert_eq!(
         completion.choice,
         vec![AssistantContent::Text("txt".into())]
     );
-    Ok(())
 }

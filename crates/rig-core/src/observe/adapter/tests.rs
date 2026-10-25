@@ -414,16 +414,10 @@ async fn stream_terminal_eof_error_and_drop_have_distinct_closures() {
 async fn corrupt_frame_is_evidence_separate_from_recovery_or_consumer_drop() {
     let corrupt = "data: {\n\n";
     let terminal = "data: {\"candidates\":[{\"finishReason\":\"STOP\",\"index\":0}]}\n\n";
-    // The corrupt frame ends the reply as its first item, so a consumer
-    // that stops there saw the error: the terminal after it is never read.
-    let ending = AdapterEnding::Error {
-        boundary: AdapterErrorBoundary::Decode,
-        kind: "json".into(),
-        status: None,
-        retryable: false,
-    };
-    for stop in [false, true] {
-        let ending = ending.clone();
+    for (stop, ending) in [
+        (false, AdapterEnding::Terminal),
+        (true, AdapterEnding::Dropped),
+    ] {
         let trace = observed_stream(&format!("{corrupt}{terminal}"), stop).await;
         let events: Vec<_> = trace
             .observations
@@ -437,7 +431,7 @@ async fn corrupt_frame_is_evidence_separate_from_recovery_or_consumer_drop() {
             .collect();
         assert_eq!(events[2], &AdapterEvent::Corrupt { frame: 1 });
         assert_eq!(events.last().unwrap(), &&AdapterEvent::Finished { ending });
-        assert_eq!(events.len(), 4, "{events:?}");
+        assert_eq!(events.len(), if stop { 4 } else { 6 });
         assert!(!serde_json::to_string(&trace).unwrap().contains("data:"));
     }
 }

@@ -42,13 +42,7 @@ fn request(history: Vec<Message>, tools: Vec<ToolDefinition>) -> CompletionReque
 }
 
 fn text(choice: &[AssistantContent]) -> String {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
+    rig_test_support::support::assistant_text(choice)
 }
 
 fn only_call(choice: &[AssistantContent]) -> ToolCall {
@@ -308,8 +302,19 @@ async fn file_id_chain() {
                 ],
             };
             let model = client.openai.responses("gpt-4.1-mini");
+            // The recording asked for `include: ["reasoning.encrypted_content"]`, which
+            // production no longer adds for a proven nonreasoning model
+            // (coord-a-rig-g215-1). The test asks for it explicitly, beside its existing
+            // options, as MEC132-7 treated producer 220; the production model guard and
+            // the recording stay unchanged, and this test is not about `include`.
+            // Both recorded turns carry it.
+            let include = json!({ "include": ["reasoning.encrypted_content"] });
             let first = model
-                .call(request(vec![document.clone()], vec![]).provider_options(stateless()))
+                .call(
+                    request(vec![document.clone()], vec![])
+                        .provider_options(stateless())
+                        .additional_params(include.clone()),
+                )
                 .await
                 .expect("turn one reads the file by id");
             let history = vec![
@@ -318,7 +323,11 @@ async fn file_id_chain() {
                 Message::user("How many pages does the attached PDF have? Answer with a number."),
             ];
             let second = model
-                .call(request(history, vec![]).provider_options(stateless()))
+                .call(
+                    request(history, vec![])
+                        .provider_options(stateless())
+                        .additional_params(include),
+                )
                 .await
                 .expect("turn two still reads the file by id");
             assert!(

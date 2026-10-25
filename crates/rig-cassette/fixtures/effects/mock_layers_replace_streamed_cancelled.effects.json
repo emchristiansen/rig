@@ -1,5 +1,36 @@
 {
   "header": {
+    "stream_done": {
+      "1": [
+        {
+          "item": 4,
+          "response": {
+            "choice": [
+              {
+                "type": "text",
+                "text": "streamed"
+              }
+            ],
+            "usage": {
+              "total_tokens": 2
+            },
+            "origin": {
+              "api": "mock.script",
+              "provider": "mock",
+              "model": "mock-model"
+            },
+            "finish_reason": null,
+            "raw": {
+              "usage": {
+                "total_tokens": 2
+              },
+              "response_id": null,
+              "model": null
+            }
+          }
+        }
+      ]
+    },
     "run_spec": 11761598427705777809,
     "handlers": [
       {

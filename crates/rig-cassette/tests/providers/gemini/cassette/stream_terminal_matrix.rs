@@ -40,7 +40,7 @@
 //! | 17 | `three_finish_reason_chunks_still_yield_one_terminal` | unit | exactly-one-terminal invariant |
 //! | 18 | `eof_without_any_finish_reason_yields_no_terminal_record` | unit | truncation is still truncation |
 //! | 19 | `a_transport_error_after_a_finish_reason_yields_no_terminal_record` | unit | error path |
-//! | 20 | `a_tool_protocol_failure_still_ends_the_stream_immediately` | unit | in-band failure still short-circuits |
+//! | 20 | `a_tool_protocol_failure_still_ends_the_stream_immediately` | unit | a tool-protocol finish refuses the stream at once |
 //! | 21 | `a_tool_call_after_the_first_finish_reason_reaches_the_choice` | unit | tool content past the boundary |
 //! | 22 | `reasoning_after_the_first_finish_reason_reaches_the_choice` | unit | reasoning past the boundary |
 //! | 23 | `an_unknown_frame_after_the_first_finish_reason_is_passed_through` | unit | passthrough past the boundary |
@@ -88,7 +88,11 @@ mod unit {
         errors: usize,
         /// The error items' messages, in order.
         error_messages: Vec<String>,
+        /// The error items, in order.
+        failures: Vec<rig::ProviderError>,
         response: Option<rig::completion::CompletionResponse>,
+        /// What `finish` refused the reply with, when it did.
+        finish_failure: Option<rig::ProviderError>,
     }
 
     async fn run(frames: &[&str]) -> Run {
@@ -115,7 +119,9 @@ mod unit {
             unknowns: 0,
             errors: 0,
             error_messages: Vec::new(),
+            failures: Vec::new(),
             response: None,
+            finish_failure: None,
         };
         while let Some(item) = stream.next().await {
             match item {
@@ -123,10 +129,12 @@ mod unit {
                     rig::streaming::Item::Event(StreamEvent::Text { text, .. }) => {
                         run.text.push_str(&text)
                     }
-                    rig::streaming::Item::Event(StreamEvent::End {
-                        content: AssistantContent::Reasoning(_),
-                        ..
-                    }) => run.reasoning += 1,
+                    // The port ends a Gemini thought run as carried reasoning.
+                    rig::streaming::Item::Event(StreamEvent::End { content, .. })
+                        if rig_test_support::support::is_reasoning(&content) =>
+                    {
+                        run.reasoning += 1
+                    }
                     rig::streaming::Item::Event(StreamEvent::End {
                         content: AssistantContent::ToolCall(_),
                         ..
@@ -137,10 +145,14 @@ mod unit {
                 Err(error) => {
                     run.errors += 1;
                     run.error_messages.push(error.to_string());
+                    run.failures.push(error);
                 }
             }
         }
-        run.response = stream.finish().await.ok();
+        match stream.finish().await {
+            Ok(response) => run.response = Some(response),
+            Err(error) => run.finish_failure = Some(error),
+        }
         run
     }
 
@@ -231,7 +243,7 @@ mod unit {
             "the envelope's message survives: {message}"
         );
         assert!(
-            !message.contains("ended before the provider ended it"),
+            !message.contains(&rig::serve::stream_truncated().message),
             "not reported as a cut stream: {message}"
         );
     }
@@ -311,24 +323,42 @@ mod unit {
         assert!(run.response.is_none());
     }
 
+    /// A tool-protocol finish (`MALFORMED_FUNCTION_CALL`) is the REST
+    /// wire's refusal, which Vertex shares through the same decoder
+    /// (mec-rig-78-four-subjects-1 D, mec-rig-132-dispositions-2): the
+    /// stream yields one error item, exactly
+    /// `ProviderError::Response("Gemini stopped with
+    /// finish_reason=MalformedFunctionCall: <finishMessage>")`, and reads no
+    /// later frame. `finish` refuses with the same error, so a later `STOP`
+    /// cannot dress the turn up as complete. No turn is returned, so its
+    /// failed stop is not observable.
     #[tokio::test]
     async fn a_tool_protocol_failure_still_ends_the_stream_immediately() {
         const FAILURE: &str = r#"{"candidates":[{"finishReason":"MALFORMED_FUNCTION_CALL","finishMessage":"malformed function call","index":0}]}"#;
+        const REFUSAL: &str =
+            "Gemini stopped with finish_reason=MalformedFunctionCall: malformed function call";
         let run = run(&[ANSWER, FAILURE, ANSWER, REAL_TERMINAL]).await;
 
-        assert_eq!(
-            run.errors, 0,
-            "a failure finish is a failed turn, not a stream error"
+        assert!(
+            matches!(
+                run.failures.as_slice(),
+                [rig::ProviderError::Response(message)] if message == REFUSAL
+            ),
+            "the tool-protocol finish is the stream's one error item: {:?}",
+            run.failures
         );
         assert_eq!(
             run.text, "The answer is 42.",
             "nothing after the in-band failure is interpreted"
         );
-        let response = run.response.expect("the failure ends the turn");
+        assert!(run.response.is_none(), "no turn is returned");
         assert!(
-            response.stop().is_failure(),
-            "a later STOP cannot dress the failed turn up as complete: {:?}",
-            response.stop()
+            matches!(
+                &run.finish_failure,
+                Some(rig::ProviderError::Response(message)) if message == REFUSAL
+            ),
+            "finish refuses with the same error: {:?}",
+            run.finish_failure
         );
     }
 

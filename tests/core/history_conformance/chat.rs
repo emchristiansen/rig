@@ -5,13 +5,17 @@
 
 use rig_core::completion::{CompletionRequest, FinishReason};
 use rig_core::error::EncodeError;
-use rig_core::message::{AssistantContent, AssistantMessage};
+use rig_core::message::{
+    AssistantContent, AssistantMessage, DocumentData, DocumentMediaType, DocumentSourceKind,
+    UserContent,
+};
 use rig_core::providers::openai::wire::{
-    Chat, DEEPSEEK, Dialect, MISTRAL, OPENROUTER, OpenAIConfig,
+    Chat, DEEPSEEK, Dialect, GROQ, MISTRAL, OPENROUTER, OpenAIConfig,
 };
 use rig_core::wire::{Mode, Wire, WireFrame};
 use rig_history_conformance::{
-    Ablation, CallShape, Ending, HistoryFixture, Rng, Shape, decode, http_body, replies,
+    Ablation, CallShape, Ending, HistoryFixture, MediaPart, RefusedArguments, Rng, Shape, decode,
+    http_body, replies,
 };
 use serde_json::{Map, Value, json};
 
@@ -363,6 +367,49 @@ impl HistoryFixture for ChatHistory {
         })
     }
 
+    /// A whole message with no content is refused; a stream that ended
+    /// cleanly is a successful empty turn.
+    fn refuses_empty_reply(&self, mode: Mode) -> bool {
+        mode == Mode::Unary
+    }
+
+    fn refuses_empty_whole(&self) -> bool {
+        true
+    }
+
+    /// Argument text that is not JSON is refused: a whole message fails its
+    /// `chat.completion` frame with the parser's error, and a stream fails
+    /// the call with its malformed input.
+    fn refused_arguments(&self, arguments: &str, mode: Mode) -> Option<RefusedArguments> {
+        let error = serde_json::from_str::<Value>(arguments).err()?.to_string();
+        Some(match mode {
+            Mode::Unary => RefusedArguments::CorruptFrame {
+                event_type: Some("chat.completion"),
+                error,
+            },
+            Mode::Streaming => RefusedArguments::MalformedToolInput,
+        })
+    }
+
+    /// A PDF named by URL is refused before adaptation.
+    fn original_media_preflight(&self, _model: &str, part: MediaPart<'_>) -> Option<String> {
+        let MediaPart::User(UserContent::Document(document)) = part else {
+            return None;
+        };
+        matches!(
+            (&document.media_type, &document.data),
+            (
+                Some(DocumentMediaType::PDF),
+                DocumentData::File(DocumentSourceKind::Url(_))
+            )
+        )
+        .then(|| {
+            "Message conversion error: OpenAI chat completions does not accept URL files; \
+             use the Responses API or pass base64-encoded bytes"
+                .to_owned()
+        })
+    }
+
     fn finish_reason_pointer(&self) -> Option<&'static str> {
         Some("/choices/0/finish_reason")
     }
@@ -451,7 +498,9 @@ pub fn projection(turn: &AssistantMessage, dialect: &Dialect) -> Value {
             _ => {}
         }
     }
-    if has_parts {
+    // Groq takes an assistant turn's text as a content array
+    // (coord-a-rig-port-chat-document-12(2)).
+    if has_parts || (dialect.name == GROQ.name && !text.is_empty()) {
         message.insert("content".to_owned(), parts.into());
     } else if !text.is_empty() {
         message.insert("content".to_owned(), text.into());
@@ -468,8 +517,27 @@ pub fn projection(turn: &AssistantMessage, dialect: &Dialect) -> Value {
     if let Some(field) = dialect.quirks.reasoning_field {
         message.entry(field).or_insert_with(|| json!(""));
     }
-    if dialect.name == DEEPSEEK.name || dialect.name == MISTRAL.name {
+    if dialect.name == MISTRAL.name {
         message.entry("content").or_insert_with(|| json!(""));
     }
+    if dialect.name == DEEPSEEK.name {
+        deepseek_finalized(&mut message);
+    }
     Value::Object(message)
+}
+
+/// DeepSeek's finalization of a replayed assistant turn, the known
+/// differences from the projection every other dialect gets
+/// (mec-rig-132-dispositions-1 item 6): an assistant turn with no text
+/// sends `"content": ""`, and every call, parallel calls included, carries
+/// `"index": 0`. Its third, a forced `tool_choice` sent as `null`, is a
+/// request field no history row forces. Any other difference fails the
+/// rows that compare a replayed turn.
+fn deepseek_finalized(message: &mut Map<String, Value>) {
+    message.entry("content").or_insert_with(|| json!(""));
+    if let Some(Value::Array(calls)) = message.get_mut("tool_calls") {
+        for call in calls {
+            call["index"] = json!(0);
+        }
+    }
 }

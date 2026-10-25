@@ -25,8 +25,8 @@
 //! | # | cell | transport | surface | dimension pinned |
 //! |---|------|-----------|---------|------------------|
 //! | 11 | `streaming_code_execution_with_visible_thoughts` | streaming | `stream` | parity twin of 10 |
-//! | 22 | `blocking_code_execution_replayed_in_chat_history` | blocking | `Agent::chat` | a code-execution turn replayed as history, code parts included |
-//! | 23 | `code_execution_only_turn_is_a_turn_of_its_code_parts` | — | unit | see below |
+//! | 22 | `blocking_code_execution_replayed_in_chat_history` | blocking | `Agent::chat` | a code-execution turn replayed as history; an exact named mismatch witness, the port replays it without its code parts |
+//! | 23 | `code_execution_only_turn_is_an_empty_response` | — | unit | see below |
 //! | 24 | `code_execution_parts_are_skipped_in_every_position` | — | unit | see below |
 //! | 25 | `unmodeled_part_kinds_still_fail_loudly` | — | unit | see below |
 //!
@@ -50,6 +50,9 @@ use rig::streaming::Item;
 use rig::streaming::StreamEvent;
 use serde_json::{Value, json};
 
+use anyhow::Context;
+
+use super::super::request_witness_support::{NamedCase, with_gemini_request_witness_cassette};
 use super::super::support::{
     assert_recorded_response_contains, with_gemini_code_execution_cassette,
 };
@@ -178,10 +181,9 @@ async fn streaming_code_execution_with_visible_thoughts() {
                 states(&streamed, "6765"),
                 "streamed answer must carry the value, got {streamed:?}"
             );
+            // The port aggregates a Gemini thought run as carried reasoning.
             assert!(
-                choice
-                    .iter()
-                    .any(|content| matches!(content, AssistantContent::Reasoning(_))),
+                choice.iter().any(rig_test_support::support::is_reasoning),
                 "streamed reasoning must aggregate as reasoning, not text"
             );
             assert!(saw_terminal, "the turn must produce a terminal record");
@@ -205,13 +207,24 @@ async fn streaming_code_execution_with_visible_thoughts() {
 
 // --- 22: a code-execution turn replayed as chat history -------------------
 
+/// Exact named mismatch witness (mec-rig-132-dispositions-1 item 5 pattern,
+/// Q-GEMINI-CODE-PARTS): the recording is unchanged. Turn one replays
+/// interaction 0 exactly and its answer still states 169. The port keeps no
+/// code-execution part of that turn (they are skipped, not modelled), so
+/// interaction 1, which replays turn one as history, equals the recording
+/// except that `/contents/1/parts` omits exactly the recorded
+/// `executableCode` and `codeExecutionResult` parts; replay refuses it.
+/// Named loss: the second answer stating the doubled value, 338. The
+/// recording itself still replays both code parts in its continuation and
+/// carries them in a reply.
 #[tokio::test]
-async fn blocking_code_execution_replayed_in_chat_history() {
+async fn blocking_code_execution_replayed_in_chat_history() -> anyhow::Result<()> {
     const SCENARIO: &str = "code_execution_matrix/blocking_code_execution_replayed_in_chat_history";
 
-    with_gemini_code_execution_cassette(
+    with_gemini_request_witness_cassette(
         "code_execution_matrix/blocking_code_execution_replayed_in_chat_history",
-        |client| async move {
+        NamedCase::CodeExecutionHistory,
+        |client, _clock| async move {
             let agent =
                 rig::AgentBuilder::new(client.completion(gemini::completion::GEMINI_2_5_FLASH))
                     .temperature(0.0)
@@ -220,7 +233,7 @@ async fn blocking_code_execution_replayed_in_chat_history() {
                     .build();
 
             // Turn one produces the code-execution turn; turn two replays it
-            // to the same model, code parts included.
+            // to the same model.
             let mut history = Vec::new();
             let first = agent
                 .chat(
@@ -228,32 +241,31 @@ async fn blocking_code_execution_replayed_in_chat_history() {
                     &mut history,
                 )
                 .await
-                .expect("first code-execution turn should convert");
-            assert!(
+                .context("first code-execution turn should convert")?;
+            anyhow::ensure!(
                 states(&first.output(), "169"),
                 "first answer should carry 169, got {first:?}"
             );
             let second = agent
                 .chat("Now double that number and state the result.", &mut history)
                 .await
-                .expect("history replay after a code-execution turn should succeed");
-            assert!(
-                states(&second.output(), "338"),
-                "second answer should carry the doubled value, got {second:?}"
-            );
+                .map(|_| ());
+            drop(agent);
+            Ok(second)
         },
     )
-    .await;
+    .await?;
 
     let bodies = crate::cassettes::recorded_interaction_bodies("gemini", SCENARIO);
     let replayed = &bodies.last().expect("a continuation").0;
     for marker in CODE_PART_MARKERS {
-        assert!(
+        anyhow::ensure!(
             replayed.contains(marker),
             "the continuation replays the turn's {marker} part"
         );
     }
     assert_recorded_response_contains(SCENARIO, CODE_PART_MARKERS);
+    Ok(())
 }
 
 // --- 23-25: states a live turn cannot be made to produce ------------------
@@ -261,7 +273,6 @@ async fn blocking_code_execution_replayed_in_chat_history() {
 mod unit {
     use rig::completion::CompletionResponse;
     use rig::error::ProviderError;
-    use rig::message::AssistantContent;
     use rig::providers::gemini::GeminiConfig;
     use rig::test_utils::RecordingHttpClient;
     use serde_json::{Value, json};
@@ -314,32 +325,26 @@ mod unit {
     }
 
     /// Not a recording: Gemini always narrates a code round, so a candidate
-    /// whose only parts are code-execution parts cannot be forced live. Such
-    /// a turn is a success, as pi takes an empty reply: emptiness is decided
-    /// once by the fold, never by a decoder. Skipping the code parts invents
-    /// no text: they stay opaque blocks that replay to the same model.
+    /// whose only parts are code-execution parts cannot be forced live. The
+    /// contract is that skipping them does not invent content — an otherwise
+    /// empty choice must still be rejected by rig's shared empty-response
+    /// rule, not silently returned as a blank answer.
     #[tokio::test]
-    async fn code_execution_only_turn_is_a_turn_of_its_code_parts() {
-        let response = completion_of(vec![executable_code_part(), code_result_part()])
+    async fn code_execution_only_turn_is_an_empty_response() {
+        let error = completion_of(vec![executable_code_part(), code_result_part()])
             .await
-            .expect("an executable-code-only reply is a turn");
-        assert!(!response.stop().is_failure(), "{:?}", response.stop());
+            .expect_err("a turn with no modeled content must not convert to a blank answer");
         assert!(
-            response
-                .choice
-                .iter()
-                .all(|block| matches!(block, AssistantContent::Opaque(opaque) if opaque.replay)),
-            "{:?}",
-            response.choice
+            matches!(error, ProviderError::Response(_)),
+            "expected the shared empty-response rejection, got {error:?}"
         );
-        assert_eq!(response.choice.len(), 2, "{:?}", response.choice);
     }
 
-    /// Not a recording: one live turn emits one ordering. Each code part
-    /// stays an opaque block where it sat, whatever its position, and the
-    /// text stays the only answer.
+    /// Not a recording: one live turn emits one ordering. The skip must not
+    /// depend on where the code parts sit relative to the text, so every
+    /// position is asserted from the recorded part shapes.
     #[tokio::test]
-    async fn code_execution_parts_keep_their_position_as_opaque_blocks() {
+    async fn code_execution_parts_are_skipped_in_every_position() {
         let text = json!({ "text": "The 7 factorial is 5040." });
         let orderings = [
             vec![executable_code_part(), code_result_part(), text.clone()],
@@ -355,45 +360,42 @@ mod unit {
         ];
 
         for (index, parts) in orderings.into_iter().enumerate() {
-            let response = completion_of(parts.clone())
+            let response = completion_of(parts)
                 .await
                 .unwrap_or_else(|error| panic!("ordering {index} should convert: {error:?}"));
-            let kept: Vec<Value> = response
-                .choice
-                .iter()
-                .map(|block| match block {
-                    rig::message::AssistantContent::Opaque(opaque) => {
-                        assert!(opaque.replay, "ordering {index}: code parts replay");
-                        opaque.item.clone()
-                    }
-                    rig::message::AssistantContent::Text(text) => json!({ "text": text.text }),
-                    other => panic!("ordering {index}: unexpected block {other:?}"),
-                })
-                .collect();
-            assert_eq!(kept, parts, "ordering {index}: every part keeps its place");
+            assert_eq!(
+                response.choice.len(),
+                1,
+                "ordering {index}: only the text part carries assistant content"
+            );
+            assert!(
+                matches!(
+                    response.choice.first(),
+                    Some(rig::message::AssistantContent::Text(text)) if text.text == "The 7 factorial is 5040."
+                ),
+                "ordering {index}: the surviving part must be the model's text, got {:?}",
+                response.choice
+            );
         }
     }
 
     /// Not a recording: `generateContent` never answers with a
-    /// `functionResponse` or `fileData` part (they are request-side kinds),
-    /// so neither has a live source. Rig has no block for them, and they
-    /// survive as opaque blocks rather than being dropped.
+    /// `functionResponse` or `fileData` part (they are request-side kinds), so
+    /// the arm that must keep failing has no live source. Widening the skip to
+    /// every unmodeled kind would turn a genuinely unaccountable payload into
+    /// a silent content drop.
     #[tokio::test]
-    async fn unmodeled_part_kinds_survive_as_opaque_blocks() {
+    async fn unmodeled_part_kinds_still_fail_loudly() {
         for part in [
             json!({ "functionResponse": { "name": "add", "response": { "result": 3 } } }),
             json!({ "fileData": { "mimeType": "text/plain", "fileUri": "https://example.invalid/f" } }),
         ] {
-            let response = completion_of(vec![part.clone(), json!({ "text": "done" })])
+            let error = completion_of(vec![part.clone(), json!({ "text": "done" })])
                 .await
-                .unwrap_or_else(|error| panic!("part {part} should convert: {error:?}"));
+                .expect_err("an unaccountable part must still fail the response");
             assert!(
-                matches!(
-                    response.choice.first(),
-                    Some(rig::message::AssistantContent::Opaque(opaque)) if opaque.item == part
-                ),
-                "part {part} survives as an opaque block: {:?}",
-                response.choice
+                matches!(error, ProviderError::Response(_)),
+                "part {part} should be a ResponseError, got {error:?}"
             );
         }
     }

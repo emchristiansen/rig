@@ -1,5 +1,153 @@
 {
   "header": {
+    "stream_done": {
+      "2": [
+        {
+          "item": 4,
+          "response": {
+            "choice": [
+              {
+                "type": "carried_text",
+                "content": {
+                  "type": "text",
+                  "text": "Ready."
+                },
+                "payload": {
+                  "item": {
+                    "annotations": [],
+                    "logprobs": [],
+                    "text": "Ready.",
+                    "type": "output_text"
+                  },
+                  "provider": "openai",
+                  "position": {
+                    "kind": "message_content",
+                    "item_index": 0,
+                    "part_index": 0
+                  }
+                },
+                "item_id": "msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62"
+              }
+            ],
+            "usage": {
+              "input_tokens": 28,
+              "output_tokens": 3,
+              "total_tokens": 31,
+              "cached_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "reasoning_tokens": 0,
+              "cost": {
+                "input": 0.00007,
+                "output": 0.00003,
+                "cache_read": 0.0,
+                "cache_write": 0.0,
+                "total": 0.00009999999999999999
+              }
+            },
+            "message_id": "msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62",
+            "origin": {
+              "api": "openai.responses",
+              "provider": "openai",
+              "model": "gpt-4o",
+              "response_model": "gpt-4o-2024-08-06",
+              "response_id": "resp_01c5284677fdb93a006ab395fc55b487d0935621cfc8e95528"
+            },
+            "provider_request_id": "req_475dd217ebaa46b4a2b097b103cd11f6",
+            "finish_reason": "stop",
+            "raw": {
+              "access_programs": null,
+              "background": false,
+              "completed_at": 0,
+              "created_at": 0,
+              "error": null,
+              "frequency_penalty": 0.0,
+              "id": "resp_01c5284677fdb93a006ab395fc55b487d0935621cfc8e95528",
+              "incomplete_details": null,
+              "instructions": "You are a concise assistant. Answer directly.",
+              "max_output_tokens": null,
+              "max_tool_calls": null,
+              "metadata": {},
+              "model": "gpt-4o-2024-08-06",
+              "moderation": null,
+              "object": "response",
+              "output": [
+                {
+                  "content": [
+                    {
+                      "annotations": [],
+                      "logprobs": [],
+                      "text": "Ready.",
+                      "type": "output_text"
+                    }
+                  ],
+                  "id": "msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62",
+                  "role": "assistant",
+                  "status": "completed",
+                  "type": "message"
+                }
+              ],
+              "parallel_tool_calls": true,
+              "presence_penalty": 0.0,
+              "previous_response_id": null,
+              "prompt_cache_key": null,
+              "prompt_cache_retention": "in_memory",
+              "reasoning": {
+                "context": null,
+                "effort": null,
+                "summary": null
+              },
+              "safety_identifier": null,
+              "service_tier": "default",
+              "status": "completed",
+              "store": true,
+              "temperature": 0.0,
+              "text": {
+                "format": {
+                  "type": "text"
+                },
+                "verbosity": "medium"
+              },
+              "tool_choice": "auto",
+              "tool_usage": {
+                "image_gen": {
+                  "input_tokens": 0,
+                  "input_tokens_details": {
+                    "image_tokens": 0,
+                    "text_tokens": 0
+                  },
+                  "output_tokens": 0,
+                  "output_tokens_details": {
+                    "image_tokens": 0,
+                    "text_tokens": 0
+                  },
+                  "total_tokens": 0
+                },
+                "web_search": {
+                  "num_requests": 0
+                }
+              },
+              "tools": [],
+              "top_logprobs": 0,
+              "top_p": 1.0,
+              "truncation": "disabled",
+              "usage": {
+                "input_tokens": 28,
+                "input_tokens_details": {
+                  "cache_write_tokens": 0,
+                  "cached_tokens": 0
+                },
+                "output_tokens": 3,
+                "output_tokens_details": {
+                  "reasoning_tokens": 0
+                },
+                "total_tokens": 31
+              },
+              "user": null
+            }
+          }
+        }
+      ]
+    },
     "run_spec": 11761598427705777809,
     "handlers": [
       {
@@ -3198,25 +3346,26 @@
           "outcome": "completion",
           "choice": [
             {
-              "type": "text",
-              "text": "Ready.",
-              "native": {
+              "type": "carried_text",
+              "content": {
+                "type": "text",
+                "text": "Ready."
+              },
+              "payload": {
                 "item": {
-                  "content": [
-                    {
-                      "annotations": [],
-                      "logprobs": [],
-                      "text": "Ready.",
-                      "type": "output_text"
-                    }
-                  ],
-                  "id": "msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62",
-                  "role": "assistant",
-                  "status": "completed",
-                  "type": "message"
+                  "annotations": [],
+                  "logprobs": [],
+                  "text": "Ready.",
+                  "type": "output_text"
                 },
-                "fingerprint": "d69d08f702e303b6"
-              }
+                "provider": "openai",
+                "position": {
+                  "kind": "message_content",
+                  "item_index": 0,
+                  "part_index": 0
+                }
+              },
+              "item_id": "msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62"
             }
           ],
           "usage": {
@@ -3234,6 +3383,7 @@
               "total": 0.00009999999999999999
             }
           },
+          "message_id": "msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62",
           "origin": {
             "api": "openai.responses",
             "provider": "openai",
@@ -3341,7 +3491,11 @@
           "value": {
             "event": "start",
             "part": 0,
-            "kind": "text"
+            "kind": "text",
+            "source_order": {
+              "primary": 0,
+              "secondary": 0
+            }
           }
         },
         {
@@ -3366,25 +3520,25 @@
             "event": "end",
             "part": 0,
             "content": {
-              "type": "text",
-              "text": "Ready.",
-              "native": {
+              "type": "carried_text",
+              "content": {
+                "type": "text",
+                "text": "Ready."
+              },
+              "payload": {
                 "item": {
-                  "content": [
-                    {
-                      "annotations": [],
-                      "logprobs": [],
-                      "text": "Ready.",
-                      "type": "output_text"
-                    }
-                  ],
-                  "id": "msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62",
-                  "role": "assistant",
-                  "status": "completed",
-                  "type": "message"
+                  "annotations": [],
+                  "logprobs": [],
+                  "text": "Ready.",
+                  "type": "output_text"
                 },
-                "fingerprint": "d69d08f702e303b6"
-              }
+                "position": {
+                  "kind": "message_content",
+                  "item_index": 0,
+                  "part_index": 0
+                }
+              },
+              "item_id": "msg_01c5284677fdb93a006ab395fd518487d09aa3b562317b7d62"
             }
           }
         }

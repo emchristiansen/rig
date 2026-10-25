@@ -95,6 +95,16 @@ pub struct CacheSupport {
     pub retention: Vec<CacheRetention>,
 }
 
+/// Whether the provider mapping includes reasoning in its output counter.
+/// Callers choose from the mapping's contract, independently of its totals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReasoningAccounting {
+    /// The output counter already includes reasoning tokens.
+    IncludedInOutput,
+    /// Reasoning tokens are separate and charged at the same output rate.
+    SeparateFromOutput,
+}
+
 /// Prices in USD per million tokens.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -118,13 +128,22 @@ impl Pricing {
     /// retention higher costs more than this says. It is the standard-tier
     /// list price of the tokens: the service tier, long-context price tiers
     /// and hosted-tool fees (web search, code execution) are not in it.
-    pub fn cost(&self, usage: &Usage) -> Option<Cost> {
+    /// `reasoning` states whether output already counts reasoning tokens;
+    /// separately counted reasoning uses the output rate. An overflowing
+    /// billed-output sum returns `None`. The counters stay unchanged.
+    pub fn cost(&self, usage: &Usage, reasoning: ReasoningAccounting) -> Option<Cost> {
         let input = usage.input_tokens?;
         let output = usage.output_tokens?;
+        let output = match reasoning {
+            ReasoningAccounting::IncludedInOutput => output,
+            ReasoningAccounting::SeparateFromOutput => {
+                output.checked_add(usage.reasoning_tokens.unwrap_or(0))?
+            }
+        };
         let read = usage.cached_input_tokens.unwrap_or(0);
         let written = usage.cache_creation_input_tokens.unwrap_or(0);
         let uncached = input.saturating_sub(read).saturating_sub(written);
-        // Token counts stay far below 2^53, so the conversion is exact.
+        // Prices use f64, so counts above 2^53 can round on conversion.
         let price = |tokens: u64, per_million: f64| tokens as f64 * per_million / 1_000_000.0;
         Some(Cost::from_parts(
             price(uncached, self.input),

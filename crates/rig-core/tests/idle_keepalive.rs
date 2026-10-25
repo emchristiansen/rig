@@ -15,10 +15,9 @@
 #![allow(clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 
 use futures::{SinkExt, StreamExt};
-use rig_core::completion::CompletionModel as _;
-use rig_core::driver::Bound;
+use rig_core::driver::Model;
 use rig_core::providers::chatgpt;
-use rig_core::providers::openai::OpenAI;
+use rig_core::providers::openai::OpenAIConfig;
 use rig_core::providers::openai::responses_api::websocket::ResponsesWebSocketSession;
 use rig_core::providers::openai::responses_api::websocket::codex::{
     CodexWebSocketSessionBuilder, UnrecognizedEvent,
@@ -153,11 +152,12 @@ fn serve_idle_window() -> (String, mpsc::Receiver<()>) {
     (format!("http://{address}/v1"), pong_rx)
 }
 
-fn bound(base_url: &str) -> Bound<Responses, RecordingHttpClient> {
-    let wire = OpenAI::new("test-key")
-        .with_base_url(base_url)
-        .responses("gpt-5.4");
-    Bound::new(wire, RecordingHttpClient::new("{}"))
+fn bound(base_url: &str) -> Model<Responses, RecordingHttpClient> {
+    let wire = Responses::new(
+        OpenAIConfig::new("test-key").with_base_url(base_url),
+        "gpt-5.4",
+    );
+    Model::new(wire, RecordingHttpClient::new("{}"))
 }
 
 /// Drain the idle session until the server has seen its pong, then once more,
@@ -190,15 +190,15 @@ async fn drain_until_ponged(
 }
 
 async fn exercise_idle_window(
-    bound: Bound<Responses, RecordingHttpClient>,
+    bound: Model<Responses, RecordingHttpClient>,
     pong_rx: mpsc::Receiver<()>,
 ) {
-    let mut session = match bound.responses_websocket().await {
+    let mut session = match bound.responses_websocket().connect().await {
         Ok(session) => session,
         Err(error) => panic!("session should connect: {error}"),
     };
     session
-        .completion(bound.completion_request("first").build())
+        .completion(rig_core::completion::CompletionRequest::new("first"))
         .await
         .expect("first turn should complete");
 
@@ -209,7 +209,7 @@ async fn exercise_idle_window(
     assert_eq!(session.previous_response_id(), Some("resp_1"));
 
     session
-        .completion(bound.completion_request("second").build())
+        .completion(rig_core::completion::CompletionRequest::new("second"))
         .await
         .expect("second turn should complete after the idle window");
     session.close().await.expect("close should succeed");
@@ -286,29 +286,20 @@ async fn the_codex_handshake_carries_the_session_identity() {
         request
     });
 
-    let wire = OpenAI::with_key(&chatgpt::DIALECT, "test-token")
-        .with_caller_identity(rig_core::test_utils::test_caller_identity())
-        .with_base_url(format!("http://{address}/backend-api/codex"))
-        .with_account_id("acct-123")
-        .responses(chatgpt::GPT_5_3_CODEX);
+    let wire = Responses::new(
+        OpenAIConfig::with_key(&chatgpt::DIALECT, "test-token")
+            .with_caller_identity(rig_core::test_utils::test_caller_identity())
+            .with_base_url(format!("http://{address}/backend-api/codex"))
+            .with_account_id("acct-123"),
+        chatgpt::GPT_5_3_CODEX,
+    );
     let builder = CodexWebSocketSessionBuilder::new(wire).expect("a Codex wire");
     let identity = builder.identity().clone();
     let mut session = builder.connect().await.expect("session should connect");
     assert_eq!(session.identity(), &identity);
 
     session
-        .send(rig_core::completion::CompletionRequest {
-            model: None,
-            chat_history: vec![rig_core::completion::Message::user("hello")],
-            documents: Vec::new(),
-            tools: Vec::new(),
-            temperature: None,
-            max_tokens: None,
-            tool_choice: None,
-            additional_params: None,
-            output_schema: None,
-            record_telemetry_content: false,
-        })
+        .send(rig_core::completion::CompletionRequest::new("hello"))
         .await
         .expect("root send should succeed");
     let terminal = session.next_event().await.expect("terminal event");

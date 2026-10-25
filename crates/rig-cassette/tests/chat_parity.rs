@@ -29,8 +29,23 @@ parity!(
 /// through `stream().finish()`, on every recorded reply of every provider.
 #[tokio::test]
 async fn call_and_stream_finish_agree_on_every_recorded_reply() {
+    call_and_stream_finish_agree(
+        chat_parity::PROVIDERS
+            .iter()
+            .copied()
+            .filter(|provider| *provider != "openrouter"),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn openrouter_call_and_stream_finish_agree_on_every_recorded_reply() {
+    call_and_stream_finish_agree(["openrouter"].into_iter()).await;
+}
+
+async fn call_and_stream_finish_agree(providers: impl Iterator<Item = &'static str>) {
     let mut compared = 0;
-    for provider in chat_parity::PROVIDERS {
+    for provider in providers {
         for interaction in chat_parity::interactions(provider) {
             let (called, streamed) = chat_parity::both_paths(provider, &interaction).await;
             assert_eq!(
@@ -83,6 +98,24 @@ async fn perplexity_streams_without_done_match_the_snapshot() {
 /// blocks in the same order, the same provider items, origin and stop.
 #[test]
 fn every_recorded_whole_reply_agrees_with_its_restatement_as_a_stream() {
+    let compared = recorded_whole_replies_agree(
+        chat_parity::PROVIDERS
+            .iter()
+            .copied()
+            .filter(|provider| *provider != "openrouter"),
+    );
+    assert!(
+        compared > 100,
+        "only {compared} whole replies were restated"
+    );
+}
+
+#[test]
+fn openrouter_recorded_whole_replies_agree_with_their_restatement_as_a_stream() {
+    recorded_whole_replies_agree(["openrouter"].into_iter());
+}
+
+fn recorded_whole_replies_agree(providers: impl Iterator<Item = &'static str>) -> usize {
     use rig::test_utils::history::{assert_restated_agrees, decode};
     use rig::wire::{Mode, WireFrame};
 
@@ -91,7 +124,7 @@ fn every_recorded_whole_reply_agrees_with_its_restatement_as_a_stream() {
         Some((body, WireFrame::Text(interaction.body.clone())))
     }
     let mut compared = 0;
-    for provider in chat_parity::PROVIDERS {
+    for provider in providers {
         let wire = chat_parity::wire(provider);
         for interaction in chat_parity::interactions(provider) {
             if interaction.streaming {
@@ -107,8 +140,5 @@ fn every_recorded_whole_reply_agrees_with_its_restatement_as_a_stream() {
             compared += 1;
         }
     }
-    assert!(
-        compared > 100,
-        "only {compared} whole replies were restated"
-    );
+    compared
 }

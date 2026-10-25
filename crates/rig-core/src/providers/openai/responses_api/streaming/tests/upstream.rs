@@ -1222,15 +1222,14 @@ fn recorded_whole_replies(provider: &str) -> Vec<serde_json::Value> {
                     vec![body]
                 } else {
                     let mut framer = rig_http::http_client::framing::SseFramer::new();
-                    let documents = framer
+                    framer
                         .push(body.as_bytes())
                         .filter_map(|frame| {
                             serde_json::from_str::<serde_json::Value>(&frame.data).ok()
                         })
                         .filter(|event| event["type"] == "response.completed")
                         .map(|event| event["response"].clone())
-                        .collect();
-                    documents
+                        .collect()
                 };
                 replies.extend(documents.into_iter().filter(|document| {
                     document["object"] == "response"
@@ -1489,7 +1488,10 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
         }
         if status.get("status").is_none() {
             let mut missing_status = sample_response("completed");
-            missing_status.as_object_mut().unwrap().remove("status");
+            missing_status
+                .as_object_mut()
+                .unwrap()
+                .shift_remove("status");
             missing_status["output"] = body["output"].clone();
             let error = crate::test_utils::decode_reply(
                 &wire(),
@@ -1581,7 +1583,7 @@ fn sparse_whole_bodies_refuse_and_valid_statuses_keep_exact_finish_reasons() {
     }
     for required in ["id", "object", "created_at", "status", "model"] {
         let mut body = sample_response("completed");
-        body.as_object_mut().unwrap().remove(required);
+        body.as_object_mut().unwrap().shift_remove(required);
         let raw = body.to_string();
         let error = crate::test_utils::decode_reply(
             &wire(),
@@ -2651,14 +2653,14 @@ fn admitted_call_stage_events(events: &[serde_json::Value]) -> Vec<serde_json::V
                 Some("response.output_item.done") => Some("completed"),
                 _ => None,
             };
-            if event["item"]["type"] == "function_call" {
-                if let Some(stage) = stage {
-                    event["item"]
-                        .as_object_mut()
-                        .expect("fixture function item")
-                        .entry("status")
-                        .or_insert_with(|| json!(stage));
-                }
+            if event["item"]["type"] == "function_call"
+                && let Some(stage) = stage
+            {
+                event["item"]
+                    .as_object_mut()
+                    .expect("fixture function item")
+                    .entry("status")
+                    .or_insert_with(|| json!(stage));
             }
             event
         })
@@ -2775,6 +2777,127 @@ fn retained_index_stream_agrees_with_its_whole_reply() {
             whole(&output),
             frames(&restated(&output)),
         );
+    }
+}
+
+/// mec-rig-port-answers-1 Q6: ChatGPT's envelope repair fills every missing
+/// `output_index` with 0, so reasoning slots are keyed by item id. Two
+/// distinct reasoning items streamed without indices stay two reasoning
+/// blocks, in order, and fold as their whole reply does.
+#[test]
+fn repaired_indexless_reasoning_items_keep_their_own_slots_and_fold_as_the_whole_reply() {
+    let output = [
+        json!({"type":"reasoning","id":"rs_1","summary":[],
+            "content":[{"type":"reasoning_text","text":"x y z"}]}),
+        json!({"type":"reasoning","id":"rs_4",
+            "summary":[{"type":"summary_text","text":"ünï ✓ \"q\""}],
+            "encrypted_content":"ciphertext-4"}),
+    ];
+    let repaired = |input: Vec<WireFrame>| {
+        feed_frames!(
+            ResponsesDecoder::new("openai", super::super::ResponsesStreamOptions::strict())
+                .with_envelope_repair(),
+            super::super::document::Response::with_strict_reader(true),
+            "openai",
+            input
+        )
+        .outcome
+        .expect("the repaired reply decodes")
+    };
+    let streamed = repaired(frames(&without_indices(restated(&output))));
+    let unary = repaired(whole(&output));
+    assert_eq!(streamed.choice, unary.choice);
+    let reasoning = streamed
+        .choice
+        .iter()
+        .map(|block| match block {
+            AssistantContent::CarriedReasoning(reasoning) => reasoning,
+            other => panic!("only reasoning blocks: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reasoning.len(), 2, "{:?}", streamed.choice);
+    assert_eq!(reasoning[0].id.as_deref(), Some("rs_1"));
+    assert_eq!(reasoning[0].payload.item, output[0]);
+    assert_eq!(reasoning[1].id.as_deref(), Some("rs_4"));
+    assert_eq!(reasoning[1].payload.item, output[1]);
+}
+
+/// ChatGPT's envelope repair fills every missing `output_index` with 0, so
+/// provider items are known by item id and sort, like call and reasoning
+/// slots, after every earlier item at their reused index. Each reply folds
+/// streamed without indices exactly as its whole reply does (hc-r4 case 37).
+#[test]
+fn repaired_indexless_provider_items_keep_arrival_order_and_fold_as_the_whole_reply() {
+    let search = json!({"type":"web_search_call","id":"ws_0","status":"completed",
+        "action":{"type":"search","query":"rig"}});
+    let invented = |id: &str| json!({"type":"x_rig_invented","id":id,"payload":{"n":1}});
+    let replies = [
+        vec![
+            search.clone(),
+            invented("x_1"),
+            function_call("fc_4", "call_4", r#"{"q":"rig"}"#),
+        ],
+        vec![
+            search.clone(),
+            function_call("fc_1", "call_1", r#"{"q":"rig"}"#),
+            invented("x_2"),
+            function_call("fc_3", "call_3", r#"{"q":"harbor"}"#),
+        ],
+    ];
+    let repaired = |input: Vec<WireFrame>| {
+        feed_frames!(
+            ResponsesDecoder::new("openai", super::super::ResponsesStreamOptions::strict())
+                .with_envelope_repair(),
+            super::super::document::Response::with_strict_reader(true),
+            "openai",
+            input
+        )
+        .outcome
+        .expect("the repaired reply decodes")
+    };
+    for output in replies {
+        let streamed = repaired(frames(&without_indices(restated(&output))));
+        let unary = repaired(whole(&output));
+        assert_eq!(streamed.choice, unary.choice, "{output:?}");
+        assert_eq!(streamed.choice.len(), output.len(), "{:?}", streamed.choice);
+    }
+}
+
+/// A message streamed without indices after a call or reasoning item shares
+/// the repaired index 0 with it. The message gets its own state slot, sorted
+/// after the earlier item, so the terminal can move it to its real position
+/// and the reply folds as its whole reply does (hc-r4 h18 case 94).
+#[test]
+fn repaired_indexless_message_after_another_item_keeps_its_own_slot() {
+    let replies = [
+        vec![
+            function_call("fc_2", "call_2", r#"{"n":3}"#),
+            message("msg_3", "Done."),
+        ],
+        vec![reasoning("rs_1", &["Plan."]), message("msg_3", "Done.")],
+        vec![
+            function_call("fc_0", "call_0", r#"{"q":"rig"}"#),
+            reasoning("rs_1", &["Plan."]),
+            function_call("fc_2", "call_2", r#"{"n":3}"#),
+            message("msg_3", "Done."),
+        ],
+    ];
+    let repaired = |input: Vec<WireFrame>| {
+        feed_frames!(
+            ResponsesDecoder::new("openai", super::super::ResponsesStreamOptions::strict())
+                .with_envelope_repair(),
+            super::super::document::Response::with_strict_reader(true),
+            "openai",
+            input
+        )
+        .outcome
+        .expect("the repaired reply decodes")
+    };
+    for output in replies {
+        let streamed = repaired(frames(&without_indices(restated(&output))));
+        let unary = repaired(whole(&output));
+        assert_eq!(streamed.choice, unary.choice, "{output:?}");
+        assert_eq!(streamed.choice.len(), output.len(), "{:?}", streamed.choice);
     }
 }
 
